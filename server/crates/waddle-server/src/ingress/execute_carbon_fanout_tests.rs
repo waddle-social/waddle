@@ -637,9 +637,18 @@ async fn sqlite_received_remote_carbon_lost_reply_preserves_correspondent_sender
     .await;
 }
 
+#[derive(Clone, Copy)]
+enum RemoteCarbonOwnerClaim {
+    Valid,
+    ForgedSender,
+    ForgedSenderWithCustody,
+    FrozenRecipient,
+    DynamicRecipients,
+}
+
 async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
     fixture: IngressFixture,
-    forged_sender: bool,
+    claim: RemoteCarbonOwnerClaim,
 ) {
     use crate::clustering::route_bridge::tests::delivery::{
         remote_carbon_owner_reply_with_ingress, RemoteCarbonIngressFixture,
@@ -647,18 +656,43 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
     let mut submission = fixture.submission(Some("keyed-carbon-owner"), "carbon body");
     let owner = submission.sender.to_bare();
     let source = submission.sender.clone();
-    let effect = ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons {
-        owner: owner.clone(),
-        exclude: vec![source.clone()],
-        kind: CarbonKind::Sent,
-        origin: None,
-        message: Box::new(submission.plan.sanitized_message.clone()),
-    });
-    submission.plan.intents = vec![IngressEffectIntent::RelayCarbons {
-        owner,
-        exclude: vec![source.clone()],
-        kind: CarbonKind::Sent,
-    }];
+    let target = owner.with_resource_str("carbon-sibling").expect("sibling");
+    let extra_target = owner
+        .with_resource_str("zz-sibling")
+        .expect("extra sibling");
+    let (effect, intent) = if matches!(claim, RemoteCarbonOwnerClaim::FrozenRecipient) {
+        (
+            ExternalDeliveryEffect::Carbons {
+                owner: owner.clone(),
+                recipient: target.clone(),
+                exclude: vec![source.clone()],
+                kind: CarbonKind::Sent,
+                message: Box::new(submission.plan.sanitized_message.clone()),
+            },
+            IngressEffectIntent::Carbons {
+                excluded_source: source.clone(),
+                carbon_recipients: vec![target.clone()],
+                kind: CarbonKind::Sent,
+            },
+        )
+    } else {
+        (
+            ExternalDeliveryEffect::RelayCarbons {
+                owner: owner.clone(),
+                exclude: vec![source.clone()],
+                kind: CarbonKind::Sent,
+                origin: None,
+                message: Box::new(submission.plan.sanitized_message.clone()),
+            },
+            IngressEffectIntent::RelayCarbons {
+                owner: owner.clone(),
+                exclude: vec![source.clone()],
+                kind: CarbonKind::Sent,
+            },
+        )
+    };
+    let effect = ExternalEffect::Delivery(effect);
+    submission.plan.intents = vec![intent];
     submission.plan.plan = vec![PlannedEffect::new(Effect::External(effect.clone()))];
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
@@ -672,12 +706,16 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
     .await
     .expect("context")
     .expect("relay context");
-    let mut obligation = crate::ingress::identity::IngressAppendObligationRef::from_context(
+    let canonical_obligation = crate::ingress::identity::IngressAppendObligationRef::from_context(
         &context,
         source.to_bare(),
     );
+    let mut obligation = canonical_obligation.clone();
     let mut message = submission.plan.sanitized_message.clone();
-    if forged_sender {
+    if matches!(
+        claim,
+        RemoteCarbonOwnerClaim::ForgedSender | RemoteCarbonOwnerClaim::ForgedSenderWithCustody
+    ) {
         // The registration proves the owner and the offered stanza agrees with
         // the claim, but the key belongs to another canonical sender.
         let sender: jid::FullJid = "mallory@example.com/phone".parse().expect("forged sender");
@@ -700,6 +738,7 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
                 .expect("SM store"),
         )),
     );
+    let prior_queue = std::sync::Mutex::new(None);
     let reply = remote_carbon_owner_reply_with_ingress(
         source,
         Arc::clone(&sm),
@@ -708,12 +747,59 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
             message,
             obligation,
         }),
-        async {},
+        async {
+            if matches!(claim, RemoteCarbonOwnerClaim::ForgedSenderWithCustody) {
+                let carbon = waddle_xmpp_core::carbons::build_sent_carbon(
+                    &submission.plan.sanitized_message,
+                    &owner.to_string(),
+                    &target.to_string(),
+                )
+                .expect("legitimate prior carbon");
+                let outcome = sm
+                    .record_keyed_stanza_for_detached_bound_resource(
+                        &target,
+                        &waddle_xmpp::Stanza::Message(carbon),
+                        context.received_at.expect("canonical receipt time"),
+                        canonical_obligation
+                            .clone()
+                            .into_relayed_for(target.clone())
+                            .key,
+                    )
+                    .await
+                    .expect("prior keyed custody");
+                assert!(outcome.is_allocated());
+                let detached = sm
+                    .peek_session("remote-carbon-detached-stream")
+                    .await
+                    .expect("peek prior custody")
+                    .expect("prior stream");
+                *prior_queue.lock().expect("prior queue") = Some(detached.unacked_stanzas);
+            }
+            if matches!(
+                claim,
+                RemoteCarbonOwnerClaim::FrozenRecipient | RemoteCarbonOwnerClaim::DynamicRecipients
+            ) {
+                let mut extra = sm
+                    .peek_session("remote-carbon-detached-stream")
+                    .await
+                    .expect("peek sibling")
+                    .expect("sibling session");
+                extra.stream_id = "remote-carbon-extra-stream".into();
+                extra.jid = extra_target.clone();
+                extra.occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+                sm.store_session(extra).await.expect("store extra sibling");
+            }
+        },
     )
     .await;
     assert_eq!(
         reply.status,
-        if forged_sender {
+        if matches!(
+            claim,
+            RemoteCarbonOwnerClaim::ForgedSender
+                | RemoteCarbonOwnerClaim::ForgedSenderWithCustody
+                | RemoteCarbonOwnerClaim::FrozenRecipient
+        ) {
             RelayRemoteUserSideEffectStatus::Incomplete {
                 reason: CarbonFanoutFailure::Delivery,
             }
@@ -721,15 +807,46 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
             RelayRemoteUserSideEffectStatus::Applied
         }
     );
-    let expected_appends = usize::from(!forged_sender);
-    assert_eq!(reply.carbon_recipients.len(), expected_appends);
+    let expected_recipients = match claim {
+        RemoteCarbonOwnerClaim::Valid => vec![target],
+        RemoteCarbonOwnerClaim::DynamicRecipients => vec![target, extra_target],
+        _ => Vec::new(),
+    };
+    assert_eq!(reply.carbon_recipients, expected_recipients);
+    let existing_custody = matches!(claim, RemoteCarbonOwnerClaim::ForgedSenderWithCustody);
+    let expected_appends = if existing_custody {
+        1
+    } else {
+        expected_recipients.len()
+    };
     let detached = sm
         .peek_session("remote-carbon-detached-stream")
         .await
         .expect("peek detached session")
         .expect("detached session remains");
-    assert_eq!(detached.unacked_stanzas.len(), expected_appends);
-    assert_eq!(detached.outbound_count, expected_appends as u32);
+    let expected_first_queue = usize::from(existing_custody || !expected_recipients.is_empty());
+    assert_eq!(detached.unacked_stanzas.len(), expected_first_queue);
+    assert_eq!(detached.outbound_count, expected_first_queue as u32);
+    if existing_custody {
+        assert_eq!(
+            Some(detached.unacked_stanzas),
+            *prior_queue.lock().expect("prior queue"),
+            "a forged retry cannot rewrite the original custody"
+        );
+    }
+    if matches!(
+        claim,
+        RemoteCarbonOwnerClaim::FrozenRecipient | RemoteCarbonOwnerClaim::DynamicRecipients
+    ) {
+        let extra = sm
+            .peek_session("remote-carbon-extra-stream")
+            .await
+            .expect("peek extra sibling")
+            .expect("extra sibling remains");
+        let expected = usize::from(matches!(claim, RemoteCarbonOwnerClaim::DynamicRecipients));
+        assert_eq!(extra.unacked_stanzas.len(), expected);
+        assert_eq!(extra.outbound_count, expected as u32);
+    }
     assert_eq!(
         fixture.count("sm_ingress_appends").await,
         expected_appends as i64,
@@ -749,26 +866,100 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
 
 #[tokio::test]
 async fn sqlite_remote_carbon_owner_receiver_retains_keyed_custody() {
-    remote_carbon_owner_receiver_authorizes_keyed_custody(IngressFixture::sqlite().await, false)
-        .await;
+    remote_carbon_owner_receiver_authorizes_keyed_custody(
+        IngressFixture::sqlite().await,
+        RemoteCarbonOwnerClaim::Valid,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn postgres_remote_carbon_owner_receiver_retains_keyed_custody() {
     if let Some(fixture) = IngressFixture::postgres("remote_carbon_custody").await {
-        remote_carbon_owner_receiver_authorizes_keyed_custody(fixture, false).await;
+        remote_carbon_owner_receiver_authorizes_keyed_custody(
+            fixture,
+            RemoteCarbonOwnerClaim::Valid,
+        )
+        .await;
     }
 }
 
 #[tokio::test]
 async fn sqlite_remote_carbon_owner_receiver_rejects_mismatched_canonical_sender() {
-    remote_carbon_owner_receiver_authorizes_keyed_custody(IngressFixture::sqlite().await, true)
-        .await;
+    remote_carbon_owner_receiver_authorizes_keyed_custody(
+        IngressFixture::sqlite().await,
+        RemoteCarbonOwnerClaim::ForgedSender,
+    )
+    .await;
 }
 
 #[tokio::test]
 async fn postgres_remote_carbon_owner_receiver_rejects_mismatched_canonical_sender() {
     if let Some(fixture) = IngressFixture::postgres("remote_carbon_sender").await {
-        remote_carbon_owner_receiver_authorizes_keyed_custody(fixture, true).await;
+        remote_carbon_owner_receiver_authorizes_keyed_custody(
+            fixture,
+            RemoteCarbonOwnerClaim::ForgedSender,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_owner_receiver_rejects_forged_existing_custody() {
+    remote_carbon_owner_receiver_authorizes_keyed_custody(
+        IngressFixture::sqlite().await,
+        RemoteCarbonOwnerClaim::ForgedSenderWithCustody,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_remote_carbon_owner_receiver_rejects_forged_existing_custody() {
+    if let Some(fixture) = IngressFixture::postgres("carbon_existing_custody").await {
+        remote_carbon_owner_receiver_authorizes_keyed_custody(
+            fixture,
+            RemoteCarbonOwnerClaim::ForgedSenderWithCustody,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_owner_receiver_rejects_frozen_recipient_obligation() {
+    remote_carbon_owner_receiver_authorizes_keyed_custody(
+        IngressFixture::sqlite().await,
+        RemoteCarbonOwnerClaim::FrozenRecipient,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_remote_carbon_owner_receiver_rejects_frozen_recipient_obligation() {
+    if let Some(fixture) = IngressFixture::postgres("carbon_frozen_recipient").await {
+        remote_carbon_owner_receiver_authorizes_keyed_custody(
+            fixture,
+            RemoteCarbonOwnerClaim::FrozenRecipient,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_remote_carbon_owner_receiver_accepts_dynamic_siblings() {
+    remote_carbon_owner_receiver_authorizes_keyed_custody(
+        IngressFixture::sqlite().await,
+        RemoteCarbonOwnerClaim::DynamicRecipients,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_remote_carbon_owner_receiver_accepts_dynamic_siblings() {
+    if let Some(fixture) = IngressFixture::postgres("carbon_dynamic_siblings").await {
+        remote_carbon_owner_receiver_authorizes_keyed_custody(
+            fixture,
+            RemoteCarbonOwnerClaim::DynamicRecipients,
+        )
+        .await;
     }
 }
