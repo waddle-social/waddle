@@ -56,7 +56,8 @@ and local UserActor detach drains (#1789, #1805). Receiver validation rejects
 failed canonical authorization before accepting a keyed delivery. A detach
 drain of an already-accepted frame instead retains unkeyed custody when its
 supplied obligation cannot be authorized, preserving the frame but losing
-keyed deduplication. The separate relayed-carbons authorization gap is #1906;
+keyed deduplication. The relayed-carbons owner receiver applies the same
+deferred canonical authorization before keyed custody (#1906).
 #1760 now retains immutable proof and replay payload as one durable custody
 unit, with atomic pending-delivery handoff and independent recovery (§3.3a).
 New detached allocations and live attempts interlock under canonical authority;
