@@ -23,6 +23,8 @@ pub(crate) use room_observation::{
 };
 pub use room_observation::{ObservationError, RoomPublication};
 mod pending_receipts;
+mod policy_discard;
+pub(crate) use policy_discard::PolicyDiscardReason;
 mod recovery_receipts;
 pub(crate) use pending_receipts::PendingReceiptRepository;
 mod archive_ordinal;

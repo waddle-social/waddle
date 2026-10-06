@@ -49,6 +49,7 @@ impl OrderedRelayDeliveryBridge {
         target: &jid::FullJid,
         stanza: &Stanza,
         ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Result<(), OrderedRelayNackReason> {
         if let Some(result) = deliver_ordered_local_copy(
             services,
@@ -62,11 +63,12 @@ impl OrderedRelayDeliveryBridge {
             return result;
         }
         if let Some(outcome) = self
-            .try_deliver_registered_remote_resource(
+            .try_deliver_registered_remote_resource_at(
                 target,
                 stanza,
                 DeliveryKind::PeerStanza,
                 ingress_append_context,
+                received_at,
             )
             .await
         {
@@ -86,12 +88,13 @@ impl OrderedRelayDeliveryBridge {
         if matches!(stanza, Stanza::Iq(_)) {
             return deliver_reserved_full_jid_peer_live_only(services, target, stanza).await;
         }
-        match crate::server::routes::interpret::deliver_peer_to_full(
+        match crate::server::routes::interpret::deliver_peer_to_full_at(
             Some(&services.user_registry),
             Some(&services.sm_session_registry),
             target,
             stanza,
             ingress_append_context,
+            received_at,
         )
         .await
         {
@@ -160,6 +163,7 @@ pub(in super::super) async fn deliver_reserved_full_jid_peer_live_only(
             ingress_append: None,
             jid: target.clone(),
             stanza: stanza.clone(),
+            original_receipt_at: None,
         })
         .mailbox_timeout(ORDERED_DELIVERY_MAILBOX_TIMEOUT)
         .reply_timeout(ORDERED_RECEIVER_DELIVERY_TIMEOUT)

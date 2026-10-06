@@ -1167,3 +1167,6 @@ fn authenticated_phase_for_session(session: &Session, domain: &str) -> Connectio
 // ---- C: MUC nick handling -----------------------------------------
 
 // ---- D: stream feature advertisement --------------------------------
+
+#[cfg(feature = "clustering")]
+pub(crate) mod relay_timestamp_drain;

@@ -2,7 +2,7 @@ use super::Replacements;
 use jid::BareJid;
 use waddle_xmpp::ingress::{
     EffectMessageIdentity, InboxProjectionMutation, IngressEffectIntent,
-    NotificationActivityMutation, PendingDeliveryMutation,
+    NotificationActivityMutation, PendingDeliveryMutation, StoredMessagePayload,
 };
 
 impl Replacements {
@@ -28,7 +28,10 @@ impl Replacements {
         }
     }
 
-    pub(super) fn intent(&self, intent: &mut IngressEffectIntent) {
+    pub(super) fn intent(
+        &self,
+        intent: &mut IngressEffectIntent,
+    ) -> Result<(), crate::ingress_uow::IngressUowError> {
         match intent {
             IngressEffectIntent::DmCallThreadState { state, .. } => {
                 if let Some(id) = state
@@ -43,8 +46,21 @@ impl Replacements {
             | IngressEffectIntent::SystemMessageArchive { stanza_id, .. }
             | IngressEffectIntent::CallSignal { stanza_id, .. }
             | IngressEffectIntent::Extension { stanza_id, .. } => self.id(stanza_id),
-            IngressEffectIntent::RouteDirect { route_identity, .. }
-            | IngressEffectIntent::RouteMucGroupchat { route_identity, .. }
+            IngressEffectIntent::RouteDirect {
+                route_identity,
+                prepared,
+                ..
+            } => {
+                if let EffectMessageIdentity::StanzaId(id) = route_identity {
+                    self.id(id);
+                }
+                if let Some(payload) = prepared {
+                    let mut message = payload.message().clone();
+                    self.message(&mut message);
+                    *payload = StoredMessagePayload::new(message)?;
+                }
+            }
+            IngressEffectIntent::RouteMucGroupchat { route_identity, .. }
             | IngressEffectIntent::RouteMucSystemBroadcast { route_identity, .. } => {
                 if let EffectMessageIdentity::StanzaId(id) = route_identity {
                     self.id(id);
@@ -90,5 +106,6 @@ impl Replacements {
             | IngressEffectIntent::TombstoneReplayDeletion { .. }
             | IngressEffectIntent::ErrorReply { .. } => {}
         }
+        Ok(())
     }
 }

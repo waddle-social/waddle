@@ -370,6 +370,7 @@ async fn full_jid_inventory_plan(remote_unavailable: bool) {
         .iter()
         .find_map(|intent| match intent {
             IngressEffectIntent::RouteDirect {
+                prepared: _,
                 recipient: bare,
                 fanout,
                 route_identity,

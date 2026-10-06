@@ -13,6 +13,7 @@ async fn waiting_route(
         fanout.push("juliet@example.com/laptop".parse().expect("sibling"));
     }
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout,
         route_identity: EffectMessageIdentity::capture_ordinal(0),

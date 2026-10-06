@@ -1964,6 +1964,7 @@ async fn test_reap_user_if_empty_removes_orphaned_empty_actor() {
             ingress_append: None,
             jid: phone.clone(),
             stanza: sample_stanza(&phone),
+            original_receipt_at: None,
         })
         .await
         .expect("try send");

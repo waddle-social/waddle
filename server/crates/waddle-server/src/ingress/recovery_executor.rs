@@ -104,7 +104,7 @@ pub(super) async fn recover_row(
         departed_occupants: departed.occupants,
         blocked_recipients: &blocked_recipients,
     })?;
-    record_discarded_receipts(uow, key, &rebuilt.discarded_receipts).await?;
+    record_discarded_receipts(uow, key, &rebuilt.discarded_receipts, &blocked_recipients).await?;
     let mut unsupported = !still_owed
         && rebuilt.decision.external.is_empty()
         && rebuilt.delegated.is_empty()
@@ -313,6 +313,7 @@ async fn record_discarded_receipts(
     uow: &IngressUnitOfWork,
     key: MessageKey,
     discarded: &[EffectReceiptKey],
+    blocked_recipients: &[BareJid],
 ) -> Result<(), IngressUowError> {
     if discarded.is_empty() {
         return Ok(());
@@ -323,7 +324,16 @@ async fn record_discarded_receipts(
     if !CanonicalMessageRepository::lock(&mut tx, key).await? {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
+    let intents = EffectIntentRepository::load(&mut tx, key).await?;
     for receipt in discarded {
+        if intents.iter().any(|intent| {
+            matches!(intent, IngressEffectIntent::RouteDirect { recipient, .. } if blocked_recipients.contains(recipient))
+                && super::receipt_key(intent).ok().as_ref() == Some(receipt)
+        }) {
+            EffectReceiptRepository::record_policy_discard(&mut tx, key, receipt,
+                crate::ingress_uow::PolicyDiscardReason::RecipientBlocked).await?;
+            continue;
+        }
         EffectReceiptRepository::record_receipt(
             &mut tx,
             key,
@@ -394,7 +404,7 @@ async fn freeze(
     // One bulk read of delivery progress for the same reason as the receipts.
     let progress = DeliveryProgressRepository::load_all(&mut tx, key).await?;
     let mut route_progress = Vec::new();
-    let mut empty_muc = Vec::new();
+    let mut settled_routes = Vec::new();
     for intent in &unreceipted {
         let Some(mut route) = RouteProgress::from_intent(intent, Some(created_at), Vec::new())?
         else {
@@ -406,15 +416,26 @@ async fn freeze(
             .find(|(receipt, _)| receipt == &route.receipt)
             .map(|(_, completed)| completed.clone())
             .unwrap_or_default();
-        if !route.is_direct() && route.fanout.is_empty() {
+        let prepared_complete = matches!(
+            intent,
+            IngressEffectIntent::RouteDirect {
+                prepared: Some(_),
+                ..
+            }
+        ) && !route.fanout.is_empty()
+            && route
+                .fanout
+                .iter()
+                .all(|target| route.completed.contains(target));
+        if (!route.is_direct() && route.fanout.is_empty()) || prepared_complete {
             crate::ingress_uow::settle_recorded(&mut tx, key, &[route.settle_evidence()]).await?;
-            empty_muc.push(route.settle_evidence());
+            settled_routes.push(route.settle_evidence());
         } else {
             route_progress.push(route);
         }
     }
-    if !empty_muc.is_empty() {
-        unreceipted.retain(|intent| !empty_muc.contains(intent));
+    if !settled_routes.is_empty() {
+        unreceipted.retain(|intent| !settled_routes.contains(intent));
         super::execute::terminalize_if_complete_in_transaction(
             &mut tx,
             key,

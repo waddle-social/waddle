@@ -82,6 +82,7 @@ async fn detaching_socket(fixture: IngressFixture) -> DetachingSocket {
 async fn committed_obligation(socket: &DetachingSocket) -> (Stanza, SmRelayedAppendObligation) {
     let mut submission = socket.fixture.submission(None, "drained once");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: socket.recipient.to_bare(),
         fanout: vec![socket.recipient.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),
@@ -429,3 +430,35 @@ paired!(
 
 #[path = "user_actor_keyed_append.rs"]
 mod user_actor_keyed_append;
+
+#[tokio::test]
+async fn canonical_keyed_timestamp_wins_over_untrusted_transport_timestamp_during_detach() {
+    let mut socket = detaching_socket(IngressFixture::sqlite().await).await;
+    let (stanza, mut obligation) = committed_obligation(&socket).await;
+    let mut tx = socket
+        .fixture
+        .uow
+        .begin()
+        .await
+        .expect("canonical receipt read");
+    let received_at = crate::ingress_uow::CanonicalMessageRepository::created_at(
+        &mut tx,
+        obligation.key.message_key,
+    )
+    .await
+    .expect("canonical receipt timestamp");
+    tx.commit().await.expect("receipt read commit");
+    obligation.received_at = Some(received_at);
+    let mut outbound = OutboundStanza::new(stanza).with_ingress_append(obligation);
+    outbound.original_receipt_at = Some(received_at - chrono::Duration::hours(1));
+    socket
+        .tx
+        .send(outbound)
+        .await
+        .expect("queued relayed frame");
+    let detached = detach(&mut socket).await;
+    assert_eq!(detached.unacked_stanzas.len(), 1);
+    assert_eq!(detached.unacked_stanzas[0].original_receipt_at, received_at);
+    assert_eq!(socket.fixture.count("sm_ingress_appends").await, 1);
+    socket.fixture.close().await;
+}

@@ -333,6 +333,21 @@ async fn authorize_direct_stanza(
     let Stanza::Message(message) = stanza else {
         return Err(IngressUowError::EffectIntentConflict);
     };
+    if matches!(
+        intent,
+        IngressEffectIntent::RouteDirect {
+            prepared: Some(_),
+            ..
+        }
+    ) {
+        return if super::recorded::prepared_direct_message(&envelope, intent).is_some_and(
+            |expected| super::append_authority::same_message_content(expected, message),
+        ) {
+            Ok(())
+        } else {
+            Err(IngressUowError::EffectIntentConflict)
+        };
+    }
     if let Some(expected) =
         super::invitation_authority::recorded_message(&envelope, intents, &context.receipt)?
     {

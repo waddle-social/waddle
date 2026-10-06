@@ -1177,7 +1177,7 @@ fn pending_flush_reservation_preserves_sm_row_metadata() {
     ));
     let outbound = receiver.try_recv().expect("committed pending frame");
     assert_eq!(outbound.pending_row_id, Some(row_id));
-    assert_eq!(outbound.pending_row_original_receipt_at, Some(received_at));
+    assert_eq!(outbound.original_receipt_at, Some(received_at));
 }
 
 #[tokio::test]

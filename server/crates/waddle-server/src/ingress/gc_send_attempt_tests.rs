@@ -17,6 +17,7 @@ use waddle_xmpp::{
 async fn retention_preserves_unresolved_and_collects_settled_attempts(fixture: IngressFixture) {
     let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![recipient.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),

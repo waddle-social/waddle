@@ -9755,6 +9755,7 @@ mod user_reaper_tests {
                 ingress_append: None,
                 jid: jid.clone(),
                 stanza: sample_stanza(&jid),
+                original_receipt_at: None,
             })
             .await
             .expect("try send");
@@ -9837,6 +9838,7 @@ mod user_reaper_tests {
                 ingress_append: None,
                 jid: jid.clone(),
                 stanza: sample_stanza(&jid),
+                original_receipt_at: None,
             })
             .await
             .expect("try send");

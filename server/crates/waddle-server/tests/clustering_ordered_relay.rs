@@ -123,6 +123,7 @@ fn message_payload_to(id: &str, recipient: &str) -> OrderedRelayPayload {
         ingress_append: None,
         recipient: jid::Jid::from_str(recipient).expect("jid"),
         stanza: RemoteStanza(waddle_xmpp::Stanza::Message(stanza)),
+        received_at: None,
     }
 }
 
@@ -535,6 +536,7 @@ fn receiver_nacks_bare_jid_groupchat_on_user_message_payload() {
             ingress_append: None,
             recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
             stanza: groupchat_stanza_to("juliet@example.test"),
+            received_at: None,
         },
         origin_proof: None,
     };
@@ -848,6 +850,7 @@ fn receiver_nacks_stanza_kind_mismatch_as_parse_failure() {
             ingress_append: None,
             recipient: jid::Jid::from_str("juliet@example.test").expect("jid"),
             stanza: presence_stanza(),
+            received_at: None,
         },
         origin_proof: None,
     };

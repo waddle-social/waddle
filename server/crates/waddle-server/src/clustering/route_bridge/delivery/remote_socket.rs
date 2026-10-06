@@ -33,6 +33,24 @@ impl OrderedRelayDeliveryBridge {
         kind: DeliveryKind,
         ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
     ) -> Option<FullJidDeliveryOutcome> {
+        self.try_deliver_registered_remote_resource_at(
+            target,
+            stanza,
+            kind,
+            ingress_append_context,
+            None,
+        )
+        .await
+    }
+
+    pub(crate) async fn try_deliver_registered_remote_resource_at(
+        &self,
+        target: &jid::FullJid,
+        stanza: &Stanza,
+        kind: DeliveryKind,
+        ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
+    ) -> Option<FullJidDeliveryOutcome> {
         let registration = {
             let registrations = self.remote_owner_resources.lock().await;
             registrations.get(target).cloned()
@@ -43,6 +61,7 @@ impl OrderedRelayDeliveryBridge {
             kind,
             &registration,
             ingress_append_context,
+            received_at,
         )
         .await
     }
@@ -171,6 +190,7 @@ impl OrderedRelayDeliveryBridge {
                 target,
                 stanza,
                 ingress_append,
+                received_at,
             } => {
                 let ingress_append_context = super::ingress_append::authorize_ingress_append(
                     &services,
@@ -182,32 +202,35 @@ impl OrderedRelayDeliveryBridge {
                     return remote_resource_route_reply(FullJidDeliveryOutcome::Unavailable.into());
                 }
                 let outcome = if let Some(remote) = self
-                    .try_deliver_full_jid_remote(
+                    .try_deliver_full_jid_remote_at(
                         &target,
                         &stanza.0,
                         &origin,
                         None,
                         ingress_append_context.clone(),
+                        received_at,
                     )
                     .await
                 {
                     remote
                 } else if let Some(registered) = self
-                    .try_deliver_registered_remote_resource(
+                    .try_deliver_registered_remote_resource_at(
                         &target,
                         &stanza.0,
                         DeliveryKind::PeerStanza,
                         ingress_append_context.as_ref(),
+                        received_at,
                     )
                     .await
                 {
                     registered
                 } else {
-                    deliver_local_full_jid_after_target_refresh(
+                    deliver_local_full_jid_after_target_refresh_at(
                         &services,
                         &target,
                         &stanza.0,
                         ingress_append_context.as_ref(),
+                        received_at,
                     )
                     .await
                 };
@@ -490,6 +513,7 @@ impl OrderedRelayDeliveryBridge {
             }
             let mut outbound = OutboundStanza::new(msg.frame.stanza.0.clone());
             outbound.kind = msg.frame.kind;
+            outbound.original_receipt_at = context.received_at.or(msg.frame.received_at);
             outbound.ingress_append =
                 Some(obligation.clone().into_relayed_for(msg.frame.jid.clone()));
             return remote_frame_outcome(
@@ -514,6 +538,7 @@ impl OrderedRelayDeliveryBridge {
         };
         let mut outbound = OutboundStanza::new(msg.frame.stanza.0);
         outbound.kind = msg.frame.kind;
+        outbound.original_receipt_at = msg.frame.received_at;
         let outcome = services.connection_registry.try_send_outbound_if_owner(
             &msg.frame.jid,
             &registration.owner,
@@ -592,6 +617,7 @@ impl OrderedRelayDeliveryBridge {
         kind: DeliveryKind,
         registration: &RemoteOwnerRegistration,
         ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
     ) -> Option<FullJidDeliveryOutcome> {
         // Resolve a relayed claim before it leaves this node (#1790). The
         // socket node's own fence cannot report a definitive rejection on the
@@ -605,12 +631,13 @@ impl OrderedRelayDeliveryBridge {
             RelayHandle::new(registration.socket_node.clone(), self.stop_token.clone())
                 .with_ask_timeouts(self.mailbox_timeout, self.reply_timeout);
         let message = RelayDeliverRemoteResourceFrame {
-            frame: remote_resource_frame(
+            frame: remote_resource_frame_at(
                 target,
                 registration.registration_id,
                 stanza,
                 kind,
                 ingress_append_context,
+                received_at,
             ),
             trace: RelayTraceContext::default(),
         };
@@ -784,12 +811,31 @@ pub(crate) fn classify_write_accepted_status(
 
 /// The owner-to-socket frame. It carries the recorded ingress obligation so the socket
 /// node can key a later detach drain (issue #1789); the socket node authorizes it there.
+#[cfg(test)]
 pub(in super::super) fn remote_resource_frame(
     target: &jid::FullJid,
     registration_id: RemoteResourceRegistrationId,
     stanza: &Stanza,
     kind: DeliveryKind,
     ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+) -> RemoteResourceOutboundFrame {
+    remote_resource_frame_at(
+        target,
+        registration_id,
+        stanza,
+        kind,
+        ingress_append_context,
+        None,
+    )
+}
+
+pub(in super::super) fn remote_resource_frame_at(
+    target: &jid::FullJid,
+    registration_id: RemoteResourceRegistrationId,
+    stanza: &Stanza,
+    kind: DeliveryKind,
+    ingress_append_context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> RemoteResourceOutboundFrame {
     RemoteResourceOutboundFrame {
         jid: target.clone(),
@@ -800,6 +846,11 @@ pub(in super::super) fn remote_resource_frame(
             ingress_append_context,
             stanza,
         ),
+        received_at: if ingress_append_context.is_none() {
+            received_at
+        } else {
+            None
+        },
     }
 }
 

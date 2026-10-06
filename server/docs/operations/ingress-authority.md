@@ -862,7 +862,12 @@ refused startup. Treat the ledger commit as the rollback floor for this database
 `remote_resource_route` to `v7` and `deliver_ordered` to `v11` to carry the
 recorded ingress append obligation identity, including through a full-JID
 second hop. Those cutover versions are historical; the current endpoints are
-`remote_resource_route.v8` and `deliver_ordered.v12`.
+`deliver_ordered.v13` and the timestamp-capable `live_resource_route.v2` /
+`live_resource_frame.v2`. The frozen `remote_resource_route.v8` and
+`remote_resource_frame.v3` endpoints retain their append-authority contracts
+and timestamp-free legacy traffic. Separate timestamp-only metadata uses the
+live v2 endpoints and must not fall back to a legacy payload that would silently
+drop it. Keyed append authority continues to carry its own receipt timestamp.
 
 #1776 advances `remote_user_side_effect` to `v4` to carry the recorded
 relay-carbon obligation through owner fanout. An older endpoint cannot accept
@@ -1305,13 +1310,13 @@ fail-closed before rebuilding routes.
 
 | `kind_family` | Automatic recovery or reason it stays pending |
 | --- | --- |
-| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither delegated live full-JID nor DM-pin-owned. Maintenance delivers only to locally hosted live sockets or locally detached SM sessions; remote-hosted resources stay pending. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
+| `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither legacy delegated full-JID without prepared payload nor DM-pin-owned. Newly prepared full-JID routes retain the processed typed payload even when storage hints suppress MAM; recovery sends that frozen copy without a recipient persistence pass. Maintenance delivers only to locally hosted live sockets or locally detached SM sessions; remote-hosted resources stay pending. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
 | `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
 | `room_observer` | Recovery wakes the durable per-plugin observation worker. Its frozen source/generation/revision identifies the work. A leased job commits `started` before invoking the plugin. Unknown outcomes wait for the three-minute lease before a fresh-token retry; 20 attempts settle as terminal `retry_exhausted`, not callback success. Saved results, publications and receipts commit together. Pre-invocation admission rejection can retry sooner. Missing observer envelopes remain unrecoverable. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
 | `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
 | `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key and the observed invitation generation timestamp (falling back to canonical receipt time for older recorded declines). A newer invitation remains available and the recovered decline is not forwarded. A decline whose canonical row is older than the 30-day invitation TTL is not rebuilt (its invitation expired and a newer one for the same tuple could otherwise be consumed); it is metered and stays pending. |
-| `route_direct` | Delegated live full-JID routes are deferred: full target, recipient differs from sender, no recorded recipient archive, singleton full-target fanout and `CaptureOrdinal` identity. Recipient preparation belongs to the destination pipeline. This also conservatively defers detached full-target `<no-store/>` routes without archive evidence. Headline routes are deferred because they require peer delivery with recipient archival for `<store/>`. Groupchat inbox refreshes marked with the typed `InboxPush` route identity finish after a live attempt, including missing or disconnected sessions; maintenance durably discards this ephemeral refresh after a crash without replaying a stale projection. The inbox projection, archived message, MUC fanout, and notification each retain their independent obligations. Older inbox pushes with `CaptureOrdinal` identities and routes to other recipients remain unrecoverable because the canonical message does not prove their payload; use the manual abandoned-obligation repair for those older rows. |
+| `route_direct` | Legacy delegated full-JID routes remain deferred when neither recipient archive authority nor a frozen prepared payload proves recipient preparation. The conservative legacy shape is a non-self full target, singleton fanout and `CaptureOrdinal` identity. A newly prepared unarchived route is no longer classified as legacy solely because MAM is absent. Headline routes without supported payload/archive provenance remain deferred. Groupchat inbox refreshes marked with the typed `InboxPush` route identity finish after a live attempt, including missing or disconnected sessions; maintenance durably discards this ephemeral refresh after a crash without replaying a stale projection. The inbox projection, archived message, MUC fanout, and notification each retain their independent obligations. Older inbox pushes with `CaptureOrdinal` identities and routes to other recipients remain unrecoverable because the canonical message does not prove their payload; use the manual abandoned-obligation repair for those older rows. |
 | `carbons`, `relay_carbons` | Rebuilt from the canonical message and recorded carbon identity. Local carbon intents retain their frozen resource audience; legacy relay intents retain their owner and exclusions. Both carry the original receipt identity to each receiving resource's live-send or detached-custody gate. Received copies recheck the recipient blocklist. |
 | `dm_call_thread_state` | Deferred; call-state mutations are not replayed. |
 | `pin` | Room pin chains are unrecoverable: the pinner nick was not recorded. |
@@ -1352,6 +1357,68 @@ Recovered direct notification candidates retain canonical receipt time and deleg
 
 Recovered detached SM appends retain the canonical receipt time, preserving
 XEP-0203 delay stamps across the recovery grace interval.
+
+Prepared direct-route evidence (#1910) retains a storable recipient-passed message,
+including its original recipient stanza ID, independently of MAM. Maintenance
+can continue custody for the recorded resumable target without minting a new
+recipient identity or adding a newly connected resource. This does not permit
+general offline storage of a `no-store` message. Legacy records without enough
+payload/preparation evidence keep their conservative deferred classification.
+
+An exact full-JID direct message from another account with `no-store` and no
+`store` hint has no prepared ledger payload. Its canonical envelope retains
+only routing/identity metadata. The ingress transaction settles the route with
+`storage_hint_forbids_handoff` and makes it terminal; that receipt records the
+sender's storage policy, not successful delivery or observed resource absence.
+The initial in-memory decision may still attempt the frozen live socket or
+append to an accepted resumable stream. Only that stream's existing XEP-0198
+buffer may retain the payload for replay, bounded by its resume window. A crash
+before that attempt, or an unavailable recipient, permits loss. Ingress retry,
+maintenance and later resource-name reuse do not deliver the message again.
+Initial SM custody retains canonical receipt time through local delivery,
+registered remote sockets and ordered relay, including a target that detaches
+after planning. Receipt time travels as typed transport metadata, separately
+from ingress append authority, and participates in the ordered payload's
+signature and duplicate fingerprint. Existing keyed append authority determines
+its own timestamp. Rehydration uses the SM store's existing millisecond
+timestamp precision.
+Bare-JID, self-addressed and explicit `store` cases retain their existing policy.
+
+### Policy-discard receipts (V1024)
+
+The nullable `ingress_effect_receipts.policy_discard_reason` distinguishes
+`recipient_blocked` and `storage_hint_forbids_handoff` from ordinary settlement.
+It describes disposal of the remaining aggregate obligation, not successful
+per-resource delivery and not proof that an earlier uncertain send never
+happened. A null reason preserves the ordinary/legacy receipt meaning; it must
+not be interpreted as proof of socket delivery. Existing receipts win over a
+later attempted reclassification.
+
+Storage-hint disposal is decided at commit from the message policy. It requires
+no reachability snapshot, ownership epoch or bind-generation fence, so a
+same-owner reconnect cannot race an absence-based settlement. It writes no
+offline payload or successful per-resource delivery evidence.
+
+V1024 adds this nullable column through the append-only migration ledger.
+Keep the deployment on `Recreate`: old writers must stop before new writers
+record prepared payloads, frozen archive context and policy-discard evidence.
+Older binaries reject the newer ledger; use a roll-forward correction rather than a blind binary
+rollback. This change does not itself verify or perform a production cutover.
+
+For read-only classification, count reasons without exposing message payloads:
+
+```sql
+SELECT policy_discard_reason, COUNT(*)
+FROM ingress_effect_receipts
+WHERE policy_discard_reason IS NOT NULL
+GROUP BY policy_discard_reason;
+```
+
+Do not backfill a reason merely because an old row has no delivery proof. Its
+unknown outcome and the original storage policy still need authoritative
+disposition.
+
+### Delivery attempts and custody
 
 Remote-hosted resources stay pending: maintenance only uses locally hosted live
 sockets and locally detached SM sessions. It never sends a registered-remote
@@ -1433,7 +1500,11 @@ exactly-once execution of guest external effects. The existing 20-attempt limit
 settles exhausted work as failure; valid result/publication/receipt writes remain
 atomic and publication output indices remain idempotent.
 
-**Accepted residual for #1776:** “recognised on retry instead of repeated” holds
+**Accepted policy from merged #1899 (#1776, reconciled by #1909):**
+This supersedes #1658's original terminal non-SM uncertainty requirement.
+The same bounded unknown-outcome policy applies to recorded non-SM live sends;
+absence of an SM session does not make a started attempt terminal forever.
+“Recognised on retry instead of repeated” holds
 when durable completion, receipt or custody evidence exists. A committed start
 alone proves only that execution might have begun. After its bounded deadline,
 recovery deliberately permits another attempt rather than silently losing the
@@ -1445,6 +1516,14 @@ deduplicate provider side effects. This is the implemented availability policy,
 not an exactly-once or at-most-once external-effect guarantee. Providers requiring
 stronger guarantees need their own durable idempotency/result lookup before
 performing the effect.
+
+Do not conflate an unknown started attempt with an effect that never started:
+the latter still needs recovery or an explicit policy disposition. An effect
+receipt can record policy resolution or custody transfer; it is not always a
+successful socket-delivery receipt. Normal XEP-0198 replay of an unacknowledged
+frame is also distinct from allocating another logical keyed effect. See the
+[direct-message acceptance matrix](ingress-effect-acceptance.md) for the exact
+guarantee and verification boundary of each effect family.
 
 **Deployment:** this PR ships the production HelmRelease as `Recreate`. Old
 writers must stop before new writers apply V1022 or use the v4 side-effect relay;

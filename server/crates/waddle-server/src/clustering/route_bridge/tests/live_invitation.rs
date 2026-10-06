@@ -64,6 +64,7 @@ async fn generated_frame(
     )
     .expect("canonical invitation digest");
     let route = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.clone(),
         fanout: vec![target],
         route_identity: EffectMessageIdentity::capture_ordinal(7),

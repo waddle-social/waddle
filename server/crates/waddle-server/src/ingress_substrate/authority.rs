@@ -1,6 +1,14 @@
 use super::*;
 use xmpp_parsers::message::Message;
 
+/// Archive-only room metadata, never exposed through the live message accessor.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub(crate) struct MucArchiveContext {
+    pub stanza_id: waddle_xmpp_core::xep0359::StanzaId,
+    pub sender: Option<waddle_xmpp_core::mam::ArchivedMucSender>,
+    pub nickname_generation: Option<u64>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeVersion {
     V1,
@@ -24,6 +32,7 @@ pub struct MessageEnvelope {
     version: EnvelopeVersion,
     message: Message,
     observer_request: Option<Message>,
+    archive_contexts: Vec<MucArchiveContext>,
 }
 
 impl MessageEnvelope {
@@ -32,6 +41,7 @@ impl MessageEnvelope {
             version: EnvelopeVersion::V1,
             message,
             observer_request: None,
+            archive_contexts: Vec::new(),
         }
     }
 
@@ -52,6 +62,7 @@ impl MessageEnvelope {
             version: EnvelopeVersion::V1,
             message,
             observer_request: Some(request),
+            archive_contexts: Vec::new(),
         }
     }
 
@@ -64,6 +75,33 @@ impl MessageEnvelope {
         })
     }
 
+    pub(crate) fn archive_context(
+        &self,
+        stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
+    ) -> Option<&MucArchiveContext> {
+        self.archive_contexts
+            .iter()
+            .find(|context| &context.stanza_id == stanza_id)
+    }
+
+    pub(crate) fn with_archive_context(mut self, context: MucArchiveContext) -> Self {
+        self.archive_contexts.push(context);
+        self
+    }
+
+    fn preserve_archive_contexts(&mut self, stored: &Self) -> Result<(), IngressSubstrateError> {
+        for context in &stored.archive_contexts {
+            match self.archive_context(&context.stanza_id) {
+                Some(candidate) if candidate != context => {
+                    return Err(IngressSubstrateError::MessageContentConflict)
+                }
+                Some(_) => {}
+                None => self.archive_contexts.push(context.clone()),
+            }
+        }
+        Ok(())
+    }
+
     pub(super) fn from_storage(
         version: i64,
         bytes: Vec<u8>,
@@ -73,6 +111,18 @@ impl MessageEnvelope {
         }
         let stored: StoredEnvelope = serde_json::from_slice(&bytes)
             .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+        if stored
+            .archive_contexts
+            .iter()
+            .enumerate()
+            .any(|(index, context)| {
+                stored.archive_contexts[index + 1..]
+                    .iter()
+                    .any(|other| other.stanza_id == context.stanza_id)
+            })
+        {
+            return Err(IngressSubstrateError::InvalidStoredEnvelope);
+        }
         let observer_request = stored
             .observer_request
             .as_deref()
@@ -88,6 +138,7 @@ impl MessageEnvelope {
             version: EnvelopeVersion::V1,
             message: parse_envelope_message(&stored.message)?,
             observer_request,
+            archive_contexts: stored.archive_contexts,
         })
     }
 }
@@ -97,6 +148,8 @@ impl MessageEnvelope {
 struct StoredEnvelope {
     message: String,
     observer_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archive_contexts: Vec<MucArchiveContext>,
 }
 
 fn parse_envelope_message(text: &str) -> Result<Message, IngressSubstrateError> {
@@ -115,6 +168,7 @@ pub(super) fn serialize_envelope(
     let stored = StoredEnvelope {
         message: encode(envelope.message())?,
         observer_request: envelope.observer_request.as_ref().map(encode).transpose()?,
+        archive_contexts: envelope.archive_contexts.clone(),
     };
     serde_json::to_vec(&stored).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
 }
@@ -133,7 +187,15 @@ pub async fn record_room_canonical_envelope(
     let stored = load_envelope(tx, key)
         .await?
         .ok_or(IngressSubstrateError::MessageContentConflict)?;
-    if stored.observer_request.is_some() {
+    let mut updated = if stored.observer_request.is_some() {
+        let mut original = stored.clone();
+        original.preserve_archive_contexts(envelope)?;
+        original
+    } else {
+        envelope.clone()
+    };
+    updated.preserve_archive_contexts(&stored)?;
+    if updated == stored {
         return Ok(());
     }
     const POSTGRES: &str = "UPDATE ingress_messages SET envelope_version = ?, envelope = ? WHERE message_key = ?::uuid";
@@ -142,8 +204,8 @@ pub async fn record_room_canonical_envelope(
     tx.execute(
         dialect_sql(tx.driver(), POSTGRES, SQLITE),
         crate::db_params![
-            envelope.version().to_storage(),
-            serialize_envelope(envelope)?,
+            updated.version().to_storage(),
+            serialize_envelope(&updated)?,
             key.to_storage().to_string()
         ],
     )

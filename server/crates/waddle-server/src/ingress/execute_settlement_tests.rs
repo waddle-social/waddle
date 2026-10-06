@@ -7,6 +7,7 @@ use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 
 fn route_intent(ordinal: u64) -> IngressEffectIntent {
     IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
         route_identity: EffectMessageIdentity::CaptureOrdinal(ordinal),

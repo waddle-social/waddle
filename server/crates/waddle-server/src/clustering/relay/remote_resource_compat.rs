@@ -23,11 +23,12 @@ mod tests;
 /// decoding or running the handler. In particular, DeserializeMessage can mean
 /// the reply failed to decode after the receiver committed the operation.
 async fn live_or_baseline<T, E>(
+    allow_baseline: bool,
     live: impl Future<Output = Result<T, RemoteSendError<E>>>,
     baseline: impl Future<Output = Result<T, RemoteSendError<E>>>,
 ) -> Result<T, RemoteSendError<E>> {
     match live.await {
-        Err(RemoteSendError::UnknownMessage { .. }) => baseline.await,
+        Err(RemoteSendError::UnknownMessage { .. }) if allow_baseline => baseline.await,
         result => result,
     }
 }
@@ -38,8 +39,15 @@ pub(super) async fn ask_route(
     mailbox_timeout: Duration,
     reply_timeout: Duration,
 ) -> Result<RelayRouteRemoteResourceStanzaReply, RemoteSendError<kameo::error::Infallible>> {
-    let baseline = RouteV8::from(message.clone());
+    let carries_timestamp = matches!(
+        &message.target,
+        RemoteResourceRouteTarget::FullJid {
+            received_at: Some(_),
+            ..
+        }
+    );
     let baseline_ask = async {
+        let baseline = RouteV8::from(message.clone());
         remote
             .ask(&baseline)
             .mailbox_timeout(mailbox_timeout)
@@ -50,6 +58,7 @@ pub(super) async fn ask_route(
     match LiveRoute::from_current(message) {
         Some(live) => {
             live_or_baseline(
+                !carries_timestamp,
                 async {
                     remote
                         .ask(&live)
@@ -62,6 +71,9 @@ pub(super) async fn ask_route(
             )
             .await
         }
+        None if carries_timestamp => Err(RemoteSendError::SerializeMessage(
+            "timestamp-only metadata cannot be represented by the append-authority baseline".into(),
+        )),
         None => baseline_ask.await,
     }
 }
@@ -72,8 +84,9 @@ pub(super) async fn ask_frame(
     mailbox_timeout: Duration,
     reply_timeout: Duration,
 ) -> Result<RelayRemoteResourceFrameReply, RemoteSendError<kameo::error::Infallible>> {
-    let baseline = FrameV3::from(message.clone());
+    let carries_timestamp = message.frame.received_at.is_some();
     let baseline_ask = async {
+        let baseline = FrameV3::from(message.clone());
         remote
             .ask(&baseline)
             .mailbox_timeout(mailbox_timeout)
@@ -84,6 +97,7 @@ pub(super) async fn ask_frame(
     match LiveFrame::from_current(message) {
         Some(live) => {
             live_or_baseline(
+                !carries_timestamp,
                 async {
                     remote
                         .ask(&live)
@@ -96,6 +110,9 @@ pub(super) async fn ask_frame(
             )
             .await
         }
+        None if carries_timestamp => Err(RemoteSendError::SerializeMessage(
+            "timestamp-only metadata cannot be represented by the append-authority baseline".into(),
+        )),
         None => baseline_ask.await,
     }
 }
@@ -150,7 +167,7 @@ impl Message<RouteV8> for RelayActor {
     }
 }
 
-#[kameo::remote_message("waddle.clustering.relay.live_resource_route.v1")]
+#[kameo::remote_message("waddle.clustering.relay.live_resource_route.v2")]
 impl Message<LiveRoute> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<RouteReply>;
 
@@ -194,7 +211,7 @@ impl Message<FrameV3> for RelayActor {
     }
 }
 
-#[kameo::remote_message("waddle.clustering.relay.live_resource_frame.v1")]
+#[kameo::remote_message("waddle.clustering.relay.live_resource_frame.v2")]
 impl Message<LiveFrame> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<FrameReply>;
 

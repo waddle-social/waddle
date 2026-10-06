@@ -162,7 +162,9 @@ pub(super) async fn execute(
         let ResourceDelivery { outcome, certainty } =
             append_resource(&resource_deps, effect, resource).await;
         if outcome == FullJidDeliveryOutcome::Unavailable {
-            match super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await {
+            let handoff =
+                super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await;
+            match handoff {
                 Ok(Some(settled)) => {
                     handed_off.push(resource.clone());
                     if !settled.is_empty() {

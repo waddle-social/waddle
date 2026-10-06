@@ -244,6 +244,7 @@ async fn relayed_direct_receipt(fixture: IngressFixture) {
     let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let identity = EffectMessageIdentity::capture_ordinal(7);
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![recipient.clone()],
         route_identity: identity.clone(),
@@ -331,6 +332,7 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
     socket_tests::register_test_connection(&state, &target, old_sender).await;
     let key = MessageKey::new();
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: target.to_bare(),
         fanout: vec![target.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(1),
@@ -432,6 +434,7 @@ async fn archived_reflection_rechecks_completed_receipt(fixture: IngressFixture)
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let stamp = waddle_xmpp_core::xep0359::StanzaId::new("reflection", room.clone().into());
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: submission.sender.to_bare(),
         fanout: vec![submission.sender.clone()],
         route_identity: EffectMessageIdentity::stanza(stamp.clone()),

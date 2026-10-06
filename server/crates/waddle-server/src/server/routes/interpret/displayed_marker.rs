@@ -166,6 +166,7 @@ fn capture_displayed_marker_pushes(deps: &Deps<'_>, owner: &BareJid, fanout: Vec
         return;
     }
     capture.record_intent(waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: owner.clone(),
         fanout,
         route_identity: capture.next_route_identity(),

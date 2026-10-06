@@ -300,3 +300,176 @@ async fn sqlite_file_concurrent_origin_writers_do_not_upgrade_stale_snapshots() 
     ordinals.sort_unstable();
     assert_eq!(ordinals, (1..=8).collect::<Vec<_>>());
 }
+
+async fn projection_conflict(storage: SqlxMamStorage) {
+    use waddle_xmpp_core::mam::{ArchivedMucSender, ArchivedRichMessage};
+    use waddle_xmpp_core::types::{Affiliation, Role};
+    use xmpp_parsers::message::{Message, MessageType};
+    let archive: BareJid = format!("projection-{}@example.com", uuid::Uuid::now_v7())
+        .parse()
+        .expect("archive");
+    let mut original = message(&archive, &uuid::Uuid::now_v7().to_string());
+    original.timestamp =
+        chrono::DateTime::from_timestamp(1_753_617_600, 123_456_789).expect("stamp");
+    original.rich = Some(ArchivedRichMessage {
+        muc_sender: Some(ArchivedMucSender {
+            jid: "alice@example.com/original".parse().expect("sender"),
+            affiliation: Affiliation::Member,
+            role: Role::Participant,
+        }),
+        ..Default::default()
+    });
+    original.nickname_generation = Some(3);
+    let mut wire = Message::new(Some(original.to.clone()));
+    wire.from = Some(original.from.clone());
+    wire.bodies
+        .insert(Default::default(), "ordinal fixture".into());
+    original.stanza_xml = Some(String::from(&minidom::Element::from(wire.clone())));
+    let MamTxStoreOutcome::Inserted { stanza_id, ordinal } =
+        store_expected(&storage, &archive, &original, ArchiveExpectation::Fresh)
+            .await
+            .expect("insert original")
+    else {
+        panic!("inserted")
+    };
+    let expectation = ArchiveExpectation::Existing {
+        stanza_id: stanza_id.clone(),
+        archived_at: original.timestamp,
+        ordinal: Some(ordinal),
+    };
+    assert_eq!(
+        store_expected(&storage, &archive, &original, expectation.clone())
+            .await
+            .expect("matching replay"),
+        MamTxStoreOutcome::Existing {
+            stanza_id: stanza_id.clone(),
+            ordinal
+        }
+    );
+    let mut equivalent = original.clone();
+    let mut element: minidom::Element = original
+        .stanza_xml
+        .as_deref()
+        .expect("XML")
+        .parse()
+        .expect("element");
+    element.prefixes = (
+        "client".to_owned(),
+        xmpp_parsers::ns::JABBER_CLIENT.to_owned(),
+    )
+        .into();
+    equivalent.stanza_xml = Some(String::from(&element));
+    assert_ne!(equivalent.stanza_xml, original.stanza_xml);
+    assert!(matches!(
+        store_expected(&storage, &archive, &equivalent, expectation.clone())
+            .await
+            .expect("equivalent XML spelling"),
+        MamTxStoreOutcome::Existing { .. }
+    ));
+    type ProjectionMutation = fn(&mut ArchivedMessage);
+    let mutations: &[(&str, ProjectionMutation)] = &[
+        ("sender", |m| {
+            m.from = "mallory@example.com/other".parse().expect("sender")
+        }),
+        ("target", |m| {
+            m.to = "other@example.com".parse().expect("target")
+        }),
+        ("body", |m| m.body = Some("different immutable body".into())),
+        ("absent body", |m| m.body = None),
+        ("wire id", |m| {
+            m.stanza_id = Some(StanzaId::new("changed", m.to.clone()))
+        }),
+        ("origin id", |m| {
+            m.origin_id = Some(waddle_xmpp_core::xep0359::OriginId::new("changed"))
+        }),
+        ("message type", |m| m.message_type = MessageType::Headline),
+        ("rich payload", |m| {
+            m.rich
+                .as_mut()
+                .expect("rich")
+                .subjects
+                .insert(String::new(), "changed".into());
+        }),
+        ("MUC sender", |m| {
+            m.rich
+                .as_mut()
+                .expect("rich")
+                .muc_sender
+                .as_mut()
+                .expect("sender")
+                .jid = "alice@example.com/rejoined".parse().expect("jid");
+        }),
+        ("nickname generation", |m| m.nickname_generation = Some(4)),
+        ("absent XML", |m| m.stanza_xml = None),
+        ("XML payload", |m| {
+            let mut element: minidom::Element = m
+                .stanza_xml
+                .as_deref()
+                .expect("XML")
+                .parse()
+                .expect("element");
+            element.append_child(
+                minidom::Element::builder("subject", xmpp_parsers::ns::JABBER_CLIENT)
+                    .append("changed XML only")
+                    .build(),
+            );
+            m.stanza_xml = Some(String::from(&element));
+        }),
+    ];
+    for (name, mutate) in mutations {
+        let mut changed = original.clone();
+        mutate(&mut changed);
+        let result = store_expected(&storage, &archive, &changed, expectation.clone()).await;
+        assert!(
+            matches!(result, Err(MamTxStoreError::ProjectionConflict { .. })),
+            "{name} must conflict without modifying archive authority: {result:?}"
+        );
+    }
+    let wrong_time = ArchiveExpectation::Existing {
+        stanza_id,
+        archived_at: original.timestamp + Duration::microseconds(1),
+        ordinal: Some(ordinal),
+    };
+    assert!(matches!(
+        store_expected(&storage, &archive, &original, wrong_time).await,
+        Err(MamTxStoreError::ProjectionConflict { .. })
+    ));
+    let stored = storage
+        .get_message(&original.id)
+        .await
+        .expect("read")
+        .expect("original");
+    assert_eq!(stored.body, original.body);
+    assert_eq!(stored.stanza_xml, original.stanza_xml);
+    assert_eq!(stored.rich, original.rich);
+    assert_eq!(stored.ordinal, Some(ordinal));
+    assert_eq!(
+        stored.timestamp.timestamp_micros(),
+        original.timestamp.timestamp_micros()
+    );
+    if matches!(&storage.backend, MamDatabaseBackend::Sqlite(_)) {
+        assert_eq!(stored.timestamp, original.timestamp);
+    }
+    assert_eq!(
+        storage
+            .query_messages(&archive, MamArchiveKind::Personal, &MamQuery::default())
+            .await
+            .expect("archive")
+            .messages
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn sqlite_existing_archive_rejects_changed_projection() {
+    projection_conflict(SqlxMamStorage::open_in_memory().await.expect("schema")).await;
+}
+
+#[tokio::test]
+async fn postgres_existing_archive_rejects_changed_projection() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    projection_conflict(SqlxMamStorage::open(&url).await.expect("schema")).await;
+}

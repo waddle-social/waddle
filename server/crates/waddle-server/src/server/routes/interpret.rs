@@ -237,10 +237,12 @@ pub(crate) use route_to_connection::{
     queue_processed_for_detached, route_to_connection, undeliverable_iq_reply,
     DetachedQueueOutcome,
 };
+#[cfg(feature = "clustering")]
+pub(crate) use routing::deliver_peer_to_full_at;
+pub(crate) use routing::existing_ingress_delivery;
 pub(crate) use routing::{
     close_call_setup_from_outcome, deliver_direct_to_full, FullJidDeliveryOutcome,
 };
-pub(crate) use routing::{deliver_peer_to_full, existing_ingress_delivery};
 use routing::{
     deliver_peer_to_live_only, run_fanout_recipient_pass, run_headless_recipient_pass,
     FanoutPassResult,
@@ -258,7 +260,7 @@ pub use deps::{
     Deps, GroupchatRetrySuppression, HostOwnedResources, InterpretOutcome, OrderedRelayRouteOrigin,
     SmIngressAppendContext, TimerCommand,
 };
-pub(crate) use groupchat_archive::push_inbox_update;
+pub(crate) use groupchat_archive::{project_groupchat_archive, push_inbox_update};
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
 };

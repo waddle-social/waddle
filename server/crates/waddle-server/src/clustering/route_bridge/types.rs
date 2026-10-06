@@ -218,6 +218,8 @@ pub struct RemoteResourceOutboundFrame {
     /// The origin's recorded obligation, unverified. The socket node authorizes
     /// it before live enqueue and again if the frame enters XEP-0198 custody.
     pub ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub received_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
@@ -239,6 +241,8 @@ pub enum RemoteResourceRouteTarget {
         target: jid::FullJid,
         stanza: RemoteStanza,
         ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     BareJid {
         target: jid::BareJid,

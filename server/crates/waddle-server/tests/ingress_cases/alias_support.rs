@@ -203,28 +203,3 @@ pub(super) fn assert_error(message: &Message, condition: DefinedCondition) {
         .expect("standard stanza error");
     assert_eq!(error.defined_condition, condition);
 }
-
-/// Freeze the room-authored archive identity independently of the authenticated
-/// sender that owns the ingress alias.
-pub(super) fn room_archive_identity(submission: &mut IngressSubmission, generation: u64) {
-    for planned in &mut submission.plan.plan {
-        if let Effect::Durable(DurableEffect::Room(DurableRoomEffect::ArchiveGroupchat {
-            message,
-            room,
-            ..
-        })) = &mut planned.effect
-        {
-            message.from = room
-                .with_resource_str("reused-nick")
-                .expect("room occupant")
-                .into();
-            message.nickname_generation = Some(generation);
-            message.rich.get_or_insert_with(Default::default).muc_sender =
-                Some(waddle_xmpp_core::mam::ArchivedMucSender {
-                    jid: submission.sender.clone().into(),
-                    affiliation: waddle_xmpp::Affiliation::Member,
-                    role: waddle_xmpp::Role::Participant,
-                });
-        }
-    }
-}

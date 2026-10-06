@@ -36,6 +36,7 @@ fn invite_submission(
     let identity = EffectMessageIdentity::CaptureOrdinal(0);
     submission.plan.intents = vec![
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: recipient.clone(),
             fanout: vec![resource.clone()],
             route_identity: identity.clone(),

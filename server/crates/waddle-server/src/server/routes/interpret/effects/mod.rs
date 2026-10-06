@@ -1,6 +1,7 @@
 //! Typed effects shared by immediate dispatch and ingress planning.
 pub mod delivery;
 mod delivery_immediate;
+pub(crate) use delivery_immediate::execute_with_received_at as execute_delivery_with_received_at;
 pub mod direct;
 mod direct_immediate;
 mod immediate;

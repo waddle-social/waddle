@@ -401,6 +401,31 @@ async fn forged_room_stamp(
         !waddle_xmpp_core::xep0359::extract_stanza_ids(&submission.plan.sanitized_message)
             .contains(&forged)
     );
+    let archive_context = submission
+        .plan
+        .plan
+        .iter()
+        .find_map(|planned| match &planned.effect {
+            Effect::Durable(crate::ingress::effects::DurableEffect::Room(
+                crate::ingress::effects::room::DurableRoomEffect::ArchiveGroupchat {
+                    room: archive,
+                    message,
+                    ..
+                },
+            )) if archive == &room => Some(crate::ingress_substrate::MucArchiveContext {
+                stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    message.id.clone(),
+                    archive.clone().into(),
+                ),
+                sender: message
+                    .rich
+                    .as_ref()
+                    .and_then(|rich| rich.muc_sender.clone()),
+                nickname_generation: message.nickname_generation,
+            }),
+            _ => None,
+        })
+        .expect("original room archive context");
     let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("commit sanitized room message");
@@ -582,16 +607,19 @@ async fn forged_room_stamp(
     assert_eq!(fixture.count("ingress_messages").await, 1);
     assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
     let mut tx = fixture.uow.begin().await.expect("read canonical envelope");
+    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+        &mut tx,
+        decision.message_key.expect("key"),
+    )
+    .await
+    .expect("envelope read")
+    .expect("canonical envelope");
+    assert_eq!(envelope.message(), &committed_message);
+    assert_eq!(envelope.room_observer_request(), None);
     assert_eq!(
-        crate::ingress_uow::CanonicalMessageRepository::load_envelope(
-            &mut tx,
-            decision.message_key.expect("key")
-        )
-        .await
-        .expect("envelope"),
-        Some(crate::ingress_substrate::MessageEnvelope::new(
-            committed_message
-        ))
+        envelope.archive_context(&room_id.1),
+        Some(&archive_context),
+        "retry preserves archive-only metadata from the original plan"
     );
     tx.commit().await.expect("read complete");
     fixture.close().await;

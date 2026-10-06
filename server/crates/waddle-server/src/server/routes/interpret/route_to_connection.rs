@@ -99,10 +99,15 @@ async fn select_bare_jid_live_targets(deps: &Deps<'_>, bare: &BareJid) -> Vec<ji
         .collect()
 }
 
-fn capture_route_direct_intent(
+fn capture_route_direct_intent(deps: &Deps<'_>, recipient: &BareJid, fanout: Vec<jid::FullJid>) {
+    capture_prepared_route_direct_intent(deps, recipient, fanout, None);
+}
+
+fn capture_prepared_route_direct_intent(
     deps: &Deps<'_>,
     recipient: &BareJid,
     mut fanout: Vec<jid::FullJid>,
+    prepared: Option<waddle_xmpp::ingress::StoredMessagePayload>,
 ) {
     if fanout.is_empty() {
         return;
@@ -113,6 +118,7 @@ fn capture_route_direct_intent(
         return;
     };
     deps.capture_intent(IngressEffectIntent::RouteDirect {
+        prepared,
         recipient: recipient.clone(),
         fanout,
         route_identity: deps
@@ -331,6 +337,38 @@ async fn route_planned_direct_message(
             side_routes,
         } => {
             if let Some(processed) = processed {
+                let Stanza::Message(message) = processed.as_ref() else {
+                    deps.effects
+                        .fail_plan(super::effects::PlanFailure::InvalidPreparedMessage);
+                    return Vec::new();
+                };
+                // Generated side routes retain their specialized authority;
+                // only this ingress envelope's recipient pass proves a new
+                // prepared primary-direct copy.
+                let prepared = if deps.effects.message().is_some_and(|source| {
+                    source.from == message.from
+                        && source.to == message.to
+                        && source.type_ == message.type_
+                }) {
+                    match waddle_xmpp::ingress::StoredMessagePayload::new(message.clone()) {
+                        Ok(prepared) => {
+                            // Validate the same bounded copy, but retain no payload
+                            // when the sender explicitly forbids later handoff.
+                            (!crate::ingress::storage_hint::forbids_direct_handoff(
+                                message,
+                                &selection.originals,
+                            ))
+                            .then_some(prepared)
+                        }
+                        Err(_) => {
+                            deps.effects
+                                .fail_plan(super::effects::PlanFailure::InvalidPreparedMessage);
+                            return Vec::new();
+                        }
+                    }
+                } else {
+                    None
+                };
                 for target in &selection.originals {
                     if inventory
                         .live
@@ -343,7 +381,7 @@ async fn route_planned_direct_message(
                         plan::queue_detached(deps, vec![target.clone()], &processed);
                     }
                 }
-                capture_route_direct_intent(deps, &bare, selection.originals);
+                capture_prepared_route_direct_intent(deps, &bare, selection.originals, prepared);
             }
             route_side_stanzas(deps, side_routes, depth).await;
         }
@@ -1117,6 +1155,16 @@ pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
     stanza: &'a Stanza,
     call_setup: Option<PendingCallSetupRoute>,
 ) -> OrderedRelayDeliveryFuture<'a> {
+    deliver_full_jid_via_ordered_relay_at(deps, target, stanza, call_setup, None)
+}
+
+pub(crate) fn deliver_full_jid_via_ordered_relay_at<'a>(
+    deps: &'a Deps<'_>,
+    target: &'a jid::FullJid,
+    stanza: &'a Stanza,
+    call_setup: Option<PendingCallSetupRoute>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> OrderedRelayDeliveryFuture<'a> {
     Box::pin(async move {
         if deps.effects.is_planning() {
             if plan::remote_owner(deps, &target.to_bare()).await {
@@ -1163,18 +1211,19 @@ pub(crate) fn deliver_full_jid_via_ordered_relay<'a>(
                 .ordered_relay_delivery_bridge
                 .as_ref()?;
             bridge
-                .try_deliver_full_jid_remote(
+                .try_deliver_full_jid_remote_at(
                     target,
                     stanza,
                     origin,
                     call_setup,
                     deps.ingress_append_context.clone(),
+                    received_at,
                 )
                 .await
         }
         #[cfg(not(feature = "clustering"))]
         {
-            let _ = (deps, target, stanza, call_setup);
+            let _ = (deps, target, stanza, call_setup, received_at);
             None
         }
     })
@@ -1184,6 +1233,15 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    deliver_peer_to_full_with_registered_remote_at(deps, target, stanza, None).await
+}
+
+pub(crate) async fn deliver_peer_to_full_with_registered_remote_at(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     if deps.effects.is_planning() {
         plan::record(
@@ -1217,22 +1275,24 @@ pub(crate) async fn deliver_peer_to_full_with_registered_remote(
     {
         return outcome;
     }
-    if let Some(outcome) = deliver_registered_remote_resource(
+    if let Some(outcome) = deliver_registered_remote_resource_at(
         deps,
         target,
         stanza,
         waddle_xmpp::registry::DeliveryKind::PeerStanza,
+        received_at,
     )
     .await
     {
         return outcome;
     }
-    deliver_peer_to_full(
+    routing::deliver_peer_to_full_at(
         deps.user_registry,
         deps.sm_session_registry,
         target,
         stanza,
         deps.ingress_append_context.as_ref(),
+        received_at,
     )
     .await
 }
@@ -1241,6 +1301,15 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
     deps: &Deps<'_>,
     target: &jid::FullJid,
     stanza: &Stanza,
+) -> FullJidDeliveryOutcome {
+    deliver_direct_to_full_with_registered_remote_at(deps, target, stanza, None).await
+}
+
+pub(crate) async fn deliver_direct_to_full_with_registered_remote_at(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     if deps.effects.is_planning() {
         plan::record(
@@ -1303,22 +1372,24 @@ pub(crate) async fn deliver_direct_to_full_with_registered_remote(
             }
         }
     }
-    if let Some(outcome) = deliver_registered_remote_resource(
+    if let Some(outcome) = deliver_registered_remote_resource_at(
         deps,
         target,
         stanza,
         waddle_xmpp::registry::DeliveryKind::DirectFrame,
+        received_at,
     )
     .await
     {
         return outcome;
     }
-    deliver_direct_to_full(
+    routing::deliver_direct_to_full_at(
         deps.user_registry,
         deps.sm_session_registry,
         target,
         stanza,
         deps.ingress_append_context.as_ref(),
+        received_at,
     )
     .await
 }
@@ -1499,6 +1570,16 @@ pub(crate) async fn deliver_registered_remote_resource(
     stanza: &Stanza,
     kind: waddle_xmpp::registry::DeliveryKind,
 ) -> Option<FullJidDeliveryOutcome> {
+    deliver_registered_remote_resource_at(deps, target, stanza, kind, None).await
+}
+
+pub(crate) async fn deliver_registered_remote_resource_at(
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: waddle_xmpp::registry::DeliveryKind,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Option<FullJidDeliveryOutcome> {
     if deps.effects.is_planning() {
         // A same-owner registered resource remains a peer-delivery obligation;
         // its eventual executor resolves the remote socket registration.
@@ -1524,17 +1605,18 @@ pub(crate) async fn deliver_registered_remote_resource(
             .ordered_relay_delivery_bridge
             .as_ref()?;
         bridge
-            .try_deliver_registered_remote_resource(
+            .try_deliver_registered_remote_resource_at(
                 target,
                 stanza,
                 kind,
                 deps.ingress_append_context.as_ref(),
+                received_at,
             )
             .await
     }
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (deps, target, stanza, kind);
+        let _ = (deps, target, stanza, kind, received_at);
         None
     }
 }
@@ -1749,6 +1831,16 @@ pub(crate) async fn queue_processed_for_detached(
     live_set: &std::collections::HashSet<jid::FullJid>,
     stanza: &Stanza,
 ) -> Vec<(jid::FullJid, DetachedQueueOutcome)> {
+    queue_processed_for_detached_at(deps, detached_targets, live_set, stanza, None).await
+}
+
+pub(crate) async fn queue_processed_for_detached_at(
+    deps: &Deps<'_>,
+    detached_targets: Vec<jid::FullJid>,
+    live_set: &std::collections::HashSet<jid::FullJid>,
+    stanza: &Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Vec<(jid::FullJid, DetachedQueueOutcome)> {
     if deps.effects.is_planning() {
         let targets: Vec<_> = detached_targets
             .into_iter()
@@ -1768,8 +1860,14 @@ pub(crate) async fn queue_processed_for_detached(
         if live_set.contains(&full) {
             continue;
         }
-        match routing::append_detached(sm, deps.ingress_append_context.as_ref(), &full, stanza)
-            .await
+        match routing::append_detached_at(
+            sm,
+            deps.ingress_append_context.as_ref(),
+            &full,
+            stanza,
+            received_at,
+        )
+        .await
         {
             Ok(true) => {
                 outcomes.push((full.clone(), DetachedQueueOutcome::Queued));

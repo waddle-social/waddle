@@ -1,6 +1,7 @@
 # RFC 0018 — Ingress authority cutover with canonical identity (#1657)
 
-Status: implementing (PR opened 2026-09-06). Reviewed in four rounds by an
+Status: authority cutover merged in #1738; delivery policy updated by #1899.
+Originally reviewed in four rounds by an
 independent high-reasoning reviewer before implementation (REJECT ×3 →
 APPROVE-WITH-CHANGES; the last change is folded into §3.2).
 
@@ -9,7 +10,9 @@ APPROVE-WITH-CHANGES; the last change is folded into §3.2).
 Committed ingress decisions determine message responsibility. For every
 inbound `<message/>` the XEP-0198 handled count `h` advances only after the
 message's ingress transaction commits; every effect that runs after commit is
-recorded first as a durable, payload-complete intent. Origin-id duplicates are
+recorded first as a durable intent. Storable effects retain complete recovery
+payloads; protected full-JID `no-store` deliveries instead commit their
+no-handoff disposition and retain only the initial in-memory attempt. Origin-id duplicates are
 decided by the cluster-global alias (sender bare JID, target, origin-id) and
 repaired inside the transaction; the MAM-layer origin dedupe is deleted. The
 shadow scaffolding (#1656/#1695) is deleted; there is one ingress path.
@@ -19,9 +22,11 @@ roadmap slices): (i) maintenance recovery (#1755, §3.6b) re-executes
 provenance-proven direct routes, direct pending delivery and notification
 previews, observers with recorded envelopes, delegated groupchat notification
 recovery, routes of receipted DM pin mutations, and MUC ledger declines.
-Delegated live full-JID routes (including detached full-target no-store routes
-without archive evidence), headline routes, unreceipted DM pin mutations and
-their routes, and DM call state remain deferred. Carbon recovery rebuilds the
+Legacy delegated full-JID routes without frozen prepared-payload evidence,
+headline routes without supported provenance, unreceipted DM pin mutations and
+their routes, and DM call state remain deferred. Newly prepared direct routes
+record storable processed payloads independently of MAM, so an unarchived full-JID
+copy can recover without rerunning recipient preparation. Carbon recovery rebuilds the
 recorded local audience or legacy relay owner/exclusions with keyed delivery.
 Remote-owner-only
 resources and families lacking reconstructible payloads (including room pin
@@ -47,8 +52,11 @@ and non-sender MUC occupant copies (§3.3e), preserving the frozen audience and
 payload. Keyed detached delivery uses the same `sm_ingress_appends` ledger
 locally and on authorized cross-node receiver appends (#1778), including direct
 routes and recorded MUC occupant copies, and on the registered-remote-socket
-and local UserActor detach drains (#1789, #1805). The authorization-failure
-fallback remains unkeyed and at-least-once;
+and local UserActor detach drains (#1789, #1805). Receiver validation rejects
+failed canonical authorization before accepting a keyed delivery. A detach
+drain of an already-accepted frame instead retains unkeyed custody when its
+supplied obligation cannot be authorized, preserving the frame but losing
+keyed deduplication. The separate relayed-carbons authorization gap is #1906;
 #1760 now retains immutable proof and replay payload as one durable custody
 unit, with atomic pending-delivery handoff and independent recovery (§3.3a).
 New detached allocations and live attempts interlock under canonical authority;
@@ -69,6 +77,53 @@ audience is the addressed full JID; received carbons exclude that resource.
 Recipient preparation failures refuse the plan instead of delegating persistence
 to the destination connection. Live preparation adds neither offline notification
 candidates nor recipient notification activity.
+
+### Direct-message acceptance contract (#1909)
+
+The merged #1899 policy supersedes #1658's original requirement that uncertain
+non-SM delivery remain terminal forever. A recorded start proves possible
+execution, not delivery or non-delivery. Unknown live outcomes, including
+non-SM sends, suppress retry during the 60-second database-clock deadline and
+can retry afterward with a fresh fenced token. Durable completion, receipts or
+SM custody are consulted first and suppress another logical sink execution.
+An expired never-started reservation can also recover, but is not classified as
+an uncertain completed send. Offline handoff remains subject to storage hints,
+blocking, sibling authority and quota checks.
+
+Consequently, exactly-once acceptance applies to durable keyed effects and
+their settlement, not to client observation or external provider execution.
+Normal XEP-0198 replay may retransmit an unacknowledged frame; an unknown
+keyless send or provider call can repeat after its deadline. Committed effects
+that never started still require recovery or an explicit permitted policy
+disposition. They are not excused by the unknown-outcome policy.
+
+The [acceptance matrix](../operations/ingress-effect-acceptance.md) maps these
+guarantees to implementation, tests and remaining scope. Room-observer
+terminalization (#1908) is adjacent to the direct-message contract, rather than
+an implicit expansion of its acceptance criteria.
+
+Prepared route payloads are separate from archive authority: a missing MAM row
+does not prove that recipient preparation was delegated. Recovery retains the
+recorded recipient stamps and exact target set. Legacy records without that
+proof remain conservative. Full-JID, non-self messages carrying `no-store`
+without `store` do not retain a prepared copy or canonical payload. Their
+no-handoff policy receipt commits with ingress, making the route terminal
+without claiming successful per-resource delivery. The initial live/SM attempt
+remains permitted, and an accepted stream's existing XEP-0198 buffer retains
+its bounded replay semantics. There is no ledger recovery after a crash before
+that attempt or delivery to a resource that later rebinds. This decision follows
+the sender's policy and never relies on observing recipient absence.
+
+Existing MAM projections compare immutable columns and typed XML content at the
+database's timestamp precision. Direct retries retain the original canonical
+sender resource and wire identity. Room archive-only sender context is frozen
+separately from the live message and is never injected into occupant copies.
+Tombstones remain authoritative after identity/ordinal checks. Missing archive
+rows can be repaired from recorded authority; conflicting rows are not
+overwritten. Legacy or damaged authority that no longer proves generated wire
+IDs or private archive metadata can fail closed with an intent contradiction,
+without a new receipt or reflection. Reading the stored row and accepting its
+own content as proof is not integrity verification.
 
 ### Recovery convergence (#1782)
 
@@ -480,7 +535,7 @@ transport completion settles it independently of the kind-2 occupant aggregate.
 A delayed execution decision rechecks that receipt and cannot resend a completed
 archived reflection. A retransmission from a sibling resource preserves that
 attempt's reflection without replacing the original resource's obligation.
-Ordinary cross-node occupant copies use `deliver_ordered.v12`; a definite
+Ordinary cross-node occupant copies use `deliver_ordered.v13`; a definite
 `Delivered` ACK proves that occupant's copy. The MUC-only `RelayFullJid` executor
 arm records progress and preserves the MUC append context when ownership becomes
 local before execution or during relay fallback. Declined or uncertain delivery
@@ -630,7 +685,10 @@ delegates to its existing settlement. No actor call runs under the freeze lock.
 Recorded wins: never invent audience or payload. The plan's provenance gate
 admits generic direct routes only for `Chat`/`Normal` messages whose bare
 `to` equals the recorded recipient, with non-empty fanout, proven Phase B
-recipient preparation and no delegated live full-JID route. Pin-owned
+recipient preparation, including the frozen prepared payload for storable
+unarchived full-JID routes. Protected no-store routes settle at admission and
+never enter this recovery path. Legacy delegated full-JID routes without this proof remain
+deferred. Pin-owned
 `StanzaId` routes, specialized invitations and recorded offline audiences
 belong to their restorers. Receipted DM mutations permit route-only recovery;
 unreceipted mutations and their routes remain pending. Unsupported families
@@ -746,8 +804,13 @@ Carbon recovery reconstructs its frozen targets, direction and payload, rather
 than selecting a new audience. Pending flush claims use archive order and an
 owner-bound off-loop retry pump when an earlier obligation or SM ack is pending.
 
-The cutover uses `deliver_ordered.v12`, `remote_resource_route.v8` and
-`remote_resource_frame.v3`. A one-shot Recreate deployment is required: an old
+The dispatch-gate cutover introduced `deliver_ordered.v12`,
+`remote_resource_route.v8` and `remote_resource_frame.v3`. Receipt-time transport
+now uses `deliver_ordered.v13`, `live_resource_route.v2` and
+`live_resource_frame.v2`; the frozen route/frame endpoints remain unchanged.
+Timestamp-bearing requests cannot downgrade to a payload that discards that
+metadata. The timestamp is not ingress append authority and cannot override a
+keyed append's canonical time. A one-shot Recreate deployment is required: an old
 writer does not participate in dispatch gates and the route/frame endpoints
 cannot negotiate the mixed wire shape. This does not strengthen XEP-0198 into
 an exactly-once client-observation protocol; retransmission after an uncertain

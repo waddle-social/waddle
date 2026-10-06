@@ -304,6 +304,29 @@ async fn authorize_direct_sender(
         crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
             .await
             .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
+    if let Some(intent) = intents.iter().find(|intent| {
+        matches!(
+            intent,
+            waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+                prepared: Some(_),
+                ..
+            }
+        ) && super::receipt_key(intent).ok().as_ref() == Some(&obligation.receipt)
+    }) {
+        let expected = super::recorded::prepared_direct_message(&envelope, intent)
+            .ok_or(AppendAuthorityRejection::StanzaSenderMismatch)?;
+        let Stanza::Message(message) = stanza else {
+            return Err(AppendAuthorityRejection::NotMessage);
+        };
+        return if expected.from.as_ref().map(jid::Jid::to_bare).as_ref()
+            == Some(&obligation.sender_bare)
+            && same_message_content(expected, message)
+        {
+            Ok(())
+        } else {
+            Err(AppendAuthorityRejection::StanzaSenderMismatch)
+        };
+    }
     let expected =
         super::invitation_authority::recorded_message(&envelope, &intents, &obligation.receipt)
             .map_err(|_| AppendAuthorityRejection::StanzaSenderMismatch)?;

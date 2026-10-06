@@ -491,7 +491,7 @@ fn is_idempotent_join_presence_envelope(envelope: &RemoteStanzaEnvelope) -> bool
 // remote-resource replies; companion endpoint versions are v3 and v6 (#1756).
 // v11: carry the recorded ingress append obligation on full-JID message payloads (#1778).
 // v12: frozen processed recipient copies bypass the recipient pipeline (#1770).
-#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v12")]
+#[kameo::remote_message("waddle.clustering.relay.deliver_ordered.v13")]
 impl Message<RelayDeliverOrdered> for RelayActor {
     type Reply = kameo::reply::DelegatedReply<OrderedRelayReply>;
 

@@ -3,6 +3,7 @@ mod intents;
 #[cfg(test)]
 mod tests;
 
+use crate::ingress_uow::IngressUowError;
 use crate::server::routes::interpret::effects::{
     delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
     direct::{DurableDirectEffect, ExternalDirectEffect},
@@ -26,7 +27,7 @@ use xmpp_parsers::message::Message;
 pub fn restamp_plan(
     plan: &IngressPlan,
     recorded_archive_ids: &[(BareJid, ArchiveRole, StanzaId)],
-) -> IngressPlan {
+) -> Result<IngressPlan, IngressUowError> {
     let ids = Replacements::new(plan, recorded_archive_ids);
     let mut stamped = plan.clone();
     ids.message(&mut stamped.sanitized_message);
@@ -44,23 +45,27 @@ pub fn restamp_plan(
         }
         match &mut planned.effect {
             Effect::Durable(effect) => ids.durable(effect),
-            Effect::External(effect) => ids.external(effect),
+            Effect::External(effect) => ids.external(effect)?,
             Effect::Immediate(_) => {}
         }
     }
     for intent in &mut stamped.intents {
-        ids.intent(intent);
+        ids.intent(intent)?;
     }
-    stamped
+    Ok(stamped)
 }
 
-/// Archive-free groupchat has no MAM stamp to restore. Only a unique recorded
-/// groupchat obligation in the same authority slot can supply its frozen ID;
-/// system broadcasts continue to correlate through their archive sequence.
-pub(super) fn restore_muc_route_identity(plan: &mut IngressPlan, recorded: &[IngressEffectIntent]) {
+/// Restore route-derived stamps, including prepared copies with no MAM row.
+/// Only exact provisional IDs from a matching recorded authority are replaced;
+/// payload and audience changes remain visible to reconciliation.
+pub(super) fn restore_route_identities(
+    plan: &mut IngressPlan,
+    recorded: &[IngressEffectIntent],
+) -> Result<(), IngressUowError> {
     use waddle_xmpp::ingress::EffectMessageIdentity;
     let mut replacements = Vec::new();
     for planned in &plan.intents {
+        replacements.extend(prepared_route_ids(planned, recorded));
         let IngressEffectIntent::RouteMucGroupchat {
             route_identity: EffectMessageIdentity::StanzaId(minted),
             ..
@@ -96,13 +101,67 @@ pub(super) fn restore_muc_route_identity(plan: &mut IngressPlan, recorded: &[Ing
         }
         match &mut planned.effect {
             Effect::Durable(effect) => ids.durable(effect),
-            Effect::External(effect) => ids.external(effect),
+            Effect::External(effect) => ids.external(effect)?,
             Effect::Immediate(_) => {}
         }
     }
     for intent in &mut plan.intents {
-        ids.intent(intent);
+        ids.intent(intent)?;
     }
+    Ok(())
+}
+
+fn prepared_route_ids(
+    planned: &IngressEffectIntent,
+    recorded: &[IngressEffectIntent],
+) -> Vec<(StanzaId, StanzaId)> {
+    use waddle_xmpp_core::xep0359::extract_stanza_ids;
+    let IngressEffectIntent::RouteDirect {
+        recipient,
+        prepared: Some(offered),
+        ..
+    } = planned
+    else {
+        return Vec::new();
+    };
+    let mut candidates = recorded
+        .iter()
+        .filter(|saved| saved.semantic_key() == planned.semantic_key());
+    let Some(IngressEffectIntent::RouteDirect {
+        prepared: Some(saved),
+        ..
+    }) = candidates.next()
+    else {
+        return Vec::new();
+    };
+    let offered = offered.message();
+    let saved = saved.message();
+    let Some(sender) = offered.from.as_ref().map(jid::Jid::to_bare) else {
+        return Vec::new();
+    };
+    if candidates.next().is_some()
+        || saved.from.as_ref().map(jid::Jid::to_bare).as_ref() != Some(&sender)
+        || offered.to != saved.to
+        || offered.type_ != saved.type_
+    {
+        return Vec::new();
+    }
+    let mut owners = vec![sender];
+    if !owners.contains(recipient) {
+        owners.push(recipient.clone());
+    }
+    let minted = extract_stanza_ids(offered);
+    let frozen = extract_stanza_ids(saved);
+    owners
+        .into_iter()
+        .filter_map(|owner| {
+            let owner: jid::Jid = owner.into();
+            let mut provisional = minted.iter().filter(|id| id.by == owner);
+            let mut original = frozen.iter().filter(|id| id.by == owner);
+            let pair = (provisional.next()?.clone(), original.next()?.clone());
+            (provisional.next().is_none() && original.next().is_none()).then_some(pair)
+        })
+        .collect()
 }
 
 struct Replacements(Vec<(StanzaId, StanzaId)>);
@@ -263,7 +322,7 @@ impl Replacements {
         }
     }
 
-    fn external(&self, effect: &mut ExternalEffect) {
+    fn external(&self, effect: &mut ExternalEffect) -> Result<(), IngressUowError> {
         match effect {
             ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
                 if let Some(waddle_xmpp::ingress::EffectMessageIdentity::StanzaId(id)) =
@@ -281,13 +340,14 @@ impl Replacements {
             | ExternalEffect::InviteLedger(_)
             | ExternalEffect::DmPinMutation(_) => {}
             ExternalEffect::Frame(stanza) => self.stanza(stanza),
-            ExternalEffect::Direct(effect) => self.direct(effect),
+            ExternalEffect::Direct(effect) => self.direct(effect)?,
             ExternalEffect::Room(effect) => self.room(effect),
             ExternalEffect::Delivery(effect) => self.delivery(effect),
         }
+        Ok(())
     }
 
-    fn direct(&self, effect: &mut ExternalDirectEffect) {
+    fn direct(&self, effect: &mut ExternalDirectEffect) -> Result<(), IngressUowError> {
         match effect {
             ExternalDirectEffect::NotificationActivity { mutation, .. } => {
                 self.notification(mutation)
@@ -302,7 +362,7 @@ impl Replacements {
             }
             ExternalDirectEffect::DmCallThreadState { state, receipt } => {
                 if let Some(receipt) = receipt {
-                    self.intent(receipt);
+                    self.intent(receipt)?;
                 }
                 if let Some(id) = state
                     .active
@@ -314,6 +374,7 @@ impl Replacements {
             }
             ExternalDirectEffect::ScrubReplayForTombstone { .. } => {}
         }
+        Ok(())
     }
 
     fn candidate(&self, candidate: &mut crate::notification_outbox::NotificationCandidate) {

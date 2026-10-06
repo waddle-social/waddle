@@ -111,6 +111,7 @@ fn capture_groupchat_inbox_pushes(
     ] {
         if !fanout.is_empty() {
             capture.record_intent(IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: owner.clone(),
                 fanout: fanout.clone(),
                 route_identity: capture.next_route_identity(),

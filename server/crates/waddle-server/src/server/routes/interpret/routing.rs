@@ -601,6 +601,7 @@ pub(crate) async fn existing_ingress_delivery(
     }
 }
 
+#[cfg(test)]
 async fn deliver_one_via_actor(
     user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
@@ -608,6 +609,27 @@ async fn deliver_one_via_actor(
     stanza: &Stanza,
     kind: ActorSendKind,
     ingress_append_context: Option<&SmIngressAppendContext>,
+) -> FullJidDeliveryOutcome {
+    deliver_one_via_actor_at(
+        user_registry,
+        sm_session_registry,
+        target,
+        stanza,
+        kind,
+        ingress_append_context,
+        None,
+    )
+    .await
+}
+
+async fn deliver_one_via_actor_at(
+    user_registry: &kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    kind: ActorSendKind,
+    ingress_append_context: Option<&SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     if let Some(outcome) =
         existing_ingress_delivery(sm_session_registry, ingress_append_context, target).await
@@ -636,11 +658,12 @@ async fn deliver_one_via_actor(
         // No live actor for this bare JID — no delivery was attempted, so the
         // detached replay buffer is a safe (non-duplicating) fallback.
         Ok(None) => {
-            return deliver_to_detached(
+            return deliver_to_detached_at(
                 sm_session_registry,
                 target,
                 stanza,
                 ingress_append_context,
+                received_at,
             )
             .await
             .into();
@@ -648,8 +671,14 @@ async fn deliver_one_via_actor(
         Err(error) => {
             warn!(jid = %target, message_id, %error, "actor delivery: GetUser failed; routing to detached");
             return detached_after_routing_failure(
-                deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
-                    .await,
+                deliver_to_detached_at(
+                    sm_session_registry,
+                    target,
+                    stanza,
+                    ingress_append_context,
+                    received_at,
+                )
+                .await,
             );
         }
     };
@@ -683,6 +712,9 @@ async fn deliver_one_via_actor(
                         ingress_append: ingress_append.clone(),
                         jid: target.clone(),
                         stanza: stanza.clone(),
+                        original_receipt_at: ingress_append_context
+                            .and_then(|context| context.received_at)
+                            .or(received_at),
                     })
                     .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
                     .reply_timeout(ACTOR_DELIVER_TIMEOUT)
@@ -693,6 +725,9 @@ async fn deliver_one_via_actor(
                         ingress_append: ingress_append.clone(),
                         jid: target.clone(),
                         stanza: stanza.clone(),
+                        original_receipt_at: ingress_append_context
+                            .and_then(|context| context.received_at)
+                            .or(received_at),
                     })
                     .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
                     .reply_timeout(ACTOR_DELIVER_TIMEOUT)
@@ -732,11 +767,15 @@ async fn deliver_one_via_actor(
             FullJidDeliveryOutcome::Dropped
         }
         Ok(waddle_xmpp::registry::BroadcastOutcome::NotConnected)
-        | Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedClosed) => {
-            deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
-                .await
-                .into()
-        }
+        | Ok(waddle_xmpp::registry::BroadcastOutcome::DroppedClosed) => deliver_to_detached_at(
+            sm_session_registry,
+            target,
+            stanza,
+            ingress_append_context,
+            received_at,
+        )
+        .await
+        .into(),
         // Provably never enqueued — no delivery was attempted, so the detached
         // replay buffer is a lossless, non-duplicating fallback.
         Err((ActorSendFailure::NeverEnqueued, error)) => {
@@ -747,8 +786,14 @@ async fn deliver_one_via_actor(
                 "actor delivery: TrySend ask failed before enqueue; routing to detached"
             );
             detached_after_routing_failure(
-                deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
-                    .await,
+                deliver_to_detached_at(
+                    sm_session_registry,
+                    target,
+                    stanza,
+                    ingress_append_context,
+                    received_at,
+                )
+                .await,
             )
         }
         // May have been enqueued — kameo does not cancel the enqueued handler,
@@ -778,6 +823,7 @@ async fn deliver_one_via_actor(
 /// only delivery path. `None` — test fixtures without an actor tree — can no
 /// longer deliver live and falls back to the detached XEP-0198 buffer (the same
 /// "no live target" fallback used everywhere), never a DashMap send.
+#[cfg(test)]
 pub(crate) async fn deliver_peer_to_full(
     user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
@@ -785,28 +831,60 @@ pub(crate) async fn deliver_peer_to_full(
     stanza: &Stanza,
     ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
+    deliver_peer_to_full_at(
+        user_registry,
+        sm_session_registry,
+        target,
+        stanza,
+        ingress_append_context,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn deliver_peer_to_full_at(
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    ingress_append_context: Option<&SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> FullJidDeliveryOutcome {
     // Keyed live copies are accepted only by the owning socket boundary.
     // A socket appearing after that check must not bypass its durable fence.
     if ingress_append_context.is_some() {
-        return deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
-            .await
-            .into();
+        return deliver_to_detached_at(
+            sm_session_registry,
+            target,
+            stanza,
+            ingress_append_context,
+            received_at,
+        )
+        .await
+        .into();
     }
     match user_registry {
         Some(user_registry) => {
-            deliver_one_via_actor(
+            deliver_one_via_actor_at(
                 user_registry,
                 sm_session_registry,
                 target,
                 stanza,
                 ActorSendKind::Peer,
                 ingress_append_context,
+                received_at,
             )
             .await
         }
-        None => deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
-            .await
-            .into(),
+        None => deliver_to_detached_at(
+            sm_session_registry,
+            target,
+            stanza,
+            ingress_append_context,
+            received_at,
+        )
+        .await
+        .into(),
     }
 }
 
@@ -824,28 +902,60 @@ pub(crate) async fn deliver_direct_to_full(
     stanza: &Stanza,
     ingress_append_context: Option<&SmIngressAppendContext>,
 ) -> FullJidDeliveryOutcome {
+    deliver_direct_to_full_at(
+        user_registry,
+        sm_session_registry,
+        target,
+        stanza,
+        ingress_append_context,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn deliver_direct_to_full_at(
+    user_registry: Option<&kameo::actor::ActorRef<waddle_xmpp::registry::UserRegistryActor>>,
+    sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    ingress_append_context: Option<&SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> FullJidDeliveryOutcome {
     // Keyed live copies are accepted only by the owning socket boundary.
     // A socket appearing after that check must not bypass its durable fence.
     if ingress_append_context.is_some() {
-        return deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
-            .await
-            .into();
+        return deliver_to_detached_at(
+            sm_session_registry,
+            target,
+            stanza,
+            ingress_append_context,
+            received_at,
+        )
+        .await
+        .into();
     }
     match user_registry {
         Some(user_registry) => {
-            deliver_one_via_actor(
+            deliver_one_via_actor_at(
                 user_registry,
                 sm_session_registry,
                 target,
                 stanza,
                 ActorSendKind::Direct,
                 ingress_append_context,
+                received_at,
             )
             .await
         }
-        None => deliver_to_detached(sm_session_registry, target, stanza, ingress_append_context)
-            .await
-            .into(),
+        None => deliver_to_detached_at(
+            sm_session_registry,
+            target,
+            stanza,
+            ingress_append_context,
+            received_at,
+        )
+        .await
+        .into(),
     }
 }
 
@@ -907,6 +1017,7 @@ pub(super) async fn deliver_peer_to_live_only(
             ingress_append: None,
             jid: target.clone(),
             stanza: stanza.clone(),
+            original_receipt_at: None,
         })
         .mailbox_timeout(ACTOR_DELIVER_TIMEOUT)
         .reply_timeout(ACTOR_DELIVER_TIMEOUT)
@@ -957,6 +1068,17 @@ pub(super) async fn append_detached(
     target: &jid::FullJid,
     stanza: &Stanza,
 ) -> Result<bool, waddle_xmpp::stream_management::SmRegistryError> {
+    append_detached_at(sm, context, target, stanza, None).await
+}
+
+/// Timestamp-only custody carries no canonical append authorization.
+pub(super) async fn append_detached_at(
+    sm: &Arc<InMemorySmSessionRegistry>,
+    context: Option<&SmIngressAppendContext>,
+    target: &jid::FullJid,
+    stanza: &Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<bool, waddle_xmpp::stream_management::SmRegistryError> {
     if context.is_some_and(|context| context.dispatch_stream.is_some()) {
         // The predecessor exemption was for a live stream that has since gone.
         // Retry with a fresh gate, never transplant that proof to a detached one.
@@ -985,25 +1107,30 @@ pub(super) async fn append_detached(
             })
         }
         None => {
-            sm.record_stanza_for_detached_bound_resource(target, stanza, chrono::Utc::now())
-                .await
+            sm.record_stanza_for_detached_bound_resource(
+                target,
+                stanza,
+                received_at.unwrap_or_else(chrono::Utc::now),
+            )
+            .await
         }
     }
 }
 
 /// Queue a fallback replay stanza in the detached resource's SM session.
-pub(super) async fn deliver_to_detached(
+pub(super) async fn deliver_to_detached_at(
     sm_session_registry: Option<&Arc<InMemorySmSessionRegistry>>,
     target: &jid::FullJid,
     stanza: &Stanza,
     ingress_append_context: Option<&SmIngressAppendContext>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> DetachedDeliveryOutcome {
     let message_id = stanza_message_id(stanza);
     let Some(sm) = sm_session_registry else {
         debug!(jid = %target, message_id, "RouteToConnection: target offline, dropping");
         return DetachedDeliveryOutcome::Unavailable;
     };
-    match append_detached(sm, ingress_append_context, target, stanza).await {
+    match append_detached_at(sm, ingress_append_context, target, stanza, received_at).await {
         Ok(true) => {
             debug!(jid = %target, message_id, "RouteToConnection: recipient detached, queued for XEP-0198 replay");
             DetachedDeliveryOutcome::Queued

@@ -225,6 +225,7 @@ mod tests {
         let first: FullJid = "peer@example.com/one".parse().expect("first");
         let second: FullJid = "peer@example.com/two".parse().expect("second");
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: owner,
             fanout: vec![first.clone(), second.clone()],
             route_identity: EffectMessageIdentity::OriginId(

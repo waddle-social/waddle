@@ -13,3 +13,6 @@ pub(super) use side_effects::{
 };
 #[cfg(test)]
 pub(crate) use socket::retry_remote_resource_register_test;
+
+#[cfg(test)]
+pub(super) use socket_forwarder::remote_resource_outbound_frame;

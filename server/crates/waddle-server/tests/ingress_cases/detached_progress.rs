@@ -350,6 +350,7 @@ async fn live_effects_complete_independently(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("detached-live-effects"), "two live devices");
     let identity = EffectMessageIdentity::capture_ordinal(1);
     submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: a.to_bare(),
         fanout: vec![a.clone(), b.clone()],
         route_identity: identity.clone(),

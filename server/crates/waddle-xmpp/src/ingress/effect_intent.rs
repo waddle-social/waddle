@@ -1114,6 +1114,8 @@ pub enum IngressEffectIntent {
         recipient: BareJid,
         fanout: Vec<FullJid>,
         route_identity: EffectMessageIdentity,
+        /// Exact recipient-passed copy; absent on legacy delegated routes.
+        prepared: Option<StoredMessagePayload>,
     },
     RouteMucGroupchat {
         room: BareJid,
@@ -1593,6 +1595,7 @@ impl IngressEffectIntent {
                 ordinal: None,
             },
             Self::RouteDirect {
+                prepared: None,
                 recipient: bare("romeo@example.test"),
                 fanout: vec![full("romeo@example.test/phone")],
                 route_identity: EffectMessageIdentity::stanza(stanza()),
@@ -3130,6 +3133,8 @@ enum StoredEffectIntent {
         recipient: BareJid,
         fanout: Vec<FullJid>,
         route_identity: StoredEffectMessageIdentity,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prepared: Option<StoredMessagePayload>,
     },
     RouteMucGroupchat {
         room: BareJid,
@@ -3342,12 +3347,14 @@ impl StoredEffectIntent {
                 ordinal,
             },
             IngressEffectIntent::RouteDirect {
+                prepared,
                 recipient,
                 mut fanout,
                 route_identity,
             } => {
                 canonicalize(&mut fanout);
                 Self::RouteDirect {
+                    prepared,
                     recipient,
                     fanout,
                     route_identity: route_identity.into(),
@@ -3562,10 +3569,12 @@ impl StoredEffectIntent {
                 ordinal,
             },
             Self::RouteDirect {
+                prepared,
                 recipient,
                 fanout,
                 route_identity,
             } => IngressEffectIntent::RouteDirect {
+                prepared,
                 recipient,
                 fanout,
                 route_identity: route_identity.into_domain(),
@@ -4022,6 +4031,7 @@ mod tests {
                 ordinal: None,
             },
             IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: bare("romeo@example.test"),
                 fanout: vec![full("romeo@example.test/phone")],
                 route_identity: EffectMessageIdentity::stanza(stanza_id()),
@@ -4741,6 +4751,7 @@ mod tests {
     #[test]
     fn canonicalizes_unordered_fanout_audiences() {
         let first = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: bare("romeo@example.test"),
             fanout: vec![
                 full("romeo@example.test/phone"),
@@ -4750,6 +4761,7 @@ mod tests {
             route_identity: EffectMessageIdentity::origin(OriginId::new("client-origin")),
         };
         let second = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: bare("romeo@example.test"),
             fanout: vec![
                 full("romeo@example.test/laptop"),
@@ -4806,11 +4818,13 @@ mod tests {
         assert_eq!(archive_one.authority_key(), archive_two.authority_key());
 
         let route_one = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: bare("romeo@example.test"),
             fanout: vec![full("romeo@example.test/phone")],
             route_identity: EffectMessageIdentity::origin(OriginId::new("origin-1")),
         };
         let route_two = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: bare("romeo@example.test"),
             fanout: vec![full("romeo@example.test/phone")],
             route_identity: EffectMessageIdentity::origin(OriginId::new("origin-2")),
@@ -5438,6 +5452,7 @@ mod tests {
     #[test]
     fn inbox_push_identity_roundtrips_and_cannot_alias_message_delivery() {
         let make = |route_identity| IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: "juliet@example.com".parse().expect("recipient"),
             fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
             route_identity,
@@ -5449,6 +5464,40 @@ mod tests {
         assert_eq!(
             IngressEffectIntent::decode_v1(encoded.kind(), encoded.payload()).expect("decode"),
             push
+        );
+    }
+
+    #[test]
+    fn prepared_direct_payload_preserves_legacy_codec_and_receipt_identity() {
+        let legacy = br#"{"version":1,"intent":{"type":"route_direct","recipient":"juliet@example.test","fanout":["juliet@example.test/phone"],"route_identity":{"type":"capture_ordinal","ordinal":7}}}"#;
+        let original = IngressEffectIntent::decode_v1(1, legacy).expect("legacy route");
+        assert!(matches!(
+            &original,
+            IngressEffectIntent::RouteDirect { prepared: None, .. }
+        ));
+        original
+            .with_encoded_v1(|kind, bytes| {
+                assert_eq!(kind, 1);
+                assert_eq!(
+                    serde_json::from_slice::<serde_json::Value>(bytes).expect("JSON"),
+                    serde_json::from_slice::<serde_json::Value>(legacy).expect("legacy JSON")
+                );
+            })
+            .expect("legacy encoding");
+        let mut prepared = original.clone();
+        let message = crate::parser::message_from_string(
+            "<message xmlns='jabber:client' from='romeo@example.test/phone' to='juliet@example.test/phone' type='chat'><body>frozen</body><stanza-id xmlns='urn:xmpp:sid:0' by='juliet@example.test' id='recipient-stamp'/></message>"
+        ).expect("message");
+        if let IngressEffectIntent::RouteDirect { prepared, .. } = &mut prepared {
+            *prepared = Some(StoredMessagePayload::new(message).expect("freeze"));
+        }
+        assert_eq!(original.semantic_key(), prepared.semantic_key());
+        assert_eq!(
+            prepared
+                .with_encoded_v1(IngressEffectIntent::decode_v1)
+                .expect("encode")
+                .expect("decode"),
+            prepared
         );
     }
 }

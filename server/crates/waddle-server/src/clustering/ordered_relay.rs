@@ -243,6 +243,8 @@ pub enum OrderedRelayPayload {
         recipient: jid::Jid,
         stanza: RemoteStanza,
         ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     Iq {
         recipient: jid::Jid,
@@ -435,10 +437,12 @@ impl OrderedRelayPayload {
                 recipient,
                 stanza,
                 ingress_append,
+                received_at,
             } => OrderedRelayPayloadFingerprint::Message {
                 recipient: recipient.clone(),
                 stanza: stanza.0.to_element(),
                 ingress_append: ingress_append.clone(),
+                received_at: *received_at,
             },
             OrderedRelayPayload::Iq { recipient, stanza } => OrderedRelayPayloadFingerprint::Iq {
                 recipient: recipient.clone(),
@@ -701,6 +705,7 @@ enum OrderedRelayPayloadFingerprint {
         recipient: jid::Jid,
         stanza: minidom::Element,
         ingress_append: Option<crate::ingress::identity::IngressAppendObligationRef>,
+        received_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     Iq {
         recipient: jid::Jid,

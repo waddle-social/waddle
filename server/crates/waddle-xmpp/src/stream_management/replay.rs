@@ -11,6 +11,25 @@
 //! rationale — preserving the original send date for the recipient —
 //! is identical). This module is the pure builder that applies that
 //! stamp at the serialization boundary.
+//!
+//! # Replay byte contract
+//!
+//! The immutable payload is the production serializer's UTF-8 frame captured
+//! in the unacked queue, before replay delay insertion. Persistence and fresh
+//! registry hydration must reproduce those exact bytes, not merely an XML
+//! element with equivalent semantics. Typed stanza values remain the protocol
+//! and persistence API; their storage codecs must therefore preserve this
+//! serializer round trip. This does not promise preservation of a client's
+//! original XML spelling before parsing and server-side processing.
+//!
+//! At the replay transport boundary, message/presence without this server's
+//! delay are parsed, annotated once using `original_receipt_at`, and serialized.
+//! That first annotation intentionally changes the frame. Replaying the same
+//! queued frame again must produce the identical annotated bytes and original
+//! timestamp. A frame already carrying this server's delay, or an IQ, is
+//! returned byte-for-byte unchanged. Foreign delay elements remain alongside
+//! the server's annotation. The server's `xep0198_replay_bytes` and
+//! `xep0198_cross_node_resume` suites cover the durable boundaries.
 
 use chrono::{DateTime, Utc};
 use minidom::Element;

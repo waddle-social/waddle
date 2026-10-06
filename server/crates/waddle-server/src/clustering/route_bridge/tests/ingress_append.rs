@@ -159,6 +159,7 @@ async fn ingress_append_authority(
                 recipient: recipient.clone().into(),
                 stanza: RemoteStanza(Stanza::Message(message)),
                 ingress_append: Some(obligation),
+                received_at: None,
             };
             let reads_before = canonical_reads::count();
             let result = bridge
@@ -244,6 +245,7 @@ async fn ingress_append_authority(
             }
         } else {
             IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: recipient.to_bare(),
                 fanout: vec![recipient.clone()],
                 route_identity: EffectMessageIdentity::capture_ordinal(index as u64),
@@ -358,6 +360,7 @@ async fn ingress_append_authority(
                             target: recipient.clone(),
                             stanza: RemoteStanza(Stanza::Message(message.clone())),
                             ingress_append: Some(obligation),
+                            received_at: None,
                         },
                         trace: RelayTraceContext::default(),
                     },
@@ -397,6 +400,7 @@ async fn ingress_append_authority(
                 recipient: recipient.clone().into(),
                 stanza: RemoteStanza(Stanza::Message(message.clone())),
                 ingress_append: Some(obligation),
+                received_at: None,
             };
             // Exercise the authenticated delivery seam directly, including its
             // stanza-sender defense even if the ordered parser also rejects it.
@@ -533,6 +537,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         .expect("local detached resources")
         .is_empty());
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![recipient.clone()],
         route_identity: EffectMessageIdentity::capture_ordinal(0),
@@ -600,6 +605,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
                             target: recipient.clone(),
                             stanza: RemoteStanza(stanza.clone()),
                             ingress_append: Some(obligation.clone()),
+                            received_at: None,
                         },
                         trace: RelayTraceContext::default(),
                     },
@@ -618,6 +624,7 @@ async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture)
         recipient: forwarded_recipient,
         stanza: forwarded_stanza,
         ingress_append,
+        ..
     } = &captured[0].payload
     else {
         panic!("onward message envelope");
@@ -754,6 +761,7 @@ async fn origin_preparation_signs_direct_and_muc_ingress_append_obligations() {
             message.from = Some(sender_full().into());
             message.type_ = xmpp_parsers::message::MessageType::Chat;
             IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: target_bare(),
                 fanout: vec![target_full()],
                 route_identity: identity,
@@ -872,6 +880,7 @@ impl RegisteredRemoteOwner {
             .await
             .expect("sender claim");
         let intent = IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: recipient.to_bare(),
             fanout: vec![recipient.clone()],
             route_identity: EffectMessageIdentity::capture_ordinal(0),
@@ -981,6 +990,7 @@ impl RegisteredRemoteOwner {
                 recipient: recipient.into(),
                 stanza,
                 ingress_append: Some(obligation),
+                received_at: None,
             }
         };
         let envelope = sign_envelope(envelope, &self.keypair);
@@ -1014,6 +1024,7 @@ impl RegisteredRemoteOwner {
                                 target: target_full(),
                                 stanza: RemoteStanza(Stanza::Message(self.message.clone())),
                                 ingress_append: Some(obligation),
+                                received_at: None,
                             },
                             trace: RelayTraceContext::default(),
                         },

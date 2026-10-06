@@ -125,6 +125,8 @@ pub enum PlanFailure {
     RoomSnapshotUnavailable,
     #[error("room system message cannot be frozen")]
     InvalidSystemMessage,
+    #[error("prepared direct message cannot be frozen")]
+    InvalidPreparedMessage,
     #[error("displayed-marker inbox snapshot could not be read")]
     InboxSnapshotRead,
     #[error("retraction target could not be read")]

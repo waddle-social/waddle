@@ -1322,3 +1322,4 @@ mod offline_hardening_tests;
 mod muc_occupant_progress_tests;
 
 mod room_canonical;
+pub(crate) mod storage_hint;

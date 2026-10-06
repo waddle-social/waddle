@@ -85,6 +85,7 @@ async fn archive_free_invitation_retry(fixture: IngressFixture) {
             },
         },
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: invitee,
             fanout: vec![recipient.clone()],
             route_identity: EffectMessageIdentity::OriginId(

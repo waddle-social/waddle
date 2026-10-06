@@ -49,6 +49,7 @@ async fn interrupted_delivery(fixture: &IngressFixture, origin: &str) -> Message
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: resource.to_bare(),
             fanout: vec![resource.clone()],
             route_identity: identity.clone(),
@@ -279,6 +280,7 @@ async fn backlog_and_retention(fixture: IngressFixture) {
     }
     let mut missing = fixture.submission(Some("maintenance-missing"), "missing receipt");
     missing.plan.intents.push(IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
         route_identity: EffectMessageIdentity::capture_ordinal(0),
@@ -560,6 +562,7 @@ async fn unreceipted_page_selects_only_recoverable_pending_rows(fixture: Ingress
     let complete = interrupted_delivery(&fixture, "recovery-page-complete").await;
     let mut pending = fixture.submission(Some("recovery-page-pending"), "pending");
     pending.plan.intents.push(IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: vec!["juliet@example.com/phone".parse().expect("resource")],
         route_identity: EffectMessageIdentity::capture_ordinal(0),
@@ -699,6 +702,7 @@ async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture)
         fixture.submission(Some("maintenance-lost-route"), "lost detached delivery");
     let identity = EffectMessageIdentity::capture_ordinal(0);
     submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: resource.to_bare(),
         fanout: vec![resource.clone()],
         route_identity: identity.clone(),
@@ -890,6 +894,7 @@ async fn stalled_route(fixture: &IngressFixture) -> MessageKey {
         .map(|resource| resource.parse().expect("resource"))
         .collect();
     submission.plan.intents = vec![IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: resources,
         route_identity: EffectMessageIdentity::capture_ordinal(0),

@@ -56,6 +56,38 @@ async fn store(
     let recorded = EffectIntentRepository::load(&mut tx, key).await?;
     let archive_expectation =
         crate::ingress::archive_authority::expectation(key, &recorded, room, message);
+    // Pin replanning can produce different human-readable text (for example
+    // after a nickname change). The accepted system broadcast owns the archive
+    // payload as well as its live copies; a fresh prototype is not authority.
+    let source = recorded.iter().find_map(|intent| match intent {
+        waddle_xmpp::ingress::IngressEffectIntent::RouteMucSystemBroadcast {
+            room: saved,
+            route_identity: waddle_xmpp::ingress::EffectMessageIdentity::StanzaId(id),
+            system_message: Some(payload),
+            ..
+        } if saved == room && id.by == *room && id.id == message.id => Some(payload.message()),
+        _ => None,
+    });
+    let restored = if let Some(source) = source {
+        let archived_at = match &archive_expectation {
+            waddle_xmpp::mam::ArchiveExpectation::Existing { archived_at, .. } => *archived_at,
+            waddle_xmpp::mam::ArchiveExpectation::Fresh => message.timestamp,
+        };
+        Some(
+            crate::server::routes::interpret::project_groupchat_archive(
+                room,
+                source,
+                message.id.clone(),
+                archived_at,
+                Some(0),
+                None,
+            )
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?,
+        )
+    } else {
+        None
+    };
+    let message = restored.as_ref().unwrap_or(message.as_ref());
     #[cfg(feature = "clustering")]
     let outcome = match fence {
         crate::server::routes::interpret::effects::room::RoomFenceRequirement::Guarded(context) => {

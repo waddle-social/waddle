@@ -75,6 +75,7 @@ pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
                         submission.plan.sanitized_message.clone(),
                     )),
                     ingress_append: Some(obligation.clone()),
+                    received_at: None,
                 },
             )
             .expect("next valid ordered sequence");

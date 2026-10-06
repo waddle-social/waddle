@@ -66,6 +66,7 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
     let mut submission = fixture.submission(Some("detached-proof"), "detached fanout");
     let identity = EffectMessageIdentity::capture_ordinal(1);
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: first.to_bare(),
         fanout: vec![first.clone(), second.clone()],
         route_identity: identity.clone(),

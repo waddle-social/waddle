@@ -165,6 +165,7 @@ async fn prepare(
     }
     let mut evidence = [
         IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: route.recipient.clone(),
             fanout: route.resources.clone(),
             route_identity,

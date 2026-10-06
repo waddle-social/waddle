@@ -5,6 +5,7 @@ use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 async fn obligation(fixture: &IngressFixture) -> SendObligation {
     let recipient: FullJid = "juliet@example.com/phone".parse().expect("resource");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.to_bare(),
         fanout: vec![
             recipient.clone(),
@@ -274,6 +275,7 @@ async fn identity_independence(fixture: IngressFixture) {
     let intents: Vec<_> = [1, 2]
         .into_iter()
         .map(|ordinal| IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: recipient.to_bare(),
             fanout: vec![recipient.clone()],
             route_identity: EffectMessageIdentity::capture_ordinal(ordinal),

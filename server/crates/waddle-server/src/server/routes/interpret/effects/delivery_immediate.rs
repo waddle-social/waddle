@@ -6,6 +6,16 @@ use super::{
 };
 
 pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> EffectOutcome {
+    execute_with_received_at(effect, deps, None).await
+}
+
+/// Only detached custody consumes the timestamp; ordinary live sends keep
+/// their existing transport behavior and never gain ledger append authority.
+pub(crate) async fn execute_with_received_at(
+    effect: ExternalDeliveryEffect,
+    deps: &Deps<'_>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> EffectOutcome {
     let mut immediate = deps.clone();
     immediate.effects = &ImmediateSink;
     match effect {
@@ -37,23 +47,53 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
                             &immediate, &jid, &stanza,
                         )
                         .await
-                    } else if immediate.connection_registry.try_send_to(&jid, *stanza)
-                        == waddle_xmpp::registry::BroadcastOutcome::Delivered
-                    {
-                        FullJidDeliveryOutcome::Delivered
                     } else {
-                        FullJidDeliveryOutcome::Unavailable
+                        let mut outbound =
+                            waddle_xmpp::registry::OutboundStanza::new(stanza.as_ref().clone());
+                        outbound.original_receipt_at = received_at;
+                        let delivered =
+                            immediate
+                                .connection_registry
+                                .get_entry(&jid)
+                                .is_some_and(|entry| {
+                                    immediate.connection_registry.try_send_outbound_if_owner(
+                                        &jid,
+                                        &entry.carbons_enabled,
+                                        outbound,
+                                    ) == waddle_xmpp::registry::BroadcastOutcome::Delivered
+                                });
+                        if delivered {
+                            FullJidDeliveryOutcome::Delivered
+                        } else if received_at.is_some() {
+                            routing::deliver_to_detached_at(
+                                immediate.sm_session_registry,
+                                &jid,
+                                &stanza,
+                                None,
+                                received_at,
+                            )
+                            .await
+                            .into()
+                        } else {
+                            FullJidDeliveryOutcome::Unavailable
+                        }
                     }
                 }
                 PeerDeliveryKind::PeerStanza => {
-                    route_to_connection::deliver_peer_to_full_with_registered_remote(
-                        &immediate, &jid, &stanza,
+                    route_to_connection::deliver_peer_to_full_with_registered_remote_at(
+                        &immediate,
+                        &jid,
+                        &stanza,
+                        received_at,
                     )
                     .await
                 }
                 PeerDeliveryKind::DirectFrame => {
-                    route_to_connection::deliver_direct_to_full_with_registered_remote(
-                        &immediate, &jid, &stanza,
+                    route_to_connection::deliver_direct_to_full_with_registered_remote_at(
+                        &immediate,
+                        &jid,
+                        &stanza,
+                        received_at,
                     )
                     .await
                 }
@@ -68,7 +108,8 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             ..
         } => {
             let outcome =
-                queue_detached_without_direct_progress(&immediate, resources, &stanza).await;
+                queue_detached_without_direct_progress(&immediate, resources, &stanza, received_at)
+                    .await;
             routing::close_call_setup_from_outcome(call_setup, outcome);
             EffectOutcome::Delivery(outcome)
         }
@@ -80,15 +121,24 @@ pub(crate) async fn execute(effect: ExternalDeliveryEffect, deps: &Deps<'_>) -> 
             call_setup,
         } => {
             immediate.ordered_relay_origin = origin;
-            let outcome = route_to_connection::deliver_full_jid_via_ordered_relay(
+            let outcome = route_to_connection::deliver_full_jid_via_ordered_relay_at(
                 &immediate,
                 &target,
                 &stanza,
                 call_setup.clone(),
+                received_at,
             )
             .await;
             EffectOutcome::Delivery(
-                finish_full_jid_relay(outcome, &immediate, &target, &stanza, call_setup).await,
+                finish_full_jid_relay_at(
+                    outcome,
+                    &immediate,
+                    &target,
+                    &stanza,
+                    call_setup,
+                    received_at,
+                )
+                .await,
             )
         }
         ExternalDeliveryEffect::RelayBareJid {
@@ -140,14 +190,16 @@ async fn queue_detached_without_direct_progress(
     deps: &Deps<'_>,
     resources: Vec<jid::FullJid>,
     stanza: &waddle_xmpp::Stanza,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
 ) -> FullJidDeliveryOutcome {
     let mut outcomes = Vec::with_capacity(resources.len());
     for resource in resources {
-        let detached_outcomes = route_to_connection::queue_processed_for_detached(
+        let detached_outcomes = route_to_connection::queue_processed_for_detached_at(
             deps,
             vec![resource.clone()],
             &std::collections::HashSet::new(),
             stanza,
+            received_at,
         )
         .await;
         outcomes.push(
@@ -157,8 +209,11 @@ async fn queue_detached_without_direct_progress(
             )) {
                 FullJidDeliveryOutcome::QueuedDetached
             } else {
-                route_to_connection::deliver_direct_to_full_with_registered_remote(
-                    deps, &resource, stanza,
+                route_to_connection::deliver_direct_to_full_with_registered_remote_at(
+                    deps,
+                    &resource,
+                    stanza,
+                    received_at,
                 )
                 .await
             },
@@ -183,6 +238,7 @@ async fn queue_detached_without_direct_progress(
 }
 
 /// A handled relay owns its ticket, even when delivery was dropped or uncertain.
+#[cfg(test)]
 async fn finish_full_jid_relay(
     outcome: Option<FullJidDeliveryOutcome>,
     deps: &Deps<'_>,
@@ -190,12 +246,27 @@ async fn finish_full_jid_relay(
     stanza: &waddle_xmpp::Stanza,
     call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
 ) -> FullJidDeliveryOutcome {
+    finish_full_jid_relay_at(outcome, deps, target, stanza, call_setup, None).await
+}
+
+async fn finish_full_jid_relay_at(
+    outcome: Option<FullJidDeliveryOutcome>,
+    deps: &Deps<'_>,
+    target: &jid::FullJid,
+    stanza: &waddle_xmpp::Stanza,
+    call_setup: Option<waddle_xmpp::telemetry::call::PendingCallSetupRoute>,
+    received_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> FullJidDeliveryOutcome {
     if let Some(outcome) = outcome {
         return outcome;
     }
-    let outcome =
-        route_to_connection::deliver_peer_to_full_with_registered_remote(deps, target, stanza)
-            .await;
+    let outcome = route_to_connection::deliver_peer_to_full_with_registered_remote_at(
+        deps,
+        target,
+        stanza,
+        received_at,
+    )
+    .await;
     routing::close_call_setup_from_outcome(call_setup, outcome);
     outcome
 }

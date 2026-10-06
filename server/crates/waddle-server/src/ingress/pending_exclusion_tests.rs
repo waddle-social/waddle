@@ -66,6 +66,7 @@ async fn specialized_replay(fixture: IngressFixture, live: bool, decline: bool) 
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: recipient.clone(),
             fanout: if live { vec![resource.clone()] } else { vec![] },
             route_identity: identity.clone(),

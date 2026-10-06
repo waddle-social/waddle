@@ -13,6 +13,7 @@ async fn intent_repair_and_divergence(fixture: IngressFixture) {
         .expect("initial archive");
     let mut repair = base.clone();
     repair.plan.intents.push(IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: "juliet@example.com".parse().expect("recipient"),
         fanout: vec!["juliet@example.com/phone".parse().expect("phone")],
         route_identity: EffectMessageIdentity::capture_ordinal(0),

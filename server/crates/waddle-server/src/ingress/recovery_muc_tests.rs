@@ -185,6 +185,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
             .plan
             .intents
             .push(IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: b.to_bare(),
                 fanout: vec![b.clone()],
                 route_identity: EffectMessageIdentity::capture_ordinal(999),

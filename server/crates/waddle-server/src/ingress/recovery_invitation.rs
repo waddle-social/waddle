@@ -46,6 +46,7 @@ pub(super) fn restore(
         }
         for route in input.unreceipted {
             let IngressEffectIntent::RouteDirect {
+                prepared: _,
                 recipient,
                 fanout,
                 route_identity,

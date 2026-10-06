@@ -267,6 +267,7 @@ fn recorded_route_prefers_semantic_identity_when_audience_drifts() {
         .parse::<jid::BareJid>()
         .expect("recipient");
     let recorded = [1, 2].map(|ordinal| IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recipient.clone(),
         fanout: Vec::new(),
         route_identity: EffectMessageIdentity::CaptureOrdinal(ordinal),
@@ -654,6 +655,7 @@ fn recorded_decline_empty_fanout_requires_recipient_equality() {
     let other: jid::BareJid = "b@example.com".parse().expect("B");
     let identity = waddle_xmpp::ingress::EffectMessageIdentity::capture_ordinal(1);
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: recorded.clone(),
         fanout: Vec::new(),
         route_identity: identity.clone(),

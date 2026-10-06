@@ -590,6 +590,7 @@ fn capture_dm_pin_routes(
         fanout.sort_by_key(ToString::to_string);
         fanout.dedup();
         capture.record_intent(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient,
             fanout,
             route_identity: route_identity.clone(),

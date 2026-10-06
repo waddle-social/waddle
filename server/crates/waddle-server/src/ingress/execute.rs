@@ -527,6 +527,32 @@ pub async fn execute_effects(
             match tokio::time::timeout_at(
                 deadline,
                 async {
+                    if decision.alias != super::decision::AliasOutcomeClass::Existing
+                        && decision.external_receipts[index].is_empty()
+                        && super::storage_hint::is_transient_delivery(effect)
+                    {
+                        // A policy-settled route has no ledger append authority.
+                        // The existing sink may write now or append to an accepted
+                        // SM stream; no executor or maintenance retry is retained.
+                        let mut immediate = deps.clone();
+                        immediate.ingress_append_context = None;
+                        if let ExternalEffect::Delivery(delivery @ (ExternalDeliveryEffect::QueueDetached { .. } | ExternalDeliveryEffect::RouteToPeer { .. } | ExternalDeliveryEffect::RelayFullJid { .. })) = effect {
+                            let Some(message_key) = decision.message_key else {
+                                return EffectOutcome::Unavailable;
+                            };
+                            let received_at = match super::storage_hint::received_at(uow, message_key).await {
+                                Ok(received_at) => received_at,
+                                Err(error) => {
+                                    tracing::warn!(%error, "transient delivery receipt time unavailable; dropping initial attempt");
+                                    return EffectOutcome::Unavailable;
+                                }
+                            };
+                            return crate::server::routes::interpret::effects::execute_delivery_with_received_at(
+                                delivery.clone(), &immediate, Some(received_at),
+                            ).await;
+                        }
+                        return sink.execute_with_applied(planned[index].clone(), &immediate, &decision.applied_durable).await;
+                    }
                     let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
                         Ok((crate::ingress_uow::DispatchReadiness::Ready, stream)) => stream,
                         Ok((crate::ingress_uow::DispatchReadiness::Blocked(predecessors), _)) => return EffectOutcome::Settled(SettledOutcome {
@@ -956,6 +982,7 @@ fn proven_receipts(
         }
         if let Some(identity) = &route.route_identity {
             intents.push(IngressEffectIntent::RouteDirect {
+                prepared: None,
                 recipient: route.recipient.clone(),
                 fanout: route.resources.clone(),
                 route_identity: identity.clone(),

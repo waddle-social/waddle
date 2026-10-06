@@ -383,6 +383,7 @@ fn inbox_push_receipt_requires_every_frozen_resource() {
     let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first");
     let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: first.to_bare(),
         fanout: vec![first.clone(), second.clone()],
         route_identity: waddle_xmpp::ingress::EffectMessageIdentity::CaptureOrdinal(5),
@@ -437,6 +438,7 @@ fn ephemeral_inbox_push_settles_absent_partial_and_complete_audiences() {
     let first: jid::FullJid = "juliet@example.com/phone".parse().expect("first");
     let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second");
     let intent = IngressEffectIntent::RouteDirect {
+        prepared: None,
         recipient: first.to_bare(),
         fanout: vec![first.clone(), second.clone()],
         route_identity: waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(5),

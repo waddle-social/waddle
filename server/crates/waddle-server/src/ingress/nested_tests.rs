@@ -41,6 +41,7 @@ async fn submission(f: &IngressFixture, origin: &str) -> IngressSubmission {
         .plan
         .intents
         .push(IngressEffectIntent::RouteDirect {
+            prepared: None,
             recipient: submission.sender.to_bare(),
             fanout: vec![submission.sender.clone()],
             route_identity: EffectMessageIdentity::OriginId(

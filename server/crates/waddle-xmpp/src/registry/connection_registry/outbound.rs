@@ -88,18 +88,9 @@ pub struct OutboundStanza {
     /// rows whose flush stanza was actually acknowledged. `None` for
     /// every other outbound (the common case).
     pub pending_row_id: Option<crate::pending_delivery::PendingRowId>,
-    /// `original_receipt_at` of the source `pending_delivery` row
-    /// when this stanza is a flush replay. The destination's main
-    /// loop uses this to call
-    /// [`crate::stream_management::StreamManagementState::record_outbound_with_receipt_at`]
-    /// instead of `record_outbound`, so the SM unacked queue
-    /// preserves the row's original receipt time. If the client
-    /// disconnects pre-ack and the SM session later expires, Q6
-    /// promotion re-creates a `pending_delivery` row whose
-    /// `original_receipt_at` matches the original — so the eventual
-    /// XEP-0203 `<delay/>` advertises the real failed-delivery time.
-    /// (Greptile/Copilot/Qodo P1 review on PR #361.)
-    pub pending_row_original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// Original receipt time for pending replay or a transient relayed copy.
+    /// This timestamp carries no pending-row identity or ingress append authority.
+    pub original_receipt_at: Option<chrono::DateTime<chrono::Utc>>,
     /// Optional acknowledgement for a durable producer waiting until this
     /// frame reaches the connection's write/recovery-owning path.
     pub write_acceptance: Option<OutboundWriteAcceptance>,
@@ -122,7 +113,7 @@ impl OutboundStanza {
             stanza,
             kind: DeliveryKind::DirectFrame,
             pending_row_id: None,
-            pending_row_original_receipt_at: None,
+            original_receipt_at: None,
             write_acceptance: None,
             ingress_append: None,
         }
@@ -147,7 +138,7 @@ impl OutboundStanza {
             stanza,
             kind: DeliveryKind::PeerStanza,
             pending_row_id: None,
-            pending_row_original_receipt_at: None,
+            original_receipt_at: None,
             write_acceptance: None,
             ingress_append: None,
         }
@@ -172,7 +163,7 @@ impl OutboundStanza {
             stanza,
             kind: DeliveryKind::DirectFrame,
             pending_row_id: Some(row_id),
-            pending_row_original_receipt_at: Some(original_receipt_at),
+            original_receipt_at: Some(original_receipt_at),
             write_acceptance: None,
             ingress_append: None,
         }
@@ -186,7 +177,7 @@ impl OutboundStanza {
             stanza,
             kind: DeliveryKind::DirectFrame,
             pending_row_id: None,
-            pending_row_original_receipt_at: None,
+            original_receipt_at: None,
             write_acceptance: Some(acceptance),
             ingress_append: None,
         }
