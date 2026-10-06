@@ -23,7 +23,7 @@ evidence, not proof of later changes.
 | Existing projection integrity | Transactional MAM and XEP-0313 suite above | Immutable columns and typed XML element content must match. Namespace-prefix spelling and attribute order are not message identity; literal transport replay bytes have their own row below. Timestamp equality follows SQLite's stored precision and PostgreSQL's encoded timestamp precision. Authoritative tombstones and missing-row repair retain their semantics. |
 | Deferred system-message archives retain their original projection | [deferred archive execution](../../crates/waddle-server/src/ingress/execute_archive.rs), [pin retry tests](../../crates/waddle-server/src/ingress/room_pin_tests.rs) | Rebuild from the matching recorded system-broadcast payload and archive identity/time. A later nickname or regenerated description cannot replace the archived message. |
 | Recover a committed unarchived storable full-JID route | [recovery reconstruction](../../crates/waddle-server/src/ingress/recovery_rebuild.rs), [prepared-route regressions](../../crates/waddle-server/src/ingress/recovery_prepared_direct_tests.rs), [legacy recovery tests](../../crates/waddle-server/src/ingress/recovery_executor_tests.rs) | Prepared payload evidence distinguishes storable routes from legacy delegation. Only recorded targets and payloads may execute. Protected `no-store` messages retain no prepared copy and have no ingress recovery obligation. Size limits before `h` and the existing bare-JID policy remain enforced. |
-| Carbons and notification effects | [local carbon retries](../../crates/waddle-server/src/ingress/execute_local_carbons_tests.rs), [offline settlement](../../crates/waddle-server/src/ingress/offline_settlement_tests.rs) | Exact recorded audiences and transactional keyed effects; relayed-carbon canonical authorization remains #1906. Provider delivery without a durable provider key remains at-least-once. |
+| Carbons and notification effects | [local carbon retries](../../crates/waddle-server/src/ingress/execute_local_carbons_tests.rs), [offline settlement](../../crates/waddle-server/src/ingress/offline_settlement_tests.rs), [relayed carbon authority](../../crates/waddle-server/src/ingress/append_authority_carbons.rs), [owner-receiver regressions](../../crates/waddle-server/src/ingress/execute_carbon_fanout_tests.rs) | Exact recorded audiences and transactional keyed effects. A relayed carbon claim must carry the relay-wide receipt and is verified against the canonical sender, intent and message before keyed custody; every target keeps its own resource authorization. Provider delivery without a durable provider key remains at-least-once. |
 | One authorized keyed SM custody allocation | [keyed append regressions](../../crates/waddle-xmpp/src/stream_management/session_registry/tests/keyed_append.rs), [SQL custody regressions](../../crates/waddle-server/src/sm_persistence/ingress_append_tests.rs) | Durable append proof survives replay-cache eviction, resume and acknowledgement. An unacknowledged frame may legitimately be retransmitted. An already-accepted frame whose obligation fails authorization during detach retains unkeyed custody, without keyed deduplication. |
 | Durable ordinal width and wrapping wire count | [typed ordinals](../../crates/waddle-xmpp/src/ingress/ordinal.rs), [substrate round-trip tests](../../crates/waddle-server/src/ingress_substrate/mod.rs), [authority wrap tests](../../crates/waddle-server/src/ingress_substrate/authority_tests.rs) | Durable `u64` and wire `u32` are distinct types; durable frontier allocation does not derive its epoch from wrapping wire `h`. |
 | Replay bytes and original delay | [byte contract](../../crates/waddle-xmpp/src/stream_management/replay.rs), [durable byte suite](../../crates/waddle-server/tests/xep0198_replay_bytes.rs), [cross-node registry suite](../../crates/waddle-server/tests/xep0198_cross_node_resume.rs), [XEP-0198 delay suite](../../crates/waddle-xmpp/tests/xep0198_resume_replay_delay.rs) | The immutable bytes are production serializer output, not client-original lexical XML. Fresh registry hydration preserves them; first insertion of a missing server delay deliberately changes the frame. Repeated replay preserves the resulting bytes and original time. The cross-node proof uses fenced storage/registry transitions, not a remote relay or WebSocket handshake. |
@@ -37,10 +37,12 @@ evidence, not proof of later changes.
 
 - #1759 is complete in #1896; #1776 is complete in #1899. Their original issue
   descriptions are historical, not instructions to restore superseded behavior.
-- #1909 reconciles this matrix, the RFC, runbook, roadmap and epic wording.
-  #1910–#1912 supply the recovery/integrity/replay acceptance work described above.
-- #1906 remains an independent prerequisite for the exact-key/target authority
-  claim on relayed carbons. These four tickets do not close it.
+- #1909–#1912 are complete in #1913: #1909 reconciled this matrix, the RFC,
+  runbook, roadmap and epic wording; #1910–#1912 supplied the
+  recovery/integrity/replay acceptance work described above.
+- #1906 is complete in #1923: the relayed-carbons owner receiver defers
+  canonical authorization to the keyed append decision. No carve-out of the
+  epic remains open; only the final closure record below is outstanding.
 - #1908 investigates room-observer terminalization. It is adjacent; any impact
   on the DM contract must be demonstrated rather than inferred from shared
   maintenance code. Keyless guest/provider execution can repeat under #1899.
@@ -66,4 +68,4 @@ runs (workspace, dedicated XEP suites, Clippy `-D warnings` and doctests), and
 the disposition of every remaining row above to the epic. Keep any explicitly
 excluded legacy or remote-only behavior in the epic's acceptance boundary.
 The implementation PR's verification record supplies evidence for its own
-changes; it does not establish production activation or close #1906.
+changes; it does not establish production activation.
