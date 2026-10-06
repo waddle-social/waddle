@@ -311,9 +311,13 @@ impl OrderedRelayDeliveryBridge {
                                 carbon_recipients: Vec::new(),
                             };
                             }
-                            if let Some(delivery) = delivery.as_mut() {
+                            if let (Some(delivery), Some(state)) =
+                                (delivery.as_mut(), web_socket_state.as_deref())
+                            {
                                 delivery.ingress_append_context =
-                                    Some((*obligation).into_verified_context());
+                                    Some((*obligation).into_deferred_context(
+                                        state.deps.app_state.db_pool.global().clone(),
+                                    ));
                             }
                         }
                         let outcome =

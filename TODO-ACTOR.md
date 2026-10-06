@@ -9,7 +9,7 @@ The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664
 - **Immediate reliability:** #1386 — coordinate clustered shutdown with SM drain completion and classify terminal authority loss. The 2026-09-25 issue report remains relevant; current code already sleeps 250 ms between nonempty passes, so the old “no backoff” diagnosis is stale.
 - **Distributed-actors bug:** #1732 — retire displaced-generation media authority without revoking the successor's tokens or removing its LiveKit participant. #1869 narrowed the replacement paths but explicitly deferred this work; re-establish the reproducer against the new bind fencing.
 - **Small distributed-actors task:** #1688 — require `deployment.uuid` at render time for durable database configurations. Clustering already requires it; cover the remaining durable/noncluster configurations, preserve explicit dev/memory behavior, bump the chart, and verify the GitOps render.
-- **Roadmap progress:** finish the #1658 acceptance matrix and remaining authorization follow-up #1906. #1759 and #1776 are closed; #1899's bounded uncertainty policy is the accepted baseline. Do not reimplement closed carve-outs listed below.
+- **Roadmap progress:** finish the #1658 acceptance matrix. #1759, #1776 and the authorization follow-up #1906 are complete; #1899's bounded uncertainty policy is the accepted baseline. Do not reimplement closed carve-outs listed below.
 - **Larger recovery task:** design #1826 and #1825 together — durable remote-join handoff plus recovery of departures after socket-node restart. Persisting membership only after the join reply does not close the lost-acknowledgement gap.
 
 **Remaining critical path:** #1658 → (#1659 ∥ #1660) → #1661 → #1662 → #1663. All prerequisites through #1657 are closed. The later umbrellas are sharpening/evaluation work, not ready-to-code feature tickets.
@@ -62,9 +62,9 @@ Still to reconcile before closing #1658:
 
 - [x] **#1759:** live full-JID archive/inbox/carbon obligations are canonical; missing recipient preparation refuses the plan. SQLite/PostgreSQL retry coverage and ownership fixtures were reconciled in #1896.
 - [x] **#1776:** #1899 recognizes completed/custodied effects, fences concurrent attempts and permits retry after unknown live outcomes reach 60 seconds. This supersedes the parent issue's original terminal non-SM uncertainty wording.
-- [x] **#1790:** relay receivers defer the canonical authorization read to the append decision that trusts it (ordered receiver before durable status, detached keyed append, owner before a registered-remote frame). Forwarding hops no longer read; a registered-remote destination still costs one owner read plus the socket node's own fence. No liveness probe; rejections stay definitive. Follow-up: the `RemoteUserSideEffect::Carbons` receiver keys appends with no canonical read.
+- [x] **#1790:** relay receivers defer the canonical authorization read to the append decision that trusts it (ordered receiver before durable status, detached keyed append, owner before a registered-remote frame). Forwarding hops no longer read; a registered-remote destination still costs one owner read plus the socket node's own fence. No liveness probe; rejections stay definitive. The relayed-carbons follow-up is covered by #1906 below.
 - [ ] **#1909–#1912:** complete acceptance reconciliation, unarchived full-JID recovery, existing MAM projection verification and replay-byte proof. Track implementation and remaining checks in the [acceptance matrix](server/docs/operations/ingress-effect-acceptance.md).
-- [ ] **#1906:** authorize the relayed-carbons obligation before trusting it for keyed append. This existing follow-up remains within the exact-key/target contract.
+- [x] **#1906:** the relayed-carbons owner receiver defers canonical authorization to the keyed append decision. SQLite/PostgreSQL side-effect regressions reject a mismatched canonical sender and preserve valid keyed detached custody. Existing frozen sibling intents provide carbon authority without an additional completion-receipt read.
 - **Adjacent #1908:** room-observer terminalization has its own investigation and disposition; it is not silently added to the DM acceptance scope.
 
 ### Remaining dependent work
@@ -124,7 +124,7 @@ Recommendations below are based on source/test inspection and merged PR evidence
 | --- | --- |
 | #1138 | Original detach age is preserved by the snapshot codec introduced in #1676 and restored for expiry checks. Implementation appears fixed, but this audit did not establish the exact repeated successful fanout → restart → original expiry-window regression. Verify that acceptance before closing. |
 | #1699 | Original outbox defect fixed in #1708; overlaps #1705/#1745. Preserve the deterministic scheduling refinement and separately disposition the group-DM rename failure before closing as consolidated. |
-| #1658 | #1759/#1776/#1790 are closed. Finish #1909–#1912 and #1906 against the reconciled acceptance matrix; retain #1899's explicit unknown-outcome duplicate policy. |
+| #1658 | #1759/#1776/#1790 are closed and #1906 is complete. Finish #1909–#1912 against the reconciled acceptance matrix; retain #1899's explicit unknown-outcome duplicate policy. |
 | #1709 | The stack-size mitigation does not establish that the remaining oversized-future work is complete. |
 | #1401 | #1869 addresses connection displacement, but malformed/invalid bind error handling remains a separate acceptance requirement. |
 | #1295 | Ordinary cluster drain still skips UserActor claims; do not close merely because #1294 takeover or room draining landed. |
