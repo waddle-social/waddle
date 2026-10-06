@@ -489,6 +489,7 @@ pub fn record_ingress_tx_duration(duration: std::time::Duration) {
         "ingress.tx.duration",
         "s",
         "Ingress authority transaction duration.",
+        buckets: super::SECOND_SCALE_BUCKETS,
         duration.as_secs_f64()
     );
 }
