@@ -299,7 +299,12 @@ impl OrderedRelayDeliveryBridge {
                         if let Some(obligation) = ingress_append {
                             // Registration authenticates the carbon owner. Received
                             // carbons retain the original correspondent as sender.
+                            // Dynamic sibling fanout requires a relay-wide receipt;
+                            // frozen per-resource claims cannot share this context.
                             if owner != msg.source_jid.to_bare()
+                                || obligation.receipt.kind.to_storage()
+                                    != waddle_xmpp::ingress::IngressEffectKind::RelayCarbons
+                                        .storage_tag()
                                 || message.from.as_ref().map(jid::Jid::to_bare).as_ref()
                                     != Some(&obligation.sender_bare)
                                 || delivery.is_none()
@@ -311,9 +316,13 @@ impl OrderedRelayDeliveryBridge {
                                 carbon_recipients: Vec::new(),
                             };
                             }
-                            if let Some(delivery) = delivery.as_mut() {
+                            if let (Some(delivery), Some(state)) =
+                                (delivery.as_mut(), web_socket_state.as_deref())
+                            {
                                 delivery.ingress_append_context =
-                                    Some((*obligation).into_verified_context());
+                                    Some((*obligation).into_deferred_context(
+                                        state.deps.app_state.db_pool.global().clone(),
+                                    ));
                             }
                         }
                         let outcome =
