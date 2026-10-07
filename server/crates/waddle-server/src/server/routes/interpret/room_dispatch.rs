@@ -705,7 +705,27 @@ pub(super) async fn dispatch_to_room(
         .protocol
         .extension_manager
         .room_observation_subscriptions(&room_jid);
-    if retry_suppression.is_none() && deps.effects.is_planning() {
+    if retry_suppression.is_none()
+        && deps.effects.is_planning()
+        && !observer_subscriptions.is_empty()
+    {
+        // Observer work is captured by the archive transaction. An accepted
+        // chat state, marker, or no-store message has no such source and must
+        // not leave a deferred obligation that a wake hint can never complete.
+        let revision = waddle_xmpp_core::xep0359::extract_stanza_ids(&observer_message)
+            .into_iter()
+            .find(|id| id.by == room_jid);
+        let archive_planned = deps.effects.snapshot().iter().any(|planned| {
+            matches!(
+                &planned.effect,
+                super::effects::Effect::Durable(super::effects::DurableEffect::Room(
+                    super::effects::room::DurableRoomEffect::ArchiveGroupchat { room, message, .. }
+                )) if room == &room_jid && revision.as_ref().is_some_and(|id| id.id == message.id)
+            )
+        });
+        if !archive_planned {
+            return outcome;
+        }
         for subscription in observer_subscriptions {
             let plugin = subscription.plugin;
             deps.capture_intent(IngressEffectIntent::RoomObserver {

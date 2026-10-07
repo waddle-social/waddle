@@ -576,6 +576,64 @@ async fn room_observer_planning_captures_complete_replayable_invocation() {
 }
 
 #[tokio::test]
+async fn room_observer_planning_chatstate_records_no_obligation() {
+    let mut message = Message::new(None);
+    message
+        .payloads
+        .push(xmpp_parsers::chatstates::ChatState::Composing.into());
+    assert_room_observer_message_planning(ObserverConfiguration::Observer, message, true, false)
+        .await;
+}
+
+#[tokio::test]
+async fn room_observer_planning_threaded_marker_records_no_obligation() {
+    let mut message = Message::new(None);
+    message
+        .payloads
+        .push(waddle_xmpp::xep::xep0333::build_displayed_element(
+            "read-message",
+        ));
+    waddle_xmpp_core::xep0201::set_thread_id(&mut message, "thread-root");
+    waddle_xmpp_core::xep0359::add_origin_id(&mut message, "marker-origin");
+    assert_room_observer_message_planning(ObserverConfiguration::Observer, message, true, false)
+        .await;
+}
+
+#[tokio::test]
+async fn room_observer_planning_storage_hints_follow_the_archive() {
+    use waddle_xmpp::xep::{build_hint_element, Hint};
+
+    for hint in [Hint::NoStore, Hint::NoPermanentStore] {
+        let mut message = Message::new(None);
+        message
+            .bodies
+            .insert(Default::default(), "ephemeral body".to_owned());
+        message.payloads.push(build_hint_element(hint));
+        assert_room_observer_message_planning(
+            ObserverConfiguration::Observer,
+            message.clone(),
+            true,
+            false,
+        )
+        .await;
+
+        message.payloads.push(build_hint_element(Hint::Store));
+        assert_room_observer_message_planning(ObserverConfiguration::Observer, message, true, true)
+            .await;
+    }
+}
+
+#[tokio::test]
+async fn room_observer_planning_without_archive_storage_records_no_obligation() {
+    let mut message = Message::new(None);
+    message
+        .bodies
+        .insert(Default::default(), "unarchived body".to_owned());
+    assert_room_observer_message_planning(ObserverConfiguration::Observer, message, false, false)
+        .await;
+}
+
+#[tokio::test]
 async fn room_observer_planning_disabled_extensions_records_no_obligation() {
     assert_room_observer_planning(ObserverConfiguration::Disabled, false).await;
 }
@@ -653,6 +711,19 @@ pub(crate) async fn room_observer_test_manager(
 }
 
 async fn assert_room_observer_planning(configuration: ObserverConfiguration, expected: bool) {
+    let mut message = Message::new(None);
+    message
+        .bodies
+        .insert(Default::default(), "observe after commit".to_owned());
+    assert_room_observer_message_planning(configuration, message, true, expected).await;
+}
+
+async fn assert_room_observer_message_planning(
+    configuration: ObserverConfiguration,
+    mut message: Message,
+    archive_available: bool,
+    expected: bool,
+) {
     use crate::server::routes::interpret::effects::{
         room::ExternalRoomEffect, Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
     };
@@ -696,14 +767,11 @@ async fn assert_room_observer_planning(configuration: ObserverConfiguration, exp
     deps.web_socket_state = Some(state.as_ref());
     deps.room_registry = Some(&state.deps.protocol.room_registry);
     deps.extension_manager = Some(&state.deps.protocol.extension_manager);
-    deps.mam_storage = Some(&state.deps.protocol.mam_storage);
+    deps.mam_storage = archive_available.then_some(&state.deps.protocol.mam_storage);
     deps.inbox_storage = Some(&state.deps.protocol.inbox_storage);
-    let mut message = Message::new(Some(room_jid.clone().into()));
+    message.to = Some(room_jid.clone().into());
     message.from = Some(sender.clone().into());
     message.type_ = XmppMessageType::Groupchat;
-    message
-        .bodies
-        .insert(Default::default(), "observe after commit".to_owned());
     let incoming = message.clone();
     interpret(
         vec![OutboundEvent::DispatchToRoom {
