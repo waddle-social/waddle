@@ -86,3 +86,23 @@ keep answering after the text renderer's deletion. Notes:
   normalization (unit annotations dropped, `_total` on monotonic
   sums). Verify against live series before relying on a new alias;
   see the ClusterHeartbeat runbook for the same caveat.
+
+## Ingress alert regression tests
+
+`tests/ingress.test.yaml` evaluates the checked-in rules with synthetic series
+using [Prometheus rule tests](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/).
+With `promtool` on PATH, run `sh rules/tests/run.sh` from `infrastructure/waddle.cloud`.
+The runner removes only Mimir's top-level `namespace` upload metadata in a
+temporary copy; it never edits or uploads the source rules.
+
+Alternatively, from `infrastructure/waddle.cloud`, use an isolated test container:
+
+```sh
+docker run --rm --network none --entrypoint /bin/sh \
+  -v "$PWD/rules:/rules:ro" prom/prometheus:v3.5.0 /rules/tests/run.sh
+```
+
+The suite covers normal live unresolved attempts, flat aged obligations, the
+age threshold and hold/reset/resolution, primary failover, missing age telemetry,
+and independent per-kind backlog growth. Run it when changing ingress alerts;
+the existing PR pipeline lints rule syntax but does not run these behavioral tests.

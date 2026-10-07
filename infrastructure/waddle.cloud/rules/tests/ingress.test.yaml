@@ -1,0 +1,130 @@
+rule_files:
+  - waddle-reliability.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: healthy offline traffic with repeated live attempts stays quiet
+    interval: 1m
+    input_series:
+      - series: 'ingress_effects_unresolved_total{phase="live",kind="terminalization"}'
+        values: '0+10x60'
+      - series: 'ingress_effects_unresolved_total{phase="live",kind="delivery"}'
+        values: '0+5x60'
+      # Durable custody settles ingress without waiting for recipient return.
+      - series: 'cnpg_waddle_ingress_nonterminal_age_oldest_seconds'
+        values: '0x60'
+      - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="none"}'
+        values: '0x60'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname=~"IngressUnresolvedEffectsGrowing|IngressNonTerminalAge|IngressNonTerminalBacklog",alertstate="firing"}'
+        eval_time: 1h
+        exp_samples: []
+
+  - name: a flat aging obligation fires without live attempts or backlog growth
+    interval: 1m
+    input_series:
+      - series: 'cnpg_waddle_ingress_nonterminal_age_oldest_seconds'
+        values: '86400+60x80'
+      - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="route_direct"}'
+        values: '8x80'
+      - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="none"}'
+        values: '0x80'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing"}'
+        eval_time: 9m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing"}'
+        eval_time: 80m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="IngressNonTerminalBacklog",alertstate="firing"}'
+        eval_time: 80m
+        exp_samples: []
+
+  - name: threshold equality and transient recovery reset the hold
+    interval: 1m
+    input_series:
+      - series: 'cnpg_waddle_ingress_nonterminal_age_oldest_seconds'
+        # Equality at 0-15m; old at 16-24m; clear at 25m; old again at 26m.
+        values: '600x15 660+60x8 0 660+60x10 0x5'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge"}'
+        eval_time: 15m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing"}'
+        eval_time: 24m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge"}'
+        eval_time: 25m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing"}'
+        eval_time: 35m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing"}'
+        eval_time: 36m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge"}'
+        eval_time: 37m
+        exp_samples: []
+
+  - name: primary relabeling preserves the age hold
+    interval: 1m
+    input_series:
+      - series: 'cnpg_waddle_ingress_nonterminal_age_oldest_seconds{instance="old-primary"}'
+        values: '660+60x4 stale'
+      - series: 'cnpg_waddle_ingress_nonterminal_age_oldest_seconds{instance="new-primary"}'
+        values: '_x4 960+60x10'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressNonTerminalAge",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: missing age telemetry is not healthy zero
+    interval: 1m
+    input_series:
+      - series: 'cnpg_waddle_ingress_gc_eligible_messages'
+        values: '0x30'
+      - series: 'cnpg_waddle_ingress_gc_oldest_eligible_age_seconds'
+        values: '0x30'
+      - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="none"}'
+        values: '0x30'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressCnpgQueriesMissing",alertstate="firing"}'
+        eval_time: 14m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressCnpgQueriesMissing",alertstate="firing"}'
+        eval_time: 15m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressCnpgQueriesMissing",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="IngressNonTerminalAge"}'
+        eval_time: 15m
+        exp_samples: []
+
+  - name: backlog growth still warns per kind
+    interval: 1m
+    input_series:
+      - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="route_direct"}'
+        # Allow the missing-history fallback to resolve before growth at 80m.
+        values: '8x79 9x20'
+      - series: 'cnpg_waddle_ingress_nonterminal_messages{kind="none"}'
+        values: '0x100'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="IngressNonTerminalBacklog",alertstate="firing"}'
+        eval_time: 89m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="IngressNonTerminalBacklog",alertstate="firing"}'
+        eval_time: 90m
+        exp_samples:
+          - labels: 'ALERTS{alertname="IngressNonTerminalBacklog",alertstate="firing",kind="route_direct",severity="warning",team="waddle"}'
+            value: 1

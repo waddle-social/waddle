@@ -185,9 +185,9 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | Frozen groupchat copies settled for occupants the room no longer lists; not zero-registered, so read it as "did this ever tick" |
 | `muc.ghost_occupants.evicted` | `muc_ghost_occupants_evicted_total` | XEP-0045 ghost occupants removed from a room by a stalled groupchat obligation; not zero-registered, and every tick means a cleanup leak happened upstream |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
-| `ingress.effects.unresolved{kind,phase}` (local executions only) | `ingress_effects_unresolved_total` | `IngressUnresolvedEffectsGrowing` considers only `phase="live"`; `maintenance_recovery`, `maintenance_terminalization`, and `stream_retirement` remain available for inspection |
+| `ingress.effects.unresolved{kind,phase}` (local executions only) | `ingress_effects_unresolved_total` | Dashboard diagnostics only; incomplete attempts, including repeated observations of the same obligation, are not leakage |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
-| CNPG oldest non-terminal message older than 10m (seconds; zero when empty) | `cnpg_waddle_ingress_nonterminal_age_oldest_seconds` | `IngressCnpgQueriesMissing` |
+| CNPG oldest non-terminal message older than 10m (seconds; zero when empty) | `cnpg_waddle_ingress_nonterminal_age_oldest_seconds` | `IngressNonTerminalAge`, `IngressCnpgQueriesMissing` |
 | CNPG GC eligibility and oldest eligible age | `cnpg_waddle_ingress_gc_eligible_messages`, `cnpg_waddle_ingress_gc_oldest_eligible_age_seconds` | `IngressGcBacklog`, `IngressGcAge`, `IngressCnpgQueriesMissing` |
 
 `IngressInfraDecisions` is critical: a positive rate of storage, serialization
@@ -212,10 +212,27 @@ at startup, so absence indicates missing telemetry even on idle pods.
 15m. The age query always returns one row (zero for no backlog) and the
 backlog query always emits the `none` sentinel row, so a missing or failing
 query cannot masquerade as healthy receipt completeness.
-`IngressUnresolvedEffectsGrowing` warns on a positive counter increase over
-1h for `phase="live"`, grouped by kind. It sees only locally executed effects, not obligations
-that were recorded but never executed; it is not a current queue gauge. Use
-`IngressNonTerminalBacklog` for the canonical row-level view.
+`ingress_effects_unresolved_total` remains a dashboard diagnostic by kind and
+phase, with no attempt-based alert (#1847). An incomplete live terminalization
+attempt is normal while another effect is still in flight, and repeated attempts
+count the same obligation again. It also misses obligations never executed
+locally, so it cannot measure leakage. Keep all phases visible for diagnosis.
+
+`IngressNonTerminalAge` warns when the oldest non-terminal canonical message
+is older than 600 seconds, sustained for 10m. The threshold reuses #1750's
+10-minute allowance for the 5s Phase C budget; the hold allows transient recovery
+to complete. With continuous telemetry, a newly stuck row therefore warns after
+about 20 minutes, including when its backlog count never grows. Aggregating with
+`max` removes primary-instance labels so failover does not restart the hold.
+The alert resolves when no old non-terminal rows remain. Missing age telemetry
+is covered separately by `IngressCnpgQueriesMissing`.
+
+Normal offline or detached custody can settle ingress without waiting for a
+recipient to return: a detached queue acceptance completes the effect, and an
+eligible direct-route recovery atomically transfers custody to pending delivery
+and records the route receipt. Unresolved attempt counts alone do not warn.
+Unsupported recovery, quota/storage failures, or routes without a proven custody
+handoff can still leave old canonical obligations; those warrant investigation.
 
 `IngressNonTerminalBacklog` warns when the count of canonical rows older than
 10 minutes that remain non-terminal is higher than it was an hour ago,
@@ -223,9 +240,9 @@ sustained for 10m. The comparison aggregates per kind before comparing and
 treats a kind with no series an hour ago as zero, because an empty backlog
 emits no family rows: the first stuck rows of a kind fire, and a primary
 failover that re-labels the series neither fires nor hides growth. It fires on growth, not on a
-standing floor (#1803): a parked, operator-accepted residue must not keep the
-alert permanently firing and blind it to new stuck rows. Read the gauge itself
-for the absolute backlog. Its `kind` is the unreceipted intent family;
+standing floor (#1803), so new stuck rows remain distinguishable from legacy
+residue. `IngressNonTerminalAge` independently warns on that residue until it is
+resolved; parking is not completion. Read the gauge itself for the absolute backlog. Its `kind` is the unreceipted intent family;
 `terminalization` means all receipts exist but terminalization itself is
 missing; `none` is the always-zero sentinel and never fires. A row counts once per pending family, even with several intents in
 that family, so summing families can count one row more than once. The 10m
@@ -2027,6 +2044,37 @@ manual repair below only if the claim never clears.
 
 The existing manual repair procedure below remains for unrecoverable families,
 with its explicit reviewed manifest and abandonment semantics.
+
+## Legacy inbox-route residue (#1847)
+
+**Disposition: reviewed operator repair, not automatic replay or blanket
+receipt insertion.** The September 25 report counted eight old `route_direct`
+rows after #1816. This is historical incident context, not a current inventory
+or a repair selector. #1816 gives new inbox refreshes typed `InboxPush` identities
+and an explicit ephemeral completion outcome; it cannot reconstruct the distinct
+payload of older `CaptureOrdinal` routes. Do not infer that every pending
+`route_direct` is an inbox refresh.
+
+Use [non-terminal backlog triage](#non-terminal-backlog-triage) to inventory the
+current rows and review each canonical payload, route identity, audience, archive
+evidence, and exact pending kind/hash pairs. Confirm that only the legacy ephemeral
+refresh is being abandoned and the independent archive, MUC fanout, inbox
+projection, and notification obligations have settled. A recoverable route must
+be handled by recovery instead; an unproven route needs further investigation.
+
+For confirmed legacy refreshes, record explicit message keys, pending pairs,
+what remains available in MAM/the committed inbox, and acceptance that repair
+records **abandonment, not delivery**. Use an incident-specific bound verified
+against the #1816 rollout on both replicas. The #1749 SQL below contains a
+different historical window and must not be run verbatim for this residue.
+Reuse its reviewed-manifest and epoch-lock checks, plus the maintenance-quiescence
+procedure in the #1782 repair section: canonical locks alone do not fence effects
+already frozen by a running recovery attempt.
+
+This documents the repair decision; no production repair is performed by the
+alert change. After a separately executed repair, verify exact receipts and
+terminalization, then confirm the per-kind backlog and oldest-age gauge fall.
+Any remaining old obligation should continue to trigger `IngressNonTerminalAge`.
 
 ## Repair for abandoned obligations (#1749)
 
