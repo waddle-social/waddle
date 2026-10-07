@@ -392,11 +392,17 @@ async fn histogram_buckets_form_pins_explicit_boundaries() {
         buckets: super::SECOND_SCALE_BUCKETS,
         0.42,
     );
+    super::reliability::record_ingress_tx_duration(std::time::Duration::from_millis(250));
 
-    assert_eq!(
-        guard.histogram_bounds("waddle.telemetry.selftest.seconds"),
-        Some(super::SECOND_SCALE_BUCKETS.to_vec()),
-    );
+    for metric in ["waddle.telemetry.selftest.seconds", "ingress.tx.duration"] {
+        assert_eq!(
+            guard.histogram_bounds(metric),
+            Some(vec![
+                0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
+            ]),
+            "{metric} must export seconds-scale boundaries",
+        );
+    }
 }
 
 #[tokio::test]

@@ -2288,14 +2288,15 @@ async fn retraction_landing_after_tombstone_snapshot_still_scrubs_promoted_rows(
     );
 }
 
-/// PendingDeliveryStorage that fails exactly one insert (the Nth call)
-/// while armed, delegating everything to a real in-memory store —
-/// simulates a transient partial storage failure mid-promotion.
+/// Fault-injecting pending storage backed by real in-memory rows. Tests
+/// choose a single insert failure, a persistent outage, or quota rejection
+/// followed by recovered capacity.
 struct FlakyPending {
     inner: InMemoryPendingDeliveryStorage,
     armed: std::sync::atomic::AtomicBool,
     insert_calls: std::sync::atomic::AtomicU32,
-    fail_on_call: u32,
+    fail_on_call: Option<u32>,
+    quota_on_failure: bool,
 }
 
 impl FlakyPending {
@@ -2304,8 +2305,22 @@ impl FlakyPending {
             inner: InMemoryPendingDeliveryStorage::unlimited(),
             armed: std::sync::atomic::AtomicBool::new(true),
             insert_calls: std::sync::atomic::AtomicU32::new(0),
-            fail_on_call: call,
+            fail_on_call: Some(call),
+            quota_on_failure: false,
         }
+    }
+
+    fn failing_every_insert() -> Self {
+        let mut storage = Self::failing_on(1);
+        storage.fail_on_call = None;
+        storage
+    }
+
+    #[cfg(feature = "clustering")]
+    fn quota_then_available() -> Self {
+        let mut storage = Self::failing_on(1);
+        storage.quota_on_failure = true;
+        storage
     }
 
     fn disarm(&self) {
@@ -2330,7 +2345,14 @@ impl PendingDeliveryStorage for FlakyPending {
             .insert_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
             + 1;
-        if self.armed.load(std::sync::atomic::Ordering::SeqCst) && call == self.fail_on_call {
+        if self.armed.load(std::sync::atomic::Ordering::SeqCst)
+            && self
+                .fail_on_call
+                .is_none_or(|failed_call| call == failed_call)
+        {
+            if self.quota_on_failure {
+                return Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded);
+            }
             return Err(
                 waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
                     "simulated transient backend failure".into(),
@@ -2446,6 +2468,188 @@ impl PendingDeliveryStorage for FlakyPending {
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
         self.inner.scrub_for_tombstone(target).await
     }
+}
+
+async fn run_test_shutdown_drain(state: Arc<crate::server::routes::websocket::WebSocketState>) {
+    let stop = tokio_util::sync::CancellationToken::new();
+    stop.cancel();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(4),
+        crate::server::session_janitors::run_graceful_shutdown_drain(
+            state,
+            stop,
+            Arc::new(tokio::sync::Notify::new()),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
+            std::time::Duration::from_secs(8),
+        ),
+    )
+    .await
+    .expect("a failing promotion must not spin until the shutdown deadline");
+}
+
+#[tokio::test]
+async fn shutdown_persistent_storage_failure_has_bounded_retries_and_restart_recovery() {
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_pending_storage;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let storage = Arc::new(FlakyPending::failing_every_insert());
+    let stream = waddle_xmpp::pending_delivery::SmSessionId::new("shutdown-backend-down");
+    let mut session = detached_session_with_unacked(
+        stream.as_str(),
+        full("alice@example.com/phone"),
+        vec![dm_xml(
+            "bob@example.com/web",
+            "alice@example.com",
+            "recover after outage",
+        )],
+    );
+    session.max_resume_time = Some(0);
+    registry.store_session(session).await.unwrap();
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        storage.clone(),
+    )
+    .await;
+    run_test_shutdown_drain(state).await;
+    assert_eq!(
+        storage
+            .insert_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        3,
+        "a fixed failed-pass budget retains responsibility without guessing determinism"
+    );
+    assert!(persistence.get_session(&stream).await.unwrap().is_some());
+    assert_eq!(persistence.list_unacked(&stream).await.unwrap().len(), 1);
+    assert_eq!(
+        metrics
+            .counter_sum("xmpp.sm.drain_timeout", &[])
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(registry.live_session_ids().unwrap(), vec![stream.as_str()]);
+    storage.disarm();
+    let restored = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    assert_eq!(restored.restore_from_persistence().await.unwrap(), 1);
+    let restarted =
+        create_test_websocket_state_with_sm_registry_and_pending_storage(restored, storage.clone())
+            .await;
+    crate::server::session_janitors::run_sm_expiry_sweep(&restarted).await;
+    assert!(persistence.get_session(&stream).await.unwrap().is_none());
+    let rows = storage.list(&bare("alice@example.com")).await.unwrap();
+    assert_eq!(rows.len(), 1);
+    let waddle_xmpp::pending_delivery::PendingPayload::Transient(message) = &rows[0].payload else {
+        panic!("fixture has no archive reference");
+    };
+    assert_eq!(
+        message
+            .bodies
+            .get(&xmpp_parsers::message::Lang::new())
+            .unwrap(),
+        "recover after outage"
+    );
+}
+
+#[tokio::test]
+async fn shutdown_retries_transient_storage_failure_before_confirming() {
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_pending_storage;
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let storage = Arc::new(FlakyPending::failing_on(1));
+    let stream = waddle_xmpp::pending_delivery::SmSessionId::new("shutdown-transient-backend");
+    registry
+        .store_session(detached_session_with_unacked(
+            stream.as_str(),
+            full("alice@example.com/phone"),
+            vec![dm_xml(
+                "bob@example.com/web",
+                "alice@example.com",
+                "retry during shutdown",
+            )],
+        ))
+        .await
+        .unwrap();
+    let state =
+        create_test_websocket_state_with_sm_registry_and_pending_storage(registry, storage.clone())
+            .await;
+    run_test_shutdown_drain(state).await;
+    assert_eq!(
+        storage
+            .insert_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2
+    );
+    assert!(persistence.get_session(&stream).await.unwrap().is_none());
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustered_shutdown_retries_when_quota_capacity_becomes_available() {
+    use crate::server::routes::websocket::test_state::{
+        create_test_websocket_state_with_extension_manager, empty_extension_manager,
+        TestStateOverrides,
+    };
+    use waddle_xmpp::ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let claims = Arc::new(InProcessClaimStore::new());
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("sm-node", "quota-recovery"));
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_persistence(persistence.clone())
+            .with_claim_store(claims.clone(), identity.clone()),
+    );
+    let storage = Arc::new(FlakyPending::quota_then_available());
+    let stream = waddle_xmpp::pending_delivery::SmSessionId::new("shutdown-quota-recovery");
+    registry
+        .store_session(detached_session_with_unacked(
+            stream.as_str(),
+            full("alice@example.com/phone"),
+            vec![dm_xml(
+                "bob@example.com/web",
+                "alice@example.com",
+                "capacity recovered",
+            )],
+        ))
+        .await
+        .unwrap();
+    let state = create_test_websocket_state_with_extension_manager(
+        empty_extension_manager().await,
+        TestStateOverrides {
+            clustering: Some(crate::clustering::ClusteringHandles {
+                claim_store: Some(claims),
+                node_identity: Some(identity),
+                ..Default::default()
+            }),
+            sm_session_registry: Some(registry),
+            pending_delivery_storage: Some(storage.clone()),
+            ..Default::default()
+        },
+    )
+    .await;
+    run_test_shutdown_drain(state).await;
+    assert_eq!(
+        storage
+            .insert_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        2,
+        "quota failure may recover during the same shutdown"
+    );
+    assert!(persistence.get_session(&stream).await.unwrap().is_none());
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
 }
 
 #[tokio::test]
@@ -3147,6 +3351,10 @@ async fn clustered_shutdown_queues_before_live_delivery() {
         },
     )
     .await;
+    assert_eq!(
+        summary.first_failure,
+        Some((2, PromotionFailureReason::ClusteredIq))
+    );
     assert_eq!(summary.queued, 1);
     assert_eq!(summary.redelivered, 0);
     assert!(
@@ -3195,6 +3403,10 @@ async fn clustered_shutdown_keeps_replay_when_pending_quota_is_full() {
         },
     )
     .await;
+    assert_eq!(
+        summary.first_failure,
+        Some((1, PromotionFailureReason::ClusteredQuotaExceeded))
+    );
     assert!(summary.has_storage_failure());
     assert_eq!(summary.bounced, 0);
     assert!(summary.promoted_sequences.is_empty());
@@ -3246,6 +3458,10 @@ async fn clustered_shutdown_defers_no_store_message_without_a_direct_send() {
         },
     )
     .await;
+    assert_eq!(
+        summary.first_failure,
+        Some((1, PromotionFailureReason::ClusteredNonStorableMessage))
+    );
     assert!(summary.has_storage_failure());
     assert!(summary.promoted_sequences.is_empty());
     assert!(receiver.try_recv().is_err());

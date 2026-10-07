@@ -1,5 +1,32 @@
 use jid::FullJid;
 
+/// Why a stanza still needs its durable replay/custody responsibility.
+/// Clustered owner-policy deferrals cannot be settled by this shutdown
+/// owner; backend failures and quota rejection may succeed on a later pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionFailureReason {
+    ClusteredIq,
+    ClusteredPresence,
+    ClusteredNonStorableMessage,
+    ClusteredQuotaExceeded,
+    CustodyQuotaExceeded,
+    PendingStorage,
+    ClaimLost,
+    CustodyLookup,
+    CustodyCompletion,
+    NonDurableCustodyHandoff,
+    QuotaBounceUnavailable,
+}
+
+impl PromotionFailureReason {
+    pub(crate) fn requires_restart(self) -> bool {
+        matches!(
+            self,
+            Self::ClusteredIq | Self::ClusteredPresence | Self::ClusteredNonStorableMessage
+        )
+    }
+}
+
 /// Outcome of promoting a single unacked stanza per the Q6 chain.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PromotedOutcome {
@@ -26,14 +53,9 @@ pub enum PromotedOutcome {
     /// the drain, so the promotion-time re-check scrubs the in-flight
     /// copy instead of delivering retracted content on next login.
     Scrubbed,
-    /// Storage backend failure — `pending_delivery.insert` returned
-    /// `Err`. The caller MUST treat this as a transient promotion
-    /// failure and SKIP `confirm_drained` for the owning session so
-    /// the durable SM row survives for restart-time retry. (Copilot
-    /// review on PR #346: previously collapsed into `Dropped` so the
-    /// caller would call `confirm_drained` and permanently lose the
-    /// stanza when offline storage was temporarily failing.)
-    StorageFailure,
+    /// Promotion did not commit a durable handoff. The caller MUST skip
+    /// `confirm_drained` and retain the replay/custody payload for retry.
+    StorageFailure(PromotionFailureReason),
 }
 
 /// Aggregate outcome of promoting every unacked stanza in a session.
@@ -50,11 +72,12 @@ pub struct PromotionSummary {
     /// from `dropped` so retraction-race scrubs stay visible in the
     /// per-session summary logs.
     pub scrubbed: u32,
-    /// Number of stanzas that failed to insert into pending storage.
-    /// Non-zero means the session's promotion was lossy: the caller
-    /// MUST NOT call `confirm_drained` for this session, so its
-    /// durable SM row survives for restart-time retry.
+    /// Number of stanzas whose durable promotion responsibility remains.
+    /// Non-zero means the caller MUST NOT call `confirm_drained`.
     pub storage_failed: u32,
+    /// Exact first failed sequence and its typed cause. Shutdown uses the
+    /// cause to distinguish policy deferrals from retryable backend errors.
+    pub first_failure: Option<(u32, PromotionFailureReason)>,
     /// XEP-0198 sequences of every stanza this promotion pass fully
     /// handled (every outcome except [`PromotedOutcome::StorageFailure`]).
     /// On a partial failure the retry path durably deletes exactly
@@ -74,18 +97,23 @@ impl PromotionSummary {
             PromotedOutcome::NotPromotable => self.not_promotable += 1,
             PromotedOutcome::Unparseable => self.unparseable += 1,
             PromotedOutcome::Scrubbed => self.scrubbed += 1,
-            PromotedOutcome::StorageFailure => self.storage_failed += 1,
+            PromotedOutcome::StorageFailure(reason) => {
+                self.storage_failed += 1;
+                self.first_failure.get_or_insert((sequence, *reason));
+                tracing::warn!(
+                    sequence,
+                    ?reason,
+                    "Q6 promotion: durable handoff incomplete; retaining stanza for retry"
+                );
+            }
         }
-        if !matches!(outcome, PromotedOutcome::StorageFailure) {
+        if !matches!(outcome, PromotedOutcome::StorageFailure(_)) {
             self.promoted_sequences.push(sequence);
         }
     }
 
-    /// True when at least one stanza in this session failed to
-    /// promote due to a transient storage backend error. Callers
-    /// MUST inspect this before invoking `confirm_drained`: a
-    /// `true` result means the durable SM row must be kept so a
-    /// later janitor pass / restart can retry promotion.
+    /// True when a backend failure or intentional policy deferral left
+    /// durable responsibility outstanding. Keep the SM row for retry.
     pub fn has_storage_failure(&self) -> bool {
         self.storage_failed > 0
     }

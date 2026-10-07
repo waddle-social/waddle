@@ -52,7 +52,7 @@ use waddle_xmpp::Stanza;
 use live::{build_online_resources, collect_live_targets};
 use pending::{insert_pending, promote_as_transient, DeliveryHandles, PromotionOrigin};
 use stanza::{parse_stanza, promote_iq, promote_presence};
-pub use types::{PromotedOutcome, PromotionSummary};
+pub use types::{PromotedOutcome, PromotionFailureReason, PromotionSummary};
 
 /// Walk a session's unacked queue, promoting each stanza per the
 /// locked Q6 = B priority chain. Each promoted `pending_delivery`
@@ -213,11 +213,13 @@ async fn promote_session_unacked_with_policy(
             Some(Stanza::Presence(presence)) if allow_unfenced_effects => {
                 promote_presence(presence, registry).await
             }
-            Some(Stanza::Iq(_) | Stanza::Presence(_)) => {
-                // Clustered shutdown has no atomic replay retirement for a
-                // direct IQ/presence send. Keep its durable replay row for
-                // successor recovery instead of sending under a stale claim.
-                PromotedOutcome::StorageFailure
+            // Clustered shutdown cannot atomically retire replay with a
+            // direct IQ/presence send; the successor retains responsibility.
+            Some(Stanza::Iq(_)) => {
+                PromotedOutcome::StorageFailure(PromotionFailureReason::ClusteredIq)
+            }
+            Some(Stanza::Presence(_)) => {
+                PromotedOutcome::StorageFailure(PromotionFailureReason::ClusteredPresence)
             }
             None => PromotedOutcome::Unparseable,
         };
@@ -228,7 +230,7 @@ async fn promote_session_unacked_with_policy(
             ?outcome,
             "Q6 promotion: per-stanza outcome"
         );
-        let failed_storage = matches!(outcome, PromotedOutcome::StorageFailure);
+        let failed_storage = matches!(outcome, PromotedOutcome::StorageFailure(_));
         summary.record(entry.sequence, &outcome);
         if failed_storage {
             // Stop at the first durable-storage failure: promoting later
@@ -732,6 +734,17 @@ pub async fn prune_promoted_then_reinsert_for_retry(
     mut session: DetachedSession,
     summary: &PromotionSummary,
 ) -> bool {
+    prune_promoted_sequences(sm_registry, &mut session, summary).await;
+    reinsert_failed_session_for_retry(sm_registry, session).await
+}
+
+/// Reconcile the owned retry payload immediately after the durable prune.
+/// A cancellation guard must hold this updated payload before its next await.
+pub(crate) async fn prune_promoted_sequences(
+    sm_registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    session: &mut DetachedSession,
+    summary: &PromotionSummary,
+) {
     if !summary.promoted_sequences.is_empty() {
         match sm_registry
             .delete_unacked_sequences(&session.stream_id, &summary.promoted_sequences)
@@ -754,7 +767,6 @@ pub async fn prune_promoted_then_reinsert_for_retry(
             }
         }
     }
-    reinsert_failed_session_for_retry(sm_registry, session).await
 }
 
 /// Read the SM registry's recent-tombstone record immediately before a
@@ -1146,7 +1158,9 @@ async fn promote_one(
         // A non-storable message cannot use the atomic pending handoff.
         // Keep its SM replay row for successor recovery; dropping it here
         // could lose a message that an alternate resource could receive.
-        return PromotedOutcome::StorageFailure;
+        return PromotedOutcome::StorageFailure(
+            PromotionFailureReason::ClusteredNonStorableMessage,
+        );
     }
     match routing.pending {
         PendingDecision::None => {
