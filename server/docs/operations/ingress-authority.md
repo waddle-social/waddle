@@ -491,6 +491,114 @@ the work is either still being serviced, or it is genuinely unsupported and
 needs the disposition below. Never delete observer rows by hand to silence a
 backlog.
 
+### Bodyless observer obligations without archived sources (#1908)
+
+The production inspection on **2026-10-07 at 16:10:41 UTC** found 3,258
+non-terminal messages with an unreceipted `room_observer` (kind 28) intent,
+all older than ten minutes. None had observer work or an observer receipt for
+the same canonical message: there were **zero active retired-generation work
+rows and zero settled-work/missing-kind-28-receipt cases**. All intents named
+the configured `jev-judgments` generation 1, across seven rooms and one observer
+identity; every hash matched the disposition query's identity formula.
+The oldest message was created at `2026-09-26T13:12:36.862576Z`, the newest at
+`2026-10-07T16:00:10.537856Z`. These are observed bounds, not repair approval.
+
+Of these messages, 2,276 were bodyless chatstates without an origin-id/alias;
+982 were bodyless chat markers with an origin-id/alias. Every message retained
+its observer request envelope; none had an archive intent (kind **0**, not
+kind 1, which is `route_direct`). The writer planned observer obligations for
+chatstates and markers even though it did not archive them. Observer capture
+requires the archived source, so these obligations never created work. The
+#1908 fix gates observer planning on an actual planned archive effect. It
+prevents new invalid obligations; it does not settle existing ones.
+
+Run this aggregate diagnosis on the primary as `pg_monitor` or the application
+role. It returns no message content, room JIDs, or sender JIDs. `has_work` and
+`has_observer_receipt` check any evidence for the same canonical message;
+inspect exact identity pairs separately before making a disposition decision.
+
+<!-- observer-bodyless-inspection:begin -->
+```sql
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
+SET LOCAL statement_timeout = '10s';
+SET LOCAL lock_timeout = '1s';
+WITH pending AS (
+  SELECT intent.message_key,
+         convert_from(intent.payload, 'UTF8')::jsonb->'intent' AS data,
+         convert_from(message.envelope, 'UTF8')::jsonb AS envelope
+  FROM ingress_effect_intents intent
+  JOIN ingress_messages message USING (message_key)
+  WHERE intent.kind = 28 AND message.terminal_at IS NULL
+    AND NOT EXISTS (
+      SELECT 1 FROM ingress_effect_receipts receipt
+      WHERE receipt.message_key = intent.message_key
+        AND receipt.kind = intent.kind
+        AND receipt.semantic_identity_hash = intent.semantic_identity_hash
+    )
+), classified AS (
+  SELECT pending.message_key, data->>'plugin' AS plugin_id,
+         data->>'generation' AS recorded_generation,
+         observer.generation AS configured_generation,
+         xpath_exists('/*[local-name()="message"]/*[local-name()="body"]',
+           xmlparse(document envelope->>'message')) AS has_body,
+         xpath_exists('/*[local-name()="message"]/*[namespace-uri()="http://jabber.org/protocol/chatstates"]',
+           xmlparse(document envelope->>'message')) AS has_chatstate,
+         xpath_exists('/*[local-name()="message"]/*[namespace-uri()="urn:xmpp:chat-markers:0"]',
+           xmlparse(document envelope->>'message')) AS has_chat_marker,
+         envelope->>'observer_request' IS NOT NULL AS has_observer_envelope,
+         EXISTS (
+           SELECT 1 FROM ingress_effect_intents other
+           WHERE other.message_key = pending.message_key AND other.kind = 0
+         ) AS has_archive_intent,
+         EXISTS (
+           SELECT 1 FROM ingress_origin_aliases alias
+           WHERE alias.message_key = pending.message_key
+         ) AS has_origin_alias,
+         EXISTS (
+           SELECT 1 FROM extension_room_observation_work work
+           WHERE CAST(work.message_key AS uuid) = pending.message_key
+         ) AS has_work,
+         EXISTS (
+           SELECT 1 FROM extension_room_observation_receipts receipt
+           WHERE CAST(receipt.message_key AS uuid) = pending.message_key
+         ) AS has_observer_receipt
+  FROM pending
+  LEFT JOIN extension_room_observers observer
+    ON observer.plugin_id = data->>'plugin'
+)
+SELECT plugin_id, recorded_generation, configured_generation,
+       has_body, has_chatstate, has_chat_marker, has_observer_envelope,
+       has_archive_intent, has_origin_alias, has_work, has_observer_receipt,
+       count(*) AS pending_pairs, count(DISTINCT message_key) AS canonical_messages
+FROM classified
+GROUP BY plugin_id, recorded_generation, configured_generation,
+         has_body, has_chatstate, has_chat_marker, has_observer_envelope,
+         has_archive_intent, has_origin_alias, has_work, has_observer_receipt
+ORDER BY pending_pairs DESC;
+COMMIT;
+```
+<!-- observer-bodyless-inspection:end -->
+
+The unsupported-work disposition below does **not** cover this class: it
+requires existing work or pending publications, neither of which these rows
+have. After **every replica runs the #1908 fix**, re-run the diagnosis and
+review an explicit canonical-key and exact `(message_key, kind,
+semantic_identity_hash)` manifest. If the operator accepts abandonment, use
+the transaction and review checks in
+[Repair for abandoned obligations](#repair-for-abandoned-obligations-1749),
+replacing that incident's time bounds in both the dry run and write validation
+with the reviewed **#1908 incident window**, ending at the actual all-replicas
+#1908 rollout completion time. Do not reuse the #1749 rollout timestamp.
+
+Only include reviewed bodyless, non-archived chatstate/marker messages with no
+observer work or observer receipts, whose complete pending-pair set consists
+of the exact invalid kind-28 pairs approved for abandonment. Leave messages
+with other pending obligations for separate review; do not remove the existing
+procedure's complete-pair comparison. Never issue a blanket kind-28 receipt or
+treat an archived-but-workless observer obligation as this incident. Preserve
+the manifest and verification output; these receipts record abandonment, not
+callback success. This inspection did not execute a disposition or deployment.
+
 ### Disposition for unsupported observer work (#1901)
 
 There is no code path that resets observer work. Two classes of rows can remain
