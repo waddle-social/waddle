@@ -1,4 +1,4 @@
-//! Publish-time fan-out of XEP-0060 §7.1 event notifications.
+//! Shared fan-out of XEP-0060 publish (§7.1) and retract (§7.2.2.1) events.
 //!
 //! Called from both the generic `PubSubRequest::Publish` arm and
 //! `handle_spaces_publish` after `publish_item` succeeds, so §7.1
@@ -36,6 +36,7 @@ use waddle_xmpp::pubsub::{build_pubsub_event, AccessModel, PubSubEvent, PubSubIt
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::build_pubsub_retract_event;
+use xmpp_parsers::message::Message;
 
 use super::super::WebSocketState;
 
@@ -77,11 +78,47 @@ pub struct FanOutRetractRequest<'a> {
 /// contacts that happen to advertise `<node>+notify` for the
 /// (unrelated) generic node — a real authorization bypass.
 pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
+    fan_out_event(
+        state,
+        EventFanOutRequest {
+            owner: req.owner,
+            node: req.node,
+            publisher_full: req.publisher_full,
+            is_pep: req.is_pep,
+            notification: Notification::Publish {
+                item: req.published_item,
+                item_id: req.item_id,
+                publisher: req.publisher,
+            },
+        },
+    )
+    .await;
+}
+
+/// Publish and retract notifications share recipient authorization and routing.
+enum Notification<'a> {
+    Publish {
+        item: &'a PubSubItem,
+        item_id: &'a str,
+        publisher: Option<&'a BareJid>,
+    },
+    Retract {
+        item_id: &'a str,
+        notify: bool,
+    },
+}
+
+struct EventFanOutRequest<'a> {
+    owner: &'a BareJid,
+    node: &'a str,
+    publisher_full: Option<&'a FullJid>,
+    is_pep: bool,
+    notification: Notification<'a>,
+}
+
+async fn fan_out_event(state: &WebSocketState, req: EventFanOutRequest<'_>) {
     let owner = req.owner;
     let node = req.node;
-    let published_item = req.published_item;
-    let item_id = req.item_id;
-    let publisher = req.publisher;
     let publisher_full = req.publisher_full;
     let is_pep = req.is_pep;
     let storage = &state.deps.protocol.pubsub_storage;
@@ -92,7 +129,7 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
             warn!(
                 owner = %owner,
                 node,
-                "Fan-out skipped: node disappeared between publish and config fetch"
+                "Fan-out skipped: node disappeared before config fetch"
             );
             return;
         }
@@ -143,24 +180,33 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
     // We still need to iterate the publisher's roster for from/both
     // contacts whose CAPS advertise `<node>+notify`.
 
-    // §7.1.5: include `publisher` only when it differs from the owner.
-    let event_publisher = publisher.filter(|p| *p != owner).cloned();
-
-    // §7.1.3.5: payload included only when deliver_payloads is true.
-    let event_payload = if node_cfg.deliver_payloads {
-        published_item.payload.clone()
-    } else {
-        None
-    };
-
-    let event_item = PubSubItem {
-        id: Some(item_id.to_string()),
-        publisher: event_publisher,
-        payload: event_payload,
-    };
-
-    let event = PubSubEvent::new(node.to_string(), vec![event_item]);
     let from = Jid::from(owner.clone());
+    let event: Message = match req.notification {
+        Notification::Publish {
+            item,
+            item_id,
+            publisher,
+        } => {
+            // §7.1.5: include publisher only when it differs from the owner.
+            // §7.1.3.5: honor deliver_payloads only for published items.
+            let event_item = PubSubItem {
+                id: Some(item_id.to_string()),
+                publisher: publisher.filter(|p| *p != owner).cloned(),
+                payload: node_cfg
+                    .deliver_payloads
+                    .then(|| item.payload.clone())
+                    .flatten(),
+            };
+            let event = PubSubEvent::new(node.to_string(), vec![event_item]);
+            build_pubsub_event(&from, &from, &event)
+        }
+        Notification::Retract { item_id, notify } => {
+            if !node_cfg.notify_retract && !notify {
+                return;
+            }
+            build_pubsub_retract_event(&from, &from, node, item_id)
+        }
+    };
 
     let mut intended: u32 = 0;
     let mut delivered: u32 = 0;
@@ -238,7 +284,8 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
         for resource in target_resources {
             intended += 1;
             already_delivered.insert(resource.clone());
-            let message = build_pubsub_event(&from, &Jid::from(resource.clone()), &event);
+            let mut message = event.clone();
+            message.to = Some(Jid::from(resource.clone()));
             let stanza = Stanza::Message(message);
 
             match state
@@ -364,7 +411,7 @@ pub async fn fan_out_publish(state: &WebSocketState, req: FanOutRequest<'_>) {
         roster_caps_delivered = roster_metrics.delivered,
         self_caps_intended = self_metrics.intended,
         self_caps_delivered = self_metrics.delivered,
-        "PubSub publish fan-out complete"
+        "PubSub event fan-out complete"
     );
 }
 
@@ -428,121 +475,42 @@ async fn private_node_subscriber_allowed(
     }
 }
 
+/// Service-node retractions use only explicit subscriptions.
 pub async fn fan_out_retract(state: &WebSocketState, req: FanOutRetractRequest<'_>) {
-    let storage = &state.deps.protocol.pubsub_storage;
-    let node_cfg = match storage.get_node(req.owner, req.node).await {
-        Ok(Some(record)) => record.config,
-        Ok(None) => {
-            warn!(
-                owner = %req.owner,
-                node = req.node,
-                "Retract fan-out skipped: node disappeared between retract and config fetch"
-            );
-            return;
-        }
-        Err(error) => {
-            warn!(
-                owner = %req.owner,
-                node = req.node,
-                error = %error,
-                "Retract fan-out skipped: node config fetch failed"
-            );
-            return;
-        }
-    };
-    if !node_cfg.notify_retract {
-        return;
-    }
+    fan_out_retract_with_options(state, req, None, false, false).await;
+}
 
-    let subscribers = match storage
-        .list_deliverable_subscribers(req.owner, req.node)
-        .await
-    {
-        Ok(subs) => subs,
-        Err(error) => {
-            warn!(
-                owner = %req.owner,
-                node = req.node,
-                error = %error,
-                "Retract fan-out skipped: subscriber list fetch failed"
-            );
-            return;
-        }
-    };
+/// PEP retractions also reach roster contacts and the owner's other resources.
+pub async fn fan_out_pep_retract(
+    state: &WebSocketState,
+    req: FanOutRetractRequest<'_>,
+    publisher_full: Option<&FullJid>,
+    notify: bool,
+) {
+    fan_out_retract_with_options(state, req, publisher_full, true, notify).await;
+}
 
-    let from = Jid::from(req.owner.clone());
-    for sub in subscribers {
-        let target_resources: Vec<FullJid> = match sub.subscriber.try_as_full() {
-            Ok(full) => vec![full.clone()],
-            Err(bare) => {
-                let mut all = waddle_xmpp::registry::get_resources_for_user(
-                    &state.deps.protocol.user_registry,
-                    bare,
-                )
-                .await;
-                match state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .detached_resources_for_user(bare)
-                    .await
-                {
-                    Ok(detached) => all.extend(detached),
-                    Err(error) => warn!(
-                        bare = %bare,
-                        error = %error,
-                        "Failed to enumerate detached resources for bare-JID retract fan-out"
-                    ),
-                }
-                all
-            }
-        };
-
-        for resource in target_resources {
-            let message = build_pubsub_retract_event(
-                &from,
-                &Jid::from(resource.clone()),
-                req.node,
-                req.item_id,
-            );
-            let stanza = Stanza::Message(message);
-            match state
-                .deps
-                .protocol
-                .connection_registry
-                .try_send_to(&resource, stanza.clone())
-            {
-                BroadcastOutcome::Delivered => {}
-                BroadcastOutcome::DroppedClosed | BroadcastOutcome::NotConnected => {
-                    if let Err(error) = state
-                        .deps
-                        .protocol
-                        .sm_session_registry
-                        .record_stanza_for_detached_bound_resource(
-                            &resource,
-                            &stanza,
-                            chrono::Utc::now(),
-                        )
-                        .await
-                    {
-                        warn!(
-                            resource = %resource,
-                            error = %error,
-                            "Failed to record retract fan-out stanza for detached resource"
-                        );
-                    }
-                }
-                BroadcastOutcome::DroppedFull => {
-                    warn!(
-                        resource = %resource,
-                        node = req.node,
-                        item_id = req.item_id,
-                        "Retract fan-out dropped: subscriber channel full"
-                    );
-                }
-            }
-        }
-    }
+async fn fan_out_retract_with_options(
+    state: &WebSocketState,
+    req: FanOutRetractRequest<'_>,
+    publisher_full: Option<&FullJid>,
+    is_pep: bool,
+    notify: bool,
+) {
+    fan_out_event(
+        state,
+        EventFanOutRequest {
+            owner: req.owner,
+            node: req.node,
+            publisher_full,
+            is_pep,
+            notification: Notification::Retract {
+                item_id: req.item_id,
+                notify,
+            },
+        },
+    )
+    .await;
 }
 
 #[derive(Default)]

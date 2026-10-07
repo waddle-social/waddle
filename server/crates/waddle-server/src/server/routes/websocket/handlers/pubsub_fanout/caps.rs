@@ -1,9 +1,9 @@
 use jid::{BareJid, FullJid, Jid};
 use std::collections::HashSet;
 use tracing::warn;
-use waddle_xmpp::pubsub::{build_pubsub_event, PubSubEvent};
 use waddle_xmpp::registry::BroadcastOutcome;
 use waddle_xmpp::Stanza;
+use xmpp_parsers::message::Message;
 
 use super::{FanOutMetrics, WebSocketState};
 use crate::db::actor::GetDatabase;
@@ -13,7 +13,7 @@ use crate::db::roster::DatabaseRosterStorage;
 /// Constants threaded through both §3 fan-out passes.
 pub(super) struct CapsFanOutCtx<'a> {
     pub(super) from: &'a Jid,
-    pub(super) event: &'a PubSubEvent,
+    pub(super) event: &'a Message,
     pub(super) notify_filter: &'a str,
 }
 
@@ -209,7 +209,8 @@ async fn deliver_to_user_resources(
 
         metrics.intended += 1;
         already_delivered.insert(resource.clone());
-        let message = build_pubsub_event(ctx.from, &Jid::from(resource.clone()), ctx.event);
+        let mut message = ctx.event.clone();
+        message.to = Some(Jid::from(resource.clone()));
         let stanza = Stanza::Message(message);
         match state
             .deps

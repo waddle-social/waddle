@@ -1001,3 +1001,239 @@ async fn publish_with_no_subscribers_returns_result_and_emits_no_event() {
 
     let _ = admin.close().await;
 }
+
+async fn element_iq_to(
+    client: &mut WsXmppClient,
+    id: &str,
+    owner: &str,
+    kind: &str,
+    payload: minidom::Element,
+) -> String {
+    let iq = minidom::Element::builder("iq", xmpp_parsers::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), owner)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), kind)
+        .append(payload)
+        .build();
+    client.send(&String::from(&iq)).await.expect("send IQ");
+    client
+        .recv_matching(|frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("iq", xmpp_parsers::ns::JABBER_CLIENT) && element.attr("id") == Some(id)
+            })
+        })
+        .await
+        .expect("IQ response")
+}
+
+fn retract_payload(node: &str, item_id: &str, notify: Option<bool>) -> minidom::Element {
+    let mut retract = minidom::Element::builder("retract", NS_PUBSUB)
+        .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+    if let Some(notify) = notify {
+        retract = retract.attr(
+            minidom::rxml::xml_ncname!("notify").to_owned(),
+            if notify { "true" } else { "false" },
+        );
+    }
+    minidom::Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            retract
+                .append(
+                    minidom::Element::builder("item", NS_PUBSUB)
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                        .build(),
+                )
+                .build(),
+        )
+        .build()
+}
+
+#[tokio::test]
+async fn retract_notifications_honor_node_config_and_explicit_notify() {
+    let _serial = TEST_SERIAL.lock().await;
+    let password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[("bob", &password)]);
+    let mut owner = admin_client(&server, "retract-owner").await;
+    let owner_bare = format!("{USERNAME}@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let mut bob =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "bob", &password, "retract-bob")
+            .await
+            .expect("bob connect");
+    let mut bob_other = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "bob",
+        &password,
+        "retract-bob-other",
+    )
+    .await
+    .expect("bob other resource connect");
+
+    // XEP-0060 §7.2.2.1: notify=true requires an event. notify=false
+    // does not veto a node configured with pubsub#notify_retract=true.
+    for (index, (configured_notify, request_notify, expected_event)) in [
+        (true, None, true),
+        (true, Some(false), true),
+        (false, None, false),
+        (false, Some(false), false),
+        (false, Some(true), true),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let node = format!("urn:waddle:test:retract:{index}");
+        auto_create_node(&mut owner, &owner_bare, &node, "retract-seed").await;
+        let mut form = minidom::Element::builder("x", xmpp_parsers::ns::DATA_FORMS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "submit");
+        for (field, value) in [
+            ("pubsub#access_model", "open"),
+            (
+                "pubsub#notify_retract",
+                if configured_notify { "1" } else { "0" },
+            ),
+        ] {
+            form = form.append(
+                minidom::Element::builder("field", xmpp_parsers::ns::DATA_FORMS)
+                    .attr(minidom::rxml::xml_ncname!("var").to_owned(), field)
+                    .append(
+                        minidom::Element::builder("value", xmpp_parsers::ns::DATA_FORMS)
+                            .append(value)
+                            .build(),
+                    )
+                    .build(),
+            );
+        }
+        let config = minidom::Element::builder("pubsub", NS_PUBSUB_OWNER)
+            .append(
+                minidom::Element::builder("configure", NS_PUBSUB_OWNER)
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), &node)
+                    .append(form.build())
+                    .build(),
+            )
+            .build();
+        let response =
+            element_iq_to(&mut owner, "retract-config", &owner_bare, "set", config).await;
+        assert!(response.contains("type='result'"), "configure: {response}");
+        subscribe_with_jid(&mut bob, &owner_bare, &node, &bob_bare, "retract-subscribe").await;
+
+        if index == 0 {
+            let denied = element_iq_to(
+                &mut bob,
+                "retract-denied",
+                &owner_bare,
+                "set",
+                retract_payload(&node, "seed", Some(true)),
+            )
+            .await;
+            assert!(
+                denied.contains("type='error'") && denied.contains("forbidden"),
+                "peer cannot retract: {denied}"
+            );
+            let get = element_iq_to(
+                &mut owner,
+                "retract-get",
+                &owner_bare,
+                "get",
+                retract_payload(&node, "seed", Some(true)),
+            )
+            .await;
+            assert!(
+                get.contains("type='error'") && get.contains("bad-request"),
+                "GET cannot mutate or notify: {get}"
+            );
+            let missing = element_iq_to(
+                &mut owner,
+                "retract-missing",
+                &owner_bare,
+                "set",
+                retract_payload(&node, "missing", Some(true)),
+            )
+            .await;
+            assert!(
+                missing.contains("type='error'") && missing.contains("item-not-found"),
+                "missing item cannot notify: {missing}"
+            );
+            assert_no_event_message(&mut bob, &node, Duration::from_millis(250)).await;
+            assert_no_event_message(&mut bob_other, &node, Duration::from_millis(250)).await;
+            let items = minidom::Element::builder("pubsub", NS_PUBSUB)
+                .append(
+                    minidom::Element::builder("items", NS_PUBSUB)
+                        .attr(minidom::rxml::xml_ncname!("node").to_owned(), &node)
+                        .build(),
+                )
+                .build();
+            let remaining = element_iq_to(
+                &mut owner,
+                "retract-still-present",
+                &owner_bare,
+                "get",
+                items,
+            )
+            .await;
+            assert_eq!(
+                count_item_elements(&remaining),
+                1,
+                "rejected requests must retain item: {remaining}"
+            );
+        }
+
+        let response = element_iq_to(
+            &mut owner,
+            "retract-success",
+            &owner_bare,
+            "set",
+            retract_payload(&node, "seed", request_notify),
+        )
+        .await;
+        assert!(
+            response.contains("type='result'"),
+            "owner retract: {response}"
+        );
+        for recipient in [&mut bob, &mut bob_other] {
+            if expected_event {
+                let event = wait_for_event_message(recipient, &node, Duration::from_secs(2))
+                    .await
+                    .expect("bare-JID subscriber resource receives retract");
+                let message: minidom::Element = event.parse().expect("valid event XML");
+                assert_eq!(message.attr("from"), Some(owner_bare.as_str()));
+                assert_eq!(message.attr("type"), Some("headline"));
+                let items = message
+                    .get_child("event", NS_PUBSUB_EVENT)
+                    .expect("event")
+                    .get_child("items", NS_PUBSUB_EVENT)
+                    .expect("items");
+                assert_eq!(items.attr("node"), Some(node.as_str()));
+                assert_eq!(
+                    items
+                        .get_child("retract", NS_PUBSUB_EVENT)
+                        .expect("retract")
+                        .attr("id"),
+                    Some("seed")
+                );
+                assert!(items.get_child("item", NS_PUBSUB_EVENT).is_none());
+            }
+            assert_no_event_message(recipient, &node, Duration::from_millis(250)).await;
+        }
+        let items = minidom::Element::builder("pubsub", NS_PUBSUB)
+            .append(
+                minidom::Element::builder("items", NS_PUBSUB)
+                    .attr(minidom::rxml::xml_ncname!("node").to_owned(), &node)
+                    .build(),
+            )
+            .build();
+        let remaining = element_iq_to(&mut owner, "retract-empty", &owner_bare, "get", items).await;
+        assert!(
+            remaining.contains("type='result'"),
+            "retrieve after retract: {remaining}"
+        );
+        assert_eq!(
+            count_item_elements(&remaining),
+            0,
+            "retract removes item even when notifications disabled: {remaining}"
+        );
+    }
+    let _ = bob.close().await;
+    let _ = bob_other.close().await;
+    let _ = owner.close().await;
+}
