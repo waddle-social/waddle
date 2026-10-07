@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { timelineRowKey } from "../src/lib/timeline-row-key";
 import { insertLiveMessage } from "../src/lib/messaging/timeline-insert";
 import { buildChannelTimelineFromMamResults } from "../src/channels/message-timeline-state";
 import type { TimelineMessage } from "../src/lib/chat-ui";
@@ -22,9 +23,21 @@ function row(overrides: Partial<TimelineMessage>): TimelineMessage {
 }
 
 describe("live merge never lends author identity across an unvouched twin", () => {
+  test("retained room twins have stable independent presentation keys", () => {
+    const first = insertLiveMessage([], row({}), new Set()).messages;
+    const second = insertLiveMessage(first, row({ body: "new holder" }), new Set()).messages;
+    expect(second).toHaveLength(2);
+    expect(second[0]?.rowKey).toBeDefined();
+    expect(second[1]?.rowKey).toBeDefined();
+    expect(second.map(timelineRowKey)).toHaveLength(new Set(second.map(timelineRowKey)).size);
+    expect(second[0]?.rowKey).not.toBe(second[1]?.rowKey);
+    expect(second[0]?.rowKey).toBe(first[0]?.rowKey);
+    expect(second.map((message) => message.id)).toEqual(["origin-x", "origin-x"]);
+  });
+
   test("the first attribution wins over a redelivered copy stamped with a later nick holder", () => {
     const first = insertLiveMessage([row({ authorAvatarJid: "sam@example.com" })], row({ authorAvatarJid: "mallory@example.com" }), new Set());
-    expect(first.messages).toHaveLength(1);
+    expect(first.messages).toHaveLength(2);
     expect(first.messages[0]?.authorAvatarJid).toBe("sam@example.com");
   });
 
@@ -33,9 +46,10 @@ describe("live merge never lends author identity across an unvouched twin", () =
     const sams = row({ createdAtSource: "delay" });
     const mallorys = row({ createdAt: "2026-09-27T11:00:00Z", authorAvatarJid: "mallory@example.com" });
     const merged = insertLiveMessage([sams], mallorys, new Set());
-    // The copies match on the sender-chosen id and collapse into Sam's row;
-    // that row must not become Mallory's.
-    expect(merged.messages).toHaveLength(1);
+    // A reused sender ID must keep the older row separate.
+    expect(merged.messages).toHaveLength(2);
+    expect(merged.messages[0]?.body).toBe(sams.body);
+    expect(merged.messages[0]?.createdAt).toBe(sams.createdAt);
     expect(merged.messages[0]?.authorAvatarJid).toBeUndefined();
   });
 
@@ -49,7 +63,7 @@ describe("live merge never lends author identity across an unvouched twin", () =
       stanzaIdBy: ROOM,
     });
     const merged = insertLiveMessage([sams], archiveCopy, new Set());
-    expect(merged.messages).toHaveLength(1);
+    expect(merged.messages).toHaveLength(2);
     expect(merged.messages[0]?.authorAvatarJid).toBeUndefined();
     expect(merged.messages[0]?.authorRealJid).toBeUndefined();
   });
@@ -99,10 +113,56 @@ describe("MAM page merge never lends the archive real JID across an origin-id-on
   test("Mallory's archived message reusing Sam's origin-id does not give Sam's row Mallory's JID", () => {
     const sams = row({ createdAtSource: "delay" });
     const messages = build([sams], [archived({ authorRealJid: "mallory@example.com", stanzaId: "room-assigned-2", stanzaIdBy: ROOM })]);
-    // The copies match on the sender-chosen id and collapse into one row,
-    // which must not take Mallory's real JID.
-    expect(messages).toHaveLength(1);
+    // The earlier row retains its content, timestamp, and attribution.
+    expect(messages).toHaveLength(2);
+    expect(messages[0]?.body).toBe(sams.body);
+    expect(messages[0]?.createdAt).toBe(sams.createdAt);
     expect(messages[0]?.authorRealJid).toBeUndefined();
+  });
+
+  test("live and MAM aliases preserve both copies when either sender is unknown", () => {
+    for (const [firstReal, secondReal] of [[undefined, undefined], ["sam@example.com", undefined], [undefined, "sam@example.com"], ["sam@example.com", "mallory@example.com"]]) {
+      const first = row({ authorRealJid: firstReal, body: "first", createdAtSource: "delay" });
+      const second = row({ id: "new-envelope", wireIds: ["origin-x"], authorRealJid: secondReal, body: "second", createdAt: "2026-09-27T11:00:00Z" });
+      expect(insertLiveMessage([first], second, new Set()).messages.map((message) => message.body)).toEqual(["first", "second"]);
+      expect(build([first], [archived({ id: second.id, wireIds: second.wireIds, body: second.body, authorRealJid: secondReal })]).map((message) => message.body)).toEqual(["first", "second"]);
+    }
+  });
+
+  test("MAM canonical room tuple reconciles a nick change independently of aliases", () => {
+    const first = row({ stanzaId: "room-stanza", stanzaIdBy: ROOM });
+    const messages = build([first], [archived({ id: "new-envelope", nick: "new-nick", stanzaId: "room-stanza", stanzaIdBy: ROOM, authorRealJid: "sam@example.com" })]);
+    expect(messages).toHaveLength(1);
+    expect(messages[0]?.authorRealJid).toBe("sam@example.com");
+  });
+
+  test("MAM reconciliation preserves the presentation key in either seed mode", () => {
+    const first = row({ rowKey: "stable-row", stanzaId: "room-stanza", stanzaIdBy: ROOM });
+    for (const seedExistingOnly of [false, true]) {
+      const messages = buildChannelTimelineFromMamResults({
+        session, channelIsForum: false, existing: [first], options: { seedExistingOnly },
+        mamResults: [archived({ id: "new-envelope", stanzaId: "room-stanza", stanzaIdBy: ROOM })],
+      });
+      expect(messages).toHaveLength(1);
+      expect(timelineRowKey(messages[0]!)).toBe("stable-row");
+    }
+  });
+
+  test("canonical-only MAM twins cannot lend their envelope alias to a new sender ID", () => {
+    const first = row({ id: "room-stanza", stanzaId: "room-stanza", stanzaIdBy: ROOM, authorRealJid: "sam@example.com" });
+    const reconciled = build([first], [archived({ id: "mam-twin", archiveId: "mam-twin", stanzaId: "room-stanza", stanzaIdBy: ROOM, authorRealJid: "sam@example.com" })]);
+    expect(reconciled).toHaveLength(1);
+    expect(build(reconciled, [archived({ id: "new-envelope", archiveId: "new-envelope", originId: "mam-twin", authorRealJid: "sam@example.com" })])).toHaveLength(2);
+  });
+
+  test("reconciled MAM envelopes never enter the authored ID namespace", () => {
+    const first = row({ id: "mam-one", archiveId: "mam-one", originId: "real-origin", authorRealJid: "sam@example.com" });
+    const reconciled = build([first], [archived({ id: "mam-two", archiveId: "mam-two", originId: "real-origin", authorRealJid: "sam@example.com" })]);
+    expect(reconciled).toHaveLength(1);
+    for (const forgedId of ["mam-one", "mam-two"]) {
+      const messages = build(reconciled, [archived({ id: "new-mam", archiveId: "new-mam", originId: forgedId, authorRealJid: "sam@example.com", body: "different" })]);
+      expect(messages).toHaveLength(2);
+    }
   });
 
   test("the archive copy with the same room stanza-id still supplies the real JID", () => {

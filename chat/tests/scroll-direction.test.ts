@@ -330,7 +330,7 @@ describe("scroll direction preference", () => {
 
     await messaging.loadMessages("w1", "c1", 2);
 
-    expect(messaging.firstUnseenId.value).toBe("room-2");
+    expect(messaging.firstUnseenId.value).toBe(messaging.messages.value.find((row) => row.id === "room-2")?.rowKey);
     expect(messaging.applyMdsDisplayed("w1-c1@rooms.example.com/alice", {
       stanzaId: "room-stanza-2",
       stanzaIdBy: "w1-c1@rooms.example.com",

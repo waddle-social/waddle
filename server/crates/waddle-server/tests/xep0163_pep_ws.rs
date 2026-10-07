@@ -865,8 +865,7 @@ async fn pep_retract_fans_to_roster_contacts_with_matching_caps_notify() {
             "bob in alice's roster (subscription=from) and advertising +notify MUST receive the PEP event without explicit pubsub <subscribe/> per XEP-0163 §3",
         );
     assert!(
-        event.contains(&format!(r#"from='{alice_bare}'"#))
-            || event.contains(&format!(r#"from='{alice_bare}'"#)),
+        event.contains(&format!(r#"from='{alice_bare}'"#)),
         "fan-out from MUST be alice's bare JID per XEP-0163 §4.3: {event}"
     );
     assert!(

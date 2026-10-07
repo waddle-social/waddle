@@ -4,6 +4,7 @@ import { mergeMessageIds } from "@/lib/message-ids";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import { compareTimelineMessages, pickAuthoritativeTimestamp } from "@/lib/timeline-timestamps";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
+import { senderChosenMessageIds } from "@/lib/messaging/sender-scoped-ids";
 import { consumeReconciledEchoIds, findLiveMergeTarget } from "@/lib/messaging/self-echo";
 import { findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
 
@@ -74,6 +75,10 @@ function mergedLiveRow(existing: TimelineMessage, incoming: TimelineMessage): Ti
     createdAt: authoritativeTimestamp.createdAt,
     createdAtSource: authoritativeTimestamp.createdAtSource,
   };
+  if (existing.authorOccupantJid || incoming.authorOccupantJid) {
+    updated.rowKey = existing.rowKey ?? incoming.rowKey ?? crypto.randomUUID();
+    updated.senderChosenIds = [...new Set([...senderChosenMessageIds(existing), ...senderChosenMessageIds(incoming)])];
+  }
   // Author identity is never lent across a twin match made on sender-chosen
   // ids (origin-id, client id): a later holder of the same nick can reuse
   // them. The first attribution wins; a missing one is filled only from an
@@ -161,7 +166,9 @@ export function insertLiveMessage(
     return { messages: finalize(merged), appended: false };
   }
   return {
-    messages: finalize([...messages, msg].sort(compareTimelineMessages)),
+    messages: finalize([...messages, msg.authorOccupantJid && !msg.rowKey
+      ? { ...msg, rowKey: crypto.randomUUID() }
+      : msg].sort(compareTimelineMessages)),
     appended: true,
   };
 }

@@ -14,6 +14,7 @@ import {
   type MessageReference,
   type TimelineMessage,
 } from "@/lib/chat-ui";
+import { resolveRoomMessageTarget } from "@/lib/messaging/room-message-target";
 import { findMessageById } from "@/lib/message-ids";
 import { applyForumContext } from "@/channels/timeline";
 import { applyDeliveryEventById } from "@/lib/timeline-state";
@@ -189,9 +190,12 @@ export function useMucSend(deps: UseMucSendDeps) {
         // Optimistic insert: show message immediately with "sending" status
         const optimistic: TimelineMessage = {
           id: msgId,
+          rowKey: crypto.randomUUID(),
           correctionTargetId: msgId,
           author: session.value.username,
           authorJid: `${currentRoomJid.value}/${session.value.username}`,
+          authorRealJid: session.value.jid,
+          authorOccupantJid: `${currentRoomJid.value}/${session.value.username}`,
           body: bodyText || (attachments?.[0]?.url ?? ""),
           createdAt: new Date().toISOString(),
           createdAtSource: "queued",
@@ -270,7 +274,12 @@ export function useMucSend(deps: UseMucSendDeps) {
     linkPreview?: ComposerLinkPreviewSendPayload,
   ) {
     if (!xmppClient.value || !activeChannelId.value || !newBody.trim()) return;
-    const message = findMessageById(messages.value, messageId);
+    const resolution = resolveRoomMessageTarget(messages.value, messageId, { preferCanonical: false });
+    if (resolution.ambiguous) {
+      actionError.value = "This message has an ambiguous identifier and cannot be edited.";
+      return;
+    }
+    const message = resolution.message;
     const targetId = message?.correctionTargetId ?? messageId;
 
     clearActionError();

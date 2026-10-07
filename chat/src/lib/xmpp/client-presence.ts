@@ -199,8 +199,10 @@ export class PresenceManager {
         // a departure — the available presence for the new nick follows —
         // so it must NOT revoke room readiness.
         const isNickChange = presence.muc_status_codes?.includes(303) ?? false;
-        if (this.isOwnMucSelfPresence(presence) && !isNickChange) {
-          this.deps.onOwnUnavailable(room);
+        if (this.isOwnMucSelfPresence(presence)) {
+          if (!isNickChange) this.deps.onOwnUnavailable(room);
+          // The old occupant stops identifying us immediately, including
+          // during a nick change before the new available self-presence.
           this.deps.events.emitSafe("ownOccupantNick", room, null);
         }
         delete roomHats[nick];

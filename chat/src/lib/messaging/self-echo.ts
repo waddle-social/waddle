@@ -3,6 +3,8 @@ import { findMessageById } from "@/lib/message-ids";
 import {
   findSenderScopedIdTarget,
   hasMessageSenderContinuity,
+  hasConflictingRoomCanonicalIdentity,
+  senderChosenMessageIds,
 } from "@/lib/messaging/sender-scoped-ids";
 
 // Self-echo reconciliation for the live merge path, shared verbatim by
@@ -45,7 +47,27 @@ export function findLiveMergeTarget(
     : [msg.id, ...(msg.wireIds ?? [])]
       .map((id) => findMessageById(messages, id))
       .find((message): message is TimelineMessage => !!message);
-  const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
+  // A tracked local send can bridge a pre-identity optimistic row, but the
+  // echo must identify our real account; a reused self nick is insufficient.
+  const pendingIdMatches = !existingById && mucScoped && msg.isSelf && msg.authorRealJid
+    ? messages.filter((message) =>
+      pendingEchoClientIds.has(message.id)
+      && message.isSelf
+      && message.createdAtSource === "queued"
+      && message.deliveryStatus !== "rejected"
+      && hasMessageSenderContinuity(message, msg)
+      && !hasConflictingRoomCanonicalIdentity(message, msg)
+      && senderChosenMessageIds(msg).some((id) => senderChosenMessageIds(message).includes(id))
+    )
+    : [];
+  const pendingIdEcho = pendingIdMatches.length === 1 ? pendingIdMatches[0] : undefined;
+  const bodyFallbackAllowed = !existingById && !pendingIdEcho
+    && (!mucScoped || !!msg.authorRealJid)
+    && canUseSelfEchoBodyFallback(msg);
+  const roomEchoContinuity = (message: TimelineMessage): boolean => !mucScoped
+    || (!hasConflictingRoomCanonicalIdentity(message, msg)
+      && hasMessageSenderContinuity(message, msg)
+      && (message.createdAtSource === "queued" || !!message.authorRealJid));
   const pendingSelfEcho = bodyFallbackAllowed
     ? messages.find(
       (m) =>
@@ -53,7 +75,7 @@ export function findLiveMergeTarget(
         && m.isSelf
         && m.deliveryStatus !== "rejected"
         && m.body === msg.body
-        && (!mucScoped || hasMessageSenderContinuity(m, msg)),
+        && roomEchoContinuity(m),
     )
     : undefined;
   const preservedSelfEcho = bodyFallbackAllowed
@@ -64,10 +86,10 @@ export function findLiveMergeTarget(
         && !!m.deliveryStatus
         && m.deliveryStatus !== "delivered"
         && m.deliveryStatus !== "rejected"
-        && (!mucScoped || hasMessageSenderContinuity(m, msg)),
+        && roomEchoContinuity(m),
     )
     : undefined;
-  return existingById ?? pendingSelfEcho ?? preservedSelfEcho;
+  return existingById ?? pendingIdEcho ?? pendingSelfEcho ?? preservedSelfEcho;
 }
 
 /**

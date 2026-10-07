@@ -424,3 +424,20 @@ describe("useMucSend delivery lifecycle handlers", () => {
     expect(h.messages.value.length).toBe(1);
   });
 });
+
+
+describe("room edit target ambiguity", () => {
+  test("does not send a correction when retained rows claim the same raw target", async () => {
+    const sendCorrection = mock(async () => undefined);
+    const h = harness({ client: makeClient({ sendCorrection }) });
+    const first: TimelineMessage = {
+      id: "shared", author: "alice", authorOccupantJid: "general@muc.example.com/alice",
+      body: "first", createdAt: "2026-07-01T10:00:00Z", isSelf: true,
+      stanzaId: "shared", stanzaIdBy: "general@muc.example.com", correctionTargetId: "first-origin",
+    };
+    h.messages.value = [first, { ...first, stanzaId: undefined, stanzaIdBy: undefined, correctionTargetId: "second-origin" }];
+    await h.send.editMessage("shared", "edited");
+    expect(sendCorrection).not.toHaveBeenCalled();
+    expect(h.actionError.value).toContain("ambiguous");
+  });
+});

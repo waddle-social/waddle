@@ -204,6 +204,12 @@ export type ReactionRecencyStamp = string | { appliedAfterWire: string | null };
 
 export interface TimelineMessage {
   id: string;
+  /** Stable presentation identity for room rows; never sent on the wire. */
+  rowKey?: string;
+  /** Room archive UID; never a sender-chosen message identifier. */
+  archiveId?: string;
+  /** Authored IDs kept separate from room stanza IDs and MAM envelope UIDs. */
+  senderChosenIds?: string[];
   /** #1182: `id` is a fabricated UUID — the live stanza carried no wire
    * identity at all, so only content-based reconciliation can match it
    * to its MAM copy. Cleared once the row adopts a real identity. */
@@ -217,7 +223,7 @@ export interface TimelineMessage {
   authorJid?: string;
   /** Full MUC occupant JID used for same-occupant protocol checks. */
   authorOccupantJid?: string;
-  /** XEP-0313 MUC archive real JID from muc#user item@jid, when present. */
+  /** Sender real JID from muc#user item@jid, or our own local send session. */
   authorRealJid?: string;
   /**
    * Avatar-only: the occupant's real bare JID from live presence at the

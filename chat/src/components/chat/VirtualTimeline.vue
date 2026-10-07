@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { resolveRoomMessageTarget } from "@/lib/messaging/room-message-target";
+import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, watchEffect } from "vue";
 import { useVirtualizer } from "@tanstack/vue-virtual";
 import type { TimelineMessage } from "@/lib/chat-ui";
@@ -63,7 +65,10 @@ const virtualizer = useVirtualizer(computed(() => ({
   getScrollElement: () => scrollElement.value,
   estimateSize: (index: number) => (index === sentinelIndex.value ? 44 : 112),
   overscan: 8,
-  getItemKey: (index: number) => itemForVirtualIndex(index)?.id ?? "older-history-sentinel",
+  getItemKey: (index: number) => {
+    const message = itemForVirtualIndex(index);
+    return message ? timelineRowKey(message) : "older-history-sentinel";
+  },
 })));
 
 let disconnectMeasurementRecovery: (() => void) | null = null;
@@ -107,7 +112,14 @@ watch(
 );
 
 async function scrollToMessageId(messageId: string, align: "start" | "center" | "end" = "center") {
-  const index = props.items.findIndex((item) => item.id === messageId);
+  const rowKeyMatches = props.items.filter((item) => item.rowKey === messageId);
+  const target = rowKeyMatches.length === 1
+    ? rowKeyMatches[0]
+    : rowKeyMatches.length > 1 ? undefined
+      : props.items.some((item) => !!item.authorOccupantJid)
+        ? resolveRoomMessageTarget(props.items, messageId).message
+        : props.items.find((item) => item.id === messageId);
+  const index = target ? props.items.indexOf(target) : -1;
   if (index === -1) return false;
   virtualizer.value.scrollToIndex(virtualIndexForItemIndex(index), { align });
   await nextTick();

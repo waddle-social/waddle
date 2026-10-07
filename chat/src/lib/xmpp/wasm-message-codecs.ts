@@ -485,7 +485,7 @@ export function roomMessageFromArchived(
   if (activeRetractionTarget) {
     return {
       id: roomPrimaryId,
-      archiveId: message.mam_id,
+      ...(source === "archive" ? { archiveId: message.mam_id } : {}),
       fromJid,
       roomJid,
       nick,
@@ -504,7 +504,7 @@ export function roomMessageFromArchived(
   if (message.reaction_target_id) {
     return {
       id: roomPrimaryId,
-      archiveId: message.mam_id,
+      ...(source === "archive" ? { archiveId: message.mam_id } : {}),
       roomJid,
       nick,
       body: "",
@@ -525,7 +525,7 @@ export function roomMessageFromArchived(
     if (!fastening) return null;
     return {
       id: roomPrimaryId,
-      archiveId: message.mam_id,
+      ...(source === "archive" ? { archiveId: message.mam_id } : {}),
       fromJid,
       roomJid,
       nick,
@@ -544,7 +544,7 @@ export function roomMessageFromArchived(
       // #1267 item 3: only trust a stanza-id whose `by` is the room
       // (XEP-0359 §Security) — never the unverified first-listed one.
       id: roomPrimaryId,
-      archiveId: message.mam_id,
+      ...(source === "archive" ? { archiveId: message.mam_id } : {}),
       roomJid,
       nick: "",
       body: message.body ?? "",
@@ -557,7 +557,7 @@ export function roomMessageFromArchived(
   if (message.call_thread_ended) {
     return {
       id: roomPrimaryId,
-      archiveId: message.mam_id,
+      ...(source === "archive" ? { archiveId: message.mam_id } : {}),
       fromJid,
       roomJid,
       nick,
@@ -601,7 +601,8 @@ export function roomMessageFromArchived(
     );
   const base: LiveRoomMessage = {
     id: roomPrimaryId,
-    ...(synthesizedPrimary ? { synthesizedId: true } : { archiveId: message.mam_id }),
+    senderChosenIds: [...new Set([message.id, message.origin_id].filter((id): id is string => !!id))],
+    ...(synthesizedPrimary ? { synthesizedId: true } : source === "archive" ? { archiveId: message.mam_id } : {}),
     fromJid,
     roomJid,
     nick,

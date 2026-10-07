@@ -33,6 +33,16 @@ describe("buildMessageDisplayMeta", () => {
     expect(meta.grouped.has("a4")).toBe(false);
   });
 
+  test("retained rows sharing a wire ID get independent grouping and day dividers", () => {
+    const meta = buildMessageDisplayMeta([
+      message({ id: "reused", rowKey: "first-row", author: "sam", createdAt: "2026-07-01T10:00:00Z" }),
+      message({ id: "reused", rowKey: "second-row", author: "sam", createdAt: "2026-07-01T10:01:00Z" }),
+      message({ id: "reused", rowKey: "third-row", author: "sam", createdAt: "2026-07-02T10:00:00Z" }),
+    ]);
+    expect(meta.grouped).toEqual(new Set(["second-row"]));
+    expect(meta.dayDivider).toEqual(new Set(["third-row"]));
+  });
+
   test("marks day dividers on day boundaries and never groups across them", () => {
     const meta = buildMessageDisplayMeta([
       message({ id: "d1", author: "alice", createdAt: "2026-07-01T23:59:00" }),

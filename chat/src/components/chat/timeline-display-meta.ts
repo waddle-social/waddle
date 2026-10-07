@@ -1,3 +1,4 @@
+import { timelineRowKey } from "@/lib/timeline-row-key";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { OccupantPresence } from "@/lib/xmpp-client";
 import type { MessageThreadIndex } from "@/channels/threads";
@@ -23,13 +24,13 @@ export function buildMessageDisplayMeta(list: readonly TimelineMessage[]): Messa
     const prev = i > 0 ? list[i - 1] : null;
     if (!prev) continue;
     const sameDay = isSameTimelineDay(prev.createdAt, cur.createdAt);
-    if (!sameDay) dayDivider.add(cur.id);
+    if (!sameDay) dayDivider.add(timelineRowKey(cur));
     if (
       sameDay
       && prev.author === cur.author
       && Math.abs(new Date(cur.createdAt).getTime() - new Date(prev.createdAt).getTime()) < BURST_WINDOW_MS
     ) {
-      grouped.add(cur.id);
+      grouped.add(timelineRowKey(cur));
     }
   }
   return { grouped, dayDivider };

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { timelineRowKey } from "@/lib/timeline-row-key";
 import { ref, computed } from "vue";
 import {
   AlertCircle,
@@ -348,6 +349,7 @@ const swipe = gestures.swipe;
   <div
     v-if="message.isPinEvent"
     :data-message-id="message.id"
+    :data-message-row-key="timelineRowKey(message)"
     :data-message-created-at="message.createdAt"
     class="chat-message-grid animate-message-in"
   >
@@ -374,6 +376,7 @@ const swipe = gestures.swipe;
       :key="`band:${card.annotation.extensionId}:${card.annotation.annotationId}`"
       :card="card"
       :message-id="message.id"
+      :data-message-row-key="timelineRowKey(message)"
       :message-created-at="message.createdAt"
       :message-author="message.author"
       :invoke-extension-action="invokeExtensionAction"
@@ -383,6 +386,7 @@ const swipe = gestures.swipe;
   <div
     v-else-if="message.callThread && !hideCallAnchorCard"
     :data-message-id="message.id"
+    :data-message-row-key="timelineRowKey(message)"
     :data-message-created-at="message.createdAt"
     class="chat-message-grid relative animate-message-in"
   >
@@ -417,6 +421,7 @@ const swipe = gestures.swipe;
   <div
     v-else-if="message.isRetracted"
     :data-message-id="message.id"
+    :data-message-row-key="timelineRowKey(message)"
     :data-message-created-at="message.createdAt"
     class="chat-message-grid opacity-55 animate-message-in"
     :class="grouped ? 'chat-message-grouped' : ''"
@@ -457,6 +462,7 @@ const swipe = gestures.swipe;
     v-else
     ref="bubbleEl"
     :data-message-id="message.id"
+    :data-message-row-key="timelineRowKey(message)"
     :data-message-created-at="message.createdAt"
     :data-sheet-open="sheetOpen ? 'true' : 'false'"
     class="chat-message-grid group relative ring-1 ring-transparent transition-colors duration-150 animate-message-in chat-message-swipeable"
@@ -681,6 +687,7 @@ const swipe = gestures.swipe;
       v-if="safetyScores"
       :scores="safetyScores"
       :message-id="message.id"
+      :data-message-row-key="timelineRowKey(message)"
     />
 
     <MessageHoverToolbar

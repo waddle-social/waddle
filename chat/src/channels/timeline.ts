@@ -1,6 +1,7 @@
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { WaddleSession } from "@/lib/server-auth";
 import type { LiveRoomMessage } from "@/lib/xmpp-client";
+import { senderChosenMessageIds } from "@/lib/messaging/sender-scoped-ids";
 import { barePeerJid } from "@/lib/xmpp/jid";
 
 export function mapLiveRoomMessageToTimeline(
@@ -11,6 +12,7 @@ export function mapLiveRoomMessageToTimeline(
   const authorOccupantJid = `${msg.roomJid}/${msg.nick}`;
   const tm: TimelineMessage = {
     id: msg.id,
+    rowKey: crypto.randomUUID(),
     author: msg.nick,
     authorJid: msg.authorRealJid ?? authorOccupantJid,
     authorOccupantJid,
@@ -23,6 +25,7 @@ export function mapLiveRoomMessageToTimeline(
       ? barePeerJid(msg.authorRealJid).toLowerCase() === barePeerJid(session.jid).toLowerCase()
       : msg.nick === session.username,
   };
+  if (msg.archiveId !== undefined) tm.archiveId = msg.archiveId;
   if (msg.correctionTargetId) tm.correctionTargetId = msg.correctionTargetId;
   if (msg.reactionTargetId) tm.reactionTargetId = msg.reactionTargetId;
   if (msg.replyableId) tm.replyableId = msg.replyableId;
@@ -64,6 +67,7 @@ export function mapLiveRoomMessageToTimeline(
     tm.isPinEvent = true;
     if (msg.pinEventAction) tm.pinEventAction = msg.pinEventAction;
   }
+  tm.senderChosenIds = msg.senderChosenIds ?? senderChosenMessageIds(tm);
   return tm;
 }
 

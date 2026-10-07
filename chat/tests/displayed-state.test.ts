@@ -35,6 +35,13 @@ describe("displayed state divider helpers", () => {
     expect(firstUnseenIdAfterDisplayedState(timeline, firstUnread, { stanzaId: "missing", stanzaIdBy: "example.com" })).toBe("m2");
   });
 
+  test("unread row anchors distinguish retained messages sharing a wire ID", () => {
+    const first = { ...message("shared", "s1", "room@muc.example.com"), rowKey: "first" };
+    const second = { ...message("shared", "s2", "room@muc.example.com"), rowKey: "second" };
+    expect(firstUnseenIdFromUnreadCount([first, second], 1)).toBe("second");
+    expect(firstUnseenIdAfterDisplayedState([first, second], "first", { stanzaId: "s1", stanzaIdBy: "room@muc.example.com" })).toBe("second");
+  });
+
   test("resolves XEP-0490 displayed state by stanza-id and by JID", () => {
     const timeline = [
       message("sender-id-1", "server-stanza-1", "example.com"),

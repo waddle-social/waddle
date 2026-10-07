@@ -1,6 +1,18 @@
+import { bareJidKey } from "@/lib/xmpp/jid";
+
 interface MessageIdCarrier {
   id: string;
   wireIds?: string[];
+  rowKey?: string;
+  authorOccupantJid?: string;
+  stanzaId?: string;
+  stanzaIdBy?: string;
+}
+
+function roomCanonicalId(message: MessageIdCarrier): string | undefined {
+  return message.stanzaId && message.stanzaIdBy && message.authorOccupantJid
+    && bareJidKey(message.stanzaIdBy) === bareJidKey(message.authorOccupantJid)
+    ? message.stanzaId : undefined;
 }
 
 function normalizeMessageId(value: string | null | undefined): string | null {
@@ -33,7 +45,8 @@ function splitMessageIds(
 }
 
 /**
- * Collision-safe alias lookup. Primary `id` always wins; a `wireIds` alias
+ * Room references prefer verified canonical stanza IDs and reject duplicate
+ * authored claims. For DMs, primary `id` wins; a `wireIds` alias
  * only resolves when exactly one message in the input claims it. When two
  * distinct messages share the same alias (XEP-0359 origin-id reuse with
  * fresh stanza-ids per waddle-social/waddle#484) the lookup returns -1
@@ -54,6 +67,16 @@ export function findMessageIndexById<T extends MessageIdCarrier>(
 ): number {
   const normalized = normalizeMessageId(candidate);
   if (!normalized) return -1;
+
+  if (messages.some((message) => !!message.authorOccupantJid)) {
+    const candidates = messages.map((message, index) => ({ message, index }))
+      .filter(({ message }) => !predicate || predicate(message));
+    const canonical = candidates.filter(({ message }) => roomCanonicalId(message) === normalized);
+    if (canonical.length > 0) return canonical.length === 1 ? canonical[0]!.index : -1;
+    const claimants = candidates.filter(({ message }) =>
+      message.id === normalized || message.wireIds?.includes(normalized));
+    return claimants.length === 1 ? claimants[0]!.index : -1;
+  }
 
   let aliasIndex = -1;
   let aliasAmbiguous = false;
@@ -95,17 +118,35 @@ export function findMessageById<T extends MessageIdCarrier>(
  *   - re-introduce an ambiguous alias mapping after the collision has
  *     been observed.
  *
- * Primary ids are unique by construction (UUIDs / server stanza-ids) so
- * they always resolve to their owning message. Aliases (`wireIds`) only
+ * Room indexes retain distinct claimants and prioritize verified room stanza
+ * IDs. DM primary IDs retain their existing replacement semantics. Aliases (`wireIds`) only
  * resolve when no other message has claimed the same value either as a
  * primary id or as an alias.
  */
 export class MessageIdIndex<T extends MessageIdCarrier> {
+  private readonly roomClaims = new Map<string, Map<string | T, T>>();
+  private readonly roomCanonical = new Map<string, Map<string | T, T>>();
   private readonly primary = new Map<string, T>();
   private readonly aliases = new Map<string, T>();
   private readonly ambiguousAliases = new Set<string>();
 
   add(message: T): void {
+    if (message.authorOccupantJid) {
+      const canonical = roomCanonicalId(message);
+      const identity = message.rowKey ? `row:${message.rowKey}` : canonical
+        ? `canonical:${bareJidKey(message.stanzaIdBy!)}\u0000${canonical}` : message;
+      for (const id of new Set([message.id, ...(message.wireIds ?? [])])) {
+        const claims = this.roomClaims.get(id) ?? new Map<string | T, T>();
+        claims.set(identity, message);
+        this.roomClaims.set(id, claims);
+      }
+      if (canonical) {
+        const claims = this.roomCanonical.get(canonical) ?? new Map<string | T, T>();
+        claims.set(identity, message);
+        this.roomCanonical.set(canonical, claims);
+      }
+      return;
+    }
     this.primary.set(message.id, message);
     for (const alias of message.wireIds ?? []) {
       if (alias === message.id) continue;
@@ -138,6 +179,13 @@ export class MessageIdIndex<T extends MessageIdCarrier> {
   get(candidate: string | null | undefined): T | undefined {
     const normalized = normalizeMessageId(candidate);
     if (!normalized) return undefined;
+    const canonical = this.roomCanonical.get(normalized);
+    if (canonical) return canonical.size === 1 ? canonical.values().next().value : undefined;
+    const room = this.roomClaims.get(normalized);
+    if (room) {
+      if (this.primary.has(normalized) || this.aliases.has(normalized) || this.ambiguousAliases.has(normalized)) return undefined;
+      return room.size === 1 ? room.values().next().value : undefined;
+    }
     const primary = this.primary.get(normalized);
     if (primary) return primary;
     if (this.ambiguousAliases.has(normalized)) return undefined;

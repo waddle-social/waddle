@@ -56,6 +56,67 @@ describe("SenderScopedIdIndex", () => {
     expect(new SenderScopedIdIndex([existing]).find(incoming)).toBeUndefined();
   });
 
+
+  test("room sender IDs require real identity and survive nick changes", () => {
+    const known = { ...canonicalRoomMessage(0), stanzaId: undefined, stanzaIdBy: undefined };
+    const unknown = { ...known, authorRealJid: undefined };
+    const scenarios: [TimelineMessage, TimelineMessage, boolean][] = [
+      [unknown, { ...unknown }, false],
+      [unknown, known, false],
+      [known, unknown, false],
+      [known, { ...known, authorRealJid: "mallory@example.com" }, false],
+      [known, { ...known, authorOccupantJid: "room@muc.example.com/new-nick", authorRealJid: "ALICE@EXAMPLE.COM/laptop" }, true],
+      [unknown, { ...unknown, authorAvatarJid: "alice@example.com" }, false],
+      [known, { ...known, authorOccupantJid: "elsewhere@muc.example.com/alice" }, false],
+    ];
+    for (const [existing, incoming, matches] of scenarios) {
+      expect(findSenderScopedIdTarget([existing], incoming)).toBe(matches ? existing : undefined);
+      expect(new SenderScopedIdIndex([existing]).find(incoming)).toBe(matches ? existing : undefined);
+    }
+  });
+
+  test("room canonical identity resolves before sender metadata or sender aliases", () => {
+    const existing = canonicalRoomMessage(0);
+    const incoming = {
+      ...existing,
+      id: "different-client-id",
+      wireIds: ["unrelated-alias"],
+      authorOccupantJid: "room@muc.example.com/new-nick",
+      authorRealJid: "different@example.com",
+    };
+    expect(findSenderScopedIdTarget([existing], incoming)).toBe(existing);
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBe(existing);
+  });
+
+  test("different room canonical tuples block a shared sender alias", () => {
+    const existing = canonicalRoomMessage(0);
+    const incoming = { ...canonicalRoomMessage(1), id: existing.id };
+    expect(findSenderScopedIdTarget([existing], incoming)).toBeUndefined();
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBeUndefined();
+  });
+
+
+  test("foreign stanza-id authority cannot authenticate an unknown room sender", () => {
+    const existing = { ...canonicalRoomMessage(0), authorRealJid: undefined, stanzaIdBy: "foreign.example.com" };
+    const incoming = { ...existing };
+    expect(findSenderScopedIdTarget([existing], incoming)).toBeUndefined();
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBeUndefined();
+  });
+
+  test("canonical tuple ambiguity fails closed even when a sender alias is unique", () => {
+    const first = canonicalRoomMessage(0);
+    const second = { ...first, id: "other-client-id", authorRealJid: "bob@example.com" };
+    expect(findSenderScopedIdTarget([first, second], first)).toBeUndefined();
+    expect(new SenderScopedIdIndex([first, second]).find(first)).toBeUndefined();
+  });
+
+  test("sender IDs cannot collide with room-assigned or archive identities", () => {
+    const canonical = { ...canonicalRoomMessage(0), originId: "first-origin", correctionTargetId: "first-origin" };
+    const incoming = { ...canonical, stanzaId: undefined, stanzaIdBy: undefined, wireIds: [], originId: canonical.id, correctionTargetId: canonical.id };
+    expect(findSenderScopedIdTarget([canonical], incoming)).toBeUndefined();
+    expect(new SenderScopedIdIndex([canonical]).find(incoming)).toBeUndefined();
+  });
+
   test("preserves fail-closed multiplicity for a repeated object reference", () => {
     const message = canonicalRoomMessage(0);
     const index = new SenderScopedIdIndex([message, message]);
@@ -87,6 +148,6 @@ describe("SenderScopedIdIndex", () => {
       current = replacement;
     }
 
-    expect(index.retainedCanonicalPartitionCount).toBe(3);
+    expect(index.retainedCanonicalPartitionCount).toBe(2);
   });
 });
