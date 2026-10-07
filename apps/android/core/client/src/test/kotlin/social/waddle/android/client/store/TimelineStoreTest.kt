@@ -7,6 +7,7 @@ import org.junit.Before
 import org.junit.Test
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
+import social.waddle.client.ffi.WaddleStanzaId
 
 class TimelineStoreTest {
     private val store = TimelineStore()
@@ -124,6 +125,277 @@ class TimelineStoreTest {
         assertEquals(1, items.size)
         assertEquals("stanza-1", items[0].id)
         assertTrue("live record must win", items[0].source is TimelineSource.Live)
+    }
+
+    @Test
+    fun `a nick handover cannot overwrite an unknown archived author through reused sender ids`() {
+        val room = "room@muc.waddle.test"
+        store.onArchivedMessage(
+            testArchivedMessage(
+                id = "reused", originId = "reused", from = "$room/sam", to = null,
+                messageType = "groupchat", body = "earlier participant",
+            ),
+        )
+        assertTrue(
+            store.onLiveMessage(
+                testMessage(
+                    id = "reused", originId = "reused", from = "$room/sam", to = null,
+                    messageType = "groupchat", body = "later participant",
+                ),
+                authorJid = "later@waddle.test",
+            ),
+        )
+
+        val rows = store.timeline(room).value
+        assertEquals(listOf("earlier participant", "later participant"), rows.map { it.body })
+        assertTrue(rows[0].source is TimelineSource.Archived)
+        assertEquals("2026-07-15T10:00:00Z", rows[0].timestamp)
+        assertEquals(null, rows[0].authorJid)
+        assertEquals(2, rows.map { it.presentationId }.toSet().size)
+    }
+
+    @Test
+    fun `unproven or changed real authors keep sender id collisions separate in either ingest order`() {
+        val room = "room@muc.waddle.test"
+        for ((archivedAuthor, liveAuthor) in listOf(
+            null to null,
+            null to "later@waddle.test",
+            "earlier@waddle.test" to null,
+            "earlier@waddle.test" to "later@waddle.test",
+        )) {
+            for (archiveFirst in listOf(true, false)) {
+                store.clear()
+                val archive = testArchivedMessage(
+                    id = "reused", originId = "reused", from = "$room/sam", to = null,
+                    messageType = "groupchat", body = "earlier", authorRealJid = archivedAuthor,
+                )
+                val live = testMessage(
+                    id = "reused", originId = "reused", from = "$room/sam", to = null,
+                    messageType = "groupchat", body = "later", timestamp = "2026-07-15T11:00:00Z",
+                )
+                if (archiveFirst) store.onArchivedMessage(archive)
+                assertTrue(store.onLiveMessage(live, liveAuthor))
+                if (!archiveFirst) store.onArchivedMessage(archive)
+
+                assertEquals(listOf("earlier", "later"), store.timeline(room).value.map { it.body })
+            }
+        }
+    }
+
+    @Test
+    fun `room assigned identity reconciles renamed twins even behind a sender injected stanza id`() {
+        val room = "room@muc.waddle.test"
+        for (archiveFirst in listOf(true, false)) {
+            store.clear()
+            val archive = testArchivedMessage(
+                id = "archive-wire", stanzaId = "injected-archive", stanzaIdBy = "attacker@waddle.test",
+                from = "$room/old-nick", to = null, messageType = "groupchat", authorRealJid = "sam@waddle.test",
+            ).copy(
+                stanzaIds = listOf(
+                    WaddleStanzaId(id = "injected-archive", by = "attacker@waddle.test"),
+                    WaddleStanzaId(id = "room-id", by = room.uppercase()),
+                )
+            )
+            val live = testMessage(
+                id = "live-wire", stanzaId = "injected-live", stanzaIdBy = "attacker@waddle.test",
+                from = "$room/new-nick", to = null, messageType = "groupchat",
+            ).copy(
+                stanzaIds = listOf(
+                    WaddleStanzaId(id = "injected-live", by = "attacker@waddle.test"),
+                    WaddleStanzaId(id = "room-id", by = room),
+                )
+            )
+            if (archiveFirst) store.onArchivedMessage(archive)
+            assertEquals(!archiveFirst, store.onLiveMessage(live))
+            if (!archiveFirst) store.onArchivedMessage(archive)
+
+            val row = store.timeline(room).value.single()
+            assertTrue(row.source is TimelineSource.Live)
+            assertEquals("2026-07-15T10:00:00Z", row.timestamp)
+            assertEquals("sam@waddle.test", row.authorJid)
+        }
+    }
+
+    @Test
+    fun `different room assigned ids never collapse even for the same real author and sender aliases`() {
+        val room = "room@muc.waddle.test"
+        store.onArchivedMessage(
+            testArchivedMessage(
+                id = "reused", originId = "reused", stanzaId = "room-1", stanzaIdBy = room,
+                from = "$room/sam", to = null, messageType = "groupchat", body = "first",
+                authorRealJid = "sam@waddle.test",
+            ),
+        )
+        assertTrue(
+            store.onLiveMessage(
+                testMessage(
+                    id = "reused", originId = "reused", stanzaId = "room-2", stanzaIdBy = room,
+                    from = "$room/sam", to = null, messageType = "groupchat", body = "second",
+                ),
+                authorJid = "sam@waddle.test",
+            )
+        )
+
+        assertEquals(listOf("first", "second"), store.timeline(room).value.map { it.body })
+    }
+
+    @Test
+    fun `sender injected stanza ids never reconcile unknown room authors`() {
+        val room = "room@muc.waddle.test"
+        store.onArchivedMessage(
+            testArchivedMessage(
+                id = "reused", originId = "reused", stanzaId = "injected", stanzaIdBy = "attacker@waddle.test",
+                from = "$room/sam", to = null, messageType = "groupchat", body = "earlier",
+            ),
+        )
+        assertTrue(
+            store.onLiveMessage(
+                testMessage(
+                    id = "reused", originId = "reused", stanzaId = "injected", stanzaIdBy = "attacker@waddle.test",
+                    from = "$room/sam", to = null, messageType = "groupchat", body = "later",
+                ),
+            )
+        )
+
+        assertEquals(listOf("earlier", "later"), store.timeline(room).value.map { it.body })
+    }
+
+    @Test
+    fun `same real author reconciles sender aliases across a nickname change`() {
+        val room = "room@muc.waddle.test"
+        store.onArchivedMessage(
+            testArchivedMessage(
+                id = "archive-wire", originId = "origin", from = "$room/old-nick", to = null,
+                messageType = "groupchat", authorRealJid = "Sam@waddle.test/web",
+            ),
+        )
+        val presentationId = store.timeline(room).value.single().presentationId
+        assertFalse(
+            store.onLiveMessage(
+                testMessage(
+                    id = "live-wire", originId = "origin", stanzaId = "room-id", stanzaIdBy = room,
+                    from = "$room/new-nick", to = null, messageType = "groupchat",
+                ),
+                authorJid = "SAM@WADDLE.TEST/phone",
+            )
+        )
+
+        val row = store.timeline(room).value.single()
+        assertTrue(row.source is TimelineSource.Live)
+        assertEquals("sam@waddle.test", row.authorJid)
+        assertEquals(presentationId, row.presentationId)
+        assertEquals("room-id", row.stanzaId)
+        assertTrue("origin" in row.identityIds)
+    }
+
+    @Test
+    fun `self presence proven own reflection reconciles its archive via origin id`() {
+        val room = "room@muc.waddle.test"
+        val ownStore = TimelineStore(actualOwnNickIn = { "actual-nick" }).apply {
+            setOwnBareJid("me@waddle.test")
+        }
+        assertTrue(
+            ownStore.onLiveMessage(
+                testMessage(
+                    id = "send-id", originId = "send-id", from = "$room/actual-nick", to = null,
+                    messageType = "groupchat",
+                )
+            )
+        )
+        ownStore.onArchivedMessage(
+            testArchivedMessage(
+                id = "send-id", originId = "send-id", stanzaId = "room-id", stanzaIdBy = room,
+                from = "$room/actual-nick", to = null, messageType = "groupchat", authorRealJid = "me@waddle.test",
+            )
+        )
+
+        val row = ownStore.timeline(room).value.single()
+        assertEquals("me@waddle.test", row.authorJid)
+        assertEquals("2026-07-15T10:00:00Z", row.timestamp)
+        assertTrue(row.isMine)
+    }
+
+    @Test
+    fun `room assigned identity wins over an earlier matching author alias`() {
+        val room = "room@muc.waddle.test"
+        store.onArchivedMessage(
+            testArchivedMessage(
+                id = "old", originId = "alias", from = "$room/sam", to = null,
+                messageType = "groupchat", body = "earlier", authorRealJid = "sam@waddle.test",
+            )
+        )
+        store.onLiveMessage(
+            testMessage(
+                id = "canonical", stanzaId = "room-id", stanzaIdBy = room,
+                from = "$room/sam", to = null, messageType = "groupchat", body = "canonical",
+            ),
+            "sam@waddle.test"
+        )
+        assertFalse(
+            store.onLiveMessage(
+                testMessage(
+                    id = "replay", originId = "alias", stanzaId = "room-id", stanzaIdBy = room,
+                    from = "$room/sam", to = null, messageType = "groupchat", body = "replayed canonical",
+                ),
+                "sam@waddle.test"
+            )
+        )
+
+        assertEquals(listOf("earlier", "canonical"), store.timeline(room).value.map { it.body })
+    }
+
+    @Test
+    fun `ambiguous verified author aliases cannot select an arbitrary room message`() {
+        val room = "room@muc.waddle.test"
+        for (id in listOf("room-1", "room-2")) {
+            store.onLiveMessage(
+                testMessage(
+                    id = id, originId = "alias", stanzaId = id, stanzaIdBy = room,
+                    from = "$room/sam", to = null, messageType = "groupchat", body = id,
+                ),
+                "sam@waddle.test"
+            )
+        }
+        store.onArchivedMessage(
+            testArchivedMessage(
+                id = "archive", originId = "alias", from = "$room/sam", to = null,
+                messageType = "groupchat", body = "unresolved", authorRealJid = "sam@waddle.test",
+            )
+        )
+
+        assertEquals(3, store.timeline(room).value.size)
+        assertEquals(setOf("room-1", "room-2", "unresolved"), store.timeline(room).value.map { it.body }.toSet())
+    }
+
+    @Test
+    fun `trusted fallback retains room identity for a later replay without author mapping`() {
+        val room = "room@muc.waddle.test"
+        store.onLiveMessage(
+            testMessage(
+                id = "send", originId = "send", from = "$room/sam", to = null, messageType = "groupchat",
+            ),
+            "sam@waddle.test"
+        )
+        val presentationId = store.timeline(room).value.single().presentationId
+        store.onArchivedMessage(
+            testArchivedMessage(
+                id = "send", originId = "send", stanzaId = "room-id", stanzaIdBy = room,
+                from = "$room/sam", to = null, messageType = "groupchat", authorRealJid = "sam@waddle.test",
+            )
+        )
+        assertFalse(
+            store.onLiveMessage(
+                testMessage(
+                    id = "send", originId = "send", stanzaId = "room-id", stanzaIdBy = room,
+                    from = "$room/sam", to = null, messageType = "groupchat",
+                )
+            )
+        )
+
+        assertEquals(1, store.timeline(room).value.size)
+        assertEquals("room-id", store.timeline(room).value.single().assignedStanzaId(room)?.id)
+        assertEquals(presentationId, store.timeline(room).value.single().presentationId)
+        assertEquals("send", store.timeline(room).value.single().id)
     }
 
     @Test

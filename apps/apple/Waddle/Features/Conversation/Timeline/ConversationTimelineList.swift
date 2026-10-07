@@ -86,10 +86,10 @@ private struct TimelineScroller: View {
                 }
             }
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: isAtLiveEdge)
-            .onChange(of: items.last?.id) { oldNewest, newNewest in
+            .onChange(of: items.last?.presentationID) { oldNewest, newNewest in
                 followNewest(oldNewest: oldNewest, newNewest: newNewest, items: items, proxy: proxy)
             }
-            .onChange(of: items.first?.id) { oldOldest, _ in
+            .onChange(of: items.first?.presentationID) { oldOldest, _ in
                 keepPlaceAfterOlderPage(oldOldest: oldOldest, items: items, proxy: proxy)
             }
             .onChange(of: unreadAnchorID, initial: true) { _, anchor in
@@ -157,7 +157,7 @@ private struct TimelineScroller: View {
     /// reader, where nothing moves.
     private func keepPlaceAfterOlderPage(oldOldest: String?, items: [TimelineItem], proxy: ScrollViewProxy) {
         guard !newestFirst, actions.scrollRequest == nil,
-              let oldOldest, items.first?.id != oldOldest, items.contains(where: { $0.id == oldOldest })
+              let oldOldest, items.first?.presentationID != oldOldest, items.contains(where: { $0.presentationID == oldOldest })
         else { return }
         restore(oldOldest, proxy: proxy)
     }

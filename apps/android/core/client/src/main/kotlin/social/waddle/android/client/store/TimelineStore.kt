@@ -244,28 +244,23 @@ class TimelineStore(
     ): Boolean {
         synchronized(lock) {
             val list = entries.getOrPut(conversation) { mutableListOf() }
-            // Dedupe on the collapsed primary id OR — for the SAME
-            // sender only — a shared XEP-0359 identity: the MAM copy of
-            // an own DM echo keys on the server-assigned stanza id while
-            // the echo keys on the client origin id, overlapping only
-            // through the origin id. Cross-sender id collisions are NOT
-            // merged (dropping a message because another sender reused
-            // an id would be an injection vector); they stay as distinct
-            // rows that the ambiguous-alias guard refuses to mutate.
+            // Room identity is the authority-scoped XEP-0359 id; a nick
+            // can change owners and never proves continuity on its own.
+            // DMs retain their sender-scoped primary/origin-id matching.
             val incomingUnique = uniqueWireIds(item)
             val incomingSender = senderKeyOf(item.from, isGroupchat)
-            // Sender continuity gates BOTH disjuncts: a different sender
-            // reusing a primary id must not suppress or overwrite the
-            // original row (cross-sender collisions stay distinct and
-            // un-mutatable via the ambiguous-alias guard).
-            val existingIndex = list.indexOfFirst { entry ->
-                incomingSender != null &&
-                    senderKeyOf(entry.item.from, isGroupchat) == incomingSender &&
-                    (entry.item.id == item.id || uniqueWireIds(entry.item).any { it in incomingUnique })
+            val existingIndex = if (isGroupchat) {
+                roomTwinIndex(list, item)
+            } else {
+                list.indexOfFirst { entry ->
+                    incomingSender != null &&
+                        senderKeyOf(entry.item.from, isGroupchat) == incomingSender &&
+                        (entry.item.id == item.id || uniqueWireIds(entry.item).any { it in incomingUnique })
+                }
             }
             if (existingIndex >= 0) {
                 val existing = list[existingIndex]
-                mergedTwin(existing, item)?.let { merged ->
+                mergedTwin(existing, item, isGroupchat)?.let { merged ->
                     list[existingIndex] = merged
                     list.sortWith(ENTRY_ORDER)
                     publish(conversation, list)
@@ -292,6 +287,31 @@ class TimelineStore(
         return true
     }
 
+    private fun roomTwinIndex(list: List<Entry>, incoming: TimelineItem): Int {
+        val roomId = incoming.assignedStanzaId(incoming.conversationJid)?.id
+        if (roomId != null) {
+            val canonical = list.indexOfFirst { it.item.assignedStanzaId(incoming.conversationJid)?.id == roomId }
+            if (canonical >= 0) return canonical
+        }
+        // Multiple author-scoped aliases cannot identify which room row
+        // a copy without its canonical id represents.
+        return list.indices.filter { roomTwins(list[it].item, incoming) }.singleOrNull() ?: -1
+    }
+
+    private fun roomTwins(existing: TimelineItem, incoming: TimelineItem): Boolean {
+        val room = existing.conversationJid
+        val existingRoomId = existing.assignedStanzaId(room)?.id
+        val incomingRoomId = incoming.assignedStanzaId(room)?.id
+        if (existingRoomId != null && incomingRoomId != null) return existingRoomId == incomingRoomId
+
+        // Sender-chosen ids are safe only with an author captured at
+        // ingest. Unknown authors fail closed, even for the same nick.
+        val author = existing.authorJid?.let(::normalizedBareJid)?.takeIf { '@' in it } ?: return false
+        if (incoming.authorJid?.let(::normalizedBareJid) != author) return false
+        val incomingIds = setOfNotNull(incoming.originId, incoming.messageId)
+        return setOfNotNull(existing.originId, existing.messageId).any { it in incomingIds }
+    }
+
     /**
      * The same message seen twice (live + archive, or a replay): the
      * updated entry, or `null` when [existing] already has everything.
@@ -299,9 +319,11 @@ class TimelineStore(
      * otherwise the first record wins. Applied mutations live on the
      * entry and survive either way.
      */
-    private fun mergedTwin(existing: Entry, item: TimelineItem): Entry? {
+    private fun mergedTwin(existing: Entry, item: TimelineItem, isGroupchat: Boolean): Entry? {
         if (item.source is TimelineSource.Live && existing.item.source is TimelineSource.Archived) {
-            val merged = item.copy(
+            val incoming = withRoomIdentityFrom(item, existing.item, isGroupchat)
+            val merged = incoming.copy(
+                presentationId = existing.item.presentationId,
                 timestamp = item.timestamp ?: existing.item.timestamp,
                 rejected = existing.item.rejected,
                 // A stamp is never replaced by a later copy's, and a
@@ -324,14 +346,29 @@ class TimelineStore(
         // from its room-vouched archive twin.
         val adoptedTimestamp = item.timestamp?.takeIf { existing.item.timestamp == null }
         val adoptedAuthor = if (existing.item.authorJid == null) vouchedStamp(item, existing.item) else null
-        if (adoptedTimestamp == null && adoptedAuthor == null) return null
+        val existingItem = withRoomIdentityFrom(existing.item, item, isGroupchat)
+        if (adoptedTimestamp == null && adoptedAuthor == null && existingItem == existing.item) return null
         return existing.copy(
-            item = existing.item.copy(
+            item = existingItem.copy(
                 timestamp = adoptedTimestamp ?: existing.item.timestamp,
                 authorJid = adoptedAuthor ?: existing.item.authorJid,
             ),
             sortInstant = adoptedTimestamp?.let(::parseInstant) ?: existing.sortInstant,
         )
+    }
+
+    /** Keep the room's identity after a proven alias merge for future unattributed replays. */
+    private fun withRoomIdentityFrom(item: TimelineItem, twin: TimelineItem, isGroupchat: Boolean): TimelineItem {
+        val room = item.conversationJid
+        if (!isGroupchat || item.assignedStanzaId(room) != null) return item
+        val assigned = twin.assignedStanzaId(room) ?: return item
+        val source = when (val original = item.source) {
+            is TimelineSource.Live -> TimelineSource.Live(original.message.copy(stanzaIds = item.stanzaIds + assigned))
+            is TimelineSource.Archived -> TimelineSource.Archived(
+                original.message.copy(stanzaIds = item.stanzaIds + assigned),
+            )
+        }
+        return item.copy(source = source)
     }
 
     /**

@@ -208,14 +208,16 @@ class OccupantJidStoreTest {
         store.onLiveMessage(twinLive(timestamp = null, stanzaId = "s2", originId = "x"), "mallory@waddle.test")
         store.onArchivedMessage(twinArchived(stanzaId = "s3", originId = "x", authorRealJid = "mallory@waddle.test"))
 
-        // Both merged into Alice's row on the shared origin id, unstamped.
+        // Distinct room-assigned ids keep every participant's row intact.
         val rows = store.timeline(room).value
-        assertEquals(listOf("s1"), rows.map { it.id })
-        assertNull(rows.single().authorJid)
+        assertEquals(setOf("s1", "s2", "s3"), rows.map { it.id }.toSet())
+        assertNull(rows.single { it.id == "s1" }.authorJid)
+        assertEquals("mallory@waddle.test", rows.single { it.id == "s2" }.authorJid)
+        assertEquals("mallory@waddle.test", rows.single { it.id == "s3" }.authorJid)
 
         // The genuine archive copy (the room's own stanza id) still stamps it.
         store.onArchivedMessage(twinArchived(stanzaId = "s1", originId = "x", authorRealJid = "alice@waddle.test"))
-        assertEquals("alice@waddle.test", store.timeline(room).value.single().authorJid)
+        assertEquals("alice@waddle.test", store.timeline(room).value.single { it.id == "s1" }.authorJid)
     }
 
     @Test

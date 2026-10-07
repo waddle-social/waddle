@@ -15,12 +15,12 @@ struct ActivityView: View {
             ForEach(overview.groups) { group in
                 Section {
                     ActivityGroupRow(group: group) { open(group.conversation) }
-                    ForEach(group.messages) { item in
+                    ForEach(group.messages, id: \.presentationID) { item in
                         ActivityMessageRow(item: item) { open(group.conversation) }
                     }
                     ForEach(group.threads) { thread in
                         ActivityThreadRow(thread: thread) { open(thread.key) }
-                        ForEach(thread.messages) { item in
+                        ForEach(thread.messages, id: \.presentationID) { item in
                             ActivityMessageRow(item: item, isThreadReply: true) { open(thread.key) }
                         }
                     }

@@ -39,6 +39,42 @@ class MessageAvatarTest {
         avatars[avatarKeyOf(row.item)]
 
     @Test
+    fun `sender id collisions under one nick retain independent avatar rows`() {
+        val earlier = row("reused", "sam")
+        val later = row("reused", "sam", authorJid = "later@waddle.test")
+        val avatars = messageAvatarsOf(listOf(earlier, later), self)
+
+        assertEquals(2, avatars.size)
+        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, earlier))
+        assertEquals(MessageAvatar("later@waddle.test", visible = true), avatarOf(avatars, later))
+    }
+
+    @Test
+    fun `ambiguous quoted aliases resolve no loaded author`() {
+        val earlier = row("reused", "sam")
+        val later = row("reused", "sam", authorJid = "later@waddle.test")
+
+        assertNull(quotedMessagesByIdentity(listOf(earlier, later))["reused"])
+    }
+
+    @Test
+    fun `room assigned quote identity wins over another rows sender chosen alias`() {
+        val canonical = ConversationRow.Stored(
+            row("wire", "sam").item.copy(
+                source = TimelineSource.Live(
+                    testMessage(
+                        id = "wire", stanzaId = "room-id", stanzaIdBy = room,
+                        from = "$room/sam", to = null, messageType = "groupchat",
+                    ),
+                ),
+            ),
+        )
+        val conflicting = row("room-id", "sam", authorJid = "later@waddle.test")
+
+        assertEquals(canonical.item, quotedMessagesByIdentity(listOf(canonical, conflicting))["room-id"])
+    }
+
+    @Test
     fun `consecutive rows of one author within five minutes share one avatar`() {
         val stamp = "alice@waddle.test"
         val first = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = stamp)

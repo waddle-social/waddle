@@ -64,7 +64,7 @@ struct SearchSheet: View {
         } else if results.isEmpty {
             ContentUnavailableView.search(text: searchedQuery)
         } else {
-            List(results) { item in
+            List(results, id: \.presentationID) { item in
                 Button {
                     select(item)
                 } label: {
@@ -106,7 +106,7 @@ struct SearchSheet: View {
     }
 
     private func select(_ item: TimelineItem) {
-        navigation.focus(item.id, in: conversation)
+        navigation.focus(item.roomStanzaID ?? item.id, in: conversation)
         dismiss()
     }
 }

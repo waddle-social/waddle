@@ -30,6 +30,9 @@ public enum Tombstone: Hashable, Sendable {
 public struct TimelineItem: Hashable, Sendable, Identifiable {
     /// Dedupe identity: stanza id, else origin id, else message id.
     public let id: String
+    /// Stable local row key for rendering, scrolling and highlighting.
+    /// Distinct messages may carry identical sender-chosen wire ids.
+    public let presentationID: String
     public let conversation: ConversationID
     public let isMine: Bool
     /// The parsed stanza backing the row.
@@ -52,6 +55,7 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
 
     public init(
         id: String,
+        presentationID: String = UUID().uuidString,
         conversation: ConversationID,
         isMine: Bool,
         message: WireMessage,
@@ -64,6 +68,7 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         receivedAt: Date = Date()
     ) {
         self.id = id
+        self.presentationID = presentationID
         self.conversation = conversation
         self.isMine = isMine
         self.message = message

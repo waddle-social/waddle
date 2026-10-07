@@ -85,6 +85,7 @@ struct RoomAuthorTests {
     @Test func ownSendIsStampedWithOurAccount() async {
         let coordinator = coordinator()
         coordinator.isSendReady = true
+        coordinator.handle(.presence(selfPresence(me.nick)))
         let id = await coordinator.send(Draft(text: "hello"), in: roomConversation)!
         let echo = coordinator.timelines.timeline(for: roomConversation).items[0]
         #expect(coordinator.authorJID(of: echo) == me.jid)
@@ -203,8 +204,8 @@ struct RoomAuthorTests {
         var archived = roomMessage("from mallory", from: "sam", stanzaID: "s3", originID: "x", at: date(2), source: .archive(mamID: "s3"))
         archived.authorRealJID = erin
         coordinator.timelines.ingest(archived)
-        // Both merged into Sam's row on the shared origin id.
-        #expect(coordinator.timelines.timeline(for: roomConversation).items.map(\.id) == ["s1"])
+        // Reused sender ids cannot swallow a row with another room identity.
+        #expect(Set(coordinator.timelines.timeline(for: roomConversation).items.map(\.id)) == ["s1", "s2", "s3"])
         #expect(row(coordinator, "s1")?.message.authorRealJID == nil)
         #expect(coordinator.authorJID(of: row(coordinator, "s1")!) == nil)
 
