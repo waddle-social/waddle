@@ -254,14 +254,15 @@ groups:
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
             summary: "The ingress transaction p99 exceeded 2 seconds for 30m."
-        - alert: IngressUnresolvedEffectsGrowing
-          expr: sum by (kind) (increase(ingress_effects_unresolved_total{phase="live"}[1h])) > 0
+        - alert: IngressNonTerminalAge
+          expr: max(cnpg_waddle_ingress_nonterminal_age_oldest_seconds) > 600
+          for: 10m
           labels:
             severity: warning
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
-            summary: 'Unresolved effects from live ingress executions increased in the last hour. Repair and stream-retirement attributions are excluded; inspect ingress_effects_unresolved_total with phase="maintenance_recovery", phase="maintenance_terminalization", or phase="stream_retirement" for those paths. See IngressNonTerminalBacklog for the canonical row-level view and ingress_maintenance_unrecoverable_obligations_total for recovery classifications.'
+            summary: "A canonical ingress obligation stayed older than the 10-minute completion budget for 10m. This includes a flat backlog that the growth alert cannot detect. Inspect pending intent pairs and maintenance recovery classifications; normal offline custody can settle ingress without waiting for recipient return. Legacy route_direct residue requires reviewed operator repair, not blanket completion receipts."
         - alert: IngressNonTerminalBacklog
           expr: max by (kind) (cnpg_waddle_ingress_nonterminal_messages{kind!="none"}) > (max by (kind) (cnpg_waddle_ingress_nonterminal_messages offset 1h) or max by (kind) (cnpg_waddle_ingress_nonterminal_messages) * 0)
           for: 10m
@@ -279,7 +280,7 @@ groups:
             team: waddle
           annotations:
             runbook: https://github.com/waddle-social/waddle/blob/main/server/docs/operations/ingress-authority.md
-            summary: "Primary-only ingress custom-query series are absent, including the always-present non-terminal oldest-age query and the backlog query's kind=none sentinel; IngressGcBacklog, IngressGcAge or IngressNonTerminalBacklog may be blind. Check the CNPG collector and monitoring query configuration."
+            summary: "Primary-only ingress custom-query series are absent, including the always-present non-terminal oldest-age query and the backlog query's kind=none sentinel; IngressGcBacklog, IngressGcAge, IngressNonTerminalAge or IngressNonTerminalBacklog may be blind. Check the CNPG collector and monitoring query configuration."
     # Grafana Cloud Mimir caps each rule group at 20 rules.
     # Keep ingress and PostgreSQL capacity rules in separate groups.
     - name: waddle-postgres
