@@ -11,9 +11,27 @@ import subprocess
 import sys
 
 MANIFEST = 'infrastructure/waddle.cloud/gitops/waddle-server/helmrelease.yaml'
-# These inputs all trigger the server publisher. Including the whole server tree
-# conservatively requires the last server build during the Recreate window.
-SERVER_INPUTS = ['server', 'flake.nix', 'flake.lock']
+# Match the server/build paths that trigger waddle-server-default.yml. Docs and
+# agent guidance do not publish images, so they cannot advance the cutover floor.
+SERVER_INPUTS = [
+    ':(top,glob)server/**/env.cue',
+    ':(top,glob)server/.cargo/**',
+    'server/.config/nextest.toml',
+    'server/Cargo.lock',
+    'server/Cargo.toml',
+    'server/README.md',
+    'server/capabilities.toml',
+    ':(top,glob)server/charts/waddle-server/**',
+    ':(top,glob)server/crates/**',
+    'server/deployment.cue',
+    ':(top,glob)server/extensions/**',
+    'server/rust-toolchain.toml',
+    ':(top,glob)server/schema/**',
+    ':(top,glob)server/scripts/**',
+    ':(top,glob)server/wit/**',
+    'flake.nix',
+    'flake.lock',
+]
 
 
 def revisions(repository: Path) -> list[str]:

@@ -8,8 +8,9 @@ change without a compatible delivery path still requires a `Recreate` deployment
 The server publisher and Helm chart enforce the return to rolling updates:
 
 1. `server/scripts/cutover_revisions.py` reads complete first-parent Git history.
-   It locates the most recent Recreate window and its last server source change,
-   then emits that revision and its first-parent descendants. A canceled build,
+   It locates the most recent Recreate window and its last publisher-triggering
+   server/build input change, then emits that revision and its first-parent
+   descendants. A canceled build,
    a PR description, and a YAML comment do not establish that an image rolled.
    A flip commit that also changes server/build inputs is rejected: those
    changes must first ship in a separate Recreate commit.
@@ -45,10 +46,15 @@ install; `helm template --is-upgrade` fails without live objects. Use
 [Helm lookup documentation](https://docs.helm.sh/docs/v3/chart_template_guide/functions_and_pipelines/#using-the-lookup-function).
 
 The publisher rejects shallow history (and fetches complete history in CI) or a
-RollingUpdate history without a Recreate window. It deliberately includes all
-server-tree changes in the cutover floor: requiring a slightly newer image is
-safer than overlooking a wire change. The accepted revision list grows within
-the current cutover window and resets at the next Recreate window.
+RollingUpdate history without a Recreate window. Its server/build inputs match
+the server and flake paths that trigger `waddle-server-default.yml`, with a
+regression test checking that the two policies agree. Unpublished changes such
+as `server/docs/**` and server agent guidance do not advance the cutover floor
+and may accompany a flip. Published source, configuration, charts, scripts,
+schema, extensions, and WIT changes still require a Recreate rollout first.
+The HelmRelease remains a separate cutover-history input even for manifest-only
+changes. The accepted revision list grows within the current cutover window and
+resets at the next Recreate window.
 
 Run the guard regression tests with:
 
@@ -57,7 +63,8 @@ python3 -m unittest discover -s server/scripts -p 'test_cutover_*.py'
 ```
 
 These tests cover Git histories with canceled builds, multiple cutovers, server
-changes during Recreate, unrelated commits, and shallow checkouts; Helm fixtures
+changes during Recreate, unpublished docs and guidance, publisher-input drift,
+unrelated commits, and shallow checkouts; Helm fixtures
 cover mixed images, incomplete rollouts, absent pods, terminating pods, mutable
 images, missing source SHAs, and reuse/reset of the completed-cutover marker.
 They run in the existing `renderDeployment` CI task.
