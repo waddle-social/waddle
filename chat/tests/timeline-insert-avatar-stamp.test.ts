@@ -110,6 +110,39 @@ describe("MAM page merge never lends the archive real JID across an origin-id-on
     return buildChannelTimelineFromMamResults({ session, channelIsForum: false, existing, mamResults });
   }
 
+  test("repeated anonymous MAM results reconcile by room-scoped archive UID", () => {
+    const result = archived({ id: "archive-1", archiveId: "archive-1", senderChosenIds: [] });
+    const first = build([], [result]);
+    for (const seedExistingOnly of [false, true]) {
+      const repeated = buildChannelTimelineFromMamResults({
+        session, channelIsForum: false, existing: first,
+        mamResults: [{ ...result }], options: { seedExistingOnly },
+      });
+      expect(repeated).toHaveLength(1);
+      expect(repeated[0]?.body).toBe("hi");
+      expect(repeated[0]?.authorRealJid).toBeUndefined();
+      expect(repeated[0]?.rowKey).toBe(first[0]?.rowKey);
+    }
+    expect(build([], [result, { ...result }])).toHaveLength(1);
+  });
+
+  test("a verified MAM twin retains its archive UID for later anonymous replay", () => {
+    const result = archived({
+      id: "archive-1", archiveId: "archive-1", originId: "origin-x",
+      senderChosenIds: ["origin-x"], authorRealJid: "sam@example.com",
+    });
+    for (const archiveId of [undefined, ""]) {
+      const live = row({ archiveId, rowKey: "live-row", authorRealJid: "sam@example.com", senderChosenIds: ["origin-x"] });
+      const first = build([live], [result]);
+      expect(first).toHaveLength(1);
+      expect(first[0]?.archiveId).toBe("archive-1");
+      const repeated = build(first, [{ ...result, authorRealJid: undefined }]);
+      expect(repeated).toHaveLength(1);
+      expect(repeated[0]?.rowKey).toBe("live-row");
+      expect(repeated[0]?.authorRealJid).toBe("sam@example.com");
+    }
+  });
+
   test("Mallory's archived message reusing Sam's origin-id does not give Sam's row Mallory's JID", () => {
     const sams = row({ createdAtSource: "delay" });
     const messages = build([sams], [archived({ authorRealJid: "mallory@example.com", stanzaId: "room-assigned-2", stanzaIdBy: ROOM })]);

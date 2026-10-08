@@ -18,7 +18,20 @@ function roomCanonicalIdentity(message: TimelineMessage): string | undefined {
     || !message.stanzaIdBy
     || bareJidKey(message.stanzaIdBy) !== bareJidKey(message.authorOccupantJid)
   ) return undefined;
-  return `${bareJidKey(message.stanzaIdBy)}\u0000${message.stanzaId}`;
+  return `stanza\u0000${bareJidKey(message.stanzaIdBy)}\u0000${message.stanzaId}`;
+}
+
+function roomArchiveIdentity(message: TimelineMessage): string | undefined {
+  const room = bareJidKey(message.authorOccupantJid ?? "");
+  return room && message.archiveId
+    ? `archive\u0000${room}\u0000${message.archiveId}`
+    : undefined;
+}
+
+/** Room stanza identity takes precedence over the room archive's opaque UID. */
+function roomAuthorityIdentities(message: TimelineMessage): string[] {
+  return [roomCanonicalIdentity(message), roomArchiveIdentity(message)]
+    .filter((identity): identity is string => !!identity);
 }
 
 export function hasConflictingRoomCanonicalIdentity(
@@ -90,18 +103,19 @@ function hasSenderIdContinuity(existing: TimelineMessage, incoming: TimelineMess
 }
 
 /**
- * Resolves sender-chosen ids only inside a verified sender scope. A primary
- * match wins; aliases must identify exactly one row, and aliases that point
- * at different rows fail closed.
+ * Resolves room authority identities first, then sender-chosen ids inside a
+ * verified sender scope. A primary authored match wins; aliases must identify
+ * exactly one row, and aliases that point at different rows fail closed.
  */
 export function findSenderScopedIdTarget(
   messages: readonly TimelineMessage[],
   incoming: TimelineMessage,
 ): TimelineMessage | undefined {
-  const canonical = roomCanonicalIdentity(incoming);
-  if (canonical) {
-    const matches = messages.filter((message) => roomCanonicalIdentity(message) === canonical);
-    if (matches.length > 0) return matches.length === 1 ? matches[0] : undefined;
+  for (const identity of roomAuthorityIdentities(incoming)) {
+    const matches = messages.filter((message) => roomAuthorityIdentities(message).includes(identity));
+    if (matches.length === 0) continue;
+    const match = matches.length === 1 ? matches[0] : undefined;
+    return match && !hasConflictingRoomCanonicalIdentity(match, incoming) ? match : undefined;
   }
 
   const primaryMatches = messages.filter(
@@ -341,7 +355,7 @@ class SenderIdBucket {
 
 /** Collision-preserving identity index for repeated MAM reconciliation. */
 export class SenderScopedIdIndex {
-  private readonly byCanonical = new Map<string, Map<TimelineMessage, number>>();
+  private readonly byAuthority = new Map<string, Map<TimelineMessage, number>>();
   private readonly byId = new Map<string, SenderIdBucket>();
   private readonly primaryById = new Map<string, SenderIdBucket>();
   private probes = 0;
@@ -355,9 +369,9 @@ export class SenderScopedIdIndex {
     return this.probes;
   }
 
-  /** Number of live canonical sub-indexes retained across every ID bucket. */
+  /** Live authority identities and canonical sender-ID partitions retained. */
   get retainedCanonicalPartitionCount(): number {
-    return this.byCanonical.size + [...this.byId.values(), ...this.primaryById.values()]
+    return this.byAuthority.size + [...this.byId.values(), ...this.primaryById.values()]
       .reduce((total, bucket) => total + bucket.canonicalPartitionCount, 0);
   }
 
@@ -386,11 +400,10 @@ export class SenderScopedIdIndex {
   }
 
   add(message: TimelineMessage): void {
-    const canonical = roomCanonicalIdentity(message);
-    if (canonical) {
-      const matches = this.byCanonical.get(canonical) ?? new Map<TimelineMessage, number>();
+    for (const identity of roomAuthorityIdentities(message)) {
+      const matches = this.byAuthority.get(identity) ?? new Map<TimelineMessage, number>();
       matches.set(message, (matches.get(message) ?? 0) + 1);
-      this.byCanonical.set(canonical, matches);
+      this.byAuthority.set(identity, matches);
     }
     for (const id of senderChosenMessageIds(message)) {
       this.addToBucket(this.byId, id, message);
@@ -401,13 +414,12 @@ export class SenderScopedIdIndex {
   }
 
   replace(existing: TimelineMessage, replacement: TimelineMessage): void {
-    const canonical = roomCanonicalIdentity(existing);
-    if (canonical) {
-      const matches = this.byCanonical.get(canonical);
+    for (const identity of roomAuthorityIdentities(existing)) {
+      const matches = this.byAuthority.get(identity);
       const occurrences = matches?.get(existing) ?? 0;
       if (occurrences > 1) matches?.set(existing, occurrences - 1);
       else matches?.delete(existing);
-      if (matches?.size === 0) this.byCanonical.delete(canonical);
+      if (matches?.size === 0) this.byAuthority.delete(identity);
     }
     for (const id of senderChosenMessageIds(existing)) {
       this.removeFromBucket(this.byId, id, existing);
@@ -417,13 +429,13 @@ export class SenderScopedIdIndex {
   }
 
   find(incoming: TimelineMessage): TimelineMessage | undefined {
-    const canonical = roomCanonicalIdentity(incoming);
-    if (canonical) {
+    for (const identity of roomAuthorityIdentities(incoming)) {
       this.noteProbe();
-      const matches = this.byCanonical.get(canonical);
+      const matches = this.byAuthority.get(identity);
       if (matches && matches.size > 0) {
         const [message, occurrences] = matches.entries().next().value!;
-        return matches.size === 1 && occurrences === 1 ? message : undefined;
+        return matches.size === 1 && occurrences === 1
+          && !hasConflictingRoomCanonicalIdentity(message, incoming) ? message : undefined;
       }
     }
     const primary = senderChosenMessageIds(incoming).includes(incoming.id)

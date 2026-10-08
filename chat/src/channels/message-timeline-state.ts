@@ -52,6 +52,10 @@ function mergeMissingThreadMetadata(
     next = next === existing ? { ...existing, ...patch } : { ...next, ...patch };
   };
 
+  if (!existing.archiveId && incoming.archiveId !== undefined) {
+    assign({ archiveId: incoming.archiveId });
+  }
+
   const canonicalRoomMessage = [incoming, existing].find((message) =>
     !!message.authorOccupantJid
     && !!message.stanzaId

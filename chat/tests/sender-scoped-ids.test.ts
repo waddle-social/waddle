@@ -24,7 +24,88 @@ function canonicalRoomMessage(index: number): TimelineMessage {
   };
 }
 
+function anonymousArchiveMessage(archiveId: string): TimelineMessage {
+  return {
+    ...canonicalRoomMessage(0), id: archiveId, archiveId, senderChosenIds: [], wireIds: [],
+    stanzaId: undefined, stanzaIdBy: undefined, authorRealJid: undefined,
+  };
+}
+
 describe("SenderScopedIdIndex", () => {
+  test("room archive UIDs reconcile anonymous copies independently of nick and primary ID", () => {
+    const existing = anonymousArchiveMessage("opaque-UID");
+    const incoming = { ...existing, id: "different-primary", authorOccupantJid: "ROOM@muc.example.com/new-nick" };
+    expect(findSenderScopedIdTarget([existing], incoming)).toBe(existing);
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBe(existing);
+  });
+
+  test("archive identity stays inside its room and its authority namespace", () => {
+    const existing = anonymousArchiveMessage("archive-1");
+    const rejected: TimelineMessage[] = [
+      { ...existing, archiveId: "archive-2" },
+      { ...existing, archiveId: "ARCHIVE-1" },
+      { ...existing, archiveId: " archive-1 " },
+      { ...existing, authorOccupantJid: "elsewhere@muc.example.com/alice" },
+      { ...existing, authorOccupantJid: undefined },
+      { ...existing, archiveId: undefined, stanzaId: "archive-1", stanzaIdBy: "room@muc.example.com" },
+      { ...existing, archiveId: undefined, senderChosenIds: ["archive-1"], originId: "archive-1" },
+    ];
+    for (const incoming of rejected) {
+      expect(findSenderScopedIdTarget([existing], incoming)).toBeUndefined();
+      expect(new SenderScopedIdIndex([existing]).find(incoming)).toBeUndefined();
+    }
+    const empty = anonymousArchiveMessage("");
+    expect(findSenderScopedIdTarget([empty], { ...empty })).toBeUndefined();
+    expect(new SenderScopedIdIndex([empty]).find({ ...empty })).toBeUndefined();
+    const direct = { ...existing, authorOccupantJid: undefined };
+    expect(findSenderScopedIdTarget([direct], { ...direct, id: "other" })).toBeUndefined();
+    expect(new SenderScopedIdIndex([direct]).find({ ...direct, id: "other" })).toBeUndefined();
+  });
+
+  test("an authored ID cannot claim an archive UID even for a verified author", () => {
+    const existing = { ...anonymousArchiveMessage("archive-1"), authorRealJid: "alice@example.com" };
+    const incoming = { ...existing, archiveId: undefined, senderChosenIds: ["archive-1"], originId: "archive-1" };
+    expect(findSenderScopedIdTarget([existing], incoming)).toBeUndefined();
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBeUndefined();
+  });
+
+  test("matching archive UIDs cannot override conflicting room stanza IDs", () => {
+    const existing = { ...canonicalRoomMessage(0), archiveId: "archive-1" };
+    const incoming = { ...canonicalRoomMessage(1), archiveId: "archive-1" };
+    expect(findSenderScopedIdTarget([existing], incoming)).toBeUndefined();
+    expect(new SenderScopedIdIndex([existing]).find(incoming)).toBeUndefined();
+  });
+
+  test("room stanza identity wins when an archive UID points at another row", () => {
+    const existing = { ...canonicalRoomMessage(0), archiveId: "archive-1" };
+    const other = { ...canonicalRoomMessage(1), archiveId: "archive-2" };
+    const incoming = { ...existing, archiveId: "archive-2" };
+    expect(findSenderScopedIdTarget([other, existing], incoming)).toBe(existing);
+    expect(new SenderScopedIdIndex([other, existing]).find(incoming)).toBe(existing);
+  });
+
+  test("ambiguous archive UIDs fail closed for distinct rows and repeated references", () => {
+    const existing = anonymousArchiveMessage("archive-1");
+    for (const messages of [[existing, { ...existing }], [existing, existing]]) {
+      expect(findSenderScopedIdTarget(messages, { ...existing })).toBeUndefined();
+      expect(new SenderScopedIdIndex(messages).find({ ...existing })).toBeUndefined();
+    }
+  });
+
+  test("replacing archive identities removes obsolete UIDs and bounds index work", () => {
+    let current = anonymousArchiveMessage("archive-0");
+    const index = new SenderScopedIdIndex([current]);
+    for (let value = 1; value <= 2_000; value += 1) {
+      const replacement = anonymousArchiveMessage(`archive-${value}`);
+      index.replace(current, replacement);
+      expect(index.find(current)).toBeUndefined();
+      expect(index.find({ ...replacement })).toBe(replacement);
+      current = replacement;
+    }
+    expect(index.retainedCanonicalPartitionCount).toBe(1);
+    expect(index.resolutionProbeCount).toBeLessThanOrEqual(4_000);
+  });
+
   test("normalizes bare sender JIDs identically in the scan and index", () => {
     const existing: TimelineMessage = {
       ...canonicalRoomMessage(0),
