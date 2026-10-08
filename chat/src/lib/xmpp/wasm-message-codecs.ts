@@ -602,7 +602,6 @@ export function roomMessageFromArchived(
   const base: LiveRoomMessage = {
     id: roomPrimaryId,
     senderChosenIds: [...new Set([message.id, message.origin_id].filter((id): id is string => !!id))],
-    ...(synthesizedPrimary ? { synthesizedId: true } : source === "archive" ? { archiveId: message.mam_id } : {}),
     fromJid,
     roomJid,
     nick,
@@ -661,6 +660,11 @@ export function roomMessageFromArchived(
     ...(stampedByRoom ? { stanzaId: stampedByRoom, stanzaIdBy: roomJid } : {}),
     ...(message.displayed_marker_requested ? { displayedMarkerRequested: true } : {}),
   };
+  if (synthesizedPrimary) {
+    base.synthesizedId = true;
+  } else if (source === "archive") {
+    base.archiveId = message.mam_id;
+  }
   return stripReplyFallback(base, message.reply_fallback_start, message.reply_fallback_end);
 }
 

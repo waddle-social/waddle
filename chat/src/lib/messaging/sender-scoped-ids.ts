@@ -102,6 +102,26 @@ function hasSenderIdContinuity(existing: TimelineMessage, incoming: TimelineMess
   return hasMessageSenderContinuity(existing, incoming);
 }
 
+type Resolution = {
+  ambiguous: boolean;
+  match?: TimelineMessage;
+};
+
+function resolveRoomAuthorityTarget(
+  messages: readonly TimelineMessage[],
+  incoming: TimelineMessage,
+): Resolution {
+  for (const identity of roomAuthorityIdentities(incoming)) {
+    const matches = messages.filter((message) => roomAuthorityIdentities(message).includes(identity));
+    if (matches.length === 0) continue;
+    if (matches.length !== 1) return { ambiguous: true };
+    const match = matches[0]!;
+    if (hasConflictingRoomCanonicalIdentity(match, incoming)) return { ambiguous: true };
+    return { ambiguous: false, match };
+  }
+  return { ambiguous: false };
+}
+
 /**
  * Resolves room authority identities first, then sender-chosen ids inside a
  * verified sender scope. A primary authored match wins; aliases must identify
@@ -111,12 +131,9 @@ export function findSenderScopedIdTarget(
   messages: readonly TimelineMessage[],
   incoming: TimelineMessage,
 ): TimelineMessage | undefined {
-  for (const identity of roomAuthorityIdentities(incoming)) {
-    const matches = messages.filter((message) => roomAuthorityIdentities(message).includes(identity));
-    if (matches.length === 0) continue;
-    const match = matches.length === 1 ? matches[0] : undefined;
-    return match && !hasConflictingRoomCanonicalIdentity(match, incoming) ? match : undefined;
-  }
+  const authority = resolveRoomAuthorityTarget(messages, incoming);
+  if (authority.ambiguous) return undefined;
+  if (authority.match) return authority.match;
 
   const primaryMatches = messages.filter(
     (message) =>
@@ -145,11 +162,6 @@ export function findSenderScopedIdTarget(
   }
   return target;
 }
-
-type Resolution = {
-  ambiguous: boolean;
-  match?: TimelineMessage;
-};
 
 function addToIndex(
   index: Map<string, Set<TimelineMessage>>,
@@ -428,16 +440,23 @@ export class SenderScopedIdIndex {
     this.add(replacement);
   }
 
-  find(incoming: TimelineMessage): TimelineMessage | undefined {
+  private resolveAuthority(incoming: TimelineMessage): Resolution {
     for (const identity of roomAuthorityIdentities(incoming)) {
       this.noteProbe();
       const matches = this.byAuthority.get(identity);
-      if (matches && matches.size > 0) {
-        const [message, occurrences] = matches.entries().next().value!;
-        return matches.size === 1 && occurrences === 1
-          && !hasConflictingRoomCanonicalIdentity(message, incoming) ? message : undefined;
-      }
+      if (!matches || matches.size === 0) continue;
+      const [message, occurrences] = matches.entries().next().value!;
+      if (matches.size !== 1 || occurrences !== 1
+        || hasConflictingRoomCanonicalIdentity(message, incoming)) return { ambiguous: true };
+      return { ambiguous: false, match: message };
     }
+    return { ambiguous: false };
+  }
+
+  find(incoming: TimelineMessage): TimelineMessage | undefined {
+    const authority = this.resolveAuthority(incoming);
+    if (authority.ambiguous) return undefined;
+    if (authority.match) return authority.match;
     const primary = senderChosenMessageIds(incoming).includes(incoming.id)
       ? this.primaryById.get(incoming.id)?.resolve(incoming)
       : undefined;

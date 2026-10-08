@@ -44,6 +44,47 @@ function splitMessageIds(
   return wireIds.length > 0 ? { id, wireIds } : { id };
 }
 
+function findRoomMessageIndexById<T extends MessageIdCarrier>(
+  messages: readonly T[],
+  normalized: string,
+  predicate?: (message: T) => boolean,
+): number {
+  const candidates = messages.map((message, index) => ({ message, index }))
+    .filter(({ message }) => !predicate || predicate(message));
+  const canonical = candidates.filter(({ message }) => roomCanonicalId(message) === normalized);
+  if (canonical.length > 0) return canonical.length === 1 ? canonical[0]!.index : -1;
+  const claimants = candidates.filter(({ message }) =>
+    message.id === normalized || message.wireIds?.includes(normalized));
+  return claimants.length === 1 ? claimants[0]!.index : -1;
+}
+
+function findDmMessageIndexById<T extends MessageIdCarrier>(
+  messages: readonly T[],
+  normalized: string,
+  predicate?: (message: T) => boolean,
+): number {
+  let aliasIndex = -1;
+  let aliasAmbiguous = false;
+  for (let i = 0; i < messages.length; i++) {
+    const message = messages[i]!;
+    if (predicate && !predicate(message)) continue;
+    // Primary ids win over alias ambiguity, so the scan must complete
+    // before the ambiguity verdict: bailing out on the second alias
+    // claimant would hide a later row whose PRIMARY id matches (e.g. a
+    // redelivered copy reconciling into its own row while two other rows
+    // share the candidate as a reused origin-id alias) — the caller would
+    // then append a duplicate instead of merging.
+    if (message.id === normalized) return i;
+    if (!message.wireIds?.includes(normalized)) continue;
+    if (aliasIndex < 0) {
+      aliasIndex = i;
+      continue;
+    }
+    if (messages[aliasIndex]!.id !== message.id) aliasAmbiguous = true;
+  }
+  return aliasAmbiguous ? -1 : aliasIndex;
+}
+
 /**
  * Room references prefer verified canonical stanza IDs and reject duplicate
  * authored claims. For DMs, primary `id` wins; a `wireIds` alias
@@ -67,37 +108,10 @@ export function findMessageIndexById<T extends MessageIdCarrier>(
 ): number {
   const normalized = normalizeMessageId(candidate);
   if (!normalized) return -1;
-
   if (messages.some((message) => !!message.authorOccupantJid)) {
-    const candidates = messages.map((message, index) => ({ message, index }))
-      .filter(({ message }) => !predicate || predicate(message));
-    const canonical = candidates.filter(({ message }) => roomCanonicalId(message) === normalized);
-    if (canonical.length > 0) return canonical.length === 1 ? canonical[0]!.index : -1;
-    const claimants = candidates.filter(({ message }) =>
-      message.id === normalized || message.wireIds?.includes(normalized));
-    return claimants.length === 1 ? claimants[0]!.index : -1;
+    return findRoomMessageIndexById(messages, normalized, predicate);
   }
-
-  let aliasIndex = -1;
-  let aliasAmbiguous = false;
-  for (let i = 0; i < messages.length; i++) {
-    const message = messages[i]!;
-    if (predicate && !predicate(message)) continue;
-    // Primary ids win over alias ambiguity, so the scan must complete
-    // before the ambiguity verdict: bailing out on the second alias
-    // claimant would hide a later row whose PRIMARY id matches (e.g. a
-    // redelivered copy reconciling into its own row while two other rows
-    // share the candidate as a reused origin-id alias) — the caller would
-    // then append a duplicate instead of merging.
-    if (message.id === normalized) return i;
-    if (!message.wireIds?.includes(normalized)) continue;
-    if (aliasIndex < 0) {
-      aliasIndex = i;
-      continue;
-    }
-    if (messages[aliasIndex]!.id !== message.id) aliasAmbiguous = true;
-  }
-  return aliasAmbiguous ? -1 : aliasIndex;
+  return findDmMessageIndexById(messages, normalized, predicate);
 }
 
 export function findMessageById<T extends MessageIdCarrier>(
@@ -132,21 +146,34 @@ export class MessageIdIndex<T extends MessageIdCarrier> {
 
   add(message: T): void {
     if (message.authorOccupantJid) {
-      const canonical = roomCanonicalId(message);
-      const identity = message.rowKey ? `row:${message.rowKey}` : canonical
-        ? `canonical:${bareJidKey(message.stanzaIdBy!)}\u0000${canonical}` : message;
-      for (const id of new Set([message.id, ...(message.wireIds ?? [])])) {
-        const claims = this.roomClaims.get(id) ?? new Map<string | T, T>();
-        claims.set(identity, message);
-        this.roomClaims.set(id, claims);
-      }
-      if (canonical) {
-        const claims = this.roomCanonical.get(canonical) ?? new Map<string | T, T>();
-        claims.set(identity, message);
-        this.roomCanonical.set(canonical, claims);
-      }
+      this.addRoom(message);
       return;
     }
+    this.addDm(message);
+  }
+
+  private roomClaimIdentity(message: T, canonical: string | undefined): string | T {
+    if (message.rowKey) return `row:${message.rowKey}`;
+    if (canonical) return `canonical:${bareJidKey(message.stanzaIdBy!)}\u0000${canonical}`;
+    return message;
+  }
+
+  private addRoom(message: T): void {
+    const canonical = roomCanonicalId(message);
+    const identity = this.roomClaimIdentity(message, canonical);
+    for (const id of new Set([message.id, ...(message.wireIds ?? [])])) {
+      const claims = this.roomClaims.get(id) ?? new Map<string | T, T>();
+      claims.set(identity, message);
+      this.roomClaims.set(id, claims);
+    }
+    if (canonical) {
+      const claims = this.roomCanonical.get(canonical) ?? new Map<string | T, T>();
+      claims.set(identity, message);
+      this.roomCanonical.set(canonical, claims);
+    }
+  }
+
+  private addDm(message: T): void {
     this.primary.set(message.id, message);
     for (const alias of message.wireIds ?? []) {
       if (alias === message.id) continue;

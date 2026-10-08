@@ -92,6 +92,40 @@ describe("SenderScopedIdIndex", () => {
     }
   });
 
+  test("ambiguous archive UIDs block an otherwise unique verified sender alias", () => {
+    const first = {
+      ...anonymousArchiveMessage("shared-uid"), id: "first-envelope", authorRealJid: "alice@example.com",
+      senderChosenIds: ["unique-alias"], wireIds: ["unique-alias"], originId: "unique-alias",
+    };
+    const second = { ...first, id: "second-envelope", authorRealJid: "bob@example.com", senderChosenIds: [], wireIds: [] };
+    const incoming = { ...first, id: "incoming-envelope" };
+    const withoutAuthority = { ...incoming, archiveId: undefined };
+    for (const messages of [[first, second], [second, first]]) {
+      const index = new SenderScopedIdIndex(messages);
+      expect(findSenderScopedIdTarget(messages, withoutAuthority)).toBe(first);
+      expect(index.find(withoutAuthority)).toBe(first);
+      expect(findSenderScopedIdTarget(messages, incoming)).toBeUndefined();
+      expect(index.find(incoming)).toBeUndefined();
+    }
+  });
+
+  test("an archive UID with a conflicting stanza ID blocks a different sender-alias target", () => {
+    const authority = { ...canonicalRoomMessage(0), archiveId: "shared-uid", senderChosenIds: [], wireIds: [] };
+    const alias = {
+      ...anonymousArchiveMessage("other-uid"), authorRealJid: "alice@example.com",
+      senderChosenIds: ["unique-alias"], wireIds: ["unique-alias"], originId: "unique-alias",
+    };
+    const incoming = { ...canonicalRoomMessage(1), archiveId: "shared-uid", senderChosenIds: ["unique-alias"], wireIds: ["unique-alias"] };
+    const withoutAuthority = { ...incoming, archiveId: undefined };
+    for (const messages of [[authority, alias], [alias, authority]]) {
+      const index = new SenderScopedIdIndex(messages);
+      expect(findSenderScopedIdTarget(messages, withoutAuthority)).toBe(alias);
+      expect(index.find(withoutAuthority)).toBe(alias);
+      expect(findSenderScopedIdTarget(messages, incoming)).toBeUndefined();
+      expect(index.find(incoming)).toBeUndefined();
+    }
+  });
+
   test("replacing archive identities removes obsolete UIDs and bounds index work", () => {
     let current = anonymousArchiveMessage("archive-0");
     const index = new SenderScopedIdIndex([current]);

@@ -113,12 +113,15 @@ watch(
 
 async function scrollToMessageId(messageId: string, align: "start" | "center" | "end" = "center") {
   const rowKeyMatches = props.items.filter((item) => item.rowKey === messageId);
-  const target = rowKeyMatches.length === 1
-    ? rowKeyMatches[0]
-    : rowKeyMatches.length > 1 ? undefined
-      : props.items.some((item) => !!item.authorOccupantJid)
-        ? resolveRoomMessageTarget(props.items, messageId).message
-        : props.items.find((item) => item.id === messageId);
+  if (rowKeyMatches.length > 1) return false;
+  let target = rowKeyMatches[0];
+  if (rowKeyMatches.length === 0) {
+    if (props.items.some((item) => !!item.authorOccupantJid)) {
+      target = resolveRoomMessageTarget(props.items, messageId).message;
+    } else {
+      target = props.items.find((item) => item.id === messageId);
+    }
+  }
   const index = target ? props.items.indexOf(target) : -1;
   if (index === -1) return false;
   virtualizer.value.scrollToIndex(virtualIndexForItemIndex(index), { align });
