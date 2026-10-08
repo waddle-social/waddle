@@ -260,8 +260,13 @@ class TimelineStore(
             }
             if (existingIndex >= 0) {
                 val existing = list[existingIndex]
-                mergedTwin(existing, item, isGroupchat)?.let { merged ->
-                    list[existingIndex] = merged
+                val merged = mergedTwin(existing, item, isGroupchat)
+                // The MAM UID is private dedupe metadata, retained even
+                // when a live source supersedes its archived copy.
+                list[existingIndex] = (merged ?: existing).copy(
+                    dedupeArchiveId = existing.dedupeArchiveId ?: archiveIdOf(item),
+                )
+                if (merged != null) {
                     list.sortWith(ENTRY_ORDER)
                     publish(conversation, list)
                 }
@@ -273,6 +278,7 @@ class TimelineStore(
                 sortInstant = item.timestamp?.let { parseInstant(it) },
                 order = insertionCounter++,
                 mutations = MutationState(tombstone = initialTombstone),
+                dedupeArchiveId = archiveIdOf(item),
             )
             recordWireInstant(conversation, item.timestamp)
             entry = drainPendingMutationsInto(conversation, entry, isGroupchat)
@@ -290,12 +296,30 @@ class TimelineStore(
     private fun roomTwinIndex(list: List<Entry>, incoming: TimelineItem): Int {
         val roomId = incoming.assignedStanzaId(incoming.conversationJid)?.id
         if (roomId != null) {
-            val canonical = list.indexOfFirst { it.item.assignedStanzaId(incoming.conversationJid)?.id == roomId }
-            if (canonical >= 0) return canonical
+            val canonical = list.indices.filter {
+                list[it].item.assignedStanzaId(incoming.conversationJid)?.id == roomId
+            }
+            if (canonical.isNotEmpty()) return canonical.singleOrNull() ?: -1
+        }
+        val archiveId = archiveIdOf(incoming)
+        if (archiveId != null) {
+            val archived = list.indices.filter { list[it].dedupeArchiveId == archiveId }
+            if (archived.isNotEmpty()) {
+                val index = archived.singleOrNull() ?: return -1
+                val existingRoomId = list[index].item.assignedStanzaId(incoming.conversationJid)?.id
+                return if (roomId != null && existingRoomId != null && roomId != existingRoomId) -1 else index
+            }
         }
         // Multiple author-scoped aliases cannot identify which room row
         // a copy without its canonical id represents.
         return list.indices.filter { roomTwins(list[it].item, incoming) }.singleOrNull() ?: -1
+    }
+
+    /** XEP-0313 room-archive UID, never a personal-archive or sender-controlled stanza alias. */
+    private fun archiveIdOf(item: TimelineItem): String? {
+        val message = (item.source as? TimelineSource.Archived)?.message ?: return null
+        if (message.messageType != "groupchat") return null
+        return message.mamId.takeIf { it.isNotEmpty() }
     }
 
     private fun roomTwins(existing: TimelineItem, incoming: TimelineItem): Boolean {
@@ -649,6 +673,8 @@ class TimelineStore(
         val sortInstant: Instant?,
         val order: Long,
         val mutations: MutationState = MutationState(),
+        /** First valid MAM UID; survives live-source replacement and never enters wire identities. */
+        val dedupeArchiveId: String? = null,
     )
 
     /**

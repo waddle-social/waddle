@@ -15,9 +15,10 @@ public enum TimelineIngestResult: Equatable, Sendable {
 
 /// Per-conversation ordered timelines.
 ///
-/// - Room rows dedupe first on the room-assigned XEP-0359 id. Authored
-///   ids only join rows stamped with the same real author; an occupant
-///   nick can change hands. Direct rows retain sender-scoped dedupe.
+/// - Room rows dedupe first on the room-assigned XEP-0359 id, then the
+///   room archive's MAM UID. Authored ids only join rows stamped with the
+///   same real author; a nick can change hands. Direct rows retain
+///   sender-scoped dedupe.
 /// - Rows sort by wire timestamp, then insertion order. Live stanzas carry
 ///   no timestamp and sort after all timestamped history.
 /// - Mutations apply latest-wins per kind. A mutation's rank is its
@@ -182,6 +183,13 @@ public final class TimelineStore {
             let existing = list[index]
             recordWireDate(item.timestamp, in: conversation)
             var updated = superseding(existing, with: item, isLocalEcho: isLocalEcho)
+            if existing.roomArchiveUID == nil, let uid = roomArchiveUID(of: item) {
+                // Keep the first UID even when this copy changes no rendered
+                // fields, or a later live payload replaces its archive source.
+                var learned = updated ?? existing
+                learned.roomArchiveUID = uid
+                updated = learned
+            }
             if let tombstone, (updated ?? existing).mutations.tombstone == nil {
                 // An archive tombstone for a row loaded before it was retracted.
                 var marked = updated ?? existing
@@ -204,7 +212,8 @@ public final class TimelineStore {
             order: nextOrder(),
             mutations: MutationState(tombstone: tombstone),
             isLocalEcho: isLocalEcho,
-            isArchived: item.message.source != .live
+            isArchived: item.message.source != .live,
+            roomArchiveUID: roomArchiveUID(of: item)
         )
         entry = drainParked(into: entry, conversation: conversation)
         list.append(entry)
@@ -399,6 +408,17 @@ public final class TimelineStore {
            let index = list.firstIndex(where: { $0.item.roomStanzaID == roomID }) {
             return index
         }
+        if let uid = roomArchiveUID(of: incoming) {
+            let matches = list.indices.filter { list[$0].roomArchiveUID == uid }
+            if !matches.isEmpty {
+                guard matches.count == 1 else { return nil }
+                let index = matches[0]
+                if let roomID = incoming.roomStanzaID,
+                   let existingRoomID = list[index].item.roomStanzaID,
+                   roomID != existingRoomID { return nil }
+                return index
+            }
+        }
         guard let author = incoming.message.authorRealJID else { return nil }
         let authoredIDs = Set([incoming.identity.originID, incoming.identity.messageID].compactMap { $0 })
         let matches = list.indices.filter { index in
@@ -411,6 +431,15 @@ public final class TimelineStore {
         }
         // Reused aliases can claim several rows even for a verified author.
         return matches.count == 1 ? matches[0] : nil
+    }
+
+    /// MAM UIDs belong to this room archive, never to sender-chosen wire
+    /// aliases. `Entry.archiveID` separately follows the paging payload.
+    private func roomArchiveUID(of item: TimelineItem) -> String? {
+        guard item.conversation.isRoom,
+              case let .archive(uid) = item.message.source,
+              !uid.isEmpty else { return nil }
+        return uid
     }
 
     private func drainParked(into entry: Entry, conversation: ConversationID) -> Entry {
@@ -549,6 +578,8 @@ private struct Entry: Hashable {
     var mutations: MutationState
     var isLocalEcho: Bool
     var isArchived: Bool
+    /// Retained dedupe identity; independent of the current paging source.
+    var roomArchiveUID: String?
 
     var archiveID: String? {
         guard case let .archive(mamID) = item.message.source else { return nil }
