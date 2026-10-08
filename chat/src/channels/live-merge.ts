@@ -199,6 +199,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
       : rawMessage;
     const channelId = activeChannelId.value;
     const result = insertLiveMessage(messages.value, msg, pendingEchoClientIds, {
+      conversationKind: "room",
       finalize: (timeline) => applyForumContext(timeline),
     });
     messages.value = result.messages;

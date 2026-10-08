@@ -219,7 +219,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         seedExistingOnly: metadataSeed.length > 0,
       });
       for (const live of liveDuringLoad) {
-        rebuilt = insertLiveMessage(rebuilt, live, pendingEchoClientIds).messages;
+        rebuilt = insertLiveMessage(rebuilt, live, pendingEchoClientIds, { conversationKind: "room" }).messages;
       }
       // One forum-context pass after all re-inserts: nothing observes
       // the intermediate timelines (messages.value is assigned below),

@@ -155,7 +155,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
       const liveDuringLoad = stripQueuedSelfMessages(messages.value);
       let timeline = buildTimelineFromMamResults(mamResults);
       for (const live of liveDuringLoad) {
-        timeline = insertLiveMessage(timeline, live, pendingEchoClientIds).messages;
+        timeline = insertLiveMessage(timeline, live, pendingEchoClientIds, { conversationKind: "direct" }).messages;
       }
       const timelineWithQueue = appendQueuedMessages(timeline, peerJid);
       messages.value = timelineWithQueue;

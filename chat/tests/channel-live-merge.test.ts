@@ -769,6 +769,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "my msg",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         deliveryStatus: "sending",
         timestamp: 0,
       } as TimelineMessage,
@@ -778,6 +780,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "my msg",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       timestamp: 0,
     } as TimelineMessage);
     expect(h.messages.value.length).toBe(1);
@@ -793,6 +797,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "duplicate-body",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         deliveryStatus: "sending",
         createdAt: "2026-05-14T10:36:55.000Z",
       } as TimelineMessage,
@@ -802,6 +808,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "duplicate-body",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       createdAt: "2026-05-14T10:36:56.000Z",
     } as TimelineMessage);
     expect(h.messages.value.length).toBe(1);
@@ -835,6 +843,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "draft body",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         createdAt: "2026-05-14T10:36:55.000Z",
       } as TimelineMessage,
     ];
@@ -843,6 +853,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "canonical body",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       createdAt: "2026-05-14T10:36:55.000Z",
       extensionAnnotations: [
         {
@@ -868,6 +880,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "read https://example.com",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         deliveryStatus: "sending",
         linkPreviews: [{ originalUrl: "https://example.com", title: "Example" }],
         createdAt: "2026-05-14T10:36:55.000Z",
@@ -879,6 +893,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "read https://example.com",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       createdAt: "2026-05-14T10:36:56.000Z",
     } as TimelineMessage);
 
