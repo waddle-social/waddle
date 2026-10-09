@@ -188,6 +188,8 @@ impl DatabasePushServiceStore {
                 attempted_devices: 0,
             }),
             Err(error) => {
+                // Repair by acceptance ID does not carry claim authority;
+                // possible sends keep their lease and sticky uncertainty.
                 self.record_publish_job_failure_by_id(
                     &enqueue.job_id.to_string(),
                     &error.to_string(),

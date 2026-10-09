@@ -840,3 +840,104 @@ async fn web_push_capability_is_ready_when_provider_wired() {
         waddle_xmpp::push::WebPushCapability::Ready
     );
 }
+
+#[tokio::test]
+async fn phase3_failure_after_web_send_keeps_uncertainty_and_lease_until_recovery() {
+    let sender = PerEndpointSender::with_sequences(vec![(
+        "phase3-repair".to_string(),
+        vec![
+            WebPushOutcome::Delivered { status: 201 },
+            WebPushOutcome::RateLimited {
+                status: 429,
+                retry_after: None,
+            },
+        ],
+    )]);
+    let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    let (p256dh, auth) = fresh_subscription_material();
+    store
+        .upsert_device(
+            &owner,
+            PushDeviceRegistration::new("device", node.node(), PushDevicePlatform::Web, "test")
+                .with_provider_endpoint(Some("https://push.example.com/phase3-repair".to_string()))
+                .with_provider_token(Some(auth))
+                .with_provider_key_material(Some(p256dh)),
+        )
+        .await
+        .expect("device");
+    let db = store.database();
+    db.guard().await.expect("guard").execute("CREATE TRIGGER fail_phase3_repair BEFORE INSERT ON push_delivery_attempts BEGIN SELECT RAISE(ABORT, 'phase3 failure after send'); END", ()).await.expect("failure injection");
+    assert!(store
+        .publish_notification_from_user_server(
+            node.node(),
+            &web_push_notification_item("phase3-repair", "alice@example.com", "dm", 1),
+            &owner
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sender.calls_matching("phase3-repair"),
+        1,
+        "the encrypted provider request ran before phase3 failed"
+    );
+    let mut rows = query(&store, "SELECT job_id, status, uncertain_send, claim_token, claimed_at_ms FROM push_publish_jobs WHERE item_id = ?", db_params!["phase3-repair"]).await;
+    let row = rows.next().await.expect("row").expect("acceptance");
+    let job: String = row.get(0).expect("job");
+    assert_eq!(
+        row.get::<String>(1).expect("status"),
+        "in-progress",
+        "a repair without its claim token must preserve ownership"
+    );
+    assert_eq!(
+        row.get::<i64>(2).expect("uncertainty"),
+        1,
+        "failed receipt persistence leaves the send unproved"
+    );
+    assert!(row.get::<Option<String>>(3).expect("claim token").is_some());
+    assert!(row.get::<Option<i64>>(4).expect("lease").is_some());
+    assert!(store
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("attempts")
+        .is_empty());
+    db.guard()
+        .await
+        .expect("guard")
+        .execute("DROP TRIGGER fail_phase3_repair", ())
+        .await
+        .expect("remove injection");
+    db.guard()
+        .await
+        .expect("guard")
+        .execute(
+            "UPDATE push_publish_jobs SET claimed_at_ms = 1, attempt_count = 50 WHERE job_id = ?",
+            db_params![job.clone()],
+        )
+        .await
+        .expect("expire lease past cap");
+    store
+        .drain_queued_notification_publish_jobs(1)
+        .await
+        .expect("recover lease");
+    db.guard()
+        .await
+        .expect("guard")
+        .execute(
+            "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
+            db_params![job],
+        )
+        .await
+        .expect("retry now");
+    store
+        .drain_queued_notification_publish_jobs(1)
+        .await
+        .expect("known429 after uncertain send");
+    assert_eq!(sender.calls_matching("phase3-repair"), 2);
+    assert_eq!(
+        store.queued_publish_jobs().await.expect("queue").len(),
+        1,
+        "the later explicit transient and attempt50 cannot erase prior uncertainty"
+    );
+}

@@ -1034,35 +1034,28 @@ impl DatabasePushServiceStore {
         Ok(())
     }
 
+    /// An outer processing error carries no claim capability. An in-progress
+    /// send may have succeeded before its receipt failed, so retain uncertainty
+    /// and let lease recovery retry it without taking ownership from a successor.
     pub(super) async fn record_publish_job_failure_by_id(
         &self,
         job_id: &str,
         error: &str,
     ) -> Result<(), XmppError> {
         let now_ms = crate::time::now_ms();
-        let next_retry_at_ms = retry_at_ms(now_ms);
         self.execute(
             r#"
             UPDATE push_publish_jobs
-            SET status = ?,
-                attempt_count = attempt_count + 1,
-                last_error = ?,
-                next_retry_at_ms = ?,
-                claimed_at_ms = NULL,
-                updated_at_ms = ?
+            SET uncertain_send = CASE WHEN status = 'in-progress' THEN 1 ELSE uncertain_send END,
+                attempt_count = CASE WHEN status = 'queued' THEN attempt_count + 1 ELSE attempt_count END,
+                last_error = CASE WHEN status = 'queued' THEN ? ELSE last_error END,
+                next_retry_at_ms = CASE WHEN status = 'queued' THEN ? ELSE next_retry_at_ms END,
+                updated_at_ms = CASE WHEN status = 'queued' THEN ? ELSE updated_at_ms END
             WHERE job_id = ? AND status IN (?, ?)
             "#,
-            crate::db_params![
-                PUBLISH_JOB_STATUS_QUEUED,
-                error,
-                next_retry_at_ms,
-                now_ms,
-                job_id,
-                PUBLISH_JOB_STATUS_QUEUED,
-                PUBLISH_JOB_STATUS_IN_PROGRESS,
-            ],
-        )
-        .await?;
+            crate::db_params![error, retry_at_ms(now_ms), now_ms, job_id,
+                PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
+        ).await?;
         Ok(())
     }
 
@@ -1143,6 +1136,52 @@ mod tests {
             seen.len() > 1,
             "200 samples produced a single delay — backoff is not jittered"
         );
+    }
+
+    #[tokio::test]
+    async fn failure_repair_without_claim_proof_preserves_successor_lease() {
+        let store = store().await;
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, "repair-ownership")
+            .await
+            .expect("node");
+        let accepted = store
+            .enqueue_notification_publish_job_from_user_server(
+                node.node(),
+                &notification_item("repair-ownership"),
+                &owner,
+            )
+            .await
+            .expect("acceptance");
+        let successor_at = crate::time::now_ms();
+        let successor = uuid::Uuid::new_v4().to_string();
+        store.execute("UPDATE push_publish_jobs SET status = 'in-progress', claim_token = ?, claimed_at_ms = ?, attempt_count = 50 WHERE job_id = ?", crate::db_params![successor.clone(), successor_at, accepted.job_id().to_string()]).await.expect("successor claim");
+        store
+            .record_publish_job_failure_by_id(
+                &accepted.job_id().to_string(),
+                "late predecessor error",
+            )
+            .await
+            .expect("repair");
+        let repaired = store
+            .load_publish_job(&accepted.job_id().to_string())
+            .await
+            .expect("load")
+            .expect("job");
+        assert_eq!(repaired.status(), PUBLISH_JOB_STATUS_IN_PROGRESS);
+        assert_eq!(repaired.claim_token(), successor);
+        assert!(repaired.uncertain_send);
+        let mut rows = store
+            .query(
+                "SELECT claimed_at_ms, attempt_count FROM push_publish_jobs WHERE job_id = ?",
+                crate::db_params![accepted.job_id().to_string()],
+            )
+            .await
+            .expect("lease");
+        let row = rows.next().await.expect("row").expect("claim");
+        assert_eq!(row.get::<i64>(0).expect("claimed time"), successor_at);
+        assert_eq!(row.get::<i64>(1).expect("attempts"), 50);
     }
 
     #[tokio::test]

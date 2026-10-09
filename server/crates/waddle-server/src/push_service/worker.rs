@@ -448,6 +448,8 @@ impl DatabasePushServiceStore {
                 Ok(Some(result)) => results.push(result),
                 Ok(None) => {}
                 Err(error) => {
+                    // No claim token escapes this processing call. Preserve an
+                    // in-progress lease and its possible-send uncertainty.
                     self.record_publish_job_failure_by_id(&job_id, &error.to_string())
                         .await?;
                 }
@@ -1744,8 +1746,24 @@ mod tests {
         assert_eq!(results[0].item_id(), "deliver-after-poison");
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].item_id(), "deliver-after-poison");
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].item_id(), "poison");
+        assert!(queued.is_empty());
+        let mut rows = store
+            .query(
+                "SELECT status, uncertain_send FROM push_publish_jobs WHERE item_id = ?",
+                crate::db_params!["poison"],
+            )
+            .await
+            .expect("failed phase3 lease");
+        let row = rows.next().await.expect("row").expect("poison work");
+        assert_eq!(
+            row.get::<String>(0).expect("status"),
+            PUBLISH_JOB_STATUS_IN_PROGRESS
+        );
+        assert_eq!(
+            row.get::<i64>(1).expect("uncertainty"),
+            1,
+            "phase3 failure keeps the send unknown while unrelated queued work proceeds"
+        );
     }
 
     #[tokio::test]
