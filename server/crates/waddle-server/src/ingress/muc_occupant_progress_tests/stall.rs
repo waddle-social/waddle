@@ -13,7 +13,7 @@ use crate::ingress::{
     execute_uow::{CANCEL_STALLED_DELIVERY, STALL_DELIVERY_RESOURCE},
 };
 
-pub(super) async fn execute(
+pub(in crate::ingress) async fn execute(
     target: jid::FullJid,
     execution: impl Future<Output = ExecutionReport>,
 ) -> ExecutionReport {

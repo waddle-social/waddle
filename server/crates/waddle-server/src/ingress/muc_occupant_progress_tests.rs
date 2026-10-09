@@ -546,7 +546,7 @@ mod canonical;
 mod local;
 
 #[path = "muc_occupant_progress_tests/stall.rs"]
-mod stall;
+pub(super) mod stall;
 
 #[path = "muc_occupant_progress_tests/system.rs"]
 mod system;

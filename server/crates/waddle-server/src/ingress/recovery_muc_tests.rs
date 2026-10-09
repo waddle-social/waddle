@@ -1,11 +1,13 @@
 //! Real room planning followed by maintenance, without client retransmission.
 use super::*;
-use crate::ingress::{receipt_key, IngressEffectCapture};
+use crate::ingress::{execute::ExternalOutcome, receipt_key, IngressEffectCapture};
 use crate::ingress_uow::DeliveryProgressRepository;
 use waddle_xmpp::{
     muc::{room_actor::Join, room_registry_actor::CreateRoom},
     protocol::OutboundEvent,
 };
+
+use crate::ingress::muc_occupant_progress_tests::stall as stalled_copy;
 
 #[derive(Clone, Copy)]
 enum Case {
@@ -289,7 +291,6 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
     }
     if matches!(case, Case::Partial | Case::Inbox) {
         let deps = env.recovery_deps();
-        let entered = Arc::new(AtomicBool::new(false));
         let mut ordered = decision.clone();
         // There is one detached effect per occupant; preserve all original dependencies.
         let b_index = ordered.external.iter().position(|e| matches!(e, ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. }) if resources == std::slice::from_ref(&b))).expect("B effect");
@@ -297,20 +298,29 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         ordered.external.swap(b_index, last);
         ordered.external_dependencies.swap(b_index, last);
         ordered.external_receipts.swap(b_index, last);
-        let report = STALL_DELIVERY_RESOURCE
-            .scope(
-                (b.clone(), entered.clone()),
-                execute_effects(
-                    &f.uow,
-                    &f.db,
-                    &ordered,
-                    &ImmediateSink,
-                    &deps,
-                    Duration::from_millis(100),
-                ),
-            )
-            .await;
-        assert!(entered.load(Ordering::SeqCst), "B stalled: {report:?}");
+        // Partial recovery needs a copy interrupted at the delivery seam;
+        // preceding activity/DB work must not consume that interruption point.
+        let report = stalled_copy::execute(
+            b.clone(),
+            execute_effects(
+                &f.uow,
+                &f.db,
+                &ordered,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(30),
+            ),
+        )
+        .await;
+        assert!(
+            report.receipt_failures.is_empty(),
+            "partial copy persistence: {report:?}"
+        );
+        assert_eq!(
+            report.outcomes[last].1,
+            ExternalOutcome::Failed,
+            "cancelled B has no acceptance proof"
+        );
         assert_eq!(append_count(&sm, &a).await, 1);
         assert_eq!(append_count(&sm, &b).await, 0);
     }
