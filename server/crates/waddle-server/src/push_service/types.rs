@@ -317,6 +317,7 @@ pub struct PushPublishJob {
     pub(super) acceptance_scope: PushAcceptanceScope,
     pub(super) publication_order: u64,
     pub(super) backing_state: PushBackingState,
+    pub(super) uncertain_send: bool,
     pub(super) status: String,
     /// The UUID-string written by phase 1's claim. Phase 3's UPDATE
     /// gates on this so a stale-claim recovery + concurrent re-claim

@@ -812,6 +812,69 @@ pub(super) fn apply_retry_jitter(delay_ms: i64) -> i64 {
     ((delay_ms as f64) * factor) as i64
 }
 
+pub(super) async fn lock_outbox_ancestry_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    if let Ok(id) = uuid::Uuid::parse_str(job_id) {
+        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id FOR UPDATE"
+        } else {
+            "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id"
+        };
+        let mut rows = tx.query(sql, crate::db_params![job_id]).await?;
+        while rows.next().await?.is_some() {}
+        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn settle_outbox_ancestry_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    if let Ok(id) = uuid::Uuid::parse_str(job_id) {
+        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
+            .await?;
+        tx.execute("UPDATE notification_outbox_lineage SET settled_at_ms = ? WHERE job_id = ? AND settled_at_ms IS NULL",
+            crate::db_params![crate::time::now_ms(), job_id]).await?;
+    }
+    Ok(())
+}
+
+/// An upstream refusal cannot release a descendant already owned by the
+/// durable provider queue. The provider worker settles that remaining custody.
+pub(super) async fn settle_outbox_if_unowned_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    let has_queue = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let mut rows = tx
+            .query("SELECT to_regclass('push_publish_jobs')::text", ())
+            .await?;
+        match rows.next().await? {
+            Some(row) => row.get::<Option<String>>(0)?.is_some(),
+            None => false,
+        }
+    } else {
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'",
+                (),
+            )
+            .await?;
+        rows.next().await?.is_some()
+    };
+    if has_queue {
+        let mut rows = tx.query("SELECT 1 FROM push_publish_jobs WHERE ancestry_job_id = ? AND status IN ('queued', 'in-progress') LIMIT 1", crate::db_params![job_id]).await?;
+        if rows.next().await?.is_some() {
+            return Ok(());
+        }
+    }
+    settle_outbox_ancestry_tx(tx, job_id).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -929,67 +992,4 @@ mod tests {
             .expect("pending after fresh mark")
             .is_empty());
     }
-}
-
-pub(super) async fn lock_outbox_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
-    job_id: &str,
-) -> Result<(), NotificationOutboxError> {
-    if let Ok(id) = uuid::Uuid::parse_str(job_id) {
-        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
-        let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
-            "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id FOR UPDATE"
-        } else {
-            "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id"
-        };
-        let mut rows = tx.query(sql, crate::db_params![job_id]).await?;
-        while rows.next().await?.is_some() {}
-        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
-    }
-    Ok(())
-}
-
-pub(super) async fn settle_outbox_ancestry_tx(
-    tx: &mut crate::db::Transaction<'_>,
-    job_id: &str,
-) -> Result<(), NotificationOutboxError> {
-    if let Ok(id) = uuid::Uuid::parse_str(job_id) {
-        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
-            .await?;
-        tx.execute("UPDATE notification_outbox_lineage SET settled_at_ms = ? WHERE job_id = ? AND settled_at_ms IS NULL",
-            crate::db_params![crate::time::now_ms(), job_id]).await?;
-    }
-    Ok(())
-}
-
-/// An upstream refusal cannot release a descendant already owned by the
-/// durable provider queue. The provider worker settles that remaining custody.
-pub(super) async fn settle_outbox_if_unowned_tx(
-    tx: &mut crate::db::Transaction<'_>,
-    job_id: &str,
-) -> Result<(), NotificationOutboxError> {
-    let has_queue = if tx.driver() == crate::db::DatabaseDriver::Postgres {
-        let mut rows = tx
-            .query("SELECT to_regclass('push_publish_jobs')::text", ())
-            .await?;
-        match rows.next().await? {
-            Some(row) => row.get::<Option<String>>(0)?.is_some(),
-            None => false,
-        }
-    } else {
-        let mut rows = tx
-            .query(
-                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'",
-                (),
-            )
-            .await?;
-        rows.next().await?.is_some()
-    };
-    if has_queue {
-        let mut rows = tx.query("SELECT 1 FROM push_publish_jobs WHERE ancestry_job_id = ? AND status IN ('queued', 'in-progress') LIMIT 1", crate::db_params![job_id]).await?;
-        if rows.next().await?.is_some() {
-            return Ok(());
-        }
-    }
-    settle_outbox_ancestry_tx(tx, job_id).await
 }

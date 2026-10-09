@@ -361,6 +361,11 @@ impl DatabasePushServiceStore {
         self.execute(&format!("CREATE TABLE IF NOT EXISTS push_publication_orders (node TEXT PRIMARY KEY, next_order {i64_type} NOT NULL)"), ()).await?;
         self.add_column_if_missing("push_delivery_attempts", "publish_job_id TEXT")
             .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "uncertain_send INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
         self.migrate_publish_acceptance_scope().await?;
         self.adopt_notification_ancestry().await?;
         Ok(())
@@ -397,7 +402,7 @@ impl DatabasePushServiceStore {
                 )
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-                tx.execute("INSERT INTO push_publish_jobs_rebuild (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms) SELECT job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms FROM push_publish_jobs", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("INSERT INTO push_publish_jobs_rebuild (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms) SELECT job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms FROM push_publish_jobs", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
                 tx.execute("DROP TABLE push_publish_jobs", ())
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -527,6 +532,37 @@ impl DatabasePushServiceStore {
     }
 }
 
+fn push_publish_jobs_table_sql(i64_type: &str, table: &str, if_not_exists: bool) -> String {
+    let exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    format!(
+        r#"CREATE TABLE {exists}{table} (
+        job_id TEXT PRIMARY KEY,
+        owner_bare_jid TEXT NOT NULL,
+        push_service_jid TEXT,
+        node TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        payload_xml TEXT NOT NULL,
+        publish_options_xml TEXT,
+        ancestry_job_id TEXT,
+        acceptance_scope TEXT NOT NULL DEFAULT 'legacy' CHECK (acceptance_scope IN ('legacy', 'wire', 'canonical')),
+        backing_published_at_ms {i64_type},
+        publication_order {i64_type} NOT NULL DEFAULT 0,
+        backing_state TEXT NOT NULL DEFAULT 'pending' CHECK (backing_state IN ('pending', 'published', 'superseded', 'not-configured')),
+        uncertain_send INTEGER NOT NULL DEFAULT 0 CHECK (uncertain_send IN (0, 1)),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_retry_at_ms {i64_type},
+        claimed_at_ms {i64_type},
+        claim_token TEXT,
+        created_at_ms {i64_type} NOT NULL,
+        updated_at_ms {i64_type} NOT NULL,
+        published_at_ms {i64_type},
+        FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
+    )"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -604,34 +640,4 @@ mod tests {
         assert_eq!(device.provider_key_material(), None);
         assert_item_not_found(publish_err);
     }
-}
-
-fn push_publish_jobs_table_sql(i64_type: &str, table: &str, if_not_exists: bool) -> String {
-    let exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
-    format!(
-        r#"CREATE TABLE {exists}{table} (
-        job_id TEXT PRIMARY KEY,
-        owner_bare_jid TEXT NOT NULL,
-        push_service_jid TEXT,
-        node TEXT NOT NULL,
-        item_id TEXT NOT NULL,
-        payload_xml TEXT NOT NULL,
-        publish_options_xml TEXT,
-        ancestry_job_id TEXT,
-        acceptance_scope TEXT NOT NULL DEFAULT 'legacy' CHECK (acceptance_scope IN ('legacy', 'wire', 'canonical')),
-        backing_published_at_ms {i64_type},
-        publication_order {i64_type} NOT NULL DEFAULT 0,
-        backing_state TEXT NOT NULL DEFAULT 'pending' CHECK (backing_state IN ('pending', 'published', 'superseded', 'not-configured')),
-        status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
-        attempt_count INTEGER NOT NULL DEFAULT 0,
-        last_error TEXT,
-        next_retry_at_ms {i64_type},
-        claimed_at_ms {i64_type},
-        claim_token TEXT,
-        created_at_ms {i64_type} NOT NULL,
-        updated_at_ms {i64_type} NOT NULL,
-        published_at_ms {i64_type},
-        FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
-    )"#
-    )
 }

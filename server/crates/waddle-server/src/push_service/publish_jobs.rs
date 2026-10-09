@@ -158,7 +158,7 @@ pub(super) async fn get_publish_job_tx(
     let mut rows = tx
         .query(
             r#"
-            SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state
+            SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send
             FROM push_publish_jobs
             WHERE job_id = ?
             "#,
@@ -462,7 +462,8 @@ pub(super) async fn prune_delivery_attempts_tx(
               LIMIT ?
           )
           AND NOT (
-              status IN (?, ?, ?)
+              publish_job_id IS NOT NULL
+              AND status IN (?, ?, ?)
               AND publish_job_id IN (
                   SELECT job_id
                   FROM push_publish_jobs
@@ -558,7 +559,7 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
     node: &str,
 ) -> Result<(), XmppError> {
     let mut rows = tx.query(
-        "SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state FROM push_publish_jobs WHERE owner_bare_jid = ? AND node = ? AND status IN (?, ?) ORDER BY job_id",
+        "SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send FROM push_publish_jobs WHERE owner_bare_jid = ? AND node = ? AND status IN (?, ?) ORDER BY job_id",
         crate::db_params![owner_bare_jid.to_string(), node, PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
     ).await.map_err(|error| XmppError::internal(error.to_string()))?;
     let mut jobs = Vec::new();
@@ -647,6 +648,10 @@ fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError>
             &row.get::<String>(10)
                 .map_err(|error| XmppError::internal(error.to_string()))?,
         )?,
+        uncertain_send: row
+            .get::<i64>(11)
+            .map_err(|error| XmppError::internal(error.to_string()))?
+            != 0,
     })
 }
 
@@ -977,6 +982,7 @@ impl DatabasePushServiceStore {
                 next_retry_at_ms = ?,
                 claimed_at_ms = NULL,
                 claim_token = NULL,
+                uncertain_send = 1,
                 updated_at_ms = ?
             WHERE status = ?
               AND claimed_at_ms IS NOT NULL
@@ -1008,6 +1014,7 @@ impl DatabasePushServiceStore {
                 next_retry_at_ms = NULL,
                 claimed_at_ms = NULL,
                 claim_token = NULL,
+                uncertain_send = 1,
                 updated_at_ms = ?
             WHERE job_id = ?
               AND status = ?
@@ -1063,7 +1070,7 @@ impl DatabasePushServiceStore {
         let mut rows = self
             .query(
                 r#"
-                SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state
+                SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send
                 FROM push_publish_jobs
                 WHERE status = ?
                 ORDER BY created_at_ms ASC, job_id ASC

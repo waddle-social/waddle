@@ -451,7 +451,7 @@ impl DatabasePushServiceStore {
             super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx(
                 &mut tx,
                 owner_bare_jid,
-                &node,
+                node,
             )
             .await?;
         }

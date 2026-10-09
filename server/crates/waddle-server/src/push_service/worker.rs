@@ -973,7 +973,7 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        super::publish_jobs::lock_notification_ancestry_tx(&mut tx, &job).await?;
+        super::publish_jobs::lock_notification_ancestry_tx(&mut tx, job).await?;
         lock_owner_tx(&mut tx, job.owner_bare_jid(), now_ms).await?;
         lock_node_tx(&mut tx, job.node(), now_ms).await?;
         // Completion interlock: if our claim was reset by a
@@ -1109,13 +1109,14 @@ impl DatabasePushServiceStore {
                 .find(|attempt| attempt_status_is_transient(attempt.status))
                 .and_then(|attempt| attempt.last_error.clone())
                 .unwrap_or_else(|| "Web Push transient failure".to_string());
-            let unknown_send = attempts.iter().any(|attempt| {
-                matches!(
-                    attempt.status,
-                    dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
-                        | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
-                )
-            });
+            let unknown_send = job.uncertain_send
+                || attempts.iter().any(|attempt| {
+                    matches!(
+                        attempt.status,
+                        dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
+                            | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
+                    )
+                });
             if !unknown_send && attempt_count_so_far + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS {
                 // XEP-0357 §6.1: "until a sufficient number of errors
                 // have been received in a row." Past the ceiling, mark
@@ -1179,6 +1180,7 @@ impl DatabasePushServiceStore {
                         attempt_count = attempt_count + 1,
                         last_error = ?,
                         next_retry_at_ms = ?,
+                        uncertain_send = ?,
                         claimed_at_ms = NULL,
                         claim_token = NULL,
                         updated_at_ms = ?
@@ -1188,6 +1190,7 @@ impl DatabasePushServiceStore {
                         PUBLISH_JOB_STATUS_QUEUED,
                         transient_error,
                         retry_at,
+                        i64::from(unknown_send),
                         now_ms,
                         job.job_id().to_string(),
                         PUBLISH_JOB_STATUS_IN_PROGRESS,
@@ -1322,6 +1325,112 @@ mod tests {
     use crate::push_service::test_support::{notification_item, owner, store};
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
     use waddle_xmpp::inbox::storage::InboxStorage;
+
+    #[tokio::test]
+    async fn expired_unknown_send_past_cap_survives_known_transient_and_settles_only_disposition() {
+        let store = store().await;
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, "unknown-history")
+            .await
+            .expect("node");
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new(
+                    "web-device",
+                    node.node(),
+                    PushDevicePlatform::Web,
+                    "test",
+                ),
+            )
+            .await
+            .expect("device");
+        let accepted = store
+            .enqueue_notification_publish_job_from_user_server(
+                node.node(),
+                &notification_item("unknown-history"),
+                &owner,
+            )
+            .await
+            .expect("acceptance");
+        store.execute("UPDATE push_publish_jobs SET status = 'in-progress', attempt_count = 50, claimed_at_ms = 1, claim_token = 'lost-claim' WHERE job_id = ?", crate::db_params![accepted.job_id().to_string()]).await.expect("lost expired send");
+        store
+            .process_publish_job_with_retention_limit(&accepted.job_id().to_string(), 10_000)
+            .await
+            .expect("known not-configured transient");
+        let queued = store.queued_publish_jobs().await.expect("queued");
+        assert_eq!(
+            queued.len(),
+            1,
+            "a later known transient cannot erase prior uncertain delivery"
+        );
+        assert!(queued[0].uncertain_send);
+        store
+            .disable_device_for_owner(
+                &owner,
+                node.node(),
+                "web-device",
+                Some("explicit device revocation"),
+            )
+            .await
+            .expect("revoke unavailable device");
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new(
+                    "known-device",
+                    node.node(),
+                    PushDevicePlatform::Fcm,
+                    "test",
+                ),
+            )
+            .await
+            .expect("known dispatcher fixture");
+        store
+            .execute(
+                "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
+                crate::db_params![accepted.job_id().to_string()],
+            )
+            .await
+            .expect("retry now");
+        store
+            .process_publish_job_with_retention_limit(&accepted.job_id().to_string(), 10_000)
+            .await
+            .expect("known successful disposition");
+        assert_eq!(
+            store
+                .load_publish_job(&accepted.job_id().to_string())
+                .await
+                .expect("load")
+                .expect("job")
+                .status(),
+            PUBLISH_JOB_STATUS_PUBLISHED
+        );
+        let refused = store
+            .enqueue_notification_publish_job_from_user_server(
+                node.node(),
+                &notification_item("unknown-refused"),
+                &owner,
+            )
+            .await
+            .expect("second acceptance");
+        store.execute("UPDATE push_publish_jobs SET uncertain_send = 1, attempt_count = 50 WHERE job_id = ?", crate::db_params![refused.job_id().to_string()]).await.expect("prior uncertainty");
+        store
+            .disable_nodes_for_owner(&owner, Some(node.node()))
+            .await
+            .expect("explicit revocation");
+        assert_eq!(
+            store
+                .load_publish_job(&refused.job_id().to_string())
+                .await
+                .expect("load")
+                .expect("job")
+                .status(),
+            PUBLISH_JOB_STATUS_FAILED,
+            "explicit revocation records refusal rather than fake provider success"
+        );
+    }
 
     #[tokio::test]
     async fn apns_badge_uses_live_account_unread_total() {

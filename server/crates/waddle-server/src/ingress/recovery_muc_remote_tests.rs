@@ -112,9 +112,54 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         blocked_recipients: &[],
     })
     .expect("rebuild remote occupant");
+    let mut detached_index = None;
+    for (index, effect) in rebuilt.decision.external.iter().enumerate() {
+        match effect {
+            ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+                bare, resources, route_identity, stanza, ..
+            }) => {
+                assert!(detached_index.replace(index).is_none(), "one original detached route");
+                assert_eq!(bare, &occupant.to_bare());
+                assert_eq!(resources, std::slice::from_ref(&occupant), "frozen exact resource audience");
+                let IngressEffectIntent::RouteMucGroupchat { route_identity: approved_identity, .. } = muc else { panic!("MUC intent"); };
+                // MUC copies carry their identity in the frozen stanza and
+                // route progress; the optional direct-route hint is absent.
+                if let Some(identity) = route_identity {
+                    assert_eq!(identity, approved_identity);
+                }
+                let original_progress = rebuilt.decision.route_progress.iter()
+                    .find(|progress| progress.receipt == receipt).expect("original MUC progress");
+                assert_eq!(&original_progress.route_identity, approved_identity);
+                assert!(original_progress.matches(effect), "exact original route authority");
+                let source = crate::ingress::room_canonical::source(&envelope, muc).expect("canonical original source");
+                let waddle_xmpp::Stanza::Message(message) = stanza.as_ref() else { panic!("canonical message copy"); };
+                assert_eq!(message, &crate::ingress::room_canonical::occupant_copy_message(source, &occupant), "only personalize the original frozen target");
+                assert_eq!(rebuilt.decision.external_receipts[index], vec![receipt.clone()]);
+            }
+            ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::NotificationActivity { owner, mutation }) => {
+                assert!(matches!(mutation,
+                    waddle_xmpp::ingress::NotificationActivityMutation::ChatState { .. }
+                        | waddle_xmpp::ingress::NotificationActivityMutation::ChatStateGone { .. }
+                        | waddle_xmpp::ingress::NotificationActivityMutation::ReadMarker { .. }
+                        | waddle_xmpp::ingress::NotificationActivityMutation::OutboundMessage { .. }), "supported local projection only");
+                let approved = IngressEffectIntent::NotificationActivityPreview { owner: owner.clone(), mutation: mutation.clone() };
+                assert!(unreceipted.contains(&approved), "local projection retains original unreceipted payload");
+                assert_eq!(rebuilt.decision.external_receipts[index], vec![receipt_key(&approved).expect("approved projection receipt")]);
+            }
+            _ => panic!("recovery must not introduce relays or another live audience: {effect:?}"),
+        }
+    }
+    let detached_index = detached_index.expect("one detached route");
+    assert_eq!(rebuilt.decision.message_key, Some(key));
     assert!(
-        matches!(&rebuilt.decision.external[..], [ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached { resources, .. })] if resources == std::slice::from_ref(&occupant)),
-        "recovery emits only the exact detached copy, never a relay"
+        rebuilt
+            .decision
+            .receipts_pending
+            .iter()
+            .all(|receipt| unreceipted
+                .iter()
+                .any(|intent| receipt_key(intent).as_ref().ok() == Some(receipt))),
+        "reconstructed obligations belong to the original canonical intents"
     );
 
     let claims = Arc::new(InProcessClaimStore::new());
@@ -178,8 +223,8 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
             &f.uow,
             &f.db,
             &rebuilt.decision,
-            0,
-            &rebuilt.decision.external[0],
+            detached_index,
+            &rebuilt.decision.external[detached_index],
             &deps,
             tokio::time::Instant::now() + Duration::from_secs(5),
         )

@@ -190,7 +190,7 @@ async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
             .expect("registrations");
     let push = DatabasePushServiceStore::new_with_secret_key(
         fixture.db.clone(),
-        b"notification-ancestry-secret",
+        &rand::random::<[u8; 32]>(),
     )
     .await
     .expect("push service");
@@ -370,7 +370,7 @@ async fn notification_lost_backing_marker_preserves_newer_wire(fixture: IngressF
     let service: BareJid = "push.example.com".parse().expect("service");
     let push = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
         fixture.db.clone(),
-        b"notification-version-secret",
+        &rand::random::<[u8; 32]>(),
         service.clone(),
         backing.clone(),
     )
@@ -391,6 +391,12 @@ async fn notification_lost_backing_marker_preserves_newer_wire(fixture: IngressF
     push.register_first_party_node_for_owner(&owner, service.as_str(), node.node(), None)
         .await
         .expect("register");
+    let mut config = waddle_xmpp::pubsub::NodeConfig::push_service();
+    config.max_items = 1;
+    backing
+        .update_node_config(&service, node.node(), &config)
+        .await
+        .expect("max-items1 fixture");
     attach(&fixture, &candidate).await;
     fanout(
         &outbox,

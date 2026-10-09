@@ -1447,6 +1447,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     [
                         "ingress_archive_dispatch",
                         "ingress_deliveries",
+                        "ingress_effect_descendants",
                         "ingress_effect_intents",
                         "ingress_effect_receipts",
                         "ingress_messages",
@@ -4974,6 +4975,7 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
     .await
     .expect("pre-V1025 catalog");
     let key = MessageKey::new();
+    let active_key = MessageKey::new();
     let mut tx = db.begin_immediate().await.expect("legacy observer data");
     crate::ingress_substrate::record_message(
         &mut tx,
@@ -4983,6 +4985,14 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
     )
     .await
     .expect("canonical message");
+    crate::ingress_substrate::record_message(
+        &mut tx,
+        active_key,
+        &SemanticDigest::from_storage(1, [2; 32]).expect("active digest"),
+        None,
+    )
+    .await
+    .expect("active canonical message");
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
     let mut matching_hash = Vec::new();
     for (ordinal, plugin) in ["plugin-a", "plugin-b"].into_iter().enumerate() {
@@ -5012,17 +5022,36 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
                 key.to_storage().to_string(),
                 ordinal.to_string(),
                 kind,
-                hash,
-                payload
+                hash.clone(),
+                payload.clone()
             ],
         )
         .await
         .expect("canonical observer intent");
+        if ordinal == 0 {
+            tx.execute(
+                sql,
+                crate::db_params![
+                    active_key.to_storage().to_string(),
+                    "0",
+                    kind,
+                    hash,
+                    payload
+                ],
+            )
+            .await
+            .expect("active canonical observer intent");
+        }
     }
     let active_work = uuid::Uuid::new_v4();
     let completed_work = uuid::Uuid::new_v4();
-    for (id, status) in [(active_work, "pending"), (completed_work, "completed")] {
-        tx.execute("INSERT INTO extension_room_observation_work(id,source_key,message_key,plugin_id,generation,identity,room_jid,revision,source_json,body,status,attempt,due_at_ms) VALUES(?,?,?,'plugin-a',1,?,?,0,'{}','',?,0,0)", crate::db_params![id.to_string(),key.to_storage().to_string(),key.to_storage().to_string(),"a".repeat(64),room.to_string(),status]).await.expect("legacy work");
+    // Distinct source messages preserve the observer's natural work key.
+    // Pending work still relies on its unreceipted canonical obligation.
+    for (id, status, message_key) in [
+        (active_work, "pending", active_key),
+        (completed_work, "completed", key),
+    ] {
+        tx.execute("INSERT INTO extension_room_observation_work(id,source_key,message_key,plugin_id,generation,identity,room_jid,revision,source_json,body,status,attempt,due_at_ms) VALUES(?,?,?,'plugin-a',1,?,?,0,'{}','',?,0,0)", crate::db_params![id.to_string(),message_key.to_storage().to_string(),message_key.to_storage().to_string(),"a".repeat(64),room.to_string(),status]).await.expect("legacy work");
     }
     let publication = uuid::Uuid::new_v4();
     tx.execute("INSERT INTO extension_room_publications(id,work_id,output_index,source_key,plugin_id,generation,identity,room_jid,revision,source_json,payload_json,status) VALUES(?,?,0,?,'plugin-a',1,?,?,0,'{}','{}','pending')", crate::db_params![publication.to_string(),completed_work.to_string(),key.to_storage().to_string(),"a".repeat(64),room.to_string()]).await.expect("legacy pending publication");
@@ -5035,11 +5064,12 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
         vec![1025]
     );
     let conn = db.guard().await.expect("catalog");
+    let references_query = match db.driver() {
+        DatabaseDriver::Postgres => "SELECT descendant_key, semantic_identity_hash, message_key::text FROM ingress_effect_descendants",
+        DatabaseDriver::Sqlite => "SELECT descendant_key, semantic_identity_hash, message_key FROM ingress_effect_descendants",
+    };
     let mut rows = conn
-        .query(
-            "SELECT descendant_key, semantic_identity_hash FROM ingress_effect_descendants",
-            (),
-        )
+        .query(references_query, ())
         .await
         .expect("adopted Foundation references");
     let row = rows
@@ -5054,6 +5084,11 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
     assert_eq!(
         row.get::<Vec<u8>>(1).expect("reference authority"),
         matching_hash
+    );
+    assert_eq!(
+        row.get::<String>(2).expect("canonical publication parent"),
+        key.to_storage().to_string(),
+        "the active source must not borrow the completed source's publication",
     );
     assert!(rows.next().await.expect("reference end").is_none(), "active work uses canonical unreceipted intent; unrelated plugin must not borrow publication ancestry");
 }

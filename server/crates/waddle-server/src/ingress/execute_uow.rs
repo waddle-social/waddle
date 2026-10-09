@@ -45,7 +45,9 @@ pub(in crate::ingress) use detached::record_delivery_progress;
 #[cfg(test)]
 pub(crate) use detached::CONTEND_DELIVERY_PROGRESS_ONCE;
 #[cfg(test)]
-pub(crate) use detached::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE};
+pub(crate) use detached::{
+    CANCEL_STALLED_DELIVERY, FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE,
+};
 
 pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
     match effect {
