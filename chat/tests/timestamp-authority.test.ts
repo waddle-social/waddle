@@ -333,14 +333,14 @@ describe("end-to-end tab-restore scenario (codec → merge)", () => {
   test("channel: same scenario via roomMessageFromArchived → mapLiveRoomMessageToTimeline → mergeLiveMessage", () => {
     const h = channelHarness();
     const archive = roomMessageFromArchived(
-      { ...baseArchivedRoom, id: "msg-1", timestamp: "2026-05-20T10:00:00.000Z" },
+      { ...baseArchivedRoom, stanza_id: "room-stanza-1", stanza_id_by: "room@conf.example.com", id: "msg-1", timestamp: "2026-05-20T10:00:00.000Z" },
     );
     expect(archive).not.toBeNull();
     h.messages.value = [mapLiveRoomMessageToTimeline(session, archive!)];
     expect(h.messages.value[0]?.createdAtSource).toBe("archive");
 
     const live = roomMessageFromArchived(
-      { ...baseArchivedRoom, id: "msg-1", timestamp: undefined },
+      { ...baseArchivedRoom, stanza_id: "room-stanza-1", stanza_id_by: "room@conf.example.com", id: "msg-1", timestamp: undefined },
       "live",
     );
     expect(live).not.toBeNull();

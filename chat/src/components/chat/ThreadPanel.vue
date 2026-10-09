@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance, type Ref } from "vue";
 import { ArrowDown, ArrowUp, CornerDownRight } from "lucide-vue-next";
 import { useJumpToLiveEdge } from "@/ui/use-jump-to-live-edge";
@@ -138,12 +139,12 @@ const latestRemoteThreadMessageId = computed(() =>
 // Burst grouping and day dividers match the main feed (ContentArea.vue).
 const threadDisplayMeta = computed(() => buildMessageDisplayMeta(orderedThreadMessages.value));
 
-function isGroupedFollowUp(messageId: string): boolean {
-  return threadDisplayMeta.value.grouped.has(messageId);
+function isGroupedFollowUp(message: TimelineMessage): boolean {
+  return threadDisplayMeta.value.grouped.has(timelineRowKey(message));
 }
 
-function showDayDividerBefore(messageId: string): boolean {
-  return threadDisplayMeta.value.dayDivider.has(messageId);
+function showDayDividerBefore(message: TimelineMessage): boolean {
+  return threadDisplayMeta.value.dayDivider.has(timelineRowKey(message));
 }
 
 function dayDividerLabel(createdAt: string): string {
@@ -242,7 +243,7 @@ const setVirtualTimelineRef = (instance: VirtualTimelineHandle | null) => {
         );
         if (!target) return false;
         return instance.scrollToMessageId(
-          target.id,
+          timelineRowKey(target),
           isTopPinnedScrollDirection(mode) ? "start" : "end",
         );
       }
@@ -471,9 +472,9 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
       @load-older="activeThreadId && emit('loadOlder', activeThreadId)"
     >
       <template #item="{ item: message }">
-        <template v-if="message.id === activeEntry.root?.id">
+        <template v-if="activeEntry.root && timelineRowKey(message) === timelineRowKey(activeEntry.root)">
           <div
-            v-if="showDayDividerBefore(message.id)"
+            v-if="showDayDividerBefore(message)"
             class="chat-day-divider type-section-label"
             :data-day-marker-created-at="message.createdAt"
             role="separator"
@@ -527,7 +528,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
         </template>
         <template v-else>
           <div
-            v-if="showDayDividerBefore(message.id)"
+            v-if="showDayDividerBefore(message)"
             class="chat-day-divider type-section-label"
             :data-day-marker-created-at="message.createdAt"
             role="separator"
@@ -552,7 +553,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               :last-seen="roomLastSeen[message.author]"
               :author-jid="authorJidByNick?.[message.author]"
               :thread-reply-count="replyChildThreadCount(message)"
-              :grouped="isGroupedFollowUp(message.id)"
+              :grouped="isGroupedFollowUp(message)"
               hide-thread-chip
               hide-reply-chip
               :reaction-mode-selected="reactionMode?.selectedMessageId === message.id"

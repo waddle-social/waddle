@@ -240,7 +240,7 @@ describe("ThreadPanel desktop sub-thread action", () => {
   test("ThreadPanel targets a reply row's own child thread", () => {
     const rootCard = sourceBlock(
       threadPanelSource,
-      'v-if="message.id === activeEntry.root?.id"',
+      'v-if="activeEntry.root && timelineRowKey(message) === timelineRowKey(activeEntry.root)"',
       "<template v-else>",
     );
     expect(rootCard).toContain(':thread-action-thread-id="activeThreadId ?? message.id"');
@@ -248,7 +248,7 @@ describe("ThreadPanel desktop sub-thread action", () => {
 
     const replyCard = sourceBlockAfter(
       threadPanelSource,
-      'v-if="message.id === activeEntry.root?.id"',
+      'v-if="activeEntry.root && timelineRowKey(message) === timelineRowKey(activeEntry.root)"',
       '<div class="relative group/thread-child">',
       '<div v-if="replyChildHasNestedThread(message)"',
     );

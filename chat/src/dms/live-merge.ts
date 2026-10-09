@@ -150,7 +150,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
       ? retractTimelineMessage(rawMessage, rawMessage.retractionId)
       : rawMessage;
     const peerJid = activePeerJid.value;
-    const result = insertLiveMessage(messages.value, msg, pendingEchoClientIds);
+    const result = insertLiveMessage(messages.value, msg, pendingEchoClientIds, { conversationKind: "direct" });
     messages.value = result.messages;
     if (!result.appended) return;
     void scrollToPinnedEdgeAndPin();

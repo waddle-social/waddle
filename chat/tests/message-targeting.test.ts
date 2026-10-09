@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, mock, test } from "bun:test";
-import { findMessageElementById } from "../src/lib/message-targeting";
+import { findMessageElementById, findMessageElementByRowKey } from "../src/lib/message-targeting";
 
 type StubElement = {
   getAttribute(name: string): string | null;
@@ -83,4 +83,14 @@ describe("findMessageElementById", () => {
     expect(querySelector).toHaveBeenCalledTimes(1);
     expect(querySelectorAll).toHaveBeenCalledWith("[data-message-id]");
   });
+});
+
+
+test("local row-key DOM targets distinguish cards sharing a wire ID", () => {
+  const first = { getAttribute: (name: string) => name === "data-message-id" ? "shared" : name === "data-message-row-key" ? "first" : null };
+  const second = { getAttribute: (name: string) => name === "data-message-id" ? "shared" : name === "data-message-row-key" ? "second" : null };
+  delete (globalThis as { CSS?: unknown }).CSS;
+  const root = { querySelector: mock(() => null), querySelectorAll: mock(() => [first, second]) };
+  expect(findMessageElementByRowKey(root, "second")).toBe(second);
+  expect(root.querySelectorAll).toHaveBeenCalledWith("[data-message-row-key]");
 });

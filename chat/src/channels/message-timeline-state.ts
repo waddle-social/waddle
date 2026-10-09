@@ -20,7 +20,7 @@ import { isStaleReactionUpdate } from "@/lib/messaging/reactions";
 import { retractTimelineMessage } from "@/lib/messaging/retraction";
 import { mergeRetractionTombstone } from "@/lib/messaging/timeline-insert";
 import { adoptArchiveIdentity, findSynthesizedIdMergeTarget } from "@/lib/messaging/synthesized-id-merge";
-import { SenderScopedIdIndex } from "@/lib/messaging/sender-scoped-ids";
+import { SenderScopedIdIndex, senderChosenMessageIds } from "@/lib/messaging/sender-scoped-ids";
 import type { SafetyScoresFastening } from "@/lib/safety-scores/types";
 
 function mergeReplyToMetadata(
@@ -52,11 +52,17 @@ function mergeMissingThreadMetadata(
     next = next === existing ? { ...existing, ...patch } : { ...next, ...patch };
   };
 
+  if (!existing.archiveId && incoming.archiveId !== undefined) {
+    assign({ archiveId: incoming.archiveId });
+  }
+
   const canonicalRoomMessage = [incoming, existing].find((message) =>
     !!message.authorOccupantJid
     && !!message.stanzaId
     && !!message.stanzaIdBy
   );
+  const senderChosenIds = [...new Set([...senderChosenMessageIds(existing), ...senderChosenMessageIds(incoming)])];
+  if (!existing.senderChosenIds || !sameStringList(existing.senderChosenIds, senderChosenIds)) assign({ senderChosenIds });
   const ids = mergeMessageIds(
     next,
     canonicalRoomMessage?.stanzaId ?? next.id,
@@ -126,9 +132,12 @@ export function queuedRoomMessageToTimeline(
 ): TimelineMessage {
   const message: TimelineMessage = {
     id: queued.id,
+    rowKey: crypto.randomUUID(),
     correctionTargetId: queued.id,
     author: session.username,
     authorJid: `${roomJid}/${session.username}`,
+    authorRealJid: session.jid,
+    authorOccupantJid: `${roomJid}/${session.username}`,
     body: queued.body || (queued.files?.[0]?.url ?? ""),
     createdAt: queued.createdAt,
     createdAtSource: "queued",
@@ -396,6 +405,7 @@ export function buildChannelTimelineFromMamResults(params: {
         ? mergeMissingThreadMetadata(tm, existingMessage)
         : mergeMissingThreadMetadata(existingMessage, tm);
       let merged = mergeRetractionTombstone(mergedBase, tm);
+      if (existingMessage.rowKey) merged = { ...merged, rowKey: existingMessage.rowKey };
       if (synthesizedMatch) merged = adoptArchiveIdentity(merged, tm);
       if (options.seedExistingOnly) {
         byId.add(merged);

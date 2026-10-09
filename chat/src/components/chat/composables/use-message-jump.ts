@@ -1,5 +1,7 @@
 import { nextTick, ref, type Ref } from "vue";
-import { findMessageElementById } from "@/lib/message-targeting";
+import { timelineRowKey } from "@/lib/timeline-row-key";
+import { resolveRoomMessageTarget } from "@/lib/messaging/room-message-target";
+import { findMessageElementByRowKey } from "@/lib/message-targeting";
 import { findMessageById } from "@/lib/message-ids";
 import { getReplyJumpNotice } from "@/lib/reply-ux";
 import type { TimelineMessage } from "@/lib/chat-ui";
@@ -69,16 +71,21 @@ export function useMessageJump(input: {
       showReplyJumpNotice(getReplyJumpNotice(false));
       return;
     }
-    // VirtualTimeline + the data-message-id index match items by their
-    // primary `id` only. Pinned-panel "jump to message" passes a
-    // XEP-0359 stanza-id, which on the timeline lives in `wireIds[]`,
-    // not `id`. Resolve the candidate to the primary id first so both
-    // paths work (#414).
-    const resolvedId = findMessageById(input.messages(), messageId)?.id ?? messageId;
+    // Resolve protocol references first, then use the local presentation key
+    // for both virtual scrolling and DOM highlighting.
+    const messages = input.messages();
+    const message = messages.some((row) => !!row.authorOccupantJid)
+      ? resolveRoomMessageTarget(messages, messageId).message
+      : findMessageById(messages, messageId);
+    if (!message) {
+      showReplyJumpNotice(getReplyJumpNotice(false));
+      return;
+    }
+    const resolvedId = timelineRowKey(message);
     if (await input.virtualTimeline()?.scrollToMessageId(resolvedId, "center")) {
       await nextTick();
     }
-    const el = findMessageElementById(input.messagesContainer.value, resolvedId);
+    const el = findMessageElementByRowKey(input.messagesContainer.value, resolvedId);
     const notice = getReplyJumpNotice(el instanceof HTMLElement);
     if (!notice && el instanceof HTMLElement) {
       clearReplyJumpNotice();

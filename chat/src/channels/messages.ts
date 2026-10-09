@@ -29,7 +29,7 @@ import {
 import { getMdsDisplayed, mdsChatKey, type MdsDisplayedState } from "@/lib/last-seen-store";
 import { findMessageById } from "@/lib/message-ids";
 import { mergeQueuedIntoTimeline } from "@/lib/timeline-queue-merge";
-import { findMessageElementById } from "@/lib/message-targeting";
+import { findMessageElementByRowKey } from "@/lib/message-targeting";
 import { isTopPinnedScrollDirection, type ScrollDirectionMode } from "@/lib/scroll-direction";
 import { createPinnedEdgeScroller } from "@/lib/pinned-edge-scroll";
 import {
@@ -395,7 +395,7 @@ export function useChannelMessages(
       (divider as HTMLElement).scrollIntoView({ block: "start" });
       return;
     }
-    const target = findMessageElementById(el, messageId);
+    const target = findMessageElementByRowKey(el, messageId);
     if (target && typeof (target as HTMLElement).scrollIntoView === "function") {
       (target as HTMLElement).scrollIntoView({ block: "start" });
     }

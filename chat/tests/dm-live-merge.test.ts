@@ -19,7 +19,7 @@ const session: WaddleSession = {
   xmpp_websocket_url: "wss://example.com/ws",
 };
 
-function harness() {
+function harness(peerJid = "bob@example.com") {
   const messages = ref<TimelineMessage[]>([]);
   const pendingEchoClientIds = new Set<string>();
   const scrollToPinnedEdgeAndPin = mock(async () => true);
@@ -29,7 +29,7 @@ function harness() {
   const liveMerge = useDmLiveMerge({
     session: ref(session),
     messages,
-    activePeerJid: ref("bob@example.com"),
+    activePeerJid: ref(peerJid),
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
     persistLastSeen,
@@ -111,6 +111,92 @@ describe("applyReaction (XEP-0444 replace semantics)", () => {
 });
 
 describe("handleIncomingMessage typed dispatch", () => {
+  test("MUC private-message replays reconcile without a disclosed real JID", () => {
+    const occupant = "room@muc.example.com/sam";
+    const h = harness(occupant);
+    const original = makeLive({
+      id: "private-1", peerJid: occupant, fromJid: occupant, mucPm: true,
+      createdAt: "2026-07-01T10:00:00Z", createdAtSource: "fallback",
+    });
+    h.liveMerge.handleIncomingMessage(original);
+    h.liveMerge.handleIncomingMessage({ ...original });
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.authorOccupantJid).toBe(occupant);
+    expect(h.messages.value[0]?.authorRealJid).toBeUndefined();
+  });
+
+  test("MUC private-message live and personal archive aliases reconcile", () => {
+    const occupant = "room@muc.example.com/sam";
+    const h = harness(occupant);
+    const live = makeLive({
+      id: "private-client", peerJid: occupant, fromJid: occupant, mucPm: true,
+      createdAt: "2026-07-01T10:00:00Z", createdAtSource: "fallback",
+    });
+    h.liveMerge.handleIncomingMessage(live);
+    const rowKey = h.messages.value[0]?.rowKey;
+    h.liveMerge.handleIncomingMessage({
+      ...live, id: "personal-sid", wireIds: ["private-client"],
+      stanzaId: "personal-sid", stanzaIdBy: "alice@example.com", createdAtSource: "archive",
+    });
+    h.liveMerge.handleIncomingMessage(live);
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.rowKey).toBe(rowKey);
+    expect(h.messages.value[0]?.authorRealJid).toBeUndefined();
+  });
+
+  test("MUC private-message IDs stay scoped to the full occupant JID", () => {
+    const h = harness("room@muc.example.com/sam");
+    for (const nick of ["sam", "other"]) {
+      h.liveMerge.handleIncomingMessage(makeLive({
+        id: "reused", peerJid: `room@muc.example.com/${nick}`,
+        fromJid: `room@muc.example.com/${nick}`, mucPm: true, body: nick,
+        createdAt: "2026-07-01T10:00:00Z", createdAtSource: "fallback",
+      }));
+    }
+    expect(h.messages.value.map((message) => message.body)).toEqual(["sam", "other"]);
+  });
+
+  test("own account carbons reconcile beside MUC private-message peer rows", () => {
+    for (const useAlias of [false, true]) {
+      const occupant = "room@muc.example.com/sam";
+      const h = harness(occupant);
+      h.liveMerge.handleIncomingMessage(makeLive({
+        id: "peer-row", peerJid: occupant, fromJid: occupant, mucPm: true,
+        createdAt: "2026-07-01T09:00:00Z", createdAtSource: "fallback",
+      }));
+      h.liveMerge.mergeLiveMessage({
+        id: "own-client", body: "my draft", author: "alice", authorJid: session.jid,
+        isSelf: true, deliveryStatus: "sending", createdAt: "2026-07-01T10:00:00Z", createdAtSource: "queued",
+      });
+      h.pendingEchoClientIds.add("own-client");
+      h.liveMerge.handleIncomingMessage(makeLive({
+        id: "own-carbon", peerJid: occupant, fromJid: session.jid, mucPm: true, body: "my draft",
+        wireIds: useAlias ? ["own-client"] : undefined,
+        createdAt: "2026-07-01T10:00:01Z", createdAtSource: "fallback",
+      }));
+      expect(h.messages.value).toHaveLength(2);
+      expect(h.messages.value[1]?.deliveryStatus).toBe("delivered");
+      expect(h.pendingEchoClientIds.has("own-client")).toBe(false);
+    }
+  });
+
+  test("a private peer cannot claim a pending account send by its ID or body", () => {
+    const occupant = "room@muc.example.com/sam";
+    const h = harness(occupant);
+    h.liveMerge.mergeLiveMessage({
+      id: "own-client", body: "my draft", author: "alice", authorJid: session.jid,
+      isSelf: true, deliveryStatus: "sending", createdAt: "2026-07-01T10:00:00Z", createdAtSource: "queued",
+    });
+    h.pendingEchoClientIds.add("own-client");
+    h.liveMerge.handleIncomingMessage(makeLive({
+      id: "own-client", peerJid: occupant, fromJid: occupant, mucPm: true, body: "my draft",
+      createdAt: "2026-07-01T10:00:01Z", createdAtSource: "fallback",
+    }));
+    expect(h.messages.value).toHaveLength(2);
+    expect(h.messages.value.find((message) => message.authorJid === session.jid)?.deliveryStatus).toBe("sending");
+    expect(h.pendingEchoClientIds.has("own-client")).toBe(true);
+  });
+
   test("retraction routes to applyRetraction (with DM sender match)", () => {
     const h = harness();
     h.messages.value = [

@@ -11,6 +11,7 @@ import social.waddle.client.ffi.WaddleSafetyScores
 import social.waddle.client.ffi.WaddleSafetyScoresFastening
 import social.waddle.client.ffi.WaddleSharedFile
 import social.waddle.client.ffi.WaddleStanzaId
+import java.util.UUID
 
 /** One emoji's aggregated reaction state on a timeline row. */
 data class ReactionGroup(
@@ -65,6 +66,8 @@ data class TimelineItem(
      * not re-attribute this row. `null` = unknown (initials).
      */
     val authorJid: String? = null,
+    /** Stable local row identity for rendering; wire ids can collide even under the same nick. */
+    val presentationId: String = UUID.randomUUID().toString(),
 ) {
     /**
      * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),

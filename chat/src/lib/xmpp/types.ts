@@ -215,6 +215,8 @@ export interface LiveRoomMessage {
    * only content-based reconciliation can match it to its MAM copy. */
   synthesizedId?: true;
   wireIds?: string[];
+  /** Actual sender-chosen @id/origin-id, distinct from room or envelope IDs. */
+  senderChosenIds?: string[];
   /** XEP-0308 correction target: original sender message id/origin-id. */
   correctionTargetId?: string;
   fromJid?: string;

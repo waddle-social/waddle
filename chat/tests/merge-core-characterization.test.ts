@@ -85,6 +85,7 @@ function row(
   return {
     author,
     authorJid: pipeline === "channel" ? `${ROOM}/${author}` : `${author}@example.com`,
+    ...(pipeline === "channel" ? { authorOccupantJid: `${ROOM}/${author}`, authorRealJid: `${author}@example.com` } : {}),
     body: "original",
     createdAt: T0,
     createdAtSource: "archive",
@@ -101,6 +102,7 @@ function toRoomMessage(spec: LiveSpec): LiveRoomMessage {
     roomJid: ROOM,
     fromJid: spec.from === "room" ? ROOM : `${ROOM}/${nick}`,
     nick,
+    authorRealJid: `${spec.from ?? "bob"}@example.com`,
     body: spec.body ?? "",
     createdAt: spec.createdAt ?? T1,
     createdAtSource: spec.createdAtSource ?? "fallback",

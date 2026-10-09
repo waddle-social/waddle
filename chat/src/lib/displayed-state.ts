@@ -1,3 +1,4 @@
+import { timelineRowKey } from "@/lib/timeline-row-key";
 import type { TimelineMessage } from "@/lib/chat-ui";
 import type { MdsDisplayedState } from "@/lib/last-seen-store";
 
@@ -9,7 +10,8 @@ function nextUnreadEligibleIdAfter(
   timeline: ReadonlyArray<TimelineMessage>,
   index: number,
 ): string | null {
-  return timeline.slice(index + 1).find(isUnreadEligible)?.id ?? null;
+  const next = timeline.slice(index + 1).find(isUnreadEligible);
+  return next ? timelineRowKey(next) : null;
 }
 
 function displayedStateIndex(
@@ -30,7 +32,7 @@ export function firstUnseenIdFromUnreadCount(
 ): string | null {
   const unreadEligible = timeline.filter(isUnreadEligible);
   return unreadAtLoad > 0 && unreadEligible.length >= unreadAtLoad
-    ? unreadEligible[unreadEligible.length - unreadAtLoad]?.id ?? null
+    ? timelineRowKey(unreadEligible[unreadEligible.length - unreadAtLoad]!)
     : null;
 }
 
@@ -42,7 +44,7 @@ export function firstUnseenIdAfterDisplayedState(
   const displayedAt = displayedStateIndex(timeline, displayed);
   if (displayedAt < 0 || currentFirstUnseenId === null) return currentFirstUnseenId;
 
-  const currentAt = timeline.findIndex((message) => message.id === currentFirstUnseenId);
+  const currentAt = timeline.findIndex((message) => timelineRowKey(message) === currentFirstUnseenId);
   if (currentAt < 0 || displayedAt < currentAt) return currentFirstUnseenId;
   return nextUnreadEligibleIdAfter(timeline, displayedAt);
 }

@@ -18,7 +18,7 @@ data class MessageAvatar(val jid: String?, val visible: Boolean)
 
 /**
  * Avatar gutters for the received rows of [rows] (chronological), keyed
- * by stored item id + sender. Web `buildMessageDisplayMeta` grouping: a
+ * by stable local row identity. Web `buildMessageDisplayMeta` grouping: a
  * row continues the previous group when the same author wrote it on the
  * same day within five minutes. Own rows and pending sends get none.
  */
@@ -75,8 +75,27 @@ private fun isGroupchatRow(item: TimelineItem): Boolean = when (val source = ite
     is TimelineSource.Archived -> source.message.messageType == "groupchat"
 }
 
-/** Stable per-row key: ids may collide across senders (see TimelineList). */
-fun avatarKeyOf(item: TimelineItem): String = "${item.id}:${item.from.orEmpty()}"
+/** Canonical room identities win; ambiguous sender aliases cannot attribute a quote. */
+fun quotedMessagesByIdentity(rows: List<ConversationRow>): Map<String, TimelineItem> {
+    val candidates = HashMap<String, MutableList<TimelineItem>>()
+    rows.filterIsInstance<ConversationRow.Stored>().forEach { row ->
+        (row.item.identityIds + row.item.id).forEach { id ->
+            candidates.getOrPut(id) { mutableListOf() }.add(row.item)
+        }
+    }
+    return buildMap {
+        candidates.forEach { (id, items) ->
+            val canonical = items.filter {
+                isGroupchatRow(it) && it.assignedStanzaId(it.conversationJid)?.id == id
+            }
+            val target = if (canonical.isEmpty()) items.singleOrNull() else canonical.singleOrNull()
+            if (target != null) put(id, target)
+        }
+    }
+}
+
+/** Stable per-row key even when both wire ids and occupant nicks collide. */
+fun avatarKeyOf(item: TimelineItem): String = item.presentationId
 
 private fun continuesGroup(previous: TimelineItem, current: TimelineItem): Boolean {
     if (previous.isMine || previous.from != current.from) return false

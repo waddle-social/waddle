@@ -70,7 +70,7 @@ private struct ThreadContent: View {
                         missingRoot
                     }
                     ForEach(entries) { entry in
-                        let isRoot = entry.id == root?.id
+                        let isRoot = entry.id == root?.presentationID
                         if isRoot, newestFirst {
                             ThreadRepliesDivider(count: replies.count)
                         }
@@ -90,7 +90,7 @@ private struct ThreadContent: View {
             }
             .defaultScrollAnchor(newestFirst ? UnitPoint.top : UnitPoint.bottom)
             .scrollDismissesKeyboard(.interactively)
-            .onChange(of: replies.last?.id) { _, last in
+            .onChange(of: replies.last?.presentationID) { _, last in
                 guard let last else { return }
                 withAnimation(reduceMotion ? nil : .easeOut(duration: 0.25)) {
                     proxy.scrollTo(last, anchor: newestFirst ? UnitPoint.top : UnitPoint.bottom)

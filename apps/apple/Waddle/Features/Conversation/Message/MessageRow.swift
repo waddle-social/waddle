@@ -78,7 +78,7 @@ private struct MessageRowContent: View {
         .padding(.top, topPadding)
         .padding(.bottom, Theme.Spacing.xxs)
         .background(background)
-        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: actions.highlightedID == item.id)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.3), value: actions.highlightedID == item.presentationID)
         .contentShape(Rectangle())
         #if os(iOS)
         .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
@@ -142,7 +142,7 @@ private struct MessageRowContent: View {
     }
 
     private var background: Color {
-        if actions.highlightedID == item.id {
+        if actions.highlightedID == item.presentationID {
             return Color.accentColor.opacity(0.14)
         }
         return isHovering ? Color.secondary.opacity(0.07) : Color.clear
@@ -176,7 +176,7 @@ private struct MessageRowBody: View {
         if let target = item.message.reply {
             MessageReplyPreview(target: target, parent: entry.replyParent, isRoom: item.conversation.isRoom) {
                 if let parent = entry.replyParent {
-                    actions.showMessage(parent.id)
+                    actions.showMessage(parent.presentationID)
                 }
             }
         }

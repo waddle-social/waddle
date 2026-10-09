@@ -4,7 +4,7 @@ import WaddleKit
 /// One feed row with everything the row view needs precomputed, so row
 /// bodies never scan the timeline.
 struct TimelineFeedEntry: Identifiable, Hashable {
-    var id: String { item.id }
+    var id: String { item.presentationID }
     let item: TimelineItem
     /// Start of the day when a day separator precedes this row.
     let daySeparator: Date?
@@ -47,7 +47,7 @@ enum TimelineFeedLayout {
         var previous: TimelineItem?
         for item in ordered {
             let separator = daySeparator(before: item, previous: previous, calendar: calendar)
-            let unread = item.id == dividerID
+            let unread = item.presentationID == dividerID
             let starts = separator != nil || unread
                 || !continuesGroup(item, after: previous, window: groupingWindow)
             entries.append(TimelineFeedEntry(
@@ -67,8 +67,8 @@ enum TimelineFeedLayout {
     /// already read. Nil when `id` is the last row loaded, so every loaded
     /// row is unread and there is nothing to divide.
     private static func rowAfter(_ id: String, in items: [TimelineItem]) -> String? {
-        guard let index = items.firstIndex(where: { $0.id == id }), index + 1 < items.count else { return nil }
-        return items[index + 1].id
+        guard let index = items.firstIndex(where: { $0.presentationID == id }), index + 1 < items.count else { return nil }
+        return items[index + 1].presentationID
     }
 
     static func daySeparator(before item: TimelineItem, previous: TimelineItem?, calendar: Calendar) -> Date? {

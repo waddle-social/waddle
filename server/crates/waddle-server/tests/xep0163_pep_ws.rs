@@ -703,6 +703,220 @@ async fn pep_publish_fans_to_roster_contacts_with_matching_caps_notify() {
     let _ = alice.close().await;
 }
 
+async fn element_iq_to(
+    client: &mut WsXmppClient,
+    id: &str,
+    owner: &str,
+    kind: &str,
+    payload: minidom::Element,
+) -> String {
+    let iq = minidom::Element::builder("iq", xmpp_parsers::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), owner)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), kind)
+        .append(payload)
+        .build();
+    client.send(&String::from(&iq)).await.expect("send IQ");
+    client
+        .recv_matching(|frame| {
+            frame.parse::<minidom::Element>().is_ok_and(|element| {
+                element.is("iq", xmpp_parsers::ns::JABBER_CLIENT) && element.attr("id") == Some(id)
+            })
+        })
+        .await
+        .expect("IQ response")
+}
+
+async fn retract_pep_item(client: &mut WsXmppClient, owner: &str, node: &str, item_id: &str) {
+    let payload = minidom::Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            minidom::Element::builder("retract", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(
+                    minidom::Element::builder("item", NS_PUBSUB)
+                        .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let response = element_iq_to(client, "pep-retract", owner, "set", payload).await;
+    assert!(
+        response.contains("type='result'"),
+        "owner retract: {response}"
+    );
+}
+
+#[tokio::test]
+async fn pep_retract_fans_to_roster_contacts_with_matching_caps_notify() {
+    let _serial = TEST_SERIAL.lock().await;
+    let alice_password = format!("alice-{}", uuid::Uuid::new_v4());
+    let bob_password = format!("bob-{}", uuid::Uuid::new_v4());
+    let server = TestServer::start_with_extra_accounts(&[
+        ("alice", &alice_password),
+        ("bob", &bob_password),
+    ]);
+    let mut alice = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        "alice",
+        &alice_password,
+        "alice-r1",
+    )
+    .await
+    .expect("alice connect");
+    let mut bob =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, "bob", &bob_password, "bob-r1")
+            .await
+            .expect("bob connect");
+    let alice_bare = format!("alice@{DOMAIN}");
+    let bob_bare = format!("bob@{DOMAIN}");
+    let bob_full = bob.full_jid.clone().expect("bob full jid");
+
+    establish_bob_subscribes_to_alice(&mut alice, &mut bob, &alice_bare, &bob_bare).await;
+
+    let node = "urn:xmpp:avatar:metadata";
+    let notify_var = format!("{node}+notify");
+    let features = ["http://jabber.org/protocol/disco#info", notify_var.as_str()];
+    let caps_node = "https://bob.example/caps";
+    let ver = caps_verification_string("client", "pc", "Bob's Client", &features);
+
+    let presence = minidom::Element::builder("presence", xmpp_parsers::ns::JABBER_CLIENT)
+        .append(
+            minidom::Element::builder("c", NS_CAPS)
+                .attr(minidom::rxml::xml_ncname!("hash").to_owned(), "sha-1")
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), caps_node)
+                .attr(minidom::rxml::xml_ncname!("ver").to_owned(), &ver)
+                .build(),
+        )
+        .build();
+    bob.send(&String::from(&presence))
+        .await
+        .expect("bob presence with caps");
+    let disco_query = bob
+        .recv_matching(|frame| {
+            frame.contains("<iq")
+                && frame.contains(r#"type='get'"#)
+                && frame.contains(NS_DISCO_INFO)
+        })
+        .await
+        .expect("server queries bob caps");
+    let iq_id = extract_iq_id(&disco_query);
+    let mut query = minidom::Element::builder("query", NS_DISCO_INFO)
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            format!("{caps_node}#{ver}"),
+        )
+        .append(
+            minidom::Element::builder("identity", NS_DISCO_INFO)
+                .attr(minidom::rxml::xml_ncname!("category").to_owned(), "client")
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "pc")
+                .attr(
+                    minidom::rxml::xml_ncname!("name").to_owned(),
+                    "Bob's Client",
+                )
+                .build(),
+        );
+    for feature in features {
+        query = query.append(
+            minidom::Element::builder("feature", NS_DISCO_INFO)
+                .attr(minidom::rxml::xml_ncname!("var").to_owned(), feature)
+                .build(),
+        );
+    }
+    let response = minidom::Element::builder("iq", xmpp_parsers::ns::JABBER_CLIENT)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), &iq_id)
+        .attr(minidom::rxml::xml_ncname!("from").to_owned(), &bob_full)
+        .append(query.build())
+        .build();
+    bob.send(&String::from(&response))
+        .await
+        .expect("bob disco#info reply");
+
+    ping_anchor(
+        &mut bob,
+        &format!("pep-bob-anchor-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+
+    let publish = minidom::Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            minidom::Element::builder("publish", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(
+                    minidom::Element::builder("item", NS_PUBSUB)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            "avatar-metadata-1",
+                        )
+                        .append(minidom::Element::builder("metadata", node).build())
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let pub_resp = element_iq_to(&mut alice, "pep-roster-pub", &alice_bare, "set", publish).await;
+    assert!(pub_resp.contains(r#"type='result'"#), "publish: {pub_resp}");
+
+    let event = wait_for_event_message(&mut bob, node, Duration::from_secs(2))
+        .await
+        .expect(
+            "bob in alice's roster (subscription=from) and advertising +notify MUST receive the PEP event without explicit pubsub <subscribe/> per XEP-0163 §3",
+        );
+    assert!(
+        event.contains(&format!(r#"from='{alice_bare}'"#)),
+        "fan-out from MUST be alice's bare JID per XEP-0163 §4.3: {event}"
+    );
+    assert!(
+        event.contains(r#"id='avatar-metadata-1'"#),
+        "item id must round-trip: {event}"
+    );
+
+    let body = minidom::Element::builder("pubsub", NS_PUBSUB)
+        .append(
+            minidom::Element::builder("retract", NS_PUBSUB)
+                .attr(minidom::rxml::xml_ncname!("node").to_owned(), node)
+                .append(
+                    minidom::Element::builder("item", NS_PUBSUB)
+                        .attr(
+                            minidom::rxml::xml_ncname!("id").to_owned(),
+                            "avatar-metadata-1",
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+        .build();
+    let retract = element_iq_to(&mut alice, "pep-roster-retract", &alice_bare, "set", body).await;
+    assert!(retract.contains(r#"type='result'"#), "retract: {retract}");
+    let event = wait_for_event_message(&mut bob, node, Duration::from_secs(2))
+        .await
+        .expect("roster contact advertising +notify must receive the retract event");
+    let message: minidom::Element = event.parse().expect("valid message XML");
+    assert_eq!(message.attr("from"), Some(alice_bare.as_str()));
+    assert_eq!(message.attr("type"), Some("headline"));
+    let items = message
+        .get_child("event", NS_PUBSUB_EVENT)
+        .expect("PubSub event")
+        .get_child("items", NS_PUBSUB_EVENT)
+        .expect("event items");
+    assert_eq!(items.attr("node"), Some(node));
+    let retracted = items
+        .get_child("retract", NS_PUBSUB_EVENT)
+        .expect("retract");
+    assert_eq!(retracted.attr("id"), Some("avatar-metadata-1"));
+    assert!(items.get_child("item", NS_PUBSUB_EVENT).is_none());
+    assert!(
+        wait_for_event_message(&mut bob, node, Duration::from_millis(250))
+            .await
+            .is_none()
+    );
+
+    let _ = bob.close().await;
+    let _ = alice.close().await;
+}
+
 #[tokio::test]
 async fn pep_bookmark_publish_skips_roster_contacts_even_with_matching_caps_notify() {
     let _serial = TEST_SERIAL.lock().await;
@@ -891,6 +1105,20 @@ async fn pep_bookmark_member_affiliation_grants_no_event_delivery() {
     assert!(
         event.is_none(),
         "bookmarks are owner-only even for member-affiliated subscribers; leaked: {event:?}"
+    );
+
+    retract_pep_item(
+        &mut alice,
+        &alice_bare,
+        node,
+        "private-member@muc.example.com",
+    )
+    .await;
+    assert!(
+        wait_for_event_message(&mut bob, node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "retract must respect the same recipient filter as publish"
     );
 
     let _ = bob.close().await;
@@ -1160,6 +1388,14 @@ async fn pep_publish_skips_roster_contact_without_caps_notify_filter() {
     assert!(
         event.is_none(),
         "bob without `<node>+notify` MUST NOT receive the PEP event; got: {event:?}"
+    );
+
+    retract_pep_item(&mut alice, &alice_bare, publish_node, "silent-1").await;
+    assert!(
+        wait_for_event_message(&mut bob, publish_node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "retract must respect the same recipient filter as publish"
     );
 
     let _ = bob.close().await;
@@ -1463,6 +1699,30 @@ async fn pep_publish_delivers_exactly_once_when_subscriber_also_in_roster() {
         "MUST receive exactly one event when both subscriber AND roster paths apply; got duplicate: {second:?}"
     );
 
+    retract_pep_item(&mut alice, &alice_bare, publish_node, "dedup-1").await;
+    let retract = wait_for_event_message(&mut bob, publish_node, Duration::from_secs(2))
+        .await
+        .expect("eligible PEP resource receives retract");
+    let message: minidom::Element = retract.parse().expect("valid XML");
+    let items = message
+        .get_child("event", NS_PUBSUB_EVENT)
+        .expect("event")
+        .get_child("items", NS_PUBSUB_EVENT)
+        .expect("items");
+    assert_eq!(
+        items
+            .get_child("retract", NS_PUBSUB_EVENT)
+            .expect("retract")
+            .attr("id"),
+        Some("dedup-1")
+    );
+    assert!(
+        wait_for_event_message(&mut bob, publish_node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "retract must be delivered exactly once"
+    );
+
     let _ = bob.close().await;
     let _ = alice.close().await;
 }
@@ -1567,6 +1827,36 @@ async fn pep_publish_fans_to_owner_other_resources_with_caps_notify() {
     assert!(
         event.contains(r#"id='self-1@muc.example.com'"#),
         "item id: {event}"
+    );
+
+    retract_pep_item(
+        &mut alice_a,
+        &alice_bare,
+        publish_node,
+        "self-1@muc.example.com",
+    )
+    .await;
+    let retract = wait_for_event_message(&mut alice_b, publish_node, Duration::from_secs(2))
+        .await
+        .expect("eligible PEP resource receives retract");
+    let message: minidom::Element = retract.parse().expect("valid XML");
+    let items = message
+        .get_child("event", NS_PUBSUB_EVENT)
+        .expect("event")
+        .get_child("items", NS_PUBSUB_EVENT)
+        .expect("items");
+    assert_eq!(
+        items
+            .get_child("retract", NS_PUBSUB_EVENT)
+            .expect("retract")
+            .attr("id"),
+        Some("self-1@muc.example.com")
+    );
+    assert!(
+        wait_for_event_message(&mut alice_b, publish_node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "retract must be delivered exactly once"
     );
 
     let _ = alice_a.close().await;
@@ -1690,6 +1980,14 @@ async fn pep_publish_skips_blocked_roster_contact() {
         "alice blocked bob: bob MUST NOT receive PEP event per §3.3 + XEP-0191 §2; got: {event:?}"
     );
 
+    retract_pep_item(&mut alice, &alice_bare, publish_node, "blocked-1").await;
+    assert!(
+        wait_for_event_message(&mut bob, publish_node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "retract must respect the same recipient filter as publish"
+    );
+
     let _ = bob.close().await;
     let _ = alice.close().await;
 }
@@ -1780,6 +2078,14 @@ async fn pep_publish_skips_when_contact_blocked_publisher() {
         "bob blocked alice: §3.3 + XEP-0191 §2 require skipping; got: {event:?}"
     );
 
+    retract_pep_item(&mut alice, &alice_bare, publish_node, "contact-blocks-1").await;
+    assert!(
+        wait_for_event_message(&mut bob, publish_node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "retract must respect the same recipient filter as publish"
+    );
+
     let _ = bob.close().await;
     let _ = alice.close().await;
 }
@@ -1856,6 +2162,20 @@ async fn pep_publish_does_not_echo_to_publishing_resource() {
     assert!(
         event.is_none(),
         "publishing resource MUST NOT receive its own item back as a §3.4 self-echo; got: {event:?}"
+    );
+
+    retract_pep_item(
+        &mut alice,
+        &alice_bare,
+        publish_node,
+        "echo-1@muc.example.com",
+    )
+    .await;
+    assert!(
+        wait_for_event_message(&mut alice, publish_node, Duration::from_millis(250))
+            .await
+            .is_none(),
+        "retract must respect the same recipient filter as publish"
     );
 
     let _ = alice.close().await;

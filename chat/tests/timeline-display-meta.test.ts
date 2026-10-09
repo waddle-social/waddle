@@ -33,6 +33,35 @@ describe("buildMessageDisplayMeta", () => {
     expect(meta.grouped.has("a4")).toBe(false);
   });
 
+  const capturedAuthors: { name: string; first: Partial<TimelineMessage>; next: Partial<TimelineMessage>; grouped: boolean }[] = [
+    { name: "different disclosed accounts", first: { authorRealJid: "alice@example.com" }, next: { authorRealJid: "mallory@example.com" }, grouped: false },
+    { name: "different captured avatar accounts", first: { authorAvatarJid: "alice@example.com" }, next: { authorAvatarJid: "mallory@example.com" }, grouped: false },
+    { name: "known followed by unknown", first: { authorRealJid: "alice@example.com" }, next: {}, grouped: false },
+    { name: "unknown followed by known", first: {}, next: { authorAvatarJid: "alice@example.com" }, grouped: false },
+    { name: "same account across resource and case differences", first: { authorRealJid: "Alice@Example.COM/phone" }, next: { authorAvatarJid: "alice@example.com/laptop" }, grouped: true },
+    { name: "real identity takes precedence over an avatar stamp", first: { authorRealJid: "alice@example.com", authorAvatarJid: "mallory@example.com" }, next: { authorAvatarJid: "alice@example.com" }, grouped: true },
+    { name: "both unknown preserve existing grouping", first: {}, next: {}, grouped: true },
+  ];
+  for (const scenario of capturedAuthors) {
+    test(`same-nick grouping respects ${scenario.name}`, () => {
+      const meta = buildMessageDisplayMeta([
+        message({ id: "reused", rowKey: "first-row", author: "sam", createdAt: "2026-07-01T10:00:00Z", ...scenario.first }),
+        message({ id: "reused", rowKey: "next-row", author: "sam", createdAt: "2026-07-01T10:01:00Z", ...scenario.next }),
+      ]);
+      expect(meta.grouped.has("next-row")).toBe(scenario.grouped);
+    });
+  }
+
+  test("retained rows sharing a wire ID get independent grouping and day dividers", () => {
+    const meta = buildMessageDisplayMeta([
+      message({ id: "reused", rowKey: "first-row", author: "sam", createdAt: "2026-07-01T10:00:00Z" }),
+      message({ id: "reused", rowKey: "second-row", author: "sam", createdAt: "2026-07-01T10:01:00Z" }),
+      message({ id: "reused", rowKey: "third-row", author: "sam", createdAt: "2026-07-02T10:00:00Z" }),
+    ]);
+    expect(meta.grouped).toEqual(new Set(["second-row"]));
+    expect(meta.dayDivider).toEqual(new Set(["third-row"]));
+  });
+
   test("marks day dividers on day boundaries and never groups across them", () => {
     const meta = buildMessageDisplayMeta([
       message({ id: "d1", author: "alice", createdAt: "2026-07-01T23:59:00" }),

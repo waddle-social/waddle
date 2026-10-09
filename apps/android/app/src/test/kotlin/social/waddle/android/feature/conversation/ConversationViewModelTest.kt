@@ -598,6 +598,7 @@ class ConversationViewModelTest {
     ) = testArchivedMessage(
         mamId = mamId,
         stanzaId = stanzaId,
+        stanzaIdBy = ROOM_JID,
         timestamp = timestamp,
         from = "$ROOM_JID/alice",
         to = OWN_JID,

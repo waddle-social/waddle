@@ -5,13 +5,16 @@
  * presence join callbacks (XEP-0045 §7.2.2 / §7.6), and outbound
  * presence encoding — all without the full client.
  */
-import { describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, test } from "bun:test";
 import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events";
+import { occupantJidDirectory, stampLiveRoomAuthor } from "../src/lib/avatars/author-jid";
 import { PresenceManager } from "../src/lib/xmpp/client-presence";
 import type { PresenceUpdateEvent } from "../src/lib/xmpp/types";
 import type { WasmPresence } from "../src/lib/xmpp/wasm-types";
 
 const ROOM = "general@muc.example.com";
+
+afterEach(() => occupantJidDirectory.clear());
 
 function createManager(overrides: {
   currentRoom?: () => string | null;
@@ -239,6 +242,31 @@ describe("PresenceManager MUC occupant tracking", () => {
       muc_status_codes: [110],
     }));
     expect(revoked).toEqual([ROOM]);
+  });
+
+  test("self nick-change unavailable retires identity proof until the renamed available self presence", () => {
+    const revoked: string[] = [];
+    const { manager, events } = createManager({ onOwnUnavailable: (room) => revoked.push(room) });
+    const nicks: (string | null)[] = [];
+    events.on("ownOccupantNick", (room, nick) => {
+      nicks.push(nick);
+      occupantJidDirectory.recordOwnNick(room, nick);
+    });
+    const reflection = (nick: string) => stampLiveRoomAuthor({
+      authorOccupantJid: `${ROOM}/${nick}`, createdAtSource: "fallback" as const,
+    }, ROOM, nick, "alice@example.com/web-1");
+
+    manager.handle(directPresence({ from: `${ROOM}/alice`, muc_status_codes: [110] }));
+    manager.handle(directPresence({ from: `${ROOM}/alice`, presence_type: "unavailable", muc_status_codes: [110, 303] }));
+    expect(nicks).toEqual(["alice", null]);
+    expect(occupantJidDirectory.ownNick(ROOM)).toBeNull();
+    expect(reflection("alice").authorRealJid).toBeUndefined();
+    expect(revoked).toEqual([]);
+
+    manager.handle(directPresence({ from: `${ROOM}/alice_2`, muc_status_codes: [110, 210] }));
+    expect(nicks).toEqual(["alice", null, "alice_2"]);
+    expect(reflection("alice").authorRealJid).toBeUndefined();
+    expect(reflection("alice_2").authorRealJid).toBe("alice@example.com");
   });
 
   test("same-resource departure then rejoin restores the roster and authority without message events", () => {

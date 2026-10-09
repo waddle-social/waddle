@@ -16,11 +16,25 @@ function roomCanonicalIdentity(message: TimelineMessage): string | undefined {
     !message.authorOccupantJid
     || !message.stanzaId
     || !message.stanzaIdBy
+    || bareJidKey(message.stanzaIdBy) !== bareJidKey(message.authorOccupantJid)
   ) return undefined;
-  return `${barePeerJid(message.stanzaIdBy).toLowerCase()}\u0000${message.stanzaId}`;
+  return `stanza\u0000${bareJidKey(message.stanzaIdBy)}\u0000${message.stanzaId}`;
 }
 
-function hasConflictingRoomCanonicalIdentity(
+function roomArchiveIdentity(message: TimelineMessage): string | undefined {
+  const room = bareJidKey(message.authorOccupantJid ?? "");
+  return room && message.archiveId
+    ? `archive\u0000${room}\u0000${message.archiveId}`
+    : undefined;
+}
+
+/** Room stanza identity takes precedence over the room archive's opaque UID. */
+function roomAuthorityIdentities(message: TimelineMessage): string[] {
+  return [roomCanonicalIdentity(message), roomArchiveIdentity(message)]
+    .filter((identity): identity is string => !!identity);
+}
+
+export function hasConflictingRoomCanonicalIdentity(
   existing: TimelineMessage,
   incoming: TimelineMessage,
 ): boolean {
@@ -63,31 +77,82 @@ export function hasMessageSenderContinuity(
     && existingAuthorJid === incomingAuthorJid;
 }
 
+/** Keep room/archive authority IDs out of the sender-chosen ID namespace. */
+export function senderChosenMessageIds(message: TimelineMessage): string[] {
+  if (message.senderChosenIds) return message.senderChosenIds;
+  if (message.authorOccupantJid && message.synthesizedId) return [];
+  if (!message.authorOccupantJid) return [...new Set([message.id, ...(message.wireIds ?? [])])];
+  return [...new Set([
+    ...(message.originId ? [message.originId] : []),
+    ...(message.correctionTargetId ? [message.correctionTargetId] : []),
+    ...[message.id, ...(message.wireIds ?? [])].filter((id) =>
+      id !== message.stanzaId && id !== message.archiveId),
+  ])];
+}
+
+/** Room sender-chosen IDs need actual sender identity, never nick continuity. */
+function hasSenderIdContinuity(existing: TimelineMessage, incoming: TimelineMessage): boolean {
+  if (existing.authorOccupantJid || incoming.authorOccupantJid) {
+    const existingReal = normalizedRealJid(existing);
+    const incomingReal = normalizedRealJid(incoming);
+    return !!existing.authorOccupantJid && !!incoming.authorOccupantJid
+      && bareJidKey(existing.authorOccupantJid) === bareJidKey(incoming.authorOccupantJid)
+      && !!existingReal && existingReal === incomingReal;
+  }
+  return hasMessageSenderContinuity(existing, incoming);
+}
+
+type Resolution = {
+  ambiguous: boolean;
+  match?: TimelineMessage;
+};
+
+function resolveRoomAuthorityTarget(
+  messages: readonly TimelineMessage[],
+  incoming: TimelineMessage,
+): Resolution {
+  for (const identity of roomAuthorityIdentities(incoming)) {
+    const matches = messages.filter((message) => roomAuthorityIdentities(message).includes(identity));
+    if (matches.length === 0) continue;
+    if (matches.length !== 1) return { ambiguous: true };
+    const match = matches[0]!;
+    if (hasConflictingRoomCanonicalIdentity(match, incoming)) return { ambiguous: true };
+    return { ambiguous: false, match };
+  }
+  return { ambiguous: false };
+}
+
 /**
- * Resolves sender-chosen ids only inside a verified sender scope. A primary
- * match wins; aliases must identify exactly one row, and aliases that point
- * at different rows fail closed.
+ * Resolves room authority identities first, then sender-chosen ids inside a
+ * verified sender scope. A primary authored match wins; aliases must identify
+ * exactly one row, and aliases that point at different rows fail closed.
  */
 export function findSenderScopedIdTarget(
   messages: readonly TimelineMessage[],
   incoming: TimelineMessage,
 ): TimelineMessage | undefined {
+  const authority = resolveRoomAuthorityTarget(messages, incoming);
+  if (authority.ambiguous) return undefined;
+  if (authority.match) return authority.match;
+
   const primaryMatches = messages.filter(
     (message) =>
       message.id === incoming.id
+      && senderChosenMessageIds(incoming).includes(incoming.id)
+      && senderChosenMessageIds(message).includes(message.id)
       && !hasConflictingRoomCanonicalIdentity(message, incoming)
-      && hasMessageSenderContinuity(message, incoming),
+      && hasSenderIdContinuity(message, incoming),
   );
   if (primaryMatches.length === 1) return primaryMatches[0];
   if (primaryMatches.length > 1) return undefined;
 
   let target: TimelineMessage | undefined;
-  for (const id of new Set([incoming.id, ...(incoming.wireIds ?? [])])) {
+  for (const id of senderChosenMessageIds(incoming)) {
     const matches = messages.filter(
       (message) =>
-        (message.id === id || message.wireIds?.includes(id))
+        senderChosenMessageIds(message).includes(id)
         && !hasConflictingRoomCanonicalIdentity(message, incoming)
-        && hasMessageSenderContinuity(message, incoming),
+        && hasSenderIdContinuity(message, incoming),
     );
     if (matches.length > 1) return undefined;
     const match = matches[0];
@@ -97,11 +162,6 @@ export function findSenderScopedIdTarget(
   }
   return target;
 }
-
-type Resolution = {
-  ambiguous: boolean;
-  match?: TimelineMessage;
-};
 
 function addToIndex(
   index: Map<string, Set<TimelineMessage>>,
@@ -160,15 +220,10 @@ function legacySenderKey(message: TimelineMessage): string | undefined {
 
 class SenderContinuityIndex {
   private messageCount = 0;
-  private readonly occupantAll = new Map<string, Set<TimelineMessage>>();
-  private readonly occupantByReal = new Map<string, Set<TimelineMessage>>();
-  private readonly occupantByJidAndReal = new Map<string, Set<TimelineMessage>>();
-  private readonly occupantWithoutReal = new Map<string, Set<TimelineMessage>>();
+  private readonly roomByReal = new Map<string, Set<TimelineMessage>>();
   private readonly accountAllByLegacy = new Map<string, Set<TimelineMessage>>();
-  private readonly accountAllByScope = new Map<string, Set<TimelineMessage>>();
   private readonly accountByReal = new Map<string, Set<TimelineMessage>>();
   private readonly accountWithoutRealByLegacy = new Map<string, Set<TimelineMessage>>();
-  private readonly accountWithoutRealByScope = new Map<string, Set<TimelineMessage>>();
 
   constructor(private readonly noteProbe: () => void) {}
 
@@ -189,25 +244,16 @@ class SenderContinuityIndex {
     const occupant = message.authorOccupantJid;
     const real = normalizedRealJid(message) || undefined;
     if (occupant) {
-      addToIndex(this.occupantAll, occupant, message);
-      if (real) {
-        addToIndex(this.occupantByReal, real, message);
-        addToIndex(this.occupantByJidAndReal, continuityKey(occupant, real), message);
-      } else {
-        addToIndex(this.occupantWithoutReal, occupant, message);
-      }
+      if (real) addToIndex(this.roomByReal, continuityKey(bareJidKey(occupant), real), message);
       return;
     }
 
-    const scope = senderScopeJid(message) || undefined;
     const legacy = legacySenderKey(message);
     addToIndex(this.accountAllByLegacy, legacy, message);
-    addToIndex(this.accountAllByScope, scope, message);
     if (real) {
       addToIndex(this.accountByReal, real, message);
     } else {
       addToIndex(this.accountWithoutRealByLegacy, legacy, message);
-      addToIndex(this.accountWithoutRealByScope, scope, message);
     }
   }
 
@@ -216,59 +262,37 @@ class SenderContinuityIndex {
     const occupant = message.authorOccupantJid;
     const real = normalizedRealJid(message) || undefined;
     if (occupant) {
-      removeFromIndex(this.occupantAll, occupant, message);
-      if (real) {
-        removeFromIndex(this.occupantByReal, real, message);
-        removeFromIndex(this.occupantByJidAndReal, continuityKey(occupant, real), message);
-      } else {
-        removeFromIndex(this.occupantWithoutReal, occupant, message);
-      }
+      if (real) removeFromIndex(this.roomByReal, continuityKey(bareJidKey(occupant), real), message);
       return;
     }
 
-    const scope = senderScopeJid(message) || undefined;
     const legacy = legacySenderKey(message);
     removeFromIndex(this.accountAllByLegacy, legacy, message);
-    removeFromIndex(this.accountAllByScope, scope, message);
     if (real) {
       removeFromIndex(this.accountByReal, real, message);
     } else {
       removeFromIndex(this.accountWithoutRealByLegacy, legacy, message);
-      removeFromIndex(this.accountWithoutRealByScope, scope, message);
     }
   }
 
   resolve(incoming: TimelineMessage): Resolution {
     const occupant = incoming.authorOccupantJid;
     const real = normalizedRealJid(incoming) || undefined;
-    if (occupant && real) {
-      return resolveSets([
-        this.get(this.occupantByJidAndReal, continuityKey(occupant, real)),
-        this.get(this.occupantWithoutReal, occupant),
-        this.get(this.accountByReal, real),
-        this.get(this.accountWithoutRealByScope, occupant),
-      ]);
-    }
     if (occupant) {
-      return resolveSets([
-        this.get(this.occupantAll, occupant),
-        this.get(this.accountAllByScope, occupant),
-      ]);
+      return real
+        ? resolveSets([this.get(this.roomByReal, continuityKey(bareJidKey(occupant), real))])
+        : { ambiguous: false };
     }
 
-    const scope = senderScopeJid(incoming) || undefined;
     const legacy = legacySenderKey(incoming);
     if (real) {
       return resolveSets([
         this.get(this.accountByReal, real),
         this.get(this.accountWithoutRealByLegacy, legacy),
-        this.get(this.occupantByReal, real),
-        this.get(this.occupantWithoutReal, scope),
       ]);
     }
     return resolveSets([
       this.get(this.accountAllByLegacy, legacy),
-      this.get(this.occupantAll, scope),
     ]);
   }
 }
@@ -343,6 +367,7 @@ class SenderIdBucket {
 
 /** Collision-preserving identity index for repeated MAM reconciliation. */
 export class SenderScopedIdIndex {
+  private readonly byAuthority = new Map<string, Map<TimelineMessage, number>>();
   private readonly byId = new Map<string, SenderIdBucket>();
   private readonly primaryById = new Map<string, SenderIdBucket>();
   private probes = 0;
@@ -356,9 +381,9 @@ export class SenderScopedIdIndex {
     return this.probes;
   }
 
-  /** Number of live canonical sub-indexes retained across every ID bucket. */
+  /** Live authority identities and canonical sender-ID partitions retained. */
   get retainedCanonicalPartitionCount(): number {
-    return [...this.byId.values(), ...this.primaryById.values()]
+    return this.byAuthority.size + [...this.byId.values(), ...this.primaryById.values()]
       .reduce((total, bucket) => total + bucket.canonicalPartitionCount, 0);
   }
 
@@ -387,27 +412,59 @@ export class SenderScopedIdIndex {
   }
 
   add(message: TimelineMessage): void {
-    for (const id of new Set([message.id, ...(message.wireIds ?? [])])) {
+    for (const identity of roomAuthorityIdentities(message)) {
+      const matches = this.byAuthority.get(identity) ?? new Map<TimelineMessage, number>();
+      matches.set(message, (matches.get(message) ?? 0) + 1);
+      this.byAuthority.set(identity, matches);
+    }
+    for (const id of senderChosenMessageIds(message)) {
       this.addToBucket(this.byId, id, message);
     }
-    this.addToBucket(this.primaryById, message.id, message);
+    if (senderChosenMessageIds(message).includes(message.id)) {
+      this.addToBucket(this.primaryById, message.id, message);
+    }
   }
 
   replace(existing: TimelineMessage, replacement: TimelineMessage): void {
-    for (const id of new Set([existing.id, ...(existing.wireIds ?? [])])) {
+    for (const identity of roomAuthorityIdentities(existing)) {
+      const matches = this.byAuthority.get(identity);
+      const occurrences = matches?.get(existing) ?? 0;
+      if (occurrences > 1) matches?.set(existing, occurrences - 1);
+      else matches?.delete(existing);
+      if (matches?.size === 0) this.byAuthority.delete(identity);
+    }
+    for (const id of senderChosenMessageIds(existing)) {
       this.removeFromBucket(this.byId, id, existing);
     }
     this.removeFromBucket(this.primaryById, existing.id, existing);
     this.add(replacement);
   }
 
+  private resolveAuthority(incoming: TimelineMessage): Resolution {
+    for (const identity of roomAuthorityIdentities(incoming)) {
+      this.noteProbe();
+      const matches = this.byAuthority.get(identity);
+      if (!matches || matches.size === 0) continue;
+      const [message, occurrences] = matches.entries().next().value!;
+      if (matches.size !== 1 || occurrences !== 1
+        || hasConflictingRoomCanonicalIdentity(message, incoming)) return { ambiguous: true };
+      return { ambiguous: false, match: message };
+    }
+    return { ambiguous: false };
+  }
+
   find(incoming: TimelineMessage): TimelineMessage | undefined {
-    const primary = this.primaryById.get(incoming.id)?.resolve(incoming);
+    const authority = this.resolveAuthority(incoming);
+    if (authority.ambiguous) return undefined;
+    if (authority.match) return authority.match;
+    const primary = senderChosenMessageIds(incoming).includes(incoming.id)
+      ? this.primaryById.get(incoming.id)?.resolve(incoming)
+      : undefined;
     if (primary?.ambiguous) return undefined;
     if (primary?.match) return primary.match;
 
     let target: TimelineMessage | undefined;
-    for (const id of new Set([incoming.id, ...(incoming.wireIds ?? [])])) {
+    for (const id of senderChosenMessageIds(incoming)) {
       const resolution = this.byId.get(id)?.resolve(incoming);
       if (resolution?.ambiguous) return undefined;
       const match = resolution?.match;

@@ -20,7 +20,7 @@ import type { TimelineMessage } from "@/lib/chat-ui";
 
 export type AuthorRef = Partial<Pick<
   TimelineMessage,
-  "authorJid" | "authorOccupantJid" | "authorRealJid" | "authorAvatarJid" | "isSelf" | "createdAt" | "createdAtSource" | "deliveryStatus"
+  "authorJid" | "authorOccupantJid" | "authorRealJid" | "authorAvatarJid" | "isSelf" | "createdAt" | "createdAtSource" | "deliveryStatus" | "archiveId"
 >>;
 
 function bare(jid: string | null | undefined): string | null {
@@ -192,7 +192,21 @@ export function roomOccupantAvatarJid(roomJid: string | null | undefined, nick: 
  * only the identity it carries (initials otherwise).
  */
 export function stampLiveRoomAuthor<T extends AuthorRef>(row: T, roomJid: string, nick: string, selfJid?: string | null): T {
+  // Live groupchat echoes need not disclose muc#user item@jid. Our actual
+  // available self-presence proves this occupant is our own account; a
+  // configured nick, avatar stamp, or delivery status cannot provide it.
+  const self = bare(selfJid);
+  if (!row.authorRealJid
+    && row.createdAtSource === "fallback"
+    && row.archiveId === undefined
+    && row.authorOccupantJid === `${roomJid}/${nick}`
+    && occupantJidDirectory.ownNick(roomJid) === nick
+    && self && /^[^\s@]+@[^\s@]+$/.test(self)
+  ) {
+    return { ...row, authorRealJid: self, authorAvatarJid: row.authorAvatarJid ?? self, isSelf: true };
+  }
   if (row.authorRealJid || row.authorAvatarJid) return row;
+  if (row.archiveId !== undefined) return row;
   if (isOwnSend(row, occupantJidDirectory)) {
     // Pin our own reflection now, while our actual nick is known: the
     // own-nick map is forgotten on a fresh session.

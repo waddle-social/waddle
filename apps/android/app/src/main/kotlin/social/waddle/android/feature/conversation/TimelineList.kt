@@ -49,16 +49,7 @@ fun TimelineList(
     val newestFirst = remember(rows) { rows.asReversed() }
     val avatars = remember(rows, selfBareJid) { messageAvatarsOf(rows, selfBareJid) }
     // Every wire identity → row, for quote previews and scroll targets.
-    val byIdentity = remember(rows) {
-        buildMap {
-            rows.forEach { row ->
-                if (row is ConversationRow.Stored) {
-                    put(row.item.id, row.item)
-                    row.item.identityIds.forEach { put(it, row.item) }
-                }
-            }
-        }
-    }
+    val byIdentity = remember(rows) { quotedMessagesByIdentity(rows) }
 
     LazyColumn(
         state = listState,
@@ -84,7 +75,7 @@ fun TimelineList(
                 onQuoteClick = { id ->
                     val target = byIdentity[id] ?: return@MessageCard
                     val index = newestFirst.indexOfFirst { candidate ->
-                        candidate is ConversationRow.Stored && candidate.item.id == target.id
+                        candidate is ConversationRow.Stored && candidate.item.presentationId == target.presentationId
                     }
                     if (index >= 0) scope.launch { listState.animateScrollToItem(index) }
                 },
@@ -137,10 +128,7 @@ fun TimelineList(
 }
 
 private fun rowKey(row: ConversationRow): String = when (row) {
-    // id + sender: the store deliberately keeps cross-sender id
-    // collisions as distinct rows (suppressing them would be an
-    // injection vector), and same-sender same-id always merges — so
-    // the pair is unique where the id alone would crash the LazyColumn.
+    // Wire ids and occupant nicks can both collide across retained rows.
     is ConversationRow.Stored -> "s:${avatarKeyOf(row.item)}"
     is ConversationRow.Unconfirmed -> "p:${row.message.localId}"
 }

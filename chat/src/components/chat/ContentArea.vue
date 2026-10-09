@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { timelineRowKey } from "@/lib/timeline-row-key";
 import { computed, nextTick, onBeforeUnmount, ref, watch, type ComponentPublicInstance } from "vue";
 import { useStore } from "@nanostores/vue";
 import { AlertCircle, RefreshCw, Upload } from "lucide-vue-next";
@@ -679,12 +680,12 @@ onBeforeUnmount(() => {
   clearReplyJumpNotice();
 });
 
-function showDividerBefore(messageId: string): boolean {
-  return props.firstUnseenId === messageId && newMessagesDividerPlacement.value === "before";
+function showDividerBefore(message: TimelineMessage): boolean {
+  return props.firstUnseenId === timelineRowKey(message) && newMessagesDividerPlacement.value === "before";
 }
 
-function showDividerAfter(messageId: string): boolean {
-  return props.firstUnseenId === messageId && newMessagesDividerPlacement.value === "after";
+function showDividerAfter(message: TimelineMessage): boolean {
+  return props.firstUnseenId === timelineRowKey(message) && newMessagesDividerPlacement.value === "after";
 }
 
 function updateCurrentDayMarker() {
@@ -701,8 +702,8 @@ watch(
 
 const messageDisplayMeta = computed(() => buildMessageDisplayMeta(orderedFeedMessages.value));
 
-function isGroupedFollowUp(messageId: string): boolean {
-  return messageDisplayMeta.value.grouped.has(messageId);
+function isGroupedFollowUp(message: TimelineMessage): boolean {
+  return messageDisplayMeta.value.grouped.has(timelineRowKey(message));
 }
 
 function threadChipParticipants(messageId: string) {
@@ -718,8 +719,8 @@ function threadChipLastReplyAt(messageId: string): string | undefined {
   return threadChipLastReplyAtFor(props.threadIndex, messageId);
 }
 
-function showDayDividerBefore(messageId: string): boolean {
-  return messageDisplayMeta.value.dayDivider.has(messageId);
+function showDayDividerBefore(message: TimelineMessage): boolean {
+  return messageDisplayMeta.value.dayDivider.has(timelineRowKey(message));
 }
 
 function dayDividerLabel(createdAt: string): string {
@@ -1045,7 +1046,7 @@ function dayDividerLabel(createdAt: string): string {
     >
       <template #item="{ item: msg }">
           <div
-            v-if="showDayDividerBefore(msg.id)"
+            v-if="showDayDividerBefore(msg)"
             class="chat-day-divider type-section-label"
             :data-day-marker-created-at="msg.createdAt"
             role="separator"
@@ -1056,7 +1057,7 @@ function dayDividerLabel(createdAt: string): string {
             <div class="chat-day-divider__rule" />
           </div>
           <div
-            v-if="showDividerBefore(msg.id)"
+            v-if="showDividerBefore(msg)"
             class="chat-new-messages-divider type-section-label"
             data-new-messages-divider
             role="separator"
@@ -1082,7 +1083,7 @@ function dayDividerLabel(createdAt: string): string {
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
             :thread-participants="threadChipParticipants(msg.id)"
             :thread-last-reply-at="threadChipLastReplyAt(msg.id)"
-            :grouped="isGroupedFollowUp(msg.id)"
+            :grouped="isGroupedFollowUp(msg)"
             :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
             :invoke-extension-action="props.invokeExtensionAction"
             :is-pinned="isPinnedMessage(msg)"
@@ -1103,7 +1104,7 @@ function dayDividerLabel(createdAt: string): string {
             @unpin="(id: string) => emit('unpinMessage', id)"
           />
           <div
-            v-if="showDividerAfter(msg.id)"
+            v-if="showDividerAfter(msg)"
             class="chat-new-messages-divider type-section-label"
             data-new-messages-divider
             role="separator"

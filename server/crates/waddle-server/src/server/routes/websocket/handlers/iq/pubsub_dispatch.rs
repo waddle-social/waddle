@@ -438,8 +438,12 @@ pub(super) async fn handle_pubsub_iq(
             PubSubRequest::Retract {
                 node,
                 item_id,
-                notify: _,
+                notify,
             } => {
+                if !matches!(iq, xmpp_parsers::iq::Iq::Set { .. }) {
+                    return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::BadRequest))];
+                }
+
                 if target_jid.to_string() == spaces_domain {
                     return handle_spaces_retract(
                         iq,
@@ -492,6 +496,17 @@ pub(super) async fn handle_pubsub_iq(
                     Ok(retracted) => {
                         if retracted {
                             debug!(node = %node, item_id = %item_id, "PubSub item retracted via WebSocket");
+                            pubsub_fanout::fan_out_pep_retract(
+                                state,
+                                pubsub_fanout::FanOutRetractRequest {
+                                    owner: &target_jid,
+                                    node: &node,
+                                    item_id: &item_id,
+                                },
+                                phase.bound_jid(),
+                                notify,
+                            )
+                            .await;
                             let response = build_pubsub_success(iq);
                             return vec![iq_to_xml(response)];
                         } else {

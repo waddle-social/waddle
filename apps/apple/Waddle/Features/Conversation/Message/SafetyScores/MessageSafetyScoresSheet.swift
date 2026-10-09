@@ -33,7 +33,7 @@ struct MessageSafetyScoresSheet: View {
     /// has left the timeline.
     private var scores: SafetyScores? {
         let timeline = session.timelines.timeline(for: item.conversation)
-        guard let current = timeline.item(withID: item.id) else { return item.safetyScores }
+        guard let current = timeline.item(withPresentationID: item.presentationID) else { return item.safetyScores }
         return current.safetyScores
     }
 

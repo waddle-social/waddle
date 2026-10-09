@@ -165,10 +165,10 @@ private struct ConversationContent: View {
     /// `reveal`, replacing (and so cancelling) any search still running.
     private func focus(on request: FocusRequest) {
         showsRevealMiss = false
-        // Rows are keyed by their primary id; resolve any alias.
+        // Resolve the wire id, then scroll using the row's local key.
         if let item = session.timelines.timeline(for: conversation).item(withID: request.messageID) {
             pendingFocus = nil
-            actions.scrollRequest = item.id
+            actions.scrollRequest = item.presentationID
         } else {
             pendingFocus = request
         }
@@ -181,8 +181,9 @@ private struct ConversationContent: View {
         let outcome = await session.reveal(messageID: request.messageID, in: conversation)
         guard !Task.isCancelled else { return }
         pendingFocus = nil
-        if case let .found(itemID) = outcome {
-            actions.scrollRequest = itemID
+        if case .found = outcome,
+           let item = session.timelines.timeline(for: conversation).item(withID: request.messageID) {
+            actions.scrollRequest = item.presentationID
         } else {
             showsRevealMiss = true
         }

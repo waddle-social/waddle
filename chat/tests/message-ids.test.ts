@@ -132,3 +132,36 @@ describe("MessageIdIndex", () => {
 });
 
 
+
+
+describe("room identity claims", () => {
+  test("canonical room references win over authored primary collisions in either order", () => {
+    const canonical = { id: "room-id", stanzaId: "room-id", stanzaIdBy: "room@muc.example.com", authorOccupantJid: "room@muc.example.com/alice", body: "canonical" };
+    const claimant = { id: "room-id", authorOccupantJid: "room@muc.example.com/guest", body: "authored" };
+    for (const messages of [[canonical, claimant], [claimant, canonical]]) {
+      expect(findMessageById(messages, "room-id")).toBe(canonical);
+      const index = new MessageIdIndex<(typeof messages)[number]>();
+      for (const message of messages) index.add(message);
+      expect(index.get("room-id")).toBe(canonical);
+    }
+  });
+
+  test("re-registering a room row with its presentation key updates its claim", () => {
+    const first = { id: "sender-id", rowKey: "stable-row", authorOccupantJid: "room@muc.example.com/alice", body: "before" };
+    const updated = { ...first, body: "after" };
+    const index = new MessageIdIndex<typeof first>();
+    index.add(first);
+    index.add(updated);
+    expect(index.get("sender-id")).toBe(updated);
+  });
+
+  test("unknown authored primary twins fail closed in scan and index", () => {
+    const first = { id: "reused", rowKey: "first", authorOccupantJid: "room@muc.example.com/guest", body: "first" };
+    const second = { ...first, rowKey: "second", body: "second" };
+    expect(findMessageById([first, second], "reused")).toBeUndefined();
+    const index = new MessageIdIndex<typeof first>();
+    index.add(first);
+    index.add(second);
+    expect(index.get("reused")).toBeUndefined();
+  });
+});

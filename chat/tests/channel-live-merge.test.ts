@@ -7,9 +7,15 @@ import { useChannelLiveMerge } from "../src/channels/live-merge";
 import type { LiveRoomMessage } from "../src/lib/xmpp-client";
 import type { WaddleSession } from "../src/lib/server-auth";
 import type { TimelineMessage } from "../src/lib/chat-ui";
+import { occupantJidDirectory } from "../src/lib/avatars/author-jid";
+import { queuedRoomMessageToTimeline } from "../src/channels/message-timeline-state";
+import { roomMessageFromArchived } from "../src/lib/xmpp/wasm-message-codecs";
 import { __setFaroForTesting } from "../src/lib/telemetry";
 
-afterEach(() => __setFaroForTesting(null));
+afterEach(() => {
+  __setFaroForTesting(null);
+  occupantJidDirectory.clear();
+});
 
 const session: WaddleSession = {
   username: "alice",
@@ -507,7 +513,7 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     ]);
   });
 
-  test("does not merge unstamped simultaneous occupants with the same bare real JID", () => {
+  test("reconciles sender IDs for the same real account across occupant nicks", () => {
     const h = harness();
     for (const [index, nick] of ["alice-phone", "alice-laptop"].entries()) {
       h.liveMerge.mergeLiveMessage({
@@ -524,10 +530,7 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       });
     }
 
-    expect(h.messages.value.map((message) => message.id)).toEqual([
-      "envelope-1",
-      "envelope-2",
-    ]);
+    expect(h.messages.value.map((message) => message.id)).toEqual(["envelope-2"]);
   });
 
   test("does not trust a reused nick when the known real JID changed", () => {
@@ -592,6 +595,55 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
     expect(h.messages.value[0]?.id).toBe("room-stanza-self");
     expect(h.messages.value[0]?.wireIds).toEqual(["client-id"]);
     expect(h.messages.value[0]?.deliveryStatus).toBe("delivered");
+  });
+
+  test("a pending room send does not trust an echo identified only by a self nick", () => {
+    const h = harness();
+    h.pendingEchoClientIds.add("client-id");
+    h.messages.value = [{
+      id: "client-id", author: "alice", authorJid: "room@muc.example.com/alice",
+      authorOccupantJid: "room@muc.example.com/alice", authorRealJid: session.jid,
+      body: "my message", isSelf: true, deliveryStatus: "sending",
+      createdAt: "2026-05-14T10:36:55Z", createdAtSource: "queued",
+    }];
+    h.liveMerge.mergeLiveMessage({
+      id: "echo-id", wireIds: ["client-id"], author: "alice", authorJid: "room@muc.example.com/alice",
+      authorOccupantJid: "room@muc.example.com/alice", body: "my message", isSelf: true,
+      createdAt: "2026-05-14T10:36:56Z", createdAtSource: "delay",
+    });
+    expect(h.messages.value).toHaveLength(2);
+    expect(h.pendingEchoClientIds.has("client-id")).toBe(true);
+  });
+
+  test("body echo fallback preserves distinct canonical room messages", () => {
+    for (const tracked of [false, true]) {
+      const h = harness();
+      if (tracked) h.pendingEchoClientIds.add("first");
+      const base: TimelineMessage = {
+        id: "first", author: "alice", authorJid: session.jid, authorRealJid: session.jid,
+        authorOccupantJid: "room@muc.example.com/alice", body: "same", isSelf: true,
+        stanzaId: "first", stanzaIdBy: "room@muc.example.com", deliveryStatus: "sending",
+        createdAt: "2026-05-14T10:36:55Z", createdAtSource: "queued",
+      };
+      h.messages.value = [base];
+      h.liveMerge.mergeLiveMessage({ ...base, id: "second", stanzaId: "second", deliveryStatus: undefined, createdAtSource: "delay" });
+      expect(h.messages.value).toHaveLength(2);
+    }
+  });
+
+  test("preserved echo fallback refuses unknown sender rows without local provenance", () => {
+    const h = harness();
+    h.messages.value = [{
+      id: "old", author: "alice", authorJid: "room@muc.example.com/alice",
+      authorOccupantJid: "room@muc.example.com/alice", body: "same", isSelf: true,
+      deliveryStatus: "failed", createdAt: "2026-05-14T10:36:55Z", createdAtSource: "delay",
+    }];
+    h.liveMerge.mergeLiveMessage({
+      id: "new", author: "alice", authorJid: session.jid, authorRealJid: session.jid,
+      authorOccupantJid: "room@muc.example.com/alice", body: "same", isSelf: true,
+      createdAt: "2026-05-14T10:36:56Z", createdAtSource: "delay",
+    });
+    expect(h.messages.value).toHaveLength(2);
   });
 
   test("fails closed when sender-scoped aliases select multiple rows", () => {
@@ -717,6 +769,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "my msg",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         deliveryStatus: "sending",
         timestamp: 0,
       } as TimelineMessage,
@@ -726,6 +780,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "my msg",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       timestamp: 0,
     } as TimelineMessage);
     expect(h.messages.value.length).toBe(1);
@@ -741,6 +797,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "duplicate-body",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         deliveryStatus: "sending",
         createdAt: "2026-05-14T10:36:55.000Z",
       } as TimelineMessage,
@@ -750,6 +808,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "duplicate-body",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       createdAt: "2026-05-14T10:36:56.000Z",
     } as TimelineMessage);
     expect(h.messages.value.length).toBe(1);
@@ -783,6 +843,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "draft body",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         createdAt: "2026-05-14T10:36:55.000Z",
       } as TimelineMessage,
     ];
@@ -791,6 +853,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "canonical body",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       createdAt: "2026-05-14T10:36:55.000Z",
       extensionAnnotations: [
         {
@@ -816,6 +880,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
         body: "read https://example.com",
         nick: "alice",
         isSelf: true,
+        authorOccupantJid: "room@muc.example.com/alice",
+        authorRealJid: session.jid,
         deliveryStatus: "sending",
         linkPreviews: [{ originalUrl: "https://example.com", title: "Example" }],
         createdAt: "2026-05-14T10:36:55.000Z",
@@ -827,6 +893,8 @@ describe("mergeLiveMessage self-echo reconciliation", () => {
       body: "read https://example.com",
       nick: "alice",
       isSelf: true,
+      authorOccupantJid: "room@muc.example.com/alice",
+      authorRealJid: session.jid,
       createdAt: "2026-05-14T10:36:56.000Z",
     } as TimelineMessage);
 
@@ -869,6 +937,7 @@ describe("live row author stamping (nick reuse)", () => {
       occupantJidDirectory.record("room@muc.example.com", "sam", "alice@example.com");
       const sentAt = new Date().toISOString();
       h.liveMerge.handleRoomMessage(makeLive({
+        stanzaId: "from-alice", stanzaIdBy: "room@muc.example.com",
         id: "from-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from alice",
         createdAt: sentAt, createdAtSource: "fallback",
       }));
@@ -876,6 +945,7 @@ describe("live row author stamping (nick reuse)", () => {
       occupantJidDirectory.record("room@muc.example.com", "sam", "bob@example.com");
       // Reconnect catch-up re-emits the same stanza on the live path.
       h.liveMerge.handleRoomMessage(makeLive({
+        stanzaId: "from-alice", stanzaIdBy: "room@muc.example.com",
         id: "from-alice", nick: "sam", fromJid: "room@muc.example.com/sam", body: "hi from alice",
         createdAt: sentAt, createdAtSource: "archive",
       }));
@@ -913,3 +983,101 @@ describe("live row author stamping (nick reuse)", () => {
   });
 });
 
+
+
+describe("production live self echo without disclosed real JID", () => {
+  const room = "room@muc.example.com";
+
+  function echo(nick: string, source: "live" | "archive" = "live", timestamp?: string, archiveEnvelope = "archive-envelope") {
+    return roomMessageFromArchived({
+      mam_id: source === "live" ? "client-id" : archiveEnvelope, id: "client-id", origin_id: "client-id",
+      stanza_id: "room-echo", stanza_id_by: room, from: `${room}/${nick}`,
+      to: session.jid, body: "my message", message_type: "groupchat", is_muc: true,
+      timestamp, reaction_emojis: [], markup_spans: [], mention_uris: [], references: [],
+      is_sticker: false, shared_files: [], link_previews: [],
+    }, source)!;
+  }
+
+  function queued(h: ReturnType<typeof harness>) {
+    const row = queuedRoomMessageToTimeline(session, room, {
+      kind: "room", roomJid: room, id: "client-id", body: "my message",
+      createdAt: "2026-07-01T10:00:00Z",
+    });
+    h.messages.value = [row];
+    h.pendingEchoClientIds.add("client-id");
+    return row;
+  }
+
+  test("actual self presence reconciles an undelayed live echo lacking author_real_jid", () => {
+    const h = harness();
+    const local = queued(h);
+    occupantJidDirectory.recordOwnNick(room, "alice");
+    const incoming = echo("alice");
+    expect(incoming.authorRealJid).toBeUndefined();
+    expect(incoming.createdAtSource).toBe("fallback");
+    expect(incoming.archiveId).toBeUndefined();
+    h.liveMerge.handleRoomMessage(incoming);
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]).toMatchObject({ authorRealJid: session.jid, isSelf: true, deliveryStatus: "delivered", rowKey: local.rowKey });
+    expect(h.pendingEchoClientIds.has("client-id")).toBe(false);
+  });
+
+  test("room-assigned own nick reconciles independently of the configured nick", () => {
+    const h = harness();
+    queued(h);
+    occupantJidDirectory.recordOwnNick(room, "alice_2");
+    h.liveMerge.handleRoomMessage(echo("alice_2"));
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]).toMatchObject({ authorRealJid: session.jid, authorOccupantJid: `${room}/alice_2`, isSelf: true, deliveryStatus: "delivered" });
+  });
+
+  test("absent, old-nick, delayed, and archive echoes cannot borrow own identity", () => {
+    for (const scenario of ["no-presence", "avatar-only", "old-nick", "delay", "archive", "malformed-archive", "empty-archive"] as const) {
+      occupantJidDirectory.clear();
+      const h = harness();
+      queued(h);
+      if (scenario === "avatar-only") occupantJidDirectory.record(room, "alice", session.jid);
+      if (scenario !== "no-presence" && scenario !== "avatar-only") occupantJidDirectory.recordOwnNick(room, scenario === "old-nick" ? "alice_2" : "alice");
+      const incoming = echo("alice", scenario === "archive" || scenario === "malformed-archive" || scenario === "empty-archive" ? "archive" : "live", scenario === "delay" || scenario === "archive" ? "2026-07-01T10:00:00Z" : undefined, scenario === "empty-archive" ? "" : undefined);
+      h.liveMerge.handleRoomMessage(incoming);
+      expect(h.messages.value).toHaveLength(2);
+      expect(h.messages.value.find((row) => row.id === "room-echo")?.authorRealJid).toBeUndefined();
+      if (scenario === "malformed-archive" || scenario === "empty-archive") expect(h.messages.value.find((row) => row.id === "room-echo")?.authorAvatarJid).toBeUndefined();
+      expect(h.pendingEchoClientIds.has("client-id")).toBe(true);
+    }
+  });
+
+  test("codec preserves distinct raw client and origin IDs without claiming its envelope ID", () => {
+    const incoming = roomMessageFromArchived({
+      mam_id: "client-id", id: "client-id", origin_id: "different-origin", from: `${room}/alice`, body: "my message", message_type: "groupchat", is_muc: true,
+      reaction_emojis: [], markup_spans: [], mention_uris: [], references: [], is_sticker: false, shared_files: [], link_previews: [],
+    }, "live")!;
+    expect(incoming.senderChosenIds).toEqual(["client-id", "different-origin"]);
+    const h = harness();
+    queued(h);
+    occupantJidDirectory.recordOwnNick(room, "alice");
+    h.liveMerge.handleRoomMessage(incoming);
+    expect(h.messages.value).toHaveLength(1);
+    expect(h.messages.value[0]?.senderChosenIds).toEqual(["client-id", "different-origin"]);
+  });
+
+  test("origin-only live wrappers never lend their fabricated envelope ID to authored fallback", () => {
+    for (const stamped of [false, true]) {
+      occupantJidDirectory.clear();
+      occupantJidDirectory.recordOwnNick(room, "alice");
+      const h = harness();
+      const originOnly = (envelope: string, origin: string, canonical = "room-one") => roomMessageFromArchived({
+        mam_id: envelope, origin_id: origin, from: `${room}/alice`, body: "origin only", message_type: "groupchat", is_muc: true,
+        ...(stamped ? { stanza_id: canonical, stanza_id_by: room } : {}),
+        reaction_emojis: [], markup_spans: [], mention_uris: [], references: [], is_sticker: false, shared_files: [], link_previews: [],
+      }, "live")!;
+      h.liveMerge.handleRoomMessage(originOnly("fabricated-one", "actual-origin"));
+      h.liveMerge.handleRoomMessage(originOnly("fabricated-two", "actual-origin"));
+      expect(h.messages.value).toHaveLength(1);
+      expect(h.messages.value[0]?.senderChosenIds).toEqual(["actual-origin"]);
+      h.liveMerge.handleRoomMessage(originOnly("fabricated-three", "fabricated-one", "room-two"));
+      expect(h.messages.value).toHaveLength(2);
+    }
+  });
+
+});

@@ -1,3 +1,4 @@
+import { renderVueComponent } from "./helpers/render-vue-sfc";
 import { describe, expect, test } from "bun:test";
 import {
   eventBandsFor,
@@ -64,3 +65,17 @@ describe("system band class helpers", () => {
     expect(systemBandMetaValueClass("Event")).toBe("");
   });
 });
+
+
+test("system-band message cards expose the same local presentation anchor as ordinary cards", async () => {
+  const html = await renderVueComponent("../src/components/chat/MessageCard.vue", {
+    message: {
+      id: "wire-id", rowKey: "stable-system-row", author: "bot", body: "event",
+      createdAt: "2026-07-01T10:00:00Z", isSelf: false,
+      extensionAnnotations: [annotation()],
+    },
+    hats: [],
+  }, import.meta.url);
+  expect(html).toContain('data-message-row-key="stable-system-row"');
+  expect(html).toContain('data-message-id="wire-id"');
+}, 30_000);

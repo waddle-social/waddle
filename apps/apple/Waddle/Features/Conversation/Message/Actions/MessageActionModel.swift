@@ -65,7 +65,7 @@ final class MessageActionModel {
     /// XEP-0444 sends our full set, so toggle against the freshest row, not
     /// a snapshot a picker may have held while other reactions arrived.
     func react(_ emoji: String, to item: TimelineItem, session: SessionCoordinator) {
-        let current = session.timelines.timeline(for: item.conversation).item(withID: item.id) ?? item
+        let current = session.timelines.timeline(for: item.conversation).item(withPresentationID: item.presentationID) ?? item
         Task {
             let succeeded = await session.toggleReaction(emoji, on: current)
             if !succeeded {

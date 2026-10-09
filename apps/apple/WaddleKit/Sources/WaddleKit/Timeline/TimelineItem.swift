@@ -30,6 +30,9 @@ public enum Tombstone: Hashable, Sendable {
 public struct TimelineItem: Hashable, Sendable, Identifiable {
     /// Dedupe identity: stanza id, else origin id, else message id.
     public let id: String
+    /// Stable local row key for rendering, scrolling and highlighting.
+    /// Distinct messages may carry identical sender-chosen wire ids.
+    public let presentationID: String
     public let conversation: ConversationID
     public let isMine: Bool
     /// The parsed stanza backing the row.
@@ -52,6 +55,7 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
 
     public init(
         id: String,
+        presentationID: String = UUID().uuidString,
         conversation: ConversationID,
         isMine: Bool,
         message: WireMessage,
@@ -64,6 +68,7 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         receivedAt: Date = Date()
     ) {
         self.id = id
+        self.presentationID = presentationID
         self.conversation = conversation
         self.isMine = isMine
         self.message = message
@@ -93,10 +98,16 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return from.bare.localpart ?? from.bare.domain
     }
 
-    /// Author key used for grouping: occupant JID in rooms, bare JID in 1:1.
+    /// Display-only grouping key: occupant JID plus its captured real JID
+    /// in rooms, bare sender JID in 1:1. A nick handover starts a new group;
+    /// unstamped rows keep their occupant grouping without guessing identity.
     public var authorKey: String {
         guard let from = message.from else { return "" }
-        return conversation.isRoom ? from.description : from.bare.description
+        guard conversation.isRoom else { return from.bare.description }
+        if let author = message.authorRealJID {
+            return "\(from.description)\u{0}\(author.description)"
+        }
+        return from.description
     }
 
     /// Thread replies render only inside their thread.

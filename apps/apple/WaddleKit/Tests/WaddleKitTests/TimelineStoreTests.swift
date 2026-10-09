@@ -36,28 +36,354 @@ struct TimelineStoreTests {
         #expect(items(store).first?.timestamp == date(5))
     }
 
-    @Test func crossSenderCollisionStaysDistinct() {
+    @Test(arguments: [false, true])
+    func anonymousArchiveRefetchUsesTheRoomsMAMUID(hasAuthoredIDs: Bool) {
+        let store = store()
+        var first = roomMessage("archive original", from: "sam", stanzaID: "unused", at: date(1), source: .archive(mamID: "mam-1"))
+        first.identity = hasAuthoredIDs ? MessageIdentity(messageID: "client-1", originID: "client-1") : MessageIdentity()
+        store.ingest(first)
+        let presentationID = items(store)[0].presentationID
+        var refetched = first
+        refetched.body = "refetched copy"
+        #expect(store.ingest(refetched) == .duplicate)
+        #expect(items(store).count == 1)
+        #expect(items(store)[0].body == "archive original")
+        #expect(items(store)[0].presentationID == presentationID)
+        #expect(items(store)[0].message.authorRealJID == nil)
+        #expect(items(store)[0].message.source == .archive(mamID: "mam-1"))
+        #expect(items(store)[0].identity == first.identity)
+    }
+
+    @Test func roomMAMUIDSurvivesAnArchiveToLiveReplacement() {
+        let store = store()
+        var archived = roomMessage("archived", from: "bob", stanzaID: "unused", originID: "client-1", at: date(1), source: .archive(mamID: "mam-1"))
+        archived.identity = MessageIdentity(messageID: "client-1", originID: "client-1")
+        archived.authorRealJID = bob
+        store.ingest(archived)
+        var live = archived
+        live.source = .live
+        live.timestamp = nil
+        live.body = "live"
+        #expect(store.ingest(live) == .duplicate)
+        let presentationID = items(store)[0].presentationID
+        var refetched = archived
+        refetched.authorRealJID = nil
+        refetched.from = room.with(resource: "old-nick")
+        #expect(store.ingest(refetched) == .duplicate)
+        #expect(items(store).count == 1)
+        #expect(items(store)[0].body == "live")
+        #expect(items(store)[0].presentationID == presentationID)
+        #expect(items(store)[0].message.source == .live)
+        #expect(items(store)[0].identity == live.identity)
+        #expect(!items(store)[0].identity.all.contains("mam-1"))
+    }
+
+    @Test func liveRowLearnsMAMUIDWithoutChangingItsRenderedPayload() {
+        let store = store()
+        let live = roomMessage("live", from: "sam", stanzaID: "room-1", originID: "client-1", at: date(1))
+        store.ingest(live)
+        let presentationID = items(store)[0].presentationID
+        var archived = live
+        archived.source = .archive(mamID: "mam-first")
+        #expect(store.ingest(archived) == .duplicate)
+        archived.source = .archive(mamID: "mam-later")
+        #expect(store.ingest(archived) == .duplicate)
+        var refetched = archived
+        refetched.source = .archive(mamID: "mam-first")
+        refetched.identity = MessageIdentity(messageID: "client-1", originID: "client-1")
+        #expect(store.ingest(refetched) == .duplicate)
+        #expect(items(store).count == 1)
+        #expect(items(store)[0].presentationID == presentationID)
+        #expect(items(store)[0].message == live)
+        refetched.source = .archive(mamID: "mam-later")
+        guard case .inserted = store.ingest(refetched) else {
+            Issue.record("the first learned MAM UID must not be replaced")
+            return
+        }
+    }
+
+    @Test func canonicalRoomIDWinsBeforeAnAmbiguousMAMUID() {
+        let store = store()
+        store.ingest(roomMessage("one", from: "sam", stanzaID: "room-1", at: date(1), source: .archive(mamID: "mam-1")))
+        store.ingest(roomMessage("two", from: "sam", stanzaID: "room-2", at: date(2)))
+        // The canonical room id resolves row two, even though the archive
+        // incorrectly reused row one's UID. Both rows now retain that UID.
+        #expect(store.ingest(roomMessage("two archived", from: "sam", stanzaID: "room-2", at: date(2), source: .archive(mamID: "mam-1"))) == .duplicate)
+        var ambiguous = roomMessage("unresolved", from: "sam", stanzaID: "unused", at: date(3), source: .archive(mamID: "mam-1"))
+        ambiguous.identity = MessageIdentity()
+        guard case .inserted = store.ingest(ambiguous) else {
+            Issue.record("an ambiguous archive UID must not select either row")
+            return
+        }
+        #expect(items(store).map(\.body) == ["one", "two", "unresolved"])
+        #expect(store.ingest(roomMessage("one refetched", from: "other-nick", stanzaID: "room-1", at: date(1), source: .archive(mamID: "mam-1"))) == .duplicate)
+    }
+
+    @Test func aSharedMAMUIDCannotMergeConflictingCanonicalRoomIDs() {
+        let store = store()
+        store.ingest(roomMessage("one", from: "sam", stanzaID: "room-1", at: date(1), source: .archive(mamID: "mam-1")))
+        store.ingest(roomMessage("two", from: "sam", stanzaID: "room-2", at: date(2), source: .archive(mamID: "mam-1")))
+        #expect(items(store).map(\.body) == ["one", "two"])
+    }
+
+    @Test func roomMAMUIDIsScopedToTheConversation() {
+        let store = store()
+        let otherRoom = bare("other@muc.waddle.test")
+        for conversation in [roomConversation, .room(otherRoom)] {
+            var message = roomMessage(conversation.jid.description, from: "sam", stanzaID: "unused", at: date(1), source: .archive(mamID: "shared-uid"))
+            message.identity = MessageIdentity()
+            message.from = conversation.jid.with(resource: "sam")
+            store.ingest(message)
+            #expect(store.ingest(message) == .duplicate)
+            #expect(items(store, conversation).count == 1)
+            #expect(items(store, conversation)[0].body == conversation.jid.description)
+        }
+    }
+
+    @Test func emptyMAMUIDDoesNotProveTwoAnonymousRowsAreTheSame() {
+        let store = store()
+        var message = roomMessage("one", from: "sam", stanzaID: "unused", originID: "shared", at: date(1), source: .archive(mamID: ""))
+        message.identity = MessageIdentity(messageID: "shared", originID: "shared")
+        store.ingest(message)
+        message.body = "two"
+        store.ingest(message)
+        #expect(items(store).map(\.body) == ["one", "two"])
+    }
+
+    @Test func roomMAMUIDNeverMatchesASenderChosenWireAlias() {
+        let store = store()
+        var archive = roomMessage("archive", from: "sam", stanzaID: "unused", at: date(1), source: .archive(mamID: "mam-1"))
+        archive.identity = MessageIdentity()
+        archive.authorRealJID = bob
+        store.ingest(archive)
+        var alias = roomMessage("authored alias", from: "sam", stanzaID: "unused", originID: "mam-1", at: date(2), source: .archive(mamID: "mam-2"))
+        alias.identity = MessageIdentity(messageID: "mam-1", originID: "mam-1")
+        alias.authorRealJID = bob
+        store.ingest(alias)
+        #expect(items(store).map(\.body) == ["archive", "authored alias"])
+        #expect(items(store)[0].identity.all.isEmpty)
+    }
+
+    @Test func roomAuthorGroupingSeparatesCapturedIdentitiesAtTheSameNick() {
+        let store = store()
+        let erin = bare("erin@waddle.test")
+        let authors: [BareJID?] = [bob, erin, nil, nil, erin]
+        for (index, author) in authors.enumerated() {
+            var message = roomMessage("message \(index)", from: "sam", stanzaID: "room-\(index)")
+            message.authorRealJID = author
+            store.ingest(message)
+        }
+        let rows = items(store)
+        #expect(rows[0].authorKey != rows[1].authorKey)
+        #expect(rows[1].authorKey != rows[2].authorKey)
+        #expect(rows[2].authorKey == rows[3].authorKey)
+        #expect(rows[1].authorKey == rows[4].authorKey)
+        #expect(rows.map(\.authorName) == Array(repeating: "sam", count: 5))
+    }
+
+    @Test func authorGroupingRetainsOccupantAndDirectBareSenderBoundaries() {
+        let store = store()
+        for (index, nick) in ["sam", "sam2"].enumerated() {
+            var message = roomMessage(nick, from: nick, stanzaID: "room-\(index)")
+            message.authorRealJID = bob
+            store.ingest(message)
+        }
+        #expect(items(store)[0].authorKey != items(store)[1].authorKey)
+        for (index, resource) in ["phone", "desktop"].enumerated() {
+            var message = directMessage(resource, from: bob.with(resource: resource)!, to: jid("alice@waddle.test/phone"), id: "direct-\(index)")
+            message.authorRealJID = index == 0 ? bob : nil
+            store.ingest(message)
+        }
+        #expect(items(store, bobConversation).map(\.authorKey) == [bob.description, bob.description])
+    }
+
+    @Test func roomAssignedIDIdentifiesTheSameMessageAcrossNicks() {
         let store = store()
         store.ingest(roomMessage("from bob", from: "bob", stanzaID: "same"))
-        store.ingest(roomMessage("from eve", from: "eve", stanzaID: "same"))
-        #expect(items(store).count == 2)
+        #expect(store.ingest(roomMessage("archive copy", from: "bob2", stanzaID: "same", at: date(1), source: .archive(mamID: "same"))) == .duplicate)
+        #expect(items(store).count == 1)
+        #expect(items(store)[0].body == "from bob")
+    }
+
+    @Test(arguments: [false, true], [false, true])
+    func reusedOriginWithoutRoomIDKeepsBothAuthorsMessages(oldAuthorKnown: Bool, newAuthorKnown: Bool) {
+        let store = store()
+        var old = roomMessage("before handover", from: "sam", stanzaID: "unused", originID: "shared", at: date(1))
+        old.identity = MessageIdentity(messageID: "shared", originID: "shared")
+        old.authorRealJID = oldAuthorKnown ? bob : nil
+        var incoming = roomMessage("after handover", from: "sam", stanzaID: "unused", originID: "shared")
+        incoming.identity = old.identity
+        incoming.authorRealJID = newAuthorKnown ? bare("erin@waddle.test") : nil
+
+        store.ingest(old)
+        guard case .inserted = store.ingest(incoming) else {
+            Issue.record("a new holder of the nick must insert their own message")
+            return
+        }
+        #expect(items(store).map(\.body) == ["before handover", "after handover"])
+        #expect(items(store).first?.timestamp == date(1))
+        #expect(items(store).first?.message.authorRealJID == old.authorRealJID)
+        let rows = items(store)
+        #expect(rows[0].presentationID != rows[1].presentationID)
     }
 
     @Test func localEchoIsSupersededByReflection() {
         let store = store()
         var echo = roomMessage("hello", from: "alice", stanzaID: "unused", originID: "client-1")
         echo.identity = MessageIdentity(messageID: "client-1", originID: "client-1")
+        echo.authorRealJID = me.jid
         store.insertLocalEcho(echo, in: roomConversation)
+        let presentationID = items(store)[0].presentationID
         #expect(items(store).first?.isLocalEcho == true)
         #expect(items(store).first?.actionTargetID == nil)
 
-        store.ingest(roomMessage("hello", from: "alice", stanzaID: "room-9", originID: "client-1"))
+        var reflection = roomMessage("hello", from: "alice", stanzaID: "room-9", originID: "client-1")
+        reflection.authorRealJID = me.jid
+        store.ingest(reflection)
         let rows = items(store)
         #expect(rows.count == 1)
         #expect(rows[0].isLocalEcho == false)
         #expect(rows[0].id == "client-1")
         #expect(rows[0].actionTargetID == "room-9")
         #expect(rows[0].isMine)
+        #expect(rows[0].presentationID == presentationID)
+    }
+
+    @Test(arguments: [false, true])
+    func distinctRoomIDsNeverMergeOnReusedOrigin(sameAuthor: Bool) {
+        let store = store()
+        var original = roomMessage("original", from: "sam", stanzaID: "room-1", originID: "shared")
+        original.authorRealJID = bob
+        var incoming = roomMessage("new message", from: "sam", stanzaID: "room-2", originID: "shared")
+        incoming.authorRealJID = sameAuthor ? bob : bare("erin@waddle.test")
+        store.ingest(original)
+        store.ingest(incoming)
+        #expect(items(store).map(\.body) == ["original", "new message"])
+    }
+
+    @Test(arguments: [false, true])
+    func unverifiedLocalEchoCannotBeClaimedByTheSameNick(conflictingAuthor: Bool) {
+        let store = store()
+        var echo = roomMessage("pending", from: me.nick, stanzaID: "unused", originID: "client-1")
+        echo.identity = MessageIdentity(messageID: "client-1", originID: "client-1")
+        echo.authorRealJID = me.jid
+        store.insertLocalEcho(echo, in: roomConversation)
+        var claim = roomMessage("claim", from: me.nick, stanzaID: "room-1", originID: "client-1")
+        claim.authorRealJID = conflictingAuthor ? bob : nil
+        store.ingest(claim)
+        #expect(items(store).map(\.body) == ["pending", "claim"])
+        #expect(items(store)[0].isLocalEcho)
+    }
+
+    @Test(arguments: [false, true])
+    func matchingAuthorReconcilesCopiesWithoutRoomID(useOriginID: Bool) {
+        let store = store()
+        var original = roomMessage("hello", from: "bob", stanzaID: "unused", originID: "client-1", at: date(1), source: .archive(mamID: "mam-1"))
+        original.identity = MessageIdentity(messageID: "client-1", originID: useOriginID ? "client-1" : nil)
+        original.authorRealJID = bob
+        var incoming = roomMessage("hello live", from: "bob2", stanzaID: "room-1", originID: "client-1")
+        incoming.identity.originID = useOriginID ? "client-1" : nil
+        incoming.authorRealJID = bob
+        store.ingest(original)
+        let presentationID = items(store)[0].presentationID
+        #expect(store.ingest(incoming) == .duplicate)
+        #expect(items(store).count == 1)
+        #expect(items(store)[0].body == "hello live")
+        #expect(items(store)[0].timestamp == date(1))
+        #expect(items(store)[0].actionTargetID == "room-1")
+        #expect(items(store)[0].presentationID == presentationID)
+    }
+
+    @Test func verifiedArchiveTwinAddsCanonicalIdentityToALiveRow() {
+        let store = store()
+        var live = roomMessage("live body", from: "bob", stanzaID: "unused", originID: "client-1")
+        live.identity = MessageIdentity(messageID: "client-1", originID: "client-1")
+        live.authorRealJID = bob
+        store.ingest(live)
+        store.ingest(reaction(["👍"], to: "room-1", from: "carol"))
+        var archive = roomMessage("archived body", from: "bob", stanzaID: "room-1", originID: "client-1", at: date(1), source: .archive(mamID: "mam-1"))
+        archive.authorRealJID = bob
+        #expect(store.ingest(archive) == .duplicate)
+        #expect(items(store)[0].actionTargetID == "room-1")
+        #expect(store.ingest(roomMessage("unstamped replay", from: "bob2", stanzaID: "room-1")) == .duplicate)
+        #expect(items(store).count == 1)
+        #expect(items(store)[0].body == "live body")
+        #expect(items(store)[0].timestamp == date(1))
+        #expect(items(store)[0].message.authorRealJID == bob)
+        #expect(items(store)[0].reactions.map(\.emoji) == ["👍"])
+    }
+
+    @Test func liveTwinWithoutRoomIDKeepsTheCanonicalArchiveIdentity() {
+        let store = store()
+        var archive = roomMessage("archive", from: "bob", stanzaID: "room-1", originID: "client-1", at: date(1), source: .archive(mamID: "mam-1"))
+        archive.authorRealJID = bob
+        store.ingest(archive)
+        var live = roomMessage("live", from: "bob2", stanzaID: "unused", originID: "client-1")
+        live.identity = MessageIdentity(messageID: "client-1", originID: "client-1")
+        live.authorRealJID = bob
+        #expect(store.ingest(live) == .duplicate)
+        #expect(items(store)[0].actionTargetID == "room-1")
+        #expect(items(store)[0].body == "live")
+        #expect(items(store)[0].timestamp == date(1))
+        #expect(store.ingest(roomMessage("replay", from: "bob", stanzaID: "room-1")) == .duplicate)
+        #expect(items(store).count == 1)
+    }
+
+    @Test func foreignAuthorityAndAuthoredAliasesCannotClaimARoomIdentity() {
+        let store = store()
+        var original = roomMessage("original", from: "bob", stanzaID: "room-1", originID: "original-client-id")
+        original.authorRealJID = bob
+        store.ingest(original)
+        var foreign = roomMessage("foreign id", from: "bob", stanzaID: "unused", originID: "other-client-id")
+        foreign.identity = MessageIdentity(messageID: "other-client-id", originID: "other-client-id", stanzaID: StanzaID(id: "room-1", by: bare("evil.example")))
+        foreign.authorRealJID = bob
+        store.ingest(foreign)
+        var alias = roomMessage("authored alias", from: "bob", stanzaID: "unused", originID: "room-1")
+        alias.identity = MessageIdentity(messageID: "room-1", originID: "room-1")
+        alias.authorRealJID = bob
+        store.ingest(alias)
+        #expect(items(store).map(\.body) == ["original", "foreign id", "authored alias"])
+    }
+
+    @Test func ambiguousAuthoredAliasCannotChooseBetweenCanonicalRows() {
+        let store = store()
+        for id in ["room-1", "room-2"] {
+            var message = roomMessage(id, from: "bob", stanzaID: id, originID: "shared")
+            message.authorRealJID = bob
+            store.ingest(message)
+        }
+        var unknown = roomMessage("unresolved copy", from: "bob", stanzaID: "unused", originID: "shared")
+        unknown.identity = MessageIdentity(messageID: "shared", originID: "shared")
+        unknown.authorRealJID = bob
+        store.ingest(unknown)
+        #expect(items(store).map(\.body) == ["room-1", "room-2", "unresolved copy"])
+    }
+
+    @Test func canonicalLookupCannotBeHijackedByAnAuthoredPrimaryID() {
+        let store = store()
+        store.ingest(roomMessage("canonical", from: "bob", stanzaID: "room-1"))
+        var claim = roomMessage("claim", from: "eve", stanzaID: "unused", originID: "room-1")
+        claim.identity = MessageIdentity(messageID: "room-1", originID: "room-1")
+        store.ingest(claim)
+        let timeline = store.timeline(for: roomConversation)
+        #expect(timeline.item(withID: "room-1")?.body == "canonical")
+        for item in timeline.items {
+            #expect(timeline.item(withPresentationID: item.presentationID)?.body == item.body)
+        }
+    }
+
+    @Test func ambiguousAuthoredPrimaryIDsDoNotResolveToAnotherAuthorsRow() {
+        let store = store()
+        for nick in ["bob", "eve"] {
+            var message = roomMessage(nick, from: nick, stanzaID: "unused", originID: "shared")
+            message.identity = MessageIdentity(messageID: "shared", originID: "shared")
+            store.ingest(message)
+        }
+        var canonical = roomMessage("canonical other", from: "carol", stanzaID: "other-room-id", originID: "shared")
+        canonical.authorRealJID = bare("carol@waddle.test")
+        store.ingest(canonical)
+        #expect(store.timeline(for: roomConversation).item(withID: "shared") == nil)
+        #expect(store.timeline(for: roomConversation).item(withID: "other-room-id")?.body == "canonical other")
     }
 
     @Test func reactionsReplaceTheSendersSet() {

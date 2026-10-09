@@ -249,6 +249,34 @@ describe("room-assigned nick (XEP-0045 210)", () => {
   });
 });
 
+describe("own live protocol identity requires actual self presence", () => {
+  test("actual own occupant proof supplies real sender identity independently of avatar stamps", () => {
+    occupantJidDirectory.recordOwnNick(ROOM, "me");
+    const own = stampLiveRoomAuthor(liveRow("me", { isSelf: false, authorAvatarJid: "other@example.com" }), ROOM, "me", SELF);
+    expect(own.authorRealJid).toBe("me@waddle.social");
+    expect(own.isSelf).toBe(true);
+  });
+
+  test("nickname flags, delivery states, avatar stamps, and delayed copies cannot supply protocol identity", () => {
+    for (const source of ["queued", "delay", "archive"] as const) {
+      occupantJidDirectory.recordOwnNick(ROOM, "me");
+      const row = stampLiveRoomAuthor(liveRow("me", { createdAtSource: source, isSelf: true, deliveryStatus: "sending" }), ROOM, "me", SELF);
+      expect(row.authorRealJid).toBeUndefined();
+    }
+    occupantJidDirectory.forgetOwnNicks();
+    const withoutProof = stampLiveRoomAuthor(liveRow("me", { isSelf: true, deliveryStatus: "sending", authorAvatarJid: "me@waddle.social" }), ROOM, "me", SELF);
+    expect(withoutProof.authorRealJid).toBeUndefined();
+    occupantJidDirectory.recordOwnNick(ROOM, "me");
+    for (const invalid of ["not-a-jid", "me@", "@example.com", "me@@example.com", "me @example.com"]) {
+      expect(stampLiveRoomAuthor(liveRow("me"), ROOM, "me", invalid).authorRealJid).toBeUndefined();
+    }
+    const history = stampLiveRoomAuthor(liveRow("me", { archiveId: "archive-uid" }), ROOM, "me", SELF);
+    expect(history.authorRealJid).toBeUndefined();
+    expect(history.authorAvatarJid).toBeUndefined();
+    expect(stampLiveRoomAuthor(liveRow("different"), ROOM, "me", SELF).authorRealJid).toBeUndefined();
+  });
+});
+
 describe("typing indicator avatars", () => {
   test("a DM peer sharing our localpart on another domain shows the peer, not us", () => {
     // We are alex@a.example; the DM chat-state nick is the peer JID's localpart.

@@ -248,10 +248,11 @@ describe("roomMessageFromArchived", () => {
     const archived = roomMessageFromArchived({
       ...baseArchivedRoom,
       mam_id: "mam-reload-1",
-      id: "server-1",
+      id: "client-1",
       stanza_id: "room-stanza-1",
       stanza_id_by: "room@conf.example.com",
       from: "room@conf.example.com/alice",
+      author_real_jid: "alice@example.com/phone",
       body: "read https://example.com",
       link_previews: [],
     });
@@ -262,9 +263,9 @@ describe("roomMessageFromArchived", () => {
       mamResults: [archived!],
       existing: [{
         id: "client-1",
-        wireIds: ["room-stanza-1"],
         author: "alice",
         authorJid: "room@conf.example.com/alice",
+        authorRealJid: "alice@example.com/laptop",
         authorOccupantJid: "room@conf.example.com/alice",
         body: "read https://example.com",
         isSelf: true,
@@ -480,6 +481,8 @@ describe("roomMessageFromArchived", () => {
       correctionTargetId: "client-id",
       author: "alice",
       authorJid: "room@conf.example.com/alice",
+      authorRealJid: "alice@example.com/laptop",
+      authorOccupantJid: "room@conf.example.com/alice",
       body: "my message",
       createdAt: "2026-05-14T10:36:55Z",
       createdAtSource: "queued" as const,

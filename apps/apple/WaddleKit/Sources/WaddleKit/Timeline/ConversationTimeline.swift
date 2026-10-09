@@ -27,6 +27,12 @@ public final class ConversationTimeline {
         indexByAnyID[id].map { items[$0] }
     }
 
+    /// Resolves a local row key independently of its potentially colliding
+    /// sender-chosen wire ids.
+    public func item(withPresentationID id: String) -> TimelineItem? {
+        items.first { $0.presentationID == id }
+    }
+
     /// Replies inside the thread rooted at `threadID`, oldest first.
     public func threadReplies(threadID: String) -> [TimelineItem] {
         (repliesByThread[threadID] ?? []).map { items[$0] }
@@ -46,13 +52,22 @@ public final class ConversationTimeline {
 
     func publish(_ items: [TimelineItem]) {
         self.items = items
-        // Primary ids win; an alias resolves only when exactly one row
-        // claims it.
+        // A room's canonical id wins over sender-chosen primary ids. A
+        // colliding authored primary is ambiguous and resolves to nothing.
         var byID: [String: Int] = [:]
+        var primaryOwners: [String: [Int]] = [:]
+        var roomOwners: [String: [Int]] = [:]
         var aliasOwners: [String: [Int]] = [:]
         var replies: [String: [Int]] = [:]
         for (index, item) in items.enumerated() {
-            byID[item.id] = index
+            if conversation.isRoom {
+                primaryOwners[item.id, default: []].append(index)
+                if let roomID = item.roomStanzaID {
+                    roomOwners[roomID, default: []].append(index)
+                }
+            } else {
+                byID[item.id] = index
+            }
             for alias in item.targetableIDs where alias != item.id {
                 aliasOwners[alias, default: []].append(index)
             }
@@ -60,8 +75,14 @@ public final class ConversationTimeline {
                 replies[thread, default: []].append(index)
             }
         }
+        for (id, owners) in primaryOwners where owners.count == 1 {
+            byID[id] = owners[0]
+        }
         for (alias, owners) in aliasOwners where byID[alias] == nil && owners.count == 1 {
             byID[alias] = owners[0]
+        }
+        for (id, owners) in roomOwners {
+            byID[id] = owners.count == 1 ? owners[0] : nil
         }
         indexByAnyID = byID
         repliesByThread = replies

@@ -3,13 +3,14 @@ import { findMessageById } from "@/lib/message-ids";
 import {
   findSenderScopedIdTarget,
   hasMessageSenderContinuity,
+  hasConflictingRoomCanonicalIdentity,
+  senderChosenMessageIds,
 } from "@/lib/messaging/sender-scoped-ids";
 
 // Self-echo reconciliation for the live merge path, shared verbatim by
 // the channel and DM pipelines (XEP-0359 alias resolution + body-match
-// fallback). Both sides must stay behaviourally identical here so a
-// fresh-session resume can't retarget the wrong row when an echo arrives
-// without a XEP-0359 alias.
+// fallback). Conversation kind keeps groupchat authority checks separate
+// from direct-message continuity, including full-occupant MUC private peers.
 
 /**
  * Body-match fallback is a last resort: only when the incoming message
@@ -38,14 +39,40 @@ export function findLiveMergeTarget(
   messages: TimelineMessage[],
   msg: TimelineMessage,
   pendingEchoClientIds: ReadonlySet<string>,
+  conversationKind?: "room" | "direct",
 ): TimelineMessage | undefined {
-  const mucScoped = !!msg.authorOccupantJid || messages.some((message) => !!message.authorOccupantJid);
-  const existingById = mucScoped
+  const roomScoped = conversationKind
+    ? conversationKind === "room"
+    : !!msg.authorOccupantJid || messages.some((message) => !!message.authorOccupantJid);
+  const directSenderContinuity = (message: TimelineMessage): boolean =>
+    (!message.authorOccupantJid && !msg.authorOccupantJid) || hasMessageSenderContinuity(message, msg);
+  const existingById = roomScoped
     ? findSenderScopedIdTarget(messages, msg)
     : [msg.id, ...(msg.wireIds ?? [])]
-      .map((id) => findMessageById(messages, id))
+      .map((id) => findMessageById(messages, id, directSenderContinuity))
       .find((message): message is TimelineMessage => !!message);
-  const bodyFallbackAllowed = !existingById && canUseSelfEchoBodyFallback(msg);
+  // A tracked local send can bridge a pre-identity optimistic row, but the
+  // echo must identify our real account; a reused self nick is insufficient.
+  const pendingIdMatches = !existingById && roomScoped && msg.isSelf && msg.authorRealJid
+    ? messages.filter((message) =>
+      pendingEchoClientIds.has(message.id)
+      && message.isSelf
+      && message.createdAtSource === "queued"
+      && message.deliveryStatus !== "rejected"
+      && hasMessageSenderContinuity(message, msg)
+      && !hasConflictingRoomCanonicalIdentity(message, msg)
+      && senderChosenMessageIds(msg).some((id) => senderChosenMessageIds(message).includes(id))
+    )
+    : [];
+  const pendingIdEcho = pendingIdMatches.length === 1 ? pendingIdMatches[0] : undefined;
+  const bodyFallbackAllowed = !existingById && !pendingIdEcho
+    && (!roomScoped || !!msg.authorRealJid)
+    && canUseSelfEchoBodyFallback(msg);
+  const echoContinuity = (message: TimelineMessage): boolean => roomScoped
+    ? (!hasConflictingRoomCanonicalIdentity(message, msg)
+      && hasMessageSenderContinuity(message, msg)
+      && (message.createdAtSource === "queued" || !!message.authorRealJid))
+    : directSenderContinuity(message);
   const pendingSelfEcho = bodyFallbackAllowed
     ? messages.find(
       (m) =>
@@ -53,7 +80,7 @@ export function findLiveMergeTarget(
         && m.isSelf
         && m.deliveryStatus !== "rejected"
         && m.body === msg.body
-        && (!mucScoped || hasMessageSenderContinuity(m, msg)),
+        && echoContinuity(m),
     )
     : undefined;
   const preservedSelfEcho = bodyFallbackAllowed
@@ -64,10 +91,10 @@ export function findLiveMergeTarget(
         && !!m.deliveryStatus
         && m.deliveryStatus !== "delivered"
         && m.deliveryStatus !== "rejected"
-        && (!mucScoped || hasMessageSenderContinuity(m, msg)),
+        && echoContinuity(m),
     )
     : undefined;
-  return existingById ?? pendingSelfEcho ?? preservedSelfEcho;
+  return existingById ?? pendingIdEcho ?? pendingSelfEcho ?? preservedSelfEcho;
 }
 
 /**

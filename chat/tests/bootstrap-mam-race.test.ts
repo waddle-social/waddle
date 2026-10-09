@@ -324,7 +324,7 @@ describe("bootstrap merge keeps the unread divider anchored (#675 review)", () =
 
     // arch-2 was the one unread message at load time; the live arrival
     // is also unread — the divider anchors at arch-2, not at live-1.
-    expect(firstUnseenId.value).toBe("arch-2");
+    expect(firstUnseenId.value).toBe(messages.value.find((row) => row.id === "arch-2")?.rowKey);
   });
 });
 

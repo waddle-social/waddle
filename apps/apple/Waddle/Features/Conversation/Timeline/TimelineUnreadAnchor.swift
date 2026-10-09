@@ -11,9 +11,9 @@ enum TimelineUnreadAnchor {
         var remaining = unreadCount
         var oldest: String?
         for item in items.reversed() where counts(item) {
-            oldest = item.id
+            oldest = item.presentationID
             remaining -= 1
-            if remaining == 0 { return item.id }
+            if remaining == 0 { return item.presentationID }
         }
         return oldest
     }
@@ -21,7 +21,7 @@ enum TimelineUnreadAnchor {
     /// Counted rows after the row `previousLastID`. Zero when that row is
     /// no longer loaded (the feed was replaced, not appended to).
     static func arrivals(after previousLastID: String?, in items: [TimelineItem]) -> Int {
-        guard let previousLastID, let index = items.lastIndex(where: { $0.id == previousLastID }) else {
+        guard let previousLastID, let index = items.lastIndex(where: { $0.presentationID == previousLastID }) else {
             return 0
         }
         return items[(index + 1)...].filter(counts).count

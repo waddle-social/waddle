@@ -10,33 +10,42 @@ type MessageTargetingRoot<T extends MessageTargetingElement> = {
   querySelectorAll(selector: string): Iterable<T>;
 };
 
-function hasExactMessageId<T extends MessageTargetingElement>(
-  candidate: T | null | undefined,
+function findMessageElement<T extends MessageTargetingElement>(
+  root: MessageTargetingRoot<T> | null | undefined,
   messageId: string,
-): candidate is T {
-  return candidate?.getAttribute(DATA_MESSAGE_ID_ATTRIBUTE) === messageId;
+  attribute: "data-message-id" | "data-message-row-key",
+): T | null {
+  if (!root) return null;
+
+  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
+    const candidate = root.querySelector(
+      `[${attribute}="${CSS.escape(messageId)}"]`,
+    );
+    if (candidate?.getAttribute(attribute) === messageId) {
+      return candidate;
+    }
+  }
+
+  for (const candidate of root.querySelectorAll(attribute === DATA_MESSAGE_ID_ATTRIBUTE ? ALL_MESSAGE_SELECTOR : `[${attribute}]`)) {
+    if (candidate?.getAttribute(attribute) === messageId) {
+      return candidate;
+    }
+  }
+
+  return null;
 }
 
 export function findMessageElementById<T extends MessageTargetingElement>(
   root: MessageTargetingRoot<T> | null | undefined,
   messageId: string,
 ): T | null {
-  if (!root) return null;
+  return findMessageElement(root, messageId, DATA_MESSAGE_ID_ATTRIBUTE);
+}
 
-  if (typeof CSS !== "undefined" && typeof CSS.escape === "function") {
-    const candidate = root.querySelector(
-      `[${DATA_MESSAGE_ID_ATTRIBUTE}="${CSS.escape(messageId)}"]`,
-    );
-    if (hasExactMessageId(candidate, messageId)) {
-      return candidate;
-    }
-  }
-
-  for (const candidate of root.querySelectorAll(ALL_MESSAGE_SELECTOR)) {
-    if (hasExactMessageId(candidate, messageId)) {
-      return candidate;
-    }
-  }
-
-  return null;
+/** Local presentation anchors never depend on colliding room wire IDs. */
+export function findMessageElementByRowKey<T extends MessageTargetingElement>(
+  root: MessageTargetingRoot<T> | null | undefined,
+  rowKey: string,
+): T | null {
+  return findMessageElement(root, rowKey, "data-message-row-key");
 }
