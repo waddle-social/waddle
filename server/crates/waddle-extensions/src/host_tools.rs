@@ -21,6 +21,23 @@ pub struct InvocationContext {
     pub provider_room_grants: Vec<BareJid>,
 }
 
+/// Server-owned canonical authority, kept outside clustered invocation context.
+/// Implementations bind the exact source, plugin generation, target, and lease
+/// to Foundation's canonical key. Validation never constitutes provider acceptance.
+#[async_trait]
+pub trait ExtensionDeliveryCapability: Send + Sync + 'static {
+    async fn validate(
+        &self,
+        context: &InvocationContext,
+        source: &crate::types::RoomMessageSource,
+    ) -> Result<(), HostToolError>;
+}
+
+pub struct DeliveryInvocation {
+    pub context: InvocationContext,
+    pub capability: std::sync::Arc<dyn ExtensionDeliveryCapability>,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InvocationKind {
     RoomMessageObserve,

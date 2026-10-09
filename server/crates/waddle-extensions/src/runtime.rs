@@ -4,6 +4,7 @@ wasmtime::component::bindgen!({
     imports: { default: async | tracing | trappable },
     exports: { default: async },
     with: {
+        "waddle:extension/delivery@3.0.0.delivery-key": crate::runtime::DeliveryKey,
         "wasi:io": wasmtime_wasi::p2::bindings::io,
         "wasi:clocks": wasmtime_wasi::p2::bindings::clocks,
         "wasi:random": wasmtime_wasi::p2::bindings::random,
@@ -34,5 +35,5 @@ mod tests;
 mod ui_conversions;
 mod wit_to_domain;
 
-pub use host_state::HostState;
+pub use host_state::{DeliveryKey, HostState};
 pub use loader::{LoadedExtension, WasmRuntime};

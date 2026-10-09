@@ -28,6 +28,7 @@ mod deps;
 mod drain;
 mod enqueue;
 mod gate;
+mod legacy_ancestry;
 mod payload;
 mod prune;
 mod publish;

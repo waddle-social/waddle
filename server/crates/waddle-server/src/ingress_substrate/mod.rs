@@ -8,9 +8,13 @@ pub(crate) use authority::MucArchiveContext;
 mod canonical_sender;
 pub(crate) use canonical_sender::canonical_sender_pooled;
 mod maintenance;
+mod retention;
 pub use maintenance::{
     receipt_complete_nonterminal_keys, recovery_evidence_pooled,
     unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
+};
+pub(crate) use retention::{
+    invalidate_retention, refresh_retention, refresh_retention_with_db_clock,
 };
 #[cfg(test)]
 mod authority_tests;
@@ -63,7 +67,7 @@ pub fn supported_protocol_epoch() -> ProtocolEpoch {
 /// Keep this list in lock-step with the migration manifest: tests query the
 /// live catalog to ensure a newly-added ingress table cannot accidentally be
 /// left outside the activation boundary.
-pub const EPOCH_GUARDED_TABLES: [&str; 11] = [
+pub const EPOCH_GUARDED_TABLES: [&str; 12] = [
     "ingress_messages",
     "ingress_origin_aliases",
     "ingress_sm_refs",
@@ -75,6 +79,7 @@ pub const EPOCH_GUARDED_TABLES: [&str; 11] = [
     "ingress_delivery_receipts",
     "ingress_archive_dispatch",
     "ingress_send_attempts",
+    "ingress_effect_descendants",
 ];
 
 /// Fail-closed errors for the dark ingress substrate.
@@ -514,6 +519,7 @@ pub async fn insert_sm_ref(
         .await
         .map_err(discard_database_error)?;
     if inserted == 1 {
+        invalidate_retention(tx, message_key).await?;
         return Ok(MessageWriteOutcome::Recorded);
     }
     let existing = stored_child_message_key(
@@ -604,6 +610,7 @@ pub async fn terminalize_message(
         .await
         .map_err(discard_database_error)?;
     if changed == 1 {
+        refresh_retention(tx, message_key, proven_terminal_at).await?;
         return Ok(TerminalizeOutcome::Terminalized);
     }
     if message_exists(tx, message_key).await? {
@@ -900,9 +907,8 @@ async fn gc_canonical_candidates(
                 completed: false,
             });
         }
-        // Bounded batches of rows with work left to do: expired rows kept
-        // alive by SM refs stop matching once aliases and delivery markers are gone,
-        // so retained history does not grow the scan or the candidate vector.
+        // Bounded batches exclude live SM/descendant custody. Ready legacy
+        // rows are adopted under the same canonical lock as collection.
         let candidates = expired_candidates(db, &cutoff, budget)
             .await
             .map_err(|error| gc_failure(deleted_messages, error))?;
@@ -914,7 +920,7 @@ async fn gc_canonical_candidates(
             });
         }
         let batch_len = candidates.len();
-        let batch = match gc_candidate_batch(db, &cutoff, candidates, budget).await {
+        let batch = match gc_candidate_batch(db, now, &cutoff, candidates, budget).await {
             Ok(batch) => batch,
             Err(mut failure) => {
                 failure.deleted_messages += deleted_messages;
@@ -959,6 +965,7 @@ const GC_BATCH_LIMIT: usize = 256;
 
 async fn gc_candidate_batch(
     db: &Database,
+    now: DateTime<Utc>,
     cutoff: &str,
     candidates: Vec<MessageKey>,
     budget: &AliasGcBudget,
@@ -1059,19 +1066,45 @@ async fn gc_candidate_batch(
                 .map_err(|error| gc_database_failure(deleted_messages, error))?;
             continue;
         }
-        // Alias retention has elapsed: the aliases go unconditionally, even
-        // when live SM refs keep the message row itself alive —
-        // otherwise a reused sender/target/origin-id would keep resolving
-        // against the stale message indefinitely.
+        // Adoption and reference settlement start a fresh full tail; aliases
+        // and key bindings remain available throughout that tail.
+        refresh_retention(&mut tx, message_key, now)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error.into()))?;
+        let expired_sql = dialect_sql(tx.driver(),
+            "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ?::timestamptz FROM ingress_messages WHERE message_key = ?::uuid",
+            "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ? FROM ingress_messages WHERE message_key = ?");
+        let mut rows = tx
+            .query(
+                expired_sql,
+                crate::db_params![cutoff, message_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let expired = match rows
+            .next()
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?
+        {
+            Some(row) => row
+                .get::<bool>(0)
+                .map_err(|error| gc_database_failure(deleted_messages, error))?,
+            None => false,
+        };
+        drop(rows);
+        if !expired {
+            tx.commit()
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            continue;
+        }
         tx.execute(
             dialect_sql(tx.driver(), DELETE_ALIASES_POSTGRES, DELETE_ALIASES_SQLITE),
             crate::db_params![message_key.to_storage().to_string()],
         )
         .await
         .map_err(|error| gc_database_failure(deleted_messages, error))?;
-        // Delivery markers protect inbox projection retries only during the
-        // canonical message's retention window. Delete children before their
-        // parent under the same candidate lock, transaction, and timeout budget.
+        // Remove the complete dedup evidence together under the canonical lock.
         tx.execute(
             dialect_sql(
                 tx.driver(),
@@ -1336,8 +1369,8 @@ async fn expired_candidates(
 /// Pending enqueue may terminalize ingress before its offline copy is sent.
 /// Retain its ordering authority just like a live SM reference. The pending
 /// store owns its schema and is absent in minimal installations; inspect the
-/// catalog before mentioning it in SQL. Alias/delivery expiration still runs,
-/// and the next scan omits protected rows once those children are gone, so a
+/// catalog before mentioning it in SQL. All dedup evidence remains protected,
+/// and the candidate scan omits protected rows, so a
 /// full batch of pending copies cannot starve collectable later messages.
 async fn gc_retained_child_sql(
     tx: &mut Transaction<'_>,
@@ -1696,7 +1729,8 @@ const MESSAGE_EXISTS_SQLITE: &str = r#"SELECT 1 FROM ingress_messages WHERE mess
 const GC_CANDIDATES_POSTGRES: &str = r#"
             SELECT m.message_key::text
             FROM ingress_messages m
-            WHERE m.terminal_at IS NOT NULL AND m.terminal_at <= ?::timestamptz
+            WHERE m.terminal_at IS NOT NULL
+              AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= ?::timestamptz)
               AND NOT EXISTS (
                   SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
                     AND NOT EXISTS (
@@ -1705,24 +1739,20 @@ const GC_CANDIDATES_POSTGRES: &str = r#"
                           AND r.semantic_identity_hash = i.semantic_identity_hash
                     )
               )
-              AND (
-                  EXISTS (
-                      SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
-                  )
-                  OR EXISTS (
-                      SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
-                  )
-                  OR NOT EXISTS (
-                      SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
-                  )
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
               )
-            ORDER BY m.terminal_at, m.message_key
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL
+              )
+            ORDER BY m.retention_eligible_at, m.message_key
             LIMIT ?
             "#;
 const GC_CANDIDATES_SQLITE: &str = r#"
             SELECT m.message_key
             FROM ingress_messages m
-            WHERE m.terminal_at IS NOT NULL AND m.terminal_at <= ?
+            WHERE m.terminal_at IS NOT NULL
+              AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= ?)
               AND NOT EXISTS (
                   SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
                     AND NOT EXISTS (
@@ -1731,28 +1761,23 @@ const GC_CANDIDATES_SQLITE: &str = r#"
                           AND r.semantic_identity_hash = i.semantic_identity_hash
                     )
               )
-              AND (
-                  EXISTS (
-                      SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
-                  )
-                  OR EXISTS (
-                      SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
-                  )
-                  OR NOT EXISTS (
-                      SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
-                  )
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
               )
-            ORDER BY m.terminal_at, m.message_key
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL
+              )
+            ORDER BY m.retention_eligible_at, m.message_key
             LIMIT ?
             "#;
 const GC_LOCK_CANDIDATE_POSTGRES: &str = r#"
-            SELECT terminal_at <= ?::timestamptz
+            SELECT retention_eligible_at IS NULL OR retention_eligible_at <= ?::timestamptz
             FROM ingress_messages
             WHERE message_key = ?::uuid AND terminal_at IS NOT NULL
             FOR UPDATE SKIP LOCKED
             "#;
 const GC_LOCK_CANDIDATE_SQLITE: &str = r#"
-            SELECT terminal_at <= ?
+            SELECT retention_eligible_at IS NULL OR retention_eligible_at <= ?
             FROM ingress_messages
             WHERE message_key = ? AND terminal_at IS NOT NULL
 
@@ -1762,14 +1787,14 @@ const GC_CHECK_CANDIDATE_POSTGRES: &str = r#"
                     FROM ingress_messages
                     WHERE message_key = ?::uuid
                       AND terminal_at IS NOT NULL
-                      AND terminal_at <= ?::timestamptz
+                      AND (retention_eligible_at IS NULL OR retention_eligible_at <= ?::timestamptz)
                     "#;
 const GC_CHECK_CANDIDATE_SQLITE: &str = r#"
                     SELECT 1
                     FROM ingress_messages
                     WHERE message_key = ?
                       AND terminal_at IS NOT NULL
-                      AND terminal_at <= ?
+                      AND (retention_eligible_at IS NULL OR retention_eligible_at <= ?)
                     "#;
 #[cfg(test)]
 mod tests {
@@ -2299,6 +2324,391 @@ mod tests {
         fixture.close().await;
     }
 
+    async fn descendant_test_uow(db: &Database) -> crate::ingress_uow::IngressUnitOfWork {
+        let config = crate::config::LineageConfig {
+            deployment_uuid: Some(
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001"
+                    .parse()
+                    .expect("deployment UUID"),
+            ),
+            action: None,
+        };
+        crate::db::lineage::enroll(db, &config)
+            .await
+            .expect("enroll fixture");
+        crate::ingress_uow::IngressUnitOfWork::open(db.clone(), config).expect("open UoW")
+    }
+
+    async fn descendants_hold_canonical_evidence_until_every_provider_settles(db: &Database) {
+        use crate::ingress_uow::{
+            CanonicalMessageRepository, DeliveryEffectRepository, EffectDeliveryBinding,
+            EffectDescendantRepository, EffectIntentRepository, EffectReceiptRepository,
+        };
+        use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey};
+        let uow = descendant_test_uow(db).await;
+        let store = PostgresIngressSubstrate::open(db.clone()).expect("store");
+        let key = MessageKey::new();
+        let recipient: BareJid = "target@example.com".parse().expect("recipient");
+        let effect = IngressEffectIntent::Extension {
+            recipient: recipient.clone(),
+            stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                "canonical",
+                recipient.clone().into(),
+            ),
+        };
+        let semantic = effect.semantic_key();
+        let candidate = Uuid::new_v4();
+        let first_provider = Uuid::new_v4();
+        let last_provider = Uuid::new_v4();
+        let terminal_at = timestamp(1);
+        let mut tx = uow.begin().await.expect("begin");
+        let alias = OriginId::new("descendant-dedup-origin");
+        assert_eq!(
+            CanonicalMessageRepository::resolve_and_record_alias(
+                &mut tx,
+                &sender(),
+                &target(),
+                &alias,
+                &digest(1),
+                || key,
+            )
+            .await
+            .expect("canonical alias"),
+            inserted(key)
+        );
+        EffectIntentRepository::reconcile(&mut tx, key, &[effect], false)
+            .await
+            .expect("intent");
+        let binding = DeliveryEffectRepository::bind_effect(&mut tx, key, &semantic)
+            .await
+            .expect("bind");
+        let EffectDeliveryBinding::Bound(delivery) = binding else {
+            panic!("extension is supported");
+        };
+        // A different target cannot borrow the accepted message's authority.
+        assert!(matches!(
+            DeliveryEffectRepository::bind_effect(
+                &mut tx,
+                key,
+                &IngressEffectKey::Extension("foreign@example.com".parse().expect("foreign"))
+            )
+            .await,
+            Err(crate::ingress_uow::IngressUowError::EffectIntentConflict)
+        ));
+        EffectDescendantRepository::attach(&mut tx, key, &semantic, candidate)
+            .await
+            .expect("candidate custody");
+        let hash: [u8; 32] = Sha256::digest(semantic.storage_identity().as_bytes()).into();
+        EffectReceiptRepository::record_receipt(
+            &mut tx,
+            key,
+            EffectReceiptKind::from_storage(semantic.storage_kind()),
+            &hash,
+        )
+        .await
+        .expect("canonical receipt");
+        CanonicalMessageRepository::terminalize(&mut tx, key, terminal_at)
+            .await
+            .expect("terminal");
+        tx.commit().await.expect("commit");
+        assert_eq!(
+            store
+                .gc_expired_aliases(terminal_at + Duration::days(20), gc_budget())
+                .await
+                .expect("pending candidate GC")
+                .deleted_messages,
+            0
+        );
+        let mut tx = uow.begin().await.expect("fanout");
+        EffectDescendantRepository::copy(&mut tx, candidate, first_provider)
+            .await
+            .expect("first provider ancestry");
+        EffectDescendantRepository::copy(&mut tx, candidate, last_provider)
+            .await
+            .expect("last provider ancestry");
+        EffectDescendantRepository::settle_all(
+            &mut tx,
+            candidate,
+            terminal_at + Duration::days(21),
+        )
+        .await
+        .expect("candidate accepted");
+        EffectDescendantRepository::settle_all(
+            &mut tx,
+            first_provider,
+            terminal_at + Duration::days(21),
+        )
+        .await
+        .expect("first provider settles");
+        tx.commit().await.expect("commit fanout");
+        assert_eq!(
+            store
+                .gc_expired_aliases(terminal_at + Duration::days(40), gc_budget())
+                .await
+                .expect("pending final provider GC")
+                .deleted_messages,
+            0
+        );
+        let mut tx = uow.begin().await.expect("binding replay");
+        assert_eq!(
+            CanonicalMessageRepository::resolve_and_record_alias(
+                &mut tx,
+                &sender(),
+                &target(),
+                &alias,
+                &digest(1),
+                MessageKey::new,
+            )
+            .await
+            .expect("alias still deduplicates with pending descendant"),
+            existing(key)
+        );
+        assert_eq!(
+            DeliveryEffectRepository::lookup(&mut tx, delivery)
+                .await
+                .expect("lookup retained binding"),
+            Some(key)
+        );
+        assert_eq!(
+            DeliveryEffectRepository::bind_effect(&mut tx, key, &semantic)
+                .await
+                .expect("same-key replay"),
+            binding
+        );
+        let settled = terminal_at + Duration::days(41);
+        EffectDescendantRepository::settle_all(&mut tx, last_provider, settled)
+            .await
+            .expect("last provider settles");
+        tx.commit().await.expect("settled");
+        assert_eq!(
+            store
+                .gc_expired_aliases(
+                    settled + ALIAS_RETENTION - Duration::microseconds(1),
+                    gc_budget()
+                )
+                .await
+                .expect("full tail")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(settled + ALIAS_RETENTION, gc_budget())
+                .await
+                .expect("exact tail boundary")
+                .deleted_messages,
+            1
+        );
+        let mut tx = uow.begin().await.expect("reclaimed");
+        assert_eq!(
+            DeliveryEffectRepository::lookup(&mut tx, delivery)
+                .await
+                .expect("lookup gone binding"),
+            None
+        );
+        tx.commit().await.expect("commit read");
+    }
+
+    #[tokio::test]
+    async fn sqlite_descendants_hold_canonical_evidence_until_every_provider_settles() {
+        let db = Database::in_memory("descendant-retention")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        descendants_hold_canonical_evidence_until_every_provider_settles(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_descendants_hold_canonical_evidence_until_every_provider_settles() {
+        let Some(fixture) = Fixture::open("descendant_retention").await else {
+            return;
+        };
+        descendants_hold_canonical_evidence_until_every_provider_settles(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    async fn last_sm_reference_starts_a_fresh_full_retention_tail(db: &Database) {
+        use crate::ingress_uow::{CanonicalMessageRepository, SmIngressRepository};
+        let uow = descendant_test_uow(db).await;
+        let store = PostgresIngressSubstrate::open(db.clone()).expect("store");
+        let key = MessageKey::new();
+        let sm = SmIngressId::new();
+        let now = Utc::now();
+        let mut stream_tx = store.begin().await.expect("stream fixture");
+        authority_tests::insert_stream(&mut stream_tx, sm).await;
+        stream_tx.commit().await.expect("stream fixture commit");
+        let mut tx = uow.begin().await.expect("begin");
+        CanonicalMessageRepository::record_message(&mut tx, key, &digest(1), None)
+            .await
+            .expect("message");
+        SmIngressRepository::insert_sm_ref(
+            &mut tx,
+            sm,
+            IngressOrdinal::FIRST,
+            WireHandledCount::from_storage(1),
+            key,
+        )
+        .await
+        .expect("SM custody");
+        CanonicalMessageRepository::terminalize(&mut tx, key, now - Duration::days(20))
+            .await
+            .expect("terminal");
+        tx.commit().await.expect("commit");
+        assert_eq!(
+            store
+                .gc_expired_aliases(now, gc_budget())
+                .await
+                .expect("live SM ref GC")
+                .deleted_messages,
+            0
+        );
+        let mut tx = uow.begin().await.expect("retire stream");
+        SmIngressRepository::delete_stream_ref(&mut tx, sm, IngressOrdinal::FIRST)
+            .await
+            .expect("last reference settles");
+        tx.commit().await.expect("retire");
+        assert_eq!(
+            store
+                .gc_expired_aliases(now + ALIAS_RETENTION - Duration::seconds(1), gc_budget())
+                .await
+                .expect("fresh full tail")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(
+                    Utc::now() + ALIAS_RETENTION + Duration::seconds(1),
+                    gc_budget()
+                )
+                .await
+                .expect("after fresh tail")
+                .deleted_messages,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_last_sm_reference_starts_a_fresh_full_retention_tail() {
+        let db = Database::in_memory("sm-retention").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        last_sm_reference_starts_a_fresh_full_retention_tail(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_last_sm_reference_starts_a_fresh_full_retention_tail() {
+        let Some(fixture) = Fixture::open("last_sm_tail").await else {
+            return;
+        };
+        last_sm_reference_starts_a_fresh_full_retention_tail(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_canonical_nowait_contention_is_retryable_and_preserves_authority() {
+        use crate::ingress_uow::{
+            CanonicalMessageRepository, DbRetryClass, EffectDescendantRepository, IngressUowError,
+        };
+        let Some(fixture) = Fixture::open("canonical_nowait").await else {
+            return;
+        };
+        let uow = descendant_test_uow(&fixture.db).await;
+        let key = fixture.record_message().await;
+        let mut holder = uow.begin().await.expect("holder");
+        assert!(CanonicalMessageRepository::lock(&mut holder, key)
+            .await
+            .expect("lock parent"));
+        let mut contender = uow.begin().await.expect("contender");
+        let refused = tokio::time::timeout(
+            StdDuration::from_secs(1),
+            EffectDescendantRepository::lock_nowait(&mut contender, key),
+        )
+        .await
+        .expect("canonical acquisition must not wait");
+        assert!(matches!(
+            refused,
+            Err(IngressUowError::Database {
+                retry_class: DbRetryClass::CanonicalLockContention
+            })
+        ));
+        drop(contender);
+        holder.commit().await.expect("release holder");
+        let mut retry = uow.begin().await.expect("retry whole transaction");
+        EffectDescendantRepository::lock_nowait(&mut retry, key)
+            .await
+            .expect("acquire on fresh attempt");
+        retry.commit().await.expect("retry commit");
+        fixture.close().await;
+    }
+
+    async fn legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof(db: &Database) {
+        let uow = descendant_test_uow(db).await;
+        let store = PostgresIngressSubstrate::open(db.clone()).expect("store");
+        let key = MessageKey::new();
+        let now = timestamp(9);
+        let mut tx = uow.begin().await.expect("legacy fixture");
+        crate::ingress_uow::CanonicalMessageRepository::record_message(
+            &mut tx,
+            key,
+            &digest(1),
+            None,
+        )
+        .await
+        .expect("legacy message");
+        tx.commit().await.expect("canonical fixture commit");
+        let mut tx = store.begin().await.expect("legacy fixture mutation");
+        // Simulate a pre-V1025 row: terminal means receipts, never retention.
+        tx.execute(
+            dialect_sql(db.driver(), "UPDATE ingress_messages SET terminal_at = ?::timestamptz WHERE message_key = ?::uuid", "UPDATE ingress_messages SET terminal_at = ? WHERE message_key = ?"),
+            crate::db_params![(now - Duration::days(20)).to_rfc3339(), key.to_storage().to_string()],
+        ).await.expect("legacy terminal");
+        tx.commit().await.expect("legacy commit");
+        assert_eq!(
+            store
+                .gc_expired_aliases(now, gc_budget())
+                .await
+                .expect("adopt without deletion")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(
+                    now + ALIAS_RETENTION - Duration::microseconds(1),
+                    gc_budget()
+                )
+                .await
+                .expect("full adoption tail")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(now + ALIAS_RETENTION, gc_budget())
+                .await
+                .expect("exact adoption tail")
+                .deleted_messages,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof() {
+        let db = Database::in_memory("legacy-retention")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof() {
+        let Some(fixture) = Fixture::open("legacy_tail").await else {
+            return;
+        };
+        legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof(&fixture.db).await;
+        fixture.close().await;
+    }
     #[test]
     fn gc_monitoring_predicate_matches_collector() {
         fn normalized(sql: &str) -> String {
@@ -2312,13 +2722,13 @@ mod tests {
         )
         .expect("read deployed ingress monitoring SQL");
         let monitoring = normalized(&monitoring);
-        let eligibility = "receipts_complete AND (has_alias OR has_delivery OR NOT has_ref)";
+        let eligibility = "receipts_complete AND NOT has_ref AND NOT has_descendant";
         let receipt_predicate = "NOT EXISTS ( SELECT 1 FROM ingress_effect_intents intent WHERE intent.message_key = message.message_key AND NOT EXISTS ( SELECT 1 FROM ingress_effect_receipts receipt WHERE receipt.message_key = intent.message_key AND receipt.kind = intent.kind AND receipt.semantic_identity_hash = intent.semantic_identity_hash ) )";
         assert!(monitoring.contains(&format!("{receipt_predicate} AS receipts_complete")));
 
         assert!(monitoring.contains("SELECT now() - interval '8 days' AS value"));
         assert!(monitoring.contains(
-            "WHERE message.terminal_at IS NOT NULL AND message.terminal_at <= cutoff.value"
+            "WHERE message.terminal_at IS NOT NULL AND (message.retention_eligible_at IS NULL OR message.retention_eligible_at <= cutoff.value)"
         ));
         assert_eq!(
             monitoring
@@ -2328,7 +2738,7 @@ mod tests {
             "backlog and oldest-age must use the same collector eligibility"
         );
         assert!(
-            monitoring.contains("count(*) FILTER (WHERE has_ref OR NOT receipts_complete) AS retained_referenced_messages")
+            monitoring.contains("count(*) FILTER (WHERE has_ref OR has_descendant OR NOT receipts_complete) AS retained_referenced_messages")
         );
         for (sql, cutoff) in [
             (GC_CANDIDATES_POSTGRES, "?::timestamptz"),
@@ -2350,6 +2760,10 @@ mod tests {
                 .replace(
                     "EXISTS ( SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key )",
                     "has_ref",
+                )
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL )",
+                    "has_descendant",
                 );
             let predicate = sql
                 .split_once(" WHERE ")
@@ -2361,7 +2775,7 @@ mod tests {
             assert_eq!(
                 predicate,
                 format!(
-                    "m.terminal_at IS NOT NULL AND m.terminal_at <= {cutoff} AND receipts_complete AND ( has_alias OR has_delivery OR NOT has_ref )"
+                    "m.terminal_at IS NOT NULL AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= {cutoff}) AND receipts_complete AND NOT has_ref AND NOT has_descendant"
                 )
             );
         }
@@ -3118,7 +3532,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gc_expires_aliases_and_deliveries_but_preserves_messages_with_live_sm_refs() {
+    async fn gc_preserves_aliases_and_deliveries_with_live_sm_refs() {
         let Some(fixture) = Fixture::open("gc_live_children").await else {
             return;
         };
@@ -3177,13 +3591,12 @@ mod tests {
                 .deleted_messages,
             0
         );
-        // Expired aliases and delivery markers are gone even though the SM
-        // reference keeps the message row itself alive.
-        assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
+        // Live SM custody retains the entire canonical dedup authority.
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
         assert_eq!(fixture.count("ingress_messages").await, 1);
         assert_eq!(fixture.count("ingress_sm_refs").await, 1);
-        assert_eq!(fixture.count("ingress_deliveries").await, 0);
-        // Alias-less retained rows drop out of the candidate scan: a second
+        assert_eq!(fixture.count("ingress_deliveries").await, 1);
+        // Referenced rows remain outside the candidate scan: a second
         // pass finds no work and touches nothing.
         assert_eq!(
             fixture

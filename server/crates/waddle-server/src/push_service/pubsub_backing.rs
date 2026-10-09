@@ -6,12 +6,15 @@ use std::sync::Arc;
 
 use jid::BareJid;
 use minidom::Element;
-use waddle_xmpp::pubsub::{Affiliation, NodeConfig, PubSubItem, PubSubStorage};
+use waddle_xmpp::pubsub::{
+    Affiliation, NodeConfig, PubSubItem, PubSubStorage, PublicationNode, PublicationVersion,
+    VersionedPublishResult,
+};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
 
 use super::store::DatabasePushServiceStore;
-use super::types::{PushNodeStatus, PushPublishJob};
+use super::types::{PushBackingState, PushNodeStatus};
 
 pub(super) fn validate_xep0357_notification(item: &PubSubItem) -> Result<(), XmppError> {
     // XEP-0060 §7.1.3 publish errors: surface the typed PubSub
@@ -89,94 +92,94 @@ impl DatabasePushServiceStore {
         .await
     }
 
-    pub(super) async fn persist_xep0060_publish_if_configured(
+    /// Complete the independent PubSub projection outside provider/queue
+    /// transactions. Its revision/token contract rejects delayed old writes;
+    /// it proves no provider accepted the frozen queued notification.
+    pub(super) async fn complete_versioned_publish_backing(
         &self,
-        push_service_jid: Option<&str>,
-        node: &str,
-        item: &PubSubItem,
-        publisher: &BareJid,
+        job_id: &str,
     ) -> Result<(), XmppError> {
-        let Some(boundary) = &self.pubsub_boundary else {
-            return Ok(());
+        let Some(job) = self.load_publish_job(job_id).await? else {
+            return Err(XmppError::internal("publish acceptance missing"));
         };
-        let Some(push_service_jid) = push_service_jid else {
+        if job.backing_state != PushBackingState::Pending
+            || matches!(job.status(), "published" | "failed")
+        {
             return Ok(());
-        };
-        let parsed_service_jid: BareJid = push_service_jid.parse().map_err(|error| {
-            XmppError::bad_request(Some(format!("Invalid Push Service JID: {error}")))
-        })?;
-        if parsed_service_jid != boundary.service_jid {
-            return Err(XmppError::bad_request(Some(
-                "XEP-0357 Push Service publish target does not match configured service"
-                    .to_string(),
-            )));
         }
-        validate_xep0357_notification(item)?;
-        let can_publish = crate::pubsub_authz::can_publish(
-            &boundary.storage,
-            &boundary.service_jid,
-            node,
-            publisher,
-            false,
-        )
-        .await?;
-        if !can_publish {
-            return Err(XmppError::forbidden(Some(
-                "Publisher is not affiliated to publish to the Push Service PubSub node"
-                    .to_string(),
-            )));
-        }
-        boundary
-            .storage
-            .publish_item(&boundary.service_jid, node, item, Some(publisher), false)
-            .await?;
-        Ok(())
-    }
-
-    pub(super) async fn ensure_xep0060_publish_item_backing(
-        &self,
-        job: &PushPublishJob,
-    ) -> Result<(), XmppError> {
-        let Some(boundary) = &self.pubsub_boundary else {
-            return Ok(());
-        };
-        let Some(push_service_jid) = job.push_service_jid() else {
-            return Ok(());
-        };
-        let parsed_service_jid: BareJid = push_service_jid.parse().map_err(|error| {
-            XmppError::bad_request(Some(format!("Invalid Push Service JID: {error}")))
-        })?;
-        if parsed_service_jid != boundary.service_jid {
-            return Err(XmppError::bad_request(Some(
-                "Push publish job service does not match configured Push Service".to_string(),
-            )));
-        }
-        let items = boundary
-            .storage
-            .get_items(
+        let state = if let (Some(boundary), Some(service)) =
+            (&self.pubsub_boundary, job.push_service_jid())
+        {
+            if service != &boundary.service_jid {
+                return Err(XmppError::bad_request(Some(
+                    "push service backing target mismatch".to_string(),
+                )));
+            }
+            if !crate::pubsub_authz::can_publish(
+                &boundary.storage,
                 &boundary.service_jid,
                 job.node(),
-                Some(1),
-                &[job.item_id().to_string()],
+                job.owner_bare_jid(),
+                false,
             )
-            .await?;
-        let item = items.into_iter().next().ok_or_else(|| {
-            XmppError::item_not_found(Some(
-                "Push publish job has no durable XEP-0060 PubSub item".to_string(),
-            ))
-        })?;
-        let payload = item
-            .payload_xml
-            .as_deref()
-            .ok_or_else(|| {
-                XmppError::bad_request(Some("Stored PubSub item has no payload".to_string()))
-            })?
-            .parse::<Element>()
-            .map_err(|error| {
-                XmppError::bad_request(Some(format!(
-                    "Stored PubSub payload is invalid XML: {error}"
-                )))
-            })?;
-        validate_xep0357_notification(&PubSubItem::new(Some(item.id), Some(payload)))
+            .await?
+            {
+                return Err(XmppError::forbidden(Some(
+                    "publisher not affiliated to push node".to_string(),
+                )));
+            }
+            let db = self.database();
+            let conn = db
+                .guard()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let mut rows = conn
+                .query(
+                    "SELECT payload_xml FROM push_publish_jobs WHERE job_id = ?",
+                    crate::db_params![job_id],
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let row = rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+                .ok_or_else(|| XmppError::internal("accepted payload missing"))?;
+            let payload: String = row
+                .get(0)
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let payload: Element = payload
+                .parse()
+                .map_err(|_| XmppError::internal("accepted payload malformed"))?;
+            drop(rows);
+            drop(conn);
+            let token = uuid::Uuid::parse_str(job_id)
+                .map_err(|_| XmppError::internal("invalid publication token"))?;
+            let version = PublicationVersion::new(job.publication_order, token)
+                .map_err(|error| error.into_xmpp_error())?;
+            let node = PublicationNode::new(job.node()).map_err(|error| error.into_xmpp_error())?;
+            let item = PubSubItem::new(Some(job.item_id().to_string()), Some(payload));
+            match boundary
+                .storage
+                .publish_push_item_versioned(
+                    &boundary.service_jid,
+                    job.owner_bare_jid(),
+                    &node,
+                    &item,
+                    version,
+                )
+                .await
+                .map_err(|error| error.into_xmpp_error())?
+            {
+                VersionedPublishResult::Applied(_) | VersionedPublishResult::AlreadyApplied => {
+                    "published"
+                }
+                VersionedPublishResult::Superseded => "superseded",
+            }
+        } else {
+            "not-configured"
+        };
+        self.execute("UPDATE push_publish_jobs SET backing_state = ?, backing_published_at_ms = ? WHERE job_id = ? AND backing_state = 'pending'", crate::db_params![state, crate::time::now_ms(), job_id]).await?;
+        Ok(())
     }
 }

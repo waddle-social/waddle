@@ -1981,3 +1981,175 @@ async fn retention_guards_are_index_lookups_postgres() {
         retention_guards_are_index_lookups(fixture).await;
     }
 }
+
+async fn pending_publication_holds_canonical_gc_until_its_own_tail(fixture: IngressFixture) {
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    let observer = configured_observer(1, 'a');
+    let subscription = subscription(&observer);
+    let t0 = Utc::now() - Duration::days(10);
+    let key = seed(&fixture, &observer, "publication-descendant", t0).await;
+    settle(&fixture, &subscription, ms(t0), completed(vec![payload()])).await;
+    let mut tx = fixture.uow.begin().await.expect("terminalize parent");
+    assert_eq!(
+        crate::ingress_substrate::terminalize_message(tx.transaction_mut(), key, t0)
+            .await
+            .expect("terminalize"),
+        crate::ingress_substrate::TerminalizeOutcome::Terminalized
+    );
+    tx.commit().await.expect("terminal commit");
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1
+    );
+    let budget = || crate::ingress_substrate::AliasGcBudget {
+        deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        lock_timeout: std::time::Duration::from_secs(1),
+        statement_timeout: std::time::Duration::from_secs(2),
+        scan_timeout: std::time::Duration::from_secs(2),
+        progress: crate::ingress_substrate::AliasGcProgress::default(),
+    };
+    crate::ingress_substrate::gc_expired_aliases(&fixture.db, t0 + Duration::days(9), budget())
+        .await
+        .expect("GC with pending descendant");
+    assert_eq!(
+        fixture.count("ingress_messages").await,
+        1,
+        "observer receipt and an old parent terminal clock do not settle pending publication"
+    );
+    let published_at = t0 + Duration::days(9);
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("publication settlement rollback");
+    let publication = Repo::publication(&mut tx, &subscription, ms(published_at))
+        .await
+        .expect("load")
+        .expect("publication");
+    assert!(Repo::assert_publication(&mut tx, &publication)
+        .await
+        .expect("approved payload"));
+    assert!(
+        Repo::mark_published(&mut tx, &publication.id, ms(published_at))
+            .await
+            .expect("durable publication")
+    );
+    drop(tx);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1,
+        "publication and descendant settlement rollback together"
+    );
+    let mut tx = fixture.uow.begin().await.expect("publish");
+    assert!(Repo::assert_publication(&mut tx, &publication)
+        .await
+        .expect("approved payload"));
+    assert!(
+        Repo::mark_published(&mut tx, &publication.id, ms(published_at))
+            .await
+            .expect("publish")
+    );
+    tx.commit().await.expect("publish commit");
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        0
+    );
+    crate::ingress_substrate::gc_expired_aliases(
+        &fixture.db,
+        published_at + Duration::days(7),
+        budget(),
+    )
+    .await
+    .expect("tail retained");
+    assert_eq!(fixture.count("ingress_messages").await, 1);
+    crate::ingress_substrate::gc_expired_aliases(
+        &fixture.db,
+        published_at + Duration::days(9),
+        budget(),
+    )
+    .await
+    .expect("tail expired");
+    assert_eq!(fixture.count("ingress_messages").await, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn pending_publication_holds_canonical_gc_until_its_own_tail_sqlite() {
+    pending_publication_holds_canonical_gc_until_its_own_tail(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn pending_publication_holds_canonical_gc_until_its_own_tail_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("observer_descendant_gc").await {
+        pending_publication_holds_canonical_gc_until_its_own_tail(fixture).await;
+    }
+}
+
+async fn upgraded_active_work_does_not_leave_an_unsettled_work_reference(fixture: IngressFixture) {
+    initialize_room_observations(&fixture.db)
+        .await
+        .expect("schema");
+    let observer = configured_observer(1, 'a');
+    let subscription = subscription(&observer);
+    let t0 = Utc::now();
+    let key = seed(&fixture, &observer, "upgraded-active-work", t0).await;
+    revert_v1025(&fixture).await;
+    assert_eq!(
+        crate::db::MigrationRunner::single()
+            .run(&fixture.db)
+            .await
+            .expect("Foundation upgrade"),
+        vec![1025]
+    );
+    assert_eq!(
+        fixture.count("ingress_effect_descendants").await,
+        0,
+        "unreceipted work uses canonical intent authority, not a second lifetime reference"
+    );
+    settle(&fixture, &subscription, ms(t0), completed(Vec::new())).await;
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        0
+    );
+    let mut tx = fixture.uow.begin().await.expect("terminalize");
+    crate::ingress_substrate::terminalize_message(tx.transaction_mut(), key, t0)
+        .await
+        .expect("terminal");
+    tx.commit().await.expect("terminal commit");
+    let budget = || crate::ingress_substrate::AliasGcBudget {
+        deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+        lock_timeout: std::time::Duration::from_secs(1),
+        statement_timeout: std::time::Duration::from_secs(2),
+        scan_timeout: std::time::Duration::from_secs(2),
+        progress: crate::ingress_substrate::AliasGcProgress::default(),
+    };
+    crate::ingress_substrate::gc_expired_aliases(&fixture.db, t0 + Duration::days(7), budget())
+        .await
+        .expect("tail protected");
+    assert_eq!(fixture.count("ingress_messages").await, 1);
+    crate::ingress_substrate::gc_expired_aliases(&fixture.db, t0 + Duration::days(9), budget())
+        .await
+        .expect("tail expired");
+    assert_eq!(fixture.count("ingress_messages").await, 0);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn upgraded_active_work_does_not_leave_an_unsettled_work_reference_sqlite() {
+    upgraded_active_work_does_not_leave_an_unsettled_work_reference(IngressFixture::sqlite().await)
+        .await;
+}
+#[tokio::test]
+async fn upgraded_active_work_does_not_leave_an_unsettled_work_reference_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("observer_active_upgrade_gc").await {
+        upgraded_active_work_does_not_leave_an_unsettled_work_reference(fixture).await;
+    }
+}

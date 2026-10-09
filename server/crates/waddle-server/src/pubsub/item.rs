@@ -626,7 +626,7 @@ impl DatabasePubSubStorage {
         Ok(affected)
     }
 
-    async fn enforce_max_items_tx(
+    pub(super) async fn enforce_max_items_tx(
         &self,
         tx: &mut crate::db::Transaction<'_>,
         owner: &BareJid,

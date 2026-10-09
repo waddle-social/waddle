@@ -6,7 +6,10 @@ use crate::pubsub::node::{AccessModel, NodeConfig};
 use crate::pubsub::stanzas::PubSubItem;
 use crate::XmppError;
 
-use super::{PubSubNode, PubSubStorage, PublishResult, StoredItem};
+use super::{
+    PubSubNode, PubSubStorage, PublicationError, PublicationFingerprint, PublicationNode,
+    PublicationVersion, PublishResult, StoredItem, VersionedPublishResult,
+};
 
 /// In-memory implementation of PubSub storage.
 ///
@@ -16,6 +19,8 @@ use super::{PubSubNode, PubSubStorage, PublishResult, StoredItem};
 pub struct InMemoryPubSubStorage {
     /// (owner_bare_jid, node_name) -> PubSubNode
     nodes: dashmap::DashMap<(String, String), PubSubNode>,
+    /// Projection watermarks outlive the item and node's deletion.
+    publications: dashmap::DashMap<(String, String), (PublicationVersion, PublicationFingerprint)>,
     /// (owner_bare_jid, node_name) -> Vec<StoredItem>
     items: dashmap::DashMap<(String, String), Vec<StoredItem>>,
     /// (owner_bare_jid, node_name, subid) -> Subscription
@@ -36,6 +41,7 @@ impl InMemoryPubSubStorage {
     pub fn new() -> Self {
         Self {
             nodes: dashmap::DashMap::new(),
+            publications: dashmap::DashMap::new(),
             items: dashmap::DashMap::new(),
             subscriptions: dashmap::DashMap::new(),
             affiliations: dashmap::DashMap::new(),
@@ -45,6 +51,17 @@ impl InMemoryPubSubStorage {
 
     fn key(owner: &BareJid, node_name: &str) -> (String, String) {
         (owner.to_string(), node_name.to_string())
+    }
+
+    #[cfg(test)]
+    pub(super) fn publication_for_test(
+        &self,
+        service: &BareJid,
+        node: &PublicationNode,
+    ) -> Option<(PublicationVersion, PublicationFingerprint)> {
+        self.publications
+            .get(&Self::key(service, node.as_str()))
+            .map(|entry| *entry.value())
     }
 
     fn generate_item_id() -> String {
@@ -202,6 +219,69 @@ impl PubSubStorage for InMemoryPubSubStorage {
             node_created,
             evicted_item_ids,
         })
+    }
+
+    async fn publish_push_item_versioned(
+        &self,
+        service: &BareJid,
+        publisher: &BareJid,
+        node: &PublicationNode,
+        item: &PubSubItem,
+        version: PublicationVersion,
+    ) -> Result<VersionedPublishResult, PublicationError> {
+        let fingerprint = PublicationFingerprint::of(item, publisher)?;
+        let key = Self::key(service, node.as_str());
+        // The existing item guard also serializes retract/purge/eviction. The
+        // separate watermark survives their removal of items or the node.
+        let mut items = self.items.entry(key.clone()).or_default();
+        let config = self
+            .nodes
+            .get(&key)
+            .map(|node| node.config.clone())
+            .ok_or_else(|| {
+                XmppError::item_not_found(Some("Push backing node does not exist".to_owned()))
+            })?;
+        let mut approved = item.clone();
+        approved.publisher = Some(publisher.clone());
+        if let Some(previous) = self.publications.get(&key) {
+            if previous.0.revision() > version.revision() {
+                return Ok(VersionedPublishResult::Superseded);
+            }
+            if previous.0.revision() == version.revision() {
+                return if previous.0 == version && previous.1 == fingerprint {
+                    Ok(VersionedPublishResult::AlreadyApplied)
+                } else {
+                    Err(PublicationError::IntegrityConflict)
+                };
+            }
+        }
+        let item_id = approved
+            .id
+            .clone()
+            .ok_or(PublicationError::InvalidPublication)?;
+        let stored = StoredItem {
+            id: item_id.clone(),
+            payload_xml: approved.payload.as_ref().map(String::from),
+            publisher: Some(publisher.clone()),
+            published_at: chrono::Utc::now(),
+        };
+        if let Some(position) = items.iter().position(|stored| stored.id == item_id) {
+            items[position] = stored;
+        } else {
+            items.push(stored);
+        }
+        let mut evicted_item_ids = Vec::new();
+        let max_items = config.max_items as usize;
+        if max_items > 0 && items.len() > max_items {
+            let excess = items.len() - max_items;
+            evicted_item_ids.extend(items.drain(0..excess).map(|item| item.id));
+        }
+        self.publications.insert(key, (version, fingerprint));
+        Ok(VersionedPublishResult::Applied(PublishResult {
+            item_id,
+            node_created: false,
+            evicted_item_ids,
+        }))
     }
 
     async fn get_items(

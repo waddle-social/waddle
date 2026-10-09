@@ -1,4 +1,4 @@
-package waddle:extension@2.0.0;
+package waddle:extension@3.0.0;
 
 interface types {
     record detected-link {
@@ -792,9 +792,20 @@ interface types {
     }
 }
 
+/// Opaque, host-issued authority for a single canonical delivery invocation.
+/// Guests can check the current scope, but cannot construct, export, or settle keys.
+/// A valid key does not attest acceptance by an arbitrary external HTTP provider.
+interface delivery {
+    use types.{host-tool-error};
+    resource delivery-key {
+        validate: func() -> result<_, host-tool-error>;
+    }
+}
+
 interface framework {
+    use delivery.{delivery-key};
     use types.{extension-error, extension-event, extension-response};
-    handle-event: func(event: extension-event) -> result<extension-response, extension-error>;
+    handle-event: func(event: extension-event, delivery: option<borrow<delivery-key>>) -> result<extension-response, extension-error>;
 }
 
 interface lifecycle {
@@ -845,6 +856,7 @@ world waddle-extension {
     import wasi:logging/logging@0.1.0-draft;
     import wasi:clocks/monotonic-clock@0.2.0;
     import wasi:random/random@0.2.0;
+    import delivery;
     import host-tools;
     import runtime;
 

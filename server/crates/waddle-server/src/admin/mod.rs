@@ -333,6 +333,19 @@ mod tests {
             ) -> Result<PublishResult, XmppError> {
                 boom("publish_item_if_missing_or_publisher")
             }
+            async fn publish_push_item_versioned(
+                &self,
+                _service: &BareJid,
+                _publisher: &BareJid,
+                _node: &waddle_xmpp::pubsub::PublicationNode,
+                _item: &PubSubItem,
+                _version: waddle_xmpp::pubsub::PublicationVersion,
+            ) -> Result<
+                waddle_xmpp::pubsub::VersionedPublishResult,
+                waddle_xmpp::pubsub::PublicationError,
+            > {
+                boom("publish_push_item_versioned").map_err(Into::into)
+            }
             async fn get_items(
                 &self,
                 _owner: &BareJid,

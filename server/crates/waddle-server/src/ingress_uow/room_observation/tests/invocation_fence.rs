@@ -221,6 +221,7 @@ async fn not_invoked_retries_before_ambiguous_lease_expiry_postgres() {
 /// Remove later schema and ledger entries so callers can model pre-V1022 state.
 /// Both must agree before the normal runner upgrades the fixture again.
 async fn revert_after_v1022(fixture: &IngressFixture) {
+    revert_v1025(fixture).await;
     fixture
         .execute(
             "ALTER TABLE ingress_effect_receipts DROP COLUMN policy_discard_reason",
@@ -289,7 +290,7 @@ async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: Ing
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022, 1023, 1024]
+        vec![1022, 1023, 1024, 1025]
     );
     initialize_room_observations(&fixture.db)
         .await
@@ -460,7 +461,7 @@ async fn legacy_upgrade_bounds_ambiguity_once(fixture: IngressFixture) {
             .run(&fixture.db)
             .await
             .expect("legacy upgrade"),
-        vec![1022, 1023, 1024]
+        vec![1022, 1023, 1024, 1025]
     );
     let after = Utc::now().timestamp_millis();
     assert!(crate::db::MigrationRunner::single()
@@ -532,7 +533,7 @@ async fn legacy_upgrade_bounds_ambiguity_once_postgres() {
     }
 }
 
-async fn repeated_started_expiry_terminates_after_twenty_attempts(fixture: IngressFixture) {
+async fn unknown_started_outcome_remains_retryable_after_twenty_attempts(fixture: IngressFixture) {
     let (observer, now) = seed(&fixture).await;
     let subscription = subscription(&observer);
     let mut last = None;
@@ -548,49 +549,64 @@ async fn repeated_started_expiry_terminates_after_twenty_attempts(fixture: Ingre
         tx.commit().await.expect("start commit");
         last = Some(work);
     }
-    let mut tx = fixture.uow.begin().await.expect("exhausted");
-    assert!(Repo::claim(&mut tx, &subscription, now + 20 * 180_000)
+    let mut tx = fixture.uow.begin().await.expect("unknown recovery");
+    let retry = Repo::claim(&mut tx, &subscription, now + 20 * 180_000)
         .await
-        .expect("exhausted")
-        .is_none());
-    assert!(
-        Repo::due_rooms(&mut tx, &observer, None, now + 20 * 180_000, 10)
-            .await
-            .expect("not due")
-            .is_empty()
-    );
+        .expect("unknown remains retryable")
+        .expect("twenty-first attempt");
+    assert_eq!(retry.attempt, 21);
+    let last = last.expect("last work");
+    assert_ne!(retry.lease, last.lease);
+    assert_eq!(retry.message_key, last.message_key);
     let result = RoomObservationOutcome::Completed(RoomObservationResult {
         payloads: vec![payload()],
         usage: None,
     });
-    assert!(!Repo::finish(
+    assert!(!Repo::finish(&mut tx, &last, &result, now + 20 * 180_000)
+        .await
+        .expect("late result"));
+    assert!(Repo::start(&mut tx, &retry, now + 20 * 180_000)
+        .await
+        .expect("retry start"));
+    // A later pre-invocation refusal cannot erase an earlier unknown send.
+    assert!(Repo::finish(
         &mut tx,
-        &last.expect("last work"),
-        &result,
+        &retry,
+        &RoomObservationOutcome::NotInvoked,
         now + 20 * 180_000
     )
     .await
-    .expect("late result"));
-    tx.commit().await.expect("terminal commit");
-    assert_eq!(fixture.count("extension_room_observation_work WHERE status = 'terminal' AND terminal_category = 'retry_exhausted' AND body = ''").await, 1);
+    .expect("known noninvocation retains earlier uncertainty"));
+    assert!(
+        Repo::claim(&mut tx, &subscription, now + 20 * 180_000 + 60_000)
+            .await
+            .expect("retry after backoff")
+            .is_some()
+    );
+    tx.commit().await.expect("retry commit");
     assert_eq!(
         fixture
-            .count("extension_room_observation_receipts WHERE category = 'retry_exhausted'")
+            .count("extension_room_observation_work WHERE status = 'terminal'")
             .await,
-        1
+        0
     );
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(
+        fixture.count("extension_room_observation_receipts").await,
+        0
+    );
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert_eq!(fixture.count("extension_room_publications").await, 0);
     fixture.close().await;
 }
 #[tokio::test]
-async fn repeated_started_expiry_terminates_after_twenty_attempts_sqlite() {
-    repeated_started_expiry_terminates_after_twenty_attempts(IngressFixture::sqlite().await).await;
+async fn unknown_started_outcome_remains_retryable_after_twenty_attempts_sqlite() {
+    unknown_started_outcome_remains_retryable_after_twenty_attempts(IngressFixture::sqlite().await)
+        .await;
 }
 #[tokio::test]
-async fn repeated_started_expiry_terminates_after_twenty_attempts_postgres() {
+async fn unknown_started_outcome_remains_retryable_after_twenty_attempts_postgres() {
     if let Some(fixture) = IngressFixture::postgres("observation_exhausted").await {
-        repeated_started_expiry_terminates_after_twenty_attempts(fixture).await;
+        unknown_started_outcome_remains_retryable_after_twenty_attempts(fixture).await;
     }
 }
 
@@ -625,7 +641,7 @@ async fn postgres_observer_upgrade_preserves_owned_work() {
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022, 1023, 1024]
+        vec![1022, 1023, 1024, 1025]
     );
     assert_eq!(fixture.count("extension_room_observation_work WHERE status = 'started' AND lease_node_id IS NOT NULL AND lease_node_incarnation IS NOT NULL AND terminal_category IS NULL").await, 1);
     let mut tx = fixture.uow.begin().await.expect("finish");
@@ -638,5 +654,97 @@ async fn postgres_observer_upgrade_preserves_owned_work() {
         .expect("unchanged lease"));
     tx.commit().await.expect("finish commit");
     assert_eq!(fixture.count("extension_room_publications").await, 1);
+    fixture.close().await;
+}
+
+async fn started_delivery_authority_expires_before_reclaim(fixture: IngressFixture) {
+    let (observer, now) = seed(&fixture).await;
+    let subscription = subscription(&observer);
+    let mut tx = fixture.uow.begin().await.expect("claim");
+    let work = Repo::claim(&mut tx, &subscription, now)
+        .await
+        .expect("claim")
+        .expect("work");
+    assert!(!Repo::validate_started(&mut tx, &work, now)
+        .await
+        .expect("not yet started"));
+    assert!(Repo::start(&mut tx, &work, now).await.expect("start"));
+    assert!(Repo::validate_started(&mut tx, &work, now)
+        .await
+        .expect("current authority"));
+    assert!(!Repo::validate_started(&mut tx, &work, now + 180_000)
+        .await
+        .expect("expired authority"));
+    let result = RoomObservationOutcome::Completed(RoomObservationResult {
+        payloads: vec![payload()],
+        usage: None,
+    });
+    assert!(!Repo::finish(&mut tx, &work, &result, now + 180_000)
+        .await
+        .expect("late result before reclaim"));
+    tx.commit().await.expect("commit");
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    fixture.close().await;
+}
+#[tokio::test]
+async fn started_delivery_authority_expires_before_reclaim_sqlite() {
+    started_delivery_authority_expires_before_reclaim(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn started_delivery_authority_expires_before_reclaim_postgres() {
+    if let Some(fixture) = IngressFixture::postgres("observation_capability_expiry").await {
+        started_delivery_authority_expires_before_reclaim(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_observer_parent_contention_is_prompt_and_retryable() {
+    let Some(fixture) = IngressFixture::postgres("observation_parent_nowait").await else {
+        return;
+    };
+    let (observer, now) = seed(&fixture).await;
+    let mut tx = fixture.uow.begin().await.expect("start");
+    let work = Repo::claim(&mut tx, &subscription(&observer), now)
+        .await
+        .expect("claim")
+        .expect("work");
+    assert!(Repo::start(&mut tx, &work, now).await.expect("start"));
+    tx.commit().await.expect("start commit");
+    let mut blocker = fixture.db.begin().await.expect("parent holder");
+    let mut rows = blocker
+        .query(
+            "SELECT message_key FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE",
+            crate::db_params![work.message_key.to_storage().to_string()],
+        )
+        .await
+        .expect("hold parent");
+    assert!(rows.next().await.expect("row").is_some());
+    drop(rows);
+    let mut tx = fixture.uow.begin().await.expect("contender");
+    let error = tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        Repo::validate_started(&mut tx, &work, now),
+    )
+    .await
+    .expect("canonical NOWAIT must not wait for inherited observer locks")
+    .expect_err("parent held");
+    assert_eq!(
+        error,
+        ObservationError::RetryableDatabase(
+            crate::ingress_uow::DbRetryClass::CanonicalLockContention
+        )
+    );
+    assert_eq!(
+        crate::ingress_uow::IngressUowError::from(error).retry_class(),
+        crate::ingress_uow::DbRetryClass::CanonicalLockContention
+    );
+    drop(tx);
+    blocker.commit().await.expect("release parent");
+    let mut tx = fixture.uow.begin().await.expect("fresh retry");
+    assert!(Repo::validate_started(&mut tx, &work, now)
+        .await
+        .expect("current after contention"));
+    tx.commit().await.expect("retry commit");
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     fixture.close().await;
 }

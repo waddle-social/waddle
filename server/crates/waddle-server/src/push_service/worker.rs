@@ -19,7 +19,7 @@ use super::devices::{
 use super::dispatch;
 use super::nodes::get_node_tx;
 use super::publish_jobs::{
-    claim_publish_job_tx, delivered_device_ids_for_item_tx, get_publish_job_payload_xml_tx,
+    claim_publish_job_tx, delivered_device_ids_for_acceptance_tx, get_publish_job_payload_xml_tx,
     get_publish_job_tx, mark_publish_job_failed_tx, prune_delivery_attempts_tx,
     prune_publish_jobs_tx, read_publish_job_attempt_count_tx, read_publish_job_claim_token_tx,
     retry_at_ms, MAX_DELIVERY_ATTEMPTS_PER_NODE, MAX_PUBLISH_JOBS_PER_NODE,
@@ -163,7 +163,6 @@ struct WebPushDispatchProvider<'a> {
 
 async fn dispatch_web_device_owned(
     device: &dispatch::SealedActiveDevice,
-    recipient: &BareJid,
     parsed: &dispatch::ParsedPushPayload,
     item_id: &str,
     provider: WebPushDispatchProvider<'_>,
@@ -173,8 +172,6 @@ async fn dispatch_web_device_owned(
         Err(reason) => {
             let status = dispatch::skip_reason_to_attempt_status(reason);
             tracing::warn!(
-                recipient = %recipient,
-                conversation = %parsed.conversation,
                 notification_class = parsed.class.as_db_value(),
                 provider = "web_push",
                 push_stage = "provider_dispatch_skipped",
@@ -204,8 +201,6 @@ async fn dispatch_web_device_owned(
             let status = dispatch::outcome_to_attempt_status(&outcome);
             match waddle_xmpp::telemetry::push_pipeline::record_web_push_outcome(&outcome) {
                 Some(stage) => tracing::info!(
-                    recipient = %recipient,
-                    conversation = %parsed.conversation,
                     notification_class = parsed.class.as_db_value(),
                     provider = "web_push",
                     push_stage = stage.value(),
@@ -213,8 +208,6 @@ async fn dispatch_web_device_owned(
                     "push provider transition"
                 ),
                 None => tracing::warn!(
-                    recipient = %recipient,
-                    conversation = %parsed.conversation,
                     notification_class = parsed.class.as_db_value(),
                     provider = "web_push",
                     push_stage = "provider_no_response",
@@ -283,8 +276,6 @@ async fn dispatch_web_device_owned(
         // active (not a per-device problem).
         Err(error) => {
             tracing::error!(
-                recipient = %recipient,
-                conversation = %parsed.conversation,
                 notification_class = parsed.class.as_db_value(),
                 provider = "web_push",
                 push_stage = "provider_dispatch_failed",
@@ -465,25 +456,13 @@ impl DatabasePushServiceStore {
         Ok(results)
     }
 
-    pub(super) async fn process_publish_job_by_node_item_with_retention_limit(
-        &self,
-        node: &str,
-        item_id: &str,
-        retention_limit: i64,
-    ) -> Result<Option<PushFanoutResult>, XmppError> {
-        let Some(job_id) = self.publish_job_id_for_node_item(node, item_id).await? else {
-            return Ok(None);
-        };
-        self.recover_stale_publish_job_claim_by_id(&job_id).await?;
-        self.process_publish_job_with_retention_limit(&job_id, retention_limit)
-            .await
-    }
-
-    async fn process_publish_job_with_retention_limit(
+    pub(super) async fn process_publish_job_with_retention_limit(
         &self,
         job_id: &str,
         retention_limit: i64,
     ) -> Result<Option<PushFanoutResult>, XmppError> {
+        self.recover_stale_publish_job_claim_by_id(job_id).await?;
+        self.complete_versioned_publish_backing(job_id).await?;
         let now_ms = crate::time::now_ms();
 
         // ---- Phase 1: tx1 — claim + validate + load sealed devices +
@@ -592,6 +571,7 @@ impl DatabasePushServiceStore {
         let Some(lock_target) = get_publish_job_tx(&mut tx, job_id).await? else {
             return Ok(Phase1Outcome::ShortCircuit(None));
         };
+        super::publish_jobs::lock_notification_ancestry_tx(&mut tx, &lock_target).await?;
         lock_owner_tx(&mut tx, lock_target.owner_bare_jid(), now_ms).await?;
         lock_node_tx(&mut tx, lock_target.node(), now_ms).await?;
         let Some(job) = claim_publish_job_tx(&mut tx, job_id, now_ms).await? else {
@@ -600,6 +580,7 @@ impl DatabasePushServiceStore {
         let Some(push_node) = get_node_tx(&mut tx, job.node()).await? else {
             mark_publish_job_failed_tx(&mut tx, job.job_id(), "Push node not found", now_ms)
                 .await?;
+            super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -611,6 +592,7 @@ impl DatabasePushServiceStore {
         if push_node.status != PushNodeStatus::Active {
             mark_publish_job_failed_tx(&mut tx, job.job_id(), "Push node not active", now_ms)
                 .await?;
+            super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -628,7 +610,7 @@ impl DatabasePushServiceStore {
             if let Err(error) = ensure_active_registration_tx(
                 &mut tx,
                 job.owner_bare_jid(),
-                push_service_jid,
+                push_service_jid.as_str(),
                 job.node(),
             )
             .await
@@ -658,7 +640,6 @@ impl DatabasePushServiceStore {
                 return Err(error);
             }
         }
-        self.ensure_xep0060_publish_item_backing(&job).await?;
 
         let sealed_devices =
             active_devices_with_subscription_for_node_tx(&mut tx, job.node()).await?;
@@ -686,6 +667,7 @@ impl DatabasePushServiceStore {
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+            super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -700,7 +682,7 @@ impl DatabasePushServiceStore {
         // dispatch set against the terminal-success attempts recorded
         // by earlier passes.
         let already_delivered =
-            delivered_device_ids_for_item_tx(&mut tx, job.node(), job.item_id()).await?;
+            delivered_device_ids_for_acceptance_tx(&mut tx, job.job_id()).await?;
         let device_count_before_filter = sealed_devices.len();
         let sealed_devices: Vec<_> = sealed_devices
             .into_iter()
@@ -738,6 +720,7 @@ impl DatabasePushServiceStore {
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+            super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -768,19 +751,14 @@ impl DatabasePushServiceStore {
 
     async fn current_apns_badge_count(&self, recipient: &BareJid) -> Option<u64> {
         let Some(inbox_storage) = self.inbox_storage.as_ref() else {
-            tracing::warn!(
-                recipient = %recipient,
-                "APNs app badge omitted because inbox storage is unavailable"
-            );
+            tracing::warn!("APNs app badge omitted because inbox storage is unavailable");
             return None;
         };
 
         match inbox_storage.total_unread(recipient).await {
             Ok(total) => Some(total),
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
-                    recipient = %recipient,
-                    %error,
                     "APNs app badge omitted because account unread total could not be read"
                 );
                 None
@@ -847,7 +825,6 @@ impl DatabasePushServiceStore {
         let node_arc: Arc<str> = Arc::from(job.node);
         let app_id_arc: Arc<str> = Arc::from(job.app_id);
         let secrets = Arc::clone(&self.secrets);
-        let recipient = recipient.clone();
         // `Arc` so the per-device fan-out clones a refcount, not the
         // parsed payload, for the web-arm log context.
         let log_context = Arc::new(parsed.cloned());
@@ -860,14 +837,12 @@ impl DatabasePushServiceStore {
                 let secrets = Arc::clone(&secrets);
                 let web_provider = web_provider.clone();
                 let apns_provider = apns_provider.clone();
-                let recipient = recipient.clone();
                 let log_context = Arc::clone(&log_context);
                 async move {
                     match (&web_provider, device.platform) {
                         (Some((signer, sender, sub, parsed, secrets)), PushDevicePlatform::Web) => {
                             dispatch_web_device_owned(
                                 &device,
-                                &recipient,
                                 parsed,
                                 &item_id,
                                 WebPushDispatchProvider {
@@ -886,8 +861,6 @@ impl DatabasePushServiceStore {
                         (None, PushDevicePlatform::Web) => {
                             if let Some(parsed) = log_context.as_ref() {
                                 tracing::warn!(
-                                    recipient = %recipient,
-                                    conversation = %parsed.conversation,
                                     notification_class = parsed.class.as_db_value(),
                                     provider = "web_push",
                                     push_stage = "provider_not_configured",
@@ -907,7 +880,6 @@ impl DatabasePushServiceStore {
                             Some((provider, parsed, badge_count)) => {
                                 let attempt = apns_dispatch::dispatch_apns_device(
                                     &device,
-                                    &recipient,
                                     parsed,
                                     *badge_count,
                                     apns_dispatch::ApnsJobContext {
@@ -936,8 +908,6 @@ impl DatabasePushServiceStore {
                             None => {
                                 if let Some(parsed) = log_context.as_ref() {
                                     tracing::warn!(
-                                        recipient = %recipient,
-                                        conversation = %parsed.conversation,
                                         notification_class = parsed.class.as_db_value(),
                                         provider = "apns",
                                         push_stage = "provider_not_configured",
@@ -978,8 +948,9 @@ impl DatabasePushServiceStore {
     /// requeue the job (any transient outcome) or mark it published.
     /// Prunes the per-node attempts/jobs tail so retention stays bounded.
     ///
-    /// At-most-once delivery is enforced via the `claim_token` UUID
-    /// column: phase 1 mints a fresh token; phase 3's state-transition
+    /// Completion writes are fenced by the `claim_token` UUID
+    /// column. Unknown provider sends remain retryable and duplicate-possible:
+    /// phase 1 mints a fresh token; phase 3's state-transition
     /// UPDATEs gate on `claim_token = ?` so a stale worker (whose
     /// claim was reset by `recover_stale_publish_job_claims`) sees 0
     /// rows changed and the *current* claim-holder owns the final
@@ -1002,9 +973,10 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        super::publish_jobs::lock_notification_ancestry_tx(&mut tx, &job).await?;
         lock_owner_tx(&mut tx, job.owner_bare_jid(), now_ms).await?;
         lock_node_tx(&mut tx, job.node(), now_ms).await?;
-        // At-most-once interlock: if our claim was reset by a
+        // Completion interlock: if our claim was reset by a
         // stale-claim recovery between phase 1 and now, the row's
         // current `claim_token` no longer matches the one phase 1
         // captured. Abort BEFORE writing `push_delivery_attempts`
@@ -1025,6 +997,7 @@ impl DatabasePushServiceStore {
             tx.execute(
                 r#"
                 INSERT INTO push_delivery_attempts (
+                    publish_job_id,
                     attempt_id,
                     node,
                     device_id,
@@ -1033,9 +1006,10 @@ impl DatabasePushServiceStore {
                     status,
                     last_error,
                     created_at_ms
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 "#,
                 crate::db_params![
+                    job.job_id(),
                     uuid::Uuid::new_v4().to_string(),
                     job.node().to_string(),
                     attempt.device_id.clone(),
@@ -1099,20 +1073,10 @@ impl DatabasePushServiceStore {
         if any_device_disabled {
             if let Some(push_service_jid) = job.push_service_jid() {
                 if count_active_devices_for_node_tx(&mut tx, job.node()).await? == 0 {
-                    // Parse the stored service JID at this boundary —
-                    // the job row predates typed storage; a malformed
-                    // value is an internal invariant break, not a
-                    // reason to skip §6 cleanup silently.
-                    let push_service_jid: jid::BareJid =
-                        push_service_jid.parse().map_err(|error| {
-                            XmppError::internal(format!(
-                                "stored push_service_jid is not a bare JID: {error}"
-                            ))
-                        })?;
                     let disabled = crate::push_registrations::disable_registration_tx(
                         &mut tx,
                         job.owner_bare_jid(),
-                        &push_service_jid,
+                        push_service_jid,
                         job.node(),
                         "XEP-0357 §6: all devices permanently unreachable (subscription gone/invalid)",
                     )
@@ -1120,8 +1084,7 @@ impl DatabasePushServiceStore {
                     .map_err(|error| XmppError::internal(error.to_string()))?;
                     if disabled > 0 {
                         tracing::info!(
-                            owner = %job.owner_bare_jid(),
-                            node = %job.node(),
+
                             "XEP-0357 §6 forward cleanup: last active device gone; registration disabled"
                         );
                     }
@@ -1146,7 +1109,14 @@ impl DatabasePushServiceStore {
                 .find(|attempt| attempt_status_is_transient(attempt.status))
                 .and_then(|attempt| attempt.last_error.clone())
                 .unwrap_or_else(|| "Web Push transient failure".to_string());
-            if attempt_count_so_far + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS {
+            let unknown_send = attempts.iter().any(|attempt| {
+                matches!(
+                    attempt.status,
+                    dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
+                        | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
+                )
+            });
+            if !unknown_send && attempt_count_so_far + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS {
                 // XEP-0357 §6.1: "until a sufficient number of errors
                 // have been received in a row." Past the ceiling, mark
                 // the job permanently FAILED so it stops occupying the
@@ -1306,6 +1276,7 @@ impl DatabasePushServiceStore {
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         }
+        super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, job).await?;
         prune_delivery_attempts_tx(&mut tx, job.node(), retention_limit).await?;
         prune_publish_jobs_tx(&mut tx, job.node(), MAX_PUBLISH_JOBS_PER_NODE).await?;
         tx.commit()
@@ -1331,6 +1302,9 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        if let Some(job) = get_publish_job_tx(&mut tx, job_id).await? {
+            super::publish_jobs::lock_notification_ancestry_tx(&mut tx, &job).await?;
+        }
         lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
         lock_node_tx(&mut tx, node, now_ms).await?;
         mark_publish_job_failed_tx(&mut tx, job_id, error, now_ms).await?;

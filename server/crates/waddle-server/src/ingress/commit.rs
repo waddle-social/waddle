@@ -43,7 +43,9 @@ pub async fn commit_submission(
     .map_err(|failure| IngressCommitFailure {
         class: if matches!(
             failure.last_error.retry_class(),
-            DbRetryClass::SerializationFailure | DbRetryClass::Deadlock
+            DbRetryClass::SerializationFailure
+                | DbRetryClass::Deadlock
+                | DbRetryClass::CanonicalLockContention
         ) {
             IngressDecisionClass::SerializationExhaustion
         } else {
@@ -355,6 +357,9 @@ async fn commit_attempt(
     {
         return Err(IngressUowError::EffectIntentMessageMissing);
     }
+    if alias == AliasOutcomeClass::Existing && !owner_first {
+        super::recorded::freeze_preview_intents(&mut plan, &recorded);
+    }
     super::reflection_dispatch::freeze(&mut plan, &recorded);
     let verdict = EffectIntentRepository::reconcile(
         &mut tx,
@@ -398,6 +403,8 @@ async fn commit_attempt(
         CanonicalMessageRepository::clear_terminal(&mut tx, key).await?;
     }
     let mut plan = super::recorded::apply_recorded_intents(&plan, &intents);
+    reconstructed |=
+        super::recorded::restore_pending_preview_effects(&mut plan, &intents, &unreceipted);
     // An accepted canonical row with no recorded obligations authorizes nothing.
     // Current policy may plan work for it again (a block that has since been
     // lifted, a newly enabled extension); replaying it would invent obligations

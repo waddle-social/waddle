@@ -1093,7 +1093,7 @@ async fn effect_intents_reconcile_authorities_and_repair_omissions_sqlite() {
     let mut transaction = db.begin_immediate().await.expect("write transaction");
     transaction
         .execute_batch(
-            "CREATE TABLE ingress_messages (message_key TEXT PRIMARY KEY);
+            "CREATE TABLE ingress_messages (message_key TEXT PRIMARY KEY, retention_eligible_at TEXT NULL);
          CREATE TABLE ingress_effect_intents (
              message_key TEXT NOT NULL REFERENCES ingress_messages(message_key),
              effect_ordinal INTEGER NOT NULL, kind INTEGER NOT NULL,
@@ -1106,7 +1106,7 @@ async fn effect_intents_reconcile_authorities_and_repair_omissions_sqlite() {
     let key = MessageKey::new();
     transaction
         .execute(
-            "INSERT INTO ingress_messages VALUES (?)",
+            "INSERT INTO ingress_messages(message_key) VALUES (?)",
             crate::db_params![key.to_storage().to_string()],
         )
         .await

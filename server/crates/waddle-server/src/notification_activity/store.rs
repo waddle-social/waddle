@@ -7,10 +7,9 @@ impl NotificationActivityStore {
     /// Record a XEP-0085 chat-state change as activity for the user
     /// on the named conversation.
     ///
-    /// Idempotent: re-applying the same `(owner, conversation, state)`
-    /// at a later time advances both `last_active_at_ms` and
-    /// `updated_at_ms`. Concurrent writers race to `INSERT … ON
-    /// CONFLICT DO UPDATE`; the row reflects the most recent commit.
+    /// Event timestamps advance monotonically. Historical writes cannot
+    /// resurrect a newer `<gone/>` inactivity signal; gone also wins ties
+    /// at millisecond precision until a strictly newer active event arrives.
     pub async fn record_chat_state(
         &self,
         owner: &BareJid,
@@ -18,8 +17,19 @@ impl NotificationActivityStore {
         chat_state: NotificationChatState,
         now_ms: i64,
     ) -> Result<(), NotificationActivityError> {
-        self.execute(
-            r#"
+        let write = Self::chat_state_write(owner, conversation, chat_state, now_ms);
+        self.execute(&write.sql, write.params).await?;
+        Ok(())
+    }
+
+    fn chat_state_write(
+        owner: &BareJid,
+        conversation: &BareJid,
+        chat_state: NotificationChatState,
+        now_ms: i64,
+    ) -> crate::db::actor::DbExecute {
+        crate::db::actor::DbExecute {
+            sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
                 conversation_jid,
@@ -32,12 +42,20 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, ?, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 last_chat_state = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN excluded.last_chat_state
                     ELSE notification_activity.last_chat_state
                 END,
@@ -46,8 +64,9 @@ impl NotificationActivityStore {
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
-            "#,
-            crate::db_params![
+            "#
+            .to_owned(),
+            params: crate::db_params![
                 owner.to_string(),
                 conversation.to_string(),
                 now_ms,
@@ -55,9 +74,7 @@ impl NotificationActivityStore {
                 now_ms,
                 now_ms,
             ],
-        )
-        .await?;
-        Ok(())
+        }
     }
 
     /// Mark the conversation inactive only when `<gone/>` is at least as recent
@@ -70,8 +87,18 @@ impl NotificationActivityStore {
         conversation: &BareJid,
         now_ms: i64,
     ) -> Result<(), NotificationActivityError> {
-        self.execute(
-            r#"
+        let write = Self::chat_state_gone_write(owner, conversation, now_ms);
+        self.execute(&write.sql, write.params).await?;
+        Ok(())
+    }
+
+    fn chat_state_gone_write(
+        owner: &BareJid,
+        conversation: &BareJid,
+        now_ms: i64,
+    ) -> crate::db::actor::DbExecute {
+        crate::db::actor::DbExecute {
+            sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
                 conversation_jid,
@@ -84,12 +111,12 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, 0, ?, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.updated_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
                     THEN 0
                     ELSE notification_activity.last_active_at_ms
                 END,
                 last_chat_state = CASE
-                    WHEN excluded.updated_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.updated_at_ms >= notification_activity.updated_at_ms
                     THEN excluded.last_chat_state
                     ELSE notification_activity.last_chat_state
                 END,
@@ -98,17 +125,16 @@ impl NotificationActivityStore {
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
-            "#,
-            crate::db_params![
+            "#
+            .to_owned(),
+            params: crate::db_params![
                 owner.to_string(),
                 conversation.to_string(),
                 NotificationChatState::Gone.as_db_value(),
                 now_ms,
                 now_ms,
             ],
-        )
-        .await?;
-        Ok(())
+        }
     }
 
     /// Record a XEP-0490 read-marker advance as activity for the user
@@ -124,8 +150,18 @@ impl NotificationActivityStore {
         conversation: &BareJid,
         now_ms: i64,
     ) -> Result<(), NotificationActivityError> {
-        self.execute(
-            r#"
+        let write = Self::read_marker_write(owner, conversation, now_ms);
+        self.execute(&write.sql, write.params).await?;
+        Ok(())
+    }
+
+    fn read_marker_write(
+        owner: &BareJid,
+        conversation: &BareJid,
+        now_ms: i64,
+    ) -> crate::db::actor::DbExecute {
+        crate::db::actor::DbExecute {
+            sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
                 conversation_jid,
@@ -138,7 +174,11 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, ?, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
@@ -153,8 +193,9 @@ impl NotificationActivityStore {
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
-            "#,
-            crate::db_params![
+            "#
+            .to_owned(),
+            params: crate::db_params![
                 owner.to_string(),
                 conversation.to_string(),
                 now_ms,
@@ -162,9 +203,7 @@ impl NotificationActivityStore {
                 now_ms,
                 now_ms,
             ],
-        )
-        .await?;
-        Ok(())
+        }
     }
 
     /// Record an outbound message commit as activity for the sender
@@ -176,8 +215,18 @@ impl NotificationActivityStore {
         conversation: &BareJid,
         now_ms: i64,
     ) -> Result<(), NotificationActivityError> {
-        self.execute(
-            r#"
+        let write = Self::outbound_message_write(owner, conversation, now_ms);
+        self.execute(&write.sql, write.params).await?;
+        Ok(())
+    }
+
+    fn outbound_message_write(
+        owner: &BareJid,
+        conversation: &BareJid,
+        now_ms: i64,
+    ) -> crate::db::actor::DbExecute {
+        crate::db::actor::DbExecute {
+            sql: r#"
             INSERT INTO notification_activity (
                 owner_bare_jid,
                 conversation_jid,
@@ -190,7 +239,11 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
@@ -199,17 +252,16 @@ impl NotificationActivityStore {
                     THEN excluded.updated_at_ms
                     ELSE notification_activity.updated_at_ms
                 END
-            "#,
-            crate::db_params![
+            "#
+            .to_owned(),
+            params: crate::db_params![
                 owner.to_string(),
                 conversation.to_string(),
                 now_ms,
                 now_ms,
                 now_ms,
             ],
-        )
-        .await?;
-        Ok(())
+        }
     }
 
     /// Record a XEP-0045 presence event (join or available `<show/>`
@@ -243,12 +295,20 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, NULL, ?, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 presence_show = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN excluded.presence_show
                     ELSE notification_activity.presence_show
                 END,
@@ -295,12 +355,20 @@ impl NotificationActivityStore {
             ) VALUES (?, ?, ?, NULL, NULL, NULL, ?, ?)
             ON CONFLICT (owner_bare_jid, conversation_jid) DO UPDATE SET
                 last_active_at_ms = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN excluded.last_active_at_ms
                     ELSE notification_activity.last_active_at_ms
                 END,
                 presence_show = CASE
-                    WHEN excluded.last_active_at_ms >= notification_activity.last_active_at_ms
+                    WHEN excluded.last_active_at_ms > notification_activity.updated_at_ms
+                        OR (excluded.last_active_at_ms = notification_activity.updated_at_ms
+                            AND (notification_activity.last_active_at_ms <> 0
+                                OR notification_activity.last_chat_state IS NULL
+                                OR notification_activity.last_chat_state <> 'gone'))
                     THEN NULL
                     ELSE notification_activity.presence_show
                 END,
@@ -320,6 +388,41 @@ impl NotificationActivityStore {
         )
         .await?;
         Ok(())
+    }
+
+    /// Build the same projection write for the canonical ingress transaction.
+    pub(crate) fn mutation_write(
+        owner: &BareJid,
+        mutation: &waddle_xmpp::ingress::NotificationActivityMutation,
+    ) -> Option<crate::db::actor::DbExecute> {
+        use waddle_xmpp::ingress::NotificationActivityMutation as Mutation;
+        Some(match mutation {
+            Mutation::ChatState {
+                conversation,
+                state,
+                committed_at_ms,
+            } => Self::chat_state_write(
+                owner,
+                conversation,
+                NotificationChatState::from_xep0085(*state),
+                *committed_at_ms,
+            ),
+            Mutation::ChatStateGone {
+                conversation,
+                committed_at_ms,
+            } => Self::chat_state_gone_write(owner, conversation, *committed_at_ms),
+            Mutation::ReadMarker {
+                conversation,
+                committed_at_ms,
+            } => Self::read_marker_write(owner, conversation, *committed_at_ms),
+            Mutation::OutboundMessage {
+                conversation,
+                committed_at_ms,
+            } => Self::outbound_message_write(owner, conversation, *committed_at_ms),
+            Mutation::OfflineDelivery { .. } | Mutation::NotificationCandidate { .. } => {
+                return None
+            }
+        })
     }
 
     async fn read(

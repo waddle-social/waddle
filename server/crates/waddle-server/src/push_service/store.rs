@@ -301,9 +301,8 @@ impl DatabasePushServiceStore {
         )
         .await?;
         // #1123 retry-path idempotency lookup:
-        // `delivered_device_ids_for_item_tx` filters by
-        // (node, item_id, status) and reads device_id — this covering
-        // index keeps the per-retry query off a node-wide scan.
+        // `delivery_attempts_for_node` retains this legacy wire-item index.
+        // Retry dedup uses the scoped acceptance index installed below.
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_item_status \
              ON push_delivery_attempts (node, item_id, status, device_id)",
@@ -311,30 +310,7 @@ impl DatabasePushServiceStore {
         )
         .await?;
         self.execute(
-            &format!(
-                r#"
-                CREATE TABLE IF NOT EXISTS push_publish_jobs (
-                    job_id TEXT PRIMARY KEY,
-                    owner_bare_jid TEXT NOT NULL,
-                    push_service_jid TEXT,
-                    node TEXT NOT NULL,
-                    item_id TEXT NOT NULL,
-                    payload_xml TEXT NOT NULL,
-                    publish_options_xml TEXT,
-                    status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    next_retry_at_ms {i64_type},
-                    claimed_at_ms {i64_type},
-                    claim_token TEXT,
-                    created_at_ms {i64_type} NOT NULL,
-                    updated_at_ms {i64_type} NOT NULL,
-                    published_at_ms {i64_type},
-                    UNIQUE (node, item_id),
-                    FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
-                )
-                "#
-            ),
+            &push_publish_jobs_table_sql(i64_type, "push_publish_jobs", true),
             (),
         )
         .await?;
@@ -360,7 +336,111 @@ impl DatabasePushServiceStore {
         // token) cannot persist attempts from the original worker.
         self.add_column_if_missing("push_publish_jobs", "claim_token TEXT")
             .await?;
+        self.add_column_if_missing("push_publish_jobs", "ancestry_job_id TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "acceptance_scope TEXT NOT NULL DEFAULT 'legacy'",
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            &format!("backing_published_at_ms {i64_type}"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            &format!("publication_order {i64_type} NOT NULL DEFAULT 0"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "backing_state TEXT NOT NULL DEFAULT 'pending'",
+        )
+        .await?;
+        self.execute(&format!("CREATE TABLE IF NOT EXISTS push_publication_orders (node TEXT PRIMARY KEY, next_order {i64_type} NOT NULL)"), ()).await?;
+        self.add_column_if_missing("push_delivery_attempts", "publish_job_id TEXT")
+            .await?;
+        self.migrate_publish_acceptance_scope().await?;
+        self.adopt_notification_ancestry().await?;
         Ok(())
+    }
+
+    async fn migrate_publish_acceptance_scope(&self) -> Result<(), XmppError> {
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        // The old unique node/item pair proves which pending acceptance owns
+        // legacy attempts. Preserve it before removing that uniqueness.
+        tx.execute("UPDATE push_delivery_attempts SET publish_job_id = (SELECT job_id FROM push_publish_jobs WHERE push_publish_jobs.node = push_delivery_attempts.node AND push_publish_jobs.item_id = push_delivery_attempts.item_id AND push_publish_jobs.acceptance_scope = 'legacy' LIMIT 1) WHERE publish_job_id IS NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            tx.execute("ALTER TABLE push_publish_jobs DROP CONSTRAINT IF EXISTS push_publish_jobs_node_item_id_key", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        } else {
+            let mut rows = tx.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            let legacy_unique = match rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+            {
+                Some(row) => row
+                    .get::<String>(0)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    .contains("UNIQUE (node, item_id)"),
+                None => false,
+            };
+            if legacy_unique {
+                tx.execute(
+                    &push_publish_jobs_table_sql("INTEGER", "push_publish_jobs_rebuild", false),
+                    (),
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("INSERT INTO push_publish_jobs_rebuild (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms) SELECT job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms FROM push_publish_jobs", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("DROP TABLE push_publish_jobs", ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute(
+                    "ALTER TABLE push_publish_jobs_rebuild RENAME TO push_publish_jobs",
+                    (),
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        loop {
+            let mut rows = tx.query("SELECT job_id, node FROM push_publish_jobs WHERE publication_order = 0 ORDER BY created_at_ms, job_id LIMIT 128", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            let mut pending = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+            {
+                pending.push((
+                    row.get::<String>(0)
+                        .map_err(|error| XmppError::internal(error.to_string()))?,
+                    row.get::<String>(1)
+                        .map_err(|error| XmppError::internal(error.to_string()))?,
+                ));
+            }
+            if pending.is_empty() {
+                break;
+            }
+            for (job, node) in pending {
+                let order =
+                    super::publish_jobs::allocate_publication_order_tx(&mut tx, &node).await?;
+                tx.execute("UPDATE push_publish_jobs SET publication_order = ?, backing_state = CASE WHEN acceptance_scope = 'legacy' THEN 'published' ELSE backing_state END, backing_published_at_ms = CASE WHEN acceptance_scope = 'legacy' THEN created_at_ms ELSE backing_published_at_ms END WHERE job_id = ? AND publication_order = 0",
+                    crate::db_params![order, job]).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        tx.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_push_publish_jobs_canonical_delivery ON push_publish_jobs (ancestry_job_id) WHERE ancestry_job_id IS NOT NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_status_created ON push_publish_jobs (status, created_at_ms)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_node_status ON push_publish_jobs (node, status)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_acceptance_status ON push_delivery_attempts (publish_job_id, status, device_id)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
     }
 
     async fn add_column_if_missing(&self, table: &str, column_def: &str) -> Result<(), XmppError> {
@@ -524,4 +604,34 @@ mod tests {
         assert_eq!(device.provider_key_material(), None);
         assert_item_not_found(publish_err);
     }
+}
+
+fn push_publish_jobs_table_sql(i64_type: &str, table: &str, if_not_exists: bool) -> String {
+    let exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    format!(
+        r#"CREATE TABLE {exists}{table} (
+        job_id TEXT PRIMARY KEY,
+        owner_bare_jid TEXT NOT NULL,
+        push_service_jid TEXT,
+        node TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        payload_xml TEXT NOT NULL,
+        publish_options_xml TEXT,
+        ancestry_job_id TEXT,
+        acceptance_scope TEXT NOT NULL DEFAULT 'legacy' CHECK (acceptance_scope IN ('legacy', 'wire', 'canonical')),
+        backing_published_at_ms {i64_type},
+        publication_order {i64_type} NOT NULL DEFAULT 0,
+        backing_state TEXT NOT NULL DEFAULT 'pending' CHECK (backing_state IN ('pending', 'published', 'superseded', 'not-configured')),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_retry_at_ms {i64_type},
+        claimed_at_ms {i64_type},
+        claim_token TEXT,
+        created_at_ms {i64_type} NOT NULL,
+        updated_at_ms {i64_type} NOT NULL,
+        published_at_ms {i64_type},
+        FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
+    )"#
+    )
 }

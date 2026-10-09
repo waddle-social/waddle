@@ -45,6 +45,24 @@ impl DeliveryKey {
         Self(Uuid::now_v7())
     }
 
+    /// Opaque identity bound to the canonical message, effect kind and target.
+    /// Approved payload bytes belong to the stored intent, not this identity.
+    pub fn effect(message_key: MessageKey, effect: &super::IngressEffectKey) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"waddle.ingress.effect_delivery.v1");
+        hash.update(message_key.to_storage().as_bytes());
+        hash.update(effect.storage_kind().to_be_bytes());
+        let identity = effect.storage_identity();
+        hash.update((identity.len() as u64).to_be_bytes());
+        hash.update(identity.as_bytes());
+        let digest = hash.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+
     /// Stable identity for one message's projection into an owner's conversation.
     /// Length-delimited fields keep distinct JIDs and thread ids unambiguous.
     pub fn inbox_projection(
@@ -99,6 +117,27 @@ impl fmt::Debug for DeliveryKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn effect_key_is_stable_and_scoped_to_canonical_effect_kind_and_target() {
+        use crate::ingress::IngressEffectKey;
+        let message = MessageKey::new();
+        let alice: BareJid = "alice@example.com".parse().expect("alice");
+        let bob: BareJid = "bob@example.com".parse().expect("bob");
+        let effect = IngressEffectKey::Extension(alice.clone());
+        let key = DeliveryKey::effect(message, &effect);
+        assert_eq!(key, DeliveryKey::effect(message, &effect));
+        assert_ne!(key, DeliveryKey::effect(MessageKey::new(), &effect));
+        assert_ne!(
+            key,
+            DeliveryKey::effect(message, &IngressEffectKey::Extension(bob))
+        );
+        assert_ne!(
+            key,
+            DeliveryKey::effect(message, &IngressEffectKey::RoomSubjectMutation(alice))
+        );
+        assert_eq!(format!("{key:?}"), "DeliveryKey(..)");
+    }
 
     #[test]
     fn inbox_projection_key_is_stable_and_scoped_to_message_owner_and_thread() {

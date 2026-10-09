@@ -14,12 +14,14 @@ pub(crate) use delivery_progress::DeliveryProgressRepository;
 mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
+mod effect_descendants;
 mod error;
+pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;
 mod room_observation;
 pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{
-    initialize_room_observations, CapturedRoomSource, RoomObservationRepository,
+    initialize_room_observations, CapturedRoomSource, ObservationWork, RoomObservationRepository,
 };
 pub use room_observation::{ObservationError, RoomPublication};
 mod pending_receipts;
@@ -34,6 +36,8 @@ pub(crate) use recovery_receipts::{RecoveryCompletion, RecoveryReceiptRepository
 mod send_attempts;
 pub(crate) use send_attempts::{send_attempt_blocks_delivery, SendAttemptStatus};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
+mod projections;
+pub(crate) use projections::ProjectionRepository;
 mod settlement;
 pub(crate) use settlement::settle_recorded;
 

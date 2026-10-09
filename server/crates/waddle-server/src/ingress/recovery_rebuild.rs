@@ -8,8 +8,8 @@ use crate::{
     ingress_uow::{IngressUowError, ReconcileVerdict},
     server::routes::{
         interpret::effects::{
-            delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
-            PlanEffectDependency, PlannedEffect, RoomExecutionPath,
+            delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, Effect, ExternalEffect,
+            IngressPlan, PlanEffectDependency, PlannedEffect, RoomExecutionPath,
         },
         websocket::handlers::message::{dm_pin, muc_direct},
     },
@@ -26,10 +26,11 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::message::MessageType;
 
-pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 10] = [
+pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 11] = [
     IngressEffectKind::RouteDirect,
     IngressEffectKind::RouteMucGroupchat,
     IngressEffectKind::NotificationActivityPreview,
+    IngressEffectKind::LinkPreviewMediaRef,
     IngressEffectKind::DmPinMutation,
     IngressEffectKind::MucInviteLedger,
     IngressEffectKind::GroupchatNotificationRecovery,
@@ -124,6 +125,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
             Err(error) => return Err(error),
         }
     }
+    restore_local_projections(&mut plan, input.unreceipted);
     let mut discarded_receipts = invitation::restore(&mut plan, &input)?;
     for receipt in restore_direct_routes(&mut plan, &input)? {
         if !discarded_receipts.contains(&receipt) {
@@ -206,6 +208,37 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         unsupported_receipts,
         discarded_receipts,
     })
+}
+
+/// Restore only approved local writes; a replay never fetches fresh enrichment.
+fn restore_local_projections(plan: &mut IngressPlan, pending: &[IngressEffectIntent]) {
+    for intent in pending {
+        let effect = match intent {
+            IngressEffectIntent::NotificationActivityPreview { owner, mutation }
+                if matches!(
+                    mutation,
+                    NotificationActivityMutation::ChatState { .. }
+                        | NotificationActivityMutation::ChatStateGone { .. }
+                        | NotificationActivityMutation::ReadMarker { .. }
+                        | NotificationActivityMutation::OutboundMessage { .. }
+                ) =>
+            {
+                ExternalDirectEffect::NotificationActivity {
+                    owner: owner.clone(),
+                    mutation: mutation.clone(),
+                }
+            }
+            IngressEffectIntent::LinkPreviewMediaRef { mutation } => {
+                ExternalDirectEffect::LinkPreviewRefs {
+                    mutations: vec![mutation.clone()],
+                }
+            }
+            _ => continue,
+        };
+        plan.plan.push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Direct(effect),
+        )));
+    }
 }
 
 /// Mutation receipts authorize only the event routes, never replaying mutable pin state.

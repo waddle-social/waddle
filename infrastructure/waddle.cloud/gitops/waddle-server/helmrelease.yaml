@@ -43,10 +43,9 @@ spec:
     cutoverGuard:
       enabled: true
     updateStrategy:
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      # #1660: V1025 retention authority and extension ABI 3 require all old
+      # collectors to stop before the new binary writes descendant custody.
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main

@@ -9,7 +9,7 @@ use waddle_xmpp::XmppError;
 
 use super::devices::{count_active_devices_for_node_tx, validate_len};
 use super::nodes::{get_node_tx, MAX_NODE_ID_LEN};
-use super::publish_jobs::delete_retryable_publish_jobs_for_node_tx;
+use super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx;
 use super::store::{lock_node_tx, lock_owner_tx, DatabasePushServiceStore};
 use super::types::PushNodeStatus;
 
@@ -195,7 +195,7 @@ impl DatabasePushServiceStore {
         registered_push_nodes.dedup();
         for node in &registered_push_nodes {
             lock_node_tx(&mut tx, node, now_ms).await?;
-            delete_retryable_publish_jobs_for_node_tx(&mut tx, owner_bare_jid, node).await?;
+            cancel_retryable_publish_jobs_for_node_tx(&mut tx, owner_bare_jid, node).await?;
         }
         let removed = crate::push_registrations::remove_subscription_tx(
             &mut tx,

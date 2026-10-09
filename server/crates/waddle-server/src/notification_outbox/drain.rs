@@ -47,7 +47,8 @@ impl NotificationOutboxStore {
             match xep0191_blocks_notification_candidate(&candidate, blocking_storage).await {
                 Ok(true) => {
                     let now_ms = crate::time::now_ms();
-                    let mut tx = self.db.begin().await?;
+                    let mut tx = self.db.begin_immediate().await?;
+                    lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
                     record_candidate_suppressed_reason_tx(
                         &mut tx,
                         &candidate,
@@ -55,11 +56,12 @@ impl NotificationOutboxStore {
                     )
                     .await?;
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+                    if claimed > 0 {
+                        settle_candidate_ancestry_tx(&mut tx, &candidate).await?;
+                    }
                     tx.commit().await?;
                     if claimed > 0 {
                         tracing::info!(
-                            recipient = %candidate.recipient_bare_jid(),
-                            conversation = %candidate.conversation_jid(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = SuppressedReason::Xep0191Blocked.as_db_value(),
@@ -73,11 +75,9 @@ impl NotificationOutboxStore {
                     continue;
                 }
                 Ok(false) => {}
-                Err(error) => {
+                Err(_) => {
                     tracing::warn!(
-                        recipient = %candidate.recipient_bare_jid(),
-                        sender = %candidate.sender_jid(),
-                        %error,
+
                         "XEP-0191 blocklist load failed; deferring notification candidate fail-closed"
                     );
                     if self.defer_candidate_policy_error(&candidate).await? {
@@ -135,13 +135,8 @@ impl NotificationOutboxStore {
             .await
             {
                 Ok(outcome) => outcome,
-                Err(error) => {
-                    tracing::warn!(
-                        recipient = %candidate.recipient_bare_jid(),
-                        conversation = %candidate.conversation_jid(),
-                        error = ?error,
-                        "push gate evaluation failed at T1; deferring candidate"
-                    );
+                Err(_) => {
+                    tracing::warn!("push gate evaluation failed at T1; deferring candidate");
                     if self.defer_candidate_policy_error(&candidate).await? {
                         processed += 1;
                     }
@@ -151,15 +146,16 @@ impl NotificationOutboxStore {
             let rich = match outcome {
                 T1PushDispatchOutcome::Suppressed { reason } => {
                     let now_ms = crate::time::now_ms();
-                    let mut tx = self.db.begin().await?;
+                    let mut tx = self.db.begin_immediate().await?;
+                    lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
                     record_candidate_suppressed_reason_tx(&mut tx, &candidate, reason).await?;
                     let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+                    if claimed > 0 {
+                        settle_candidate_ancestry_tx(&mut tx, &candidate).await?;
+                    }
                     tx.commit().await?;
                     if claimed > 0 {
                         tracing::info!(
-                            recipient = %candidate.recipient_bare_jid(),
-                            conversation = %candidate.conversation_jid(),
-                            sender = %candidate.sender_jid(),
                             notification_class = candidate.class().as_db_value(),
                             push_stage = "suppressed",
                             suppression_reason = reason.as_db_value(),
@@ -180,8 +176,8 @@ impl NotificationOutboxStore {
                     // stays the single source-of-truth signal for
                     // operators triaging room-policy lookup failures.
                     tracing::debug!(
-                        recipient = %candidate.recipient_bare_jid(),
-                        conversation = %candidate.conversation_jid(),
+
+
                         class = ?candidate.class(),
                         "MUC config unavailable at T1; deferring candidate (unknown room policy is not 'public')"
                     );
@@ -209,14 +205,16 @@ impl NotificationOutboxStore {
             if targets.is_empty() {
                 let reason = SuppressedReason::Xep0357NoRegistration;
                 let now_ms = crate::time::now_ms();
-                let mut tx = self.db.begin().await?;
+                let mut tx = self.db.begin_immediate().await?;
+                lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
                 record_candidate_suppressed_reason_tx(&mut tx, &candidate, reason).await?;
                 let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
+                if claimed > 0 {
+                    settle_candidate_ancestry_tx(&mut tx, &candidate).await?;
+                }
                 tx.commit().await?;
                 if claimed > 0 {
                     tracing::info!(
-                        recipient = %candidate.recipient_bare_jid(),
-                        conversation = %candidate.conversation_jid(),
                         notification_class = candidate.class().as_db_value(),
                         push_stage = "suppressed",
                         suppression_reason = reason.as_db_value(),
@@ -231,7 +229,8 @@ impl NotificationOutboxStore {
             }
             let context = build_waddle_context(&candidate);
             let now_ms = crate::time::now_ms();
-            let mut tx = self.db.begin().await?;
+            let mut tx = self.db.begin_immediate().await?;
+            lock_candidate_ancestry_tx(&mut tx, &candidate).await?;
             let claimed = mark_candidate_outboxed_tx(&mut tx, &candidate, now_ms).await?;
             if claimed == 0 {
                 tx.commit().await?;
@@ -240,6 +239,7 @@ impl NotificationOutboxStore {
             for target in &targets {
                 enqueue_outbox_job_tx(&mut tx, &candidate, target, &context, &rich, now_ms).await?;
             }
+            settle_candidate_ancestry_tx(&mut tx, &candidate).await?;
             tx.commit().await?;
             processed += 1;
         }
@@ -254,7 +254,8 @@ impl NotificationOutboxStore {
         let next_policy_error_count = candidate.policy_error_count + 1;
         if next_policy_error_count >= MAX_CANDIDATE_POLICY_ATTEMPTS {
             let reason = SuppressedReason::PolicyRetriesExhausted;
-            let mut tx = self.db.begin().await?;
+            let mut tx = self.db.begin_immediate().await?;
+            lock_candidate_ancestry_tx(&mut tx, candidate).await?;
             tx.execute(
                 r#"
                 UPDATE notification_candidates
@@ -282,11 +283,12 @@ impl NotificationOutboxStore {
             .await?;
             record_candidate_suppressed_reason_tx(&mut tx, candidate, reason).await?;
             let claimed = mark_candidate_outboxed_tx(&mut tx, candidate, now_ms).await?;
+            if claimed > 0 {
+                settle_candidate_ancestry_tx(&mut tx, candidate).await?;
+            }
             tx.commit().await?;
             if claimed > 0 {
                 tracing::info!(
-                    recipient = %candidate.recipient_bare_jid(),
-                    conversation = %candidate.conversation_jid(),
                     notification_class = candidate.class().as_db_value(),
                     push_stage = "suppressed",
                     suppression_reason = reason.as_db_value(),
@@ -349,7 +351,8 @@ impl NotificationOutboxStore {
                        no_store,
                        no_permanent_store,
                        last_message_body,
-                       reaction
+                       reaction,
+                       delivery_id
                 FROM notification_candidates
                 WHERE outboxed_at_ms IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
@@ -381,27 +384,28 @@ impl NotificationOutboxStore {
     async fn mark_malformed_candidate_outboxed(
         &self,
         row: &Row,
-        error: &NotificationOutboxError,
+        _error: &NotificationOutboxError,
     ) -> Result<(), NotificationOutboxError> {
         let recipient_raw: String = row.get(0)?;
         let conversation_raw: String = row.get(1)?;
-        let sender_raw = row
-            .get::<Option<String>>(2)?
-            .unwrap_or_else(|| "<null>".to_string());
         let thread_id: String = row.get(3)?;
         let stanza_id_by_raw: String = row.get(4)?;
         let stanza_id: String = row.get(5)?;
         let class: String = row.get(6)?;
-        tracing::warn!(
-            recipient = %recipient_raw,
-            conversation = %conversation_raw,
-            sender = %sender_raw,
-            stanza_id = %stanza_id,
-            %error,
-            "dropping malformed XEP-0357 notification candidate fail-closed"
-        );
-        self.execute(
-            r#"
+        tracing::warn!("dropping malformed XEP-0357 notification candidate fail-closed");
+        let id = row
+            .get::<Option<String>>(14)?
+            .map(|raw| uuid::Uuid::parse_str(&raw))
+            .transpose()
+            .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
+        let mut tx = self.db.begin_immediate().await?;
+        if let Some(id) = id {
+            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(&mut tx, id)
+                .await?;
+        }
+        let changed = tx
+            .execute(
+                r#"
             UPDATE notification_candidates
             SET outboxed_at_ms = ?
             WHERE recipient_bare_jid = ?
@@ -412,17 +416,28 @@ impl NotificationOutboxStore {
               AND class = ?
               AND outboxed_at_ms IS NULL
             "#,
-            crate::db_params![
-                crate::time::now_ms(),
-                recipient_raw,
-                conversation_raw,
-                thread_id,
-                stanza_id_by_raw,
-                stanza_id,
-                class,
-            ],
-        )
-        .await?;
+                crate::db_params![
+                    crate::time::now_ms(),
+                    recipient_raw,
+                    conversation_raw,
+                    thread_id,
+                    stanza_id_by_raw,
+                    stanza_id,
+                    class,
+                ],
+            )
+            .await?;
+        if changed > 0 {
+            if let Some(id) = id {
+                crate::ingress_uow::EffectDescendantRepository::settle_all_raw(
+                    &mut tx,
+                    id,
+                    chrono::Utc::now(),
+                )
+                .await?;
+            }
+        }
+        tx.commit().await?;
         Ok(())
     }
 }
@@ -436,6 +451,7 @@ pub(super) async fn enqueue_outbox_job_tx(
     now_ms: i64,
 ) -> Result<(), NotificationOutboxError> {
     // The durable schema stores XML as TEXT; keep protocol context typed until this DB write edge.
+    lock_candidate_ancestry_tx(tx, candidate).await?;
     let context_xml = String::from(context);
     for _ in 0..8 {
         let inserted =
@@ -464,7 +480,7 @@ pub(super) async fn insert_outbox_job_tx(
 ) -> Result<u64, NotificationOutboxError> {
     let job_id = NotificationOutboxJobId::fresh();
     let sender_jids = encode_sender_jids(std::slice::from_ref(&candidate.sender_jid))?;
-    Ok(tx
+    let changed = tx
         .execute(
             r#"
             INSERT INTO notification_outbox (
@@ -512,7 +528,11 @@ pub(super) async fn insert_outbox_job_tx(
                 now_ms,
             ],
         )
-        .await?)
+        .await?;
+    if changed > 0 {
+        copy_candidate_ancestry_tx(tx, candidate, job_id.as_str()).await?;
+    }
+    Ok(changed)
 }
 
 pub(super) enum OutboxMergeOutcome {
@@ -542,6 +562,7 @@ pub(super) async fn merge_outbox_job_tx(
               AND thread_id = ?
               AND class = ?
               AND status = ?
+              AND approved_payload_xml IS NULL
             LIMIT 1
             "#,
             crate::db_params![
@@ -627,6 +648,7 @@ pub(super) async fn merge_outbox_job_tx(
             updated_at_ms = ?
         WHERE job_id = ?
           AND status = ?
+          AND approved_payload_xml IS NULL
         "#,
             crate::db_params![
                 context_xml,
@@ -635,7 +657,7 @@ pub(super) async fn merge_outbox_job_tx(
                 rich.sender.as_ref().map(ToString::to_string),
                 rich.body.clone(),
                 now_ms,
-                job_id_raw,
+                job_id_raw.clone(),
                 STATUS_QUEUED,
             ],
         )
@@ -643,6 +665,7 @@ pub(super) async fn merge_outbox_job_tx(
     if affected == 0 {
         return Ok(OutboxMergeOutcome::QueuedJobChanged);
     }
+    copy_candidate_ancestry_tx(tx, candidate, &job_id_raw).await?;
     Ok(OutboxMergeOutcome::Merged)
 }
 
@@ -652,8 +675,10 @@ pub(super) async fn mark_malformed_outbox_job_failed_tx(
     error: &str,
     now_ms: i64,
 ) -> Result<(), NotificationOutboxError> {
-    tx.execute(
-        r#"
+    lock_outbox_ancestry_tx(tx, job_id).await?;
+    let changed = tx
+        .execute(
+            r#"
         UPDATE notification_outbox
         SET status = ?,
             policy_error_count = 0,
@@ -665,15 +690,18 @@ pub(super) async fn mark_malformed_outbox_job_failed_tx(
         WHERE job_id = ?
           AND status = ?
         "#,
-        crate::db_params![
-            STATUS_FAILED,
-            format!("malformed notification outbox job: {error}"),
-            now_ms,
-            job_id,
-            STATUS_QUEUED,
-        ],
-    )
-    .await?;
+            crate::db_params![
+                STATUS_FAILED,
+                format!("malformed notification outbox job: {error}"),
+                now_ms,
+                job_id,
+                STATUS_QUEUED,
+            ],
+        )
+        .await?;
+    if changed > 0 {
+        settle_outbox_if_unowned_tx(tx, job_id).await?;
+    }
     Ok(())
 }
 
@@ -767,25 +795,24 @@ pub(super) async fn resolve_first_party_targets(
             Ok(Some(target)) if target.push_service_jid() == first_party_service_jid => {
                 targets.push(target);
             }
-            Ok(Some(target)) => {
+            Ok(Some(_)) => {
                 tracing::warn!(
-                    recipient = %recipient,
-                    registration_service = %registration.service_jid,
-                    target_service = %target.push_service_jid(),
+
+
+
                     "first-party XEP-0357 registration target did not parse back to the configured service"
                 );
             }
             Ok(None) => {
                 tracing::warn!(
-                    recipient = %recipient,
-                    service = %registration.service_jid,
+
+
                     "first-party XEP-0357 registration missing node; skipping notification outbox target"
                 );
             }
-            Err(error) => {
+            Err(_) => {
                 tracing::warn!(
-                    recipient = %recipient,
-                    error = %error,
+
                     "first-party XEP-0357 registration could not be converted into a notification outbox target"
                 );
             }
@@ -793,3 +820,55 @@ pub(super) async fn resolve_first_party_targets(
     }
     Ok(targets)
 }
+
+async fn candidate_delivery_id_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    candidate: &NotificationCandidate,
+) -> Result<Option<uuid::Uuid>, NotificationOutboxError> {
+    match candidate.delivery_id {
+        Some(id) => Ok(Some(id)),
+        None => Ok(
+            NotificationOutboxStore::candidate_delivery_id_in_transaction(tx, candidate).await?,
+        ),
+    }
+}
+
+async fn lock_candidate_ancestry_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    candidate: &NotificationCandidate,
+) -> Result<(), NotificationOutboxError> {
+    if let Some(id) = candidate_delivery_id_tx(tx, candidate).await? {
+        crate::ingress_uow::EffectDescendantRepository::lock_all_raw(tx, id).await?;
+    }
+    Ok(())
+}
+
+async fn copy_candidate_ancestry_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    candidate: &NotificationCandidate,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    if let Some(source) = candidate_delivery_id_tx(tx, candidate).await? {
+        let target = uuid::Uuid::parse_str(job_id)
+            .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
+        crate::ingress_uow::EffectDescendantRepository::copy_raw(tx, source, target).await?;
+        tx.execute("INSERT INTO notification_outbox_lineage (candidate_delivery_id, job_id) VALUES (?, ?) ON CONFLICT DO NOTHING",
+            crate::db_params![source.to_string(), target.to_string()]).await?;
+    }
+    Ok(())
+}
+
+async fn settle_candidate_ancestry_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    candidate: &NotificationCandidate,
+) -> Result<(), NotificationOutboxError> {
+    if let Some(id) = candidate_delivery_id_tx(tx, candidate).await? {
+        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
+            .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "ancestry_tests.rs"]
+mod ancestry_tests;

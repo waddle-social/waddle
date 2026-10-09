@@ -355,8 +355,23 @@ async fn wildcard_and_pending(fixture: IngressFixture) {
         .expect("delete pending predecessor");
     assert_eq!(
         collect(&fixture).await,
+        0,
+        "deleting pending row starts the full retention tail"
+    );
+    let released_at = chrono::Utc::now();
+    assert_eq!(
+        collect_at(&fixture, released_at + chrono::Duration::days(7)).await,
+        0,
+        "original terminal age cannot shorten the tail after custody clears"
+    );
+    assert_eq!(
+        collect_at(
+            &fixture,
+            released_at + chrono::Duration::days(8) + chrono::Duration::seconds(1)
+        )
+        .await,
         1,
-        "deleting pending row makes retained authority collectible"
+        "settled ordering authority becomes collectible after the new tail"
     );
     assert_eq!(
         readiness(&fixture, c, &cr, Some(&resource)).await,
@@ -574,9 +589,13 @@ async fn independent_pending(fixture: IngressFixture) {
 }
 
 async fn collect(fixture: &IngressFixture) -> usize {
+    collect_at(fixture, chrono::Utc::now()).await
+}
+
+async fn collect_at(fixture: &IngressFixture, now: chrono::DateTime<chrono::Utc>) -> usize {
     crate::ingress_substrate::gc_expired_aliases(
         &fixture.db,
-        chrono::Utc::now(),
+        now,
         crate::ingress_substrate::AliasGcBudget {
             deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(10),
             lock_timeout: std::time::Duration::from_secs(1),

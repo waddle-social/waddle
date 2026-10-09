@@ -516,12 +516,17 @@ async fn transient_outcome_keeps_device_active_and_requeues() {
         )
         .await
         .expect("publish");
+    let db = store.database();
+    db.guard().await.expect("guard").execute(
+        "UPDATE push_publish_jobs SET attempt_count = ?, next_retry_at_ms = NULL WHERE item_id = ?",
+        db_params![50_i64, "transient-item-1"],
+    ).await.expect("many previous unknown outcomes");
     store
         .drain_queued_notification_publish_jobs(16)
         .await
         .expect("drain");
 
-    assert_eq!(sender.call_count(), 1);
+    assert_eq!(sender.call_count(), 2);
     assert_eq!(
         device_status(&store, node.node(), "web-1").await,
         DEVICE_STATUS_ACTIVE,

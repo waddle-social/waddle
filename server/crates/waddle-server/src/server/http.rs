@@ -1101,6 +1101,12 @@ async fn create_websocket_state(
                 anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
             })?,
     );
+    // Push initialization precedes outbox schema/adoption. Rebind only exact
+    // accepted target tuples once canonical ancestry is available.
+    push_service
+        .adopt_notification_ancestry()
+        .await
+        .map_err(|_| anyhow::anyhow!("failed to adopt canonical notification ancestry"))?;
     let notification_settings_projection = Arc::new(
         crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
             pubsub_database_storage.database(),

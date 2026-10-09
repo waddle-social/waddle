@@ -146,6 +146,37 @@ async fn capture(
     .await
 }
 
+/// Reconstruct the complete pre-V1025 fixture, including its PostgreSQL
+/// append-only guard manifest. Production migrations retain that protection.
+async fn revert_v1025(fixture: &IngressFixture) {
+    let mut tx = fixture
+        .db
+        .begin()
+        .await
+        .expect("downgrade fixture transaction");
+    tx.execute("DROP TABLE ingress_effect_descendants", ())
+        .await
+        .expect("remove descendant schema");
+    tx.execute("DROP INDEX ingress_messages_retention_eligible", ())
+        .await
+        .expect("remove eligibility index");
+    tx.execute(
+        "ALTER TABLE ingress_messages DROP COLUMN retention_eligible_at",
+        (),
+    )
+    .await
+    .expect("remove eligibility clock");
+    if fixture.db.driver() == crate::db::DatabaseDriver::Postgres {
+        tx.execute("ALTER TABLE ingress_epoch_guard_manifest DISABLE TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("model earlier manifest");
+        tx.execute("DELETE FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_effect_descendants'", ()).await.expect("remove later manifest entry");
+        tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("restore append-only protection");
+    }
+    tx.execute("DELETE FROM _migrations WHERE version = 1025", ())
+        .await
+        .expect("remove later ledger entry");
+    tx.commit().await.expect("downgrade fixture commit");
+}
+
 #[test]
 fn retry_delay_is_bounded() {
     assert_eq!(retry_delay_ms(1), 1_000);

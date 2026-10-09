@@ -10,7 +10,6 @@
 use std::sync::Arc;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use jid::BareJid;
 use waddle_xmpp::push::apns::{
     ApnsCollapseId, ApnsDeviceToken, ApnsEnvironment, ApnsExpiration, ApnsOutcome, ApnsPayload,
     ApnsPayloadError, ApnsPayloadFields, ApnsPriority, ApnsProviderJwt, ApnsProviderTokenSource,
@@ -152,7 +151,6 @@ fn priority_for(urgency: Urgency) -> ApnsPriority {
 /// Send one notification to one Apple device.
 pub(super) async fn dispatch_apns_device(
     device: &SealedActiveDevice,
-    recipient: &BareJid,
     parsed: &ParsedPushPayload,
     badge_count: Option<u64>,
     job: ApnsJobContext<'_>,
@@ -161,8 +159,6 @@ pub(super) async fn dispatch_apns_device(
 ) -> ApnsAttempt {
     let log_skip = |status: &'static str| {
         tracing::warn!(
-            recipient = %recipient,
-            conversation = %parsed.conversation,
             notification_class = parsed.class.as_db_value(),
             provider = "apns",
             push_stage = "provider_dispatch_skipped",
@@ -246,7 +242,7 @@ pub(super) async fn dispatch_apns_device(
         }
     };
     let mut outcome = send(jwt.clone()).await;
-    record_outcome(&outcome, recipient, parsed);
+    record_outcome(&outcome, parsed);
     // Expired or rejected provider token: drop exactly the token Apple
     // refused and retry this device once with a fresh one. A token too
     // young to refresh, or a second refusal, is a key/team/key-id
@@ -260,17 +256,15 @@ pub(super) async fn dispatch_apns_device(
             }
         };
         outcome = send(fresh).await;
-        record_outcome(&outcome, recipient, parsed);
+        record_outcome(&outcome, parsed);
     }
     attempt_for_outcome(&outcome)
 }
 
-fn record_outcome(outcome: &ApnsOutcome, recipient: &BareJid, parsed: &ParsedPushPayload) {
+fn record_outcome(outcome: &ApnsOutcome, parsed: &ParsedPushPayload) {
     let status = outcome_to_attempt_status(outcome);
     match waddle_xmpp::telemetry::push_pipeline::record_apns_outcome(outcome) {
         Some(stage) => tracing::info!(
-            recipient = %recipient,
-            conversation = %parsed.conversation,
             notification_class = parsed.class.as_db_value(),
             provider = "apns",
             push_stage = stage.value(),
@@ -278,8 +272,6 @@ fn record_outcome(outcome: &ApnsOutcome, recipient: &BareJid, parsed: &ParsedPus
             "push provider transition"
         ),
         None => tracing::warn!(
-            recipient = %recipient,
-            conversation = %parsed.conversation,
             notification_class = parsed.class.as_db_value(),
             provider = "apns",
             push_stage = "provider_no_response",

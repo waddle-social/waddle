@@ -876,6 +876,22 @@ mod tests {
                 .await
         }
 
+        async fn publish_push_item_versioned(
+            &self,
+            service: &BareJid,
+            publisher: &BareJid,
+            node: &waddle_xmpp::pubsub::PublicationNode,
+            item: &PubSubItem,
+            version: waddle_xmpp::pubsub::PublicationVersion,
+        ) -> Result<
+            waddle_xmpp::pubsub::VersionedPublishResult,
+            waddle_xmpp::pubsub::PublicationError,
+        > {
+            self.inner
+                .publish_push_item_versioned(service, publisher, node, item, version)
+                .await
+        }
+
         async fn get_items(
             &self,
             owner: &BareJid,

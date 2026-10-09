@@ -143,6 +143,7 @@ impl IngressAuthority {
                     }
                     let outcome = match RecoveryReceiptRepository::insert_candidate(
                         &mut tx,
+                        recovery.message_key,
                         candidate,
                         recovery.created_at_ms,
                     )

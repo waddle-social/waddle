@@ -1,5 +1,8 @@
 //! Atomic notification candidate and recovery writes beneath the canonical lock.
-use waddle_xmpp::{inbox::storage::GroupchatNotificationRecoveryKey, ingress::MessageKey};
+use waddle_xmpp::{
+    inbox::storage::GroupchatNotificationRecoveryKey,
+    ingress::{IngressEffectIntent, MessageKey, NotificationActivityMutation},
+};
 
 use super::{IngressUowError, IngressUowTransaction};
 use crate::notification_outbox::{
@@ -18,16 +21,53 @@ pub(crate) struct RecoveryReceiptRepository;
 impl RecoveryReceiptRepository {
     pub(crate) async fn insert_candidate(
         tx: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
         candidate: &NotificationCandidate,
         created_at_ms: i64,
     ) -> Result<NotificationCandidateInsertOutcome, IngressUowError> {
-        NotificationOutboxStore::insert_candidate_in_transaction(
+        if !super::CanonicalMessageRepository::lock(tx, message_key).await? {
+            return Err(IngressUowError::EffectIntentMessageMissing);
+        }
+        let intents = super::EffectIntentRepository::load(tx, message_key).await?;
+        let authority = intents
+            .iter()
+            .find(|intent| match intent {
+                IngressEffectIntent::NotificationActivityPreview { owner, mutation } => {
+                    owner == candidate.recipient_bare_jid()
+                        && match mutation {
+                            NotificationActivityMutation::NotificationCandidate {
+                                archive_stanza_id,
+                                ..
+                            }
+                            | NotificationActivityMutation::OfflineDelivery {
+                                archive_stanza_id,
+                                ..
+                            } => archive_stanza_id == candidate.archive_stanza_id(),
+                            _ => false,
+                        }
+                }
+                IngressEffectIntent::GroupchatNotificationRecovery { mutation } => {
+                    &mutation.recipient == candidate.recipient_bare_jid()
+                        && &mutation.room == candidate.conversation_jid()
+                        && &mutation.archive_stanza_id == candidate.archive_stanza_id()
+                }
+                _ => false,
+            })
+            .ok_or(IngressUowError::EffectIntentConflict)?;
+        let outcome = NotificationOutboxStore::insert_candidate_in_transaction(
             tx.transaction_mut(),
             candidate,
             created_at_ms,
         )
-        .await
-        .map_err(Into::into)
+        .await?;
+        NotificationOutboxStore::attach_candidate_lineage_in_transaction(
+            tx.transaction_mut(),
+            message_key,
+            &authority.semantic_key(),
+            candidate,
+        )
+        .await?;
+        Ok(outcome)
     }
 
     pub(crate) async fn complete(

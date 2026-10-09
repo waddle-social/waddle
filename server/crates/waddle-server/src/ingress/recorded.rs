@@ -1,4 +1,7 @@
 //! Apply the payload-complete policy decisions retained by reconciliation.
+#[path = "recorded/preview_restore.rs"]
+mod preview_restore;
+pub(super) use preview_restore::{freeze_preview_intents, restore_pending_preview_effects};
 #[cfg(test)]
 #[path = "recorded/delivery_replay_tests.rs"]
 mod delivery_replay_tests;

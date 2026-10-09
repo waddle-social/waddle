@@ -38,6 +38,8 @@ pub struct NotificationCandidate {
     /// [`SuppressedReason::Xep0444Reaction`]; "Alice reacted 👍" is
     /// archived (MAM is untouched) but never fires an OS push.
     pub(super) reaction: bool,
+    /// Host-owned durable scheduler identity, assigned at the database boundary.
+    pub(super) delivery_id: Option<uuid::Uuid>,
 }
 
 /// Message-frozen suppression hints carried on a
@@ -153,6 +155,7 @@ impl NotificationCandidate {
             no_permanent_store: hints.no_permanent_store,
             last_message_body: None,
             reaction: hints.reaction,
+            delivery_id: None,
         })
     }
 
@@ -220,6 +223,7 @@ impl NotificationCandidate {
             no_permanent_store: hints.no_permanent_store,
             last_message_body: None,
             reaction: hints.reaction,
+            delivery_id: None,
         })
     }
 

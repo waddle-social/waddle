@@ -89,6 +89,7 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             no_permanent_store INTEGER NOT NULL DEFAULT 0,
             last_message_body TEXT,
             reaction INTEGER NOT NULL DEFAULT 0,
+            delivery_id TEXT,
             PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
         )
         "#
@@ -119,6 +120,8 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
             -- `sender_jid`, so `RichSummary` round-trips 1:1.
             summary_sender_jid TEXT,
             summary_body TEXT,
+            approved_payload_xml TEXT,
+            approved_publish_options_xml TEXT,
             status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
             attempt_count INTEGER NOT NULL DEFAULT 0,
             policy_error_count INTEGER NOT NULL DEFAULT 0,
@@ -217,6 +220,8 @@ impl NotificationOutboxStore {
             }
         }
         let i64_type = crate::db::i64_sql_type(self.db.driver());
+        self.execute(&format!("CREATE TABLE IF NOT EXISTS notification_outbox_lineage (candidate_delivery_id TEXT NOT NULL, job_id TEXT NOT NULL, settled_at_ms {i64_type}, PRIMARY KEY (candidate_delivery_id, job_id))"), ()).await?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_lineage_job ON notification_outbox_lineage (job_id)", ()).await?;
         self.execute(&notification_candidates_table_sql(i64_type, true), ())
             .await?;
         self.query("SELECT sender_jid FROM notification_candidates LIMIT 0", ())
@@ -269,6 +274,8 @@ impl NotificationOutboxStore {
             "reaction INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        self.add_column_if_missing("notification_candidates", "delivery_id TEXT")
+            .await?;
         self.migrate_notification_candidates_suppressed_reason_constraint(i64_type)
             .await?;
         self.execute(
@@ -327,6 +334,10 @@ impl NotificationOutboxStore {
             .await?;
         self.add_column_if_missing("notification_outbox", "summary_body TEXT")
             .await?;
+        self.add_column_if_missing("notification_outbox", "approved_payload_xml TEXT")
+            .await?;
+        self.add_column_if_missing("notification_outbox", "approved_publish_options_xml TEXT")
+            .await?;
         self.execute(
             "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
             (),
@@ -340,7 +351,7 @@ impl NotificationOutboxStore {
         self.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_outbox_queued_coalesce \
              ON notification_outbox (recipient_bare_jid, push_service_jid, node, conversation_jid, thread_id, class) \
-             WHERE status = 'queued'",
+             WHERE status = 'queued' AND approved_payload_xml IS NULL",
             (),
         )
         .await?;
@@ -363,7 +374,36 @@ impl NotificationOutboxStore {
             (),
         )
         .await?;
+        self.adopt_legacy_candidate_ids().await?;
+        self.adopt_legacy_ancestry().await?;
         Ok(())
+    }
+
+    /// Scheduling identities confer neither canonical nor provider authority.
+    /// Assign them in bounded batches without changing frozen candidate data.
+    async fn adopt_legacy_candidate_ids(&self) -> Result<(), NotificationOutboxError> {
+        let sql = match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                "UPDATE notification_candidates SET delivery_id = gen_random_uuid()::text WHERE ctid IN (SELECT ctid FROM notification_candidates WHERE delivery_id IS NULL LIMIT 128) AND delivery_id IS NULL"
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                // Each row receives an independent UUIDv4 scheduler identity.
+                "UPDATE notification_candidates SET delivery_id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2, 3) || '-8' || substr(lower(hex(randomblob(2))), 2, 3) || '-' || lower(hex(randomblob(6))) WHERE rowid IN (SELECT rowid FROM notification_candidates WHERE delivery_id IS NULL LIMIT 128) AND delivery_id IS NULL"
+            }
+        };
+        loop {
+            let mut tx = self.db.begin_immediate().await?;
+            if self.db.driver() == crate::db::DatabaseDriver::Postgres {
+                tx.execute("SET LOCAL lock_timeout = '100ms'", ()).await?;
+                tx.execute("SET LOCAL statement_timeout = '500ms'", ())
+                    .await?;
+            }
+            let adopted = tx.execute(sql, ()).await?;
+            tx.commit().await?;
+            if adopted == 0 {
+                return Ok(());
+            }
+        }
     }
 
     async fn migrate_notification_candidates_reason_constraint(
@@ -670,7 +710,8 @@ impl NotificationOutboxStore {
                 no_store,
                 no_permanent_store,
                 last_message_body,
-                reaction
+                reaction,
+                delivery_id
             )
             SELECT
                 recipient_bare_jid,
@@ -690,7 +731,8 @@ impl NotificationOutboxStore {
                 no_store,
                 no_permanent_store,
                 last_message_body,
-                reaction
+                reaction,
+                delivery_id
             FROM notification_candidates_old_suppressed_reason_check
             "#,
             (),

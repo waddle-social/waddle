@@ -47,6 +47,7 @@ impl exports::waddle::extension::lifecycle::Guest for JevJudgments {
 impl exports::waddle::extension::framework::Guest for JevJudgments {
     fn handle_event(
         event: types::ExtensionEvent,
+        _delivery: Option<&bindings::waddle::extension::delivery::DeliveryKey>,
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let types::ExtensionEvent::RoomMessageObserve(observation) = event else {
             return Err(error(

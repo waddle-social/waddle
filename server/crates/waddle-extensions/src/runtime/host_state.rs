@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use tracing::{debug, error, info, trace, warn};
-use wasmtime::component::ResourceTable;
+use wasmtime::component::{Resource, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 use super::http::execute_runtime_http_request;
@@ -12,14 +12,23 @@ use super::waddle::extension::runtime::Host as RuntimeHost;
 use super::waddle::extension::types as wit_types;
 use super::wasi::logging::logging::{Host as LoggingHost, Level as LogLevel};
 use crate::host_tools::{
-    DenyingExtensionHostTools, ExtensionHostTools, HostToolError, InvocationContext, InvocationKind,
+    DenyingExtensionHostTools, ExtensionDeliveryCapability, ExtensionHostTools, HostToolError,
+    InvocationContext, InvocationKind,
 };
 use crate::types::{DisplayText, ExtensionCapability, PluginId, WaddleId};
+
+/// The Foundation delivery key remains inside the server implementation. This
+/// table entry has no public constructor, representation, or receipt operation.
+pub struct DeliveryKey {
+    capability: Arc<dyn ExtensionDeliveryCapability>,
+    source: crate::types::RoomMessageSource,
+}
 
 /// Host state made available to every WASM instance for satisfying WASI imports.
 pub struct HostState {
     wasi: WasiCtx,
     table: ResourceTable,
+    delivery: Option<Resource<DeliveryKey>>,
     tools: Arc<dyn ExtensionHostTools>,
     context: InvocationContext,
     pub config: String,
@@ -57,6 +66,7 @@ impl HostState {
         Self {
             wasi,
             table: ResourceTable::new(),
+            delivery: None,
             tools,
             context,
             config,
@@ -67,6 +77,42 @@ impl HostState {
             http,
             http_requests: 0,
         }
+    }
+
+    pub(super) async fn bind_delivery(
+        &mut self,
+        capability: Arc<dyn ExtensionDeliveryCapability>,
+        source: crate::types::RoomMessageSource,
+    ) -> Result<(), HostToolError> {
+        capability.validate(&self.context, &source).await?;
+        let resource = self
+            .table
+            .push(DeliveryKey { capability, source })
+            .map_err(|_| {
+                HostToolError::denied(
+                    DisplayText::new("delivery resource unavailable").expect("static denial"),
+                )
+            })?;
+        self.delivery = Some(resource);
+        Ok(())
+    }
+
+    pub(super) fn delivery_resource(&self) -> Option<Resource<DeliveryKey>> {
+        self.delivery
+            .as_ref()
+            .map(|key| Resource::new_borrow(key.rep()))
+    }
+
+    pub(super) async fn validate_delivery(&mut self) -> Result<(), HostToolError> {
+        if let Some(resource) = self.delivery.as_ref() {
+            let key = self.table.get(resource).map_err(|_| {
+                HostToolError::denied(
+                    DisplayText::new("delivery resource unavailable").expect("static denial"),
+                )
+            })?;
+            key.capability.validate(&self.context, &key.source).await?;
+        }
+        Ok(())
     }
 
     pub(super) fn for_init() -> Self {
@@ -340,7 +386,11 @@ impl RuntimeHost for HostState {
         request: wit_types::OutgoingHttpRequest,
     ) -> wasmtime::Result<std::result::Result<wit_types::HttpResponse, wit_types::HostToolError>>
     {
-        let result = match self.ensure_capability(ExtensionCapability::OutboundHttpRequest) {
+        let result = match self
+            .validate_delivery()
+            .await
+            .and_then(|()| self.ensure_capability(ExtensionCapability::OutboundHttpRequest))
+        {
             Ok(()) if self.http_requests < self.runtime_limits.http_max_requests => {
                 self.http_requests += 1;
                 execute_runtime_http_request(
@@ -361,5 +411,26 @@ impl RuntimeHost for HostState {
 
     async fn current_timestamp(&mut self) -> wasmtime::Result<String> {
         Ok(Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+    }
+}
+
+impl super::waddle::extension::delivery::Host for HostState {}
+
+impl super::waddle::extension::delivery::HostDeliveryKey for HostState {
+    async fn validate(
+        &mut self,
+        resource: Resource<DeliveryKey>,
+    ) -> wasmtime::Result<Result<(), wit_types::HostToolError>> {
+        let key = self.table.get(&resource)?;
+        Ok(key
+            .capability
+            .validate(&self.context, &key.source)
+            .await
+            .map_err(Into::into))
+    }
+
+    async fn drop(&mut self, resource: Resource<DeliveryKey>) -> wasmtime::Result<()> {
+        self.table.delete(resource)?;
+        Ok(())
     }
 }

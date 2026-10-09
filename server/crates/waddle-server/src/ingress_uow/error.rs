@@ -117,6 +117,9 @@ impl IngressUowError {
     pub fn retry_class(&self) -> DbRetryClass {
         match self {
             Self::Database { retry_class } => *retry_class,
+            Self::RoomObservation(super::ObservationError::RetryableDatabase(retry_class)) => {
+                *retry_class
+            }
             Self::Substrate(IngressSubstrateError::Database { retry_class }) => *retry_class,
             Self::MamStore(waddle_xmpp::mam::MamTxStoreError::Database(error)) => {
                 DbRetryClass::from_sqlx_error(error)
@@ -152,5 +155,33 @@ impl From<DatabaseError> for IngressUowError {
         Self::Database {
             retry_class: DbRetryClass::from_database_error(&error),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn observer_parent_contention_retries_the_whole_transaction() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let attempts = AtomicUsize::new(0);
+        let result = crate::ingress_uow::run_with_retry(2, || async {
+            if attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                Err(IngressUowError::from(
+                    super::super::ObservationError::RetryableDatabase(
+                        DbRetryClass::CanonicalLockContention,
+                    ),
+                ))
+            } else {
+                Ok(())
+            }
+        })
+        .await;
+        assert!(
+            result.is_ok(),
+            "sanitized observation contention must retain its retry class"
+        );
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
     }
 }

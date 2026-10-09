@@ -14,7 +14,9 @@ use xmpp_parsers::message::Message;
 
 use crate::db::{DatabaseDriver, Row};
 use crate::ingress_substrate::EffectReceiptKind;
-use crate::ingress_uow::{EffectReceiptRepository, IngressUowTransaction};
+use crate::ingress_uow::{
+    EffectDescendantRepository, EffectReceiptRepository, IngressUowTransaction,
+};
 
 use super::observation_body::observation_body;
 use super::{CapturedRoomSource, ObservationError};
@@ -45,11 +47,126 @@ fn canonical_scope(scope: &RoomObservationScope) -> RoomObservationScope {
     }
 }
 
+/// Discover immutable ancestry without child locks, then lock canonical parents
+/// before configuration/source/work locks. A root may outlive its canonical row.
+async fn prelock_sources(
+    tx: &mut IngressUowTransaction<'_>,
+    roots: &[MessageKey],
+    additional: &[MessageKey],
+) -> Result<Vec<MessageKey>, ObservationError> {
+    let mut keys = additional.to_vec();
+    keys.extend_from_slice(roots);
+    for root in roots {
+        let mut rows = tx
+            .transaction_mut()
+            .query(
+                "SELECT message_key FROM extension_room_observation_work WHERE source_key = ?",
+                crate::db_params![root.to_storage().to_string()],
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            let key: String = row.get(0)?;
+            keys.push(MessageKey::from_storage(
+                Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?,
+            ));
+        }
+    }
+    keys.sort_by_key(MessageKey::to_storage);
+    keys.dedup();
+    super::work::lock_canonical_keys(tx, &keys).await?;
+    Ok(keys)
+}
+
+async fn assert_source_locks(
+    tx: &mut IngressUowTransaction<'_>,
+    root: MessageKey,
+    locked: &[MessageKey],
+) -> Result<(), ObservationError> {
+    if !locked.contains(&root) {
+        return Err(ObservationError::RetryableDatabase(
+            crate::ingress_uow::DbRetryClass::CanonicalLockContention,
+        ));
+    }
+    let mut rows = tx
+        .transaction_mut()
+        .query(
+            "SELECT message_key FROM extension_room_observation_work WHERE source_key = ?",
+            crate::db_params![root.to_storage().to_string()],
+        )
+        .await?;
+    while let Some(row) = rows.next().await? {
+        let key: String = row.get(0)?;
+        let key =
+            MessageKey::from_storage(Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?);
+        if !locked.contains(&key) {
+            return Err(ObservationError::RetryableDatabase(
+                crate::ingress_uow::DbRetryClass::CanonicalLockContention,
+            ));
+        }
+    }
+    Ok(())
+}
+
+async fn roots_for_target(
+    tx: &mut IngressUowTransaction<'_>,
+    room: &BareJid,
+    stanza_id: &str,
+) -> Result<Vec<MessageKey>, ObservationError> {
+    let mut rows = tx.transaction_mut().query(
+        "SELECT source_key FROM extension_room_sources WHERE room_jid = ? AND (root_stanza_id = ? OR revision_stanza_id = ?) UNION SELECT source_key FROM extension_room_source_revisions WHERE room_jid = ? AND room_stanza_id = ?",
+        crate::db_params![room.to_string(), stanza_id, stanza_id, room.to_string(), stanza_id],
+    ).await?;
+    let mut roots = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let key: String = row.get(0)?;
+        roots.push(MessageKey::from_storage(
+            Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?,
+        ));
+    }
+    Ok(roots)
+}
+
+async fn settle_publications(
+    tx: &mut IngressUowTransaction<'_>,
+    mut rows: crate::db::Rows,
+    now_ms: i64,
+) -> Result<(), ObservationError> {
+    let mut ids = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let id: String = row.get(0)?;
+        ids.push(Uuid::parse_str(&id).map_err(|_| ObservationError::Codec)?);
+    }
+    drop(rows);
+    let now = DateTime::from_timestamp_millis(now_ms).ok_or(ObservationError::Codec)?;
+    for id in ids {
+        EffectDescendantRepository::settle_all_raw(tx.transaction_mut(), id, now)
+            .await
+            .map_err(ObservationError::from)?;
+    }
+    Ok(())
+}
+
 pub(super) async fn sync_configured(
     tx: &mut IngressUowTransaction<'_>,
     configured: &[ConfiguredRoomObserver],
     now_ms: i64,
 ) -> Result<(), ObservationError> {
+    let mut roots = Vec::new();
+    for observer in configured {
+        let generation = i64::try_from(observer.generation.get())
+            .map_err(|_| ObservationError::GenerationOutOfRange)?;
+        let mut rows = tx.transaction_mut().query(
+            "SELECT DISTINCT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ?",
+            crate::db_params![observer.plugin.as_str(), generation],
+        ).await?;
+        while let Some(row) = rows.next().await? {
+            let key: String = row.get(0)?;
+            roots.push(MessageKey::from_storage(
+                Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?,
+            ));
+        }
+    }
+    let canonical_locks = prelock_sources(tx, &roots, &[]).await?;
     let mut seen = std::collections::HashSet::new();
     for observer in configured {
         if !seen.insert(observer.plugin.clone()) {
@@ -97,7 +214,7 @@ pub(super) async fn sync_configured(
                 crate::db_params![generation, observer.identity.as_str(), &scope_json, max_concurrent, observer.plugin.as_str(), generation],
             )
             .await?;
-        stale_generation(tx, &observer.plugin, generation, now_ms).await?;
+        stale_generation(tx, &observer.plugin, generation, now_ms, &canonical_locks).await?;
     }
     Ok(())
 }
@@ -229,7 +346,7 @@ pub(super) async fn terminal_receipt(
         &hash,
     )
     .await
-    .map_err(|_| ObservationError::Database)?;
+    .map_err(ObservationError::from)?;
     tx.transaction_mut().execute(
         "INSERT INTO extension_room_observation_receipts (plugin_id, generation, room_jid, message_key, category, recorded_at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (plugin_id, generation, room_jid, message_key) DO NOTHING",
         crate::db_params![subscription.plugin.as_str(), i64::try_from(subscription.generation.get()).map_err(|_| ObservationError::GenerationOutOfRange)?, subscription.room.to_string(), key.to_storage().to_string(), category, now_ms],
@@ -267,10 +384,11 @@ pub(super) async fn stale_source_work(
         "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = ?, body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE source_key = ? AND status IN ('pending', 'leased', 'started') AND (? IS NULL OR revision < ?)",
         crate::db_params![category, now_ms, &key, revision, revision],
     ).await?;
-    tx.transaction_mut().execute(
-        "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE source_key = ? AND status = 'pending' AND (? IS NULL OR revision < ?)",
+    let publications = tx.transaction_mut().query(
+        "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE source_key = ? AND status = 'pending' AND (? IS NULL OR revision < ?) RETURNING id",
         crate::db_params![now_ms, &key, revision, revision],
     ).await?;
+    settle_publications(tx, publications, now_ms).await?;
     for (plugin, generation, identity, room, message_key) in pending {
         let subscription = RoomObservationSubscription {
             plugin: PluginId::new(plugin).map_err(|_| ObservationError::Codec)?,
@@ -294,6 +412,7 @@ async fn stale_generation(
     plugin: &PluginId,
     generation: i64,
     now_ms: i64,
+    locked_keys: &[MessageKey],
 ) -> Result<(), ObservationError> {
     let mut rows = tx.transaction_mut().query(
         "SELECT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started') UNION SELECT source_key FROM extension_room_publications WHERE plugin_id = ? AND generation < ? AND status = 'pending' ORDER BY source_key",
@@ -312,6 +431,7 @@ async fn stale_generation(
         let Some(_) = load_source(tx, key).await? else {
             continue;
         };
+        assert_source_locks(tx, key, locked_keys).await?;
         let mut rows = tx.transaction_mut().query(
             "SELECT generation, identity, room_jid, message_key FROM extension_room_observation_work WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started')",
             crate::db_params![&source_key, plugin.as_str(), generation],
@@ -329,10 +449,11 @@ async fn stale_generation(
             "UPDATE extension_room_observation_work SET status = 'stale', terminal_category = 'generation_changed', body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started')",
             crate::db_params![now_ms, &source_key, plugin.as_str(), generation],
         ).await?;
-        tx.transaction_mut().execute(
-            "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status = 'pending'",
+        let publications = tx.transaction_mut().query(
+            "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE source_key = ? AND plugin_id = ? AND generation < ? AND status = 'pending' RETURNING id",
             crate::db_params![now_ms, &source_key, plugin.as_str(), generation],
         ).await?;
+        settle_publications(tx, publications, now_ms).await?;
         for (old_generation, identity, room, message_key) in pending {
             let subscription = RoomObservationSubscription {
                 plugin: plugin.clone(),
@@ -399,6 +520,11 @@ pub(super) async fn capture(
     // Match the core room validator: malformed replace payloads are ordinary
     // messages there and must not make optional observation abort the archive.
     let correction = xep0308::extract_correction_from_message(message);
+    let roots = match correction_target {
+        Some(target) if target.by == *room => roots_for_target(tx, room, &target.id).await?,
+        _ => Vec::new(),
+    };
+    let locked_keys = prelock_sources(tx, &roots, &[key]).await?;
     let mut subscriptions: Vec<_> = intents
         .iter()
         .filter_map(|intent| match intent {
@@ -476,6 +602,7 @@ pub(super) async fn capture(
             }
             return Ok(());
         };
+        assert_source_locks(tx, stored.key, &locked_keys).await?;
         if stored.retracted {
             for subscription in &subscriptions {
                 terminal_receipt(tx, subscription, key, "retracted_source", now_ms).await?;
@@ -574,6 +701,8 @@ pub(super) async fn retract(
     if target.by != *room {
         return Ok(());
     }
+    let roots = roots_for_target(tx, room, &target.id).await?;
+    let locked_keys = prelock_sources(tx, &roots, &[]).await?;
     let sql = locked(
         "SELECT source_key, source_json, retracted FROM extension_room_sources WHERE room_jid = ? AND (root_stanza_id = ? OR revision_stanza_id = ?)",
         tx.transaction_mut().driver(),
@@ -590,6 +719,7 @@ pub(super) async fn retract(
     };
     let source = decode_source(&row)?;
     drop(rows);
+    assert_source_locks(tx, source.key, &locked_keys).await?;
     if source.retracted {
         return Ok(());
     }

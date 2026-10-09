@@ -335,8 +335,10 @@ Existing `ingress.gc.*` series retain their GC-specific meaning and outcomes.
 
 ## Retention and unresolved effects
 
-GC retains canonical messages for eight days from `terminal_at`, and keeps
-rows with live stream references. Intents without matching receipts prevent
+GC retains canonical messages, aliases, delivery bindings and receipts until
+scheduled descendants and live stream references settle, then for eight days
+from `retention_eligible_at`. Execution completion remains `terminal_at`.
+Intents without matching receipts prevent
 terminalization. Reconciliation that adds omitted intents clears `terminal_at`
 in the same transaction. GC also checks receipt completeness while holding the
 canonical-row lock, so unresolved effects protect a message even when its
@@ -352,21 +354,25 @@ Repair-path and stream-retirement attributions are separated by `phase` and excl
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
-The collector and CNPG backlog/oldest-age queries share this eligibility
-predicate: `terminal_at IS NOT NULL AND terminal_at <= now() - interval '8 days'
-AND receipts_complete AND (has_alias OR has_delivery OR NOT has_ref)`, where
-the three reference booleans mean a matching row exists in
-`ingress_origin_aliases`, `ingress_deliveries`, and `ingress_sm_refs`, respectively. `receipts_complete` means every recorded
+The collector and CNPG backlog/oldest-age queries share this candidate
+predicate: `terminal_at IS NOT NULL AND (retention_eligible_at IS NULL OR retention_eligible_at <= now() - interval '8 days')
+AND receipts_complete AND NOT has_ref AND NOT has_pending_descendant`, where
+`has_ref` includes SM custody and pending archive-dispatch references, and
+`has_pending_descendant` means an unsettled Foundation scheduling reference.
+`receipts_complete` means every recorded
 intent has a receipt with the same message key, kind, and semantic identity
 hash. Expired delivery markers are GC work only when receipts are complete,
-including when no alias or stream reference remains. GC removes aliases and
-delivery markers even when a stream reference retains the canonical row.
-The retained-reference gauge counts expired rows with `has_ref OR NOT
-receipts_complete`; this includes stale terminal rows with pending intents.
-Receipt-complete rows with stream references can also be eligible until their
-aliases and delivery markers are removed; the stream reference retains the
-canonical row itself. Eligible age is measured
-from `terminal_at`, not from expiry. The Rust predicate parity test pins both
+including when no alias or stream reference remains. Stream references and
+pending descendants retain the aliases and delivery bindings too. Descendant
+fanout/coalescing copies all canonical ancestry before settling the predecessor;
+a transport ACK alone cannot discharge it. A new pending reference clears the
+frontier under the canonical lock. The retained-reference gauge includes rows
+whose frontier is unset, with references, descendants or missing receipts.
+Eligible age is measured from `retention_eligible_at`, not from execution
+completion or expiry. Existing rows with no recorded frontier are adopted
+conservatively at their first eligible maintenance observation; adoption starts
+the full tail and does not collect the row in that pass. Physical deletion
+requires a non-null, expired frontier. The Rust predicate parity test pins both
 collector dialects and both CNPG eligibility aggregates to this definition.
 
 GC takes the epoch lock before canonical rows and uses `FOR UPDATE SKIP LOCKED`.
@@ -374,6 +380,33 @@ A `partial` result means bounded progress with more work pending, not failure;
 `failed` or `timed_out` requires investigation. See
 [ingress epoch guards](ingress-epoch-guards.md) for lock order and activation
 preconditions; the cutover does not itself authorize an epoch activation.
+
+### Extension effect delivery (#1660)
+
+Activity and preview mutations commit with their canonical receipts. Recovery
+reuses recorded payloads and original timestamps, without fresh enrichment.
+Opaque delivery bindings identify the canonical message, effect kind and
+target; the extension ABI exposes only invocation-scoped host resources.
+Guests cannot manufacture or export a key. Each host operation revalidates
+the configured observer generation, source and unexpired started lease.
+
+Approved observer results and publication descendants commit together.
+Unknown started guest/provider effects remain pending after lease expiry,
+including after repeated attempts; they may repeat. Calls and pins remain
+`AwaitingDurableOwner` for the P1.4 contract. Existing call/pin operations do
+not acquire a durable guarantee from their in-memory mutation receipts.
+
+Notification candidates preserve ancestry through coalesced jobs and device
+delivery. The first approved payload is immutable on same-key retry. Durable
+push-service queue acceptance, a stable XEP-0357 item ID and provider delivery
+are distinct stages; APNs/Web Push without a durable key contract remain
+at-least-once.
+
+V1025 adds the canonical retention frontier and descendant scheduling state.
+It appends to the checksummed ledger; do not run older writers after this
+cutover. The extension component ABI is `waddle:extension@3.0.0`; rebuild all
+guest components before loading them. This implementation does not authorize
+or assert a live activation.
 
 ## Observer history retention (#1901)
 

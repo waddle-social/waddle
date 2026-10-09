@@ -1076,6 +1076,8 @@ mod tests {
             message_count: 1,
             context: Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build(),
             rich_summary: RichSummary::minimal(),
+            approved_payload: None,
+            approved_publish_options: None,
             status: NotificationOutboxStatus::Queued,
             attempt_count: 0,
             policy_error_count: 0,

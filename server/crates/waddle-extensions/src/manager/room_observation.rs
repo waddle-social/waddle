@@ -35,6 +35,28 @@ impl ExtensionManager {
         source: RoomMessageSource,
         body: DisplayText,
     ) -> RoomObservationOutcome {
+        self.observe_room_message_bound(subscription, source, body, None)
+            .await
+    }
+
+    pub async fn observe_room_message_with_delivery(
+        &self,
+        subscription: &RoomObservationSubscription,
+        source: RoomMessageSource,
+        body: DisplayText,
+        capability: Arc<dyn crate::host_tools::ExtensionDeliveryCapability>,
+    ) -> RoomObservationOutcome {
+        self.observe_room_message_bound(subscription, source, body, Some(capability))
+            .await
+    }
+
+    async fn observe_room_message_bound(
+        &self,
+        subscription: &RoomObservationSubscription,
+        source: RoomMessageSource,
+        body: DisplayText,
+        delivery: Option<Arc<dyn crate::host_tools::ExtensionDeliveryCapability>>,
+    ) -> RoomObservationOutcome {
         let Some(actor) = self.actors.iter().find(|actor| {
             actor.room_observer().is_some_and(|current| {
                 current.plugin == subscription.plugin
@@ -59,7 +81,7 @@ impl ExtensionManager {
             return RoomObservationOutcome::NotApplicable(ObservationSkip::MissingOriginId);
         }
         match actor
-            .observe_room_message(RoomMessageObserve { source, body })
+            .observe_room_message(RoomMessageObserve { source, body }, delivery)
             .await
         {
             Ok(response) => {

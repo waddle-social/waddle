@@ -32,7 +32,9 @@ impl NotificationOutboxStore {
                        policy_error_count,
                        claim_token,
                        summary_sender_jid,
-                       summary_body
+                       summary_body,
+                       approved_payload_xml,
+                       approved_publish_options_xml
                 FROM notification_outbox
                 WHERE status IN (?, ?)
                 ORDER BY created_at_ms ASC, job_id ASC
@@ -73,7 +75,9 @@ impl NotificationOutboxStore {
                        policy_error_count,
                        claim_token,
                        summary_sender_jid,
-                       summary_body
+                       summary_body,
+                       approved_payload_xml,
+                       approved_publish_options_xml
                 FROM notification_outbox
                 WHERE (
                     status = ?
@@ -102,8 +106,6 @@ impl NotificationOutboxStore {
                 Ok(job) => selected.push(job),
                 Err(error) => {
                     tracing::warn!(
-                        job_id = %job_id_raw,
-                        %error,
                         "failing malformed XEP-0357 notification outbox job fail-closed"
                     );
                     self.mark_malformed_outbox_job_failed(job_id_raw.as_str(), &error.to_string())
@@ -149,11 +151,16 @@ impl NotificationOutboxStore {
                 )
                 .await?;
             if affected > 0 {
-                claimed.push(NotificationOutboxJob {
-                    status: NotificationOutboxStatus::InProgress,
-                    claim_token: Some(claim_token),
-                    ..job
-                });
+                // A coalescing transaction may have committed after the
+                // candidate SELECT but before this claim won. Freeze the
+                // current claimed row, never that earlier payload snapshot.
+                let mut rows = self.query(
+                    "SELECT job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, claim_token, summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml FROM notification_outbox WHERE job_id = ? AND status = ? AND claim_token = ?",
+                    crate::db_params![job.job_id.as_str(), STATUS_IN_PROGRESS, claim_token],
+                ).await?;
+                if let Some(row) = rows.next().await? {
+                    claimed.push(decode_outbox_job(&row)?);
+                }
             }
         }
         Ok(claimed)
@@ -165,8 +172,11 @@ impl NotificationOutboxStore {
         error: &str,
     ) -> Result<(), NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
-        self.execute(
-            r#"
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job_id).await?;
+        let changed = tx
+            .execute(
+                r#"
             UPDATE notification_outbox
             SET status = ?,
                 policy_error_count = 0,
@@ -178,16 +188,20 @@ impl NotificationOutboxStore {
             WHERE job_id = ?
               AND status IN (?, ?)
             "#,
-            crate::db_params![
-                STATUS_FAILED,
-                format!("malformed notification outbox job: {error}"),
-                now_ms,
-                job_id,
-                STATUS_QUEUED,
-                STATUS_IN_PROGRESS,
-            ],
-        )
-        .await?;
+                crate::db_params![
+                    STATUS_FAILED,
+                    format!("malformed notification outbox job: {error}"),
+                    now_ms,
+                    job_id,
+                    STATUS_QUEUED,
+                    STATUS_IN_PROGRESS,
+                ],
+            )
+            .await?;
+        if changed > 0 {
+            settle_outbox_if_unowned_tx(&mut tx, job_id).await?;
+        }
+        tx.commit().await?;
         Ok(())
     }
 
@@ -231,8 +245,6 @@ impl NotificationOutboxStore {
                 NotificationOutboxPublishOutcome::Published { .. } => {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_published();
                     tracing::info!(
-                        recipient = %job.recipient_bare_jid(),
-                        conversation = %job.conversation_jid(),
                         notification_class = job.class().as_db_value(),
                         push_stage = "published",
                         "push pipeline transition"
@@ -243,8 +255,6 @@ impl NotificationOutboxStore {
                         waddle_xmpp::telemetry::attributes::PushRetryReason::Unknown,
                     );
                     tracing::warn!(
-                        recipient = %job.recipient_bare_jid(),
-                        conversation = %job.conversation_jid(),
                         notification_class = job.class().as_db_value(),
                         push_stage = "retry_scheduled",
                         "push pipeline transition"
@@ -253,8 +263,6 @@ impl NotificationOutboxStore {
                 NotificationOutboxPublishOutcome::Failed { .. } => {
                     waddle_xmpp::telemetry::reliability::increment_push_outbox_dead_lettered();
                     tracing::warn!(
-                        recipient = %job.recipient_bare_jid(),
-                        conversation = %job.conversation_jid(),
                         notification_class = job.class().as_db_value(),
                         push_stage = "dead_lettered",
                         "push pipeline transition"
@@ -262,8 +270,6 @@ impl NotificationOutboxStore {
                 }
                 NotificationOutboxPublishOutcome::Suppressed { .. } => {
                     tracing::info!(
-                        recipient = %job.recipient_bare_jid(),
-                        conversation = %job.conversation_jid(),
                         notification_class = job.class().as_db_value(),
                         push_stage = "suppressed",
                         suppression_reason = SuppressedReason::UnreadZeroAtPublish.as_db_value(),
@@ -365,7 +371,11 @@ impl NotificationOutboxStore {
             });
         }
 
-        let unread = current_unread_count_for_job(job, inbox_storage).await?;
+        let unread = if job.approved_payload.is_some() {
+            None
+        } else {
+            current_unread_count_for_job(job, inbox_storage).await?
+        };
         // #1126: the recipient reconnected and read the conversation
         // inside the notification window — an OS push now would be
         // for a message they already saw. Drop the job terminally.
@@ -394,14 +404,23 @@ impl NotificationOutboxStore {
         // thread. APNs reads the account-wide total immediately before send
         // so a delayed retry cannot replay an old absolute app-icon badge.
         let item = job.to_xep0357_pubsub_item_with_count(message_count);
-        let push_service_jid = job.push_service_jid.to_string();
+        let Some((item, publish_options)) = self
+            .freeze_approved_item(job, &item, registration.publish_options.as_ref())
+            .await?
+        else {
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            });
+        };
         match push_service
             .enqueue_registered_notification_from_user_server_with_publish_options(
-                push_service_jid.as_str(),
+                &job.push_service_jid,
                 job.node.as_str(),
                 &item,
                 &job.recipient_bare_jid,
-                registration.publish_options.as_ref(),
+                publish_options.as_ref(),
+                uuid::Uuid::parse_str(job.job_id.as_str())
+                    .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?,
             )
             .await
         {
@@ -421,6 +440,44 @@ impl NotificationOutboxStore {
                     .await
             }
         }
+    }
+
+    /// Freeze the approved notification before crossing the durable acceptance
+    /// boundary. A lost reply must replay the same key and payload/options.
+    async fn freeze_approved_item(
+        &self,
+        job: &NotificationOutboxJob,
+        item: &PubSubItem,
+        publish_options: Option<&Element>,
+    ) -> Result<Option<(PubSubItem, Option<Element>)>, NotificationOutboxError> {
+        let mut tx = self.db.begin_immediate().await?;
+        let changed = tx.execute(
+            "UPDATE notification_outbox SET approved_payload_xml = COALESCE(approved_payload_xml, ?), approved_publish_options_xml = CASE WHEN approved_payload_xml IS NULL THEN ? ELSE approved_publish_options_xml END WHERE job_id = ? AND status = ? AND claim_token = ?",
+            crate::db_params![item.payload.as_ref().map(String::from), publish_options.map(String::from),
+                job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+        ).await?;
+        if changed == 0 {
+            return Ok(None);
+        }
+        let mut rows = tx.query("SELECT approved_payload_xml, approved_publish_options_xml FROM notification_outbox WHERE job_id = ?",
+            crate::db_params![job.job_id.as_str()]).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let payload = row
+            .get::<String>(0)?
+            .parse::<Element>()
+            .map_err(|_| NotificationOutboxError::InvalidApprovedPayload)?;
+        let options = row
+            .get::<Option<String>>(1)?
+            .map(|raw| raw.parse::<Element>())
+            .transpose()
+            .map_err(|_| NotificationOutboxError::InvalidApprovedPayload)?;
+        tx.commit().await?;
+        Ok(Some((
+            PubSubItem::new(Some(job.job_id.as_str().to_string()), Some(payload)),
+            options,
+        )))
     }
 
     async fn claimed_job_is_current(
@@ -452,12 +509,22 @@ impl NotificationOutboxStore {
         job: &NotificationOutboxJob,
         error: String,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
-        let Some(attempts) = self.schedule_retry_or_fail(job, error).await? else {
+        let Some(_) = self.schedule_retry_or_fail(job, error).await? else {
             return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
                 job_id: job.job_id.clone(),
             });
         };
-        if attempts >= MAX_OUTBOX_ATTEMPTS {
+        let mut rows = self
+            .query(
+                "SELECT status FROM notification_outbox WHERE job_id = ?",
+                crate::db_params![job.job_id.as_str()],
+            )
+            .await?;
+        let failed = match rows.next().await? {
+            Some(row) => row.get::<String>(0)? == STATUS_FAILED,
+            None => false,
+        };
+        if failed {
             Ok(NotificationOutboxPublishOutcome::Failed {
                 job_id: job.job_id.clone(),
             })
@@ -552,7 +619,9 @@ impl NotificationOutboxStore {
         &self,
         job: &NotificationOutboxJob,
     ) -> Result<bool, NotificationOutboxError> {
-        let affected = self
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let affected = tx
             .execute(
                 r#"
             DELETE FROM notification_outbox
@@ -567,6 +636,10 @@ impl NotificationOutboxStore {
                 ],
             )
             .await?;
+        if affected > 0 {
+            settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
+        }
+        tx.commit().await?;
         Ok(affected > 0)
     }
 
@@ -576,7 +649,9 @@ impl NotificationOutboxStore {
         error: &str,
     ) -> Result<bool, NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
-        let affected = self
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let affected = tx
             .execute(
                 r#"
             UPDATE notification_outbox
@@ -601,6 +676,10 @@ impl NotificationOutboxStore {
                 ],
             )
             .await?;
+        if affected > 0 {
+            settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
+        }
+        tx.commit().await?;
         Ok(affected > 0)
     }
 
@@ -611,7 +690,22 @@ impl NotificationOutboxStore {
     ) -> Result<Option<i64>, NotificationOutboxError> {
         let next_attempt_count = job.attempt_count + 1;
         let now_ms = crate::time::now_ms();
-        let (status, next_attempt_at_ms) = if next_attempt_count >= MAX_OUTBOX_ATTEMPTS {
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let mut rows = tx
+            .query(
+                "SELECT approved_payload_xml FROM notification_outbox WHERE job_id = ?",
+                crate::db_params![job.job_id.as_str()],
+            )
+            .await?;
+        let approved = match rows.next().await? {
+            Some(row) => row.get::<Option<String>>(0)?.is_some(),
+            None => false,
+        };
+        // Once approved work has crossed the acceptance boundary, a lost
+        // reply remains unknown. Attempt counts cannot turn it into refusal.
+        let (status, next_attempt_at_ms) = if !approved && next_attempt_count >= MAX_OUTBOX_ATTEMPTS
+        {
             (STATUS_FAILED, None)
         } else {
             (
@@ -619,7 +713,7 @@ impl NotificationOutboxStore {
                 Some(now_ms.saturating_add(retry_delay_ms(next_attempt_count))),
             )
         };
-        let affected = self
+        let affected = tx
             .execute(
                 r#"
             UPDATE notification_outbox
@@ -650,6 +744,10 @@ impl NotificationOutboxStore {
         if affected == 0 {
             return Ok(None);
         }
+        if status == STATUS_FAILED {
+            settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
+        }
+        tx.commit().await?;
         Ok(Some(next_attempt_count))
     }
 }
@@ -831,4 +929,67 @@ mod tests {
             .expect("pending after fresh mark")
             .is_empty());
     }
+}
+
+pub(super) async fn lock_outbox_ancestry_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    if let Ok(id) = uuid::Uuid::parse_str(job_id) {
+        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id FOR UPDATE"
+        } else {
+            "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id"
+        };
+        let mut rows = tx.query(sql, crate::db_params![job_id]).await?;
+        while rows.next().await?.is_some() {}
+        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+    }
+    Ok(())
+}
+
+pub(super) async fn settle_outbox_ancestry_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    if let Ok(id) = uuid::Uuid::parse_str(job_id) {
+        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
+            .await?;
+        tx.execute("UPDATE notification_outbox_lineage SET settled_at_ms = ? WHERE job_id = ? AND settled_at_ms IS NULL",
+            crate::db_params![crate::time::now_ms(), job_id]).await?;
+    }
+    Ok(())
+}
+
+/// An upstream refusal cannot release a descendant already owned by the
+/// durable provider queue. The provider worker settles that remaining custody.
+pub(super) async fn settle_outbox_if_unowned_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), NotificationOutboxError> {
+    let has_queue = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let mut rows = tx
+            .query("SELECT to_regclass('push_publish_jobs')::text", ())
+            .await?;
+        match rows.next().await? {
+            Some(row) => row.get::<Option<String>>(0)?.is_some(),
+            None => false,
+        }
+    } else {
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'",
+                (),
+            )
+            .await?;
+        rows.next().await?.is_some()
+    };
+    if has_queue {
+        let mut rows = tx.query("SELECT 1 FROM push_publish_jobs WHERE ancestry_job_id = ? AND status IN ('queued', 'in-progress') LIMIT 1", crate::db_params![job_id]).await?;
+        if rows.next().await?.is_some() {
+            return Ok(());
+        }
+    }
+    settle_outbox_ancestry_tx(tx, job_id).await
 }

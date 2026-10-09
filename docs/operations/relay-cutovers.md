@@ -1,5 +1,26 @@
 # Relay cutovers and the RollingUpdate guard
 
+## Extension effect authority cutover (#1660)
+
+V1025 changes collection authority and the guest ABI becomes
+`waddle:extension@3.0.0`. The committed HelmRelease uses `Recreate`: stop every
+older binary before the new binary writes descendant custody or advances the
+retention frontier. An already-running V1024 collector still uses the old
+terminal-time policy; additive schema alone does not make mixed collectors safe.
+
+Publish the reviewed server image and rebuilt, digest-pinned guest components
+together. Preserve the deployment UUID. Verify the migration ledger, observer
+and notification recovery, and that unresolved descendants/SM references retain
+aliases, delivery bindings and receipts. Verify the rebuilt guests load and
+replay their approved payloads. Keep deployment evidence separate from merge CI.
+
+Restore `RollingUpdate` only in a separate change after fleet verification,
+using the existing cutover revision guard. An older image is not a valid binary
+rollback after this roll-forward ledger migration. This document records the
+required procedure; it does not assert or authorize a live cutover.
+
+## RollingUpdate guard
+
 Remote-resource relay endpoints have
 [version compatibility handling](remote-resource-relay-upgrades.md). A future
 change without a compatible delivery path still requires a `Recreate` deployment. Do not combine that cutover with the return to
