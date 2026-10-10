@@ -417,6 +417,16 @@ than silently treating elapsed time as successful delivery.
 The failure-classification and capacity/disposition follow-up is
 [#1940](https://github.com/waddle-social/waddle/issues/1940), coordinated with
 [#1846](https://github.com/waddle-social/waddle/issues/1846) for diagnostics.
+Known queued failures before provider dispatch stop at the existing 24-attempt
+ceiling when no prior send is uncertain. Their explicit terminal disposition
+settles custody without recording provider delivery; it does not override a
+started lease or sticky uncertainty.
+
+Legacy outbox reconstruction requires stored candidate/job lineage or the exact
+typed message context and sender. Conversation/thread/class alone is not
+message ancestry. Ambiguous fanout keeps a separate pending Foundation reference,
+persisted before child adoption, so later pruning or an interrupted startup cannot
+erase the uncertainty. Such history requires verified explicit disposition.
 
 V1025 adds the canonical retention frontier and descendant scheduling state.
 It appends to the checksummed ledger; do not run older writers after this

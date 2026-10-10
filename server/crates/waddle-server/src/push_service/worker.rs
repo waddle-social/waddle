@@ -1328,6 +1328,413 @@ mod tests {
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
     use waddle_xmpp::inbox::storage::InboxStorage;
 
+    async fn missing_backing_cap_releases_all_canonical_parents(
+        fixture: crate::ingress::test_support::IngressFixture,
+    ) {
+        use crate::ingress_substrate::{gc_expired_aliases, AliasGcBudget};
+        use crate::ingress_uow::{
+            settle_recorded, CanonicalMessageRepository, EffectDescendantRepository,
+            EffectIntentRepository,
+        };
+        use waddle_xmpp::ingress::{
+            IngressEffectIntent, MessageKey, NotificationActivityMutation,
+            NotificationCandidateOutcome, SemanticDigest,
+        };
+        use waddle_xmpp::pubsub::PubSubStorage;
+
+        let backing = Arc::new(
+            crate::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+                .await
+                .expect("independent backing"),
+        );
+        let service: BareJid = "push.example.com".parse().expect("service");
+        crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+            .await
+            .expect("registration store");
+        let push = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+            fixture.db.clone(),
+            b"waddle-push-service-test-secret-key",
+            service.clone(),
+            backing.clone(),
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let node = push
+            .ensure_node(&owner, "missing-backing")
+            .await
+            .expect("node");
+        push.upsert_device(
+            &owner,
+            PushDeviceRegistration::new("device", node.node(), PushDevicePlatform::Fcm, "test"),
+        )
+        .await
+        .expect("device");
+        push.register_first_party_node_for_owner(&owner, service.as_str(), node.node(), None)
+            .await
+            .expect("registration");
+        let delivery = uuid::Uuid::new_v4();
+        let accepted = push
+            .enqueue_canonical_notification_publish_job(
+                node.node(),
+                &notification_item("missing-backing"),
+                &owner,
+                &service,
+                None,
+                delivery,
+            )
+            .await
+            .expect("canonical acceptance");
+        let intent = IngressEffectIntent::NotificationActivityPreview {
+            owner: owner.clone(),
+            mutation: NotificationActivityMutation::NotificationCandidate {
+                conversation: "bob@example.com".parse().expect("conversation"),
+                archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    "missing-backing",
+                    owner.clone().into(),
+                ),
+                outcome: NotificationCandidateOutcome::Inserted,
+            },
+        };
+        for _ in 0..2 {
+            let key = MessageKey::new();
+            let mut tx = fixture.uow.begin().await.expect("canonical tx");
+            CanonicalMessageRepository::record_message(
+                &mut tx,
+                key,
+                &SemanticDigest::from_storage(1, [1; 32]).expect("digest"),
+                None,
+            )
+            .await
+            .expect("parent");
+            EffectIntentRepository::reconcile(&mut tx, key, std::slice::from_ref(&intent), false)
+                .await
+                .expect("intent");
+            EffectDescendantRepository::attach(&mut tx, key, &intent.semantic_key(), delivery)
+                .await
+                .expect("provider custody");
+            settle_recorded(&mut tx, key, std::slice::from_ref(&intent))
+                .await
+                .expect("candidate insertion proof");
+            CanonicalMessageRepository::terminalize(&mut tx, key, chrono::Utc::now())
+                .await
+                .expect("canonical obligations complete");
+            tx.commit().await.expect("commit parents");
+        }
+        backing
+            .delete_node(&service, node.node())
+            .await
+            .expect("remove backing");
+        fixture
+            .execute(
+                "UPDATE push_publish_jobs SET attempt_count = ? WHERE job_id = ?",
+                crate::db_params![
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS - 2,
+                    accepted.job_id().to_string()
+                ],
+            )
+            .await;
+        assert_eq!(
+            fixture
+                .count("ingress_effect_descendants WHERE settled_at IS NULL")
+                .await,
+            2
+        );
+        assert_eq!(
+            fixture
+                .count("ingress_messages WHERE retention_eligible_at IS NOT NULL")
+                .await,
+            0
+        );
+        assert!(push
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("penultimate retry")
+            .is_empty());
+        assert_eq!(push.queued_publish_jobs().await.expect("queue").len(), 1);
+        assert_eq!(
+            fixture
+                .count("ingress_effect_descendants WHERE settled_at IS NULL")
+                .await,
+            2
+        );
+        fixture
+            .execute(
+                "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
+                crate::db_params![accepted.job_id().to_string()],
+            )
+            .await;
+        assert!(push
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("cap")
+            .is_empty());
+        assert_eq!(
+            push.load_publish_job(&accepted.job_id().to_string())
+                .await
+                .expect("load")
+                .expect("acceptance")
+                .status(),
+            PUBLISH_JOB_STATUS_FAILED
+        );
+        assert_eq!(
+            fixture
+                .count("ingress_effect_descendants WHERE settled_at IS NULL")
+                .await,
+            0
+        );
+        assert_eq!(
+            fixture.count("ingress_effect_receipts").await,
+            2,
+            "terminal disposition adds no provider receipt"
+        );
+        assert_eq!(
+            fixture
+                .count("ingress_messages WHERE retention_eligible_at IS NOT NULL")
+                .await,
+            2
+        );
+        assert!(push
+            .delivery_attempts_for_node(node.node())
+            .await
+            .expect("attempts")
+            .is_empty());
+        let gc = gc_expired_aliases(
+            &fixture.db,
+            chrono::Utc::now() + chrono::Duration::days(9),
+            AliasGcBudget {
+                deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(5),
+                lock_timeout: std::time::Duration::from_millis(100),
+                statement_timeout: std::time::Duration::from_secs(2),
+                scan_timeout: std::time::Duration::from_secs(2),
+                progress: Default::default(),
+            },
+        )
+        .await
+        .expect("retention GC");
+        assert_eq!(gc.deleted_messages, 2);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_missing_backing_cap_releases_all_canonical_parents() {
+        missing_backing_cap_releases_all_canonical_parents(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn postgres_missing_backing_cap_releases_all_canonical_parents() {
+        if let Some(fixture) =
+            crate::ingress::test_support::IngressFixture::postgres("push_backing_cap").await
+        {
+            missing_backing_cap_releases_all_canonical_parents(fixture).await;
+        }
+    }
+
+    async fn postgres_parent_contention_preserves_batch_and_lease(attempt_count: i64, name: &str) {
+        use crate::ingress_uow::{
+            CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
+        };
+        use waddle_xmpp::ingress::{
+            IngressEffectIntent, MessageKey, NotificationActivityMutation,
+            NotificationCandidateOutcome, SemanticDigest,
+        };
+        let Some(fixture) = crate::ingress::test_support::IngressFixture::postgres(name).await
+        else {
+            return;
+        };
+        crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+            .await
+            .expect("registrations");
+        let push = DatabasePushServiceStore::new_with_secret_key(
+            fixture.db.clone(),
+            b"waddle-push-service-test-secret-key",
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let service: BareJid = "push.example.com".parse().expect("service");
+        let first = push
+            .ensure_node(&owner, "contended")
+            .await
+            .expect("first node");
+        let second = push
+            .ensure_node(&owner, "unrelated")
+            .await
+            .expect("second node");
+        for node in [first.node(), second.node()] {
+            push.upsert_device(
+                &owner,
+                PushDeviceRegistration::new("device", node, PushDevicePlatform::Fcm, "test"),
+            )
+            .await
+            .expect("device");
+        }
+        push.register_first_party_node_for_owner(&owner, service.as_str(), first.node(), None)
+            .await
+            .expect("registration");
+        let delivery = uuid::Uuid::new_v4();
+        let accepted = push
+            .enqueue_canonical_notification_publish_job(
+                first.node(),
+                &notification_item("contended"),
+                &owner,
+                &service,
+                None,
+                delivery,
+            )
+            .await
+            .expect("canonical acceptance");
+        let unrelated = push
+            .enqueue_notification_publish_job_from_user_server(
+                second.node(),
+                &notification_item("unrelated"),
+                &owner,
+            )
+            .await
+            .expect("unrelated acceptance");
+        fixture.execute(
+            "UPDATE push_publish_jobs SET created_at_ms = 1, attempt_count = ? WHERE job_id = ?",
+            crate::db_params![attempt_count, accepted.job_id().to_string()],
+        ).await;
+        fixture
+            .execute(
+                "UPDATE push_publish_jobs SET created_at_ms = 2 WHERE job_id = ?",
+                crate::db_params![unrelated.job_id().to_string()],
+            )
+            .await;
+        let key = MessageKey::new();
+        let intent = IngressEffectIntent::NotificationActivityPreview {
+            owner: owner.clone(),
+            mutation: NotificationActivityMutation::NotificationCandidate {
+                conversation: "bob@example.com".parse().expect("conversation"),
+                archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    "contended",
+                    owner.clone().into(),
+                ),
+                outcome: NotificationCandidateOutcome::Inserted,
+            },
+        };
+        let mut tx = fixture.uow.begin().await.expect("parent tx");
+        CanonicalMessageRepository::record_message(
+            &mut tx,
+            key,
+            &SemanticDigest::from_storage(1, [1; 32]).expect("digest"),
+            None,
+        )
+        .await
+        .expect("parent");
+        EffectIntentRepository::reconcile(&mut tx, key, std::slice::from_ref(&intent), false)
+            .await
+            .expect("intent");
+        EffectDescendantRepository::attach(&mut tx, key, &intent.semantic_key(), delivery)
+            .await
+            .expect("custody");
+        tx.commit().await.expect("commit parent");
+        let mut held = fixture.uow.begin().await.expect("held parent tx");
+        assert!(CanonicalMessageRepository::lock(&mut held, key)
+            .await
+            .expect("hold parent"));
+        let results = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            push.drain_queued_notification_publish_jobs(2),
+        )
+        .await
+        .expect("drain must not wait for the held parent")
+        .expect("contention must not abort the batch");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item_id(), "unrelated");
+        let first_job = push
+            .load_publish_job(&accepted.job_id().to_string())
+            .await
+            .expect("load")
+            .expect("first job");
+        assert_eq!(first_job.status(), PUBLISH_JOB_STATUS_QUEUED);
+        assert!(!first_job.uncertain_send);
+        assert!(push
+            .delivery_attempts_for_node(first.node())
+            .await
+            .expect("first attempts")
+            .is_empty());
+        assert_eq!(
+            push.delivery_attempts_for_node(second.node())
+                .await
+                .expect("second attempts")
+                .len(),
+            1
+        );
+        assert_eq!(
+            fixture
+                .count("ingress_effect_descendants WHERE settled_at IS NULL")
+                .await,
+            1
+        );
+        assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+        let mut rows = push
+            .query(
+                "SELECT attempt_count, next_retry_at_ms FROM push_publish_jobs WHERE job_id = ?",
+                crate::db_params![accepted.job_id().to_string()],
+            )
+            .await
+            .expect("retry");
+        let row = rows.next().await.expect("row").expect("retry row");
+        assert_eq!(row.get::<i64>(0).expect("count"), attempt_count + 1);
+        assert!(row.get::<Option<i64>>(1).expect("retry deadline").is_some());
+        drop(rows);
+
+        let claim = uuid::Uuid::new_v4().to_string();
+        let claimed_at = crate::time::now_ms();
+        fixture.execute(
+            "UPDATE push_publish_jobs SET status = 'in-progress', claim_token = ?, claimed_at_ms = ?, attempt_count = 50, next_retry_at_ms = NULL WHERE job_id = ?",
+            crate::db_params![claim.clone(), claimed_at, accepted.job_id().to_string()],
+        ).await;
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            push.record_publish_job_failure_by_id(
+                &accepted.job_id().to_string(),
+                "late predecessor error",
+            ),
+        )
+        .await
+        .expect("repair must not wait for the held parent")
+        .expect("repair owned work under contention");
+        let repaired = push
+            .load_publish_job(&accepted.job_id().to_string())
+            .await
+            .expect("load")
+            .expect("owned job");
+        assert_eq!(repaired.status(), PUBLISH_JOB_STATUS_IN_PROGRESS);
+        assert_eq!(repaired.claim_token(), claim);
+        assert!(repaired.uncertain_send);
+        let mut rows = push.query(
+            "SELECT attempt_count, claimed_at_ms, next_retry_at_ms FROM push_publish_jobs WHERE job_id = ?",
+            crate::db_params![accepted.job_id().to_string()],
+        ).await.expect("lease");
+        let row = rows.next().await.expect("row").expect("lease row");
+        assert_eq!(row.get::<i64>(0).expect("count"), 50);
+        assert_eq!(row.get::<i64>(1).expect("claim time"), claimed_at);
+        assert_eq!(row.get::<Option<i64>>(2).expect("retry deadline"), None);
+        drop(rows);
+        held.commit().await.expect("release parent");
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_uncapped_parent_contention_preserves_batch_and_lease() {
+        postgres_parent_contention_preserves_batch_and_lease(0, "push_uncapped_parent_lock").await;
+    }
+
+    #[tokio::test]
+    async fn postgres_at_cap_parent_contention_preserves_batch_and_lease() {
+        postgres_parent_contention_preserves_batch_and_lease(
+            PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS - 1,
+            "push_capped_parent_lock",
+        )
+        .await;
+    }
+
     #[tokio::test]
     async fn expired_unknown_send_past_cap_survives_known_transient_and_settles_only_disposition() {
         let store = store().await;

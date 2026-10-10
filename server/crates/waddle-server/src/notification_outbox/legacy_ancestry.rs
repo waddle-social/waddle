@@ -240,7 +240,7 @@ impl NotificationOutboxStore {
                 return Ok(());
             }
             for job in &jobs {
-                run_with_retry(5, || self.adopt_job(recorded, candidate, *job))
+                run_with_retry(5, || self.adopt_job(recorded, candidate, *job, false))
                     .await
                     .map_err(|error| error.last_error)?;
             }
@@ -256,40 +256,67 @@ impl NotificationOutboxStore {
         recorded: &Recorded,
         candidate: &NotificationCandidate,
     ) -> Result<(), IngressUowError> {
+        let candidate_id = candidate
+            .delivery_id
+            .ok_or(IngressUowError::EffectIntentConflict)?;
         let mut cursor = String::new();
         let mut found = false;
+        let mut ambiguous = false;
         loop {
             let mut tx = begin_bounded(&self.db).await?;
+            if !quarantine::lock_scanned_parent(&mut tx, recorded).await?
+                || !Self::lock_unquarantined_candidate(&mut tx, candidate).await?
+            {
+                tx.commit().await?;
+                return Ok(());
+            }
             let mut rows = tx.query(
-                "SELECT job_id FROM notification_outbox WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND class = ? AND job_id > ? ORDER BY job_id LIMIT ?",
-                crate::db_params![candidate.recipient_bare_jid.to_string(),candidate.conversation_jid.to_string(),candidate.thread_id.as_str(),candidate.class.as_db_value(),&cursor,PAGE],
+                "SELECT job_id,context_xml,sender_jid,EXISTS(SELECT 1 FROM notification_outbox_lineage l WHERE l.candidate_delivery_id = ? AND l.job_id = notification_outbox.job_id) FROM notification_outbox WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND class = ? AND job_id > ? ORDER BY job_id LIMIT ?",
+                crate::db_params![candidate_id.to_string(),candidate.recipient_bare_jid.to_string(),candidate.conversation_jid.to_string(),candidate.thread_id.as_str(),candidate.class.as_db_value(),&cursor,PAGE],
             ).await?;
             let mut jobs = Vec::new();
+            let mut scanned = false;
             while let Some(row) = rows.next().await? {
                 let raw: String = row.get(0)?;
-                jobs.push(
-                    Uuid::parse_str(&raw).map_err(|_| IngressUowError::EffectIntentConflict)?,
-                );
+                cursor.clone_from(&raw);
+                scanned = true;
+                let recorded_lineage: bool = row.get(3)?;
+                let context: String = row.get(1)?;
+                let sender: Option<String> = row.get(2)?;
+                if recorded_lineage
+                    || legacy_context_matches(candidate, &context, sender.as_deref())
+                {
+                    match Uuid::parse_str(&raw) {
+                        Ok(job) => jobs.push((job, !recorded_lineage)),
+                        Err(_) => ambiguous = true,
+                    }
+                } else {
+                    // A different latest context can also hide this candidate in
+                    // older coalesced fanout. It proves neither inclusion nor absence.
+                    ambiguous = true;
+                }
             }
             drop(rows);
+            if ambiguous {
+                retain_legacy_fanout_gap(&mut tx, recorded).await?;
+            }
             tx.commit().await?;
-            if jobs.is_empty() {
+            if !scanned {
                 break;
             }
-            for job in &jobs {
-                run_with_retry(5, || self.adopt_job(recorded, candidate, *job))
-                    .await
-                    .map_err(|error| error.last_error)?;
-                found = true;
+            for (job, require_context_match) in jobs {
+                let adopted = run_with_retry(5, || {
+                    self.adopt_job(recorded, candidate, job, require_context_match)
+                })
+                .await
+                .map_err(|error| error.last_error)?;
+                found |= adopted;
+                ambiguous |= !adopted;
             }
-            cursor = jobs
-                .last()
-                .ok_or(IngressUowError::EffectIntentConflict)?
-                .to_string();
         }
-        // No job and no explicit suppression is unknown history, not successful
-        // provider acceptance. Keep the candidate bridge pending in that case.
-        if found {
+        // Unknown fanout remains on the candidate even after known children settle.
+        // A partial reconstruction cannot discharge missing/coalesced history.
+        if found || ambiguous {
             let id = candidate
                 .delivery_id
                 .ok_or(IngressUowError::EffectIntentConflict)?;
@@ -301,7 +328,25 @@ impl NotificationOutboxStore {
                     tx.commit().await?;
                     return Ok(());
                 }
-                EffectDescendantRepository::settle_all_raw(&mut tx, id, chrono::Utc::now()).await?;
+                let gap = legacy_fanout_gap_key(recorded);
+                if ambiguous {
+                    // Persist the observation: later pruning cannot turn an
+                    // unknown target into evidence that the fanout was complete.
+                    EffectDescendantRepository::attach_raw(
+                        &mut tx, recorded.message, &recorded.intent.semantic_key(), gap,
+                    ).await?;
+                }
+                let query = if tx.driver() == DatabaseDriver::Postgres {
+                    "SELECT 1 FROM ingress_effect_descendants WHERE message_key = ?::uuid AND descendant_key = ? AND settled_at IS NULL"
+                } else {
+                    "SELECT 1 FROM ingress_effect_descendants WHERE message_key = ? AND descendant_key = ? AND settled_at IS NULL"
+                };
+                let mut rows = tx.query(query, crate::db_params![recorded.message.to_storage().to_string(), gap.to_string()]).await?;
+                let gap_pending = rows.next().await?.is_some();
+                drop(rows);
+                if found && !ambiguous && !gap_pending {
+                    EffectDescendantRepository::settle_all_raw(&mut tx, id, chrono::Utc::now()).await?;
+                }
                 tx.commit().await?;
                 Ok(())
             })
@@ -316,25 +361,39 @@ impl NotificationOutboxStore {
         recorded: &Recorded,
         candidate: &NotificationCandidate,
         job: Uuid,
-    ) -> Result<(), IngressUowError> {
+        require_context_match: bool,
+    ) -> Result<bool, IngressUowError> {
         let mut tx = begin_bounded(&self.db).await?;
         if !quarantine::lock_scanned_parent(&mut tx, recorded).await? {
             tx.commit().await?;
-            return Ok(());
+            return Ok(false);
         }
         if !Self::lock_unquarantined_candidate(&mut tx, candidate).await? {
             tx.commit().await?;
-            return Ok(());
+            return Ok(false);
         }
         let query = if tx.driver() == DatabaseDriver::Postgres {
-            "SELECT status,push_service_jid,node FROM notification_outbox WHERE job_id = ? FOR UPDATE NOWAIT"
+            "SELECT status,push_service_jid,node,context_xml,sender_jid FROM notification_outbox WHERE job_id = ? FOR UPDATE NOWAIT"
         } else {
-            "SELECT status,push_service_jid,node FROM notification_outbox WHERE job_id = ?"
+            "SELECT status,push_service_jid,node,context_xml,sender_jid FROM notification_outbox WHERE job_id = ?"
         };
         let mut rows = tx.query(query, crate::db_params![job.to_string()]).await?;
         let Some(row) = rows.next().await? else {
-            return Err(IngressUowError::EffectIntentConflict);
+            drop(rows);
+            retain_legacy_fanout_gap(&mut tx, recorded).await?;
+            tx.commit().await?;
+            return Ok(false);
         };
+        if require_context_match {
+            let context: String = row.get(3)?;
+            let sender: Option<String> = row.get(4)?;
+            if !legacy_context_matches(candidate, &context, sender.as_deref()) {
+                drop(rows);
+                retain_legacy_fanout_gap(&mut tx, recorded).await?;
+                tx.commit().await?;
+                return Ok(false);
+            }
+        }
         let status: String = row.get(0)?;
         let service: String = row.get(1)?;
         let node: String = row.get(2)?;
@@ -377,8 +436,48 @@ impl NotificationOutboxStore {
             EffectDescendantRepository::settle_all_raw(&mut tx, job, chrono::Utc::now()).await?;
         }
         tx.commit().await?;
-        Ok(())
+        Ok(true)
     }
+}
+
+fn legacy_fanout_gap_key(recorded: &Recorded) -> Uuid {
+    let mut hash = Sha256::new();
+    hash.update(b"waddle.legacy-notification-fanout-gap.v1\0");
+    hash.update(recorded.message.to_storage().as_bytes());
+    hash.update(recorded.kind.to_be_bytes());
+    hash.update(&recorded.hash);
+    let mut identity = [0; 16];
+    identity.copy_from_slice(&hash.finalize()[..16]);
+    Uuid::from_bytes(identity)
+}
+
+async fn retain_legacy_fanout_gap(
+    tx: &mut Transaction<'_>,
+    recorded: &Recorded,
+) -> Result<(), IngressUowError> {
+    EffectDescendantRepository::attach_raw(
+        tx,
+        recorded.message,
+        &recorded.intent.semantic_key(),
+        legacy_fanout_gap_key(recorded),
+    )
+    .await
+}
+
+/// Only the latest exact message can be reconstructed from an old context.
+/// Established lineage remains authoritative after later coalescing.
+fn legacy_context_matches(
+    candidate: &NotificationCandidate,
+    context: &str,
+    sender: Option<&str>,
+) -> bool {
+    let Some(sender) = sender.and_then(|raw| raw.parse::<Jid>().ok()) else {
+        return false;
+    };
+    let Ok(context) = context.parse::<Element>() else {
+        return false;
+    };
+    sender == candidate.sender_jid && context == build_waddle_context(candidate)
 }
 
 fn target(intent: &IngressEffectIntent) -> Option<(&BareJid, &BareJid, &StanzaId)> {

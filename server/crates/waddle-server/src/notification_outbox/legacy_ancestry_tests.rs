@@ -848,3 +848,183 @@ async fn postgres_canonical_candidate_lock_fences_other_parent_quarantine() {
     );
     fixture.close().await;
 }
+
+async fn ambiguous_legacy_jobs_preserve_candidate(fixture: IngressFixture, mixed: bool) {
+    let store = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let provider = crate::push_service::DatabasePushServiceStore::new(fixture.db.clone())
+        .await
+        .expect("provider");
+    let wanted = candidate("legacy-missing-real-job");
+    let unrelated = candidate("legacy-other-message");
+    legacy_parent(&fixture, &wanted).await;
+    store
+        .insert_candidate(&wanted)
+        .await
+        .expect("wanted candidate");
+    for (item, label) in [
+        (&unrelated, "ambiguous-target"),
+        (&wanted, "matched-target"),
+    ] {
+        if label == "matched-target" && !mixed {
+            continue;
+        }
+        let node = provider
+            .ensure_node(&wanted.recipient_bare_jid, label)
+            .await
+            .expect("node");
+        let target = NotificationOutboxTarget::new(
+            "push.example.com".parse().expect("service"),
+            PushServiceNodeName::new(node.node()).expect("node"),
+        );
+        let mut tx = fixture.db.begin_immediate().await.expect("legacy job");
+        enqueue_outbox_job_tx(
+            &mut tx,
+            item,
+            &target,
+            &build_waddle_context(item),
+            &RichSummary::minimal(),
+            crate::time::now_ms(),
+        )
+        .await
+        .expect("job");
+        tx.commit().await.expect("job commit");
+    }
+    let jobs = store.pending_outbox_jobs().await.expect("jobs");
+    for job in &jobs {
+        let completed = !mixed || job.context() == &build_waddle_context(&wanted);
+        if completed {
+            store
+                .execute(
+                    "UPDATE notification_outbox SET status = 'published' WHERE job_id = ?",
+                    crate::db_params![job.job_id().as_str()],
+                )
+                .await
+                .expect("old PubSub acceptance");
+        }
+        let payload = job.to_xep0357_pubsub_item().payload.expect("payload");
+        fixture.execute("INSERT INTO push_publish_jobs(job_id,owner_bare_jid,push_service_jid,node,item_id,payload_xml,acceptance_scope,status,created_at_ms,updated_at_ms) VALUES(?,?,?,?,?,?,'legacy',?,?,?)",
+            crate::db_params![Uuid::new_v4().to_string(), wanted.recipient_bare_jid.to_string(), job.push_service_jid().to_string(), job.node().as_str(), job.job_id().as_str(), String::from(&payload), if completed { "published" } else { "queued" }, crate::time::now_ms(), crate::time::now_ms()]).await;
+    }
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("pre-lineage history");
+    mark_candidate_outboxed_tx(&mut tx, &wanted, crate::time::now_ms())
+        .await
+        .expect("old handoff");
+    tx.execute("DELETE FROM notification_outbox_lineage", ())
+        .await
+        .expect("old schema had no links");
+    tx.commit().await.expect("legacy commit");
+    let id = stable_legacy_id(&store, &wanted).await;
+    let pruned_early = mixed && fixture.db.driver() == DatabaseDriver::Sqlite;
+    if pruned_early {
+        let matched = jobs
+            .iter()
+            .find(|job| job.context() == &build_waddle_context(&wanted))
+            .expect("matched job");
+        store.execute(&format!("CREATE TRIGGER fail_legacy_child_adoption BEFORE INSERT ON ingress_effect_descendants WHEN NEW.descendant_key = '{}' BEGIN SELECT RAISE(ABORT, 'injected legacy child adoption failure'); END", matched.job_id().as_str()), ()).await.expect("adoption fault injection");
+        store
+            .adopt_legacy_ancestry()
+            .await
+            .expect_err("interruption after scanning ambiguous fanout");
+        store
+            .execute("DROP TRIGGER fail_legacy_child_adoption", ())
+            .await
+            .expect("restore adoption");
+        store.execute("UPDATE notification_outbox SET status = 'published', updated_at_ms = 1 WHERE job_id <> ?", crate::db_params![matched.job_id().as_str()]).await.expect("ambiguous job becomes prunable");
+        assert_eq!(
+            store
+                .prune_completed_before(2, 64)
+                .await
+                .expect("prune before restart")
+                .jobs_deleted,
+            1
+        );
+    }
+    for _ in 0..2 {
+        store
+            .adopt_legacy_ancestry()
+            .await
+            .expect("conservative adoption");
+        let mut rows = store.query("SELECT count(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![id.to_string()]).await.expect("candidate custody");
+        assert_eq!(rows.next().await.expect("row").expect("count").get::<i64>(0).expect("pending count"), 1,
+            "unrelated completion or ambiguous coalesced target cannot discharge the candidate bridge");
+        drop(rows);
+        assert_eq!(
+            fixture.count("notification_outbox_lineage").await,
+            i64::from(mixed),
+            "only the reconstructable matched job gains lineage"
+        );
+    }
+    store
+        .execute(
+            "UPDATE notification_outbox SET status = 'published', updated_at_ms = 1",
+            (),
+        )
+        .await
+        .expect("old jobs become prunable");
+    assert_eq!(
+        store
+            .prune_completed_before(crate::time::now_ms(), 64)
+            .await
+            .expect("prune unknown legacy job")
+            .jobs_deleted,
+        u64::from(!pruned_early)
+    );
+    store
+        .adopt_legacy_ancestry()
+        .await
+        .expect("restart after ambiguous job was pruned");
+    let mut rows = store.query("SELECT count(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![id.to_string()]).await.expect("durable candidate uncertainty");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row")
+            .expect("count")
+            .get::<i64>(0)
+            .expect("pending count"),
+        1,
+        "pruning cannot erase previously observed unknown fanout"
+    );
+    drop(rows);
+    assert_eq!(
+        crate::ingress_substrate::gc_expired_aliases(
+            &fixture.db,
+            chrono::Utc::now() + ALIAS_RETENTION + chrono::Duration::days(1),
+            budget()
+        )
+        .await
+        .expect("future GC")
+        .deleted_messages,
+        0
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_unrelated_legacy_completion_never_discharges_candidate() {
+    ambiguous_legacy_jobs_preserve_candidate(IngressFixture::sqlite().await, false).await;
+}
+
+#[tokio::test]
+async fn postgres_unrelated_legacy_completion_never_discharges_candidate() {
+    if let Some(fixture) = IngressFixture::postgres("unrelated_legacy_job").await {
+        ambiguous_legacy_jobs_preserve_candidate(fixture, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_mixed_legacy_fanout_keeps_ambiguous_custody_pending() {
+    ambiguous_legacy_jobs_preserve_candidate(IngressFixture::sqlite().await, true).await;
+}
+
+#[tokio::test]
+async fn postgres_mixed_legacy_fanout_keeps_ambiguous_custody_pending() {
+    if let Some(fixture) = IngressFixture::postgres("mixed_legacy_jobs").await {
+        ambiguous_legacy_jobs_preserve_candidate(fixture, true).await;
+    }
+}

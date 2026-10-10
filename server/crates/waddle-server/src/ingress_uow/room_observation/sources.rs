@@ -146,6 +146,25 @@ async fn settle_publications(
     Ok(())
 }
 
+async fn live_generation_roots(
+    tx: &mut IngressUowTransaction<'_>,
+    plugin: &PluginId,
+    generation: i64,
+) -> Result<Vec<MessageKey>, ObservationError> {
+    let mut rows = tx.transaction_mut().query(
+        "SELECT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started') UNION SELECT source_key FROM extension_room_publications WHERE plugin_id = ? AND generation < ? AND status = 'pending' ORDER BY source_key",
+        crate::db_params![plugin.as_str(), generation, plugin.as_str(), generation],
+    ).await?;
+    let mut roots = Vec::new();
+    while let Some(row) = rows.next().await? {
+        let key: String = row.get(0)?;
+        roots.push(MessageKey::from_storage(
+            Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?,
+        ));
+    }
+    Ok(roots)
+}
+
 pub(super) async fn sync_configured(
     tx: &mut IngressUowTransaction<'_>,
     configured: &[ConfiguredRoomObserver],
@@ -155,16 +174,7 @@ pub(super) async fn sync_configured(
     for observer in configured {
         let generation = i64::try_from(observer.generation.get())
             .map_err(|_| ObservationError::GenerationOutOfRange)?;
-        let mut rows = tx.transaction_mut().query(
-            "SELECT DISTINCT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ?",
-            crate::db_params![observer.plugin.as_str(), generation],
-        ).await?;
-        while let Some(row) = rows.next().await? {
-            let key: String = row.get(0)?;
-            roots.push(MessageKey::from_storage(
-                Uuid::parse_str(&key).map_err(|_| ObservationError::Codec)?,
-            ));
-        }
+        roots.extend(live_generation_roots(tx, &observer.plugin, generation).await?);
     }
     let canonical_locks = prelock_sources(tx, &roots, &[]).await?;
     let mut seen = std::collections::HashSet::new();
@@ -414,20 +424,8 @@ async fn stale_generation(
     now_ms: i64,
     locked_keys: &[MessageKey],
 ) -> Result<(), ObservationError> {
-    let mut rows = tx.transaction_mut().query(
-        "SELECT source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation < ? AND status IN ('pending', 'leased', 'started') UNION SELECT source_key FROM extension_room_publications WHERE plugin_id = ? AND generation < ? AND status = 'pending' ORDER BY source_key",
-        crate::db_params![plugin.as_str(), generation, plugin.as_str(), generation],
-    ).await?;
-    let mut source_keys = Vec::new();
-    while let Some(row) = rows.next().await? {
-        let source_key: String = row.get(0)?;
-        source_keys.push(source_key);
-    }
-    drop(rows);
-    for source_key in source_keys {
-        let key = MessageKey::from_storage(
-            Uuid::parse_str(&source_key).map_err(|_| ObservationError::Codec)?,
-        );
+    for key in live_generation_roots(tx, plugin, generation).await? {
+        let source_key = key.to_storage().to_string();
         let Some(_) = load_source(tx, key).await? else {
             continue;
         };

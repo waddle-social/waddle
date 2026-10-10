@@ -361,29 +361,60 @@ pub(super) async fn lock_notification_ancestry_tx(
     tx: &mut crate::db::Transaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), XmppError> {
+    lock_notification_ancestry_typed_tx(tx, job)
+        .await
+        .map_err(|error| match error {
+            NotificationAncestryLockError::Contended => {
+                XmppError::internal("notification ancestry unavailable")
+            }
+            NotificationAncestryLockError::Failed(error) => error,
+        })
+}
+
+enum NotificationAncestryLockError {
+    Contended,
+    Failed(XmppError),
+}
+
+impl From<crate::ingress_uow::IngressUowError> for NotificationAncestryLockError {
+    fn from(error: crate::ingress_uow::IngressUowError) -> Self {
+        if error.retry_class() == crate::ingress_uow::DbRetryClass::CanonicalLockContention {
+            Self::Contended
+        } else {
+            Self::Failed(XmppError::internal("notification ancestry unavailable"))
+        }
+    }
+}
+
+impl From<crate::db::DatabaseError> for NotificationAncestryLockError {
+    fn from(error: crate::db::DatabaseError) -> Self {
+        if let crate::db::DatabaseError::Internal(sqlx::Error::Database(database)) = &error {
+            if database.code().as_deref() == Some("55P03") {
+                return Self::Contended;
+            }
+        }
+        Self::Failed(XmppError::internal(error.to_string()))
+    }
+}
+
+async fn lock_notification_ancestry_typed_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job: &PushPublishJob,
+) -> Result<(), NotificationAncestryLockError> {
     if let Some(id) = job.ancestry_job_id() {
-        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id)
+        crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
+        if has_notification_lineage_tx(tx)
             .await
-            .map_err(|_| XmppError::internal("notification ancestry unavailable"))?;
-        if has_notification_lineage_tx(tx).await? {
+            .map_err(NotificationAncestryLockError::Failed)?
+        {
             let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
                 "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id FOR UPDATE"
             } else {
                 "SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL ORDER BY candidate_delivery_id"
             };
-            let mut rows = tx
-                .query(sql, crate::db_params![id.to_string()])
-                .await
-                .map_err(|error| XmppError::internal(error.to_string()))?;
-            while rows
-                .next()
-                .await
-                .map_err(|error| XmppError::internal(error.to_string()))?
-                .is_some()
-            {}
-            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id)
-                .await
-                .map_err(|_| XmppError::internal("notification ancestry changed concurrently"))?;
+            let mut rows = tx.query(sql, crate::db_params![id.to_string()]).await?;
+            while rows.next().await?.is_some() {}
+            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(tx, id).await?;
         }
     }
     Ok(())
@@ -1034,17 +1065,18 @@ impl DatabasePushServiceStore {
         Ok(())
     }
 
-    /// An outer processing error carries no claim capability. An in-progress
-    /// send may have succeeded before its receipt failed, so retain uncertainty
-    /// and let lease recovery retry it without taking ownership from a successor.
+    /// Bound known pre-dispatch failures without claiming a send occurred.
+    /// An outer processing error carries no claim capability: in-progress and
+    /// previously uncertain sends retain their leases or retryable custody.
     pub(super) async fn record_publish_job_failure_by_id(
         &self,
         job_id: &str,
         error: &str,
     ) -> Result<(), XmppError> {
-        let now_ms = crate::time::now_ms();
-        self.execute(
-            r#"
+        // Ordinary repair must not reacquire the contended canonical parent
+        // that may have caused processing to fail. Only terminal disposition
+        // requires ancestry locks; this atomic update excludes that case.
+        const REPAIR_SQL: &str = r#"
             UPDATE push_publish_jobs
             SET uncertain_send = CASE WHEN status = 'in-progress' THEN 1 ELSE uncertain_send END,
                 attempt_count = CASE WHEN status = 'queued' THEN attempt_count + 1 ELSE attempt_count END,
@@ -1052,11 +1084,123 @@ impl DatabasePushServiceStore {
                 next_retry_at_ms = CASE WHEN status = 'queued' THEN ? ELSE next_retry_at_ms END,
                 updated_at_ms = CASE WHEN status = 'queued' THEN ? ELSE updated_at_ms END
             WHERE job_id = ? AND status IN (?, ?)
-            "#,
-            crate::db_params![error, retry_at_ms(now_ms), now_ms, job_id,
-                PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
-        ).await?;
-        Ok(())
+              AND (? = 1 OR status = 'in-progress' OR uncertain_send = 1 OR attempt_count < ?)
+        "#;
+        let now_ms = crate::time::now_ms();
+        let retry_at = retry_at_ms(now_ms);
+        let repaired = self
+            .execute(
+                REPAIR_SQL,
+                crate::db_params![
+                    error,
+                    retry_at,
+                    now_ms,
+                    job_id,
+                    PUBLISH_JOB_STATUS_QUEUED,
+                    PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    0_i64,
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS - 1
+                ],
+            )
+            .await?;
+        if repaired > 0 {
+            return Ok(());
+        }
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let Some(lock_target) = get_publish_job_tx(&mut tx, job_id).await? else {
+            return Ok(());
+        };
+        match lock_notification_ancestry_typed_tx(&mut tx, &lock_target).await {
+            Ok(()) => {}
+            Err(NotificationAncestryLockError::Contended) => {
+                // Release every partial lock before scheduling another retry.
+                // Contention defers the cap; it cannot discharge custody or
+                // prevent the drain from processing unrelated queued jobs.
+                tx.rollback()
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                self.execute(
+                    REPAIR_SQL,
+                    crate::db_params![
+                        error,
+                        retry_at,
+                        now_ms,
+                        job_id,
+                        PUBLISH_JOB_STATUS_QUEUED,
+                        PUBLISH_JOB_STATUS_IN_PROGRESS,
+                        1_i64,
+                        PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS - 1
+                    ],
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(NotificationAncestryLockError::Failed(error)) => return Err(error),
+        }
+        lock_owner_tx(&mut tx, lock_target.owner_bare_jid(), now_ms).await?;
+        lock_node_tx(&mut tx, lock_target.node(), now_ms).await?;
+        let Some(job) = get_publish_job_tx(&mut tx, job_id).await? else {
+            return Ok(());
+        };
+        let capped = job.status() == PUBLISH_JOB_STATUS_QUEUED
+            && !job.uncertain_send
+            && read_publish_job_attempt_count_tx(&mut tx, job_id)
+                .await?
+                .unwrap_or(0)
+                >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS - 1;
+        if capped {
+            let changed = tx.execute(
+                r#"
+                UPDATE push_publish_jobs
+                SET status = ?,
+                    attempt_count = attempt_count + 1,
+                    last_error = ?,
+                    next_retry_at_ms = NULL,
+                    claimed_at_ms = NULL,
+                    claim_token = NULL,
+                    updated_at_ms = ?
+                WHERE job_id = ? AND status = ? AND uncertain_send = 0
+                "#,
+                crate::db_params![
+                    PUBLISH_JOB_STATUS_FAILED,
+                    format!("pre-dispatch retry cap exceeded ({PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS}); last: {error}"),
+                    now_ms,
+                    job_id,
+                    PUBLISH_JOB_STATUS_QUEUED,
+                ],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            if changed > 0 {
+                settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
+                prune_delivery_attempts_tx(&mut tx, job.node(), MAX_DELIVERY_ATTEMPTS_PER_NODE)
+                    .await?;
+                prune_publish_jobs_tx(&mut tx, job.node(), MAX_PUBLISH_JOBS_PER_NODE).await?;
+            }
+        } else {
+            tx.execute(
+                REPAIR_SQL,
+                crate::db_params![
+                    error,
+                    retry_at,
+                    now_ms,
+                    job_id,
+                    PUBLISH_JOB_STATUS_QUEUED,
+                    PUBLISH_JOB_STATUS_IN_PROGRESS,
+                    1_i64,
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS - 1
+                ],
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
     }
 
     pub async fn queued_publish_jobs(&self) -> Result<Vec<PushPublishJob>, XmppError> {
