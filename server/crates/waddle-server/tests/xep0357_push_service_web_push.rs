@@ -1,4 +1,4 @@
-//! XEP-0357 §6 forward cleanup and Web Push dispatch outcome tests.
+//! XEP-0357 §6 publish-error handling and Web Push delivery tests.
 //!
 //! When the Web Push relay reports the subscription is permanently
 //! gone (404/410), the publish-job worker records a `web-gone`
@@ -6,6 +6,9 @@
 //! the same tx so future publish jobs for the node skip it. These
 //! tests exercise the full path with a mock `WebPushSender` so the
 //! cleanup behavior is locked in without needing a live relay.
+//! Known pre-send errors stop at the existing retry cap under the §6.1 error
+//! policy; uncertain sends remain retryable, and PubSub/queue acceptance never
+//! substitutes for a provider reply.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -40,7 +43,7 @@ async fn store() -> DatabasePushServiceStore {
         Database::in_memory("push-service")
             .await
             .expect("push service db"),
-        b"waddle-push-service-test-secret-key",
+        &rand::random::<[u8; 32]>(),
     )
     .await
     .expect("push service store")
@@ -236,13 +239,11 @@ async fn store_with_web_push_sender(sender: Arc<dyn WebPushSender>) -> DatabaseP
     let db = Database::in_memory("push-service-web-push")
         .await
         .expect("db");
-    let store = DatabasePushServiceStore::new_with_secret_key(
-        db.clone(),
-        b"waddle-push-service-test-secret-key-32b",
-    )
-    .await
-    .expect("store");
-    let signer = VapidStorage::load_or_provision(db, b"root-key")
+    let store =
+        DatabasePushServiceStore::new_with_secret_key(db.clone(), &rand::random::<[u8; 32]>())
+            .await
+            .expect("store");
+    let signer = VapidStorage::load_or_provision(db, &rand::random::<[u8; 32]>())
         .await
         .expect("VAPID signer");
     let sub = VapidSub::default_for_domain("example.com").expect("vapid sub");
@@ -281,12 +282,12 @@ async fn missing_backing_retries_are_bounded_without_provider_sends() {
     );
     let service: BareJid = "push.example.com".parse().expect("service");
     let sender = FixedOutcomeSender::new(WebPushOutcome::Delivered { status: 201 });
-    let signer = VapidStorage::load_or_provision(db.clone(), b"root-key")
+    let signer = VapidStorage::load_or_provision(db.clone(), &rand::random::<[u8; 32]>())
         .await
         .expect("signer");
     let store = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
         db,
-        b"waddle-push-service-test-secret-key-32b",
+        &rand::random::<[u8; 32]>(),
         service.clone(),
         backing.clone(),
     )
