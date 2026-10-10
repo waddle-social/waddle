@@ -1353,7 +1353,7 @@ mod tests {
             .expect("registration store");
         let push = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             fixture.db.clone(),
-            b"waddle-push-service-test-secret-key",
+            &rand::random::<[u8; 32]>(),
             service.clone(),
             backing.clone(),
         )
@@ -1550,7 +1550,7 @@ mod tests {
             .expect("registrations");
         let push = DatabasePushServiceStore::new_with_secret_key(
             fixture.db.clone(),
-            b"waddle-push-service-test-secret-key",
+            &rand::random::<[u8; 32]>(),
         )
         .await
         .expect("store");
