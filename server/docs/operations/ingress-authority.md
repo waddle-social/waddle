@@ -438,6 +438,21 @@ and rechecks unread-zero suppression. Commit/reply ambiguity, accepted work with
 failed backing, and prior uncertainty retain the marker across later refusals;
 local queue absence does not resolve a possible acceptance in another database.
 
+Recovery checks exact canonical provider-queue terminal proof before current
+registration or refusal gates. Explicit registration cancellation is persisted
+as a typed disposition, not inferred from generic failure or diagnostic text.
+The acceptance identity, target and frozen payload/options must match; foreign
+wire item IDs and unrelated failed jobs cannot retire accepted outbox custody.
+
+Canonical provider acceptance remains retained until its upstream outbox
+completion is acknowledged. In the same database, terminal completion and the
+outbox pruning backstop transfer the exact acknowledgement before deleting the
+owner; pruning transfers it in the same transaction so either deletion order is
+safe. Provider row contention defers that transaction. Missing local ownership
+does not prove completion. Separate-database proofs without an explicit completion
+acknowledgement remain retained and can consume node capacity; the disposition
+and capacity policy remains tracked in #1940.
+
 Unclassified legacy outbox rows keep possible acceptance, even without frozen
 XML: older writers could enqueue before freezing. Such rows cannot absorb new
 coalesced work, and CHECK-table rebuilds preserve their frozen payload/options,
@@ -458,6 +473,13 @@ parent and the pending notification marker commit atomically. Candidate insertio
 uses the pending row's original receipt timestamp; the marker uses recovery time. Missing or conflicting authority defers; a consumed source
 is not recreated. Production pending storage shares the Foundation database;
 only an explicitly noncanonical in-memory adapter permits raw legacy insertion.
+The janitor scans one bounded keyset page per tick within a typed finite-lap
+physical-insertion ordinal horizon. PostgreSQL identity and SQLite counter/insert
+trigger metadata assign every physical insert, including raw/UoW/SM writers;
+ordinary updates preserve the ordinal and deletion never rewinds its allocator.
+Contradictory rows stay unmarked with custody intact while
+the cursor advances past them. New suffixes cannot extend the current lap;
+wrapping revisits failures and insertions behind the cursor on the next lap.
 
 An archived ambiguous-send handoff also pins its physical pending row under the
 original `RouteDirect` authority and recorded archive ordinal in the same
@@ -484,8 +506,10 @@ recorded notification intent names the recipient conversation.
 
 At the per-node publish quota, pruning counts all retained jobs but selects only
 aged terminal rows with no canonical descendant evidence. A protected oldest row
-does not prevent a later safe row from supplying quota headroom. Both deployed
-ingress lifecycle cohorts classify unsettled descendant-only custody as
+does not prevent a later safe row from supplying quota headroom. Canonical queue
+jobs additionally require a durable upstream completion acknowledgement before
+their acceptance proof can retire. Both deployed ingress lifecycle cohorts
+classify unsettled descendant-only custody as
 `terminal_referenced`; settling the descendant removes that reference.
 
 V1025 adds the canonical retention frontier and descendant scheduling state.
@@ -1556,7 +1580,7 @@ fail-closed before rebuilding routes.
 | --- | --- |
 | `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither legacy delegated full-JID without prepared payload nor DM-pin-owned. Newly prepared full-JID routes retain the processed typed payload even when storage hints suppress MAM; recovery sends that frozen copy without a recipient persistence pass. Maintenance delivers only to locally hosted live sockets or locally detached SM sessions; remote-hosted resources stay pending. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
 | `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
-| `room_observer` | Recovery wakes the durable per-plugin observation worker. Its frozen source/generation/revision identifies the work. A leased job commits `started` before invoking the plugin. Unknown outcomes wait for the three-minute lease before a fresh-token retry; 20 attempts settle as terminal `retry_exhausted`, not callback success. Saved results, publications and receipts commit together. Pre-invocation admission rejection can retry sooner. Missing observer envelopes remain unrecoverable. |
+| `room_observer` | Recovery wakes the durable per-plugin observation worker. Its frozen source/generation/revision identifies the work. A leased job commits `started` before invoking the plugin. Unknown outcomes wait for the three-minute lease before a fresh-token retry. The 20-attempt ceiling applies to known uninvoked work; prior uncertainty remains pending across later permanent/not-applicable outcomes until successful completion or explicit disposition. Saved results, publications and receipts commit together. Pre-invocation admission rejection can retry sooner. Missing observer envelopes remain unrecoverable. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
 | `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
 | `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key and the observed invitation generation timestamp (falling back to canonical receipt time for older recorded declines). A newer invitation remains available and the recovered decline is not forwarded. A decline whose canonical row is older than the 30-day invitation TTL is not rebuilt (its invitation expired and a newer one for the same tuple could otherwise be consumed); it is metered and stays pending. |
@@ -1740,9 +1764,12 @@ on takeover. Proven pre-invocation rejection can retry earlier; unknown callback
 outcomes wait for lease expiry. Current source, revision and subscription
 generation must still match. Stale callbacks cannot publish results after a
 replacement claim. Invocation may repeat after an unknown result, so this is not
-exactly-once execution of guest external effects. The existing 20-attempt limit
-settles exhausted work as failure; valid result/publication/receipt writes remain
-atomic and publication output indices remain idempotent.
+exactly-once execution of guest external effects. The 20-attempt limit applies to
+known uninvoked work. Prior uncertainty survives
+later permanent or not-applicable outcomes and does not acquire a receipt merely
+because a later attempt failed. Successful completion or explicit disposition
+resolves it; valid result/publication/receipt writes remain atomic and publication
+output indices remain idempotent.
 
 **Accepted policy from merged #1899 (#1776, reconciled by #1909):**
 This supersedes #1658's original terminal non-SM uncertainty requirement.

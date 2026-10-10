@@ -4,7 +4,7 @@
 //! the contract; an in-memory fake here serves handler tests; the real
 //! libSQL/Postgres implementation lives in `waddle-server`.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 use std::sync::Mutex;
 
 use async_trait::async_trait;
@@ -16,6 +16,47 @@ use crate::postgres_identity::ClusterColocationIdentities;
 use super::{
     InsertOutcome, PendingRow, PendingRowId, QuotaPolicy, SmSessionId, TombstoneScrubbedPendingRows,
 };
+
+/// Immutable host-assigned physical insertion position for recovery inventory.
+/// It is operational metadata and is never carried by an XMPP stanza.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PendingNotificationRecoveryOrdinal(i64);
+
+impl PendingNotificationRecoveryOrdinal {
+    pub fn from_storage(value: i64) -> Result<Self, PendingStorageError> {
+        if value <= 0 {
+            return Err(PendingStorageError::Other(
+                "invalid pending recovery ordinal".to_owned(),
+            ));
+        }
+        Ok(Self(value))
+    }
+
+    pub fn to_storage(self) -> i64 {
+        self.0
+    }
+}
+
+/// A physical recovery inventory entry, separate from the protocol row payload.
+#[derive(Debug, Clone)]
+pub struct PendingNotificationRecoveryRow {
+    pub ordinal: PendingNotificationRecoveryOrdinal,
+    pub row: PendingRow,
+}
+
+impl std::ops::Deref for PendingNotificationRecoveryRow {
+    type Target = PendingRow;
+
+    fn deref(&self) -> &Self::Target {
+        &self.row
+    }
+}
+
+impl std::ops::DerefMut for PendingNotificationRecoveryRow {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.row
+    }
+}
 
 /// Identifies one pending-delivery claim attempt independently of the SM
 /// stream. A resumed stream can acquire new claims on another node, so its
@@ -294,15 +335,35 @@ pub trait PendingDeliveryStorage: Send + Sync {
     /// This is intentionally global rather than per-recipient: the
     /// recovery janitor must be able to find crash gaps after a durable
     /// XEP-0160 pending row was committed but before the durable XEP-0357
-    /// candidate/outbox write completed. Implementations that do not
-    /// support this recovery path may keep the default empty page.
+    /// candidate/outbox write completed.
     async fn list_unoutboxed_archived(
         &self,
         limit: usize,
     ) -> Result<Vec<PendingRow>, PendingStorageError> {
-        let _ = limit;
-        Ok(Vec::new())
+        Ok(self
+            .list_unoutboxed_archived_after(None, None, limit)
+            .await?
+            .into_iter()
+            .map(|entry| entry.row)
+            .collect())
     }
+
+    /// Greatest committed insertion ordinal, including claimed, marked and transient rows.
+    /// Recovery captures this ceiling once so new arrivals cannot extend a lap.
+    async fn notification_recovery_high_water(
+        &self,
+    ) -> Result<Option<PendingNotificationRecoveryOrdinal>, PendingStorageError>;
+
+    /// A bounded global recovery page ordered by insertion ordinal, strictly after `after`
+    /// and at or before `through`. Both bounds are optional for prefix reads.
+    /// Only unclaimed Archived rows without a notification marker are returned.
+    /// Reading a page must not claim rows or change their notification markers.
+    async fn list_unoutboxed_archived_after(
+        &self,
+        after: Option<PendingNotificationRecoveryOrdinal>,
+        through: Option<PendingNotificationRecoveryOrdinal>,
+        limit: usize,
+    ) -> Result<Vec<PendingNotificationRecoveryRow>, PendingStorageError>;
 
     /// Mark an Archived pending row as having completed notification
     /// candidate handling. Returns the number of rows marked.
@@ -752,7 +813,7 @@ pub fn sequence_in_ack_window(seq: u32, from_exclusive: u32, to_inclusive: u32) 
 /// `(recipient, sequence)`.
 #[derive(Debug)]
 pub struct InMemoryPendingDeliveryStorage {
-    inner: Mutex<HashMap<BareJid, VecDeque<PendingRow>>>,
+    inner: Mutex<MemoryPendingRows>,
     notification_outboxed: Mutex<HashSet<PendingRowId>>,
     /// Claim recency stamps (#1124): row id → `timestamp_millis()` of
     /// the claim that set `flushed_in_session`. Kept beside the rows
@@ -767,11 +828,17 @@ pub struct InMemoryPendingDeliveryStorage {
     quota: QuotaPolicy,
 }
 
+#[derive(Debug, Default)]
+struct MemoryPendingRows {
+    queues: HashMap<BareJid, VecDeque<PendingNotificationRecoveryRow>>,
+    last_ordinal: i64,
+}
+
 impl InMemoryPendingDeliveryStorage {
     /// Build with the given quota policy.
     pub fn new(quota: QuotaPolicy) -> Self {
         Self {
-            inner: Mutex::new(HashMap::new()),
+            inner: Mutex::new(MemoryPendingRows::default()),
             notification_outboxed: Mutex::new(HashSet::new()),
             claimed_at_ms: Mutex::new(HashMap::new()),
             claim_tokens: Mutex::new(HashMap::new()),
@@ -852,7 +919,7 @@ impl InMemoryPendingDeliveryStorage {
         if !matches_token || (require_unoffered && offered) {
             return Ok(0);
         }
-        for row in rows.values_mut().flat_map(|queue| queue.iter_mut()) {
+        for row in rows.queues.values_mut().flat_map(|queue| queue.iter_mut()) {
             if row.id == claim.row_id
                 && row.flushed_in_session.as_ref() == Some(&claim.session)
                 && row.outbound_sequence.is_none()
@@ -914,9 +981,8 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let entry = guard.entry(row.recipient.clone()).or_default();
         if let QuotaPolicy::CountCap { max_rows } = self.quota {
-            if entry.len() as u32 >= max_rows {
+            if guard.queues.get(&row.recipient).map_or(0, VecDeque::len) as u32 >= max_rows {
                 return Ok(InsertOutcome::QuotaExceeded);
             }
         }
@@ -926,7 +992,16 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
         if row.id.as_str().is_empty() {
             row.id = PendingRowId::fresh();
         }
-        entry.push_back(row);
+        let next = guard.last_ordinal.checked_add(1).ok_or_else(|| {
+            PendingStorageError::Other("pending recovery ordinal exhausted".to_owned())
+        })?;
+        let ordinal = PendingNotificationRecoveryOrdinal::from_storage(next)?;
+        guard.last_ordinal = next;
+        guard
+            .queues
+            .entry(row.recipient.clone())
+            .or_default()
+            .push_back(PendingNotificationRecoveryRow { ordinal, row });
         Ok(InsertOutcome::Inserted)
     }
 
@@ -936,8 +1011,9 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         Ok(guard
+            .queues
             .get(recipient)
-            .map(|q| q.iter().cloned().collect())
+            .map(|q| q.iter().map(|entry| entry.row.clone()).collect())
             .unwrap_or_default())
     }
 
@@ -956,22 +1032,40 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let after = after.map(PendingRowId::as_str);
         Ok(guard
+            .queues
             .get(recipient)
             .map(|q| {
                 q.iter()
                     .filter(|row| row.flushed_in_session.is_none())
                     .filter(|row| after.is_none_or(|after| row.id.as_str() > after))
                     .take(limit)
-                    .cloned()
+                    .map(|entry| entry.row.clone())
                     .collect()
             })
             .unwrap_or_default())
     }
 
-    async fn list_unoutboxed_archived(
+    async fn notification_recovery_high_water(
         &self,
+    ) -> Result<Option<PendingNotificationRecoveryOrdinal>, PendingStorageError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?;
+        Ok(guard
+            .queues
+            .values()
+            .flat_map(|queue| queue.iter())
+            .max_by_key(|entry| entry.ordinal)
+            .map(|entry| entry.ordinal))
+    }
+
+    async fn list_unoutboxed_archived_after(
+        &self,
+        after: Option<PendingNotificationRecoveryOrdinal>,
+        through: Option<PendingNotificationRecoveryOrdinal>,
         limit: usize,
-    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+    ) -> Result<Vec<PendingNotificationRecoveryRow>, PendingStorageError> {
         if limit == 0 {
             return Ok(Vec::new());
         }
@@ -983,17 +1077,23 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .notification_outboxed
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let mut rows = guard
+        let mut page = BTreeMap::new();
+        for row in guard
+            .queues
             .values()
             .flat_map(|queue| queue.iter())
+            .filter(|entry| after.is_none_or(|after| entry.ordinal > after))
+            .filter(|entry| through.is_none_or(|through| entry.ordinal <= through))
             .filter(|row| row.flushed_in_session.is_none())
             .filter(|row| row.payload.is_archived())
             .filter(|row| !notification_outboxed.contains(&row.id))
-            .cloned()
-            .collect::<Vec<_>>();
-        rows.sort_by(|left, right| left.id.as_str().cmp(right.id.as_str()));
-        rows.truncate(limit);
-        Ok(rows)
+        {
+            page.insert(row.ordinal, row);
+            if page.len() > limit {
+                let _ = page.pop_last();
+            }
+        }
+        Ok(page.into_values().cloned().collect())
     }
 
     async fn mark_notification_outboxed(
@@ -1005,6 +1105,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         if !guard
+            .queues
             .values()
             .flat_map(|queue| queue.iter())
             .any(|row| &row.id == id)
@@ -1028,7 +1129,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let queue = match guard.get_mut(recipient) {
+        let queue = match guard.queues.get_mut(recipient) {
             Some(q) => q,
             None => return Ok(Vec::new()),
         };
@@ -1042,7 +1143,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                 // leaves a row half-released should not be able to
                 // confuse the SM-ack delete.
                 row.outbound_sequence = None;
-                claimed.push(row.clone());
+                claimed.push(row.row.clone());
             }
         }
         let claimed_ids: Vec<PendingRowId> = claimed.iter().map(|row| row.id.clone()).collect();
@@ -1065,7 +1166,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        let queue = match guard.get_mut(recipient) {
+        let queue = match guard.queues.get_mut(recipient) {
             Some(q) => q,
             None => return Ok(Vec::new()),
         };
@@ -1089,7 +1190,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             let row = &mut queue[idx];
             row.flushed_in_session = Some(session.clone());
             row.outbound_sequence = None;
-            claimed.push(row.clone());
+            claimed.push(row.row.clone());
         }
         let claimed_ids: Vec<PendingRowId> = claimed.iter().map(|row| row.id.clone()).collect();
         self.stamp_claimed_at(&claimed_ids)?;
@@ -1111,7 +1212,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
-        let Some(queue) = guard.get_mut(recipient) else {
+        let Some(queue) = guard.queues.get_mut(recipient) else {
             return Ok(Vec::new());
         };
         let contended = queue
@@ -1140,7 +1241,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             row.flushed_in_session = Some(session.clone());
             row.outbound_sequence = None;
             tokens.insert(row.id.clone(), *token);
-            claimed.push(row.clone());
+            claimed.push(row.row.clone());
         }
         Ok(claimed)
     }
@@ -1152,11 +1253,11 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
         let mut removed_ids = Vec::new();
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
                 if row.flushed_in_session.as_ref() == Some(session) {
-                    removed_ids.push(row.id);
+                    removed_ids.push(row.row.id);
                     removed += 1;
                 } else {
                     kept.push_back(row);
@@ -1164,7 +1265,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             }
             *queue = kept;
         }
-        guard.retain(|_, q| !q.is_empty());
+        guard.queues.retain(|_, q| !q.is_empty());
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
         drop(guard);
@@ -1177,12 +1278,12 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             let before = queue.len();
             queue.retain(|row| &row.id != id);
             removed += (before - queue.len()) as u64;
         }
-        guard.retain(|_, q| !q.is_empty());
+        guard.queues.retain(|_, q| !q.is_empty());
         if removed > 0 {
             self.clear_notification_outboxed_markers(std::slice::from_ref(id))?;
             self.clear_claimed_at(std::slice::from_ref(id))?;
@@ -1214,7 +1315,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             return Ok(0);
         }
         let mut removed = 0;
-        for queue in rows.values_mut() {
+        for queue in rows.queues.values_mut() {
             let before = queue.len();
             queue.retain(|row| {
                 !(row.id == claim.row_id
@@ -1227,7 +1328,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             self.clear_notification_outboxed_markers(std::slice::from_ref(&claim.row_id))?;
             self.clear_claimed_at(std::slice::from_ref(&claim.row_id))?;
         }
-        rows.retain(|_, queue| !queue.is_empty());
+        rows.queues.retain(|_, queue| !queue.is_empty());
         Ok(removed)
     }
 
@@ -1242,7 +1343,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut released = 0u64;
         let mut released_ids = Vec::new();
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             for row in queue.iter_mut() {
                 if row.flushed_in_session.as_ref() == Some(session) {
                     row.flushed_in_session = None;
@@ -1262,7 +1363,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             for row in queue.iter_mut() {
                 if &row.id == id {
                     row.flushed_in_session = None;
@@ -1285,7 +1386,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             for row in queue.iter_mut() {
                 if &row.id == id {
                     if row.flushed_in_session.as_ref() != Some(expected_session) {
@@ -1330,11 +1431,15 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .get(&claim.row_id)
             == Some(&claim.token);
         let owned = token_matches
-            && rows.values().flat_map(|queue| queue.iter()).any(|row| {
-                row.id == claim.row_id
-                    && row.flushed_in_session.as_ref() == Some(&claim.session)
-                    && row.outbound_sequence.is_none()
-            });
+            && rows
+                .queues
+                .values()
+                .flat_map(|queue| queue.iter())
+                .any(|row| {
+                    row.id == claim.row_id
+                        && row.flushed_in_session.as_ref() == Some(&claim.session)
+                        && row.outbound_sequence.is_none()
+                });
         if owned {
             self.offered_claims
                 .lock()
@@ -1375,7 +1480,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         let mut claims = Vec::new();
-        if let Some(rows) = rows.get(recipient) {
+        if let Some(rows) = rows.queues.get(recipient) {
             for row in rows {
                 if row.outbound_sequence.is_some()
                     || offered.contains(&row.id)
@@ -1419,7 +1524,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             Ok(guard) => guard,
             Err(error) => return ReleaseRowsForOutboundSequencesOutcome::failed(error),
         };
-        let Some(queue) = guard.get_mut(recipient) else {
+        let Some(queue) = guard.queues.get_mut(recipient) else {
             return ReleaseRowsForOutboundSequencesOutcome::complete(HashSet::new());
         };
 
@@ -1452,7 +1557,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             for row in queue.iter_mut() {
                 if &row.id == id {
                     row.outbound_sequence = Some(sequence);
@@ -1475,7 +1580,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
         let mut removed_ids = Vec::new();
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
                 let claimed_by_session = row.flushed_in_session.as_ref() == Some(session);
@@ -1484,7 +1589,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
                     Some(seq) if sequence_in_ack_window(seq, from_exclusive, to_inclusive)
                 );
                 if claimed_by_session && acked {
-                    removed_ids.push(row.id);
+                    removed_ids.push(row.row.id);
                     removed += 1;
                 } else {
                     kept.push_back(row);
@@ -1492,7 +1597,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             }
             *queue = kept;
         }
-        guard.retain(|_, q| !q.is_empty());
+        guard.queues.retain(|_, q| !q.is_empty());
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
         drop(guard);
@@ -1517,7 +1622,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut out = Vec::new();
-        for queue in guard.values() {
+        for queue in guard.queues.values() {
             for row in queue.iter() {
                 if let Some(session) = row.flushed_in_session.as_ref() {
                     // #1124 recency floor: a claim stamped after the
@@ -1550,7 +1655,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut adopted = 0u64;
-        for queue in guard.values() {
+        for queue in guard.queues.values() {
             for row in queue.iter() {
                 if row.flushed_in_session.is_some() && !stamps.contains_key(&row.id) {
                     stamps.insert(row.id.clone(), now_ms);
@@ -1566,7 +1671,11 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .inner
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
-        Ok(guard.get(recipient).map(|q| q.len() as u32).unwrap_or(0))
+        Ok(guard
+            .queues
+            .get(recipient)
+            .map(|q| q.len() as u32)
+            .unwrap_or(0))
     }
 
     async fn delete_older_than(
@@ -1579,11 +1688,11 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed = 0u64;
         let mut removed_ids = Vec::new();
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
                 if row.original_receipt_at < cutoff {
-                    removed_ids.push(row.id);
+                    removed_ids.push(row.row.id);
                     removed += 1;
                 } else {
                     kept.push_back(row);
@@ -1591,7 +1700,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             }
             *queue = kept;
         }
-        guard.retain(|_, q| !q.is_empty());
+        guard.queues.retain(|_, q| !q.is_empty());
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
         drop(guard);
@@ -1617,6 +1726,7 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         Ok(guard
+            .queues
             .values()
             .flat_map(|queue| queue.iter())
             .filter(|row| pending_row_matches_tombstone(row, target))
@@ -1633,18 +1743,18 @@ impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
             .lock()
             .map_err(|e| PendingStorageError::Other(e.to_string()))?;
         let mut removed_ids = Vec::new();
-        for queue in guard.values_mut() {
+        for queue in guard.queues.values_mut() {
             let mut kept = VecDeque::with_capacity(queue.len());
             for row in queue.drain(..) {
                 if pending_row_matches_tombstone(&row, target) {
-                    removed_ids.push(row.id);
+                    removed_ids.push(row.row.id);
                 } else {
                     kept.push_back(row);
                 }
             }
             *queue = kept;
         }
-        guard.retain(|_, q| !q.is_empty());
+        guard.queues.retain(|_, q| !q.is_empty());
         self.clear_notification_outboxed_markers(&removed_ids)?;
         self.clear_claimed_at(&removed_ids)?;
         drop(guard);

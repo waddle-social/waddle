@@ -357,7 +357,12 @@ async fn recovered_attempt_notification_with_delay(
         assert_eq!(fixture.count("ingress_effect_descendants").await, 0);
         assert_eq!(fixture.count("notification_outbox_lineage").await, 0);
     }
-    let sweep = reconcile_xep0357_notification_candidates_for_sweep(&state, 64).await;
+    let sweep = reconcile_xep0357_notification_candidates_for_sweep(
+        &state,
+        64,
+        &mut crate::server::routes::interpret::PendingNotificationRecoveryCursor::default(),
+    )
+    .await;
     assert!(!sweep.had_failure);
     let expected_candidates = i64::from(matches!(policy, RecipientPolicy::Notify));
     assert_eq!(sweep.completed, expected_candidates as usize);
@@ -483,7 +488,12 @@ async fn recovered_attempt_notification_with_delay(
         .await
         .expect("no recreated pending")
         .is_empty());
-    let sweep = reconcile_xep0357_notification_candidates_for_sweep(&state, 64).await;
+    let sweep = reconcile_xep0357_notification_candidates_for_sweep(
+        &state,
+        64,
+        &mut crate::server::routes::interpret::PendingNotificationRecoveryCursor::default(),
+    )
+    .await;
     assert!(!sweep.had_failure);
     assert_eq!(sweep.completed, 0);
     assert_eq!(
@@ -614,7 +624,12 @@ async fn add_late_parent_to_marked_pending(
             .await
             .expect("real archived and pending handoff proofs");
         tx.commit().await.expect("terminal late commit");
-        let sweep = reconcile_xep0357_notification_candidates_for_sweep(state, 64).await;
+        let sweep = reconcile_xep0357_notification_candidates_for_sweep(
+            state,
+            64,
+            &mut crate::server::routes::interpret::PendingNotificationRecoveryCursor::default(),
+        )
+        .await;
         assert!(!sweep.had_failure);
         assert_eq!(sweep.completed, 1);
         assert_eq!(fixture.count("notification_candidates").await, 1);

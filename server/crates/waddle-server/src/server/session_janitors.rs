@@ -7422,6 +7422,8 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
         crate::notification_outbox::MAX_ACTIVE_MENTION_TTL_SECONDS,
     );
     tokio::spawn(async move {
+        let mut pending_notification_cursor =
+            routes::interpret::PendingNotificationRecoveryCursor::default();
         let mut ticker = tokio::time::interval(std::time::Duration::from_secs(interval_secs));
         ticker.tick().await;
         loop {
@@ -7429,8 +7431,14 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
             let Some(state) = weak_state.upgrade() else {
                 break;
             };
-            run_notification_outbox_sweep(&state, batch_size, retention_days, prune_batch_size)
-                .await;
+            run_notification_outbox_sweep(
+                &state,
+                batch_size,
+                retention_days,
+                prune_batch_size,
+                &mut pending_notification_cursor,
+            )
+            .await;
         }
     });
 }
@@ -7654,11 +7662,12 @@ async fn run_call_teardown_outbox_sweep(state: &WebSocketState, batch_size: usiz
     .await;
 }
 
-async fn run_notification_outbox_sweep(
+pub(crate) async fn run_notification_outbox_sweep(
     state: &WebSocketState,
     batch_size: usize,
     retention_days: u32,
     prune_batch_size: usize,
+    pending_notification_cursor: &mut routes::interpret::PendingNotificationRecoveryCursor,
 ) {
     async {
         let mut sweep_failed = false;
@@ -7679,7 +7688,7 @@ async fn run_notification_outbox_sweep(
         };
         let recovered =
             routes::interpret::reconcile_xep0357_notification_candidates_for_sweep(
-                state, batch_size,
+                state, batch_size, pending_notification_cursor,
             )
             .await;
         sweep_failed |= recovered.had_failure;

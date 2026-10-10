@@ -298,7 +298,7 @@ pub(super) async fn initialize(
             );
         }
     }
-    Ok(())
+    super::recovery_order::initialize(storage).await
 }
 
 /// Release pending rows claimed by SM sessions discarded by the V1014

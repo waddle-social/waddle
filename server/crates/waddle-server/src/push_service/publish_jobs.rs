@@ -13,8 +13,9 @@ use super::pubsub_backing::validate_xep0357_notification;
 use super::registration::ensure_active_registration_tx;
 use super::store::{lock_node_tx, lock_owner_tx, DatabasePushServiceStore};
 use super::types::{
-    PushAcceptanceScope, PushBackingState, PushDeliveryAttempt, PushNodeStatus, PushPublishJob,
-    PushPublishJobEnqueue, PushQueueAcceptanceError,
+    CanonicalNotificationTerminalProof, PushAcceptanceScope, PushBackingState, PushDeliveryAttempt,
+    PushNodeStatus, PushPublishJob, PushPublishJobEnqueue, PushQueueAcceptanceError,
+    REGISTRATION_REVOKED_DISPOSITION,
 };
 
 pub(super) const PUBLISH_JOB_STATUS_QUEUED: &str = "queued";
@@ -614,6 +615,7 @@ pub(super) async fn prune_publish_jobs_tx(
         DELETE FROM push_publish_jobs
         WHERE node = ?
           {ancestry_guard}
+          AND (acceptance_scope != 'canonical' OR upstream_completed = 1)
           AND status IN (?, ?)
           AND updated_at_ms <= ?
           AND job_id IN (
@@ -621,6 +623,7 @@ pub(super) async fn prune_publish_jobs_tx(
               FROM push_publish_jobs
               WHERE node = ?
                 {ancestry_guard}
+                AND (acceptance_scope != 'canonical' OR upstream_completed = 1)
                 AND status IN (?, ?)
                 AND updated_at_ms <= ?
               ORDER BY created_at_ms ASC, job_id ASC
@@ -645,6 +648,54 @@ pub(super) async fn prune_publish_jobs_tx(
     Ok(())
 }
 
+/// Transfer completed upstream ownership while that exact owner row still exists.
+/// Canonical locks and the upstream child lock are held by the caller; take the
+/// provider row NOWAIT so reversed scheduler ordering cannot wait in a cycle.
+pub(crate) async fn acknowledge_completed_outbox_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    job_id: &str,
+) -> Result<(), crate::ingress_uow::IngressUowError> {
+    let has_provider = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let mut rows = tx
+            .query("SELECT to_regclass('push_publish_jobs')::text", ())
+            .await?;
+        match rows.next().await? {
+            Some(row) => row.get::<Option<String>>(0)?.is_some(),
+            None => false,
+        }
+    } else {
+        let mut rows = tx
+            .query(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'",
+                (),
+            )
+            .await?;
+        rows.next().await?.is_some()
+    };
+    if !has_provider {
+        return Ok(());
+    }
+    let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        " FOR UPDATE NOWAIT"
+    } else {
+        ""
+    };
+    let mut rows = tx.query(&format!("SELECT job_id FROM push_publish_jobs WHERE ancestry_job_id = ? AND acceptance_scope = 'canonical' AND EXISTS (SELECT 1 FROM notification_outbox AS owner WHERE owner.job_id = push_publish_jobs.ancestry_job_id AND owner.recipient_bare_jid = push_publish_jobs.owner_bare_jid AND owner.push_service_jid = push_publish_jobs.push_service_jid AND owner.node = push_publish_jobs.node AND owner.job_id = push_publish_jobs.item_id AND owner.approved_payload_xml = push_publish_jobs.payload_xml AND (owner.approved_publish_options_xml = push_publish_jobs.publish_options_xml OR (owner.approved_publish_options_xml IS NULL AND push_publish_jobs.publish_options_xml IS NULL)) AND (owner.status = 'published' OR (owner.status = 'failed' AND owner.queue_acceptance_may_exist = 0))){lock}"), crate::db_params![job_id]).await.map_err(crate::ingress_uow::canonical_nowait_error)?;
+    let mut accepted = Vec::new();
+    while let Some(row) = rows.next().await? {
+        accepted.push(row.get::<String>(0)?);
+    }
+    drop(rows);
+    for id in accepted {
+        tx.execute(
+            "UPDATE push_publish_jobs SET upstream_completed = 1 WHERE job_id = ?",
+            crate::db_params![id],
+        )
+        .await?;
+    }
+    Ok(())
+}
+
 pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner_bare_jid: &BareJid,
@@ -666,10 +717,12 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
         // Node/owner locks are already held by revocation. NOWAIT avoids
         // reversing Foundation's canonical-before-scheduler lock order.
         lock_notification_ancestry_tx(tx, &job).await?;
-        tx.execute("UPDATE push_publish_jobs SET status = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status IN (?, ?)",
-            crate::db_params![PUBLISH_JOB_STATUS_FAILED, "notification registration revoked", crate::time::now_ms(), job.job_id(), PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
+        let changed = tx.execute("UPDATE push_publish_jobs SET status = ?, terminal_disposition = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status IN (?, ?)",
+            crate::db_params![PUBLISH_JOB_STATUS_FAILED, REGISTRATION_REVOKED_DISPOSITION, "notification registration revoked", crate::time::now_ms(), job.job_id(), PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
         ).await.map_err(|error| XmppError::internal(error.to_string()))?;
-        settle_notification_ancestry_tx(tx, &job).await?;
+        if changed > 0 {
+            settle_notification_ancestry_tx(tx, &job).await?;
+        }
     }
     Ok(())
 }
@@ -832,6 +885,74 @@ impl DatabasePushServiceStore {
         )
         .await
         .map_err(PushQueueAcceptanceError::into_error)
+    }
+
+    /// Read only terminal authority for this exact canonical host acceptance.
+    /// Neither arbitrary failure text nor a wire publication ID proves disposition.
+    pub(crate) async fn canonical_terminal_notification_proof(
+        &self,
+        service: &BareJid,
+        node: &crate::notification_outbox::PushServiceNodeName,
+        item: &PubSubItem,
+        owner: &BareJid,
+        options: Option<&Element>,
+        delivery: uuid::Uuid,
+    ) -> Result<Option<CanonicalNotificationTerminalProof>, XmppError> {
+        if item.id.as_deref() != Some(delivery.to_string().as_str()) {
+            return Ok(None);
+        }
+        let Some(payload) = item.payload.as_ref() else {
+            return Ok(None);
+        };
+        let mut rows = self.query(
+            "SELECT status, terminal_disposition FROM push_publish_jobs WHERE ancestry_job_id = ? AND acceptance_scope = 'canonical' AND owner_bare_jid = ? AND push_service_jid = ? AND node = ? AND item_id = ? AND payload_xml = ? AND (publish_options_xml = ? OR (publish_options_xml IS NULL AND ? = 0))",
+            crate::db_params![delivery.to_string(), owner.to_string(), service.to_string(), node.as_str(), delivery.to_string(), String::from(payload), options.map(String::from), i64::from(options.is_some())],
+        ).await?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        else {
+            return Ok(None);
+        };
+        let status: String = row
+            .get(0)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        let disposition: Option<String> = row
+            .get(1)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        Ok(match (status.as_str(), disposition.as_deref()) {
+            (PUBLISH_JOB_STATUS_PUBLISHED, _) => {
+                Some(CanonicalNotificationTerminalProof::ProviderCompleted)
+            }
+            (PUBLISH_JOB_STATUS_FAILED, Some(REGISTRATION_REVOKED_DISPOSITION)) => {
+                Some(CanonicalNotificationTerminalProof::RegistrationRevoked)
+            }
+            _ => None,
+        })
+    }
+
+    /// Called only after a claim-fenced upstream terminal commit. A missing
+    /// acknowledgement retains canonical proof; it does not reopen the owner.
+    pub(crate) async fn acknowledge_canonical_outbox_completion(
+        &self,
+        service: &BareJid,
+        node: &crate::notification_outbox::PushServiceNodeName,
+        item: &PubSubItem,
+        owner: &BareJid,
+        options: Option<&Element>,
+        delivery: uuid::Uuid,
+    ) -> Result<(), XmppError> {
+        let Some(payload) = item.payload.as_ref() else {
+            return Ok(());
+        };
+        if item.id.as_deref() != Some(delivery.to_string().as_str()) {
+            return Ok(());
+        }
+        self.execute("UPDATE push_publish_jobs SET upstream_completed = 1 WHERE ancestry_job_id = ? AND acceptance_scope = 'canonical' AND owner_bare_jid = ? AND push_service_jid = ? AND node = ? AND item_id = ? AND payload_xml = ? AND (publish_options_xml = ? OR (publish_options_xml IS NULL AND ? = 0))",
+            crate::db_params![delivery.to_string(), owner.to_string(), service.to_string(), node.as_str(), delivery.to_string(), String::from(payload), options.map(String::from), i64::from(options.is_some())],
+        ).await?;
+        Ok(())
     }
 
     pub(super) async fn enqueue_canonical_notification_publish_job(
@@ -1635,3 +1756,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "publish_jobs_outbox_tests.rs"]
+mod outbox_proof_tests;

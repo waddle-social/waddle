@@ -3,6 +3,7 @@ use waddle_xmpp::pending_delivery::storage::{PendingClaim, PendingClaimPhase, Pe
 
 mod ack_windows;
 mod custody;
+mod recovery_order;
 mod schema;
 
 use super::codec::{decode_row, serialize_message, PAYLOAD_KIND_ARCHIVED, PAYLOAD_KIND_TRANSIENT};
@@ -682,34 +683,71 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         Ok(out)
     }
 
-    async fn list_unoutboxed_archived(
+    async fn notification_recovery_high_water(
         &self,
+    ) -> Result<
+        Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        PendingStorageError,
+    > {
+        let mut rows = self
+            .query(
+                "SELECT notification_recovery_ordinal FROM pending_delivery ORDER BY notification_recovery_ordinal DESC LIMIT 1",
+                (),
+            )
+            .await?;
+        rows.next()
+            .await
+            .map_err(|e| PendingStorageError::Other(e.to_string()))?
+            .map(|row| {
+                let value: i64 = row.get(0).map_err(|error| PendingStorageError::Other(error.to_string()))?;
+                waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal::from_storage(value)
+            })
+            .transpose()
+    }
+
+    async fn list_unoutboxed_archived_after(
+        &self,
+        after: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        through: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
         limit: usize,
-    ) -> Result<Vec<PendingRow>, PendingStorageError> {
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryRow>,
+        PendingStorageError,
+    > {
         if limit == 0 {
             return Ok(Vec::new());
         }
-        let mut rows = self
-            .query(
-                "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
+        let mut sql = String::from(
+            "SELECT row_id, recipient_jid, original_receipt_at, payload_kind, \
                         archive_stanza_by, archive_stanza_id, transient_xml, \
-                        flushed_in_session, outbound_sequence \
+                        flushed_in_session, outbound_sequence, notification_recovery_ordinal \
                  FROM pending_delivery \
                  WHERE payload_kind = 'archived' \
                    AND flushed_in_session IS NULL \
-                   AND notification_outboxed_at_ms IS NULL \
-                 ORDER BY row_id ASC \
-                 LIMIT ?",
-                crate::db_params![limit as i64],
-            )
-            .await?;
+                   AND notification_outboxed_at_ms IS NULL",
+        );
+        let mut params = crate::db_params![];
+        if let Some(after) = after {
+            sql.push_str(" AND notification_recovery_ordinal > ?");
+            params.push(crate::db::Value::from(after.to_storage()));
+        }
+        if let Some(through) = through {
+            sql.push_str(" AND notification_recovery_ordinal <= ?");
+            params.push(crate::db::Value::from(through.to_storage()));
+        }
+        sql.push_str(" ORDER BY notification_recovery_ordinal ASC LIMIT ?");
+        params.push(crate::db::Value::from(limit as i64));
+        let mut rows = self.query(&sql, params).await?;
         let mut out = Vec::new();
         while let Some(row) = rows
             .next()
             .await
             .map_err(|e| PendingStorageError::Other(e.to_string()))?
         {
-            out.push(decode_row(&row)?);
+            out.push(waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryRow {
+                ordinal: waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal::from_storage(row.get(9).map_err(|error| PendingStorageError::Other(error.to_string()))?)?,
+                row: decode_row(&row)?,
+            });
         }
         Ok(out)
     }

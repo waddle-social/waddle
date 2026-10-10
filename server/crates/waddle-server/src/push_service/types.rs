@@ -363,6 +363,15 @@ impl PushPublishJob {
     }
 }
 
+/// A terminal fact about the exact host-owned canonical acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalNotificationTerminalProof {
+    ProviderCompleted,
+    RegistrationRevoked,
+}
+
+pub(super) const REGISTRATION_REVOKED_DISPOSITION: &str = "registration-revoked";
+
 /// Certainty about this queue invocation, distinct from provider delivery.
 /// Only errors before commit can prove this invocation was not accepted.
 #[derive(Debug, thiserror::Error)]

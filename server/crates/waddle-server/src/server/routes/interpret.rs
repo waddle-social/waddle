@@ -220,7 +220,9 @@ pub(crate) use message_plan::ownership_plan_tests::PlanningClaims;
 use offline_delivery::queue_offline_delivery;
 #[cfg(test)]
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
-pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates_for_sweep;
+pub(crate) use offline_delivery::{
+    reconcile_xep0357_notification_candidates_for_sweep, PendingNotificationRecoveryCursor,
+};
 use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::{

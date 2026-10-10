@@ -1365,6 +1365,42 @@ struct OfferFault {
 
 #[async_trait]
 impl PendingDeliveryStorage for OrderingReleaseFails {
+    async fn notification_recovery_high_water(
+        &self,
+    ) -> Result<
+        Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.notification_recovery_high_water().await
+    }
+
+    async fn list_unoutboxed_archived_after(
+        &self,
+        after: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        through: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoutboxed_archived_after(after, through, limit)
+            .await
+    }
+
+    fn notification_custody_mode(
+        &self,
+    ) -> waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode {
+        self.inner.notification_custody_mode()
+    }
+
+    async fn mark_notification_outboxed(
+        &self,
+        id: &waddle_xmpp::pending_delivery::PendingRowId,
+    ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_notification_outboxed(id).await
+    }
+
     fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
         self.inner.quota_policy()
     }
@@ -3368,6 +3404,46 @@ async fn flush_blocked_row_releases_claim_when_delete_fails() {
     }
     #[async_trait]
     impl PendingDeliveryStorage for DeleteRowFails {
+        async fn notification_recovery_high_water(
+            &self,
+        ) -> Result<
+            Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+            waddle_xmpp::pending_delivery::storage::PendingStorageError,
+        > {
+            self.inner.notification_recovery_high_water().await
+        }
+
+        async fn list_unoutboxed_archived_after(
+            &self,
+            after: Option<
+                waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal,
+            >,
+            through: Option<
+                waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal,
+            >,
+            limit: usize,
+        ) -> Result<
+            Vec<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryRow>,
+            waddle_xmpp::pending_delivery::storage::PendingStorageError,
+        > {
+            self.inner
+                .list_unoutboxed_archived_after(after, through, limit)
+                .await
+        }
+
+        fn notification_custody_mode(
+            &self,
+        ) -> waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode {
+            self.inner.notification_custody_mode()
+        }
+
+        async fn mark_notification_outboxed(
+            &self,
+            id: &waddle_xmpp::pending_delivery::PendingRowId,
+        ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+            self.inner.mark_notification_outboxed(id).await
+        }
+
         fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
             self.inner.quota_policy()
         }

@@ -6,6 +6,7 @@ use crate::ingress_uow::{
     DispatchTarget, EffectReceiptRepository, PendingReceiptRepository,
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, PendingDeliveryMutation};
+use waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
 
 struct PendingRecoveryFixture {
@@ -16,6 +17,13 @@ struct PendingRecoveryFixture {
 }
 
 async fn pending_recovery_fixture(fixture: &IngressFixture) -> PendingRecoveryFixture {
+    pending_recovery_fixture_with_row_id(fixture, PendingRowId::fresh()).await
+}
+
+async fn pending_recovery_fixture_with_row_id(
+    fixture: &IngressFixture,
+    row_id: PendingRowId,
+) -> PendingRecoveryFixture {
     let state =
         crate::server::routes::websocket::tests::create_test_websocket_state_with_durable_ingress(
             fixture,
@@ -54,13 +62,27 @@ async fn pending_recovery_fixture(fixture: &IngressFixture) -> PendingRecoveryFi
     let stamp =
         waddle_xmpp_core::xep0359::StanzaId::new("pending-recovery", recipient.clone().into());
     let row = PendingRow {
-        id: PendingRowId::fresh(),
+        id: row_id,
         recipient: recipient.clone(),
         original_receipt_at: chrono::Utc::now(),
         payload: PendingPayload::Archived(stamp.clone()),
         flushed_in_session: None,
         outbound_sequence: None,
     };
+    insert_pending_recovery(fixture, state, row, "frozen canonical body").await
+}
+
+async fn insert_pending_recovery(
+    fixture: &IngressFixture,
+    state: Arc<WebSocketState>,
+    row: PendingRow,
+    body: &str,
+) -> PendingRecoveryFixture {
+    let recipient = row.recipient.clone();
+    let PendingPayload::Archived(stamp) = &row.payload else {
+        panic!("archived fixture")
+    };
+    let stamp = stamp.clone();
     let pending = IngressEffectIntent::PendingDelivery {
         mutation: PendingDeliveryMutation::Archived {
             recipient: recipient.clone(),
@@ -68,7 +90,7 @@ async fn pending_recovery_fixture(fixture: &IngressFixture) -> PendingRecoveryFi
             archive_stanza_id: stamp.clone(),
         },
     };
-    let mut submission = fixture.submission(None, "frozen canonical body");
+    let mut submission = fixture.submission(None, body);
     submission.plan.intents = vec![pending.clone()];
     let mut mutable_archive_message = submission.plan.sanitized_message.clone();
     mutable_archive_message.bodies.insert(
@@ -158,7 +180,12 @@ async fn pending_recovery_fixture(fixture: &IngressFixture) -> PendingRecoveryFi
 async fn recovered_pending_candidate_survives_consumption_and_gc(fixture: IngressFixture) {
     let PendingRecoveryFixture { state, row, .. } = pending_recovery_fixture(&fixture).await;
 
-    let recovered = reconcile_xep0357_notification_candidates_for_sweep(&state, 16).await;
+    let recovered = reconcile_xep0357_notification_candidates_for_sweep(
+        &state,
+        16,
+        &mut PendingNotificationRecoveryCursor::default(),
+    )
+    .await;
     assert_eq!(recovered.completed, 1);
     assert!(!recovered.had_failure);
     assert_eq!(
@@ -243,10 +270,18 @@ async fn add_coalesced_parent(
     recovery: &PendingRecoveryFixture,
     body: &str,
 ) -> MessageKey {
+    record_coalesced_parent(fixture, recovery, body, PendingRowId::fresh()).await
+}
+
+async fn record_coalesced_parent(
+    fixture: &IngressFixture,
+    recovery: &PendingRecoveryFixture,
+    body: &str,
+    host_row: PendingRowId,
+) -> MessageKey {
     let PendingPayload::Archived(stamp) = &recovery.row.payload else {
         panic!("archived fixture")
     };
-    let host_row = PendingRowId::fresh();
     let pending = IngressEffectIntent::PendingDelivery {
         mutation: PendingDeliveryMutation::Archived {
             recipient: recovery.row.recipient.clone(),
@@ -272,7 +307,7 @@ async fn add_coalesced_parent(
         recovery.ordinal,
         &[ArchiveDispatchObligation {
             receipt: receipt.clone(),
-            target: DispatchTarget::Pending(host_row),
+            target: DispatchTarget::Pending(host_row.clone()),
         }],
     )
     .await
@@ -400,7 +435,12 @@ async fn pending_recovery_live_parents_and_ambiguity(fixture: IngressFixture, co
     )
     .await;
     if contradictory {
-        let result = reconcile_xep0357_notification_candidates_for_sweep(&recovery.state, 16).await;
+        let result = reconcile_xep0357_notification_candidates_for_sweep(
+            &recovery.state,
+            16,
+            &mut PendingNotificationRecoveryCursor::default(),
+        )
+        .await;
         assert!(result.had_failure);
         assert_eq!(result.completed, 0);
         assert_eq!(fixture.count("notification_candidates").await, 0);
@@ -427,8 +467,12 @@ async fn pending_recovery_live_parents_and_ambiguity(fixture: IngressFixture, co
             .await
             .expect("include the new live parent after preparation");
         assert_eq!(settled, crate::ingress::RecoverySweepOutcome::Completed);
-        let repeated =
-            reconcile_xep0357_notification_candidates_for_sweep(&recovery.state, 16).await;
+        let repeated = reconcile_xep0357_notification_candidates_for_sweep(
+            &recovery.state,
+            16,
+            &mut PendingNotificationRecoveryCursor::default(),
+        )
+        .await;
         assert_eq!(repeated.completed, 0);
         assert!(!repeated.had_failure);
         assert_eq!(fixture.count("notification_candidates").await, 1);
@@ -462,7 +506,12 @@ async fn pending_recovery_marker_fault_rolls_back(fixture: IngressFixture) {
     } else {
         fixture.execute("CREATE TRIGGER fail_pending_notification_marker BEFORE UPDATE OF notification_outboxed_at_ms ON pending_delivery BEGIN SELECT RAISE(ABORT, 'forced marker failure'); END", ()).await;
     }
-    let failed = reconcile_xep0357_notification_candidates_for_sweep(&recovery.state, 16).await;
+    let failed = reconcile_xep0357_notification_candidates_for_sweep(
+        &recovery.state,
+        16,
+        &mut PendingNotificationRecoveryCursor::default(),
+    )
+    .await;
     assert!(failed.had_failure);
     assert_eq!(failed.completed, 0);
     assert_eq!(fixture.count("notification_candidates").await, 0);
@@ -484,7 +533,12 @@ async fn pending_recovery_marker_fault_rolls_back(fixture: IngressFixture) {
             (),
         )
         .await;
-    let retried = reconcile_xep0357_notification_candidates_for_sweep(&recovery.state, 16).await;
+    let retried = reconcile_xep0357_notification_candidates_for_sweep(
+        &recovery.state,
+        16,
+        &mut PendingNotificationRecoveryCursor::default(),
+    )
+    .await;
     assert!(!retried.had_failure);
     assert_eq!(retried.completed, 1);
     assert_eq!(fixture.count("notification_candidates").await, 1);
@@ -569,5 +623,257 @@ async fn postgres_pending_notification_recovery_contracts() {
                 _ => pending_recovery_collected_preparation_is_not_recreated(fixture).await,
             }
         }
+    }
+}
+
+async fn notification_marker(fixture: &IngressFixture, id: &PendingRowId) -> bool {
+    let mut rows = fixture
+        .db
+        .guard()
+        .await
+        .expect("database guard")
+        .query(
+            "SELECT notification_outboxed_at_ms FROM pending_delivery WHERE row_id = ?",
+            crate::db_params![id.as_str()],
+        )
+        .await
+        .expect("marker query");
+    rows.next()
+        .await
+        .expect("marker row")
+        .expect("pending row retained")
+        .get::<Option<i64>>(0)
+        .expect("marker")
+        .is_some()
+}
+
+async fn insert_fair_recovery(
+    fixture: &IngressFixture,
+    recovery: &PendingRecoveryFixture,
+    id: PendingRowId,
+    label: &str,
+) -> PendingRecoveryFixture {
+    let mut row = recovery.row.clone();
+    row.id = id;
+    row.payload = PendingPayload::Archived(waddle_xmpp_core::xep0359::StanzaId::new(
+        label,
+        row.recipient.clone().into(),
+    ));
+    insert_pending_recovery(fixture, recovery.state.clone(), row, label).await
+}
+
+async fn pending_notification_janitor_pages_past_contradictions(fixture: IngressFixture) {
+    let mut ids = (0..4).map(|_| PendingRowId::fresh()).collect::<Vec<_>>();
+    ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    let sentinel = pending_recovery_fixture_with_row_id(
+        &fixture,
+        PendingRowId::new(hex::encode([255_u8; 32])),
+    )
+    .await;
+    let completed = reconcile_xep0357_notification_candidates_for_sweep(
+        &sentinel.state,
+        2,
+        &mut PendingNotificationRecoveryCursor::default(),
+    )
+    .await;
+    assert_eq!(completed.completed, 1);
+    assert!(notification_marker(&fixture, &sentinel.row.id).await);
+    let recovery = insert_fair_recovery(
+        &fixture,
+        &sentinel,
+        ids[1].clone(),
+        "fair-contradictory-first",
+    )
+    .await;
+    let contradictory = record_coalesced_parent(
+        &fixture,
+        &recovery,
+        "contradictory frozen body",
+        recovery.row.id.clone(),
+    )
+    .await;
+    assert_ne!(recovery.key, contradictory);
+    let mut second_row = recovery.row.clone();
+    second_row.id = ids[2].clone();
+    second_row.payload = PendingPayload::Archived(waddle_xmpp_core::xep0359::StanzaId::new(
+        "fair-contradictory-second",
+        second_row.recipient.clone().into(),
+    ));
+    let second = insert_pending_recovery(
+        &fixture,
+        recovery.state.clone(),
+        second_row,
+        "frozen canonical body",
+    )
+    .await;
+    let second_contradictory = record_coalesced_parent(
+        &fixture,
+        &second,
+        "another contradictory frozen body",
+        second.row.id.clone(),
+    )
+    .await;
+    let valid = insert_fair_recovery(&fixture, &recovery, ids[3].clone(), "fair-valid").await;
+    let storage = recovery
+        .state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .as_ref();
+    assert_eq!(
+        storage
+            .notification_recovery_high_water()
+            .await
+            .expect("ceiling")
+            .expect("physical rows")
+            .to_storage(),
+        4,
+        "four physical inserts, despite the marked sentinel's greater row ID"
+    );
+    assert!(storage
+        .list_unoutboxed_archived_after(
+            None,
+            Some(PendingNotificationRecoveryOrdinal::from_storage(4).expect("ceiling")),
+            0
+        )
+        .await
+        .expect("zero page")
+        .is_empty());
+    let page = storage
+        .list_unoutboxed_archived_after(
+            Some(PendingNotificationRecoveryOrdinal::from_storage(3).expect("after")),
+            Some(PendingNotificationRecoveryOrdinal::from_storage(4).expect("ceiling")),
+            1,
+        )
+        .await
+        .expect("strict bounded page");
+    assert_eq!(
+        page.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        vec![&valid.row.id]
+    );
+    let mut cursor = PendingNotificationRecoveryCursor::default();
+    // These are actual janitor sweeps, including candidate expansion, delivery
+    // and retention. Two contradictory physical rows fill the entire page.
+    crate::server::session_janitors::run_notification_outbox_sweep(
+        &recovery.state,
+        2,
+        8,
+        2,
+        &mut cursor,
+    )
+    .await;
+    assert!(!notification_marker(&fixture, &recovery.row.id).await);
+    assert!(!notification_marker(&fixture, &ids[2]).await);
+    assert!(!notification_marker(&fixture, &valid.row.id).await);
+
+    let mut suffix = Vec::new();
+    for label in ["fair-tail-1", "fair-tail-2"] {
+        let row = insert_fair_recovery(&fixture, &recovery, PendingRowId::fresh(), label).await;
+        assert!(row.row.id.as_str() > valid.row.id.as_str());
+        suffix.push(row.row.id);
+    }
+    crate::server::session_janitors::run_notification_outbox_sweep(
+        &recovery.state,
+        2,
+        8,
+        2,
+        &mut cursor,
+    )
+    .await;
+    assert!(
+        notification_marker(&fixture, &valid.row.id).await,
+        "a contradictory first page must not starve the later valid row"
+    );
+    for id in &suffix {
+        assert!(
+            !notification_marker(&fixture, id).await,
+            "new suffix rows wait outside the current lap's high-water horizon"
+        );
+    }
+
+    let behind = insert_fair_recovery(&fixture, &recovery, ids[0].clone(), "fair-behind").await;
+    crate::server::session_janitors::run_notification_outbox_sweep(
+        &recovery.state,
+        2,
+        8,
+        2,
+        &mut cursor,
+    )
+    .await;
+    let mut newer = Vec::new();
+    for tick in 0..2 {
+        for index in 0..2 {
+            let row = insert_fair_recovery(
+                &fixture,
+                &recovery,
+                PendingRowId::fresh(),
+                &format!("continuous-tail-{tick}-{index}"),
+            )
+            .await;
+            newer.push(row.row.id);
+        }
+        crate::server::session_janitors::run_notification_outbox_sweep(
+            &recovery.state,
+            2,
+            8,
+            2,
+            &mut cursor,
+        )
+        .await;
+    }
+    for id in &suffix {
+        assert!(notification_marker(&fixture, id).await);
+    }
+    assert!(
+        notification_marker(&fixture, &behind.row.id).await,
+        "a lexically behind insertion must be recovered within the next finite lap"
+    );
+    for id in &newer {
+        assert!(
+            !notification_marker(&fixture, id).await,
+            "continuous arrivals cannot extend a finite recovery lap"
+        );
+    }
+    assert!(!notification_marker(&fixture, &recovery.row.id).await);
+    assert!(!notification_marker(&fixture, &ids[2]).await);
+    let mut rows = fixture
+        .db
+        .guard()
+        .await
+        .expect("database guard")
+        .query(
+            "SELECT COUNT(*) FROM ingress_effect_descendants WHERE CAST(message_key AS TEXT) IN (?, ?, ?, ?)",
+            crate::db_params![
+                recovery.key.to_storage().to_string(),
+                contradictory.to_storage().to_string(),
+                second.key.to_storage().to_string(),
+                second_contradictory.to_storage().to_string()
+            ],
+        )
+        .await
+        .expect("contradictory parent custody");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("count row")
+            .expect("count")
+            .get::<i64>(0)
+            .expect("descendant count"),
+        0,
+        "paging must not grant notification authority to contradictory parents"
+    );
+    assert_eq!(fixture.count("pending_delivery").await, 11);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_pending_notification_janitor_fair_finite_laps() {
+    pending_notification_janitor_pages_past_contradictions(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_pending_notification_janitor_fair_finite_laps() {
+    if let Some(fixture) = IngressFixture::postgres("pendingfair").await {
+        pending_notification_janitor_pages_past_contradictions(fixture).await;
     }
 }

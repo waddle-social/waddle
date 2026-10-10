@@ -465,19 +465,30 @@ pub(super) async fn finish(
                     .transpose()?,
             )
         }
+        // A later known failure/skip describes only this invocation. It does
+        // not resolve output that may have been lost from an earlier start.
         RoomObservationOutcome::NotInvoked
-            if uncertain
-                || u32::try_from(attempt)
-                    .ok()
-                    .is_some_and(|n| n < MAX_ATTEMPTS) =>
+        | RoomObservationOutcome::PermanentFailure(_)
+        | RoomObservationOutcome::NotApplicable(_)
+            if uncertain =>
         {
             (
                 "pending",
-                if uncertain {
-                    "unknown_after_send"
-                } else {
-                    "not_invoked"
-                },
+                "unknown_after_send",
+                now_ms.saturating_add(retry_delay_ms(
+                    u32::try_from(attempt).map_err(|_| ObservationError::Codec)?,
+                )),
+                None,
+            )
+        }
+        RoomObservationOutcome::NotInvoked
+            if u32::try_from(attempt)
+                .ok()
+                .is_some_and(|n| n < MAX_ATTEMPTS) =>
+        {
+            (
+                "pending",
+                "not_invoked",
                 now_ms.saturating_add(retry_delay_ms(
                     u32::try_from(attempt).map_err(|_| ObservationError::Codec)?,
                 )),

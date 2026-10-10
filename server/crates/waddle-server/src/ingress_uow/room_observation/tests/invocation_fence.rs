@@ -1,7 +1,11 @@
 use super::*;
-use waddle_extensions::ObservationFailure;
+use waddle_extensions::{ObservationFailure, ObservationSkip};
 
 async fn seed(fixture: &IngressFixture) -> (ConfiguredRoomObserver, i64) {
+    seed_with_stanza(fixture, "stanza").await
+}
+
+async fn seed_with_stanza(fixture: &IngressFixture, stanza: &str) -> (ConfiguredRoomObserver, i64) {
     initialize_room_observations(&fixture.db)
         .await
         .expect("schema");
@@ -21,7 +25,7 @@ async fn seed(fixture: &IngressFixture) -> (ConfiguredRoomObserver, i64) {
         &mut tx,
         key,
         &room(),
-        &message("wire", "stanza", Some("origin"), "body"),
+        &message("wire", stanza, Some("origin"), "body"),
         &sender(),
         &[intent(&observer)],
         now,
@@ -30,6 +34,224 @@ async fn seed(fixture: &IngressFixture) -> (ConfiguredRoomObserver, i64) {
     .expect("capture");
     tx.commit().await.expect("seed commit");
     (observer, now.timestamp_millis())
+}
+
+async fn terminal_outcome_cannot_erase_prior_uncertainty(
+    fixture: IngressFixture,
+    outcome: RoomObservationOutcome,
+    cancel: bool,
+) {
+    let (observer, now) = seed(&fixture).await;
+    let subscription = subscription(&observer);
+    let mut last = None;
+    for index in 0..20 {
+        let at = now + index * 180_000;
+        let mut tx = fixture.uow.begin().await.expect("started invocation");
+        let work = Repo::claim(&mut tx, &subscription, at)
+            .await
+            .expect("claim")
+            .expect("work");
+        assert_eq!(i64::from(work.attempt), index + 1);
+        assert!(Repo::start(&mut tx, &work, at).await.expect("start"));
+        tx.commit()
+            .await
+            .expect("invocation commits before lost result");
+        last = Some(work);
+    }
+    let first = last.expect("expired twentieth invocation");
+    let at = now + 20 * 180_000;
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("expired invocation recovery");
+    let retry = Repo::claim(&mut tx, &subscription, at)
+        .await
+        .expect("reclaim")
+        .expect("retry");
+    assert_ne!(retry.lease, first.lease);
+    assert_eq!(retry.attempt, 21);
+    assert!(!Repo::finish(&mut tx, &first, &outcome, at)
+        .await
+        .expect("old lease remains fenced"));
+    assert!(Repo::start(&mut tx, &retry, at)
+        .await
+        .expect("retry starts"));
+    assert!(Repo::finish(&mut tx, &retry, &outcome, at)
+        .await
+        .expect("record retry outcome"));
+    tx.commit()
+        .await
+        .expect("later known outcome preserves earlier unknown invocation");
+    assert_eq!(fixture.count("extension_room_observation_work WHERE status = 'pending' AND terminal_category = 'unknown_after_send' AND body = 'body' AND lease_id IS NULL AND lease_until_ms IS NULL AND settled_at_ms IS NULL").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(
+        fixture.count("extension_room_observation_receipts").await,
+        0
+    );
+    assert_eq!(fixture.count("extension_room_publications").await, 0);
+
+    let mut tx = fixture.uow.begin().await.expect("bounded retry backoff");
+    assert!(Repo::claim(&mut tx, &subscription, at + 59_999)
+        .await
+        .expect("not due")
+        .is_none());
+    let next_at = at + 60_000;
+    let next = Repo::claim(&mut tx, &subscription, next_at)
+        .await
+        .expect("due retry")
+        .expect("uncertainty remains reclaimable");
+    assert_ne!(next.lease, retry.lease);
+    assert_eq!(next.attempt, 22);
+    assert!(Repo::start(&mut tx, &next, next_at)
+        .await
+        .expect("new lease starts"));
+    let result = RoomObservationOutcome::Completed(RoomObservationResult {
+        payloads: vec![payload()],
+        usage: None,
+    });
+    assert!(!Repo::finish(&mut tx, &retry, &result, next_at)
+        .await
+        .expect("previous retry result fenced"));
+    if cancel {
+        Repo::sync_configured(&mut tx, &[configured_observer(2, 'b')], next_at)
+            .await
+            .expect("explicit generation cancellation");
+        assert!(!Repo::finish(&mut tx, &next, &result, next_at)
+            .await
+            .expect("cancelled callback fenced"));
+    } else {
+        assert!(Repo::finish(&mut tx, &next, &result, next_at)
+            .await
+            .expect("successful completion resolves uncertainty"));
+    }
+    tx.commit().await.expect("explicit resolution");
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(
+        fixture.count("extension_room_observation_receipts").await,
+        1
+    );
+    assert_eq!(
+        fixture.count("extension_room_publications").await,
+        i64::from(!cancel)
+    );
+    assert_eq!(
+        fixture
+            .count("extension_room_observation_work WHERE status = 'pending'")
+            .await,
+        0
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_permanent_observer_failure_preserves_prior_unknown_invocation() {
+    terminal_outcome_cannot_erase_prior_uncertainty(
+        IngressFixture::sqlite().await,
+        RoomObservationOutcome::PermanentFailure(ObservationFailure::Denied),
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_permanent_observer_failure_preserves_prior_unknown_invocation() {
+    if let Some(fixture) = IngressFixture::postgres("observer_sticky_permanent").await {
+        terminal_outcome_cannot_erase_prior_uncertainty(
+            fixture,
+            RoomObservationOutcome::PermanentFailure(ObservationFailure::Denied),
+            false,
+        )
+        .await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_observer_not_applicable_preserves_prior_unknown_invocation() {
+    terminal_outcome_cannot_erase_prior_uncertainty(
+        IngressFixture::sqlite().await,
+        RoomObservationOutcome::NotApplicable(ObservationSkip::SubscriptionUnavailable),
+        true,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_observer_not_applicable_preserves_prior_unknown_invocation() {
+    if let Some(fixture) = IngressFixture::postgres("observer_sticky_skip").await {
+        terminal_outcome_cannot_erase_prior_uncertainty(
+            fixture,
+            RoomObservationOutcome::NotApplicable(ObservationSkip::SubscriptionUnavailable),
+            true,
+        )
+        .await;
+    }
+}
+
+async fn known_terminal_observer_outcomes_still_settle(fixture: IngressFixture) {
+    for (index, (stanza, outcome, category)) in [
+        (
+            "known-permanent",
+            RoomObservationOutcome::PermanentFailure(ObservationFailure::Denied),
+            "denied",
+        ),
+        (
+            "known-skip",
+            RoomObservationOutcome::NotApplicable(ObservationSkip::SubscriptionUnavailable),
+            "subscription_unavailable",
+        ),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let (observer, now) = seed_with_stanza(&fixture, stanza).await;
+        let subscription = subscription(&observer);
+        let mut tx = fixture.uow.begin().await.expect("known first invocation");
+        let work = Repo::claim(&mut tx, &subscription, now)
+            .await
+            .expect("claim")
+            .expect("work");
+        assert!(Repo::start(&mut tx, &work, now).await.expect("first start"));
+        assert!(Repo::finish(&mut tx, &work, &outcome, now)
+            .await
+            .expect("known terminal outcome"));
+        assert!(Repo::claim(&mut tx, &subscription, now + 180_000)
+            .await
+            .expect("no unresolved invocation")
+            .is_none());
+        tx.commit().await.expect("real terminal receipt");
+        let conn = fixture.db.guard().await.expect("known terminal state");
+        let mut rows = conn.query("SELECT status, terminal_category, body, settled_at_ms FROM extension_room_observation_work WHERE id = ?", crate::db_params![work.id.to_string()]).await.expect("work row");
+        let row = rows.next().await.expect("row").expect("terminal work");
+        assert_eq!(row.get::<String>(0).expect("status"), "terminal");
+        assert_eq!(row.get::<String>(1).expect("category"), category);
+        assert_eq!(row.get::<String>(2).expect("body"), "");
+        assert_eq!(
+            row.get::<Option<i64>>(3).expect("settlement time"),
+            Some(now)
+        );
+        assert_eq!(
+            fixture.count("ingress_effect_receipts").await,
+            i64::try_from(index + 1).expect("count")
+        );
+        assert_eq!(
+            fixture.count("extension_room_observation_receipts").await,
+            i64::try_from(index + 1).expect("count")
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_known_terminal_observer_outcomes_still_settle() {
+    known_terminal_observer_outcomes_still_settle(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_known_terminal_observer_outcomes_still_settle() {
+    if let Some(fixture) = IngressFixture::postgres("observer_known_terminal").await {
+        known_terminal_observer_outcomes_still_settle(fixture).await;
+    }
 }
 
 async fn expired_started_work_retries_with_fenced_results(fixture: IngressFixture) {

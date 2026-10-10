@@ -366,6 +366,12 @@ impl DatabasePushServiceStore {
             "uncertain_send INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        self.add_column_if_missing("push_publish_jobs", "terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked')").await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1))",
+        )
+        .await?;
         self.migrate_publish_acceptance_scope().await?;
         self.adopt_notification_ancestry().await?;
         Ok(())
@@ -402,7 +408,7 @@ impl DatabasePushServiceStore {
                 )
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-                tx.execute("INSERT INTO push_publish_jobs_rebuild (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms) SELECT job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms FROM push_publish_jobs", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("INSERT INTO push_publish_jobs_rebuild (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, terminal_disposition, upstream_completed, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms) SELECT job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, terminal_disposition, upstream_completed, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms FROM push_publish_jobs", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
                 tx.execute("DROP TABLE push_publish_jobs", ())
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -549,6 +555,8 @@ fn push_publish_jobs_table_sql(i64_type: &str, table: &str, if_not_exists: bool)
         publication_order {i64_type} NOT NULL DEFAULT 0,
         backing_state TEXT NOT NULL DEFAULT 'pending' CHECK (backing_state IN ('pending', 'published', 'superseded', 'not-configured')),
         uncertain_send INTEGER NOT NULL DEFAULT 0 CHECK (uncertain_send IN (0, 1)),
+        terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'),
+        upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1)),
         status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
         attempt_count INTEGER NOT NULL DEFAULT 0,
         last_error TEXT,
@@ -566,6 +574,7 @@ fn push_publish_jobs_table_sql(i64_type: &str, table: &str, if_not_exists: bool)
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minidom::Element;
     use tempfile::tempdir;
 
     use crate::push_service::test_support::{assert_item_not_found, notification_item, owner};
@@ -639,5 +648,99 @@ mod tests {
         assert_eq!(device.provider_token(), None);
         assert_eq!(device.provider_key_material(), None);
         assert_item_not_found(publish_err);
+    }
+    async fn disposition_schema_upgrade(
+        fixture: crate::ingress::test_support::IngressFixture,
+        rebuild: bool,
+    ) {
+        let store = DatabasePushServiceStore::new_with_secret_key(
+            fixture.db.clone(),
+            &rand::random::<[u8; 32]>(),
+        )
+        .await
+        .expect("store");
+        let node = store
+            .ensure_node(&owner(), "upgrade-proof")
+            .await
+            .expect("node");
+        store
+            .execute("DROP TABLE push_publish_jobs", ())
+            .await
+            .expect("pre-upgrade table");
+        let i64_type = crate::db::i64_sql_type(fixture.db.driver());
+        let mut schema = push_publish_jobs_table_sql(i64_type, "push_publish_jobs", false);
+        if rebuild {
+            schema = schema.replace(
+                "FOREIGN KEY (node)",
+                "UNIQUE (node, item_id), FOREIGN KEY (node)",
+            );
+        } else {
+            schema = schema.replace("terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'),", "").replace("upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1)),", "");
+        }
+        store.execute(&schema, ()).await.expect("old schema");
+        let payload = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+        let options = Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS).build();
+        store.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, publication_order, status, created_at_ms, updated_at_ms) VALUES ('upgrade-proof', ?, 'push.example.com', ?, 'frozen-item', ?, ?, ?, 'canonical', 17, 'failed', 1, 1)", crate::db_params![owner().to_string(), node.node(), String::from(&payload), String::from(&options), uuid::Uuid::new_v4().to_string()]).await.expect("legacy proof");
+        if rebuild {
+            store.execute("UPDATE push_publish_jobs SET terminal_disposition = 'registration-revoked', upstream_completed = 1", ()).await.expect("durable fields before actual copy");
+        }
+        store.initialize().await.expect("upgrade");
+        store.initialize().await.expect("idempotent initialization");
+        let mut rows = store.query("SELECT terminal_disposition, upstream_completed, payload_xml, publish_options_xml, item_id, publication_order FROM push_publish_jobs WHERE job_id = 'upgrade-proof'", ()).await.expect("retained row");
+        let row = rows.next().await.expect("query").expect("proof survives");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("disposition"),
+            rebuild.then(|| "registration-revoked".to_owned())
+        );
+        assert_eq!(row.get::<i64>(1).expect("ACK"), i64::from(rebuild));
+        assert_eq!(
+            row.get::<String>(2).expect("payload"),
+            String::from(&payload)
+        );
+        assert_eq!(
+            row.get::<String>(3).expect("options"),
+            String::from(&options)
+        );
+        assert_eq!(row.get::<String>(4).expect("item"), "frozen-item");
+        assert_eq!(row.get::<i64>(5).expect("order"), 17);
+        drop(rows);
+        assert!(store
+            .execute(
+                "UPDATE push_publish_jobs SET terminal_disposition = 'generic-failed'",
+                ()
+            )
+            .await
+            .is_err());
+        assert!(store
+            .execute("UPDATE push_publish_jobs SET upstream_completed = 2", ())
+            .await
+            .is_err());
+        drop(store);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_disposition_upgrade_defaults_to_unresolved_and_reinitializes() {
+        disposition_schema_upgrade(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+            false,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn postgres_disposition_upgrade_defaults_to_unresolved_and_reinitializes() {
+        if let Some(f) =
+            crate::ingress::test_support::IngressFixture::postgres("disposition_upgrade").await
+        {
+            disposition_schema_upgrade(f, false).await;
+        }
+    }
+    #[tokio::test]
+    async fn sqlite_unique_constraint_rebuild_preserves_disposition_ack_and_frozen_fields() {
+        disposition_schema_upgrade(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+            true,
+        )
+        .await;
     }
 }

@@ -25,10 +25,11 @@ pub mod vapid_storage;
 mod worker;
 
 pub use apns_config::{ApnsConfig, ApnsConfigError, ApnsConfigVar};
+pub(crate) use publish_jobs::acknowledge_completed_outbox_tx;
 pub use pubsub_backing::ensure_xep0060_push_node;
 pub(crate) use secrets::PushSecretCipher;
 pub use store::DatabasePushServiceStore;
-pub(crate) use types::PushQueueAcceptanceError;
+pub(crate) use types::{CanonicalNotificationTerminalProof, PushQueueAcceptanceError};
 pub use types::{
     PushDeliveryAttempt, PushDevicePlatform, PushDeviceRegistration, PushFanoutResult,
     PushPublishJob, PushPublishJobEnqueue, PushServiceDevice, PushServiceNode,

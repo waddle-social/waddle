@@ -327,6 +327,45 @@ impl NotificationOutboxStore {
         blocking_storage: &dyn BlockingStorage,
         first_party_service_jid: &BareJid,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        if job.approved_payload.is_some() && self.claimed_job_is_current(job).await? {
+            let item = job.to_xep0357_pubsub_item();
+            let delivery = uuid::Uuid::parse_str(job.job_id.as_str())
+                .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
+            if let Some(proof) = push_service
+                .canonical_terminal_notification_proof(
+                    &job.push_service_jid,
+                    &job.node,
+                    &item,
+                    &job.recipient_bare_jid,
+                    job.approved_publish_options.as_ref(),
+                    delivery,
+                )
+                .await
+                .map_err(|error| NotificationOutboxError::Push(error.to_string()))?
+            {
+                if self
+                    .complete_claimed_job_from_terminal_proof(job, proof)
+                    .await?
+                {
+                    self.acknowledge_provider_owner_completion(
+                        push_service,
+                        job,
+                        &item,
+                        job.approved_publish_options.as_ref(),
+                        delivery,
+                    )
+                    .await;
+                    return Ok(match proof {
+                        crate::push_service::CanonicalNotificationTerminalProof::ProviderCompleted => NotificationOutboxPublishOutcome::Published { job_id: job.job_id.clone(), item_id: job.job_id.as_str().to_string() },
+                        crate::push_service::CanonicalNotificationTerminalProof::RegistrationRevoked => NotificationOutboxPublishOutcome::Failed { job_id: job.job_id.clone() },
+                    });
+                }
+                return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                    job_id: job.job_id.clone(),
+                });
+            }
+        }
+
         if job.push_service_jid() != first_party_service_jid {
             if self
                 .mark_job_failed(
@@ -481,6 +520,15 @@ impl NotificationOutboxStore {
                         job_id: job.job_id.clone(),
                     });
                 }
+                self.acknowledge_provider_owner_completion(
+                    push_service,
+                    job,
+                    &item,
+                    publish_options.as_ref(),
+                    uuid::Uuid::parse_str(job.job_id.as_str())
+                        .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?,
+                )
+                .await;
                 Ok(NotificationOutboxPublishOutcome::Published {
                     job_id: job.job_id.clone(),
                     item_id: result.item_id().to_string(),
@@ -495,6 +543,70 @@ impl NotificationOutboxStore {
             Err(crate::push_service::PushQueueAcceptanceError::Unknown(error)) => {
                 self.retry_or_fail_outcome_for_claimed_job(job, error.to_string())
                     .await
+            }
+        }
+    }
+
+    async fn complete_claimed_job_from_terminal_proof(
+        &self,
+        job: &NotificationOutboxJob,
+        proof: crate::push_service::CanonicalNotificationTerminalProof,
+    ) -> Result<bool, NotificationOutboxError> {
+        let Some(payload) = job.approved_payload.as_ref() else {
+            return Ok(false);
+        };
+        let cancelled =
+            proof == crate::push_service::CanonicalNotificationTerminalProof::RegistrationRevoked;
+        let status = if cancelled {
+            STATUS_FAILED
+        } else {
+            STATUS_PUBLISHED
+        };
+        let now = crate::time::now_ms();
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let changed = tx.execute(
+            "UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = CASE WHEN ? = 1 THEN 0 ELSE queue_acceptance_may_exist END, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ?, published_at_ms = CASE WHEN ? = 1 THEN ? ELSE published_at_ms END WHERE job_id = ? AND status = ? AND claim_token = ? AND recipient_bare_jid = ? AND push_service_jid = ? AND node = ? AND approved_payload_xml = ? AND (approved_publish_options_xml = ? OR (approved_publish_options_xml IS NULL AND ? = 0))",
+            crate::db_params![status, i64::from(cancelled), if cancelled {Some("canonical notification acceptance explicitly cancelled by registration revocation")} else {None}, now, i64::from(!cancelled), now, job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref(), job.recipient_bare_jid.to_string(), job.push_service_jid.to_string(), job.node.as_str(), String::from(payload), job.approved_publish_options.as_ref().map(String::from), i64::from(job.approved_publish_options.is_some())],
+        ).await?;
+        if changed > 0 {
+            settle_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+            crate::push_service::acknowledge_completed_outbox_tx(&mut tx, job.job_id.as_str())
+                .await?;
+        }
+        tx.commit().await?;
+        Ok(changed > 0)
+    }
+
+    /// Completion is already committed. A separate-store ACK failure cannot
+    /// reopen its owner; unresolved provider proof remains conservatively retained.
+    async fn acknowledge_provider_owner_completion(
+        &self,
+        push_service: &crate::push_service::DatabasePushServiceStore,
+        job: &NotificationOutboxJob,
+        item: &PubSubItem,
+        options: Option<&Element>,
+        delivery: uuid::Uuid,
+    ) {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            push_service.acknowledge_canonical_outbox_completion(
+                &job.push_service_jid,
+                &job.node,
+                item,
+                &job.recipient_bare_jid,
+                options,
+                delivery,
+            ),
+        )
+        .await
+        {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, "upstream completion committed but provider proof acknowledgment failed; proof retained");
+            }
+            Err(_) => {
+                tracing::warn!("upstream completion committed but provider proof acknowledgment timed out; proof retained");
             }
         }
     }
@@ -682,7 +794,9 @@ impl NotificationOutboxStore {
         job: &NotificationOutboxJob,
     ) -> Result<bool, NotificationOutboxError> {
         let now_ms = crate::time::now_ms();
-        let affected = self
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let affected = tx
             .execute(
                 r#"
             UPDATE notification_outbox
@@ -708,6 +822,11 @@ impl NotificationOutboxStore {
                 ],
             )
             .await?;
+        if affected > 0 {
+            crate::push_service::acknowledge_completed_outbox_tx(&mut tx, job.job_id.as_str())
+                .await?;
+        }
+        tx.commit().await?;
         Ok(affected > 0)
     }
 

@@ -630,18 +630,47 @@ pub(crate) async fn reconcile_xep0357_notification_candidates(
     state: &WebSocketState,
     batch_size: usize,
 ) -> usize {
-    reconcile_xep0357_notification_candidates_for_sweep(state, batch_size)
-        .await
-        .completed
+    reconcile_xep0357_notification_candidates_for_sweep(
+        state,
+        batch_size,
+        &mut PendingNotificationRecoveryCursor::default(),
+    )
+    .await
+    .completed
+}
+
+/// Progress through one finite inventory lap. Failures retain custody and are
+/// retried on the next lap; new arrivals cannot extend the current ceiling.
+#[derive(Debug, Default)]
+pub(crate) struct PendingNotificationRecoveryCursor {
+    after: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+    through: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
 }
 
 pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
     state: &WebSocketState,
     batch_size: usize,
+    cursor: &mut PendingNotificationRecoveryCursor,
 ) -> super::NotificationRecoverySweepOutcome {
     let batch_size = batch_size.clamp(1, 1_000);
     let pending_storage = state.deps.protocol.pending_delivery_storage.as_ref();
-    let rows = match pending_storage.list_unoutboxed_archived(batch_size).await {
+    if cursor.through.is_none() {
+        match pending_storage.notification_recovery_high_water().await {
+            Ok(Some(through)) => cursor.through = Some(through),
+            Ok(None) => return super::NotificationRecoverySweepOutcome::default(),
+            Err(error) => {
+                warn!(%error, "XEP-0357 notification recovery could not capture pending inventory ceiling");
+                return super::NotificationRecoverySweepOutcome {
+                    completed: 0,
+                    had_failure: true,
+                };
+            }
+        }
+    }
+    let rows = match pending_storage
+        .list_unoutboxed_archived_after(cursor.after, cursor.through, batch_size)
+        .await
+    {
         Ok(rows) => rows,
         Err(error) => {
             warn!(
@@ -654,9 +683,17 @@ pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
             };
         }
     };
+    let at_end = rows.len() < batch_size
+        || rows
+            .last()
+            .is_some_and(|entry| cursor.through == Some(entry.ordinal));
     let mut completed = 0usize;
     let mut had_failure = false;
-    for row in rows {
+    for entry in rows {
+        // Advance before awaited recovery, including failed rows. Cancellation
+        // retains progress; the next finite lap revisits unresolved custody.
+        cursor.after = Some(entry.ordinal);
+        let row = entry.row;
         let waddle_xmpp::pending_delivery::PendingPayload::Archived(archive_stanza_id) =
             &row.payload
         else {
@@ -680,6 +717,9 @@ pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
             }
             NotificationCandidateQueueOutcome::RetryLater => had_failure = true,
         }
+    }
+    if at_end {
+        *cursor = PendingNotificationRecoveryCursor::default();
     }
     super::NotificationRecoverySweepOutcome {
         completed,

@@ -196,6 +196,9 @@ impl NotificationOutboxStore {
         }
         drop(rows);
         prelock_prune_ancestry(&mut tx, Some(job), has_foundation).await?;
+        // Transfer exact completed-owner authority before deleting its last row.
+        // This and DELETE roll back together; foreign stores remain conservative.
+        crate::push_service::acknowledge_completed_outbox_tx(&mut tx, job).await?;
         let deleted = tx
             .execute(
                 &format!("DELETE FROM notification_outbox WHERE job_id = ? AND {guards}"),

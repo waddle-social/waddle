@@ -197,6 +197,161 @@ async fn mark_notification_outboxed_requires_existing_row() {
 }
 
 #[tokio::test]
+async fn notification_recovery_pages_respect_cursor_and_finite_ceiling() {
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    assert_eq!(
+        store
+            .notification_recovery_high_water()
+            .await
+            .expect("empty ceiling"),
+        None
+    );
+    let mut rows = [
+        archived_row("alice@example.com", "marked"),
+        archived_row("bob@example.com", "claimed"),
+        transient_row("carol@example.com"),
+        archived_row("dave@example.com", "first"),
+        archived_row("ellen@example.com", "second"),
+        archived_row("frank@example.com", "third"),
+        transient_row("george@example.com"),
+    ];
+    let mut ids = rows.iter().map(|row| row.id.clone()).collect::<Vec<_>>();
+    ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+    for (row, id) in rows.iter_mut().zip(&ids) {
+        row.id = id.clone();
+        assert_eq!(
+            store.insert(row.clone()).await.expect("insert"),
+            InsertOutcome::Inserted
+        );
+    }
+    store
+        .mark_notification_outboxed(&ids[0])
+        .await
+        .expect("mark first row");
+    store
+        .claim_for_session(&bare("bob@example.com"), &SmSessionId::new("claim"))
+        .await
+        .expect("claim second row");
+    let ceiling = store
+        .notification_recovery_high_water()
+        .await
+        .expect("ceiling")
+        .expect("rows");
+    assert_eq!(
+        ceiling.to_storage(),
+        7,
+        "the horizon includes nonarchived rows"
+    );
+    let later = archived_row("hannah@example.com", "new tail");
+    let later_id = later.id.clone();
+    assert!(later_id.as_str() > ids[6].as_str());
+    store.insert(later).await.expect("new suffix");
+    assert!(store
+        .list_unoutboxed_archived_after(None, Some(ceiling), 0)
+        .await
+        .expect("zero page")
+        .is_empty());
+    let first = store
+        .list_unoutboxed_archived_after(None, Some(ceiling), 2)
+        .await
+        .expect("first page");
+    assert_eq!(
+        first.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        vec![&ids[3], &ids[4]]
+    );
+    let second = store
+        .list_unoutboxed_archived_after(
+            Some(PendingNotificationRecoveryOrdinal::from_storage(5).expect("after")),
+            Some(ceiling),
+            2,
+        )
+        .await
+        .expect("second page");
+    assert_eq!(
+        second.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        vec![&ids[5]]
+    );
+    assert!(store
+        .list_unoutboxed_archived_after(
+            Some(PendingNotificationRecoveryOrdinal::from_storage(6).expect("after")),
+            Some(ceiling),
+            2
+        )
+        .await
+        .expect("lap end")
+        .is_empty());
+    let suffix = store
+        .list_unoutboxed_archived_after(
+            Some(PendingNotificationRecoveryOrdinal::from_storage(6).expect("after")),
+            None,
+            2,
+        )
+        .await
+        .expect("next lap tail");
+    assert_eq!(
+        suffix.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        vec![&later_id]
+    );
+    let prefix = store
+        .list_unoutboxed_archived(2)
+        .await
+        .expect("unchanged inventory");
+    assert_eq!(
+        prefix.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        vec![&ids[3], &ids[4]],
+        "page reads neither claim nor mark rows"
+    );
+}
+
+#[tokio::test]
+async fn notification_recovery_ordinals_survive_delete_and_fail_closed_on_overflow() {
+    assert!(PendingNotificationRecoveryOrdinal::from_storage(0).is_err());
+    assert!(PendingNotificationRecoveryOrdinal::from_storage(-1).is_err());
+    let store = InMemoryPendingDeliveryStorage::unlimited();
+    let row = archived_row("alice@example.com", "physical row");
+    store.insert(row.clone()).await.expect("first insert");
+    let first = store
+        .notification_recovery_high_water()
+        .await
+        .expect("horizon")
+        .expect("row");
+    store.delete_row(&row.id).await.expect("delete last row");
+    assert_eq!(
+        store
+            .notification_recovery_high_water()
+            .await
+            .expect("empty horizon"),
+        None
+    );
+    store.insert(row.clone()).await.expect("same ID reinsert");
+    let next = store
+        .notification_recovery_high_water()
+        .await
+        .expect("horizon")
+        .expect("row");
+    assert!(next > first);
+    store.inner.lock().expect("row mutex").last_ordinal = i64::MAX;
+    assert!(store
+        .insert(archived_row("alice@example.com", "overflow"))
+        .await
+        .is_err());
+    assert_eq!(
+        store
+            .count(&bare("alice@example.com"))
+            .await
+            .expect("count"),
+        1
+    );
+    assert_eq!(
+        store
+            .notification_recovery_high_water()
+            .await
+            .expect("unchanged horizon"),
+        Some(next)
+    );
+}
+
+#[tokio::test]
 async fn delete_row_clears_notification_outboxed_marker() {
     let store = InMemoryPendingDeliveryStorage::unlimited();
     let row = archived_row("alice@example.com", "archive-1");
@@ -474,6 +629,42 @@ impl FailNthReleaseRowIfSessionStorage {
 
 #[async_trait::async_trait]
 impl PendingDeliveryStorage for FailNthReleaseRowIfSessionStorage {
+    async fn notification_recovery_high_water(
+        &self,
+    ) -> Result<
+        Option<crate::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        crate::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner.notification_recovery_high_water().await
+    }
+
+    async fn list_unoutboxed_archived_after(
+        &self,
+        after: Option<crate::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        through: Option<crate::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        limit: usize,
+    ) -> Result<
+        Vec<crate::pending_delivery::storage::PendingNotificationRecoveryRow>,
+        crate::pending_delivery::storage::PendingStorageError,
+    > {
+        self.inner
+            .list_unoutboxed_archived_after(after, through, limit)
+            .await
+    }
+
+    fn notification_custody_mode(
+        &self,
+    ) -> crate::pending_delivery::storage::PendingNotificationCustodyMode {
+        self.inner.notification_custody_mode()
+    }
+
+    async fn mark_notification_outboxed(
+        &self,
+        id: &crate::pending_delivery::PendingRowId,
+    ) -> Result<u64, crate::pending_delivery::storage::PendingStorageError> {
+        self.inner.mark_notification_outboxed(id).await
+    }
+
     fn quota_policy(&self) -> QuotaPolicy {
         self.inner.quota_policy()
     }
