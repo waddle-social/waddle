@@ -19,6 +19,46 @@ using the existing cutover revision guard. An older image is not a valid binary
 rollback after this roll-forward ledger migration. This document records the
 required procedure; it does not assert or authorize a live cutover.
 
+Before stopping the old collectors, record the terminal ingress backlog and its
+`terminal_at` ages using the old schema. After V1025 adds `retention_eligible_at`,
+measure the legacy NULL-frontier backlog as startup/maintenance begins; the new
+column cannot be queried on V1024. These rows are maintenance
+candidates for adoption, not immediate deletion: the collector processes bounded
+batches and starts a fresh eight-day tail. During adoption the CNPG eligible
+count includes these rows, and the oldest-age gauge falls back to `terminal_at`.
+Old ages and little reclamation can therefore be expected while adoption drains;
+legacy rows will not be deleted for at least eight days after adoption.
+
+For this planned window, arrange a scoped, time-limited silence for
+`IngressGcBacklog` and `IngressGcAge` if the baseline would trigger them. Keep
+maintenance failures, missing queries and heartbeat alerts active. Verify that
+the legacy NULL-frontier backlog decreases and unresolved custody stays retained;
+remove the silence when adoption has drained. Renew a silence only after
+investigating lack of progress. This procedure does not apply a live silence.
+
+Startup quarantine preflight and ancestry adoption each revisit retained kind-7/21
+intents on every boot.
+Individual pages and transactions are bounded; the whole startup scan has no
+fixed wall-clock budget. Measure startup duration against the retained backlog
+before scheduling a Recreate window, and account for it in readiness deadlines.
+On canonically matchable rows with compatible structural class/reason constraints,
+malformed sender JIDs, durable delivery identities and suppression audits are
+isolated without blocking healthy candidates or boot. Damaged canonical authority,
+fences and incompatible database constraints still fail closed.
+After notification schema initialization, inspect the count of candidates with
+`quarantined_at_ms IS NOT NULL`. Quarantine preserves the row, existing lineage
+and a pending Foundation reference. Invalid suppression audit text is moved into
+`quarantined_suppressed_reason` before clearing its active field, so new CHECKs can
+validate the row without erasing the audit. Ordinary worker dispatch and pruning
+must not consume it. Repeated startup, repaired fields or elapsed retention time
+do not release quarantine custody automatically. Investigate these rows and
+require a verified explicit repair/disposition before releasing their evidence.
+
+Keep publisher-triggering server/build changes out of the gap between verified
+fleet rollout and the RollingUpdate flip. Such a change advances the guarded
+cutover revision and must finish its own Recreate rollout first. Unpublished
+`server/docs/**` changes are excluded from that floor, as described below.
+
 ## RollingUpdate guard
 
 Remote-resource relay endpoints have

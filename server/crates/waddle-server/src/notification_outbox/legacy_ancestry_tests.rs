@@ -354,3 +354,497 @@ async fn postgres_legacy_provider_pending_and_repeat_startup_are_honest() {
         pending_provider_and_restart_reconcile(fixture).await;
     }
 }
+
+async fn malformed_legacy_candidate_boot_isolated_and_retained(fixture: IngressFixture) {
+    let store = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("initial outbox");
+    let bad_sender = candidate("malformed-sender");
+    let bad_identity = candidate("malformed-identity");
+    let bad_audit = candidate("malformed-audit");
+    let good = candidate("valid-neighbor");
+    let sender_key = legacy_parent(&fixture, &bad_sender).await;
+    for item in [&bad_identity, &bad_audit, &good] {
+        legacy_parent(&fixture, item).await;
+    }
+    for item in [&bad_sender, &bad_identity, &bad_audit, &good] {
+        store.insert_candidate(item).await.expect("candidate");
+    }
+    store.execute("UPDATE notification_candidates SET sender_jid = ?, outboxed_at_ms = 1 WHERE stanza_id = ?", crate::db_params!["invalid sender", bad_sender.archive_stanza_id.id.clone()]).await.expect("malformed sender");
+    store.execute("UPDATE notification_candidates SET delivery_id = ?, outboxed_at_ms = 1 WHERE stanza_id = ?", crate::db_params!["invalid-delivery-id", bad_identity.archive_stanza_id.id.clone()]).await.expect("malformed identity");
+    let mut conn = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("corruption fixture");
+    if fixture.db.driver() == DatabaseDriver::Sqlite {
+        conn.execute("PRAGMA ignore_check_constraints = ON", ())
+            .await
+            .expect("legacy unchecked fixture");
+    } else {
+        conn.execute("ALTER TABLE notification_candidates DROP CONSTRAINT notification_candidates_suppressed_reason_check", ()).await.expect("legacy audit constraint");
+    }
+    conn.execute("UPDATE notification_candidates SET suppressed_reason = ?, outboxed_at_ms = 1 WHERE stanza_id = ?", crate::db_params!["unknown-old-audit", bad_audit.archive_stanza_id.id.clone()]).await.expect("malformed audit");
+    if fixture.db.driver() == DatabaseDriver::Sqlite {
+        conn.execute("PRAGMA ignore_check_constraints = OFF", ())
+            .await
+            .expect("restore checks");
+    } else {
+        let values = SuppressedReason::ALL
+            .iter()
+            .map(|reason| format!("'{}'", reason.as_db_value()))
+            .collect::<Vec<_>>()
+            .join(",");
+        conn.execute(&format!("ALTER TABLE notification_candidates ADD CONSTRAINT notification_candidates_suppressed_reason_check CHECK (suppressed_reason IN ({values})) NOT VALID"), ()).await.expect("retain legacy invalid row with current audit shape");
+    }
+    conn.commit().await.expect("persist corruption fixture");
+    let reopened = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("malformed scheduler rows must not brick startup");
+    assert_eq!(
+        fixture
+            .count("notification_candidates WHERE quarantined_at_ms IS NOT NULL")
+            .await,
+        3
+    );
+    assert_eq!(fixture.count("notification_candidates WHERE quarantined_at_ms IS NOT NULL AND outboxed_at_ms = 1").await, 3, "original history timestamps survive");
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        4,
+        "quarantine and valid-neighbor custody remains pending"
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NOT NULL")
+            .await,
+        0
+    );
+    let pending = reopened
+        .pending_candidates(16)
+        .await
+        .expect("valid scheduler neighbor");
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].archive_stanza_id(), good.archive_stanza_id());
+    let future = chrono::Utc::now() + ALIAS_RETENTION + chrono::Duration::days(1);
+    assert_eq!(
+        crate::ingress_substrate::gc_expired_aliases(&fixture.db, future, budget())
+            .await
+            .expect("future GC")
+            .deleted_messages,
+        0
+    );
+    assert_eq!(
+        reopened
+            .prune_completed_before(future.timestamp_millis(), 64)
+            .await
+            .expect("future scheduler prune")
+            .candidates_deleted,
+        0
+    );
+    assert_eq!(fixture.count("notification_candidates").await, 4);
+    let mut audit = reopened.query(
+        "SELECT suppressed_reason, quarantined_suppressed_reason FROM notification_candidates WHERE stanza_id = ?",
+        crate::db_params![bad_audit.archive_stanza_id.id.clone()],
+    ).await.expect("preserved audit");
+    let row = audit.next().await.expect("row").expect("audit row");
+    assert_eq!(row.get::<Option<String>>(0).expect("active audit"), None);
+    assert_eq!(
+        row.get::<String>(1).expect("original audit"),
+        "unknown-old-audit"
+    );
+    drop(audit);
+    // Repairing payload fields is not a durable disposition of unknown history.
+    reopened
+        .execute(
+            "UPDATE notification_candidates SET sender_jid = ? WHERE stanza_id = ?",
+            crate::db_params![
+                bad_sender.sender_jid.to_string(),
+                bad_sender.archive_stanza_id.id.clone()
+            ],
+        )
+        .await
+        .expect("manual sender repair");
+    reopened
+        .execute(
+            "UPDATE notification_candidates SET suppressed_reason = ? WHERE stanza_id = ?",
+            crate::db_params![
+                SuppressedReason::Xep0357NoRegistration.as_db_value(),
+                bad_audit.archive_stanza_id.id.clone()
+            ],
+        )
+        .await
+        .expect("manual audit repair");
+    NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("repeat boot after manual repair");
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        4,
+        "repeat boot reuses quarantine identities without releasing history"
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NOT NULL")
+            .await,
+        0
+    );
+    let mut tx = fixture.uow.begin().await.expect("stored intent");
+    let intent = EffectIntentRepository::load(&mut tx, sender_key)
+        .await
+        .expect("load")
+        .remove(0);
+    tx.commit().await.expect("release read");
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("canonical replay");
+    EffectDescendantRepository::lock_raw(&mut tx, sender_key)
+        .await
+        .expect("canonical lock");
+    assert!(
+        matches!(
+            NotificationOutboxStore::attach_candidate_lineage_in_transaction(
+                &mut tx,
+                sender_key,
+                &intent.semantic_key(),
+                &bad_sender
+            )
+            .await,
+            Err(IngressUowError::EffectIntentConflict)
+        ),
+        "canonical replay cannot adopt or settle quarantined work"
+    );
+    drop(tx);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        4
+    );
+    let mut rows = reopened
+        .query(
+            "SELECT delivery_id FROM notification_candidates WHERE stanza_id = ?",
+            crate::db_params![bad_identity.archive_stanza_id.id.clone()],
+        )
+        .await
+        .expect("identity evidence");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row")
+            .expect("quarantined row")
+            .get::<String>(0)
+            .expect("original identity"),
+        "invalid-delivery-id"
+    );
+    drop(rows);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_malformed_legacy_candidate_boot_isolated_and_retained() {
+    malformed_legacy_candidate_boot_isolated_and_retained(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_malformed_legacy_candidate_boot_isolated_and_retained() {
+    if let Some(fixture) = IngressFixture::postgres("malformed_notification").await {
+        malformed_legacy_candidate_boot_isolated_and_retained(fixture).await;
+    }
+}
+
+async fn scanned_parent_collected_before_adoption(fixture: IngressFixture) {
+    let store = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    for (label, malformed) in [("scanned-good", false), ("scanned-malformed", true)] {
+        let item = candidate(label);
+        legacy_parent(&fixture, &item).await;
+        store.insert_candidate(&item).await.expect("candidate");
+        if malformed {
+            store
+                .execute(
+                    "UPDATE notification_candidates SET sender_jid = ? WHERE stanza_id = ?",
+                    crate::db_params!["invalid sender", item.archive_stanza_id.id.clone()],
+                )
+                .await
+                .expect("malformed sender");
+        }
+    }
+    let now = chrono::Utc::now();
+    let recorded = load_page(&fixture.db, None).await.expect("startup scan");
+    assert_eq!(recorded.len(), 2);
+    let collected = crate::ingress_substrate::gc_expired_aliases(&fixture.db, now, budget())
+        .await
+        .expect("concurrent collector");
+    assert_eq!(collected.deleted_messages, 2);
+    for item in &recorded {
+        store
+            .adopt_recorded(item, AdoptionPhase::Ancestry)
+            .await
+            .expect("already-collected scan is benign");
+    }
+    assert_eq!(fixture.count("ingress_messages").await, 0);
+    assert_eq!(fixture.count("ingress_effect_intents").await, 0);
+    assert_eq!(
+        fixture.count("ingress_effect_descendants").await,
+        0,
+        "never recreate collected authority"
+    );
+    NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("boot after collection");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_scanned_parent_collected_before_adoption_is_benign() {
+    scanned_parent_collected_before_adoption(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_scanned_parent_collected_before_adoption_is_benign() {
+    if let Some(fixture) = IngressFixture::postgres("adoption_gc_race").await {
+        scanned_parent_collected_before_adoption(fixture).await;
+    }
+}
+
+async fn malformed_audit_before_stale_check_rebuild(fixture: IngressFixture) {
+    let store = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let mut item = candidate("stale-audit-check");
+    item.last_message_body = Some("frozen snapshot".to_owned());
+    legacy_parent(&fixture, &item).await;
+    store
+        .insert_candidate(&item)
+        .await
+        .expect("legacy candidate");
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("legacy schema fixture");
+    if fixture.db.driver() == DatabaseDriver::Sqlite {
+        let mut rows = tx.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'notification_candidates'", ()).await.expect("table shape");
+        let sql: String = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("table")
+            .get(0)
+            .expect("SQL");
+        drop(rows);
+        let stale = sql
+            .replace(
+                super::super::schema::NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL,
+                "class IN ('dm')",
+            )
+            .replace(
+                super::super::schema::NOTIFICATION_CANDIDATES_REASON_CHECK_SQL,
+                "reason IN ('offline_dm')",
+            );
+        assert_ne!(stale, sql);
+        tx.execute(
+            "ALTER TABLE notification_candidates RENAME TO notification_candidates_audit_seed",
+            (),
+        )
+        .await
+        .expect("legacy rename");
+        tx.execute(&stale, ()).await.expect("stale checks");
+        tx.execute(
+            "INSERT INTO notification_candidates SELECT * FROM notification_candidates_audit_seed",
+            (),
+        )
+        .await
+        .expect("legacy row");
+        tx.execute("DROP TABLE notification_candidates_audit_seed", ())
+            .await
+            .expect("drop fixture source");
+        tx.execute("PRAGMA ignore_check_constraints = ON", ())
+            .await
+            .expect("unchecked audit fixture");
+    } else {
+        tx.execute("ALTER TABLE notification_candidates DROP CONSTRAINT notification_candidates_suppressed_reason_check", ()).await.expect("old audit check");
+        let values = SuppressedReason::ALL
+            .iter()
+            .map(|reason| format!("'{}'", reason.as_db_value()))
+            .chain(std::iter::once("'unknown-old-audit'".to_owned()))
+            .collect::<Vec<_>>()
+            .join(",");
+        tx.execute(&format!("ALTER TABLE notification_candidates ADD CONSTRAINT notification_candidates_suppressed_reason_check CHECK (suppressed_reason IN ({values}))"), ()).await.expect("stale superset");
+    }
+    tx.execute(
+        "UPDATE notification_candidates SET suppressed_reason = ? WHERE stanza_id = ?",
+        crate::db_params!["unknown-old-audit", item.archive_stanza_id.id.clone()],
+    )
+    .await
+    .expect("old audit");
+    if fixture.db.driver() == DatabaseDriver::Sqlite {
+        tx.execute("PRAGMA ignore_check_constraints = OFF", ())
+            .await
+            .expect("restore checks");
+    }
+    tx.commit().await.expect("legacy fixture commit");
+    let reopened = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("quarantine before all CHECK migrations");
+    let mut rows = reopened.query("SELECT suppressed_reason,quarantined_suppressed_reason,quarantined_at_ms,last_message_body,delivery_id FROM notification_candidates WHERE stanza_id = ?", crate::db_params![item.archive_stanza_id.id.clone()]).await.expect("preserved evidence");
+    let row = rows.next().await.expect("row").expect("candidate");
+    assert_eq!(row.get::<Option<String>>(0).expect("active audit"), None);
+    assert_eq!(
+        row.get::<String>(1).expect("original audit"),
+        "unknown-old-audit"
+    );
+    assert!(row
+        .get::<Option<i64>>(2)
+        .expect("quarantine marker")
+        .is_some());
+    assert_eq!(
+        row.get::<String>(3).expect("frozen body"),
+        "frozen snapshot"
+    );
+    assert!(row
+        .get::<Option<String>>(4)
+        .expect("delivery identity")
+        .is_some());
+    drop(rows);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1
+    );
+    assert!(reopened
+        .pending_candidates(16)
+        .await
+        .expect("worker selection")
+        .is_empty());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_malformed_audit_survives_all_stale_check_rebuilds() {
+    malformed_audit_before_stale_check_rebuild(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_malformed_audit_survives_stale_check_rebuild() {
+    if let Some(fixture) = IngressFixture::postgres("quarantine_stale_check").await {
+        malformed_audit_before_stale_check_rebuild(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_canonical_candidate_lock_fences_other_parent_quarantine() {
+    let Some(fixture) = IngressFixture::postgres("candidate_quarantine_lock").await else {
+        return;
+    };
+    let store = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let item = candidate("shared-quarantine-target");
+    let first = legacy_parent(&fixture, &item).await;
+    let second = legacy_parent(&fixture, &item).await;
+    store.insert_candidate(&item).await.expect("candidate");
+    store
+        .execute(
+            "UPDATE notification_candidates SET sender_jid = ? WHERE stanza_id = ?",
+            crate::db_params!["invalid sender", item.archive_stanza_id.id.clone()],
+        )
+        .await
+        .expect("malformed snapshot");
+    let mut rows = store.query("SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,outboxed_at_ms,suppressed_reason,quarantined_at_ms FROM notification_candidates WHERE stanza_id = ?", crate::db_params![item.archive_stanza_id.id.clone()]).await.expect("startup snapshot");
+    let snapshot = rows.next().await.expect("row").expect("candidate");
+    drop(rows);
+    store
+        .execute(
+            "UPDATE notification_candidates SET sender_jid = ? WHERE stanza_id = ?",
+            crate::db_params![
+                item.sender_jid.to_string(),
+                item.archive_stanza_id.id.clone()
+            ],
+        )
+        .await
+        .expect("operator repair after startup scan");
+    let recorded = load_page(&fixture.db, None)
+        .await
+        .expect("recorded authority");
+    let first_recorded = recorded
+        .iter()
+        .find(|row| row.message == first)
+        .expect("first parent");
+    let second_recorded = recorded
+        .iter()
+        .find(|row| row.message == second)
+        .expect("second parent");
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("canonical acceptance");
+    NotificationOutboxStore::attach_candidate_lineage_in_transaction(
+        &mut tx,
+        first,
+        &first_recorded.intent.semantic_key(),
+        &item,
+    )
+    .await
+    .expect("canonical candidate custody");
+    assert!(
+        matches!(
+            store
+                .quarantine_recorded_candidate(second_recorded, &snapshot)
+                .await,
+            Err(IngressUowError::Database {
+                retry_class: crate::ingress_uow::DbRetryClass::CanonicalLockContention
+            })
+        ),
+        "quarantine cannot interleave with candidate acceptance by another parent"
+    );
+    tx.commit().await.expect("acceptance commit");
+    assert_eq!(
+        fixture
+            .count("notification_candidates WHERE quarantined_at_ms IS NOT NULL")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1,
+        "failed quarantine leaves no partial reference"
+    );
+    store
+        .quarantine_recorded_candidate(second_recorded, &snapshot)
+        .await
+        .expect("quarantine after acceptance releases lock");
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("duplicate replay");
+    assert!(matches!(
+        NotificationOutboxStore::attach_candidate_lineage_in_transaction(
+            &mut tx,
+            first,
+            &first_recorded.intent.semantic_key(),
+            &item
+        )
+        .await,
+        Err(IngressUowError::EffectIntentConflict)
+    ));
+    drop(tx);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        2
+    );
+    fixture.close().await;
+}

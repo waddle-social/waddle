@@ -22,7 +22,7 @@ use crate::server::session_janitors::{
 use crate::server::topology::bootstrap_fresh_xmpp_topology;
 use crate::server::trace::{attach_http_route_template, make_request_span, observe_http_response};
 use crate::server::{AppState, XmppConfig};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use axum::{middleware, routing::get, Router};
 use rustls_acme::tower::TowerHttp01ChallengeService;
 use std::future::IntoFuture as _;
@@ -1106,7 +1106,7 @@ async fn create_websocket_state(
     push_service
         .adopt_notification_ancestry()
         .await
-        .map_err(|_| anyhow::anyhow!("failed to adopt canonical notification ancestry"))?;
+        .context("failed to adopt canonical notification ancestry")?;
     let notification_settings_projection = Arc::new(
         crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
             pubsub_database_storage.database(),

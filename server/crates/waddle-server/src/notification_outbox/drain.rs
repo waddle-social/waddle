@@ -268,6 +268,7 @@ impl NotificationOutboxStore {
                   AND stanza_id = ?
                   AND class = ?
                   AND outboxed_at_ms IS NULL
+                  AND quarantined_at_ms IS NULL
                 "#,
                 crate::db_params![
                     next_policy_error_count,
@@ -313,6 +314,7 @@ impl NotificationOutboxStore {
               AND stanza_id = ?
               AND class = ?
               AND outboxed_at_ms IS NULL
+                  AND quarantined_at_ms IS NULL
             "#,
             crate::db_params![
                 next_policy_error_count,
@@ -355,6 +357,7 @@ impl NotificationOutboxStore {
                        delivery_id
                 FROM notification_candidates
                 WHERE outboxed_at_ms IS NULL
+                  AND quarantined_at_ms IS NULL
                   AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
                 ORDER BY created_at_ms ASC,
                          recipient_bare_jid ASC,
@@ -415,6 +418,7 @@ impl NotificationOutboxStore {
               AND stanza_id = ?
               AND class = ?
               AND outboxed_at_ms IS NULL
+                  AND quarantined_at_ms IS NULL
             "#,
                 crate::db_params![
                     crate::time::now_ms(),
@@ -723,6 +727,7 @@ pub(super) async fn mark_candidate_outboxed_tx(
               AND stanza_id = ?
               AND class = ?
               AND outboxed_at_ms IS NULL
+                  AND quarantined_at_ms IS NULL
             "#,
             crate::db_params![
                 now_ms,
@@ -761,6 +766,7 @@ pub(super) async fn record_candidate_suppressed_reason_tx(
               AND stanza_id = ?
               AND class = ?
               AND outboxed_at_ms IS NULL
+                  AND quarantined_at_ms IS NULL
             "#,
             crate::db_params![
                 reason.as_db_value(),

@@ -64,7 +64,8 @@ impl NotificationOutboxStore {
         self.execute(
             &format!(r#"
                 DELETE FROM notification_candidates
-                WHERE (
+                WHERE quarantined_at_ms IS NULL
+                  AND (
                     recipient_bare_jid,
                     conversation_jid,
                     sender_jid,
@@ -82,6 +83,7 @@ impl NotificationOutboxStore {
                            class
                     FROM notification_candidates
                     WHERE outboxed_at_ms IS NOT NULL
+                      AND quarantined_at_ms IS NULL
                       AND outboxed_at_ms < ?
                       {candidates_guard}
                       AND NOT EXISTS (SELECT 1 FROM notification_outbox_lineage AS lineage WHERE lineage.candidate_delivery_id = notification_candidates.delivery_id AND (lineage.settled_at_ms IS NULL OR lineage.settled_at_ms > ?))

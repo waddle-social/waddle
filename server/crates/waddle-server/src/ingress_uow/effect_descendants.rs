@@ -329,7 +329,7 @@ fn sql<'a>(tx: &Transaction<'_>, postgres: &'a str, sqlite: &'a str) -> &'a str 
     }
 }
 
-fn canonical_nowait_error(error: crate::db::DatabaseError) -> IngressUowError {
+pub(crate) fn canonical_nowait_error(error: crate::db::DatabaseError) -> IngressUowError {
     if let crate::db::DatabaseError::Internal(sqlx::Error::Database(database)) = &error {
         if database.code().as_deref() == Some("55P03") {
             return IngressUowError::Database {

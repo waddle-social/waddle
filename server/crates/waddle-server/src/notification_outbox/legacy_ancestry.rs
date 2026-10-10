@@ -8,6 +8,15 @@ use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NotificationActivity
 
 const PAGE: i64 = 64;
 
+#[path = "legacy_ancestry/quarantine.rs"]
+mod quarantine;
+
+#[derive(Clone, Copy)]
+enum AdoptionPhase {
+    QuarantinePreflight,
+    Ancestry,
+}
+
 #[cfg(test)]
 #[path = "legacy_ancestry_tests.rs"]
 mod tests;
@@ -36,6 +45,22 @@ impl NotificationOutboxStore {
     /// page and mutation is bounded; interrupted pending handoffs resume on the
     /// next startup. Settled bridges are never associated with newer jobs.
     pub(crate) async fn adopt_legacy_ancestry(&self) -> Result<(), NotificationOutboxError> {
+        self.adopt_legacy_ancestry_phase(AdoptionPhase::Ancestry)
+            .await
+    }
+
+    /// Preserve malformed audit values before a CHECK rebuild can reject them.
+    pub(super) async fn quarantine_legacy_candidates_before_checks(
+        &self,
+    ) -> Result<(), NotificationOutboxError> {
+        self.adopt_legacy_ancestry_phase(AdoptionPhase::QuarantinePreflight)
+            .await
+    }
+
+    async fn adopt_legacy_ancestry_phase(
+        &self,
+        phase: AdoptionPhase,
+    ) -> Result<(), NotificationOutboxError> {
         let mut tx = begin_bounded(&self.db).await?;
         if !has_table(&mut tx, "ingress_effect_descendants").await? {
             tx.commit().await?;
@@ -49,7 +74,7 @@ impl NotificationOutboxStore {
                 return Ok(());
             }
             for row in &recorded {
-                self.adopt_recorded(row).await?;
+                self.adopt_recorded(row, phase).await?;
             }
             let last = recorded
                 .last()
@@ -58,24 +83,39 @@ impl NotificationOutboxStore {
         }
     }
 
-    async fn adopt_recorded(&self, recorded: &Recorded) -> Result<(), IngressUowError> {
+    async fn adopt_recorded(
+        &self,
+        recorded: &Recorded,
+        phase: AdoptionPhase,
+    ) -> Result<(), NotificationOutboxError> {
         let Some((owner, conversation, archive)) = target(&recorded.intent) else {
             return Ok(());
         };
         let mut tx = begin_bounded(&self.db).await?;
         let mut rows = tx.query(
-            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,outboxed_at_ms,suppressed_reason FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND stanza_id_by = ? AND stanza_id = ? ORDER BY class LIMIT 16",
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,outboxed_at_ms,suppressed_reason,quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND stanza_id_by = ? AND stanza_id = ? ORDER BY class LIMIT 16",
             crate::db_params![owner.to_string(),conversation.to_string(),archive.by.to_string(),archive.id.clone()],
         ).await?;
         let mut candidates = Vec::new();
+        let mut malformed = Vec::new();
         while let Some(row) = rows.next().await? {
-            let candidate =
-                decode_candidate(&row).map_err(|_| IngressUowError::EffectIntentConflict)?;
             let suppressed: Option<String> = row.get(16)?;
-            if let Some(reason) = suppressed.as_deref() {
-                SuppressedReason::from_db_value(reason)
-                    .map_err(|_| IngressUowError::EffectIntentConflict)?;
-            }
+            let invalid_audit = suppressed
+                .as_deref()
+                .is_some_and(|reason| SuppressedReason::from_db_value(reason).is_err());
+            let quarantined = row.get::<Option<i64>>(17)?.is_some();
+            let candidate = match decode_candidate(&row) {
+                Ok(candidate) if !invalid_audit && !quarantined => candidate,
+                Ok(_) => {
+                    malformed.push(row);
+                    continue;
+                }
+                Err(error) if quarantine::is_candidate_data_error(&error) => {
+                    malformed.push(row);
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
             candidates.push(LegacyCandidate {
                 candidate,
                 outboxed: row.get::<Option<i64>>(15)?.is_some(),
@@ -84,6 +124,14 @@ impl NotificationOutboxStore {
         }
         drop(rows);
         tx.commit().await?;
+        for row in malformed {
+            run_with_retry(5, || self.quarantine_recorded_candidate(recorded, &row))
+                .await
+                .map_err(|error| error.last_error)?;
+        }
+        if matches!(phase, AdoptionPhase::QuarantinePreflight) {
+            return Ok(());
+        }
         for candidate in candidates {
             let active = run_with_retry(5, || self.attach_legacy_candidate(recorded, &candidate))
                 .await
@@ -112,7 +160,14 @@ impl NotificationOutboxStore {
             .delivery_id
             .ok_or(IngressUowError::EffectIntentConflict)?;
         let mut tx = begin_bounded(&self.db).await?;
-        EffectDescendantRepository::lock_raw(&mut tx, recorded.message).await?;
+        if !quarantine::lock_scanned_parent(&mut tx, recorded).await? {
+            tx.commit().await?;
+            return Ok(CandidateBridge::Unmatched);
+        }
+        if !Self::lock_unquarantined_candidate(&mut tx, &legacy.candidate).await? {
+            tx.commit().await?;
+            return Ok(CandidateBridge::Unmatched);
+        }
         if !source_matches(&mut tx, recorded, &legacy.candidate).await? {
             tx.commit().await?;
             return Ok(CandidateBridge::Unmatched);
@@ -240,6 +295,12 @@ impl NotificationOutboxStore {
                 .ok_or(IngressUowError::EffectIntentConflict)?;
             run_with_retry(5, || async {
                 let mut tx = begin_bounded(&self.db).await?;
+                if !quarantine::lock_scanned_parent(&mut tx, recorded).await?
+                    || !Self::lock_unquarantined_candidate(&mut tx, candidate).await?
+                {
+                    tx.commit().await?;
+                    return Ok(());
+                }
                 EffectDescendantRepository::settle_all_raw(&mut tx, id, chrono::Utc::now()).await?;
                 tx.commit().await?;
                 Ok(())
@@ -257,7 +318,14 @@ impl NotificationOutboxStore {
         job: Uuid,
     ) -> Result<(), IngressUowError> {
         let mut tx = begin_bounded(&self.db).await?;
-        EffectDescendantRepository::lock_raw(&mut tx, recorded.message).await?;
+        if !quarantine::lock_scanned_parent(&mut tx, recorded).await? {
+            tx.commit().await?;
+            return Ok(());
+        }
+        if !Self::lock_unquarantined_candidate(&mut tx, candidate).await? {
+            tx.commit().await?;
+            return Ok(());
+        }
         let query = if tx.driver() == DatabaseDriver::Postgres {
             "SELECT status,push_service_jid,node FROM notification_outbox WHERE job_id = ? FOR UPDATE NOWAIT"
         } else {

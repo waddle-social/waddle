@@ -266,10 +266,9 @@ impl PubSubStorage for InMemoryPubSubStorage {
             published_at: chrono::Utc::now(),
         };
         if let Some(position) = items.iter().position(|stored| stored.id == item_id) {
-            items[position] = stored;
-        } else {
-            items.push(stored);
+            items.remove(position);
         }
+        items.push(stored);
         let mut evicted_item_ids = Vec::new();
         let max_items = config.max_items as usize;
         if max_items > 0 && items.len() > max_items {

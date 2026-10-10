@@ -12,7 +12,7 @@ const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
     "groupchat_active_channel_mention",
     "groupchat_notify_all",
 ];
-const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
+pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
 const NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME: &str = "notification_candidates_class_check";
 const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
     "dm",
@@ -22,7 +22,7 @@ const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
     "active_channel_mention",
     "notify_all",
 ];
-const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
 const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
     "dm",
@@ -90,6 +90,8 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             last_message_body TEXT,
             reaction INTEGER NOT NULL DEFAULT 0,
             delivery_id TEXT,
+            quarantined_at_ms {i64_type},
+            quarantined_suppressed_reason TEXT,
             PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
         )
         "#
@@ -135,6 +137,15 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
         )
         "#
     )
+}
+
+fn copy_notification_candidates_sql(old_table: &str) -> String {
+    let columns = "recipient_bare_jid, conversation_jid, sender_jid, thread_id, \
+        stanza_id_by, stanza_id, class, reason, created_at_ms, policy_error_count, \
+        next_attempt_at_ms, outboxed_at_ms, suppressed_reason, noping, no_store, \
+        no_permanent_store, last_message_body, reaction, delivery_id, \
+        quarantined_at_ms, quarantined_suppressed_reason";
+    format!("INSERT INTO notification_candidates ({columns}) SELECT {columns} FROM {old_table}")
 }
 
 /// Returns `true` iff `definition` quotes `value` as a SQL string literal,
@@ -234,17 +245,8 @@ impl NotificationOutboxStore {
         let candidate_next_attempt_column = format!("next_attempt_at_ms {i64_type}");
         self.add_column_if_missing("notification_candidates", &candidate_next_attempt_column)
             .await?;
-        // Reason/class CHECK migrations rebuild the table from a legacy
-        // schema; they MUST run before the slice-2a columns are added
-        // because the rebuild INSERT only copies the original column
-        // set. Adding the slice-2a columns afterward then either creates
-        // the column for-the-first-time (legacy upgrade) or is a no-op
-        // (cold init, since `notification_candidates_table_sql` already
-        // declares them).
-        self.migrate_notification_candidates_reason_constraint(i64_type)
-            .await?;
-        self.migrate_notification_candidates_class_constraint(i64_type)
-            .await?;
+        // Add every copied column before CHECK rebuilds, which must preserve
+        // frozen payloads, scheduling identities and quarantine evidence.
         self.add_column_if_missing("notification_candidates", "suppressed_reason TEXT")
             .await?;
         self.add_column_if_missing(
@@ -275,6 +277,21 @@ impl NotificationOutboxStore {
         )
         .await?;
         self.add_column_if_missing("notification_candidates", "delivery_id TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "notification_candidates",
+            &format!("quarantined_at_ms {i64_type}"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "notification_candidates",
+            "quarantined_suppressed_reason TEXT",
+        )
+        .await?;
+        self.quarantine_legacy_candidates_before_checks().await?;
+        self.migrate_notification_candidates_reason_constraint(i64_type)
+            .await?;
+        self.migrate_notification_candidates_class_constraint(i64_type)
             .await?;
         self.migrate_notification_candidates_suppressed_reason_constraint(i64_type)
             .await?;
@@ -384,11 +401,11 @@ impl NotificationOutboxStore {
     async fn adopt_legacy_candidate_ids(&self) -> Result<(), NotificationOutboxError> {
         let sql = match self.db.driver() {
             crate::db::DatabaseDriver::Postgres => {
-                "UPDATE notification_candidates SET delivery_id = gen_random_uuid()::text WHERE ctid IN (SELECT ctid FROM notification_candidates WHERE delivery_id IS NULL LIMIT 128) AND delivery_id IS NULL"
+                "UPDATE notification_candidates SET delivery_id = gen_random_uuid()::text WHERE ctid IN (SELECT ctid FROM notification_candidates WHERE delivery_id IS NULL AND quarantined_at_ms IS NULL LIMIT 128) AND delivery_id IS NULL AND quarantined_at_ms IS NULL"
             }
             crate::db::DatabaseDriver::Sqlite => {
                 // Each row receives an independent UUIDv4 scheduler identity.
-                "UPDATE notification_candidates SET delivery_id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2, 3) || '-8' || substr(lower(hex(randomblob(2))), 2, 3) || '-' || lower(hex(randomblob(6))) WHERE rowid IN (SELECT rowid FROM notification_candidates WHERE delivery_id IS NULL LIMIT 128) AND delivery_id IS NULL"
+                "UPDATE notification_candidates SET delivery_id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2, 3) || '-8' || substr(lower(hex(randomblob(2))), 2, 3) || '-' || lower(hex(randomblob(6))) WHERE rowid IN (SELECT rowid FROM notification_candidates WHERE delivery_id IS NULL AND quarantined_at_ms IS NULL LIMIT 128) AND delivery_id IS NULL AND quarantined_at_ms IS NULL"
             }
         };
         loop {
@@ -459,36 +476,7 @@ impl NotificationOutboxStore {
         tx.execute(&notification_candidates_table_sql(i64_type, false), ())
             .await?;
         tx.execute(
-            r#"
-            INSERT INTO notification_candidates (
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            )
-            SELECT
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            FROM notification_candidates_old_reason_check
-            "#,
+            &copy_notification_candidates_sql("notification_candidates_old_reason_check"),
             (),
         )
         .await?;
@@ -569,36 +557,7 @@ impl NotificationOutboxStore {
         tx.execute(&notification_candidates_table_sql(i64_type, false), ())
             .await?;
         tx.execute(
-            r#"
-            INSERT INTO notification_candidates (
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            )
-            SELECT
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            FROM notification_candidates_old_class_check
-            "#,
+            &copy_notification_candidates_sql("notification_candidates_old_class_check"),
             (),
         )
         .await?;
@@ -691,50 +650,9 @@ impl NotificationOutboxStore {
         // `last_message_body` / `reaction` bits (Codex review on the
         // #780 PR).
         tx.execute(
-            r#"
-            INSERT INTO notification_candidates (
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms,
-                suppressed_reason,
-                noping,
-                no_store,
-                no_permanent_store,
-                last_message_body,
-                reaction,
-                delivery_id
-            )
-            SELECT
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms,
-                suppressed_reason,
-                noping,
-                no_store,
-                no_permanent_store,
-                last_message_body,
-                reaction,
-                delivery_id
-            FROM notification_candidates_old_suppressed_reason_check
-            "#,
+            &copy_notification_candidates_sql(
+                "notification_candidates_old_suppressed_reason_check",
+            ),
             (),
         )
         .await?;

@@ -368,12 +368,15 @@ fanout/coalescing copies all canonical ancestry before settling the predecessor;
 a transport ACK alone cannot discharge it. A new pending reference clears the
 frontier under the canonical lock. The retained-reference gauge includes rows
 whose frontier is unset, with references, descendants or missing receipts.
-Eligible age is measured from `retention_eligible_at`, not from execution
-completion or expiry. Existing rows with no recorded frontier are adopted
-conservatively at their first eligible maintenance observation; adoption starts
+Eligible age uses `retention_eligible_at` when present. For legacy NULL-frontier
+rows the CNPG gauge falls back to `terminal_at`; their old ages indicate adoption
+backlog, not overdue physical deletion. Existing rows with no recorded frontier
+are adopted conservatively at their first eligible maintenance observation; adoption starts
 the full tail and does not collect the row in that pass. Physical deletion
 requires a non-null, expired frontier. The Rust predicate parity test pins both
 collector dialects and both CNPG eligibility aggregates to this definition.
+Account for the adoption window when evaluating `IngressGcBacklog` and
+`IngressGcAge`; see the [cutover procedure](../../../docs/operations/relay-cutovers.md#extension-effect-authority-cutover-1660).
 
 GC takes the epoch lock before canonical rows and uses `FOR UPDATE SKIP LOCKED`.
 A `partial` result means bounded progress with more work pending, not failure;
@@ -401,6 +404,19 @@ delivery. The first approved payload is immutable on same-key retry. Durable
 push-service queue acceptance, a stable XEP-0357 item ID and provider delivery
 are distinct stages; APNs/Web Push without a durable key contract remain
 at-least-once.
+
+Retry spacing and individual claims are bounded; total uncertainty lifetime is
+not. Started provider/guest effects and approved outbox work may retry indefinitely
+until durable acceptance or an explicit terminal disposition settles custody.
+Current Web Push/APNs transient status classes also cover HTTP 5xx replies, so
+they conservatively set sticky uncertainty. Persistent endpoint failures can
+consume the per-node queue limit and retain canonical ancestry indefinitely.
+The known-error attempt ceiling does not bound previously uncertain work; a
+future classification/disposition policy must preserve that distinction rather
+than silently treating elapsed time as successful delivery.
+The failure-classification and capacity/disposition follow-up is
+[#1940](https://github.com/waddle-social/waddle/issues/1940), coordinated with
+[#1846](https://github.com/waddle-social/waddle/issues/1846) for diagnostics.
 
 V1025 adds the canonical retention frontier and descendant scheduling state.
 It appends to the checksummed ledger; do not run older writers after this

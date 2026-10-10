@@ -15,6 +15,7 @@ mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
 mod effect_descendants;
+pub(crate) use effect_descendants::canonical_nowait_error;
 mod error;
 pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;

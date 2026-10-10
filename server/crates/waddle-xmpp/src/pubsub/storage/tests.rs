@@ -495,3 +495,71 @@ async fn versioned_push_memory_orders_replays_and_preserves_retraction_watermark
     );
     assert!(!format!("{metadata:?}").contains("newer"));
 }
+
+#[tokio::test]
+async fn versioned_push_memory_republication_updates_latest_order_and_retention() {
+    let storage = InMemoryPubSubStorage::new();
+    let service: BareJid = "push@example.com".parse().expect("service");
+    let publisher: BareJid = "alice@example.com".parse().expect("publisher");
+    let node = PublicationNode::new("republication-order").expect("node");
+    storage
+        .get_or_create_node(&service, node.as_str())
+        .await
+        .expect("node");
+    let mut config = NodeConfig::push_service();
+    config.max_items = 2;
+    storage
+        .update_node_config(&service, node.as_str(), &config)
+        .await
+        .expect("config");
+    for (revision, id, body) in [(1, "A", "first A"), (2, "B", "B"), (3, "A", "updated A")] {
+        assert!(matches!(
+            storage
+                .publish_push_item_versioned(
+                    &service,
+                    &publisher,
+                    &node,
+                    &push_notification(body, id),
+                    PublicationVersion::new(revision, uuid::Uuid::new_v4()).expect("version")
+                )
+                .await
+                .expect("publish"),
+            VersionedPublishResult::Applied(_)
+        ));
+    }
+    let latest = storage
+        .get_items(&service, node.as_str(), Some(1), &[])
+        .await
+        .expect("latest");
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].id, "A");
+    assert_eq!(
+        latest[0].to_pubsub_item().payload,
+        push_notification("updated A", "A").payload
+    );
+    let result = storage
+        .publish_push_item_versioned(
+            &service,
+            &publisher,
+            &node,
+            &push_notification("C", "C"),
+            PublicationVersion::new(4, uuid::Uuid::new_v4()).expect("version"),
+        )
+        .await
+        .expect("publish C");
+    let VersionedPublishResult::Applied(result) = result else {
+        panic!("new publication must apply");
+    };
+    assert_eq!(result.evicted_item_ids, ["B"]);
+    let retained = storage
+        .get_items(&service, node.as_str(), None, &[])
+        .await
+        .expect("retained");
+    assert_eq!(
+        retained
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "C"]
+    );
+}

@@ -115,13 +115,13 @@ impl NotificationOutboxStore {
         candidate: &NotificationCandidate,
     ) -> Result<Option<uuid::Uuid>, DatabaseError> {
         tx.execute(
-            "UPDATE notification_candidates SET delivery_id = ? WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND delivery_id IS NULL",
+            "UPDATE notification_candidates SET delivery_id = ? WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND delivery_id IS NULL AND quarantined_at_ms IS NULL",
             crate::db_params![uuid::Uuid::new_v4().to_string(), candidate.recipient_bare_jid.to_string(),
                 candidate.conversation_jid.to_string(), candidate.thread_id.as_str(),
                 candidate.archive_stanza_id.id.clone(), candidate.class.as_db_value()],
         ).await?;
         let mut rows = tx.query(
-            "SELECT delivery_id FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ?",
+            "SELECT delivery_id FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL",
             crate::db_params![candidate.recipient_bare_jid.to_string(), candidate.conversation_jid.to_string(),
                 candidate.thread_id.as_str(), candidate.archive_stanza_id.id.clone(), candidate.class.as_db_value()],
         ).await?;
@@ -146,6 +146,10 @@ impl NotificationOutboxStore {
         effect: &waddle_xmpp::ingress::IngressEffectKey,
         candidate: &NotificationCandidate,
     ) -> Result<(), crate::ingress_uow::IngressUowError> {
+        crate::ingress_uow::EffectDescendantRepository::lock_raw(tx, message_key).await?;
+        if !Self::lock_unquarantined_candidate(tx, candidate).await? {
+            return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
+        }
         let Some(id) = Self::candidate_delivery_id_in_transaction(tx, candidate).await? else {
             return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
         };
@@ -185,6 +189,42 @@ impl NotificationOutboxStore {
         crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
             .await?;
         Ok(())
+    }
+
+    /// Caller holds its canonical parent first; retain the candidate lock through
+    /// ancestry mutation so another parent cannot quarantine between check/write.
+    pub(super) async fn lock_unquarantined_candidate(
+        tx: &mut crate::db::Transaction<'_>,
+        candidate: &NotificationCandidate,
+    ) -> Result<bool, crate::ingress_uow::IngressUowError> {
+        let query = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            "SELECT quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? FOR UPDATE NOWAIT"
+        } else {
+            "SELECT quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ?"
+        };
+        let mut rows = tx
+            .query(
+                query,
+                crate::db_params![
+                    candidate.recipient_bare_jid.to_string(),
+                    candidate.conversation_jid.to_string(),
+                    candidate.thread_id.as_str(),
+                    candidate.archive_stanza_id.id.clone(),
+                    candidate.class.as_db_value()
+                ],
+            )
+            .await
+            .map_err(crate::ingress_uow::canonical_nowait_error)?;
+        Ok(
+            match rows
+                .next()
+                .await
+                .map_err(crate::ingress_uow::canonical_nowait_error)?
+            {
+                Some(row) => row.get::<Option<i64>>(0)?.is_none(),
+                None => false,
+            },
+        )
     }
 
     /// Test/diagnostic helper: total count of `notification_candidates`
