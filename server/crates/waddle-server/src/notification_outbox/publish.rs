@@ -103,14 +103,13 @@ impl NotificationOutboxStore {
             .await?;
         let mut selected = Vec::new();
         while let Some(row) = rows.next().await? {
-            let job_id_raw: String = row.get(0)?;
             match decode_outbox_job(&row) {
                 Ok(job) => selected.push(job),
-                Err(error) => {
+                Err(_) => {
                     tracing::warn!(
-                        "failing malformed XEP-0357 notification outbox job fail-closed"
+                        "quarantining malformed XEP-0357 notification outbox job fail-closed"
                     );
-                    self.mark_malformed_outbox_job_failed(job_id_raw.as_str(), &error.to_string())
+                    self.mark_malformed_outbox_job_failed(&row, now_ms, stale_claimed_before_ms)
                         .await?;
                 }
             }
@@ -170,39 +169,70 @@ impl NotificationOutboxStore {
 
     async fn mark_malformed_outbox_job_failed(
         &self,
-        job_id: &str,
-        error: &str,
+        selected: &Row,
+        now_ms: i64,
+        stale_claimed_before_ms: i64,
     ) -> Result<(), NotificationOutboxError> {
-        let now_ms = crate::time::now_ms();
+        let job_id: String = selected.get(0)?;
+        let selected_status: String = selected.get(11)?;
+        let selected_token: Option<String> = selected.get(14)?;
         let mut tx = self.db.begin_immediate().await?;
-        lock_outbox_ancestry_tx(&mut tx, job_id).await?;
-        let changed = tx
-            .execute(
-                r#"
-            UPDATE notification_outbox
-            SET status = ?,
-                policy_error_count = 0,
-                last_error = ?,
-                next_attempt_at_ms = NULL,
-                claimed_at_ms = NULL,
-                claim_token = NULL,
-                updated_at_ms = ?
-            WHERE job_id = ?
-              AND status IN (?, ?)
-              AND queue_acceptance_may_exist = 0
-            "#,
-                crate::db_params![
-                    STATUS_FAILED,
-                    format!("malformed notification outbox job: {error}"),
-                    now_ms,
-                    job_id,
-                    STATUS_QUEUED,
-                    STATUS_IN_PROGRESS,
-                ],
-            )
-            .await?;
-        if changed > 0 {
-            settle_outbox_if_unowned_tx(&mut tx, job_id).await?;
+        if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+                .await?;
+        }
+        lock_outbox_ancestry_tx(&mut tx, &job_id).await?;
+        let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            " FOR UPDATE"
+        } else {
+            ""
+        };
+        let mut rows = tx.query(
+            &format!("SELECT job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, claim_token, summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist, claimed_at_ms, next_attempt_at_ms FROM notification_outbox WHERE job_id = ?{lock}"),
+            crate::db_params![job_id.as_str()],
+        ).await?;
+        let Some(current) = rows.next().await? else {
+            tx.commit().await?;
+            return Ok(());
+        };
+        drop(rows);
+        let status: String = current.get(11)?;
+        let token: Option<String> = current.get(14)?;
+        let still_due = match status.as_str() {
+            STATUS_QUEUED => current
+                .get::<Option<i64>>(21)?
+                .is_none_or(|next| next <= now_ms),
+            STATUS_IN_PROGRESS => current
+                .get::<Option<i64>>(20)?
+                .is_some_and(|claimed| claimed <= stale_claimed_before_ms),
+            _ => false,
+        };
+        if status != selected_status || token != selected_token || !still_due {
+            tx.commit().await?;
+            return Ok(());
+        }
+        let error = match decode_outbox_job(&current) {
+            Ok(_) => {
+                tx.commit().await?;
+                return Ok(());
+            }
+            Err(error) => error,
+        };
+        let uncertain = current.get::<i64>(19)? != 0;
+        // Any parent discovered after acquiring the child lock is taken NOWAIT.
+        // A conflicting late attachment aborts this disposition without settling.
+        if let Ok(id) = uuid::Uuid::parse_str(&job_id) {
+            crate::ingress_uow::EffectDescendantRepository::lock_all_nowait_raw(&mut tx, id)
+                .await?;
+        }
+        let changed = tx.execute(
+            "UPDATE notification_outbox SET status = ?, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status = ? AND (claim_token = ? OR (claim_token IS NULL AND ? = 0))",
+            crate::db_params![STATUS_FAILED, format!("malformed notification outbox job: {error}"), now_ms, job_id.as_str(), status.as_str(), token.as_deref(), i64::from(token.is_some())],
+        ).await?;
+        // Failed + uncertain is a parked quarantine, not provider refusal.
+        // Its frozen bytes and unresolved custody survive until verified disposition.
+        if changed > 0 && !uncertain {
+            settle_outbox_if_unowned_tx(&mut tx, &job_id).await?;
         }
         tx.commit().await?;
         Ok(())
@@ -1076,3 +1106,7 @@ mod tests {
 #[cfg(test)]
 #[path = "acceptance_fence_tests.rs"]
 mod acceptance_fence_tests;
+
+#[cfg(test)]
+#[path = "malformed_outbox_tests.rs"]
+mod malformed_outbox_tests;

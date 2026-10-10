@@ -137,6 +137,76 @@ impl NotificationOutboxStore {
             .transpose()
     }
 
+    /// Reused, already marked pending custody must retain the exact existing
+    /// approval and its live jobs, without inserting a new candidate or receipt.
+    pub(crate) async fn attach_existing_candidate_lineage_in_transaction(
+        tx: &mut crate::db::Transaction<'_>,
+        message_key: waddle_xmpp::ingress::MessageKey,
+        effect: &waddle_xmpp::ingress::IngressEffectKey,
+        expected: &NotificationCandidate,
+    ) -> Result<bool, crate::ingress_uow::IngressUowError> {
+        let query = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL FOR UPDATE NOWAIT"
+        } else {
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,suppressed_reason,outboxed_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id = ? AND class = ? AND quarantined_at_ms IS NULL"
+        };
+        let mut rows = tx
+            .query(
+                query,
+                crate::db_params![
+                    expected.recipient_bare_jid.to_string(),
+                    expected.conversation_jid.to_string(),
+                    expected.thread_id.as_str(),
+                    expected.archive_stanza_id.id.clone(),
+                    expected.class.as_db_value(),
+                ],
+            )
+            .await
+            .map_err(crate::ingress_uow::canonical_nowait_error)?;
+        let Some(row) = rows
+            .next()
+            .await
+            .map_err(crate::ingress_uow::canonical_nowait_error)?
+        else {
+            return Ok(false);
+        };
+        let mut stored = decode_candidate(&row)
+            .map_err(|_| crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+        let suppression = row.get::<Option<String>>(15)?;
+        if let Some(reason) = &suppression {
+            SuppressedReason::from_db_value(reason)
+                .map_err(|_| crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+        }
+        let delivery = stored.delivery_id;
+        let outboxed = row.get::<Option<i64>>(16)?.is_some();
+        // Scheduling counters/identity may evolve; admitted intrinsic approval
+        // (including exact archive pointer) must still agree completely.
+        stored.delivery_id = expected.delivery_id;
+        stored.policy_error_count = expected.policy_error_count;
+        if &stored != expected {
+            return Ok(false);
+        }
+        drop(rows);
+        if outboxed && suppression.is_none() {
+            let Some(id) = delivery else { return Ok(false) };
+            // Outboxed alone never discharges legacy unknown fanout. A live
+            // candidate bridge, or absent lineage, retains the original route.
+            let mut rows = tx.query(
+                "SELECT EXISTS(SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL), EXISTS(SELECT 1 FROM notification_outbox_lineage WHERE candidate_delivery_id = ?)",
+                crate::db_params![id.to_string(), id.to_string()],
+            ).await?;
+            let proof = rows
+                .next()
+                .await?
+                .ok_or(crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+            if proof.get::<bool>(0)? || !proof.get::<bool>(1)? {
+                return Ok(false);
+            }
+        }
+        Self::attach_candidate_lineage_in_transaction(tx, message_key, effect, expected).await?;
+        Ok(true)
+    }
+
     /// Canonical candidate custody follows all live jobs even when another
     /// parent arrives after T1 coalesced/fanned out the original candidate.
     /// A settled scheduling relation remains an explicit terminal disposition.
@@ -153,18 +223,27 @@ impl NotificationOutboxStore {
         let Some(id) = Self::candidate_delivery_id_in_transaction(tx, candidate).await? else {
             return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
         };
-        crate::ingress_uow::EffectDescendantRepository::attach_raw(tx, message_key, effect, id)
-            .await?;
         let mut rows = tx
             .query(
-                "SELECT outboxed_at_ms FROM notification_candidates WHERE delivery_id = ?",
-                crate::db_params![id.to_string()],
+                "SELECT outboxed_at_ms, EXISTS(SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL), suppressed_reason, EXISTS(SELECT 1 FROM notification_outbox_lineage WHERE candidate_delivery_id = ?) FROM notification_candidates WHERE delivery_id = ?",
+                crate::db_params![id.to_string(), id.to_string(), id.to_string()],
             )
             .await?;
         let Some(row) = rows.next().await? else {
             return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
         };
-        if row.get::<Option<i64>>(0)?.is_none() {
+        let outboxed = row.get::<Option<i64>>(0)?.is_some();
+        let pending_bridge = row.get::<bool>(1)?;
+        let suppression = row.get::<Option<String>>(2)?;
+        if let Some(reason) = &suppression {
+            SuppressedReason::from_db_value(reason)
+                .map_err(|_| crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+        }
+        let established_history = suppression.is_some() || row.get::<bool>(3)?;
+        drop(rows);
+        crate::ingress_uow::EffectDescendantRepository::attach_raw(tx, message_key, effect, id)
+            .await?;
+        if !outboxed {
             return Ok(());
         }
         let lineage_sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
@@ -186,8 +265,16 @@ impl NotificationOutboxStore {
         for job in jobs {
             crate::ingress_uow::EffectDescendantRepository::copy_raw(tx, id, job).await?;
         }
-        crate::ingress_uow::EffectDescendantRepository::settle_all_raw(tx, id, chrono::Utc::now())
+        // Existing unresolved bridges are durable unknown fanout, including
+        // legacy history. Copying known children cannot discharge that proof.
+        if !pending_bridge && established_history {
+            crate::ingress_uow::EffectDescendantRepository::settle_all_raw(
+                tx,
+                id,
+                chrono::Utc::now(),
+            )
             .await?;
+        }
         Ok(())
     }
 

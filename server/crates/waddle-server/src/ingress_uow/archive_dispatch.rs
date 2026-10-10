@@ -36,6 +36,96 @@ pub(crate) enum DispatchReadiness {
 pub(crate) struct ArchiveDispatchRepository;
 
 impl ArchiveDispatchRepository {
+    /// Supplemental offline custody beneath the original direct-route effect.
+    /// The caller holds canonical and physical pending locks. Existing resource
+    /// audiences stay frozen; no new archive position or effect is minted.
+    pub(crate) async fn pin_pending_handoff(
+        tx: &mut IngressUowTransaction<'_>,
+        key: MessageKey,
+        intent: &waddle_xmpp::ingress::IngressEffectIntent,
+        row: &waddle_xmpp::pending_delivery::PendingRow,
+        physical_id: &PendingRowId,
+    ) -> Result<bool, IngressUowError> {
+        use waddle_xmpp::{ingress::IngressEffectIntent, pending_delivery::PendingPayload};
+        let (IngressEffectIntent::RouteDirect { recipient, .. }, PendingPayload::Archived(stamp)) =
+            (intent, &row.payload)
+        else {
+            return Err(IngressUowError::EffectIntentConflict);
+        };
+        if recipient != &row.recipient {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        let recorded = super::EffectIntentRepository::load(tx, key).await?;
+        if !recorded.contains(intent) {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        let Some(ordinal) = recorded.iter().find_map(|recorded| match recorded {
+            IngressEffectIntent::ArchiveAuthoritative {
+                archive,
+                by,
+                stanza_id,
+                ordinal,
+                ..
+            } if archive == recipient && by == &stamp.by.to_bare() && stanza_id == stamp => {
+                Some(*ordinal)
+            }
+            _ => None,
+        }) else {
+            return Ok(false);
+        };
+        let mut rows = tx.transaction_mut().query(
+            "SELECT 1 FROM pending_delivery WHERE row_id = ? AND recipient_jid = ? AND payload_kind = 'archived' AND archive_stanza_by = ? AND archive_stanza_id = ?",
+            crate::db_params![physical_id.as_str(), recipient.to_string(), stamp.by.to_bare().to_string(), stamp.id.clone()],
+        ).await?;
+        if rows.next().await?.is_none() {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        drop(rows);
+        let ordinal = match ordinal {
+            Some(ordinal) => ordinal,
+            None => {
+                let mut rows = tx.transaction_mut().query(
+                    "SELECT archive_seq FROM mam_messages WHERE room_jid = ? AND (id = ? OR stanza_id = ?)",
+                    crate::db_params![recipient.to_string(), stamp.id.clone(), stamp.id.clone()],
+                ).await?;
+                let Some(stored) = rows.next().await? else {
+                    return Ok(false);
+                };
+                let ordinal = ArchiveOrdinal::from_storage(stored.get::<i64>(0)?)
+                    .map_err(|_| IngressUowError::EffectIntentConflict)?;
+                if rows.next().await?.is_some() {
+                    return Err(IngressUowError::EffectIntentConflict);
+                }
+                ordinal
+            }
+        };
+        let receipt = crate::ingress::receipt_key(intent)?;
+        for position in Self::positions(tx, key, &receipt).await? {
+            if position.archive == *recipient && position.ordinal != ordinal {
+                return Err(IngressUowError::EffectIntentConflict);
+            }
+        }
+        let insert = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
+            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?::uuid, ?, ?, '', ?) ON CONFLICT DO NOTHING"
+        } else {
+            "INSERT INTO ingress_archive_dispatch (archive_jid, archive_seq, message_key, kind, semantic_identity_hash, resource, pending_row_id) VALUES (?, ?, ?, ?, ?, '', ?) ON CONFLICT DO NOTHING"
+        };
+        tx.transaction_mut()
+            .execute(
+                insert,
+                crate::db_params![
+                    recipient.to_string(),
+                    ordinal.to_storage(),
+                    key.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec(),
+                    physical_id.as_str(),
+                ],
+            )
+            .await?;
+        Ok(true)
+    }
+
     pub(crate) async fn positions(
         tx: &mut IngressUowTransaction<'_>,
         key: MessageKey,
@@ -266,6 +356,11 @@ async fn validate_registration(
             .map(|other| &other.target)
             .collect::<Vec<_>>();
         let receipt = &obligation.receipt;
+        let supplemental_pending = receipt.kind.to_storage()
+            == waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag()
+            && expected
+                .iter()
+                .all(|target| matches!(target, DispatchTarget::Resource(_)));
         let mut rows = tx
             .transaction_mut()
             .query(
@@ -287,6 +382,11 @@ async fn validate_registration(
                 return Err(IngressUowError::EffectIntentConflict);
             }
             let target = if !pending.is_empty() {
+                if supplemental_pending {
+                    // A typed handoff pin adds physical custody without
+                    // rewriting the original direct-route resource audience.
+                    continue;
+                }
                 DispatchTarget::Pending(PendingRowId::new(pending))
             } else if resource.is_empty() {
                 DispatchTarget::ArchiveWide

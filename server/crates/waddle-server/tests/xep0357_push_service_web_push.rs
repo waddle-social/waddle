@@ -694,6 +694,112 @@ async fn force_retry_eligibility(store: &DatabasePushServiceStore) {
         .expect("reset retry deadline");
 }
 
+#[tokio::test]
+async fn earlier_provider_timeout_survives_later_known_failure() {
+    use waddle_xmpp::push::types::TransientFailure;
+    for failure in ["encoder", "parser", "automatic-disable"] {
+        let second = if failure == "automatic-disable" {
+            WebPushOutcome::SubscriptionGone { status: 410 }
+        } else {
+            WebPushOutcome::BadRequest { status: 400 }
+        };
+        let sender = PerEndpointSender::with_sequences(vec![(
+            "sticky-device".to_string(),
+            vec![
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::Timeout,
+                },
+                second,
+            ],
+        )]);
+        let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, failure).await.expect("node");
+        register_web_device(&store, &owner, node.node(), "web-sticky", "sticky-device").await;
+        let registrations =
+            waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+                .await
+                .expect("registrations");
+        store
+            .register_first_party_node_for_owner(&owner, "push.example.com", node.node(), None)
+            .await
+            .expect("registration");
+        let item_id = format!("unknown-before-{failure}");
+        store
+            .publish_registered_notification_from_user_server_with_publish_options(
+                "push.example.com",
+                node.node(),
+                &web_push_notification_item(&item_id, "alice@example.com", "dm", 1),
+                &owner,
+                None,
+            )
+            .await
+            .expect("first provider timeout");
+        assert_eq!(sender.calls_matching("sticky-device"), 1);
+        let db = store.database();
+        let conn = db.guard().await.expect("retry fixture");
+        conn.execute(
+            "UPDATE push_publish_jobs SET attempt_count = 50 WHERE item_id = ?",
+            db_params![&item_id],
+        )
+        .await
+        .expect("past known failure cap");
+        if failure == "parser" {
+            conn.execute(
+                "UPDATE push_publish_jobs SET payload_xml = 'not XML' WHERE item_id = ?",
+                db_params![&item_id],
+            )
+            .await
+            .expect("deterministic stored payload parse error");
+        }
+        drop(conn);
+        if failure == "automatic-disable" {
+            store
+                .publish_registered_notification_from_user_server_with_publish_options(
+                    "push.example.com",
+                    node.node(),
+                    &web_push_notification_item(
+                        "other-job-disables-registration",
+                        "alice@example.com",
+                        "dm",
+                        1,
+                    ),
+                    &owner,
+                    None,
+                )
+                .await
+                .expect("other job loses the last subscription");
+            use waddle_xmpp::push::PushSubscriptionStore as _;
+            assert!(registrations
+                .get_for_user(&owner.to_string())
+                .await
+                .expect("registration disabled")
+                .is_empty());
+        }
+        force_retry_eligibility(&store).await;
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("later known failure");
+        let mut rows = query(&store, "SELECT status, uncertain_send, next_retry_at_ms, claim_token, claimed_at_ms, published_at_ms FROM push_publish_jobs WHERE item_id = ?", db_params![&item_id]).await;
+        let row = rows.next().await.expect("row").expect("uncertain job");
+        assert_eq!(
+            row.get::<String>(0).expect("status"),
+            "queued",
+            "{failure} cannot resolve the earlier provider timeout"
+        );
+        assert_eq!(row.get::<i64>(1).expect("uncertainty"), 1);
+        assert!(row.get::<Option<i64>>(2).expect("retry deadline").is_some());
+        assert_eq!(row.get::<Option<String>>(3).expect("claim token"), None);
+        assert_eq!(row.get::<Option<i64>>(4).expect("claimed time"), None);
+        assert_eq!(row.get::<Option<i64>>(5).expect("published time"), None);
+        assert_eq!(
+            sender.calls_matching("sticky-device"),
+            if failure == "parser" { 1 } else { 2 }
+        );
+    }
+}
+
 // #1123: a retried publish job must not re-push to devices whose
 // previous attempt for the same item already succeeded — one
 // rate-limited sibling must not turn into duplicate OS notifications

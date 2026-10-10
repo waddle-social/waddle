@@ -66,6 +66,22 @@ async fn run_handoff(
     };
     submission.plan.intents = vec![intent.clone()];
     if hint.is_none() {
+        use waddle_xmpp::mam::MamStorage;
+        let IngressEffectIntent::ArchiveAuthoritative { stanza_id, .. } = &archive else {
+            panic!("archive fixture")
+        };
+        let mut message = waddle_xmpp::mam::ArchivedMessage::for_test(
+            submission.sender.clone().into(),
+            resource.to_bare().into(),
+        );
+        message.id = stanza_id.id.clone();
+        message.stanza_id = Some(stanza_id.clone());
+        waddle_xmpp::mam::SqlxMamStorage::open(fixture.db.database_url())
+            .await
+            .expect("real handoff archive")
+            .store_message(&resource.to_bare(), &message)
+            .await
+            .expect("committed archive position");
         submission.plan.intents.push(archive);
     }
     submission.plan.plan = vec![PlannedEffect::new(Effect::External(

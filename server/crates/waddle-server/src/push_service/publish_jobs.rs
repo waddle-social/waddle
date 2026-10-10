@@ -252,11 +252,15 @@ pub(super) async fn read_publish_job_claim_token_tx(
     tx: &mut crate::db::Transaction<'_>,
     job_id: &str,
 ) -> Result<Option<String>, XmppError> {
+    // The finalizer already holds canonical/owner/node locks. Retain this
+    // row lock so by-ID repair cannot raise uncertainty after its reread.
+    let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        "SELECT claim_token FROM push_publish_jobs WHERE job_id = ? FOR UPDATE NOWAIT"
+    } else {
+        "SELECT claim_token FROM push_publish_jobs WHERE job_id = ?"
+    };
     let mut rows = tx
-        .query(
-            "SELECT claim_token FROM push_publish_jobs WHERE job_id = ?",
-            crate::db_params![job_id],
-        )
+        .query(sql, crate::db_params![job_id])
         .await
         .map_err(|error| XmppError::internal(error.to_string()))?;
     let Some(row) = rows
@@ -297,30 +301,54 @@ pub(super) async fn read_publish_job_attempt_count_tx(
         .map_err(|error| XmppError::internal(error.to_string()))
 }
 
-pub(super) async fn mark_publish_job_failed_tx(
+/// A known failure of this attempt cannot resolve an earlier unknown send.
+/// Decide from the durable row atomically and retain the captured claim fence.
+pub(super) async fn record_known_publish_job_failure_tx(
     tx: &mut crate::db::Transaction<'_>,
-    job_id: &str,
+    job: &PushPublishJob,
     error: &str,
     now_ms: i64,
 ) -> Result<(), XmppError> {
-    let job = get_publish_job_tx(tx, job_id).await?;
-    tx.execute(
-        r#"
+    let mut rows = tx
+        .query(
+            r#"
         UPDATE push_publish_jobs
-        SET status = ?,
+        SET status = CASE WHEN uncertain_send = 1 THEN ? ELSE ? END,
             attempt_count = attempt_count + 1,
             last_error = ?,
-            next_retry_at_ms = NULL,
+            next_retry_at_ms = CASE WHEN uncertain_send = 1 THEN ? ELSE NULL END,
             claimed_at_ms = NULL,
+            claim_token = NULL,
             updated_at_ms = ?
-        WHERE job_id = ?
+        WHERE job_id = ? AND status = ? AND claim_token = ?
+        RETURNING status
         "#,
-        crate::db_params![PUBLISH_JOB_STATUS_FAILED, error, now_ms, job_id],
-    )
-    .await
-    .map_err(|error| XmppError::internal(error.to_string()))?;
-    if let Some(job) = job {
-        settle_notification_ancestry_tx(tx, &job).await?;
+            crate::db_params![
+                PUBLISH_JOB_STATUS_QUEUED,
+                PUBLISH_JOB_STATUS_FAILED,
+                error,
+                retry_at_ms(now_ms),
+                now_ms,
+                job.job_id(),
+                PUBLISH_JOB_STATUS_IN_PROGRESS,
+                job.claim_token()
+            ],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    else {
+        return Ok(());
+    };
+    let status: String = row
+        .get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    drop(rows);
+    if status == PUBLISH_JOB_STATUS_FAILED {
+        settle_notification_ancestry_tx(tx, job).await?;
     }
     Ok(())
 }
@@ -443,7 +471,7 @@ pub(super) async fn settle_terminal_notification_ancestry_tx(
 ) -> Result<(), XmppError> {
     let mut rows = tx
         .query(
-            "SELECT status FROM push_publish_jobs WHERE job_id = ?",
+            "SELECT status, uncertain_send FROM push_publish_jobs WHERE job_id = ?",
             crate::db_params![job.job_id()],
         )
         .await
@@ -458,10 +486,13 @@ pub(super) async fn settle_terminal_notification_ancestry_tx(
     let status: String = row
         .get(0)
         .map_err(|error| XmppError::internal(error.to_string()))?;
-    if matches!(
-        status.as_str(),
-        PUBLISH_JOB_STATUS_PUBLISHED | PUBLISH_JOB_STATUS_FAILED
-    ) {
+    let uncertain: i64 = row
+        .get(1)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    drop(rows);
+    if status == PUBLISH_JOB_STATUS_PUBLISHED
+        || (status == PUBLISH_JOB_STATUS_FAILED && uncertain == 0)
+    {
         settle_notification_ancestry_tx(tx, job).await?;
     }
     Ok(())
@@ -525,6 +556,28 @@ pub(super) async fn prune_publish_jobs_tx(
     node: &str,
     limit: i64,
 ) -> Result<(), XmppError> {
+    let mut count = tx
+        .query(
+            "SELECT COUNT(*) FROM push_publish_jobs WHERE node = ?",
+            crate::db_params![node],
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let row = count
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+        .ok_or_else(|| XmppError::internal("publish job count missing"))?;
+    let total: i64 = row
+        .get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    drop(count);
+    let excess = total
+        .saturating_sub(limit.max(0))
+        .clamp(0, MAX_PUBLISH_JOBS_PER_NODE);
+    if excess == 0 {
+        return Ok(());
+    }
     let has_foundation = if tx.driver() == crate::db::DatabaseDriver::Postgres {
         let mut rows = tx
             .query("SELECT to_regclass('ingress_effect_descendants')::text", ())
@@ -553,6 +606,8 @@ pub(super) async fn prune_publish_jobs_tx(
     } else {
         ""
     };
+    let cutoff = crate::time::now_ms()
+        .saturating_sub(crate::ingress_substrate::ALIAS_RETENTION.num_milliseconds());
     tx.execute(
         &format!(
             r#"
@@ -561,11 +616,14 @@ pub(super) async fn prune_publish_jobs_tx(
           {ancestry_guard}
           AND status IN (?, ?)
           AND updated_at_ms <= ?
-          AND job_id NOT IN (
+          AND job_id IN (
               SELECT job_id
               FROM push_publish_jobs
               WHERE node = ?
-              ORDER BY created_at_ms DESC, job_id DESC
+                {ancestry_guard}
+                AND status IN (?, ?)
+                AND updated_at_ms <= ?
+              ORDER BY created_at_ms ASC, job_id ASC
               LIMIT ?
         )
         "#
@@ -574,9 +632,12 @@ pub(super) async fn prune_publish_jobs_tx(
             node,
             PUBLISH_JOB_STATUS_PUBLISHED,
             PUBLISH_JOB_STATUS_FAILED,
-            crate::time::now_ms().saturating_sub(8 * 24 * 60 * 60 * 1_000),
+            cutoff,
             node,
-            limit
+            PUBLISH_JOB_STATUS_PUBLISHED,
+            PUBLISH_JOB_STATUS_FAILED,
+            cutoff,
+            excess
         ],
     )
     .await
@@ -1255,6 +1316,10 @@ impl DatabasePushServiceStore {
         Ok(attempts)
     }
 }
+
+#[cfg(test)]
+#[path = "publish_jobs_quota_tests.rs"]
+mod quota_tests;
 
 #[cfg(test)]
 mod tests {

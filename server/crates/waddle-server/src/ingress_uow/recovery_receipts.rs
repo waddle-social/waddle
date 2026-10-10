@@ -23,6 +23,7 @@ async fn pending_notification_sources(
     let waddle_xmpp::pending_delivery::PendingPayload::Archived(stamp) = &row.payload else {
         return Err(IngressUowError::EffectIntentConflict);
     };
+    let (routes, route_seed) = pending_route_notification_sources(tx, row).await?;
     let mut rows = tx.transaction_mut().query(
         "SELECT CAST(d.message_key AS TEXT), d.kind, d.semantic_identity_hash, i.payload_version, i.payload, d.pending_row_id FROM ingress_archive_dispatch d JOIN ingress_effect_intents i ON i.message_key = d.message_key AND i.kind = d.kind AND i.semantic_identity_hash = d.semantic_identity_hash WHERE d.archive_jid = ? AND d.pending_row_id <> '' AND d.archive_seq IN (SELECT archive_seq FROM ingress_archive_dispatch WHERE archive_jid = ? AND pending_row_id = ?) ORDER BY d.message_key, d.kind, d.semantic_identity_hash, d.pending_row_id",
         crate::db_params![row.recipient.to_string(), row.recipient.to_string(), row.id.as_str()],
@@ -43,22 +44,23 @@ async fn pending_notification_sources(
         let payload: Vec<u8> = source.get(4)?;
         let intent = IngressEffectIntent::decode_v1(kind, &payload)?;
         let pending_id: String = source.get(5)?;
-        let IngressEffectIntent::PendingDelivery {
-            mutation:
-                waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
-                    recipient,
-                    row_id,
-                    archive_stanza_id,
-                },
-        } = &intent
-        else {
-            return Err(IngressUowError::EffectIntentConflict);
-        };
-        if recipient != &row.recipient
-            || archive_stanza_id != stamp
-            || row_id.as_str() != pending_id
-        {
-            return Err(IngressUowError::EffectIntentConflict);
+        match &intent {
+            IngressEffectIntent::PendingDelivery {
+                mutation:
+                    waddle_xmpp::ingress::PendingDeliveryMutation::Archived {
+                        recipient,
+                        row_id,
+                        archive_stanza_id,
+                    },
+            } if recipient == &row.recipient
+                && archive_stanza_id == stamp
+                && row_id.as_str() == pending_id => {}
+            IngressEffectIntent::RouteDirect { .. }
+                if routes.contains(&PendingNotificationSource {
+                    message,
+                    intent: intent.clone(),
+                }) => {}
+            _ => return Err(IngressUowError::EffectIntentConflict),
         }
         let receipt = crate::ingress::receipt_key(&intent)?;
         if receipt.kind.to_storage() != kind || receipt.semantic_identity_hash.as_slice() != hash {
@@ -67,11 +69,11 @@ async fn pending_notification_sources(
         sources.push(PendingNotificationSource { message, intent });
     }
     drop(rows);
-    let (routes, route_seed) = pending_route_notification_sources(tx, row).await?;
     if !sources.is_empty() || route_seed {
         sources.extend(routes);
     }
     sources.sort_by_key(|source| source.message.to_storage());
+    sources.dedup();
     Ok(sources)
 }
 
@@ -233,6 +235,25 @@ pub(crate) enum PendingNotificationPreparation {
 }
 
 impl RecoveryReceiptRepository {
+    pub(crate) async fn attach_existing_pending_notification(
+        tx: &mut IngressUowTransaction<'_>,
+        message: MessageKey,
+        intent: &IngressEffectIntent,
+        envelope: &crate::ingress_substrate::MessageEnvelope,
+        row: &waddle_xmpp::pending_delivery::PendingRow,
+    ) -> Result<bool, IngressUowError> {
+        let Some(candidate) = pending_candidate_from_envelope(envelope, row)? else {
+            return Ok(false);
+        };
+        NotificationOutboxStore::attach_existing_candidate_lineage_in_transaction(
+            tx.transaction_mut(),
+            message,
+            &intent.semantic_key(),
+            &candidate,
+        )
+        .await
+    }
+
     /// Resolve host-owned pending provenance before taking any pending or
     /// candidate lock. Same-archive-copy parents must independently agree on
     /// the exact archived pointer and frozen notification, never just ordinal.

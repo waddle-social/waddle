@@ -1481,6 +1481,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
     }
 
     assert_pending_archive_reference_monitoring(&query_pool, &mut monitor_conn, &queries).await;
+    assert_descendant_reference_monitoring(&query_pool, &mut monitor_conn, &queries).await;
     assert_populated_nonterminal_monitoring(&query_pool, &mut monitor_conn, &queries).await;
 
     drop(monitor_conn);
@@ -1573,6 +1574,91 @@ async fn assert_pending_archive_reference_monitoring(
                 .execute(pool)
                 .await
                 .expect("release pending archive reference");
+        }
+    }
+}
+
+async fn assert_descendant_reference_monitoring(
+    pool: &sqlx::PgPool,
+    monitor: &mut sqlx::PgConnection,
+    queries: &[MonitoringQuery],
+) {
+    // V1025 can retain observer publications with descendants alone: no SM,
+    // delivery binding or archive dispatch exists for this terminal parent.
+    sqlx::raw_sql(
+        "INSERT INTO ingress_messages (message_key, digest_version, digest, created_at, terminal_at)
+         VALUES ('00000000-0000-0000-0000-000000000013', 1, decode(repeat('13', 32), 'hex'), '1970-01-01T01:00:00Z', '1970-01-01T02:00:00Z');
+         INSERT INTO ingress_effect_intents
+           (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload)
+         SELECT message_key, 0, 28, digest, 1, '{}'::bytea FROM ingress_messages
+         WHERE message_key = '00000000-0000-0000-0000-000000000013';
+         INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+         SELECT message_key, kind, semantic_identity_hash FROM ingress_effect_intents
+         WHERE message_key = '00000000-0000-0000-0000-000000000013';
+         INSERT INTO ingress_effect_descendants
+           (message_key, kind, semantic_identity_hash, descendant_key)
+         SELECT message_key, kind, semantic_identity_hash, 'monitoring-observer-publication'
+         FROM ingress_effect_intents
+         WHERE message_key = '00000000-0000-0000-0000-000000000013';",
+    )
+    .execute(pool)
+    .await
+    .expect("insert descendant-only observer monitoring fixture");
+
+    for unsettled in [true, false] {
+        let referenced = i64::from(unsettled);
+        // The two prior pending archive fixtures have already been released.
+        let unreferenced = 3 - referenced;
+        for name in ["waddle_ingress_messages", "waddle_ingress_cohort"] {
+            let query = queries
+                .iter()
+                .find(|query| query.name == name)
+                .expect("lifecycle query");
+            let rows = sqlx::query(&query.sql)
+                .fetch_all(&mut *monitor)
+                .await
+                .expect("query descendant lifecycle as pg_monitor");
+            let counts: std::collections::BTreeMap<String, i64> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.try_get("state").expect("lifecycle state"),
+                        row.try_get("count").expect("lifecycle count"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                counts.get("terminal_referenced").copied().unwrap_or(0),
+                referenced,
+                "{name}: unsettled observer descendants retain their terminal parent"
+            );
+            assert_eq!(
+                counts.get("terminal_unreferenced"),
+                Some(&unreferenced),
+                "{name}: settled descendants stop retaining their terminal parent"
+            );
+        }
+        let gc = queries
+            .iter()
+            .find(|query| query.name == "waddle_ingress_gc")
+            .expect("GC query");
+        let row = sqlx::query(&gc.sql)
+            .fetch_one(&mut *monitor)
+            .await
+            .expect("query descendant GC as pg_monitor");
+        assert_eq!(
+            row.try_get::<i64, _>("eligible_messages")
+                .expect("eligible count"),
+            unreferenced
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("retained_referenced_messages")
+                .expect("retained count"),
+            referenced
+        );
+        if unsettled {
+            sqlx::query("UPDATE ingress_effect_descendants SET settled_at = now() WHERE descendant_key = 'monitoring-observer-publication'")
+                .execute(pool).await.expect("settle observer descendant");
         }
     }
 }

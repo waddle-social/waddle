@@ -20,10 +20,10 @@ use super::dispatch;
 use super::nodes::get_node_tx;
 use super::publish_jobs::{
     claim_publish_job_tx, delivered_device_ids_for_acceptance_tx, get_publish_job_payload_xml_tx,
-    get_publish_job_tx, mark_publish_job_failed_tx, prune_delivery_attempts_tx,
-    prune_publish_jobs_tx, read_publish_job_attempt_count_tx, read_publish_job_claim_token_tx,
-    retry_at_ms, MAX_DELIVERY_ATTEMPTS_PER_NODE, MAX_PUBLISH_JOBS_PER_NODE,
-    PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES, PUBLISH_JOB_MAX_RETRY_AFTER_MS,
+    get_publish_job_tx, prune_delivery_attempts_tx, prune_publish_jobs_tx,
+    read_publish_job_attempt_count_tx, read_publish_job_claim_token_tx,
+    record_known_publish_job_failure_tx, retry_at_ms, MAX_DELIVERY_ATTEMPTS_PER_NODE,
+    MAX_PUBLISH_JOBS_PER_NODE, PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES, PUBLISH_JOB_MAX_RETRY_AFTER_MS,
     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS, PUBLISH_JOB_STATUS_FAILED, PUBLISH_JOB_STATUS_IN_PROGRESS,
     PUBLISH_JOB_STATUS_PUBLISHED, PUBLISH_JOB_STATUS_QUEUED,
 };
@@ -84,13 +84,6 @@ struct PublishWorkPhase1 {
     /// the bundle id the registration was made for; APNs dispatch
     /// refuses to send when it differs from the configured topic.
     app_id: String,
-    /// How many active devices were filtered out of this pass because
-    /// an earlier pass already delivered the item to them (#1123).
-    /// Finalize uses this to disable the "all devices returned an
-    /// encoder-bug status" FAILED classification: with a prior
-    /// success, a uniform failure among the REMAINING devices is not
-    /// "all devices" and the job must still complete.
-    prior_delivered_devices: usize,
 }
 
 /// Phase 1 can either continue into phase 2/3 with a [`PublishWorkPhase1`]
@@ -481,7 +474,6 @@ impl DatabasePushServiceStore {
             sealed_devices,
             payload_xml,
             app_id,
-            prior_delivered_devices,
         } = phase1;
 
         // ---- Phase 2: outside any tx — encrypt, sign, and send.
@@ -497,12 +489,10 @@ impl DatabasePushServiceStore {
         let parsed = match dispatch::parse_publish_payload(&payload_xml) {
             Ok(parsed) => Some(parsed),
             Err(error) if any_provider_ready => {
-                // Bad payload is permanent: mark the job failed in a
-                // tiny dedicated tx and return zero attempts.
+                // This attempt cannot send. Only a job without earlier
+                // uncertainty may take a terminal failure disposition.
                 self.mark_publish_job_failed_after_phase1(
-                    job.job_id(),
-                    job.owner_bare_jid(),
-                    job.node(),
+                    &job,
                     &format!("XEP-0357 payload parse failed: {error}"),
                     now_ms,
                 )
@@ -533,14 +523,8 @@ impl DatabasePushServiceStore {
 
         // ---- Phase 3: tx2 — record attempts and finalize the job.
         let attempted_devices = attempts.len();
-        self.finalize_publish_job(
-            &job,
-            &attempts,
-            prior_delivered_devices,
-            retention_limit,
-            now_ms,
-        )
-        .await?;
+        self.finalize_publish_job(&job, &attempts, retention_limit, now_ms)
+            .await?;
         Ok(Some(PushFanoutResult {
             item_id: job.item_id().to_string(),
             attempted_devices,
@@ -580,7 +564,7 @@ impl DatabasePushServiceStore {
             return Ok(Phase1Outcome::ShortCircuit(None));
         };
         let Some(push_node) = get_node_tx(&mut tx, job.node()).await? else {
-            mark_publish_job_failed_tx(&mut tx, job.job_id(), "Push node not found", now_ms)
+            record_known_publish_job_failure_tx(&mut tx, &job, "Push node not found", now_ms)
                 .await?;
             super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
             tx.commit()
@@ -592,7 +576,7 @@ impl DatabasePushServiceStore {
             })));
         };
         if push_node.status != PushNodeStatus::Active {
-            mark_publish_job_failed_tx(&mut tx, job.job_id(), "Push node not active", now_ms)
+            record_known_publish_job_failure_tx(&mut tx, &job, "Push node not active", now_ms)
                 .await?;
             super::publish_jobs::settle_terminal_notification_ancestry_tx(&mut tx, &job).await?;
             tx.commit()
@@ -624,9 +608,9 @@ impl DatabasePushServiceStore {
                         ..
                     }
                 ) {
-                    mark_publish_job_failed_tx(
+                    record_known_publish_job_failure_tx(
                         &mut tx,
-                        job.job_id(),
+                        &job,
                         "XEP-0357 registration not active",
                         now_ms,
                     )
@@ -655,6 +639,7 @@ impl DatabasePushServiceStore {
                     last_error = ?,
                     next_retry_at_ms = ?,
                     claimed_at_ms = NULL,
+                    claim_token = NULL,
                     updated_at_ms = ?
                 WHERE job_id = ? AND status = ?
                 "#,
@@ -685,12 +670,10 @@ impl DatabasePushServiceStore {
         // by earlier passes.
         let already_delivered =
             delivered_device_ids_for_acceptance_tx(&mut tx, job.job_id()).await?;
-        let device_count_before_filter = sealed_devices.len();
         let sealed_devices: Vec<_> = sealed_devices
             .into_iter()
             .filter(|device| !already_delivered.contains(&device.device_id))
             .collect();
-        let prior_delivered_devices = device_count_before_filter - sealed_devices.len();
         if sealed_devices.is_empty() {
             // Every remaining active device already received this
             // item (the failing sibling was disabled or unregistered
@@ -747,7 +730,6 @@ impl DatabasePushServiceStore {
             sealed_devices,
             payload_xml,
             app_id: push_node.app_id,
-            prior_delivered_devices,
         })))
     }
 
@@ -964,7 +946,6 @@ impl DatabasePushServiceStore {
         &self,
         job: &PushPublishJob,
         attempts: &[DispatchedAttempt],
-        prior_delivered_devices: usize,
         retention_limit: i64,
         now_ms: i64,
     ) -> Result<(), XmppError> {
@@ -994,6 +975,10 @@ impl DatabasePushServiceStore {
                 return Ok(());
             }
         }
+        let prior_uncertainty = get_publish_job_tx(&mut tx, job.job_id())
+            .await?
+            .ok_or_else(|| XmppError::internal("claimed publish job missing"))?
+            .uncertain_send;
         let mut any_device_disabled = false;
         for attempt in attempts {
             tx.execute(
@@ -1093,6 +1078,12 @@ impl DatabasePushServiceStore {
                 }
             }
         }
+        // Only this scheduler acceptance's confirmed deliveries resolve its
+        // logical notification. Include successes from this fenced pass as
+        // well as earlier retries, even if those devices are no longer active.
+        let has_confirmed_delivery = !delivered_device_ids_for_acceptance_tx(&mut tx, job.job_id())
+            .await?
+            .is_empty();
         let any_transient = attempts
             .iter()
             .any(|attempt| attempt_status_is_transient(attempt.status));
@@ -1111,7 +1102,7 @@ impl DatabasePushServiceStore {
                 .find(|attempt| attempt_status_is_transient(attempt.status))
                 .and_then(|attempt| attempt.last_error.clone())
                 .unwrap_or_else(|| "Web Push transient failure".to_string());
-            let unknown_send = job.uncertain_send
+            let unknown_send = prior_uncertainty
                 || attempts.iter().any(|attempt| {
                     matches!(
                         attempt.status,
@@ -1202,16 +1193,30 @@ impl DatabasePushServiceStore {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
             }
-        } else if let Some(uniform_status) = all_attempts_with_encoder_bug_signature(attempts)
-            .filter(|_| prior_delivered_devices == 0)
+        } else if prior_uncertainty
+            && !has_confirmed_delivery
+            && (attempts.is_empty()
+                || attempts.iter().any(|attempt| {
+                    !matches!(
+                        attempt.status,
+                        dispatch::ATTEMPT_STATUS_WEB_DELIVERED
+                            | apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED
+                            | dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB
+                    )
+                }))
         {
-            // The `prior_delivered_devices == 0` guard (#1123, Codex
-            // review): on a retry whose fan-out excluded devices that
-            // already received the item, a uniform encoder-bug status
-            // among the REMAINING devices is not "all devices" — the
-            // payload demonstrably encoded and delivered for a
-            // sibling, so the job completes as PUBLISHED (same
-            // outcome a single mixed-result pass would produce).
+            let error = attempts
+                .iter()
+                .find_map(|attempt| attempt.last_error.as_deref())
+                .unwrap_or("No definitive provider success after an earlier unknown send");
+            record_known_publish_job_failure_tx(&mut tx, job, error, now_ms).await?;
+        } else if let Some(uniform_status) =
+            all_attempts_with_encoder_bug_signature(attempts).filter(|_| !has_confirmed_delivery)
+        {
+            // A confirmed delivery for this acceptance (#1123) means a
+            // uniform encoder-bug status among remaining devices is not an
+            // all-device failure. The job then completes as PUBLISHED,
+            // matching a single pass with mixed success/permanent outcomes.
             // Every device returned the same encoder-bug status —
             // either all `web-bad-request` (the relay rejected our
             // payload shape) or all `web-payload-too-large` (every
@@ -1290,15 +1295,11 @@ impl DatabasePushServiceStore {
         Ok(())
     }
 
-    /// Mark a job that already passed phase 1 (so the
-    /// `in-progress`/`claimed_at_ms` are set) as permanently failed in
-    /// a tiny dedicated tx. Takes the same advisory locks as phase 3 so
-    /// concurrent operations on the same owner/node serialize cleanly.
+    /// Record a pre-send failure using the claim captured by phase 1. Earlier
+    /// uncertainty remains retryable; a successor claim cannot be mutated.
     async fn mark_publish_job_failed_after_phase1(
         &self,
-        job_id: &str,
-        owner_bare_jid: &BareJid,
-        node: &str,
+        job: &PushPublishJob,
         error: &str,
         now_ms: i64,
     ) -> Result<(), XmppError> {
@@ -1307,18 +1308,20 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        if let Some(job) = get_publish_job_tx(&mut tx, job_id).await? {
-            super::publish_jobs::lock_notification_ancestry_tx(&mut tx, &job).await?;
-        }
-        lock_owner_tx(&mut tx, owner_bare_jid, now_ms).await?;
-        lock_node_tx(&mut tx, node, now_ms).await?;
-        mark_publish_job_failed_tx(&mut tx, job_id, error, now_ms).await?;
+        super::publish_jobs::lock_notification_ancestry_tx(&mut tx, job).await?;
+        lock_owner_tx(&mut tx, job.owner_bare_jid(), now_ms).await?;
+        lock_node_tx(&mut tx, job.node(), now_ms).await?;
+        record_known_publish_job_failure_tx(&mut tx, job, error, now_ms).await?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "worker_uncertainty_tests.rs"]
+mod uncertainty_tests;
 
 #[cfg(test)]
 mod tests {

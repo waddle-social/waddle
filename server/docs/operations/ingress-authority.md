@@ -422,6 +422,13 @@ Known queued failures before provider dispatch stop at the existing 24-attempt
 ceiling when no prior send is uncertain. Their explicit terminal disposition
 settles custody without recording provider delivery; it does not override a
 started lease or sticky uncertainty.
+Later preflight, encoding or configuration failures do not resolve an earlier
+uncertain request. Without confirmed delivery for that exact queue job, such
+jobs keep their retryable state, diagnostic and backoff. Finalization uses fresh
+job-scoped evidence, including delivered siblings, for its existing logical
+success decision; a foreign job sharing the wire item ID supplies no proof.
+Transient outcomes still retry. Explicit registration revocation remains a
+separate cancellation decision.
 
 Outbox approval and queue uncertainty are separate durable state. New jobs begin
 with no possible acceptance; a claim-fenced marker is set before queue invocation.
@@ -436,6 +443,9 @@ XML: older writers could enqueue before freezing. Such rows cannot absorb new
 coalesced work, and CHECK-table rebuilds preserve their frozen payload/options,
 summary and uncertainty state. Clearing legacy uncertainty requires verified
 explicit disposition, not an age or attempt threshold.
+Malformed jobs leave the due queue in failed state so valid neighbors can run.
+Possible queue acceptance remains recorded, and their ancestry and row remain
+retained pending verified disposition; parking is not provider completion.
 
 Periodic archived-pending notification recovery requires canonical provenance
 from the host's recorded archive dispatch and archived pending effect, or an
@@ -449,6 +459,14 @@ uses the pending row's original receipt timestamp; the marker uses recovery time
 is not recreated. Production pending storage shares the Foundation database;
 only an explicitly noncanonical in-memory adapter permits raw legacy insertion.
 
+An archived ambiguous-send handoff also pins its physical pending row under the
+original `RouteDirect` authority and recorded archive ordinal in the same
+transaction. Notification recovery can therefore be delayed beyond the retention
+window without losing its source. Reusing an already-marked pending row transfers
+validated candidate/job custody to the later parent before committing the handoff;
+missing or conflicting evidence defers it. The supplemental pending pin preserves
+the original resource audience and releases when the physical row is consumed.
+
 Completed candidate/job pruning discovers a bounded batch, acquires canonical
 ancestry before child locks, skips locked children, then repeats every age,
 quarantine, descendant and lineage guard in a fresh statement. A late attachment
@@ -459,6 +477,16 @@ typed message context and sender. Conversation/thread/class alone is not
 message ancestry. Ambiguous fanout keeps a separate pending Foundation reference,
 persisted before child adoption, so later pruning or an interrupted startup cannot
 erase the uncertainty. Such history requires verified explicit disposition.
+Shared candidates are located by their cross-archive identity; their stored
+archive context and the frozen canonical sender, class and thread still have to
+match. Direct-message candidate lookup uses the sender conversation even when the
+recorded notification intent names the recipient conversation.
+
+At the per-node publish quota, pruning counts all retained jobs but selects only
+aged terminal rows with no canonical descendant evidence. A protected oldest row
+does not prevent a later safe row from supplying quota headroom. Both deployed
+ingress lifecycle cohorts classify unsettled descendant-only custody as
+`terminal_referenced`; settling the descendant removes that reference.
 
 V1025 adds the canonical retention frontier and descendant scheduling state.
 It appends to the checksummed ledger; do not run older writers after this

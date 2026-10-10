@@ -56,10 +56,12 @@ impl NotificationOutboxStore {
         recorded: &Recorded,
         candidate_row: &Row,
     ) -> Result<(), IngressUowError> {
-        let Some((owner, conversation, archive)) = target(&recorded.intent) else {
+        let Some((owner, _, archive)) = target(&recorded.intent) else {
             return Ok(());
         };
         // These are untrusted storage key components, used only at this SQL boundary.
+        let conversation: String = candidate_row.get(1)?;
+        let stored_by: String = candidate_row.get(4)?;
         let thread: String = candidate_row.get(3)?;
         let class: String = candidate_row.get(6)?;
         let mut tx = begin_bounded(&self.db).await?;
@@ -77,9 +79,9 @@ impl NotificationOutboxStore {
                 query,
                 crate::db_params![
                     owner.to_string(),
-                    conversation.to_string(),
+                    &conversation,
                     &thread,
-                    archive.by.to_string(),
+                    &stored_by,
                     &archive.id,
                     &class
                 ],
@@ -118,7 +120,7 @@ impl NotificationOutboxStore {
         // Preserve the unknown audit before removing it from the active CHECK.
         // Neither NULL nor outboxed_at is a receipt for this quarantined history.
         tx.execute("UPDATE notification_candidates SET quarantined_at_ms = COALESCE(quarantined_at_ms, ?), outboxed_at_ms = COALESCE(outboxed_at_ms, ?), quarantined_suppressed_reason = COALESCE(quarantined_suppressed_reason, ?), suppressed_reason = CASE WHEN ? = 1 THEN NULL ELSE suppressed_reason END WHERE recipient_bare_jid = ? AND conversation_jid = ? AND thread_id = ? AND stanza_id_by = ? AND stanza_id = ? AND class = ?",
-            crate::db_params![crate::time::now_ms(), crate::time::now_ms(), if invalid_audit { audit } else { None }, i64::from(invalid_audit), owner.to_string(), conversation.to_string(), thread, archive.by.to_string(), archive.id.clone(), class]).await?;
+            crate::db_params![crate::time::now_ms(), crate::time::now_ms(), if invalid_audit { audit } else { None }, i64::from(invalid_audit), owner.to_string(), conversation, thread, stored_by, archive.id.clone(), class]).await?;
         tx.commit().await?;
         if !already_quarantined {
             tracing::warn!("quarantined malformed legacy notification candidate; canonical custody remains pending");

@@ -147,7 +147,7 @@ impl NotificationOutboxStore {
             ""
         };
         let guards = format!(
-            "status IN (?, ?) AND updated_at_ms < ? {foundation_guard} AND NOT EXISTS (SELECT 1 FROM notification_outbox_lineage AS lineage WHERE lineage.job_id = notification_outbox.job_id AND (lineage.settled_at_ms IS NULL OR lineage.settled_at_ms > ?))"
+            "status IN (?, ?) AND (status != '{STATUS_FAILED}' OR queue_acceptance_may_exist = 0) AND updated_at_ms < ? {foundation_guard} AND NOT EXISTS (SELECT 1 FROM notification_outbox_lineage AS lineage WHERE lineage.job_id = notification_outbox.job_id AND (lineage.settled_at_ms IS NULL OR lineage.settled_at_ms > ?))"
         );
         let mut tx = self.begin_prune_transaction().await?;
         let mut rows = tx.query(

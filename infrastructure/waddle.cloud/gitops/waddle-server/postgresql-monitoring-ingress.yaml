@@ -122,6 +122,10 @@ data:
                 JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
                 WHERE dispatch.pending_row_id <> ''
               )
+              OR message.message_key IN (
+                SELECT descendant.message_key FROM ingress_effect_descendants descendant
+                WHERE descendant.settled_at IS NULL
+              )
               THEN 'terminal_referenced'
             ELSE 'terminal_unreferenced'
           END AS state,
@@ -161,6 +165,10 @@ data:
                   SELECT dispatch.message_key FROM ingress_archive_dispatch dispatch
                   JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id
                   WHERE dispatch.pending_row_id <> ''
+                )
+                OR message.message_key IN (
+                  SELECT descendant.message_key FROM ingress_effect_descendants descendant
+                  WHERE descendant.settled_at IS NULL
                 )
                 THEN 'terminal_referenced'
               ELSE 'terminal_unreferenced'

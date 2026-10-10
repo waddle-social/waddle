@@ -88,17 +88,12 @@ impl NotificationOutboxStore {
         recorded: &Recorded,
         phase: AdoptionPhase,
     ) -> Result<(), NotificationOutboxError> {
-        let Some((owner, conversation, archive)) = target(&recorded.intent) else {
-            return Ok(());
-        };
-        let mut tx = begin_bounded(&self.db).await?;
-        let mut rows = tx.query(
-            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,outboxed_at_ms,suppressed_reason,quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND stanza_id_by = ? AND stanza_id = ? ORDER BY class LIMIT 16",
-            crate::db_params![owner.to_string(),conversation.to_string(),archive.by.to_string(),archive.id.clone()],
-        ).await?;
+        let rows = run_with_retry(5, || self.recorded_candidate_rows(recorded))
+            .await
+            .map_err(|error| error.last_error)?;
         let mut candidates = Vec::new();
         let mut malformed = Vec::new();
-        while let Some(row) = rows.next().await? {
+        for row in rows {
             let suppressed: Option<String> = row.get(16)?;
             let invalid_audit = suppressed
                 .as_deref()
@@ -122,8 +117,6 @@ impl NotificationOutboxStore {
                 suppressed: suppressed.is_some(),
             });
         }
-        drop(rows);
-        tx.commit().await?;
         for row in malformed {
             run_with_retry(5, || self.quarantine_recorded_candidate(recorded, &row))
                 .await
@@ -148,6 +141,53 @@ impl NotificationOutboxStore {
             }
         }
         Ok(())
+    }
+
+    async fn recorded_candidate_rows(
+        &self,
+        recorded: &Recorded,
+    ) -> Result<Vec<Row>, IngressUowError> {
+        let Some((owner, conversation, archive)) = target(&recorded.intent) else {
+            return Ok(Vec::new());
+        };
+        let mut tx = begin_bounded(&self.db).await?;
+        if !quarantine::lock_scanned_parent(&mut tx, recorded).await? {
+            tx.commit().await?;
+            return Ok(Vec::new());
+        }
+        let conversation = if matches!(
+            &recorded.intent,
+            IngressEffectIntent::GroupchatNotificationRecovery { .. }
+        ) {
+            conversation.clone()
+        } else {
+            let envelope = crate::ingress_substrate::load_envelope(&mut tx, recorded.message)
+                .await?
+                .ok_or(IngressUowError::EffectIntentConflict)?;
+            let message = envelope.message();
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat {
+                conversation.clone()
+            } else {
+                // Historical offline capture names the recipient as conversation;
+                // DM candidate identity uses the frozen sender's bare JID instead.
+                message
+                    .from
+                    .as_ref()
+                    .ok_or(IngressUowError::EffectIntentConflict)?
+                    .to_bare()
+            }
+        };
+        let mut rows = tx.query(
+            "SELECT recipient_bare_jid,conversation_jid,sender_jid,thread_id,stanza_id_by,stanza_id,class,reason,policy_error_count,noping,no_store,no_permanent_store,last_message_body,reaction,delivery_id,outboxed_at_ms,suppressed_reason,quarantined_at_ms FROM notification_candidates WHERE recipient_bare_jid = ? AND conversation_jid = ? AND stanza_id = ? ORDER BY class LIMIT 16",
+            crate::db_params![owner.to_string(), conversation.to_string(), archive.id.clone()],
+        ).await?;
+        let mut result = Vec::new();
+        while let Some(row) = rows.next().await? {
+            result.push(row);
+        }
+        drop(rows);
+        tx.commit().await?;
+        Ok(result)
     }
 
     async fn attach_legacy_candidate(
@@ -528,15 +568,19 @@ async fn source_matches(
         candidate.class,
         NotificationClass::DirectMessage | NotificationClass::DirectMessageMention
     ) {
-        let reconstructed = direct_candidate_from_envelope(
+        if message.type_ == xmpp_parsers::message::MessageType::Groupchat {
+            return Ok(false);
+        }
+        if candidate.sender_jid.to_bare() == candidate.recipient_bare_jid {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        let (class, _) = super::direct_envelope::direct_message_intrinsics(
             message,
             &candidate.recipient_bare_jid,
-            &candidate.sender_jid,
-            &candidate.archive_stanza_id,
-        )
-        .map_err(|_| IngressUowError::EffectIntentConflict)?;
-        return Ok(reconstructed.class == candidate.class
-            && reconstructed.thread_id == candidate.thread_id);
+        );
+        // An alternate stored archive authority is not a new-candidate admission.
+        // Preserve its stamp; only frozen sender/class/root-thread metadata matches.
+        return Ok(class == candidate.class && candidate.thread_id == NotificationThreadId::root());
     }
     Ok(true)
 }

@@ -7,6 +7,11 @@ use waddle_xmpp::pending_delivery::{
 
 pub(crate) struct PendingReceiptRepository;
 
+pub(crate) struct ArchivedPendingCustody {
+    pub row_id: PendingRowId,
+    pub notification_outboxed: bool,
+}
+
 impl PendingReceiptRepository {
     pub(crate) async fn contains(
         tx: &mut IngressUowTransaction<'_>,
@@ -18,11 +23,11 @@ impl PendingReceiptRepository {
     /// Reuse custody for the same recipient archive copy across resource
     /// handoffs. Hold the pending row through ingress settlement so a consumer
     /// cannot delete it between proving custody and recording route progress.
-    pub(crate) async fn has_archived_custody(
+    pub(crate) async fn archived_custody(
         tx: &mut IngressUowTransaction<'_>,
         recipient: &jid::BareJid,
         stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
-    ) -> Result<bool, super::IngressUowError> {
+    ) -> Result<Option<ArchivedPendingCustody>, super::IngressUowError> {
         let postgres = tx.transaction_mut().driver() == crate::db::DatabaseDriver::Postgres;
         if postgres {
             // Same recipient lock as insert_in_transaction, including the
@@ -35,9 +40,9 @@ impl PendingReceiptRepository {
                 .await?;
         }
         let sql = if postgres {
-            "SELECT 1 FROM pending_delivery WHERE recipient_jid = ? AND payload_kind = 'archived' AND archive_stanza_by = ? AND archive_stanza_id = ? FOR UPDATE"
+            "SELECT row_id, notification_outboxed_at_ms FROM pending_delivery WHERE recipient_jid = ? AND payload_kind = 'archived' AND archive_stanza_by = ? AND archive_stanza_id = ? FOR UPDATE"
         } else {
-            "SELECT 1 FROM pending_delivery WHERE recipient_jid = ? AND payload_kind = 'archived' AND archive_stanza_by = ? AND archive_stanza_id = ?"
+            "SELECT row_id, notification_outboxed_at_ms FROM pending_delivery WHERE recipient_jid = ? AND payload_kind = 'archived' AND archive_stanza_by = ? AND archive_stanza_id = ?"
         };
         let mut rows = tx
             .transaction_mut()
@@ -50,7 +55,15 @@ impl PendingReceiptRepository {
                 ],
             )
             .await?;
-        Ok(rows.next().await?.is_some())
+        rows.next()
+            .await?
+            .map(|row| {
+                Ok(ArchivedPendingCustody {
+                    row_id: PendingRowId::new(row.get::<String>(0)?),
+                    notification_outboxed: row.get::<Option<i64>>(1)?.is_some(),
+                })
+            })
+            .transpose()
     }
 
     pub(crate) async fn insert(

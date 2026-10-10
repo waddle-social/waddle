@@ -20,11 +20,19 @@ fn budget() -> AliasGcBudget {
 }
 
 async fn legacy_parent(fixture: &IngressFixture, candidate: &NotificationCandidate) -> MessageKey {
+    legacy_parent_for_conversation(fixture, candidate, &candidate.conversation_jid).await
+}
+
+async fn legacy_parent_for_conversation(
+    fixture: &IngressFixture,
+    candidate: &NotificationCandidate,
+    recorded_conversation: &BareJid,
+) -> MessageKey {
     let key = MessageKey::new();
     let intent = IngressEffectIntent::NotificationActivityPreview {
         owner: candidate.recipient_bare_jid.clone(),
         mutation: NotificationActivityMutation::NotificationCandidate {
-            conversation: candidate.conversation_jid.clone(),
+            conversation: recorded_conversation.clone(),
             archive_stanza_id: candidate.archive_stanza_id.clone(),
             outcome: NotificationCandidateOutcome::Inserted,
         },
@@ -1026,5 +1034,210 @@ async fn sqlite_mixed_legacy_fanout_keeps_ambiguous_custody_pending() {
 async fn postgres_mixed_legacy_fanout_keeps_ambiguous_custody_pending() {
     if let Some(fixture) = IngressFixture::postgres("mixed_legacy_jobs").await {
         ambiguous_legacy_jobs_preserve_candidate(fixture, true).await;
+    }
+}
+
+async fn legacy_archive_aliases_share_candidate_custody(
+    fixture: IngressFixture,
+    stored_alias: bool,
+) {
+    let store = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let item = candidate("cross-archive-adoption");
+    let first = legacy_parent(&fixture, &item).await;
+    let mut alias = item.clone();
+    alias.archive_stanza_id.by = "legacy-archive.example.com".parse().expect("archive alias");
+    let second = legacy_parent_for_conversation(&fixture, &alias, &alias.recipient_bare_jid).await;
+    let mut foreign = alias.clone();
+    foreign.sender_jid = "bob@example.com/other-source"
+        .parse()
+        .expect("foreign source");
+    let rejected =
+        legacy_parent_for_conversation(&fixture, &foreign, &foreign.recipient_bare_jid).await;
+    store
+        .insert_candidate(&item)
+        .await
+        .expect("shared cross-archive candidate");
+    let mut wrong_class = item.clone();
+    wrong_class.class = NotificationClass::DirectMessageMention;
+    wrong_class.reason = NotificationReason::OfflineDirectMessageMention;
+    store
+        .insert_candidate(&wrong_class)
+        .await
+        .expect("mismatched legacy class");
+    let mut wrong_thread = item.clone();
+    wrong_thread.thread_id = NotificationThreadId::new("wrong-thread");
+    store
+        .insert_candidate(&wrong_thread)
+        .await
+        .expect("mismatched legacy thread");
+    if stored_alias {
+        store
+            .execute(
+                "UPDATE notification_candidates SET stanza_id_by = ? WHERE stanza_id = ?",
+                crate::db_params![
+                    alias.archive_stanza_id.by.to_string(),
+                    item.archive_stanza_id.id.clone()
+                ],
+            )
+            .await
+            .expect("stored legacy archive authority");
+    }
+    store
+        .adopt_legacy_ancestry()
+        .await
+        .expect("adopt both archive authorities");
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        2,
+        "both canonical archive aliases must retain the shared unresolved candidate"
+    );
+    let id = stable_legacy_id(&store, &item).await;
+    let mut rows = store
+        .query(
+            "SELECT stanza_id_by, delivery_id FROM notification_candidates WHERE stanza_id = ? AND class = 'dm' AND thread_id = ''",
+            crate::db_params![item.archive_stanza_id.id.clone()],
+        )
+        .await
+        .expect("stored identity");
+    let row = rows.next().await.expect("row").expect("candidate");
+    assert_eq!(
+        row.get::<String>(0).expect("stored authority"),
+        if stored_alias {
+            alias.archive_stanza_id.by.to_string()
+        } else {
+            item.archive_stanza_id.by.to_string()
+        }
+    );
+    assert_eq!(
+        row.get::<String>(1).expect("stable identity"),
+        id.to_string()
+    );
+    drop(rows);
+    store.adopt_legacy_ancestry().await.expect("repeat startup");
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        2
+    );
+    assert_eq!(
+        crate::ingress_substrate::gc_expired_aliases(&fixture.db, chrono::Utc::now(), budget())
+            .await
+            .expect("archive alias GC")
+            .deleted_messages,
+        1,
+        "only the mismatched-source parent is collectible"
+    );
+    let mut tx = fixture.uow.begin().await.expect("retained parents");
+    assert!(CanonicalMessageRepository::lock(&mut tx, first)
+        .await
+        .expect("first"));
+    assert!(CanonicalMessageRepository::lock(&mut tx, second)
+        .await
+        .expect("second"));
+    assert!(!CanonicalMessageRepository::lock(&mut tx, rejected)
+        .await
+        .expect("rejected source"));
+    tx.commit().await.expect("read commit");
+    drop(store);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_legacy_archive_aliases_retain_shared_candidate_custody() {
+    legacy_archive_aliases_share_candidate_custody(IngressFixture::sqlite().await, false).await;
+}
+#[tokio::test]
+async fn postgres_legacy_archive_aliases_retain_shared_candidate_custody() {
+    if let Some(f) = IngressFixture::postgres("legacy_cross_archive").await {
+        legacy_archive_aliases_share_candidate_custody(f, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_legacy_stored_archive_alias_preserves_intrinsic_validation() {
+    legacy_archive_aliases_share_candidate_custody(IngressFixture::sqlite().await, true).await;
+}
+#[tokio::test]
+async fn postgres_legacy_stored_archive_alias_preserves_intrinsic_validation() {
+    if let Some(f) = IngressFixture::postgres("legacy_stored_alias").await {
+        legacy_archive_aliases_share_candidate_custody(f, true).await;
+    }
+}
+
+async fn malformed_cross_archive_candidate_retains_exact_row_and_parents(fixture: IngressFixture) {
+    let store = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let item = candidate("malformed-cross-archive")
+        .with_last_message_body(Some("quarantine evidence".into()));
+    legacy_parent(&fixture, &item).await;
+    let mut alias = item.clone();
+    alias.archive_stanza_id.by = "legacy-archive.example.com".parse().expect("alias");
+    legacy_parent_for_conversation(&fixture, &alias, &alias.recipient_bare_jid).await;
+    store
+        .insert_candidate(&item)
+        .await
+        .expect("legacy candidate");
+    store.execute("UPDATE notification_candidates SET sender_jid = ?, stanza_id_by = ? WHERE stanza_id = ?", crate::db_params!["invalid sender", alias.archive_stanza_id.by.to_string(), item.archive_stanza_id.id.clone()]).await.expect("malformed stored alias");
+    let reopened = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("quarantine cross-archive preflight");
+    assert_eq!(
+        fixture
+            .count("notification_candidates WHERE quarantined_at_ms IS NOT NULL")
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        2
+    );
+    let mut rows = reopened.query("SELECT stanza_id_by, sender_jid, last_message_body FROM notification_candidates WHERE stanza_id = ?", crate::db_params![item.archive_stanza_id.id.clone()]).await.expect("original row");
+    let row = rows.next().await.expect("row").expect("candidate");
+    assert_eq!(
+        row.get::<String>(0).expect("by"),
+        alias.archive_stanza_id.by.to_string()
+    );
+    assert_eq!(row.get::<String>(1).expect("sender"), "invalid sender");
+    assert_eq!(row.get::<String>(2).expect("body"), "quarantine evidence");
+    drop(rows);
+    reopened
+        .adopt_legacy_ancestry()
+        .await
+        .expect("repeat startup");
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        2
+    );
+    assert_eq!(
+        crate::ingress_substrate::gc_expired_aliases(&fixture.db, chrono::Utc::now(), budget())
+            .await
+            .expect("quarantine GC")
+            .deleted_messages,
+        0
+    );
+    drop(reopened);
+    drop(store);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_malformed_cross_archive_alias_keeps_exact_quarantine_identity() {
+    malformed_cross_archive_candidate_retains_exact_row_and_parents(IngressFixture::sqlite().await)
+        .await;
+}
+#[tokio::test]
+async fn postgres_malformed_cross_archive_alias_keeps_exact_quarantine_identity() {
+    if let Some(f) = IngressFixture::postgres("malformed_cross_archive").await {
+        malformed_cross_archive_candidate_retains_exact_row_and_parents(f).await;
     }
 }
