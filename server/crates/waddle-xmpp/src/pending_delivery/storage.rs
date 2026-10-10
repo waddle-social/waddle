@@ -162,6 +162,13 @@ pub enum CustodyInsertOutcome {
     QuotaExceeded,
 }
 
+/// Trusted host backend capability, never inferred from wire IDs or row data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PendingNotificationCustodyMode {
+    CanonicalRequired,
+    NoncanonicalMemory,
+}
+
 /// Storage contract for `pending_delivery`.
 ///
 /// All operations are per-recipient (bare JID). FIFO ordering within a
@@ -170,6 +177,12 @@ pub enum CustodyInsertOutcome {
 /// order on replay.
 #[async_trait]
 pub trait PendingDeliveryStorage: Send + Sync {
+    /// Unknown adapters must prove canonical notification custody. Only an
+    /// explicitly noncanonical backend may use the raw notification path.
+    fn notification_custody_mode(&self) -> PendingNotificationCustodyMode {
+        PendingNotificationCustodyMode::CanonicalRequired
+    }
+
     /// The recipient quota used by ordinary and transactional pending inserts.
     fn quota_policy(&self) -> QuotaPolicy;
 
@@ -888,6 +901,10 @@ impl Default for InMemoryPendingDeliveryStorage {
 
 #[async_trait]
 impl PendingDeliveryStorage for InMemoryPendingDeliveryStorage {
+    fn notification_custody_mode(&self) -> PendingNotificationCustodyMode {
+        PendingNotificationCustodyMode::NoncanonicalMemory
+    }
+
     fn quota_policy(&self) -> QuotaPolicy {
         self.quota
     }

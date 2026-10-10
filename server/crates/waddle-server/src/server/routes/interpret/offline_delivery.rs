@@ -221,6 +221,7 @@ pub(crate) async fn bounce_offline_quota(
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum NotificationCandidateQueueOutcome {
     Completed,
+    CanonicalCompleted,
     Inserted,
     Duplicate,
     RetryLater,
@@ -282,6 +283,73 @@ async fn enqueue_xep0357_notification_candidate_from_committed_archive(
         &original_message,
     )
     .await
+}
+
+async fn recover_canonical_pending_notification(
+    state: &WebSocketState,
+    row: &waddle_xmpp::pending_delivery::PendingRow,
+) -> NotificationCandidateQueueOutcome {
+    let recovered = async {
+        let preparation = state
+            .deps
+            .protocol
+            .ingress
+            .prepare_pending_notification_recovery(row)
+            .await?;
+        let crate::ingress_uow::PendingNotificationPreparation::Ready(preparation) = preparation
+        else {
+            return Ok(crate::ingress::RecoverySweepOutcome::CanonicalGone);
+        };
+        let waddle_xmpp::pending_delivery::PendingPayload::Archived(stamp) = &row.payload else {
+            return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
+        };
+        let message = preparation.envelope().message();
+        let sender = message
+            .from
+            .as_ref()
+            .ok_or(crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+        let prepared = prepare_notification_candidate_for_message(
+            state,
+            &row.recipient,
+            &sender.to_bare(),
+            sender,
+            stamp,
+            message,
+        )
+        .await;
+        let policy = match prepared {
+            PreparedOfflineNotification::Prepared(candidate) => {
+                crate::ingress::RecoveryPolicyDecision::Deliver(candidate)
+            }
+            PreparedOfflineNotification::Suppressed => {
+                crate::ingress::RecoveryPolicyDecision::Suppressed
+            }
+            PreparedOfflineNotification::RetryLater => {
+                crate::ingress::RecoveryPolicyDecision::RetryLater
+            }
+        };
+        state
+            .deps
+            .protocol
+            .ingress
+            .settle_pending_notification_recovery(&preparation, policy)
+            .await
+    }
+    .await;
+    match recovered {
+        Ok(
+            crate::ingress::RecoverySweepOutcome::Completed
+            | crate::ingress::RecoverySweepOutcome::CanonicalGone
+            | crate::ingress::RecoverySweepOutcome::Missing,
+        ) => NotificationCandidateQueueOutcome::CanonicalCompleted,
+        Ok(crate::ingress::RecoverySweepOutcome::Pending) => {
+            NotificationCandidateQueueOutcome::RetryLater
+        }
+        Err(error) => {
+            warn!(recipient = %row.recipient, %error, "canonical pending notification recovery deferred");
+            NotificationCandidateQueueOutcome::RetryLater
+        }
+    }
 }
 
 fn notification_sender_jid(
@@ -594,13 +662,12 @@ pub(crate) async fn reconcile_xep0357_notification_candidates_for_sweep(
         else {
             continue;
         };
-        let outcome = enqueue_xep0357_notification_candidate_from_committed_archive(
-            state,
-            &row.recipient,
-            archive_stanza_id,
-        )
-        .await;
+        let outcome = match pending_storage.notification_custody_mode() {
+            waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode::CanonicalRequired => recover_canonical_pending_notification(state, &row).await,
+            waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode::NoncanonicalMemory => enqueue_xep0357_notification_candidate_from_committed_archive(state, &row.recipient, archive_stanza_id).await,
+        };
         match outcome {
+            NotificationCandidateQueueOutcome::CanonicalCompleted => completed += 1,
             NotificationCandidateQueueOutcome::Completed
             | NotificationCandidateQueueOutcome::Inserted
             | NotificationCandidateQueueOutcome::Duplicate => {
@@ -629,3 +696,7 @@ pub(crate) fn offline_quota_error() -> xmpp_parsers::stanza_error::StanzaError {
         "Recipient's offline message queue is full",
     )
 }
+
+#[cfg(test)]
+#[path = "offline_delivery_recovery_tests.rs"]
+mod recovery_tests;

@@ -14,7 +14,7 @@ use super::registration::ensure_active_registration_tx;
 use super::store::{lock_node_tx, lock_owner_tx, DatabasePushServiceStore};
 use super::types::{
     PushAcceptanceScope, PushBackingState, PushDeliveryAttempt, PushNodeStatus, PushPublishJob,
-    PushPublishJobEnqueue,
+    PushPublishJobEnqueue, PushQueueAcceptanceError,
 };
 
 pub(super) const PUBLISH_JOB_STATUS_QUEUED: &str = "queued";
@@ -770,6 +770,7 @@ impl DatabasePushServiceStore {
             None,
         )
         .await
+        .map_err(PushQueueAcceptanceError::into_error)
     }
 
     pub(super) async fn enqueue_canonical_notification_publish_job(
@@ -780,7 +781,7 @@ impl DatabasePushServiceStore {
         service: &BareJid,
         options: Option<&Element>,
         delivery: uuid::Uuid,
-    ) -> Result<PushPublishJobEnqueue, XmppError> {
+    ) -> Result<PushPublishJobEnqueue, PushQueueAcceptanceError> {
         self.enqueue_notification_publish_job(
             node,
             item,
@@ -800,7 +801,7 @@ impl DatabasePushServiceStore {
         push_service_jid: Option<&BareJid>,
         publish_options: Option<&Element>,
         canonical_delivery_id: Option<uuid::Uuid>,
-    ) -> Result<PushPublishJobEnqueue, XmppError> {
+    ) -> Result<PushPublishJobEnqueue, PushQueueAcceptanceError> {
         let mut tx = self
             .db
             .begin_immediate()
@@ -813,14 +814,13 @@ impl DatabasePushServiceStore {
             .await?
             .ok_or_else(|| XmppError::item_not_found(Some("Push node not found".to_string())))?;
         if push_node.status != PushNodeStatus::Active {
-            return Err(XmppError::item_not_found(Some(
-                "Push node not active".to_string(),
-            )));
+            return Err(XmppError::item_not_found(Some("Push node not active".to_string())).into());
         }
         if push_node.owner_bare_jid != *publisher {
             return Err(XmppError::forbidden(Some(
                 "Only the node owner may publish Push Service notifications".to_string(),
-            )));
+            ))
+            .into());
         }
         if let Some(push_service_jid) = push_service_jid {
             ensure_active_registration_tx(&mut tx, publisher, push_service_jid.as_str(), node)
@@ -882,13 +882,14 @@ impl DatabasePushServiceStore {
                     return Err(XmppError::conflict(Some(
                         "canonical delivery already accepted with a different target or payload"
                             .to_string(),
-                    )));
+                    ))
+                    .into());
                 }
                 let job_id = uuid::Uuid::parse_str(&existing_id)
                     .map_err(|_| XmppError::internal("invalid canonical acceptance identity"))?;
-                tx.commit()
-                    .await
-                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.commit().await.map_err(|error| {
+                    PushQueueAcceptanceError::Unknown(XmppError::internal(error.to_string()))
+                })?;
                 return Ok(PushPublishJobEnqueue {
                     job_id,
                     item_id,
@@ -920,7 +921,8 @@ impl DatabasePushServiceStore {
                     condition: waddle_xmpp::StanzaErrorCondition::ResourceConstraint,
                     error_type: waddle_xmpp::StanzaErrorType::Wait,
                     text: Some("durable notification queue is full".to_string()),
-                });
+                }
+                .into());
             }
         }
         let ancestry_job_id = canonical_delivery_id;
@@ -947,7 +949,7 @@ impl DatabasePushServiceStore {
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?
             else {
-                return Err(XmppError::internal("canonical acceptance disappeared"));
+                return Err(XmppError::internal("canonical acceptance disappeared").into());
             };
             let stored_job: String = row
                 .get(0)
@@ -979,15 +981,16 @@ impl DatabasePushServiceStore {
                 return Err(XmppError::conflict(Some(
                     "canonical delivery already accepted with a different target or payload"
                         .to_string(),
-                )));
+                ))
+                .into());
             }
             job_id = uuid::Uuid::parse_str(&stored_job)
                 .map_err(|_| XmppError::internal("invalid canonical scheduler acceptance"))?;
         }
         prune_publish_jobs_tx(&mut tx, node, MAX_PUBLISH_JOBS_PER_NODE).await?;
-        tx.commit()
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.commit().await.map_err(|error| {
+            PushQueueAcceptanceError::Unknown(XmppError::internal(error.to_string()))
+        })?;
 
         Ok(PushPublishJobEnqueue {
             job_id,

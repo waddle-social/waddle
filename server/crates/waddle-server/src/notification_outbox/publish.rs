@@ -34,7 +34,8 @@ impl NotificationOutboxStore {
                        summary_sender_jid,
                        summary_body,
                        approved_payload_xml,
-                       approved_publish_options_xml
+                       approved_publish_options_xml,
+                       queue_acceptance_may_exist
                 FROM notification_outbox
                 WHERE status IN (?, ?)
                 ORDER BY created_at_ms ASC, job_id ASC
@@ -77,7 +78,8 @@ impl NotificationOutboxStore {
                        summary_sender_jid,
                        summary_body,
                        approved_payload_xml,
-                       approved_publish_options_xml
+                       approved_publish_options_xml,
+                       queue_acceptance_may_exist
                 FROM notification_outbox
                 WHERE (
                     status = ?
@@ -155,7 +157,7 @@ impl NotificationOutboxStore {
                 // candidate SELECT but before this claim won. Freeze the
                 // current claimed row, never that earlier payload snapshot.
                 let mut rows = self.query(
-                    "SELECT job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, claim_token, summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml FROM notification_outbox WHERE job_id = ? AND status = ? AND claim_token = ?",
+                    "SELECT job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, claim_token, summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ? AND status = ? AND claim_token = ?",
                     crate::db_params![job.job_id.as_str(), STATUS_IN_PROGRESS, claim_token],
                 ).await?;
                 if let Some(row) = rows.next().await? {
@@ -187,6 +189,7 @@ impl NotificationOutboxStore {
                 updated_at_ms = ?
             WHERE job_id = ?
               AND status IN (?, ?)
+              AND queue_acceptance_may_exist = 0
             "#,
                 crate::db_params![
                     STATUS_FAILED,
@@ -306,9 +309,13 @@ impl NotificationOutboxStore {
                     job_id: job.job_id.clone(),
                 });
             }
-            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
-                job_id: job.job_id.clone(),
-            });
+            return self
+                .retry_or_fail_outcome_for_claimed_job(
+                    job,
+                    "notification outbox job targets a non-first-party XEP-0357 Push Service"
+                        .to_string(),
+                )
+                .await;
         }
 
         match xep0191_blocks_notification_job(job, blocking_storage).await {
@@ -321,9 +328,12 @@ impl NotificationOutboxStore {
                         job_id: job.job_id.clone(),
                     });
                 }
-                return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
-                    job_id: job.job_id.clone(),
-                });
+                return self
+                    .retry_or_fail_outcome_for_claimed_job(
+                        job,
+                        "recipient blocked sender before XEP-0357 publish".to_string(),
+                    )
+                    .await;
             }
             Ok(false) => {}
             Err(error) => {
@@ -360,9 +370,12 @@ impl NotificationOutboxStore {
                     job_id: job.job_id.clone(),
                 });
             }
-            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
-                job_id: job.job_id.clone(),
-            });
+            return self
+                .retry_or_fail_outcome_for_claimed_job(
+                    job,
+                    "first-party XEP-0357 registration is no longer active".to_string(),
+                )
+                .await;
         };
 
         if !self.claimed_job_is_current(job).await? {
@@ -371,7 +384,7 @@ impl NotificationOutboxStore {
             });
         }
 
-        let unread = if job.approved_payload.is_some() {
+        let unread = if job.queue_acceptance_may_exist {
             None
         } else {
             current_unread_count_for_job(job, inbox_storage).await?
@@ -395,9 +408,12 @@ impl NotificationOutboxStore {
                     job_id: job.job_id.clone(),
                 });
             }
-            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
-                job_id: job.job_id.clone(),
-            });
+            return self
+                .retry_or_fail_outcome_for_claimed_job(
+                    job,
+                    "unread suppression lost claim or possible queue acceptance".to_string(),
+                )
+                .await;
         }
         let message_count = unread.unwrap_or(0);
         // XEP-0357 `message-count` stays scoped to this conversation and
@@ -408,6 +424,11 @@ impl NotificationOutboxStore {
             .freeze_approved_item(job, &item, registration.publish_options.as_ref())
             .await?
         else {
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            });
+        };
+        let Some(prior_acceptance_may_exist) = self.begin_queue_acceptance(job).await? else {
             return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
                 job_id: job.job_id.clone(),
             });
@@ -435,11 +456,64 @@ impl NotificationOutboxStore {
                     item_id: result.item_id().to_string(),
                 })
             }
-            Err(error) => {
+            Err(crate::push_service::PushQueueAcceptanceError::KnownNotAccepted(error)) => {
+                self.record_known_queue_refusal(job, prior_acceptance_may_exist)
+                    .await?;
+                self.retry_or_fail_outcome_for_claimed_job(job, error.to_string())
+                    .await
+            }
+            Err(crate::push_service::PushQueueAcceptanceError::Unknown(error)) => {
                 self.retry_or_fail_outcome_for_claimed_job(job, error.to_string())
                     .await
             }
         }
+    }
+
+    /// Persist uncertainty before the queue call, including cancellation between
+    /// this commit and invocation. A stale claim cannot enter that boundary.
+    async fn begin_queue_acceptance(
+        &self,
+        job: &NotificationOutboxJob,
+    ) -> Result<Option<bool>, NotificationOutboxError> {
+        let mut tx = self.db.begin_immediate().await?;
+        // A no-op UPDATE returns the previous marker while locking this row on
+        // both engines. Read the durable value, not a potentially reused snapshot.
+        let mut rows = tx.query(
+            "UPDATE notification_outbox SET queue_acceptance_may_exist = queue_acceptance_may_exist WHERE job_id = ? AND status = ? AND claim_token = ? RETURNING queue_acceptance_may_exist",
+            crate::db_params![job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+        ).await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(None);
+        };
+        let prior_acceptance_may_exist = row.get::<i64>(0)? != 0;
+        if prior_acceptance_may_exist && !job.queue_acceptance_may_exist {
+            // Another invocation of this same first-attempt claim already began.
+            // Only that invocation may clear its newly created uncertainty.
+            return Ok(None);
+        }
+        drop(rows);
+        tx.execute(
+            "UPDATE notification_outbox SET queue_acceptance_may_exist = 1 WHERE job_id = ? AND status = ? AND claim_token = ?",
+            crate::db_params![job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+        ).await?;
+        tx.commit().await?;
+        Ok(Some(prior_acceptance_may_exist))
+    }
+
+    /// A definite refusal clears only the uncertainty created by this invocation.
+    /// Prior unknown/accepted work, or a successor claim, retains custody.
+    async fn record_known_queue_refusal(
+        &self,
+        job: &NotificationOutboxJob,
+        prior_acceptance_may_exist: bool,
+    ) -> Result<(), NotificationOutboxError> {
+        if !prior_acceptance_may_exist {
+            self.execute(
+                "UPDATE notification_outbox SET queue_acceptance_may_exist = 0 WHERE job_id = ? AND status = ? AND claim_token = ?",
+                crate::db_params![job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+            ).await?;
+        }
+        Ok(())
     }
 
     /// Freeze the approved notification before crossing the durable acceptance
@@ -628,6 +702,7 @@ impl NotificationOutboxStore {
             WHERE job_id = ?
               AND status = ?
               AND claim_token = ?
+              AND queue_acceptance_may_exist = 0
             "#,
                 crate::db_params![
                     job.job_id.as_str(),
@@ -665,6 +740,7 @@ impl NotificationOutboxStore {
             WHERE job_id = ?
               AND status = ?
               AND claim_token = ?
+              AND queue_acceptance_may_exist = 0
             "#,
                 crate::db_params![
                     STATUS_FAILED,
@@ -694,25 +770,25 @@ impl NotificationOutboxStore {
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let mut rows = tx
             .query(
-                "SELECT approved_payload_xml FROM notification_outbox WHERE job_id = ?",
+                "SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?",
                 crate::db_params![job.job_id.as_str()],
             )
             .await?;
-        let approved = match rows.next().await? {
-            Some(row) => row.get::<Option<String>>(0)?.is_some(),
+        let acceptance_may_exist = match rows.next().await? {
+            Some(row) => row.get::<i64>(0)? != 0,
             None => false,
         };
-        // Once approved work has crossed the acceptance boundary, a lost
-        // reply remains unknown. Attempt counts cannot turn it into refusal.
-        let (status, next_attempt_at_ms) = if !approved && next_attempt_count >= MAX_OUTBOX_ATTEMPTS
-        {
-            (STATUS_FAILED, None)
-        } else {
-            (
-                STATUS_QUEUED,
-                Some(now_ms.saturating_add(retry_delay_ms(next_attempt_count))),
-            )
-        };
+        // Freezing the preview is independent from queue acceptance. Only known
+        // unaccepted work reaches the cap; a lost reply remains unknown.
+        let (status, next_attempt_at_ms) =
+            if !acceptance_may_exist && next_attempt_count >= MAX_OUTBOX_ATTEMPTS {
+                (STATUS_FAILED, None)
+            } else {
+                (
+                    STATUS_QUEUED,
+                    Some(now_ms.saturating_add(retry_delay_ms(next_attempt_count))),
+                )
+            };
         let affected = tx
             .execute(
                 r#"
@@ -728,6 +804,7 @@ impl NotificationOutboxStore {
             WHERE job_id = ?
               AND status = ?
               AND claim_token = ?
+              AND (queue_acceptance_may_exist = 0 OR ? <> ?)
             "#,
                 crate::db_params![
                     status,
@@ -738,6 +815,8 @@ impl NotificationOutboxStore {
                     job.job_id.as_str(),
                     STATUS_IN_PROGRESS,
                     job.claim_token.as_deref(),
+                    status,
+                    STATUS_FAILED,
                 ],
             )
             .await?;
@@ -993,3 +1072,7 @@ mod tests {
             .is_empty());
     }
 }
+
+#[cfg(test)]
+#[path = "acceptance_fence_tests.rs"]
+mod acceptance_fence_tests;

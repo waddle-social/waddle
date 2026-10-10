@@ -510,8 +510,9 @@ pub(super) async fn insert_outbox_job_tx(
                 claim_token,
                 created_at_ms,
                 updated_at_ms,
-                published_at_ms
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, NULL, NULL, NULL, NULL, ?, ?, NULL)
+                published_at_ms,
+                queue_acceptance_may_exist
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, 0, 0, NULL, NULL, NULL, NULL, ?, ?, NULL, 0)
             ON CONFLICT DO NOTHING
             "#,
             crate::db_params![
@@ -567,6 +568,7 @@ pub(super) async fn merge_outbox_job_tx(
               AND class = ?
               AND status = ?
               AND approved_payload_xml IS NULL
+              AND queue_acceptance_may_exist = 0
             LIMIT 1
             "#,
             crate::db_params![
@@ -653,6 +655,7 @@ pub(super) async fn merge_outbox_job_tx(
         WHERE job_id = ?
           AND status = ?
           AND approved_payload_xml IS NULL
+              AND queue_acceptance_may_exist = 0
         "#,
             crate::db_params![
                 context_xml,

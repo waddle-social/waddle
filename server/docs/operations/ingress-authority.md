@@ -406,8 +406,9 @@ are distinct stages; APNs/Web Push without a durable key contract remain
 at-least-once.
 
 Retry spacing and individual claims are bounded; total uncertainty lifetime is
-not. Started provider/guest effects and approved outbox work may retry indefinitely
-until durable acceptance or an explicit terminal disposition settles custody.
+not. Started provider/guest effects and outbox work with possible queue acceptance
+may retry indefinitely until durable acceptance or an explicit terminal
+disposition settles custody. Frozen approval alone does not imply acceptance.
 Current Web Push/APNs transient status classes also cover HTTP 5xx replies, so
 they conservatively set sticky uncertainty. Persistent endpoint failures can
 consume the per-node queue limit and retain canonical ancestry indefinitely.
@@ -421,6 +422,37 @@ Known queued failures before provider dispatch stop at the existing 24-attempt
 ceiling when no prior send is uncertain. Their explicit terminal disposition
 settles custody without recording provider delivery; it does not override a
 started lease or sticky uncertainty.
+
+Outbox approval and queue uncertainty are separate durable state. New jobs begin
+with no possible acceptance; a claim-fenced marker is set before queue invocation.
+Only a proven pre-commit refusal under the same claim, with no prior possible
+acceptance, can clear it. Known unaccepted work uses the outbox attempt ceiling
+and rechecks unread-zero suppression. Commit/reply ambiguity, accepted work with
+failed backing, and prior uncertainty retain the marker across later refusals;
+local queue absence does not resolve a possible acceptance in another database.
+
+Unclassified legacy outbox rows keep possible acceptance, even without frozen
+XML: older writers could enqueue before freezing. Such rows cannot absorb new
+coalesced work, and CHECK-table rebuilds preserve their frozen payload/options,
+summary and uncertainty state. Clearing legacy uncertainty requires verified
+explicit disposition, not an age or attempt threshold.
+
+Periodic archived-pending notification recovery requires canonical provenance
+from the host's recorded archive dispatch and archived pending effect, or an
+exact deterministic `RouteDirect` handoff identity independently matched to
+recorded `ArchiveAuthoritative` provenance. It reconstructs
+notification data from the frozen canonical envelope, validates every coalesced
+parent independently, applies T0 policy outside the transaction, then locks and
+rechecks the parent set and still-live pending row. Candidate custody for every
+parent and the pending notification marker commit atomically. Candidate insertion
+uses the pending row's original receipt timestamp; the marker uses recovery time. Missing or conflicting authority defers; a consumed source
+is not recreated. Production pending storage shares the Foundation database;
+only an explicitly noncanonical in-memory adapter permits raw legacy insertion.
+
+Completed candidate/job pruning discovers a bounded batch, acquires canonical
+ancestry before child locks, skips locked children, then repeats every age,
+quarantine, descendant and lineage guard in a fresh statement. A late attachment
+cannot be hidden by the snapshot taken before waiting on its child row.
 
 Legacy outbox reconstruction requires stored candidate/job lineage or the exact
 typed message context and sender. Conversation/thread/class alone is not

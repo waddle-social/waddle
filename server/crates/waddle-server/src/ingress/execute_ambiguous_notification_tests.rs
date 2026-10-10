@@ -47,6 +47,15 @@ async fn recovered_attempt_notification(
     crash_phase: CrashPhase,
 ) {
     let state = socket_tests::create_test_websocket_state_with_durable_ingress(&fixture).await;
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .notification_custody_mode(),
+        waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode::CanonicalRequired,
+        "ambiguous handoff recovery must exercise the strict durable backend"
+    );
     let recipient: FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let blocking = Arc::new(InMemoryBlockingStorage::new());
     let blocking_storage: Arc<dyn BlockingStorage> = blocking.clone();
@@ -209,6 +218,17 @@ async fn recovered_attempt_notification(
     assert_eq!(rows.len(), usize::from(stores));
     if matches!(policy, RecipientPolicy::Notify) {
         assert!(matches!(rows[0].payload, PendingPayload::Archived(_)));
+        assert_eq!(
+            rows[0].id,
+            crate::ingress::ambiguous_offline_pending_id(key, &obligation.receipt),
+            "the physical row is derived from the recorded host route obligation"
+        );
+        assert_eq!(
+            fixture.count("ingress_effect_intents").await,
+            2,
+            "only RouteDirect and ArchiveAuthoritative authorize this handoff"
+        );
+        assert_eq!(fixture.count("ingress_archive_dispatch").await, 0);
     }
     if matches!(policy, RecipientPolicy::NoPermanentStore) {
         assert!(matches!(rows[0].payload, PendingPayload::Transient(_)));
@@ -227,6 +247,34 @@ async fn recovered_attempt_notification(
             .expect("candidate count"),
         expected_candidates
     );
+    if matches!(policy, RecipientPolicy::Notify) {
+        let conn = fixture.db.guard().await.expect("custody read");
+        let mut descendants = conn
+            .query(
+                "SELECT CAST(message_key AS TEXT), kind, semantic_identity_hash FROM ingress_effect_descendants WHERE settled_at IS NULL",
+                (),
+            )
+            .await
+            .expect("route descendant");
+        let descendant = descendants
+            .next()
+            .await
+            .expect("descendant row")
+            .expect("route retains recovered notification");
+        assert_eq!(
+            descendant.get::<String>(0).expect("key"),
+            key.to_storage().to_string()
+        );
+        assert_eq!(
+            descendant.get::<i64>(1).expect("kind"),
+            i64::from(obligation.receipt.kind.to_storage())
+        );
+        assert_eq!(
+            descendant.get::<Vec<u8>>(2).expect("hash"),
+            obligation.receipt.semantic_identity_hash.to_vec()
+        );
+        assert!(descendants.next().await.expect("only descendant").is_none());
+    }
     assert!(pending
         .list_unoutboxed_archived(64)
         .await

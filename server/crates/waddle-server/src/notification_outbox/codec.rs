@@ -140,6 +140,7 @@ pub(super) fn decode_outbox_job(
             .map(|raw| raw.parse::<Element>())
             .transpose()
             .map_err(|_| NotificationOutboxError::InvalidApprovedPayload)?,
+        queue_acceptance_may_exist: row.get::<i64>(19)? != 0,
         status: NotificationOutboxStatus::from_db_value(&row.get::<String>(11)?)?,
         attempt_count: row.get(12)?,
         policy_error_count: row.get(13)?,

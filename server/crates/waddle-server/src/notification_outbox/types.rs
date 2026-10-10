@@ -364,6 +364,8 @@ pub struct NotificationOutboxJob {
     pub(super) rich_summary: RichSummary,
     pub(super) approved_payload: Option<Element>,
     pub(super) approved_publish_options: Option<Element>,
+    /// A queue invocation may have committed; freezing XML alone is not acceptance.
+    pub(super) queue_acceptance_may_exist: bool,
     pub(super) status: NotificationOutboxStatus,
     pub(super) attempt_count: i64,
     pub(super) policy_error_count: i64,

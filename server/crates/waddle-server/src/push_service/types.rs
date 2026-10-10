@@ -363,6 +363,30 @@ impl PushPublishJob {
     }
 }
 
+/// Certainty about this queue invocation, distinct from provider delivery.
+/// Only errors before commit can prove this invocation was not accepted.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PushQueueAcceptanceError {
+    #[error("{0}")]
+    KnownNotAccepted(XmppError),
+    #[error("{0}")]
+    Unknown(XmppError),
+}
+
+impl From<XmppError> for PushQueueAcceptanceError {
+    fn from(error: XmppError) -> Self {
+        Self::KnownNotAccepted(error)
+    }
+}
+
+impl PushQueueAcceptanceError {
+    pub(super) fn into_error(self) -> XmppError {
+        match self {
+            Self::KnownNotAccepted(error) | Self::Unknown(error) => error,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PushPublishJobEnqueue {
     pub(super) job_id: uuid::Uuid,

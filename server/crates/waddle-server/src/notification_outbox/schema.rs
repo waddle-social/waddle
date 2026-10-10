@@ -124,6 +124,7 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
             summary_body TEXT,
             approved_payload_xml TEXT,
             approved_publish_options_xml TEXT,
+            queue_acceptance_may_exist INTEGER NOT NULL DEFAULT 1 CHECK (queue_acceptance_may_exist IN (0, 1)),
             status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
             attempt_count INTEGER NOT NULL DEFAULT 0,
             policy_error_count INTEGER NOT NULL DEFAULT 0,
@@ -335,18 +336,9 @@ impl NotificationOutboxStore {
             "policy_error_count INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
-        self.migrate_notification_outbox_class_constraint(i64_type)
-            .await?;
-        // #719: T1-resolved XEP-0357 §5.4 rich summary fields.
-        // `summary_sender_jid` is the `last-message-sender` (NULL unless
-        // the recipient opted in); `summary_body` is the (hint-stripped)
-        // `last-message-body`.
-        //
-        // These ALTERs run AFTER the class-constraint rebuild: that
-        // rebuild's INSERT…SELECT only copies the original column set,
-        // so columns added before it would be silently dropped on a
-        // legacy-CHECK DB (same ordering rule the candidates side
-        // documents above).
+        // Add frozen state before a CHECK rebuild, then copy it with the
+        // original fields. Older writers may have accepted even unfrozen jobs,
+        // including on another database: unclassified legacy rows retain custody.
         self.add_column_if_missing("notification_outbox", "summary_sender_jid TEXT")
             .await?;
         self.add_column_if_missing("notification_outbox", "summary_body TEXT")
@@ -354,6 +346,9 @@ impl NotificationOutboxStore {
         self.add_column_if_missing("notification_outbox", "approved_payload_xml TEXT")
             .await?;
         self.add_column_if_missing("notification_outbox", "approved_publish_options_xml TEXT")
+            .await?;
+        self.add_column_if_missing("notification_outbox", "queue_acceptance_may_exist INTEGER NOT NULL DEFAULT 1 CHECK (queue_acceptance_may_exist IN (0, 1))").await?;
+        self.migrate_notification_outbox_class_constraint(i64_type)
             .await?;
         self.execute(
             "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
@@ -368,7 +363,7 @@ impl NotificationOutboxStore {
         self.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_outbox_queued_coalesce \
              ON notification_outbox (recipient_bare_jid, push_service_jid, node, conversation_jid, thread_id, class) \
-             WHERE status = 'queued' AND approved_payload_xml IS NULL",
+             WHERE status = 'queued' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist = 0",
             (),
         )
         .await?;
@@ -841,6 +836,11 @@ impl NotificationOutboxStore {
                 class,
                 message_count,
                 context_xml,
+                summary_sender_jid,
+                summary_body,
+                approved_payload_xml,
+                approved_publish_options_xml,
+                queue_acceptance_may_exist,
                 status,
                 attempt_count,
                 policy_error_count,
@@ -864,6 +864,11 @@ impl NotificationOutboxStore {
                 class,
                 message_count,
                 context_xml,
+                summary_sender_jid,
+                summary_body,
+                approved_payload_xml,
+                approved_publish_options_xml,
+                queue_acceptance_may_exist,
                 status,
                 attempt_count,
                 policy_error_count,
@@ -1479,5 +1484,85 @@ mod tests {
             )
             .await
             .expect("reset to NULL");
+    }
+
+    #[tokio::test]
+    async fn stale_outbox_class_check_preserves_frozen_acceptance_state() {
+        let db = Database::in_memory("frozen-outbox-rebuild")
+            .await
+            .expect("db");
+        let legacy_sql = notification_outbox_table_sql("INTEGER", false)
+            .replace(NOTIFICATION_OUTBOX_CLASS_CHECK_SQL, "class IN ('dm')");
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(&legacy_sql, ())
+            .await
+            .expect("legacy table");
+        let payload = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+        let options = Element::builder("x", NS_DATA_FORMS).build();
+        for possible in [0_i64, 1] {
+            db.guard().await.expect("guard").execute(
+                "INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1, 1)",
+                crate::db_params![uuid::Uuid::new_v4().to_string(), "alice@example.com", "push.example.com", "web-node", "bob@example.com", "bob@example.com/phone", "[\"bob@example.com/phone\"]", possible.to_string(), "dm", String::from(&payload), "bob@example.com/phone", "frozen body", String::from(&payload), String::from(&options), possible, STATUS_QUEUED],
+            ).await.expect("legacy frozen job");
+        }
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("CHECK rebuild");
+        for _ in 0..2 {
+            let mut rows = store.query("SELECT summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist FROM notification_outbox ORDER BY thread_id", ()).await.expect("frozen state");
+            for possible in [0_i64, 1] {
+                let row = rows.next().await.expect("row").expect("frozen job");
+                assert_eq!(
+                    row.get::<String>(0).expect("summary sender"),
+                    "bob@example.com/phone"
+                );
+                assert_eq!(row.get::<String>(1).expect("summary body"), "frozen body");
+                assert_eq!(
+                    row.get::<String>(2).expect("payload"),
+                    String::from(&payload)
+                );
+                assert_eq!(
+                    row.get::<String>(3).expect("options"),
+                    String::from(&options)
+                );
+                assert_eq!(row.get::<i64>(4).expect("acceptance marker"), possible);
+            }
+            drop(rows);
+            store.initialize().await.expect("repeat initialization");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_outbox_rows_without_frozen_xml_keep_uncertain_custody() {
+        let db = Database::in_memory("unclassified-outbox-acceptance")
+            .await
+            .expect("db");
+        let legacy_sql = notification_outbox_table_sql("INTEGER", false)
+            .replace("            queue_acceptance_may_exist INTEGER NOT NULL DEFAULT 1 CHECK (queue_acceptance_may_exist IN (0, 1)),\n", "");
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(&legacy_sql, ())
+            .await
+            .expect("legacy table");
+        let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS).build();
+        db.guard().await.expect("guard").execute(
+            "INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, class, message_count, context_xml, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, 1)",
+            crate::db_params![uuid::Uuid::new_v4().to_string(), "alice@example.com", "push.example.com", "web-node", "bob@example.com", "bob@example.com/phone", "[\"bob@example.com/phone\"]", "dm", String::from(&context), STATUS_QUEUED],
+        ).await.expect("unclassified legacy job");
+        let store = NotificationOutboxStore::new(db).await.expect("upgrade");
+        let jobs = store.pending_outbox_jobs().await.expect("legacy jobs");
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].approved_payload.is_none());
+        assert!(
+            jobs[0].queue_acceptance_may_exist,
+            "historical unfrozen XML does not prove a queue on another database never accepted"
+        );
+        store.initialize().await.expect("repeat startup");
+        assert!(
+            store.pending_outbox_jobs().await.expect("legacy jobs")[0].queue_acceptance_may_exist
+        );
     }
 }

@@ -191,7 +191,7 @@ pub(super) async fn handoff(
     Ok(Some(settled))
 }
 
-fn pending_id(
+pub(crate) fn pending_id(
     key: MessageKey,
     receipt: &crate::ingress::decision::EffectReceiptKey,
 ) -> PendingRowId {

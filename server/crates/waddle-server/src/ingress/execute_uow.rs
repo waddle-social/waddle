@@ -38,6 +38,7 @@ pub(crate) use invite::PAUSE_BEFORE_INVITATION_SETTLEMENT;
 
 #[path = "execute_ambiguous_offline.rs"]
 mod ambiguous_offline;
+pub(crate) use ambiguous_offline::pending_id as ambiguous_offline_pending_id;
 
 #[path = "execute_detached.rs"]
 mod detached;

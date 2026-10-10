@@ -1078,6 +1078,7 @@ mod tests {
             rich_summary: RichSummary::minimal(),
             approved_payload: None,
             approved_publish_options: None,
+            queue_acceptance_may_exist: false,
             status: NotificationOutboxStatus::Queued,
             attempt_count: 0,
             policy_error_count: 0,

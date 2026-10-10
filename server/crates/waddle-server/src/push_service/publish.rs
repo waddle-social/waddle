@@ -11,7 +11,7 @@ use xmpp_parsers::iq::Iq;
 use super::publish_jobs::MAX_DELIVERY_ATTEMPTS_PER_NODE;
 use super::pubsub_backing::push_pubsub_item_with_stable_id;
 use super::store::DatabasePushServiceStore;
-use super::types::{PushFanoutResult, PushPublishJobEnqueue};
+use super::types::{PushFanoutResult, PushPublishJobEnqueue, PushQueueAcceptanceError};
 
 impl DatabasePushServiceStore {
     /// Enqueue and immediately try a trusted user-server XEP-0357 publish job.
@@ -78,7 +78,7 @@ impl DatabasePushServiceStore {
         publisher: &BareJid,
         publish_options: Option<&Element>,
         delivery_id: uuid::Uuid,
-    ) -> Result<PushPublishJobEnqueue, XmppError> {
+    ) -> Result<PushPublishJobEnqueue, PushQueueAcceptanceError> {
         let item = push_pubsub_item_with_stable_id(item);
         let accepted = self
             .enqueue_canonical_notification_publish_job(
@@ -91,7 +91,8 @@ impl DatabasePushServiceStore {
             )
             .await?;
         self.complete_versioned_publish_backing(&accepted.job_id.to_string())
-            .await?;
+            .await
+            .map_err(PushQueueAcceptanceError::Unknown)?;
         Ok(accepted)
     }
 

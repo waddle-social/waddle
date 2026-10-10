@@ -5,7 +5,8 @@ use crate::{
     ingress_substrate::MessageEnvelope,
     ingress_uow::{
         settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
-        EffectReceiptRepository, IngressUowError, IngressUowTransaction, RecoveryCompletion,
+        EffectReceiptRepository, IngressUowError, IngressUowTransaction,
+        PendingNotificationPreparation, PendingNotificationRecovery, RecoveryCompletion,
         RecoveryReceiptRepository,
     },
     notification_outbox::{NotificationCandidate, NotificationCandidateInsertOutcome},
@@ -47,6 +48,72 @@ pub enum RecoverySweepOutcome {
 }
 
 impl IngressAuthority {
+    pub(crate) async fn prepare_pending_notification_recovery(
+        &self,
+        row: &waddle_xmpp::pending_delivery::PendingRow,
+    ) -> Result<PendingNotificationPreparation, IngressUowError> {
+        let admission = self.admission.read().await;
+        if self.cancellation.is_cancelled() || !*admission {
+            return Err(IngressUowError::AuthorityStopped);
+        }
+        super::super::ingress_uow::run_with_retry(5, || async {
+            let mut tx = self
+                .uow
+                .begin_read_committed_with_timeouts(
+                    std::time::Duration::from_millis(100),
+                    std::time::Duration::from_millis(250),
+                )
+                .await?;
+            let prepared =
+                RecoveryReceiptRepository::prepare_pending_notification(&mut tx, row).await?;
+            tx.commit().await?;
+            Ok(prepared)
+        })
+        .await
+        .map_err(|failure| failure.last_error)
+    }
+
+    pub(crate) async fn settle_pending_notification_recovery(
+        &self,
+        prepared: &PendingNotificationRecovery,
+        policy: RecoveryPolicyDecision,
+    ) -> Result<RecoverySweepOutcome, IngressUowError> {
+        let candidate = match &policy {
+            RecoveryPolicyDecision::Deliver(candidate) => Some(candidate.as_ref()),
+            RecoveryPolicyDecision::Suppressed => None,
+            RecoveryPolicyDecision::RetryLater => return Ok(RecoverySweepOutcome::Pending),
+            RecoveryPolicyDecision::AlreadyCompleted => {
+                return Err(IngressUowError::EffectIntentConflict)
+            }
+        };
+        let admission = self.admission.read().await;
+        if self.cancellation.is_cancelled() || !*admission {
+            return Err(IngressUowError::AuthorityStopped);
+        }
+        super::super::ingress_uow::run_with_retry(5, || async {
+            let mut tx = self
+                .uow
+                .begin_read_committed_with_timeouts(
+                    std::time::Duration::from_millis(100),
+                    std::time::Duration::from_millis(250),
+                )
+                .await?;
+            let completed = RecoveryReceiptRepository::complete_pending_notification(
+                &mut tx, prepared, candidate,
+            )
+            .await?;
+            tx.commit().await?;
+            Ok(match completed {
+                RecoveryCompletion::Completed | RecoveryCompletion::AlreadyCompleted => {
+                    RecoverySweepOutcome::Completed
+                }
+                RecoveryCompletion::Missing => RecoverySweepOutcome::CanonicalGone,
+            })
+        })
+        .await
+        .map_err(|failure| failure.last_error)
+    }
+
     pub async fn prepare_notification_recovery(
         &self,
         recovery: &GroupchatNotificationRecovery,
