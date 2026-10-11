@@ -70,6 +70,7 @@ on:
     - server/schema/**
     - server/scripts/**
     - server/scripts/*cutover*.py
+    - server/scripts/*publish_chart.py
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml

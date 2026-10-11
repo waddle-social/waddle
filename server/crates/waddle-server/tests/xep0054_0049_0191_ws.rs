@@ -3,6 +3,7 @@
 use waddle_ws_test_support as ws_common;
 
 use std::time::Duration;
+use waddle_xmpp::xep::xep0199::NS_PING;
 use ws_common::{disco_info_query, TestServer, WsXmppClient};
 use xmpp_parsers::minidom::Element;
 
@@ -211,6 +212,27 @@ async fn establish_subscription_to_alice(alice: &mut WsXmppClient, bob: &mut WsX
     bob.send(r#"<presence xmlns="jabber:client"/>"#)
         .await
         .expect("bob available for presence updates");
+
+    // The connection processes frames in order; this reply fences Bob's
+    // availability update before Alice broadcasts on her separate stream.
+    let barrier_id = "bob-available-presence-barrier";
+    let ping = Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), barrier_id)
+        .append(Element::builder("ping", NS_PING).build())
+        .build();
+    bob.send(&element_to_xml(ping))
+        .await
+        .expect("send Bob availability barrier");
+    let response = bob
+        .recv_matching(|frame| frame.contains(barrier_id))
+        .await
+        .expect("Bob availability barrier response")
+        .parse::<Element>()
+        .expect("valid availability barrier XML");
+    assert!(response.is("iq", CLIENT_NS));
+    assert_eq!(response.attr("id"), Some(barrier_id));
+    assert_eq!(response.attr("type"), Some("result"));
 }
 
 #[tokio::test]
