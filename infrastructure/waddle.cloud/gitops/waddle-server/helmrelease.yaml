@@ -43,9 +43,11 @@ spec:
     cutoverGuard:
       enabled: true
     updateStrategy:
-      # #1660: V1025 retention authority and extension ABI 3 require all old
-      # collectors to stop before the new binary writes descendant custody.
-      type: Recreate
+      # #1660: the V1025 / ABI 3 Recreate cutover is verified across the fleet.
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
