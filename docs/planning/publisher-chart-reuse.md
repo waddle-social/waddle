@@ -44,3 +44,12 @@ patch pod images or restore `RollingUpdate` as part of this repair.
 The missing-manifest condition is consistent with transient registry visibility,
 but the original CI log has no HTTP trace proving its underlying cause. The fix
 removes the unnecessary upload in this incident and bounds retries for new charts.
+
+## CI fixture synchronization
+
+The otherwise-green CI run exposed a pre-existing setup race in the blocking
+presence suite: Bob's available presence is sent, but Alice broadcasts before
+Bob's server-side presence transition is known to have completed. Synchronize
+that existing fixture with a same-stream XEP-0199 ping response before dependent
+Alice sends. Keep every protocol assertion and timeout unchanged; run the full
+dedicated suite. This test-only correction unblocks the required publisher gate.
