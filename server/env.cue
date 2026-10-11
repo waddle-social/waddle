@@ -963,7 +963,7 @@ schema.#Project & {
 					  .configSecretFiles.api_key == "/var/run/secrets/waddle-ai/api_key" and
 					  (.capabilityGrants | sort | join(",")) == "message.observe,outbound.http.request,room.result.publish" and
 					  (.allowedHttpOrigins | join(",")) == "https://openrouter.ai" and
-					  .roomObservation.generation == 1 and
+					  .roomObservation.generation == 2 and
 					  .roomObservation.scope.kind == "all-hosted-rooms" and
 					  .roomObservation.max_concurrent == 8 and
 					  .runtimeLimits.invocation_timeout_ms == 10000 and

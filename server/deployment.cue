@@ -106,7 +106,7 @@ package cuenv
 		capabilityGrants: ["message.observe", "room.result.publish", "outbound.http.request"]
 		allowedHttpOrigins: ["https://openrouter.ai"]
 		roomObservation: {
-			generation: 1
+			generation: 2
 			scope: kind: "all-hosted-rooms"
 			max_concurrent: 8
 		}
