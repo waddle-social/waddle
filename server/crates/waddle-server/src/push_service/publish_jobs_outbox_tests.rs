@@ -568,3 +568,228 @@ async fn postgres_claim_fenced_owner_completion_atomically_acks_local_provider()
         live_outbox_keeps_collected_parent_acceptance(f, ProofScenario::AtomicOwner).await;
     }
 }
+
+async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture) {
+    let mut empty = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("no outbox schema");
+    assert!(!has_notification_outbox_frozen_schema_tx(&mut empty)
+        .await
+        .expect("missing table is not readiness"));
+    empty.rollback().await.expect("end absent-table probe");
+    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("old outbox source");
+    let prior = DatabasePushServiceStore::new_with_secret_key(
+        fixture.db.clone(),
+        &rand::random::<[u8; 32]>(),
+    )
+    .await
+    .expect("prior provider schema");
+    let node = prior
+        .ensure_node(&owner(), "startup-upgrade")
+        .await
+        .expect("old provider node");
+    let service: BareJid = "push.example.com".parse().expect("service");
+    let delivery = uuid::Uuid::new_v4();
+    let payload = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+    let context = Element::builder(
+        "context",
+        crate::notification_outbox::WADDLE_PUSH_CONTEXT_NS,
+    )
+    .build();
+    prior.execute("INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, class, message_count, context_xml, queue_acceptance_may_exist, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, 'bob@example.com', 'bob@example.com/phone', '[\"bob@example.com/phone\"]', 'dm', 1, ?, 1, 'queued', 1, 1)", crate::db_params![delivery.to_string(), owner().to_string(), service.to_string(), node.node(), String::from(&context)]).await.expect("uncertain old upstream");
+    for (id, publisher) in [
+        ("old-target", owner().to_string()),
+        ("foreign-target", "mallory@example.com".to_owned()),
+    ] {
+        prior.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, acceptance_scope, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, 'legacy', 'queued', 1, 1)", crate::db_params![id, publisher, service.to_string(), node.node(), delivery.to_string(), String::from(&payload)]).await.expect("old provider acceptance");
+    }
+    let trusted = uuid::Uuid::new_v4();
+    prior.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, ancestry_job_id, acceptance_scope, status, created_at_ms, updated_at_ms) VALUES ('trusted-binding', ?, ?, ?, ?, ?, ?, 'legacy', 'queued', 1, 1)", crate::db_params![owner().to_string(), service.to_string(), node.node(), trusted.to_string(), String::from(&payload), trusted.to_string()]).await.expect("previously trusted private binding");
+    prior
+        .execute(
+            "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
+            (),
+        )
+        .await
+        .expect("old coalesce index");
+    for missing in ["approved_payload_xml", "approved_publish_options_xml"] {
+        prior
+            .execute(
+                &format!("ALTER TABLE notification_outbox DROP COLUMN {missing}"),
+                (),
+            )
+            .await
+            .expect("pre-freeze field absence");
+        let push_first = DatabasePushServiceStore::new_with_secret_key(
+            fixture.db.clone(),
+            &rand::random::<[u8; 32]>(),
+        )
+        .await
+        .expect("HTTP initializes Push before upgrading outbox");
+        assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE ancestry_job_id IS NULL AND acceptance_scope = 'legacy'", ()).await, 2, "missing frozen field defers cross-store adoption");
+        assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = 'trusted-binding' AND ancestry_job_id = ? AND acceptance_scope = 'canonical'", crate::db_params![trusted.to_string()]).await, 1, "missing outbox columns never defer trusted binding promotion");
+        assert_eq!(
+            scalar_i64(
+                &push_first,
+                "SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?",
+                crate::db_params![delivery.to_string()]
+            )
+            .await,
+            1,
+            "defer preserves uncertain custody"
+        );
+        push_first
+            .execute(
+                &format!("ALTER TABLE notification_outbox ADD COLUMN {missing} TEXT"),
+                (),
+            )
+            .await
+            .expect("advance partial upgrade");
+        drop(push_first);
+    }
+    prior
+        .execute(
+            "ALTER TABLE notification_outbox DROP COLUMN approved_payload_xml",
+            (),
+        )
+        .await
+        .expect("old payload field");
+    prior
+        .execute(
+            "ALTER TABLE notification_outbox DROP COLUMN approved_publish_options_xml",
+            (),
+        )
+        .await
+        .expect("old options field");
+    let push_first = DatabasePushServiceStore::new_with_secret_key(
+        fixture.db.clone(),
+        &rand::random::<[u8; 32]>(),
+    )
+    .await
+    .expect("both old fields absent still boot Push");
+    let upgraded = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("HTTP next upgrades outbox");
+    push_first
+        .adopt_notification_ancestry()
+        .await
+        .expect("HTTP explicitly adopts after schema upgrade");
+    assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = 'old-target' AND ancestry_job_id = ? AND acceptance_scope = 'canonical'", crate::db_params![delivery.to_string()]).await, 1);
+    assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = 'foreign-target' AND ancestry_job_id IS NULL AND acceptance_scope = 'legacy'", ()).await, 1);
+    assert_eq!(
+        scalar_i64(
+            &push_first,
+            "SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?",
+            crate::db_params![delivery.to_string()]
+        )
+        .await,
+        1
+    );
+    for mismatch in ["payload", "options"] {
+        let id = uuid::Uuid::new_v4();
+        let options = Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS).build();
+        let approved = if mismatch == "payload" {
+            Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH)
+                .append("different")
+                .build()
+        } else {
+            payload.clone()
+        };
+        prior.execute("INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, class, message_count, context_xml, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, 'bob@example.com', 'bob@example.com/phone', '[\"bob@example.com/phone\"]', 'dm', 1, ?, ?, ?, 1, 'queued', 1, 1)", crate::db_params![id.to_string(), owner().to_string(), service.to_string(), node.node(), String::from(&context), String::from(&approved), if mismatch == "options" {Some(String::from(&options))} else {None}]).await.expect("frozen upstream mismatch");
+        prior.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, acceptance_scope, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, 'legacy', 'queued', 1, 1)", crate::db_params![id.to_string(), owner().to_string(), service.to_string(), node.node(), id.to_string(), String::from(&payload)]).await.expect("mismatched accepted bytes");
+        push_first
+            .adopt_notification_ancestry()
+            .await
+            .expect("ready schema retains exact adoption checks");
+        assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = ? AND ancestry_job_id IS NULL AND acceptance_scope = 'legacy'", crate::db_params![id.to_string()]).await, 1, "frozen {mismatch} mismatch is not lineage authority");
+    }
+    push_first
+        .adopt_notification_ancestry()
+        .await
+        .expect("repeat boot adoption");
+    drop(upgraded);
+    drop(outbox);
+    drop(prior);
+    drop(push_first);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_push_boot_defers_until_outbox_frozen_schema_upgrade() {
+    push_boot_before_outbox_freeze_upgrade(IngressFixture::sqlite().await).await;
+}
+#[tokio::test]
+async fn postgres_push_boot_defers_until_outbox_frozen_schema_upgrade() {
+    if let Some(f) = IngressFixture::postgres("push_boot_schema_order").await {
+        push_boot_before_outbox_freeze_upgrade(f).await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_outbox_readiness_uses_resolved_table_not_decoy_schema() {
+    let Some(fixture) = IngressFixture::postgres("outbox_schema_decoy").await else {
+        return;
+    };
+    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("actual outbox");
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("schema probe transaction");
+    let mut rows = tx
+        .query("SELECT current_schema()", ())
+        .await
+        .expect("actual schema");
+    let actual: String = rows
+        .next()
+        .await
+        .expect("schema query")
+        .expect("schema row")
+        .get(0)
+        .expect("schema name");
+    drop(rows);
+    let empty = format!("empty_{}", uuid::Uuid::new_v4().simple());
+    let decoy = format!("decoy_{}", uuid::Uuid::new_v4().simple());
+    tx.execute(&format!("CREATE SCHEMA {empty}"), ())
+        .await
+        .expect("empty first schema");
+    tx.execute(&format!("CREATE SCHEMA {decoy}"), ())
+        .await
+        .expect("ready decoy schema");
+    tx.execute(&format!("CREATE TABLE {decoy}.notification_outbox (approved_payload_xml TEXT, approved_publish_options_xml TEXT)"), ()).await.expect("same-name ready decoy");
+    tx.execute(
+        &format!("SET LOCAL search_path = {empty}, {actual}, {decoy}"),
+        (),
+    )
+    .await
+    .expect("actual table is in second schema");
+    assert!(has_notification_outbox_frozen_schema_tx(&mut tx)
+        .await
+        .expect("resolved actual table is ready"));
+    tx.execute(
+        &format!("DROP INDEX IF EXISTS {actual}.idx_notification_outbox_queued_coalesce"),
+        (),
+    )
+    .await
+    .expect("old actual index");
+    tx.execute(
+        &format!("ALTER TABLE {actual}.notification_outbox DROP COLUMN approved_payload_xml"),
+        (),
+    )
+    .await
+    .expect("actual table misses payload column");
+    assert!(!has_notification_outbox_frozen_schema_tx(&mut tx)
+        .await
+        .expect("ready decoy cannot bless missing actual column"));
+    tx.rollback()
+        .await
+        .expect("remove decoy schemas and restore actual field");
+    drop(outbox);
+    fixture.close().await;
+}
