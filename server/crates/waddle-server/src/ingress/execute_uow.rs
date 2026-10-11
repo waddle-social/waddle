@@ -46,7 +46,7 @@ pub(super) async fn execute_legacy_remote(
         return None;
     };
     match relay_copy::attempt_before_readiness(uow, decision, index, delivery, target, deps).await {
-        Ok(Some(outcome)) => Some(EffectOutcome::Settled(
+        Ok(Some(relay_copy::LegacyRemoteAttempt::Wire(outcome))) => Some(EffectOutcome::Settled(
             crate::server::routes::interpret::effects::SettledOutcome {
                 refusal: None,
                 persisted: Vec::new(),
@@ -54,6 +54,14 @@ pub(super) async fn execute_legacy_remote(
                 detached: Some(vec![(target.clone(), outcome)]),
             },
         )),
+        Ok(Some(relay_copy::LegacyRemoteAttempt::Superseded(persisted))) => Some(
+            EffectOutcome::Settled(crate::server::routes::interpret::effects::SettledOutcome {
+                refusal: None,
+                persisted,
+                completion: crate::server::routes::interpret::effects::SettledCompletion::Complete,
+                detached: None,
+            }),
+        ),
         Ok(None) => None,
         Err(error) => {
             tracing::debug!(%error, "live legacy remote child authority unavailable");

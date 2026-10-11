@@ -212,9 +212,15 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
                 sender: submission.sender.clone(),
             });
     }
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("commit");
+    let decision = if matches!(case, Case::SenderOnly) {
+        // Seed the historical aggregate-only row before any first acceptance;
+        // today's real planner already assigns an independent sender child.
+        departed::commit_legacy_roster_fixture(&f, &submission).await
+    } else {
+        commit_submission(&f.uow, &submission, 1)
+            .await
+            .expect("commit")
+    };
     let key = decision.message_key.expect("key");
     let mut tx = f.uow.begin().await.expect("frozen source");
     let frozen = CanonicalMessageRepository::load_envelope(&mut tx, key)
@@ -271,7 +277,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
             .map(|i| decision.external_receipts[*i].clone())
             .collect();
         let deps = env.recovery_deps();
-        let mut report = execute_effects(
+        let report = execute_effects(
             &f.uow,
             &f.db,
             &mutations,
@@ -284,31 +290,6 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
             report.receipt_failures.is_empty(),
             "non-delivery effects persisted: {report:?}"
         );
-        if matches!(case, Case::SenderOnly) {
-            let [reflection] = report.frame_obligations.as_slice() else {
-                panic!("one genuine original sender reflection");
-            };
-            let [Stanza::Message(message)] = reflection.frames.as_slice() else {
-                panic!("one original sender message");
-            };
-            assert_eq!(message.to, Some(submission.sender.clone().into()));
-            assert_eq!(message.from, frozen.message().from);
-            assert_eq!(
-                waddle_xmpp::xep::extract_stanza_ids(message),
-                waddle_xmpp::xep::extract_stanza_ids(frozen.message())
-            );
-            let mut wire = Vec::new();
-            minidom::Element::from(message.clone())
-                .write_to(&mut wire)
-                .expect("write original accepted sender frame");
-            assert!(
-                report
-                    .complete_frame_obligations(&f.uow, &f.db, Duration::from_secs(5))
-                    .await
-                    .expect("confirm original sender frame"),
-                "original sender acceptance completes the sender-only row before interruption"
-            );
-        }
     }
     if matches!(case, Case::SenderOnly) {
         f.execute("DELETE FROM ingress_effect_receipts WHERE kind = 2", ())

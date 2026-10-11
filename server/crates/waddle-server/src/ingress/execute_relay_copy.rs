@@ -4,6 +4,11 @@ use crate::server::routes::interpret::{
     effects::delivery::ExternalDeliveryEffect, Deps, FullJidDeliveryOutcome,
 };
 
+pub(super) enum LegacyRemoteAttempt {
+    Wire(FullJidDeliveryOutcome),
+    Superseded(Vec<waddle_xmpp::ingress::IngressEffectIntent>),
+}
+
 /// A pending P2 child cannot act as the completion barrier for the established
 /// live remote wire. Its ordered channel owns enqueue FIFO; this does not prove
 /// canonical archive ordering or authorize any durable manifest settlement.
@@ -14,7 +19,7 @@ pub(super) async fn attempt_before_readiness(
     effect: &ExternalDeliveryEffect,
     resource: &jid::FullJid,
     deps: &Deps<'_>,
-) -> Result<Option<FullJidDeliveryOutcome>, crate::ingress_uow::IngressUowError> {
+) -> Result<Option<LegacyRemoteAttempt>, crate::ingress_uow::IngressUowError> {
     use crate::server::routes::interpret::{
         effects::ExternalEffect, DeliveryExecutionContext, SmIngressAppendContext,
     };
@@ -53,12 +58,11 @@ pub(super) async fn attempt_before_readiness(
         dispatch_stream: None,
         authority: crate::ingress::append_authority::AppendAuthority::Verified,
     };
-    if crate::ingress::room_manifest_replay::load(uow, &context, resource, stanza)
-        .await?
-        .is_none()
-    {
+    let Some(manifest) =
+        crate::ingress::room_manifest_replay::load(uow, &context, resource, stanza).await?
+    else {
         return Ok(None);
-    }
+    };
     let stop = deps.ingress_delivery_stop.clone().or_else(|| {
         deps.web_socket_state
             .map(|state| state.deps.protocol.ingress.delivery_stop_token())
@@ -69,11 +73,26 @@ pub(super) async fn attempt_before_readiness(
     {
         return Ok(None);
     }
+    if let Some(settled) = crate::ingress::room_manifest_replay::settle_superseded(
+        uow,
+        &manifest,
+        deps.room_registry,
+        &context,
+        resource,
+    )
+    .await?
+    {
+        // A proven replacement resolves the old logical child, never a send.
+        // This check must precede the legacy wire bypass of archive readiness.
+        return Ok(Some(LegacyRemoteAttempt::Superseded(settled)));
+    }
     let mut live = deps.clone();
     live.ingress_append_context = Some(context);
     live.ingress_delivery_uow = Some(uow.clone());
     live.ingress_delivery_stop = stop;
-    Ok(append_sealed_legacy(&live, effect, resource).await)
+    Ok(append_sealed_legacy(&live, effect, resource)
+        .await
+        .map(LegacyRemoteAttempt::Wire))
 }
 
 pub(super) async fn append(

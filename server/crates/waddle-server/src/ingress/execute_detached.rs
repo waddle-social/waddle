@@ -87,9 +87,18 @@ pub(super) async fn execute(
         )
         .await
         {
-            Ok(Some(outcome)) => {
+            Ok(Some(super::relay_copy::LegacyRemoteAttempt::Wire(outcome))) => {
                 destinations.push((resource.clone(), outcome));
                 completion = SettledCompletion::Uncertain;
+                continue;
+            }
+            Ok(Some(super::relay_copy::LegacyRemoteAttempt::Superseded(settled))) => {
+                handed_off.push(resource.clone());
+                if !settled.is_empty() {
+                    persisted = settled;
+                    completion = SettledCompletion::Complete;
+                    break;
+                }
                 continue;
             }
             Ok(None) => {}
