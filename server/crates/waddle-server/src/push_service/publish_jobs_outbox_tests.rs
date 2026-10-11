@@ -569,7 +569,7 @@ async fn postgres_claim_fenced_owner_completion_atomically_acks_local_provider()
     }
 }
 
-async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture) {
+async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture, missing: &[&str]) {
     let mut empty = fixture
         .db
         .begin_immediate()
@@ -616,61 +616,33 @@ async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture) {
         )
         .await
         .expect("old coalesce index");
-    for missing in ["approved_payload_xml", "approved_publish_options_xml"] {
+    for column in missing {
         prior
             .execute(
-                &format!("ALTER TABLE notification_outbox DROP COLUMN {missing}"),
+                &format!("ALTER TABLE notification_outbox DROP COLUMN {column}"),
                 (),
             )
             .await
-            .expect("pre-freeze field absence");
-        let push_first = DatabasePushServiceStore::new_with_secret_key(
-            fixture.db.clone(),
-            &rand::random::<[u8; 32]>(),
-        )
-        .await
-        .expect("HTTP initializes Push before upgrading outbox");
-        assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE ancestry_job_id IS NULL AND acceptance_scope = 'legacy'", ()).await, 2, "missing frozen field defers cross-store adoption");
-        assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = 'trusted-binding' AND ancestry_job_id = ? AND acceptance_scope = 'canonical'", crate::db_params![trusted.to_string()]).await, 1, "missing outbox columns never defer trusted binding promotion");
-        assert_eq!(
-            scalar_i64(
-                &push_first,
-                "SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?",
-                crate::db_params![delivery.to_string()]
-            )
-            .await,
-            1,
-            "defer preserves uncertain custody"
-        );
-        push_first
-            .execute(
-                &format!("ALTER TABLE notification_outbox ADD COLUMN {missing} TEXT"),
-                (),
-            )
-            .await
-            .expect("advance partial upgrade");
-        drop(push_first);
+            .expect("old outbox frozen field absent");
     }
-    prior
-        .execute(
-            "ALTER TABLE notification_outbox DROP COLUMN approved_payload_xml",
-            (),
-        )
-        .await
-        .expect("old payload field");
-    prior
-        .execute(
-            "ALTER TABLE notification_outbox DROP COLUMN approved_publish_options_xml",
-            (),
-        )
-        .await
-        .expect("old options field");
     let push_first = DatabasePushServiceStore::new_with_secret_key(
         fixture.db.clone(),
         &rand::random::<[u8; 32]>(),
     )
     .await
-    .expect("both old fields absent still boot Push");
+    .expect("HTTP initializes Push before upgrading outbox");
+    assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE ancestry_job_id IS NULL AND acceptance_scope = 'legacy'", ()).await, 2, "missing frozen field defers cross-store adoption");
+    assert_eq!(scalar_i64(&push_first, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = 'trusted-binding' AND ancestry_job_id = ? AND acceptance_scope = 'canonical'", crate::db_params![trusted.to_string()]).await, 1, "missing outbox columns never defer trusted binding promotion");
+    assert_eq!(
+        scalar_i64(
+            &push_first,
+            "SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?",
+            crate::db_params![delivery.to_string()]
+        )
+        .await,
+        1,
+        "defer preserves uncertain custody"
+    );
     let upgraded = NotificationOutboxStore::new(fixture.db.clone())
         .await
         .expect("HTTP next upgrades outbox");
@@ -720,12 +692,25 @@ async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture) {
 
 #[tokio::test]
 async fn sqlite_push_boot_defers_until_outbox_frozen_schema_upgrade() {
-    push_boot_before_outbox_freeze_upgrade(IngressFixture::sqlite().await).await;
+    for missing in [
+        &["approved_payload_xml"][..],
+        &["approved_publish_options_xml"][..],
+        &["approved_payload_xml", "approved_publish_options_xml"][..],
+    ] {
+        push_boot_before_outbox_freeze_upgrade(IngressFixture::sqlite().await, missing).await;
+    }
 }
 #[tokio::test]
 async fn postgres_push_boot_defers_until_outbox_frozen_schema_upgrade() {
-    if let Some(f) = IngressFixture::postgres("push_boot_schema_order").await {
-        push_boot_before_outbox_freeze_upgrade(f).await;
+    for missing in [
+        &["approved_payload_xml"][..],
+        &["approved_publish_options_xml"][..],
+        &["approved_payload_xml", "approved_publish_options_xml"][..],
+    ] {
+        let Some(fixture) = IngressFixture::postgres("push_boot_schema_order").await else {
+            return;
+        };
+        push_boot_before_outbox_freeze_upgrade(fixture, missing).await;
     }
 }
 
