@@ -72,16 +72,6 @@ async fn query(store: &DatabasePushServiceStore, sql: &str, params: impl IntoPar
     conn.query(sql, params).await.expect("query")
 }
 
-async fn scalar_optional_i64(
-    store: &DatabasePushServiceStore,
-    sql: &str,
-    params: impl IntoParams,
-) -> Option<i64> {
-    let mut rows = query(store, sql, params).await;
-    let row = rows.next().await.expect("scalar row").expect("scalar row");
-    row.get(0).expect("scalar optional value")
-}
-
 #[tokio::test]
 async fn publish_notification_fans_out_to_active_devices_only() {
     // Queue-mechanics test: uses the FCM platform so no real provider
@@ -195,13 +185,15 @@ async fn push_delivery_attempts_survive_store_reopen() {
 }
 
 #[tokio::test]
-async fn queued_publish_job_survives_reopen_and_retries_after_dispatch_failure() {
+async fn uncertain_publish_job_survives_reopen_and_retries_after_lease_recovery() {
     // Queue-mechanics: uses FCM so the fake-sent stub applies; Web
     // and APNs require a wired provider.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("push-service-publish-jobs.sqlite3");
     let owner = owner();
     let node_id;
+    let acceptance_id;
+    let lease_before;
     {
         let db = open_local("push-service-jobs", &path).await;
         let store = store_on(db).await;
@@ -234,24 +226,80 @@ async fn queued_publish_job_survives_reopen_and_retries_after_dispatch_failure()
                 &owner,
             )
             .await
-            .expect_err("forced dispatch failure keeps job queued");
+            .expect_err("phase3 failure retains an uncertain in-progress lease");
         execute(&store, "DROP TRIGGER fail_push_delivery_attempt_insert", ()).await;
         let queued = store.queued_publish_jobs().await.expect("queued jobs");
         let attempts = store
             .delivery_attempts_for_node(node.node())
             .await
             .expect("attempts");
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].item_id(), "retry-after-failure");
+        assert!(
+            queued.is_empty(),
+            "unproved sends retain ownership until their lease expires"
+        );
         assert!(attempts.is_empty());
+        let mut rows = query(&store,
+            "SELECT job_id, status, uncertain_send, claim_token, claimed_at_ms, next_retry_at_ms FROM push_publish_jobs WHERE item_id = ?",
+            db_params!["retry-after-failure"]).await;
+        let row = rows.next().await.expect("row").expect("owned acceptance");
+        acceptance_id = row.get::<String>(0).expect("acceptance identity");
+        assert_eq!(row.get::<String>(1).expect("status"), "in-progress");
+        assert_eq!(row.get::<i64>(2).expect("uncertainty"), 1);
+        lease_before = (
+            row.get::<Option<String>>(3).expect("claim token"),
+            row.get::<Option<i64>>(4).expect("claim time"),
+            row.get::<Option<i64>>(5).expect("nullable retry deadline"),
+        );
+        assert!(lease_before.0.is_some());
+        assert!(lease_before.1.is_some());
+        assert_eq!(lease_before.2, None);
     }
 
     let reopened_db = open_local("push-service-jobs-reopen", &path).await;
     let reopened = store_on(reopened_db).await;
+    let mut rows = query(&reopened,
+        "SELECT status, uncertain_send, claim_token, claimed_at_ms, next_retry_at_ms FROM push_publish_jobs WHERE job_id = ?",
+        db_params![acceptance_id.clone()]).await;
+    let row = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("reopened acceptance");
+    assert_eq!(row.get::<String>(0).expect("status"), "in-progress");
+    assert_eq!(row.get::<i64>(1).expect("uncertainty"), 1);
+    assert_eq!(
+        (
+            row.get::<Option<String>>(2).expect("claim token"),
+            row.get::<Option<i64>>(3).expect("claim time"),
+            row.get::<Option<i64>>(4).expect("retry deadline")
+        ),
+        lease_before
+    );
     execute(
         &reopened,
-        "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE item_id = ?",
-        db_params!["retry-after-failure"],
+        "UPDATE push_publish_jobs SET claimed_at_ms = 1 WHERE job_id = ?",
+        db_params![acceptance_id.clone()],
+    )
+    .await;
+    assert!(
+        reopened
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("recover expired lease")
+            .is_empty(),
+        "lease recovery schedules retry backoff before another provider attempt"
+    );
+    let recovered = reopened
+        .queued_publish_jobs()
+        .await
+        .expect("recovered queue");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].job_id(), acceptance_id);
+    assert_eq!(recovered[0].item_id(), "retry-after-failure");
+    execute(
+        &reopened,
+        "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
+        db_params![acceptance_id.clone()],
     )
     .await;
     let results = reopened
@@ -303,15 +351,24 @@ async fn device_registration_wakes_only_no_device_retry_jobs() {
             &owner,
         )
         .await
-        .expect_err("forced dispatch failure keeps job queued");
+        .expect_err("phase3 failure preserves the uncertain active lease");
     execute(&store, "DROP TRIGGER fail_push_delivery_attempt_insert", ()).await;
-    let retry_before = scalar_optional_i64(
-        &store,
-        "SELECT next_retry_at_ms FROM push_publish_jobs WHERE item_id = ?",
-        db_params!["retry-after-transient-failure"],
-    )
-    .await
-    .expect("transient retry deadline");
+    let mut rows = query(&store,
+        "SELECT status, uncertain_send, claim_token, claimed_at_ms, next_retry_at_ms FROM push_publish_jobs WHERE item_id = ?",
+        db_params!["retry-after-transient-failure"]).await;
+    let row = rows.next().await.expect("row").expect("uncertain lease");
+    let before = (
+        row.get::<String>(0).expect("status"),
+        row.get::<i64>(1).expect("uncertainty"),
+        row.get::<Option<String>>(2).expect("claim token"),
+        row.get::<Option<i64>>(3).expect("claim time"),
+        row.get::<Option<i64>>(4).expect("nullable retry deadline"),
+    );
+    assert_eq!(before.0, "in-progress");
+    assert_eq!(before.1, 1);
+    assert!(before.2.is_some());
+    assert!(before.3.is_some());
+    assert_eq!(before.4, None);
 
     store
         .upsert_device(
@@ -320,15 +377,25 @@ async fn device_registration_wakes_only_no_device_retry_jobs() {
         )
         .await
         .expect("device refresh");
-    let retry_after = scalar_optional_i64(
-        &store,
-        "SELECT next_retry_at_ms FROM push_publish_jobs WHERE item_id = ?",
-        db_params!["retry-after-transient-failure"],
-    )
-    .await
-    .expect("transient retry deadline after device refresh");
-
-    assert_eq!(retry_after, retry_before);
+    let mut rows = query(&store,
+        "SELECT status, uncertain_send, claim_token, claimed_at_ms, next_retry_at_ms FROM push_publish_jobs WHERE item_id = ?",
+        db_params!["retry-after-transient-failure"]).await;
+    let row = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("lease after device refresh");
+    let after = (
+        row.get::<String>(0).expect("status"),
+        row.get::<i64>(1).expect("uncertainty"),
+        row.get::<Option<String>>(2).expect("claim token"),
+        row.get::<Option<i64>>(3).expect("claim time"),
+        row.get::<Option<i64>>(4).expect("nullable retry deadline"),
+    );
+    assert_eq!(
+        after, before,
+        "device refresh must not wake or alter an owned uncertain send"
+    );
 }
 
 #[tokio::test]

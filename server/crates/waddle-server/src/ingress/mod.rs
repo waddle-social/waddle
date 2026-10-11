@@ -18,6 +18,7 @@ mod durable;
 pub(crate) use durable::receipt_key;
 pub mod execute;
 mod execute_uow;
+pub(crate) use execute_uow::ambiguous_offline_pending_id;
 mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;

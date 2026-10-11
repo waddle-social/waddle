@@ -301,9 +301,8 @@ impl DatabasePushServiceStore {
         )
         .await?;
         // #1123 retry-path idempotency lookup:
-        // `delivered_device_ids_for_item_tx` filters by
-        // (node, item_id, status) and reads device_id — this covering
-        // index keeps the per-retry query off a node-wide scan.
+        // `delivery_attempts_for_node` retains this legacy wire-item index.
+        // Retry dedup uses the scoped acceptance index installed below.
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_item_status \
              ON push_delivery_attempts (node, item_id, status, device_id)",
@@ -311,30 +310,7 @@ impl DatabasePushServiceStore {
         )
         .await?;
         self.execute(
-            &format!(
-                r#"
-                CREATE TABLE IF NOT EXISTS push_publish_jobs (
-                    job_id TEXT PRIMARY KEY,
-                    owner_bare_jid TEXT NOT NULL,
-                    push_service_jid TEXT,
-                    node TEXT NOT NULL,
-                    item_id TEXT NOT NULL,
-                    payload_xml TEXT NOT NULL,
-                    publish_options_xml TEXT,
-                    status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
-                    attempt_count INTEGER NOT NULL DEFAULT 0,
-                    last_error TEXT,
-                    next_retry_at_ms {i64_type},
-                    claimed_at_ms {i64_type},
-                    claim_token TEXT,
-                    created_at_ms {i64_type} NOT NULL,
-                    updated_at_ms {i64_type} NOT NULL,
-                    published_at_ms {i64_type},
-                    UNIQUE (node, item_id),
-                    FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
-                )
-                "#
-            ),
+            &push_publish_jobs_table_sql(i64_type, "push_publish_jobs", true),
             (),
         )
         .await?;
@@ -360,7 +336,122 @@ impl DatabasePushServiceStore {
         // token) cannot persist attempts from the original worker.
         self.add_column_if_missing("push_publish_jobs", "claim_token TEXT")
             .await?;
+        self.add_column_if_missing("push_publish_jobs", "ancestry_job_id TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "acceptance_scope TEXT NOT NULL DEFAULT 'legacy'",
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            &format!("backing_published_at_ms {i64_type}"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            &format!("publication_order {i64_type} NOT NULL DEFAULT 0"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "backing_state TEXT NOT NULL DEFAULT 'pending'",
+        )
+        .await?;
+        self.execute(&format!("CREATE TABLE IF NOT EXISTS push_publication_orders (node TEXT PRIMARY KEY, next_order {i64_type} NOT NULL)"), ()).await?;
+        self.add_column_if_missing("push_delivery_attempts", "publish_job_id TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "uncertain_send INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.add_column_if_missing("push_publish_jobs", "terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked')").await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1))",
+        )
+        .await?;
+        self.migrate_publish_acceptance_scope().await?;
+        self.adopt_notification_ancestry().await?;
         Ok(())
+    }
+
+    async fn migrate_publish_acceptance_scope(&self) -> Result<(), XmppError> {
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        // The old unique node/item pair proves which pending acceptance owns
+        // legacy attempts. Preserve it before removing that uniqueness.
+        tx.execute("UPDATE push_delivery_attempts SET publish_job_id = (SELECT job_id FROM push_publish_jobs WHERE push_publish_jobs.node = push_delivery_attempts.node AND push_publish_jobs.item_id = push_delivery_attempts.item_id AND push_publish_jobs.acceptance_scope = 'legacy' LIMIT 1) WHERE publish_job_id IS NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            tx.execute("ALTER TABLE push_publish_jobs DROP CONSTRAINT IF EXISTS push_publish_jobs_node_item_id_key", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        } else {
+            let mut rows = tx.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            let legacy_unique = match rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+            {
+                Some(row) => row
+                    .get::<String>(0)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    .contains("UNIQUE (node, item_id)"),
+                None => false,
+            };
+            if legacy_unique {
+                tx.execute(
+                    &push_publish_jobs_table_sql("INTEGER", "push_publish_jobs_rebuild", false),
+                    (),
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("INSERT INTO push_publish_jobs_rebuild (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, terminal_disposition, upstream_completed, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms) SELECT job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, terminal_disposition, upstream_completed, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms FROM push_publish_jobs", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("DROP TABLE push_publish_jobs", ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute(
+                    "ALTER TABLE push_publish_jobs_rebuild RENAME TO push_publish_jobs",
+                    (),
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        loop {
+            let mut rows = tx.query("SELECT job_id, node FROM push_publish_jobs WHERE publication_order = 0 ORDER BY created_at_ms, job_id LIMIT 128", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            let mut pending = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+            {
+                pending.push((
+                    row.get::<String>(0)
+                        .map_err(|error| XmppError::internal(error.to_string()))?,
+                    row.get::<String>(1)
+                        .map_err(|error| XmppError::internal(error.to_string()))?,
+                ));
+            }
+            if pending.is_empty() {
+                break;
+            }
+            for (job, node) in pending {
+                let order =
+                    super::publish_jobs::allocate_publication_order_tx(&mut tx, &node).await?;
+                tx.execute("UPDATE push_publish_jobs SET publication_order = ?, backing_state = CASE WHEN acceptance_scope = 'legacy' THEN 'published' ELSE backing_state END, backing_published_at_ms = CASE WHEN acceptance_scope = 'legacy' THEN created_at_ms ELSE backing_published_at_ms END WHERE job_id = ? AND publication_order = 0",
+                    crate::db_params![order, job]).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        tx.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_push_publish_jobs_canonical_delivery ON push_publish_jobs (ancestry_job_id) WHERE ancestry_job_id IS NOT NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_status_created ON push_publish_jobs (status, created_at_ms)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_node_status ON push_publish_jobs (node, status)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_acceptance_status ON push_delivery_attempts (publish_job_id, status, device_id)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
     }
 
     async fn add_column_if_missing(&self, table: &str, column_def: &str) -> Result<(), XmppError> {
@@ -447,9 +538,43 @@ impl DatabasePushServiceStore {
     }
 }
 
+fn push_publish_jobs_table_sql(i64_type: &str, table: &str, if_not_exists: bool) -> String {
+    let exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    format!(
+        r#"CREATE TABLE {exists}{table} (
+        job_id TEXT PRIMARY KEY,
+        owner_bare_jid TEXT NOT NULL,
+        push_service_jid TEXT,
+        node TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        payload_xml TEXT NOT NULL,
+        publish_options_xml TEXT,
+        ancestry_job_id TEXT,
+        acceptance_scope TEXT NOT NULL DEFAULT 'legacy' CHECK (acceptance_scope IN ('legacy', 'wire', 'canonical')),
+        backing_published_at_ms {i64_type},
+        publication_order {i64_type} NOT NULL DEFAULT 0,
+        backing_state TEXT NOT NULL DEFAULT 'pending' CHECK (backing_state IN ('pending', 'published', 'superseded', 'not-configured')),
+        uncertain_send INTEGER NOT NULL DEFAULT 0 CHECK (uncertain_send IN (0, 1)),
+        terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'),
+        upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1)),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_retry_at_ms {i64_type},
+        claimed_at_ms {i64_type},
+        claim_token TEXT,
+        created_at_ms {i64_type} NOT NULL,
+        updated_at_ms {i64_type} NOT NULL,
+        published_at_ms {i64_type},
+        FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
+    )"#
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use minidom::Element;
     use tempfile::tempdir;
 
     use crate::push_service::test_support::{assert_item_not_found, notification_item, owner};
@@ -523,5 +648,99 @@ mod tests {
         assert_eq!(device.provider_token(), None);
         assert_eq!(device.provider_key_material(), None);
         assert_item_not_found(publish_err);
+    }
+    async fn disposition_schema_upgrade(
+        fixture: crate::ingress::test_support::IngressFixture,
+        rebuild: bool,
+    ) {
+        let store = DatabasePushServiceStore::new_with_secret_key(
+            fixture.db.clone(),
+            &rand::random::<[u8; 32]>(),
+        )
+        .await
+        .expect("store");
+        let node = store
+            .ensure_node(&owner(), "upgrade-proof")
+            .await
+            .expect("node");
+        store
+            .execute("DROP TABLE push_publish_jobs", ())
+            .await
+            .expect("pre-upgrade table");
+        let i64_type = crate::db::i64_sql_type(fixture.db.driver());
+        let mut schema = push_publish_jobs_table_sql(i64_type, "push_publish_jobs", false);
+        if rebuild {
+            schema = schema.replace(
+                "FOREIGN KEY (node)",
+                "UNIQUE (node, item_id), FOREIGN KEY (node)",
+            );
+        } else {
+            schema = schema.replace("terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'),", "").replace("upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1)),", "");
+        }
+        store.execute(&schema, ()).await.expect("old schema");
+        let payload = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+        let options = Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS).build();
+        store.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, publication_order, status, created_at_ms, updated_at_ms) VALUES ('upgrade-proof', ?, 'push.example.com', ?, 'frozen-item', ?, ?, ?, 'canonical', 17, 'failed', 1, 1)", crate::db_params![owner().to_string(), node.node(), String::from(&payload), String::from(&options), uuid::Uuid::new_v4().to_string()]).await.expect("legacy proof");
+        if rebuild {
+            store.execute("UPDATE push_publish_jobs SET terminal_disposition = 'registration-revoked', upstream_completed = 1", ()).await.expect("durable fields before actual copy");
+        }
+        store.initialize().await.expect("upgrade");
+        store.initialize().await.expect("idempotent initialization");
+        let mut rows = store.query("SELECT terminal_disposition, upstream_completed, payload_xml, publish_options_xml, item_id, publication_order FROM push_publish_jobs WHERE job_id = 'upgrade-proof'", ()).await.expect("retained row");
+        let row = rows.next().await.expect("query").expect("proof survives");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("disposition"),
+            rebuild.then(|| "registration-revoked".to_owned())
+        );
+        assert_eq!(row.get::<i64>(1).expect("ACK"), i64::from(rebuild));
+        assert_eq!(
+            row.get::<String>(2).expect("payload"),
+            String::from(&payload)
+        );
+        assert_eq!(
+            row.get::<String>(3).expect("options"),
+            String::from(&options)
+        );
+        assert_eq!(row.get::<String>(4).expect("item"), "frozen-item");
+        assert_eq!(row.get::<i64>(5).expect("order"), 17);
+        drop(rows);
+        assert!(store
+            .execute(
+                "UPDATE push_publish_jobs SET terminal_disposition = 'generic-failed'",
+                ()
+            )
+            .await
+            .is_err());
+        assert!(store
+            .execute("UPDATE push_publish_jobs SET upstream_completed = 2", ())
+            .await
+            .is_err());
+        drop(store);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_disposition_upgrade_defaults_to_unresolved_and_reinitializes() {
+        disposition_schema_upgrade(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+            false,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn postgres_disposition_upgrade_defaults_to_unresolved_and_reinitializes() {
+        if let Some(f) =
+            crate::ingress::test_support::IngressFixture::postgres("disposition_upgrade").await
+        {
+            disposition_schema_upgrade(f, false).await;
+        }
+    }
+    #[tokio::test]
+    async fn sqlite_unique_constraint_rebuild_preserves_disposition_ack_and_frozen_fields() {
+        disposition_schema_upgrade(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+            true,
+        )
+        .await;
     }
 }

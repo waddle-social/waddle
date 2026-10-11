@@ -265,13 +265,59 @@ impl PushDeliveryAttempt {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PushAcceptanceScope {
+    Legacy,
+    Wire,
+    Canonical,
+}
+
+impl PushAcceptanceScope {
+    pub(super) fn from_db(value: &str) -> Result<Self, waddle_xmpp::XmppError> {
+        match value {
+            "legacy" => Ok(Self::Legacy),
+            "wire" => Ok(Self::Wire),
+            "canonical" => Ok(Self::Canonical),
+            _ => Err(waddle_xmpp::XmppError::internal(
+                "invalid push acceptance scope",
+            )),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum PushBackingState {
+    Pending,
+    Published,
+    Superseded,
+    NotConfigured,
+}
+impl PushBackingState {
+    pub(super) fn from_db(value: &str) -> Result<Self, waddle_xmpp::XmppError> {
+        match value {
+            "pending" => Ok(Self::Pending),
+            "published" => Ok(Self::Published),
+            "superseded" => Ok(Self::Superseded),
+            "not-configured" => Ok(Self::NotConfigured),
+            _ => Err(waddle_xmpp::XmppError::internal(
+                "invalid push backing state",
+            )),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PushPublishJob {
     pub(super) job_id: String,
     pub(super) owner_bare_jid: BareJid,
     pub(super) node: String,
     pub(super) item_id: String,
-    pub(super) push_service_jid: Option<String>,
+    pub(super) push_service_jid: Option<BareJid>,
+    pub(super) ancestry_job_id: Option<uuid::Uuid>,
+    pub(super) acceptance_scope: PushAcceptanceScope,
+    pub(super) publication_order: u64,
+    pub(super) backing_state: PushBackingState,
+    pub(super) uncertain_send: bool,
     pub(super) status: String,
     /// The UUID-string written by phase 1's claim. Phase 3's UPDATE
     /// gates on this so a stale-claim recovery + concurrent re-claim
@@ -296,12 +342,20 @@ impl PushPublishJob {
         &self.item_id
     }
 
-    pub(super) fn push_service_jid(&self) -> Option<&str> {
-        self.push_service_jid.as_deref()
+    pub(super) fn push_service_jid(&self) -> Option<&BareJid> {
+        self.push_service_jid.as_ref()
     }
 
     pub fn status(&self) -> &str {
         &self.status
+    }
+
+    pub(super) fn ancestry_job_id(&self) -> Option<uuid::Uuid> {
+        if self.acceptance_scope == PushAcceptanceScope::Canonical {
+            self.ancestry_job_id
+        } else {
+            None
+        }
     }
 
     pub(super) fn claim_token(&self) -> &str {
@@ -309,8 +363,42 @@ impl PushPublishJob {
     }
 }
 
+/// A terminal fact about the exact host-owned canonical acceptance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CanonicalNotificationTerminalProof {
+    ProviderCompleted,
+    RegistrationRevoked,
+}
+
+pub(super) const REGISTRATION_REVOKED_DISPOSITION: &str = "registration-revoked";
+
+/// Certainty about this queue invocation, distinct from provider delivery.
+/// Only errors before commit can prove this invocation was not accepted.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PushQueueAcceptanceError {
+    #[error("{0}")]
+    KnownNotAccepted(XmppError),
+    #[error("{0}")]
+    Unknown(XmppError),
+}
+
+impl From<XmppError> for PushQueueAcceptanceError {
+    fn from(error: XmppError) -> Self {
+        Self::KnownNotAccepted(error)
+    }
+}
+
+impl PushQueueAcceptanceError {
+    pub(super) fn into_error(self) -> XmppError {
+        match self {
+            Self::KnownNotAccepted(error) | Self::Unknown(error) => error,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct PushPublishJobEnqueue {
+    pub(super) job_id: uuid::Uuid,
     pub(super) item_id: String,
     pub(super) queued: bool,
 }
@@ -322,5 +410,9 @@ impl PushPublishJobEnqueue {
 
     pub fn queued(&self) -> bool {
         self.queued
+    }
+
+    pub fn job_id(&self) -> uuid::Uuid {
+        self.job_id
     }
 }

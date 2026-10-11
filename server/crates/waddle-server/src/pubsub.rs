@@ -15,6 +15,9 @@ mod item;
 mod node;
 mod open;
 mod schema;
+mod versioned;
+#[cfg(test)]
+mod versioned_tests;
 
 pub use open::{build_database_pubsub_storage, build_pubsub_storage};
 
@@ -73,6 +76,19 @@ impl PubSubStorage for DatabasePubSubStorage {
             auto_create,
         )
         .await
+    }
+
+    async fn publish_push_item_versioned(
+        &self,
+        service: &BareJid,
+        publisher: &BareJid,
+        node: &waddle_xmpp::pubsub::PublicationNode,
+        item: &PubSubItem,
+        version: waddle_xmpp::pubsub::PublicationVersion,
+    ) -> Result<waddle_xmpp::pubsub::VersionedPublishResult, waddle_xmpp::pubsub::PublicationError>
+    {
+        self.publish_push_item_versioned_impl(service, publisher, node, item, version)
+            .await
     }
 
     async fn get_items(

@@ -6,6 +6,8 @@ use crate::{db::DatabaseError, ingress_uow::IngressUowError};
 /// discarded at the ingress boundary.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DbRetryClass {
+    /// A known Foundation parent acquisition refused to wait (55P03).
+    CanonicalLockContention,
     SerializationFailure,
     Deadlock,
     SqliteContention,
@@ -46,7 +48,10 @@ impl DbRetryClass {
     fn is_retryable(self) -> bool {
         matches!(
             self,
-            Self::SerializationFailure | Self::Deadlock | Self::SqliteContention
+            Self::SerializationFailure
+                | Self::Deadlock
+                | Self::SqliteContention
+                | Self::CanonicalLockContention
         )
     }
 }

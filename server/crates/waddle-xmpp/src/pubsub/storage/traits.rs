@@ -6,7 +6,10 @@ use crate::pubsub::node::NodeConfig;
 use crate::pubsub::stanzas::PubSubItem;
 use crate::XmppError;
 
-use super::{PubSubNode, PublishResult, StoredItem};
+use super::{
+    PubSubNode, PublicationError, PublicationNode, PublicationVersion, PublishResult, StoredItem,
+    VersionedPublishResult,
+};
 
 /// Storage trait for PubSub nodes and items.
 ///
@@ -70,6 +73,18 @@ pub trait PubSubStorage: Send + Sync + 'static {
         publisher: &BareJid,
         auto_create: bool,
     ) -> Result<PublishResult, XmppError>;
+
+    /// Host-only XEP-0357 backing projection. Payload and monotonic per-node
+    /// watermark commit together; retries never replace a newer wire publish.
+    /// Retraction, purge, eviction and node deletion retain the watermark.
+    async fn publish_push_item_versioned(
+        &self,
+        service: &BareJid,
+        publisher: &BareJid,
+        node: &PublicationNode,
+        item: &PubSubItem,
+        version: PublicationVersion,
+    ) -> Result<VersionedPublishResult, PublicationError>;
 
     /// Get items from a node.
     ///

@@ -3,7 +3,7 @@ use waddle_extensions::{ExtensionPayload, RoomMessageSource, RoomObservationSubs
 use waddle_xmpp::ingress::MessageKey;
 
 use crate::db::Row;
-use crate::ingress_uow::IngressUowTransaction;
+use crate::ingress_uow::{EffectDescendantRepository, IngressUowTransaction};
 
 use super::sources::{active_subscription, load_source, locked};
 use super::{ObservationError, RoomPublication};
@@ -84,23 +84,41 @@ pub(super) async fn publication(
     subscription: &RoomObservationSubscription,
     now_ms: i64,
 ) -> Result<Option<RoomPublication>, ObservationError> {
-    if !active_subscription(tx, subscription).await? {
-        return Ok(None);
-    }
     let generation = i64::try_from(subscription.generation.get())
         .map_err(|_| ObservationError::GenerationOutOfRange)?;
     let mut rows = tx.transaction_mut().query(
-        "SELECT id, source_key FROM extension_room_publications WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND status = 'pending' ORDER BY id LIMIT 32",
+        "SELECT p.id, p.source_key, w.message_key FROM extension_room_publications p LEFT JOIN extension_room_observation_work w ON w.id = p.work_id WHERE p.plugin_id = ? AND p.generation = ? AND p.identity = ? AND p.room_jid = ? AND p.status = 'pending' ORDER BY p.id LIMIT 32",
         crate::db_params![subscription.plugin.as_str(), generation, subscription.identity.as_str(), subscription.room.to_string()],
     ).await?;
     let mut candidates = Vec::new();
     while let Some(row) = rows.next().await? {
         let id: String = row.get(0)?;
         let source_key: String = row.get(1)?;
-        candidates.push((id, source_key));
+        let message_key: Option<String> = row.get(2)?;
+        candidates.push((id, source_key, message_key));
     }
     drop(rows);
-    for (id, source_key) in candidates {
+    let mut keys = Vec::new();
+    for (_, source, message) in &candidates {
+        for key in std::iter::once(source).chain(message.iter()) {
+            keys.push(MessageKey::from_storage(
+                Uuid::parse_str(key).map_err(|_| ObservationError::Codec)?,
+            ));
+        }
+    }
+    super::work::lock_canonical_keys(tx, &keys).await?;
+    for (id, _, _) in &candidates {
+        EffectDescendantRepository::lock_all_nowait_raw(
+            tx.transaction_mut(),
+            Uuid::parse_str(id).map_err(|_| ObservationError::Codec)?,
+        )
+        .await
+        .map_err(ObservationError::from)?;
+    }
+    if !active_subscription(tx, subscription).await? {
+        return Ok(None);
+    }
+    for (id, source_key, _) in candidates {
         let id = Uuid::parse_str(&id).map_err(|_| ObservationError::Codec)?;
         let source_key = MessageKey::from_storage(
             Uuid::parse_str(&source_key).map_err(|_| ObservationError::Codec)?,
@@ -116,6 +134,11 @@ pub(super) async fn publication(
                 "UPDATE extension_room_publications SET status = 'stale', settled_at_ms = ? WHERE id = ? AND status = 'pending'",
                 crate::db_params![now_ms, id.to_string()],
             ).await?;
+            let now =
+                chrono::DateTime::from_timestamp_millis(now_ms).ok_or(ObservationError::Codec)?;
+            EffectDescendantRepository::settle_all_raw(tx.transaction_mut(), id, now)
+                .await
+                .map_err(ObservationError::from)?;
             continue;
         }
         return Ok(Some(RoomPublication {
@@ -132,9 +155,6 @@ pub(super) async fn assert_publication(
     tx: &mut IngressUowTransaction<'_>,
     publication: &RoomPublication,
 ) -> Result<bool, ObservationError> {
-    if !active_subscription(tx, &publication.subscription).await? {
-        return Ok(false);
-    }
     let mut rows = tx
         .transaction_mut()
         .query(
@@ -150,6 +170,13 @@ pub(super) async fn assert_publication(
     let key = MessageKey::from_storage(
         Uuid::parse_str(&source_key).map_err(|_| ObservationError::Codec)?,
     );
+    super::work::lock_canonical_keys(tx, &[key]).await?;
+    EffectDescendantRepository::lock_all_nowait_raw(tx.transaction_mut(), publication.id)
+        .await
+        .map_err(ObservationError::from)?;
+    if !active_subscription(tx, &publication.subscription).await? {
+        return Ok(false);
+    }
     let Some(source) = load_source(tx, key).await? else {
         return Ok(false);
     };
@@ -168,9 +195,18 @@ pub(super) async fn mark_published(
     id: &Uuid,
     now_ms: i64,
 ) -> Result<bool, ObservationError> {
+    EffectDescendantRepository::lock_all_nowait_raw(tx.transaction_mut(), *id)
+        .await
+        .map_err(ObservationError::from)?;
     let changed = tx.transaction_mut().execute(
         "UPDATE extension_room_publications SET status = 'published', settled_at_ms = ? WHERE id = ? AND status = 'pending'",
         crate::db_params![now_ms, id.to_string()],
     ).await?;
+    if changed == 1 {
+        let now = chrono::DateTime::from_timestamp_millis(now_ms).ok_or(ObservationError::Codec)?;
+        EffectDescendantRepository::settle_all_raw(tx.transaction_mut(), *id, now)
+            .await
+            .map_err(ObservationError::from)?;
+    }
     Ok(changed == 1)
 }

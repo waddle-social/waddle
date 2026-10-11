@@ -1417,6 +1417,41 @@ pub enum IngressEffectKey {
 }
 
 impl IngressEffectKey {
+    /// Stable canonical storage discriminator, shared with intent receipts.
+    pub fn storage_kind(&self) -> i32 {
+        let kind = match self {
+            Self::DmCallThreadState(..) => IngressEffectKind::DmCallThreadState,
+            Self::ArchiveAuthoritative(..) => IngressEffectKind::ArchiveAuthoritative,
+            Self::RouteDirect(..) => IngressEffectKind::RouteDirect,
+            Self::RouteMucGroupchat(..) => IngressEffectKind::RouteMucGroupchat,
+            Self::RouteOccupantPm(..) => IngressEffectKind::RouteOccupantPm,
+            Self::DispatchToRoomRemote(..) => IngressEffectKind::DispatchToRoomRemote,
+            Self::Carbons(..) => IngressEffectKind::Carbons,
+            Self::RelayCarbons(..) => IngressEffectKind::RelayCarbons,
+            Self::InboxProject(..) => IngressEffectKind::InboxProject,
+            Self::NotificationActivityPreview(..) => IngressEffectKind::NotificationActivityPreview,
+            Self::GroupchatNotificationRecovery(..) => {
+                IngressEffectKind::GroupchatNotificationRecovery
+            }
+            Self::PendingDelivery(..) => IngressEffectKind::PendingDelivery,
+            Self::LinkPreviewMediaRef(..) => IngressEffectKind::LinkPreviewMediaRef,
+            Self::RetractionTombstone(..) => IngressEffectKind::RetractionTombstone,
+            Self::DmPinMutation(..) => IngressEffectKind::DmPinMutation,
+            Self::MucInviteMembershipGrant(..) => IngressEffectKind::MucInviteMembershipGrant,
+            Self::MucInviteLedger(..) => IngressEffectKind::MucInviteLedger,
+            Self::GroupDmMembershipGrant(..) => IngressEffectKind::GroupDmMembershipGrant,
+            Self::GroupDmInviteLedger(..) => IngressEffectKind::GroupDmInviteLedger,
+            Self::RoomSubjectMutation(..) => IngressEffectKind::RoomSubjectMutation,
+            Self::CallSignal(..) => IngressEffectKind::CallSignal,
+            Self::Pin(..) => IngressEffectKind::Pin,
+            Self::Extension(..) => IngressEffectKind::Extension,
+            Self::RoomObserver(..) => IngressEffectKind::RoomObserver,
+            Self::TombstoneReplayDeletion(..) => IngressEffectKind::TombstoneReplayDeletion,
+            Self::ErrorReply(..) => IngressEffectKind::ErrorReply,
+        };
+        kind.storage_tag()
+    }
+
     pub fn storage_identity(&self) -> String {
         match self {
             Self::DmCallThreadState(key, sequence) => format!(

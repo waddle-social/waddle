@@ -335,8 +335,10 @@ Existing `ingress.gc.*` series retain their GC-specific meaning and outcomes.
 
 ## Retention and unresolved effects
 
-GC retains canonical messages for eight days from `terminal_at`, and keeps
-rows with live stream references. Intents without matching receipts prevent
+GC retains canonical messages, aliases, delivery bindings and receipts until
+scheduled descendants and live stream references settle, then for eight days
+from `retention_eligible_at`. Execution completion remains `terminal_at`.
+Intents without matching receipts prevent
 terminalization. Reconciliation that adds omitted intents clears `terminal_at`
 in the same transaction. GC also checks receipt completeness while holding the
 canonical-row lock, so unresolved effects protect a message even when its
@@ -352,28 +354,169 @@ Repair-path and stream-retirement attributions are separated by `phase` and excl
 Watch table bytes/live/dead tuples including `ingress_effect_receipts`, and
 CNPG eligible/retained-reference counts alongside reclamation totals.
 
-The collector and CNPG backlog/oldest-age queries share this eligibility
-predicate: `terminal_at IS NOT NULL AND terminal_at <= now() - interval '8 days'
-AND receipts_complete AND (has_alias OR has_delivery OR NOT has_ref)`, where
-the three reference booleans mean a matching row exists in
-`ingress_origin_aliases`, `ingress_deliveries`, and `ingress_sm_refs`, respectively. `receipts_complete` means every recorded
+The collector and CNPG backlog/oldest-age queries share this candidate
+predicate: `terminal_at IS NOT NULL AND (retention_eligible_at IS NULL OR retention_eligible_at <= now() - interval '8 days')
+AND receipts_complete AND NOT has_ref AND NOT has_pending_descendant`, where
+`has_ref` includes SM custody and pending archive-dispatch references, and
+`has_pending_descendant` means an unsettled Foundation scheduling reference.
+`receipts_complete` means every recorded
 intent has a receipt with the same message key, kind, and semantic identity
 hash. Expired delivery markers are GC work only when receipts are complete,
-including when no alias or stream reference remains. GC removes aliases and
-delivery markers even when a stream reference retains the canonical row.
-The retained-reference gauge counts expired rows with `has_ref OR NOT
-receipts_complete`; this includes stale terminal rows with pending intents.
-Receipt-complete rows with stream references can also be eligible until their
-aliases and delivery markers are removed; the stream reference retains the
-canonical row itself. Eligible age is measured
-from `terminal_at`, not from expiry. The Rust predicate parity test pins both
+including when no alias or stream reference remains. Stream references and
+pending descendants retain the aliases and delivery bindings too. Descendant
+fanout/coalescing copies all canonical ancestry before settling the predecessor;
+a transport ACK alone cannot discharge it. A new pending reference clears the
+frontier under the canonical lock. The retained-reference gauge includes rows
+whose frontier is unset, with references, descendants or missing receipts.
+Eligible age uses `retention_eligible_at` when present. For legacy NULL-frontier
+rows the CNPG gauge falls back to `terminal_at`; their old ages indicate adoption
+backlog, not overdue physical deletion. Existing rows with no recorded frontier
+are adopted conservatively at their first eligible maintenance observation; adoption starts
+the full tail and does not collect the row in that pass. Physical deletion
+requires a non-null, expired frontier. The Rust predicate parity test pins both
 collector dialects and both CNPG eligibility aggregates to this definition.
+Account for the adoption window when evaluating `IngressGcBacklog` and
+`IngressGcAge`; see the [cutover procedure](../../../docs/operations/relay-cutovers.md#extension-effect-authority-cutover-1660).
 
 GC takes the epoch lock before canonical rows and uses `FOR UPDATE SKIP LOCKED`.
 A `partial` result means bounded progress with more work pending, not failure;
 `failed` or `timed_out` requires investigation. See
 [ingress epoch guards](ingress-epoch-guards.md) for lock order and activation
 preconditions; the cutover does not itself authorize an epoch activation.
+
+### Extension effect delivery (#1660)
+
+Activity and preview mutations commit with their canonical receipts. Recovery
+reuses recorded payloads and original timestamps, without fresh enrichment.
+Opaque delivery bindings identify the canonical message, effect kind and
+target; the extension ABI exposes only invocation-scoped host resources.
+Guests cannot manufacture or export a key. Each host operation revalidates
+the configured observer generation, source and unexpired started lease.
+
+Approved observer results and publication descendants commit together.
+Unknown started guest/provider effects remain pending after lease expiry,
+including after repeated attempts; they may repeat. Calls and pins remain
+`AwaitingDurableOwner` for the P1.4 contract. Existing call/pin operations do
+not acquire a durable guarantee from their in-memory mutation receipts.
+
+Notification candidates preserve ancestry through coalesced jobs and device
+delivery. The first approved payload is immutable on same-key retry. Durable
+push-service queue acceptance, a stable XEP-0357 item ID and provider delivery
+are distinct stages; APNs/Web Push without a durable key contract remain
+at-least-once.
+
+Retry spacing and individual claims are bounded; total uncertainty lifetime is
+not. Started provider/guest effects and outbox work with possible queue acceptance
+may retry indefinitely until durable acceptance or an explicit terminal
+disposition settles custody. Frozen approval alone does not imply acceptance.
+Current Web Push/APNs transient status classes also cover HTTP 5xx replies, so
+they conservatively set sticky uncertainty. Persistent endpoint failures can
+consume the per-node queue limit and retain canonical ancestry indefinitely.
+The known-error attempt ceiling does not bound previously uncertain work; a
+future classification/disposition policy must preserve that distinction rather
+than silently treating elapsed time as successful delivery.
+The failure-classification and capacity/disposition follow-up is
+[#1940](https://github.com/waddle-social/waddle/issues/1940), coordinated with
+[#1846](https://github.com/waddle-social/waddle/issues/1846) for diagnostics.
+Known queued failures before provider dispatch stop at the existing 24-attempt
+ceiling when no prior send is uncertain. Their explicit terminal disposition
+settles custody without recording provider delivery; it does not override a
+started lease or sticky uncertainty.
+Later preflight, encoding or configuration failures do not resolve an earlier
+uncertain request. Without confirmed delivery for that exact queue job, such
+jobs keep their retryable state, diagnostic and backoff. Finalization uses fresh
+job-scoped evidence, including delivered siblings, for its existing logical
+success decision; a foreign job sharing the wire item ID supplies no proof.
+Transient outcomes still retry. Explicit registration revocation remains a
+separate cancellation decision.
+
+Outbox approval and queue uncertainty are separate durable state. New jobs begin
+with no possible acceptance; a claim-fenced marker is set before queue invocation.
+Only a proven pre-commit refusal under the same claim, with no prior possible
+acceptance, can clear it. Known unaccepted work uses the outbox attempt ceiling
+and rechecks unread-zero suppression. Commit/reply ambiguity, accepted work with
+failed backing, and prior uncertainty retain the marker across later refusals;
+local queue absence does not resolve a possible acceptance in another database.
+
+Recovery checks exact canonical provider-queue terminal proof before current
+registration or refusal gates. Explicit registration cancellation is persisted
+as a typed disposition, not inferred from generic failure or diagnostic text.
+The acceptance identity, target and frozen payload/options must match; foreign
+wire item IDs and unrelated failed jobs cannot retire accepted outbox custody.
+
+Canonical provider acceptance remains retained until its upstream outbox
+completion is acknowledged. In the same database, terminal completion and the
+outbox pruning backstop transfer the exact acknowledgement before deleting the
+owner; pruning transfers it in the same transaction so either deletion order is
+safe. Provider row contention defers that transaction. Missing local ownership
+does not prove completion. Separate-database proofs without an explicit completion
+acknowledgement remain retained and can consume node capacity; the disposition
+and capacity policy remains tracked in #1940.
+
+Unclassified legacy outbox rows keep possible acceptance, even without frozen
+XML: older writers could enqueue before freezing. Such rows cannot absorb new
+coalesced work, and CHECK-table rebuilds preserve their frozen payload/options,
+summary and uncertainty state. Clearing legacy uncertainty requires verified
+explicit disposition, not an age or attempt threshold.
+Malformed jobs leave the due queue in failed state so valid neighbors can run.
+Possible queue acceptance remains recorded, and their ancestry and row remain
+retained pending verified disposition; parking is not provider completion.
+
+Periodic archived-pending notification recovery requires canonical provenance
+from the host's recorded archive dispatch and archived pending effect, or an
+exact deterministic `RouteDirect` handoff identity independently matched to
+recorded `ArchiveAuthoritative` provenance. It reconstructs
+notification data from the frozen canonical envelope, validates every coalesced
+parent independently, applies T0 policy outside the transaction, then locks and
+rechecks the parent set and still-live pending row. Candidate custody for every
+parent and the pending notification marker commit atomically. Candidate insertion
+uses the pending row's original receipt timestamp; the marker uses recovery time. Missing or conflicting authority defers; a consumed source
+is not recreated. Production pending storage shares the Foundation database;
+only an explicitly noncanonical in-memory adapter permits raw legacy insertion.
+The janitor scans one bounded keyset page per tick within a typed finite-lap
+physical-insertion ordinal horizon. PostgreSQL identity and SQLite counter/insert
+trigger metadata assign every physical insert, including raw/UoW/SM writers;
+ordinary updates preserve the ordinal and deletion never rewinds its allocator.
+Contradictory rows stay unmarked with custody intact while
+the cursor advances past them. New suffixes cannot extend the current lap;
+wrapping revisits failures and insertions behind the cursor on the next lap.
+
+An archived ambiguous-send handoff also pins its physical pending row under the
+original `RouteDirect` authority and recorded archive ordinal in the same
+transaction. Notification recovery can therefore be delayed beyond the retention
+window without losing its source. Reusing an already-marked pending row transfers
+validated candidate/job custody to the later parent before committing the handoff;
+missing or conflicting evidence defers it. The supplemental pending pin preserves
+the original resource audience and releases when the physical row is consumed.
+
+Completed candidate/job pruning discovers a bounded batch, acquires canonical
+ancestry before child locks, skips locked children, then repeats every age,
+quarantine, descendant and lineage guard in a fresh statement. A late attachment
+cannot be hidden by the snapshot taken before waiting on its child row.
+
+Legacy outbox reconstruction requires stored candidate/job lineage or the exact
+typed message context and sender. Conversation/thread/class alone is not
+message ancestry. Ambiguous fanout keeps a separate pending Foundation reference,
+persisted before child adoption, so later pruning or an interrupted startup cannot
+erase the uncertainty. Such history requires verified explicit disposition.
+Shared candidates are located by their cross-archive identity; their stored
+archive context and the frozen canonical sender, class and thread still have to
+match. Direct-message candidate lookup uses the sender conversation even when the
+recorded notification intent names the recipient conversation.
+
+At the per-node publish quota, pruning counts all retained jobs but selects only
+aged terminal rows with no canonical descendant evidence. A protected oldest row
+does not prevent a later safe row from supplying quota headroom. Canonical queue
+jobs additionally require a durable upstream completion acknowledgement before
+their acceptance proof can retire. Both deployed ingress lifecycle cohorts
+classify unsettled descendant-only custody as
+`terminal_referenced`; settling the descendant removes that reference.
+
+V1025 adds the canonical retention frontier and descendant scheduling state.
+It appends to the checksummed ledger; do not run older writers after this
+cutover. The extension component ABI is `waddle:extension@3.0.0`; rebuild all
+guest components before loading them. This implementation does not authorize
+or assert a live activation.
 
 ## Observer history retention (#1901)
 
@@ -1437,7 +1580,7 @@ fail-closed before rebuilding routes.
 | --- | --- |
 | `route_direct` | Recoverable with non-empty recorded fanout when the canonical message is `Chat`/`Normal`, the recipient equals its bare `to`, and the route is neither legacy delegated full-JID without prepared payload nor DM-pin-owned. Newly prepared full-JID routes retain the processed typed payload even when storage hints suppress MAM; recovery sends that frozen copy without a recipient persistence pass. Maintenance delivers only to locally hosted live sockets or locally detached SM sessions; remote-hosted resources stay pending. Recovery re-evaluates the recipient’s current blocklist fail-closed and durably discards routes from a sender blocked after intake; a blocklist read failure defers the row. Recorded invitation/grant routes and pending-delivery audiences use their specialized restorers, never this generic path. |
 | `pending_delivery`, `notification_activity_preview` | Direct pending rows and recorded direct notification previews are rebuilt from the canonical envelope and recorded audience. A quota refusal durably receipts the pending delivery and its notification previews, so recovery never re-queues a refused message. Room notification candidates are covered by matching groupchat notification recovery delegation; unmatched candidates stay pending. |
-| `room_observer` | Recovery wakes the durable per-plugin observation worker. Its frozen source/generation/revision identifies the work. A leased job commits `started` before invoking the plugin. Unknown outcomes wait for the three-minute lease before a fresh-token retry; 20 attempts settle as terminal `retry_exhausted`, not callback success. Saved results, publications and receipts commit together. Pre-invocation admission rejection can retry sooner. Missing observer envelopes remain unrecoverable. |
+| `room_observer` | Recovery wakes the durable per-plugin observation worker. Its frozen source/generation/revision identifies the work. A leased job commits `started` before invoking the plugin. Unknown outcomes wait for the three-minute lease before a fresh-token retry. The 20-attempt ceiling applies to known uninvoked work; prior uncertainty remains pending across later permanent/not-applicable outcomes until successful completion or explicit disposition. Saved results, publications and receipts commit together. Pre-invocation admission rejection can retry sooner. Missing observer envelopes remain unrecoverable. |
 | `groupchat_notification_recovery` | `Completed`/`DeferredPolicy` obligations delegate to the existing notification recovery settlement, which re-locks and revalidates. |
 | `dm_pin_mutation`, `route_direct` | Route-only recovery when the recorded DM pin mutation is receipted. The mutation is never replayed. An unreceipted mutation and its dependent routes are deferred, because a successful mutation with a failed receipt write must not undo a later unpin; both kinds are metered. |
 | `muc_invite_ledger` | Recorded `Claimed` declines rebuild the ledger claim and inviter route, binding the claim to the canonical message key and the observed invitation generation timestamp (falling back to canonical receipt time for older recorded declines). A newer invitation remains available and the recovered decline is not forwarded. A decline whose canonical row is older than the 30-day invitation TTL is not rebuilt (its invitation expired and a newer one for the same tuple could otherwise be consumed); it is metered and stays pending. |
@@ -1621,9 +1764,12 @@ on takeover. Proven pre-invocation rejection can retry earlier; unknown callback
 outcomes wait for lease expiry. Current source, revision and subscription
 generation must still match. Stale callbacks cannot publish results after a
 replacement claim. Invocation may repeat after an unknown result, so this is not
-exactly-once execution of guest external effects. The existing 20-attempt limit
-settles exhausted work as failure; valid result/publication/receipt writes remain
-atomic and publication output indices remain idempotent.
+exactly-once execution of guest external effects. The 20-attempt limit applies to
+known uninvoked work. Prior uncertainty survives
+later permanent or not-applicable outcomes and does not acquire a receipt merely
+because a later attempt failed. Successful completion or explicit disposition
+resolves it; valid result/publication/receipt writes remain atomic and publication
+output indices remain idempotent.
 
 **Accepted policy from merged #1899 (#1776, reconciled by #1909):**
 This supersedes #1658's original terminal non-SM uncertainty requirement.

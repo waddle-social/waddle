@@ -37,10 +37,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1024) still dominates
+    // the ledger max, which the waddle namespace (V1025) still dominates
     // after global V0015.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1024));
+    assert_eq!(version, Some(1025));
 }
 
 #[tokio::test]
@@ -157,7 +157,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
         applied,
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
         ]
     );
 
@@ -178,7 +178,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1024));
+    assert_eq!(version, Some(1025));
 }
 
 #[tokio::test]
@@ -237,7 +237,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1024 (the waddle
+    // so the runner also reports applying 1001 through 1025 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -249,7 +249,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
             1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021,
-            1022, 1023, 1024
+            1022, 1023, 1024, 1025
         ]
     );
 
@@ -313,7 +313,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1024),
+        Some(1025),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -473,7 +473,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
         runner.run(&db).await.unwrap(),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
@@ -786,7 +786,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
         applied,
         vec![
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024
+            1024, 1025
         ]
     );
     assert_eq!(
@@ -959,7 +959,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
         runner.run(&db).await.expect("adopt and run migrations"),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
@@ -1447,6 +1447,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
                     [
                         "ingress_archive_dispatch",
                         "ingress_deliveries",
+                        "ingress_effect_descendants",
                         "ingress_effect_intents",
                         "ingress_effect_receipts",
                         "ingress_messages",
@@ -1480,6 +1481,7 @@ async fn postgres_monitoring_queries_match_migrated_ingress_schema() {
     }
 
     assert_pending_archive_reference_monitoring(&query_pool, &mut monitor_conn, &queries).await;
+    assert_descendant_reference_monitoring(&query_pool, &mut monitor_conn, &queries).await;
     assert_populated_nonterminal_monitoring(&query_pool, &mut monitor_conn, &queries).await;
 
     drop(monitor_conn);
@@ -1572,6 +1574,91 @@ async fn assert_pending_archive_reference_monitoring(
                 .execute(pool)
                 .await
                 .expect("release pending archive reference");
+        }
+    }
+}
+
+async fn assert_descendant_reference_monitoring(
+    pool: &sqlx::PgPool,
+    monitor: &mut sqlx::PgConnection,
+    queries: &[MonitoringQuery],
+) {
+    // V1025 can retain observer publications with descendants alone: no SM,
+    // delivery binding or archive dispatch exists for this terminal parent.
+    sqlx::raw_sql(
+        "INSERT INTO ingress_messages (message_key, digest_version, digest, created_at, terminal_at)
+         VALUES ('00000000-0000-0000-0000-000000000013', 1, decode(repeat('13', 32), 'hex'), '1970-01-01T01:00:00Z', '1970-01-01T02:00:00Z');
+         INSERT INTO ingress_effect_intents
+           (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload)
+         SELECT message_key, 0, 28, digest, 1, '{}'::bytea FROM ingress_messages
+         WHERE message_key = '00000000-0000-0000-0000-000000000013';
+         INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash)
+         SELECT message_key, kind, semantic_identity_hash FROM ingress_effect_intents
+         WHERE message_key = '00000000-0000-0000-0000-000000000013';
+         INSERT INTO ingress_effect_descendants
+           (message_key, kind, semantic_identity_hash, descendant_key)
+         SELECT message_key, kind, semantic_identity_hash, 'monitoring-observer-publication'
+         FROM ingress_effect_intents
+         WHERE message_key = '00000000-0000-0000-0000-000000000013';",
+    )
+    .execute(pool)
+    .await
+    .expect("insert descendant-only observer monitoring fixture");
+
+    for unsettled in [true, false] {
+        let referenced = i64::from(unsettled);
+        // The two prior pending archive fixtures have already been released.
+        let unreferenced = 3 - referenced;
+        for name in ["waddle_ingress_messages", "waddle_ingress_cohort"] {
+            let query = queries
+                .iter()
+                .find(|query| query.name == name)
+                .expect("lifecycle query");
+            let rows = sqlx::query(&query.sql)
+                .fetch_all(&mut *monitor)
+                .await
+                .expect("query descendant lifecycle as pg_monitor");
+            let counts: std::collections::BTreeMap<String, i64> = rows
+                .iter()
+                .map(|row| {
+                    (
+                        row.try_get("state").expect("lifecycle state"),
+                        row.try_get("count").expect("lifecycle count"),
+                    )
+                })
+                .collect();
+            assert_eq!(
+                counts.get("terminal_referenced").copied().unwrap_or(0),
+                referenced,
+                "{name}: unsettled observer descendants retain their terminal parent"
+            );
+            assert_eq!(
+                counts.get("terminal_unreferenced"),
+                Some(&unreferenced),
+                "{name}: settled descendants stop retaining their terminal parent"
+            );
+        }
+        let gc = queries
+            .iter()
+            .find(|query| query.name == "waddle_ingress_gc")
+            .expect("GC query");
+        let row = sqlx::query(&gc.sql)
+            .fetch_one(&mut *monitor)
+            .await
+            .expect("query descendant GC as pg_monitor");
+        assert_eq!(
+            row.try_get::<i64, _>("eligible_messages")
+                .expect("eligible count"),
+            unreferenced
+        );
+        assert_eq!(
+            row.try_get::<i64, _>("retained_referenced_messages")
+                .expect("retained count"),
+            referenced
+        );
+        if unsettled {
+            sqlx::query("UPDATE ingress_effect_descendants SET settled_at = now() WHERE descendant_key = 'monitoring-observer-publication'")
+                .execute(pool).await.expect("settle observer descendant");
         }
     }
 }
@@ -2241,7 +2328,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         vec![
             6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
             1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
-            1023, 1024
+            1023, 1024, 1025
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2319,7 +2406,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024
+            1024, 1025
         ]
     );
 
@@ -2973,7 +3060,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024
+            1024, 1025
         ]
     );
 
@@ -3247,7 +3334,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         applied,
         vec![
             1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016,
-            1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024
+            1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
         ]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
@@ -3949,7 +4036,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
     );
     assert_nonterminal_monitoring_index(&db).await;
     assert!(sqlite_table_exists(&db, "sm_sessions").await);
@@ -4012,7 +4099,7 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
     assert!(postgres_table_exists(&db, "sm_unacked").await);
@@ -4045,7 +4132,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
             .run(&db)
             .await
             .expect("apply V1014"),
-        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
+        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
     );
 
     assert_v1014_cutover_result(&db, 0).await;
@@ -4077,7 +4164,7 @@ async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() 
                 .run(&db)
                 .await
                 .expect("apply V1014 at live epoch"),
-            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
+            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
         );
         assert_v1014_cutover_result(&db, epoch).await;
 
@@ -4324,7 +4411,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .run(&storage.database())
             .await
             .expect("cutover migration"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024]
+        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
     );
     drop(storage);
 
@@ -4603,7 +4690,7 @@ async fn assert_v1019_custody_cutover(db: &Database) {
             .run(db)
             .await
             .expect("apply custody cutover migration"),
-        vec![1019, 1020, 1021, 1022, 1023, 1024]
+        vec![1019, 1020, 1021, 1022, 1023, 1024, 1025]
     );
     let conn = db
         .guard()
@@ -4954,4 +5041,159 @@ async fn postgres_prepared_route_v1024_refuses_old_binary() {
     if let Some(fixture) = crate::ingress::test_support::IngressFixture::postgres("prp_old").await {
         old_binary_refused(fixture).await;
     }
+}
+
+async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Database) {
+    use sha2::{Digest, Sha256};
+    use waddle_extensions::{ObservationGeneration, PluginId, Sha256Digest};
+    use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, SemanticDigest};
+    MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1025),
+            )
+            .collect(),
+    )
+    .run(db)
+    .await
+    .expect("pre-V1025 catalog");
+    let key = MessageKey::new();
+    let active_key = MessageKey::new();
+    let mut tx = db.begin_immediate().await.expect("legacy observer data");
+    crate::ingress_substrate::record_message(
+        &mut tx,
+        key,
+        &SemanticDigest::from_storage(1, [1; 32]).expect("digest"),
+        None,
+    )
+    .await
+    .expect("canonical message");
+    crate::ingress_substrate::record_message(
+        &mut tx,
+        active_key,
+        &SemanticDigest::from_storage(1, [2; 32]).expect("active digest"),
+        None,
+    )
+    .await
+    .expect("active canonical message");
+    let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
+    let mut matching_hash = Vec::new();
+    for (ordinal, plugin) in ["plugin-a", "plugin-b"].into_iter().enumerate() {
+        let effect = IngressEffectIntent::RoomObserver {
+            room: room.clone(),
+            requester: "alice@example.com".parse().expect("requester"),
+            sender: "room@conference.example.com/alice".parse().expect("sender"),
+            plugin: PluginId::new(plugin).expect("plugin"),
+            generation: ObservationGeneration::new(1).expect("generation"),
+            identity: Sha256Digest::new("a".repeat(64)).expect("artifact identity"),
+            correction_target: None,
+        };
+        let hash = Sha256::digest(effect.semantic_key().storage_identity().as_bytes()).to_vec();
+        if ordinal == 0 {
+            matching_hash = hash.clone();
+        }
+        let (kind, payload) = effect
+            .with_encoded_v1(|kind, payload| (kind, payload.to_vec()))
+            .expect("stored V1 authority");
+        let sql = match db.driver() {
+            DatabaseDriver::Postgres => "INSERT INTO ingress_effect_intents(message_key,effect_ordinal,kind,semantic_identity_hash,payload_version,payload) VALUES(?::uuid,?::numeric,?,?,1,?)",
+            DatabaseDriver::Sqlite => "INSERT INTO ingress_effect_intents(message_key,effect_ordinal,kind,semantic_identity_hash,payload_version,payload) VALUES(?,?,?,?,1,?)",
+        };
+        tx.execute(
+            sql,
+            crate::db_params![
+                key.to_storage().to_string(),
+                ordinal.to_string(),
+                kind,
+                hash.clone(),
+                payload.clone()
+            ],
+        )
+        .await
+        .expect("canonical observer intent");
+        if ordinal == 0 {
+            tx.execute(
+                sql,
+                crate::db_params![
+                    active_key.to_storage().to_string(),
+                    "0",
+                    kind,
+                    hash,
+                    payload
+                ],
+            )
+            .await
+            .expect("active canonical observer intent");
+        }
+    }
+    let active_work = uuid::Uuid::new_v4();
+    let completed_work = uuid::Uuid::new_v4();
+    // Distinct source messages preserve the observer's natural work key.
+    // Pending work still relies on its unreceipted canonical obligation.
+    for (id, status, message_key) in [
+        (active_work, "pending", active_key),
+        (completed_work, "completed", key),
+    ] {
+        tx.execute("INSERT INTO extension_room_observation_work(id,source_key,message_key,plugin_id,generation,identity,room_jid,revision,source_json,body,status,attempt,due_at_ms) VALUES(?,?,?,'plugin-a',1,?,?,0,'{}','',?,0,0)", crate::db_params![id.to_string(),message_key.to_storage().to_string(),message_key.to_storage().to_string(),"a".repeat(64),room.to_string(),status]).await.expect("legacy work");
+    }
+    let publication = uuid::Uuid::new_v4();
+    tx.execute("INSERT INTO extension_room_publications(id,work_id,output_index,source_key,plugin_id,generation,identity,room_jid,revision,source_json,payload_json,status) VALUES(?,?,0,?,'plugin-a',1,?,?,0,'{}','{}','pending')", crate::db_params![publication.to_string(),completed_work.to_string(),key.to_storage().to_string(),"a".repeat(64),room.to_string()]).await.expect("legacy pending publication");
+    tx.commit().await.expect("commit legacy data");
+    assert_eq!(
+        MigrationRunner::single()
+            .run(db)
+            .await
+            .expect("append V1025"),
+        vec![1025]
+    );
+    let conn = db.guard().await.expect("catalog");
+    let references_query = match db.driver() {
+        DatabaseDriver::Postgres => "SELECT descendant_key, semantic_identity_hash, message_key::text FROM ingress_effect_descendants",
+        DatabaseDriver::Sqlite => "SELECT descendant_key, semantic_identity_hash, message_key FROM ingress_effect_descendants",
+    };
+    let mut rows = conn
+        .query(references_query, ())
+        .await
+        .expect("adopted Foundation references");
+    let row = rows
+        .next()
+        .await
+        .expect("reference")
+        .expect("pending publication adopted");
+    assert_eq!(
+        row.get::<String>(0).expect("reference identity"),
+        publication.to_string()
+    );
+    assert_eq!(
+        row.get::<Vec<u8>>(1).expect("reference authority"),
+        matching_hash
+    );
+    assert_eq!(
+        row.get::<String>(2).expect("canonical publication parent"),
+        key.to_storage().to_string(),
+        "the active source must not borrow the completed source's publication",
+    );
+    assert!(rows.next().await.expect("reference end").is_none(), "active work uses canonical unreceipted intent; unrelated plugin must not borrow publication ancestry");
+}
+
+#[tokio::test]
+async fn sqlite_v1025_adopts_only_matching_pending_publication_authority() {
+    let db = Database::in_memory("v1025-adoption").await.expect("SQLite");
+    assert_v1025_adopts_only_matching_pending_publication_authority(&db).await;
+}
+
+#[tokio::test]
+async fn postgres_v1025_adopts_only_matching_pending_publication_authority() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1025 adoption)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("v1025_adoption");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    assert_v1025_adopts_only_matching_pending_publication_authority(&db).await;
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
 }

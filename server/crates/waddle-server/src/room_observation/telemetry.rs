@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use waddle_extensions::{PluginId, RoomObservationOutcome, Timestamp};
+use waddle_extensions::{RoomObservationOutcome, Timestamp};
 
 pub(super) fn started(observed_at: &Timestamp, attempt: u32) {
     if attempt == 1 {
@@ -14,7 +14,6 @@ pub(super) fn started(observed_at: &Timestamp, attempt: u32) {
 }
 
 pub(super) fn finished(
-    plugin: &PluginId,
     attempt: u32,
     outcome: &RoomObservationOutcome,
     duration: Duration,
@@ -35,8 +34,13 @@ pub(super) fn finished(
     );
     // Fixed categories and numeric timing only: never log input text, provider
     // responses, guest error strings, or secret configuration.
-    tracing::info!(plugin = %plugin, attempt, category, saved,
-        duration_ms = duration.as_millis(), "room extension observation finished");
+    tracing::info!(
+        attempt,
+        category,
+        saved,
+        duration_ms = duration.as_millis(),
+        "room extension observation finished"
+    );
 }
 
 pub(super) fn published(observed_at: &Timestamp) {

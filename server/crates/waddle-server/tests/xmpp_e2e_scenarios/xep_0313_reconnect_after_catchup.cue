@@ -51,6 +51,17 @@ scenario: #Scenario & {
 				name:    "id"
 			}]
 		},
+		// Close acknowledgment precedes route cleanup. Negative priority excludes
+		// Bob from bare-JID delivery while his departing route is still registered.
+		#SendPresence & {actor: bobPhone, priority: -1},
+		#SendIq & {
+			actor: bobPhone
+			type:  "get"
+			id:    "cue-gap-route-barrier"
+			to:    scenario.domain
+			payload: #XmlElement & {name: "ping", ns: "urn:xmpp:ping"}
+		},
+		#ExpectIq & {target: bobPhone, type: "result", id: "cue-gap-route-barrier"},
 		#DisconnectActor & {
 			actor: bobPhone
 		},

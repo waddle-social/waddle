@@ -1399,6 +1399,68 @@ ALTER TABLE ingress_effect_receipts ADD COLUMN policy_discard_reason TEXT
     CHECK (policy_discard_reason IN ('recipient_blocked', 'storage_hint_forbids_handoff'));
 "#;
 
+/// A separate tail begins only after descendants and SM custody settle.
+/// Legacy canonical rows intentionally carry no fabricated eligibility proof.
+pub const V1025_EFFECT_DESCENDANT_RETENTION: &str = r#"
+ALTER TABLE ingress_messages ADD COLUMN retention_eligible_at TEXT NULL;
+CREATE INDEX ingress_messages_retention_eligible ON ingress_messages (retention_eligible_at, message_key) WHERE terminal_at IS NOT NULL;
+CREATE TABLE ingress_effect_descendants (
+    message_key TEXT NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BLOB NOT NULL CHECK (length(semantic_identity_hash) = 32),
+    descendant_key TEXT NOT NULL,
+    settled_at TEXT NULL,
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, descendant_key),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE INDEX ingress_effect_descendants_pending ON ingress_effect_descendants (message_key) WHERE settled_at IS NULL;
+CREATE INDEX ingress_effect_descendants_identity ON ingress_effect_descendants (descendant_key, message_key);
+INSERT INTO ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key)
+SELECT i.message_key, i.kind, i.semantic_identity_hash, publication.id
+FROM ingress_effect_intents i JOIN extension_room_observation_work work ON work.message_key = i.message_key
+JOIN extension_room_publications publication ON publication.work_id = work.id
+WHERE i.kind = 28 AND publication.status = 'pending'
+  AND json_extract(CAST(i.payload AS TEXT), '$.intent.room') = publication.room_jid
+  AND json_extract(CAST(i.payload AS TEXT), '$.intent.plugin') = publication.plugin_id
+  AND json_extract(CAST(i.payload AS TEXT), '$.intent.generation') = publication.generation
+  AND json_extract(CAST(i.payload AS TEXT), '$.intent.identity') = publication.identity;
+"#;
+
+pub const V1025_EFFECT_DESCENDANT_RETENTION_POSTGRES: &str = r#"
+ALTER TABLE ingress_messages ADD COLUMN retention_eligible_at TIMESTAMPTZ NULL;
+CREATE INDEX ingress_messages_retention_eligible ON ingress_messages (retention_eligible_at, message_key) WHERE terminal_at IS NOT NULL;
+CREATE TABLE ingress_effect_descendants (
+    message_key UUID NOT NULL,
+    kind INTEGER NOT NULL,
+    semantic_identity_hash BYTEA NOT NULL CHECK (octet_length(semantic_identity_hash) = 32),
+    descendant_key TEXT NOT NULL,
+    settled_at TIMESTAMPTZ NULL,
+    PRIMARY KEY (message_key, kind, semantic_identity_hash, descendant_key),
+    FOREIGN KEY (message_key, kind, semantic_identity_hash) REFERENCES ingress_effect_intents (message_key, kind, semantic_identity_hash) ON DELETE CASCADE
+);
+CREATE INDEX ingress_effect_descendants_pending ON ingress_effect_descendants (message_key) WHERE settled_at IS NULL;
+CREATE INDEX ingress_effect_descendants_identity ON ingress_effect_descendants (descendant_key, message_key);
+INSERT INTO ingress_effect_descendants (message_key, kind, semantic_identity_hash, descendant_key)
+SELECT i.message_key, i.kind, i.semantic_identity_hash, publication.id
+FROM ingress_effect_intents i JOIN extension_room_observation_work work ON work.message_key = i.message_key::text
+JOIN extension_room_publications publication ON publication.work_id = work.id
+WHERE i.kind = 28 AND publication.status = 'pending'
+  AND convert_from(i.payload, 'UTF8')::jsonb #>> '{intent,room}' = publication.room_jid
+  AND convert_from(i.payload, 'UTF8')::jsonb #>> '{intent,plugin}' = publication.plugin_id
+  AND convert_from(i.payload, 'UTF8')::jsonb #>> '{intent,generation}' = publication.generation::text
+  AND convert_from(i.payload, 'UTF8')::jsonb #>> '{intent,identity}' = publication.identity;
+CREATE TRIGGER ingress_effect_descendants_epoch_guard_dml
+BEFORE INSERT OR UPDATE OR DELETE ON ingress_effect_descendants
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_epoch_guard();
+CREATE TRIGGER ingress_effect_descendants_epoch_guard_truncate
+BEFORE TRUNCATE ON ingress_effect_descendants
+FOR EACH STATEMENT EXECUTE FUNCTION waddle_ingress_truncate_guard();
+ALTER TABLE ingress_effect_descendants ENABLE ALWAYS TRIGGER ingress_effect_descendants_epoch_guard_dml;
+ALTER TABLE ingress_effect_descendants ENABLE ALWAYS TRIGGER ingress_effect_descendants_epoch_guard_truncate;
+INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_effect_descendants');
+GRANT SELECT ON TABLE ingress_effect_descendants TO pg_monitor;
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1545,6 +1607,13 @@ pub fn all() -> Vec<Migration> {
             description: "Distinguish ingress policy discard from ordinary settlement".to_string(),
             sql_sqlite: V1024_INGRESS_POLICY_DISCARD,
             sql_postgres: V1024_INGRESS_POLICY_DISCARD,
+        },
+        Migration {
+            version: 1025,
+            description: "Retain canonical evidence until descendants and SM custody settle"
+                .to_string(),
+            sql_sqlite: V1025_EFFECT_DESCENDANT_RETENTION,
+            sql_postgres: V1025_EFFECT_DESCENDANT_RETENTION_POSTGRES,
         },
     ]
 }

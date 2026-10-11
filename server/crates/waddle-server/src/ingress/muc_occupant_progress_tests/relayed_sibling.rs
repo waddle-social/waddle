@@ -172,7 +172,6 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
     let first = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("owner commit");
-    let stalled = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let relay_targets = Arc::new(Mutex::new(Vec::new()));
     let first_execution = execute_effects(
         &fixture.uow,
@@ -180,7 +179,11 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
         &first,
         &ImmediateSink,
         &deps,
-        Duration::from_secs(1),
+        Duration::from_secs(if destination == Destination::Remote {
+            1
+        } else {
+            30
+        }),
     );
     let first_report = if destination == Destination::Remote {
         CONTROLLED_MUC_RELAY
@@ -193,11 +196,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
             )
             .await
     } else {
-        let report = STALL_DELIVERY_RESOURCE
-            .scope((sibling.clone(), stalled.clone()), first_execution)
-            .await;
-        assert!(stalled.load(std::sync::atomic::Ordering::SeqCst));
-        report
+        super::stall::execute(sibling.clone(), first_execution).await
     };
     assert!(first_report.receipt_failures.is_empty(), "{first_report:?}");
     assert!(

@@ -777,3 +777,38 @@ fn inbox_refresh_discard_does_not_settle_a_message_route_to_the_same_resource() 
         .contains(&crate::ingress::durable::receipt_key(&route).expect("route key")));
     assert_detached(&result);
 }
+
+#[test]
+fn recovery_rebuilds_frozen_preview_and_activity_without_enrichment() {
+    let saved = IngressEffectIntent::storage_round_trip_samples()
+        .into_iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::LinkPreviewMediaRef { .. }))
+        .expect("preview intent");
+    let activity = IngressEffectIntent::NotificationActivityPreview {
+        owner: bare("romeo@example.com"),
+        mutation: NotificationActivityMutation::ChatStateGone {
+            conversation: bare("juliet@example.com"),
+            committed_at_ms: 123,
+        },
+    };
+    let recorded = vec![saved.clone(), activity.clone()];
+    // No preview enrichment exists in the envelope. Only approved mutations
+    // can reconstruct the effects after process loss.
+    let rebuilt = run(&envelope("original without preview"), &recorded, &recorded);
+    assert!(rebuilt.unrecoverable.is_empty());
+    assert!(rebuilt.unsupported_receipts.is_empty());
+    assert_eq!(rebuilt.decision.external.len(), 2);
+    assert!(matches!(&rebuilt.decision.external[0],
+        ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::LinkPreviewRefs { mutations })
+        if matches!(&saved, IngressEffectIntent::LinkPreviewMediaRef { mutation } if mutations == &vec![mutation.clone()])));
+    assert!(matches!(&rebuilt.decision.external[1],
+        ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::NotificationActivity { owner, mutation })
+        if matches!(&activity, IngressEffectIntent::NotificationActivityPreview { owner: saved_owner, mutation: saved_mutation } if owner == saved_owner && mutation == saved_mutation)));
+    assert_eq!(
+        run(&envelope("same"), &recorded, &[])
+            .decision
+            .external
+            .len(),
+        0
+    );
+}

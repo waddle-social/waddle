@@ -56,6 +56,7 @@ impl exports::waddle::extension::lifecycle::Guest for GitHub {
 impl exports::waddle::extension::framework::Guest for GitHub {
     fn handle_event(
         event: types::ExtensionEvent,
+        _delivery: Option<&bindings::waddle::extension::delivery::DeliveryKey>,
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let effects = match event {
             types::ExtensionEvent::RoomMessageObserve(_) => vec![],

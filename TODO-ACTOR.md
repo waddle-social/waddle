@@ -2,17 +2,19 @@
 
 Status audited **2026-09-27** against `main@35ecd05c8`, with the #1658 acceptance section reconciled **2026-10-05** after #1896/#1899/#1903. Other sections retain their original audit date. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. No new live deployment result is asserted here.
 
-The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. Native blocked-by edges remain canonical for sequencing.
+The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. Native blocked-by edges remain canonical for sequencing. The October 9 triage confirmed #1658 closed on October 6, unblocking #1659 and #1660.
 
 ## What to tackle next
 
-- **Immediate reliability:** #1386 — coordinate clustered shutdown with SM drain completion and classify terminal authority loss. The 2026-09-25 issue report remains relevant; current code already sleeps 250 ms between nonempty passes, so the old “no backoff” diagnosis is stale.
+- **Current actor implementation:** #1660 is being delivered in [PR #1939](https://github.com/waddle-social/waddle/pull/1939), using the [Astra-reviewed plan](docs/planning/1660-extension-delivery-keys.md). Keep the issue open until implementation, acceptance verification and merge are complete; this is not a deployment record.
+- **Next actor spine:** #1659 — reconcile the existing frozen MUC/reflection machinery and remove `GroupchatRetrySuppression`, preserving explicit tombstone disposition and missing-child recovery. It is unblocked now; coordinate its observer handoff with #1660.
+- **Immediate reliability:** #1938 — preserve resumption when the client recovers from an SM progress timeout. #1386 and its later #1926 shutdown follow-up are closed; do not repeat them as unfinished implementation.
 - **Distributed-actors bug:** #1732 — retire displaced-generation media authority without revoking the successor's tokens or removing its LiveKit participant. #1869 narrowed the replacement paths but explicitly deferred this work; re-establish the reproducer against the new bind fencing.
 - **Small distributed-actors task:** #1688 — require `deployment.uuid` at render time for durable database configurations. Clustering already requires it; cover the remaining durable/noncluster configurations, preserve explicit dev/memory behavior, bump the chart, and verify the GitOps render.
-- **Roadmap progress:** post the #1658 final closure record and close the epic. Every carve-out (#1759, #1776, #1790, #1906, #1909–#1912) is complete; #1899's bounded uncertainty policy is the accepted baseline. Do not reimplement closed carve-outs listed below.
+- **Completed roadmap milestone:** #1658's final closure record was attached on October 6 and the epic is closed. Every carve-out (#1759, #1776, #1790, #1906, #1909–#1912) is complete; #1899's bounded uncertainty policy remains the accepted baseline.
 - **Larger recovery task:** design #1826 and #1825 together — durable remote-join handoff plus recovery of departures after socket-node restart. Persisting membership only after the join reply does not close the lost-acknowledgement gap.
 
-**Remaining critical path:** #1658 → (#1659 ∥ #1660) → #1661 → #1662 → #1663. All prerequisites through #1657 are closed. The later umbrellas are sharpening/evaluation work, not ready-to-code feature tickets.
+**Remaining critical path:** (#1659 ∥ #1660) → #1661 → #1662 → #1663. All prerequisites through #1658 are closed. The later umbrellas are sharpening/evaluation work, not ready-to-code feature tickets.
 
 ## Delivery and verification
 
@@ -50,15 +52,15 @@ Every issue in this table is closed. Historical constraints are retained where t
 
 ## Effect executors (former waves 6–7)
 
-### #1658 — open, prerequisites complete
+### #1658 — closed October 6, acceptance complete
 
-The direct-message executor remains the prerequisite for both #1659 and #1660. Its September 20 comment is no longer an accurate list of open carve-outs.
+The direct-message executor prerequisite for both #1659 and #1660 is complete. Its final closure record preserves the accepted uncertainty and legacy-recovery limits.
 
 **Landed/closed:** #1739–#1743 recovery foundations (PR #1752), #1753 extension ingress identity, #1755 recovery executor, #1756 keyed recipient append receipts, #1757 per-occupant fanout progress, #1760 append-proof/payload liveness, #1778 cross-node detached append identity, #1789 registered-socket detach identity, and #1805 UserActor delivery identity (PR #1820). Adjacent #1803 backlog work and #1804 relay compatibility are also closed.
 
 **Recent completion:** #1770 archive/dispatch ordering landed in **PR #1834 on 2026-09-24**. #1896 completed #1759 recipient-preparation acceptance on October 3. #1899 completed #1776 on October 4 with durable leases, proof-first recovery and bounded retry of unknown outcomes; possible duplicate client/provider effects after uncertainty are an explicit policy, not unfinished exactly-once work.
 
-Still to reconcile before closing #1658:
+Completed acceptance reconciliation:
 
 - [x] **#1759:** live full-JID archive/inbox/carbon obligations are canonical; missing recipient preparation refuses the plan. SQLite/PostgreSQL retry coverage and ownership fixtures were reconciled in #1896.
 - [x] **#1776:** #1899 recognizes completed/custodied effects, fences concurrent attempts and permits retry after unknown live outcomes reach 60 seconds. This supersedes the parent issue's original terminal non-SM uncertainty wording.
@@ -71,8 +73,8 @@ Still to reconcile before closing #1658:
 
 | Issue | Current state | Boundary to preserve |
 | --- | --- | --- |
-| #1659 — fenced MUC manifest/reflection | Blocked by open #1658; #1646 prerequisite is complete | Frozen pre-`h` targets, reflection as an ordinary child, idempotent missing-child recovery; `GroupchatRetrySuppression` still exists in `server/routes/interpret/deps.rs` and the tombstone path; deletion remains pending. |
-| #1660 — opaque extension delivery keys | Blocked by open #1658; parallel with #1659 once unblocked | One receipt authority, durable same-key acceptance, descendant-aware GC; calls/pins retain the `AwaitingDurableOwner` carve-out. |
+| #1659 — fenced MUC manifest/reflection | Unblocked; #1658 and #1646 are closed | Frozen pre-`h` targets, reflection as an ordinary child, idempotent missing-child recovery; `GroupchatRetrySuppression` still exists in `server/routes/interpret/deps.rs` and the tombstone path; deletion remains pending. |
+| #1660 — opaque extension delivery keys | Unblocked; implementation in PR #1939, parallel with #1659 | One receipt authority, durable same-key acceptance, descendant-aware GC; calls/pins retain the `AwaitingDurableOwner` carve-out. V1025 and extension ABI 3 require a separate verified cutover. |
 | #1661 — P2 transport sharpening | Blocked by #1659 and #1660 | Mailbox + zero-payload hints; explicit **P2.2 mailbox DDL/core** slice is needed (issue comment identifies the omission). Cut relay consumers over lane by lane before deleting ordered relay. |
 | #1662 — P3 connections/resume sharpening | Blocked by #1661 | Build on existing claim/resume machinery. Includes server + WASM/chat XEP-0388 SASL2 and XEP-0198 §11 inline resume; preserve #1294/#1389 behavior. |
 | #1663 — P4 state/actor sharpening | Blocked by #1662 | Evaluate remaining state against the code then; calls/pins durability and obsolete actor cleanup are not assumed complete. |
@@ -85,12 +87,12 @@ Still to reconcile before closing #1658:
 - [x] Remote mirror/MUC cleanup PR #1821, retirement operations PR #1823, and reconnect-contract PR #1824 merged 2026-09-22. Their remaining durability gaps are #1825/#1826, not unfinished work in those PRs.
 - [ ] **#1732:** generation-specific token revocation and safe displaced-participant retirement. Ordinary local replacement changed under #1869; validate the residual path before implementation. Never revoke the shared identity's entire token bucket or remove a successor based only on the old FullJID.
 - [ ] **#1825 + #1826:** durable membership/departure recovery and join acknowledgement handoff. Preserve genuine resume and replacement generations; transport failure is not departure authority.
-- [ ] **#1386:** bounded coordination of room/SM shutdown, terminal-versus-transient confirmation outcomes, and a regression running both lifecycles together. Preserve immediate fatal-fence preemption and successor custody.
+- [x] **#1386:** closed; its later deterministic storage-failure follow-up #1926 is also closed via #1932. Preserve immediate fatal-fence preemption and successor custody.
 - [ ] **#1709:** the stack overflow was mitigated by PR #1710's 8 MiB Tokio worker stack. The remaining task is to identify/box the oversized Jingle future, not to rediscover the shipped mitigation.
 - [ ] **#1699:** consolidate overlapping room-outbox flake tracking with #1705/#1745 only after preserving the deterministic mid-pass test requirement and the separate group-DM rename failure mentioned on #1699. The original drain defect was fixed in #1708.
 - [ ] **#1641:** adjudicate unlanded #1357 transport-write responsibility and generation-fenced client callback work; retain custody branches until both packets are dispositioned.
 
-Other useful open reliability tasks: #1787 reconnect/offline-message loss (not resolved by #1869), #1806 PostgreSQL fixture-name truncation, #1846 push failure classification, and #1847 terminalization alert semantics. These are adjacent bug work, not prerequisites inferred for the actor spine.
+Other useful open reliability tasks: #1787 reconnect/offline-message loss (not resolved by #1869), #1806 PostgreSQL fixture-name truncation, and #1846 push failure classification. #1847 and #1908 are closed. These are adjacent work, not prerequisites inferred for the actor spine.
 
 ## Cutover, activation and operational verification
 
@@ -124,7 +126,7 @@ Recommendations below are based on source/test inspection and merged PR evidence
 | --- | --- |
 | #1138 | Original detach age is preserved by the snapshot codec introduced in #1676 and restored for expiry checks. Implementation appears fixed, but this audit did not establish the exact repeated successful fanout → restart → original expiry-window regression. Verify that acceptance before closing. |
 | #1699 | Original outbox defect fixed in #1708; overlaps #1705/#1745. Preserve the deterministic scheduling refinement and separately disposition the group-DM rename failure before closing as consolidated. |
-| #1658 | Every carve-out (#1759/#1776/#1790/#1906/#1909–#1912) is closed. Attach the acceptance matrix's final closure record before closing; retain #1899's explicit unknown-outcome duplicate policy. |
+| #1658 | Closed October 6 with the final closure record. Retain #1899's explicit unknown-outcome duplicate policy. |
 | #1709 | The stack-size mitigation does not establish that the remaining oversized-future work is complete. |
 | #1401 | #1869 addresses connection displacement, but malformed/invalid bind error handling remains a separate acceptance requirement. |
 | #1295 | Ordinary cluster drain still skips UserActor claims; do not close merely because #1294 takeover or room draining landed. |

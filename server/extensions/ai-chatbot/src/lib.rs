@@ -62,6 +62,7 @@ impl exports::waddle::extension::lifecycle::Guest for AiChatbot {
 impl exports::waddle::extension::framework::Guest for AiChatbot {
     fn handle_event(
         event: types::ExtensionEvent,
+        _delivery: Option<&bindings::waddle::extension::delivery::DeliveryKey>,
     ) -> Result<types::ExtensionResponse, types::ExtensionError> {
         let executor = RuntimeProviderExecutor;
         handle_event_with_executor(event, &executor)

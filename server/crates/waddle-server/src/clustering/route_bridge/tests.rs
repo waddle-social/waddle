@@ -412,5 +412,6 @@ mod nack_channels;
 mod owner_sweep;
 mod presence;
 mod reassert;
+mod retention_boundary;
 
 pub(crate) mod transient_timestamp;

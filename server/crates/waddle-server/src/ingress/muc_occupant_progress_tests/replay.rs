@@ -108,21 +108,18 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .await
         .expect("commit");
     let key = first.message_key.expect("key");
-    let stalled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let report = STALL_DELIVERY_RESOURCE
-        .scope(
-            (b.clone(), stalled.clone()),
-            execute_effects(
-                &fixture.uow,
-                &fixture.db,
-                &first,
-                &ImmediateSink,
-                &deps,
-                Duration::from_secs(1),
-            ),
-        )
-        .await;
-    assert!(stalled.load(std::sync::atomic::Ordering::SeqCst));
+    let report = super::stall::execute(
+        b.clone(),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &first,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(30),
+        ),
+    )
+    .await;
     assert!(report.receipt_failures.is_empty(), "{report:?}");
     assert!(receivers[1].try_recv().is_err());
     assert!(receivers[2].try_recv().is_ok());

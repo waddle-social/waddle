@@ -62,9 +62,6 @@ pub(super) async fn claim(
     subscription: &RoomObservationSubscription,
     now_ms: i64,
 ) -> Result<Option<ObservationWork>, ObservationError> {
-    if !active_subscription(tx, subscription).await? {
-        return Ok(None);
-    }
     let owner = current_owner(tx).await?;
     let generation = i64::try_from(subscription.generation.get())
         .map_err(|_| ObservationError::GenerationOutOfRange)?;
@@ -72,23 +69,36 @@ pub(super) async fn claim(
     // work row. The per-room actor applies the configured concurrency cap;
     // distinct source jobs may have independent active leases.
     let mut rows = tx.transaction_mut().query(
-        "SELECT id, source_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) ORDER BY due_at_ms, id LIMIT 32",
+        "SELECT id, source_key, message_key FROM extension_room_observation_work WHERE plugin_id = ? AND generation = ? AND identity = ? AND room_jid = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?)) ORDER BY due_at_ms, id LIMIT 32",
         crate::db_params![subscription.plugin.as_str(), generation, subscription.identity.as_str(), subscription.room.to_string(), now_ms, now_ms],
     ).await?;
     let mut candidates = Vec::new();
     while let Some(row) = rows.next().await? {
         let id: String = row.get(0)?;
         let source_key: String = row.get(1)?;
-        candidates.push((id, source_key));
+        let message_key: String = row.get(2)?;
+        candidates.push((id, source_key, message_key));
     }
     drop(rows);
-    for (id, source_key) in candidates {
+    let mut canonical_keys = Vec::new();
+    for (_, source_key, message_key) in &candidates {
+        for key in [source_key, message_key] {
+            canonical_keys.push(MessageKey::from_storage(
+                Uuid::parse_str(key).map_err(|_| ObservationError::Codec)?,
+            ));
+        }
+    }
+    lock_canonical_keys(tx, &canonical_keys).await?;
+    if !active_subscription(tx, subscription).await? {
+        return Ok(None);
+    }
+    for (id, source_key, _) in candidates {
         let source_key = MessageKey::from_storage(
             Uuid::parse_str(&source_key).map_err(|_| ObservationError::Codec)?,
         );
         let source = load_source(tx, source_key).await?;
         let sql = locked(
-            "SELECT id, message_key, source_json, body, attempt, revision, status, due_at_ms, lease_until_ms FROM extension_room_observation_work WHERE id = ?",
+            "SELECT id, message_key, source_json, body, attempt, revision, status, due_at_ms, lease_until_ms, terminal_category FROM extension_room_observation_work WHERE id = ?",
             tx.transaction_mut().driver(),
         );
         let mut work_rows = tx
@@ -105,6 +115,7 @@ pub(super) async fn claim(
         let status: String = row.get(6)?;
         let due_at_ms: i64 = row.get(7)?;
         let lease_until_ms: Option<i64> = row.get(8)?;
+        let category: Option<String> = row.get(9)?;
         drop(work_rows);
         // Candidate selection is deliberately unlocked so the source can be
         // locked first. Recheck the due predicate after both locks: another
@@ -129,9 +140,11 @@ pub(super) async fn claim(
             terminal_receipt(tx, subscription, message_key, "source_changed", now_ms).await?;
             continue;
         }
-        if u32::try_from(attempt)
-            .ok()
-            .is_none_or(|attempt| attempt >= MAX_ATTEMPTS)
+        let uncertain = status == "started" || category.as_deref() == Some("unknown_after_send");
+        if !uncertain
+            && u32::try_from(attempt)
+                .ok()
+                .is_none_or(|attempt| attempt >= MAX_ATTEMPTS)
         {
             tx.transaction_mut().execute(
                 "UPDATE extension_room_observation_work SET status = 'terminal', terminal_category = 'retry_exhausted', body = '', lease_id = NULL, lease_until_ms = NULL, settled_at_ms = ? WHERE id = ? AND status IN ('pending', 'leased', 'started')",
@@ -157,7 +170,7 @@ pub(super) async fn claim(
         }
         let lease = Uuid::now_v7();
         let changed = tx.transaction_mut().execute(
-            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, lease_node_id = ?, lease_node_incarnation = ?, attempt = attempt + 1 WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?))",
+            "UPDATE extension_room_observation_work SET status = 'leased', lease_id = ?, lease_until_ms = ?, lease_node_id = ?, lease_node_incarnation = ?, terminal_category = CASE WHEN status = 'started' THEN 'unknown_after_send' ELSE terminal_category END, attempt = CASE WHEN attempt < 4294967295 THEN attempt + 1 ELSE attempt END WHERE id = ? AND ((status = 'pending' AND due_at_ms <= ?) OR (status IN ('leased', 'started') AND lease_until_ms <= ?))",
             crate::db_params![lease.to_string(), now_ms.saturating_add(LEASE_MS), owner.node_id.clone(), owner.node_epoch.clone(), &id, now_ms, now_ms],
         ).await?;
         if changed == 1 {
@@ -194,6 +207,43 @@ fn skip_category(skip: ObservationSkip) -> &'static str {
     }
 }
 
+/// Canonical rows precede observer configuration, source, work, and publication
+/// locks. Corrections share a root source, so lock both identities in stable order.
+pub(super) async fn lock_canonical_keys(
+    tx: &mut IngressUowTransaction<'_>,
+    keys: &[MessageKey],
+) -> Result<(), ObservationError> {
+    crate::ingress_substrate::acquire_epoch_lock_first(tx.transaction_mut())
+        .await
+        .map_err(ObservationError::from)?;
+    let mut keys = keys.to_vec();
+    keys.sort_by_key(MessageKey::to_storage);
+    keys.dedup();
+    let sql = if tx.transaction_mut().driver() == crate::db::DatabaseDriver::Postgres {
+        "SELECT message_key FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE NOWAIT"
+    } else {
+        "SELECT message_key FROM ingress_messages WHERE message_key = ?"
+    };
+    for key in keys {
+        let mut rows = tx
+            .transaction_mut()
+            .query(sql, crate::db_params![key.to_storage().to_string()])
+            .await
+            .map_err(|error| match &error {
+                crate::db::DatabaseError::Internal(sqlx::Error::Database(database))
+                    if database.code().as_deref() == Some("55P03") =>
+                {
+                    ObservationError::RetryableDatabase(
+                        crate::ingress_uow::DbRetryClass::CanonicalLockContention,
+                    )
+                }
+                _ => ObservationError::from(error),
+            })?;
+        let _ = rows.next().await?;
+    }
+    Ok(())
+}
+
 async fn current_work(
     tx: &mut IngressUowTransaction<'_>,
     work: &ObservationWork,
@@ -201,9 +251,6 @@ async fn current_work(
     start_at_ms: Option<i64>,
 ) -> Result<Option<CurrentWork>, ObservationError> {
     if current_owner(tx).await? != work.owner {
-        return Ok(None);
-    }
-    if !active_subscription(tx, &work.subscription).await? {
         return Ok(None);
     }
     let mut rows = tx
@@ -221,6 +268,10 @@ async fn current_work(
     let key = MessageKey::from_storage(
         Uuid::parse_str(&source_key).map_err(|_| ObservationError::Codec)?,
     );
+    lock_canonical_keys(tx, &[work.message_key, key]).await?;
+    if !active_subscription(tx, &work.subscription).await? {
+        return Ok(None);
+    }
     let Some(source) = load_source(tx, key).await? else {
         return Ok(None);
     };
@@ -228,7 +279,7 @@ async fn current_work(
         return Ok(None);
     }
     let sql = locked(
-        "SELECT lease_id, status, source_json, attempt, message_key, generation, identity, room_jid, plugin_id, lease_until_ms, lease_node_id, lease_node_incarnation FROM extension_room_observation_work WHERE id = ?",
+        "SELECT lease_id, status, source_json, attempt, message_key, generation, identity, room_jid, plugin_id, lease_until_ms, lease_node_id, lease_node_incarnation, terminal_category FROM extension_room_observation_work WHERE id = ?",
         tx.transaction_mut().driver(),
     );
     let mut rows = tx
@@ -250,6 +301,7 @@ async fn current_work(
     let expires: Option<i64> = row.get(9)?;
     let node: Option<String> = row.get(10)?;
     let incarnation: Option<String> = row.get(11)?;
+    let category: Option<String> = row.get(12)?;
     drop(rows);
     if lease_id.as_deref() != Some(work.lease.to_string().as_str())
         || status != expected_status
@@ -270,6 +322,7 @@ async fn current_work(
         source_json,
         attempt,
         generation,
+        uncertain: category.as_deref() == Some("unknown_after_send"),
     }))
 }
 
@@ -278,6 +331,7 @@ struct CurrentWork {
     source_json: String,
     attempt: i64,
     generation: i64,
+    uncertain: bool,
 }
 
 /// Retain node authority through commit, matching the UOW's other fenced
@@ -309,6 +363,27 @@ async fn current_owner(
     Ok(NodeIdentity::local())
 }
 
+pub(super) async fn validate_started(
+    tx: &mut IngressUowTransaction<'_>,
+    work: &ObservationWork,
+    now_ms: i64,
+) -> Result<bool, ObservationError> {
+    if current_work(tx, work, "started", Some(now_ms))
+        .await?
+        .is_none()
+    {
+        return Ok(false);
+    }
+    let key = crate::ingress_uow::DeliveryEffectRepository::bind_effect(
+        tx,
+        work.message_key,
+        &work.effect_key(),
+    )
+    .await
+    .map_err(ObservationError::from)?;
+    Ok(key == crate::ingress_uow::EffectDeliveryBinding::Bound(work.delivery_key()))
+}
+
 pub(super) async fn start(
     tx: &mut IngressUowTransaction<'_>,
     work: &ObservationWork,
@@ -320,6 +395,13 @@ pub(super) async fn start(
     {
         return Ok(false);
     }
+    crate::ingress_uow::DeliveryEffectRepository::bind_effect(
+        tx,
+        work.message_key,
+        &work.effect_key(),
+    )
+    .await
+    .map_err(ObservationError::from)?;
     Ok(tx.transaction_mut().execute(
         "UPDATE extension_room_observation_work SET status = 'started' WHERE id = ? AND lease_id = ? AND status = 'leased' AND lease_until_ms > ?",
         crate::db_params![work.id.to_string(), work.lease.to_string(), now_ms],
@@ -337,17 +419,40 @@ pub(super) async fn finish(
         source_json,
         attempt,
         generation,
-    }) = current_work(tx, work, "started", None).await?
+        uncertain,
+    }) = current_work(tx, work, "started", Some(now_ms)).await?
     else {
         return Ok(false);
     };
     let (status, category, due_at_ms, usage) = match outcome {
         RoomObservationOutcome::Completed(result) => {
             for (index, payload) in result.payloads.iter().enumerate() {
+                let publication_id = Uuid::now_v7();
                 tx.transaction_mut().execute(
                     "INSERT INTO extension_room_publications (id, work_id, output_index, source_key, plugin_id, generation, identity, room_jid, revision, source_json, payload_json, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending') ON CONFLICT (work_id, output_index) DO NOTHING",
-                    crate::db_params![Uuid::now_v7().to_string(), work.id.to_string(), i64::try_from(index).map_err(|_| ObservationError::Codec)?, &source_key, work.subscription.plugin.as_str(), generation, work.subscription.identity.as_str(), work.subscription.room.to_string(), i64::try_from(work.source.revision.get()).map_err(|_| ObservationError::Codec)?, &source_json, serde_json::to_string(payload)?],
+                    crate::db_params![publication_id.to_string(), work.id.to_string(), i64::try_from(index).map_err(|_| ObservationError::Codec)?, &source_key, work.subscription.plugin.as_str(), generation, work.subscription.identity.as_str(), work.subscription.room.to_string(), i64::try_from(work.source.revision.get()).map_err(|_| ObservationError::Codec)?, &source_json, serde_json::to_string(payload)?],
                 ).await?;
+                // An already persisted output owns its original approved payload
+                // and publication identity, including during upgraded recovery.
+                let mut rows = tx.transaction_mut().query(
+                    "SELECT id FROM extension_room_publications WHERE work_id = ? AND output_index = ?",
+                    crate::db_params![work.id.to_string(), i64::try_from(index).map_err(|_| ObservationError::Codec)?],
+                ).await?;
+                let id: String = rows
+                    .next()
+                    .await?
+                    .ok_or(ObservationError::Database)?
+                    .get(0)?;
+                drop(rows);
+                let publication_id = Uuid::parse_str(&id).map_err(|_| ObservationError::Codec)?;
+                crate::ingress_uow::EffectDescendantRepository::attach(
+                    tx,
+                    work.message_key,
+                    &work.effect_key(),
+                    publication_id,
+                )
+                .await
+                .map_err(ObservationError::from)?;
             }
             (
                 "completed",
@@ -358,6 +463,22 @@ pub(super) async fn finish(
                     .as_ref()
                     .map(serde_json::to_string)
                     .transpose()?,
+            )
+        }
+        // A later known failure/skip describes only this invocation. It does
+        // not resolve output that may have been lost from an earlier start.
+        RoomObservationOutcome::NotInvoked
+        | RoomObservationOutcome::PermanentFailure(_)
+        | RoomObservationOutcome::NotApplicable(_)
+            if uncertain =>
+        {
+            (
+                "pending",
+                "unknown_after_send",
+                now_ms.saturating_add(retry_delay_ms(
+                    u32::try_from(attempt).map_err(|_| ObservationError::Codec)?,
+                )),
+                None,
             )
         }
         RoomObservationOutcome::NotInvoked

@@ -133,6 +133,7 @@ impl WasmExtensionActor {
     pub(crate) async fn observe_room_message(
         &self,
         event: crate::types::RoomMessageObserve,
+        delivery: Option<Arc<dyn crate::host_tools::ExtensionDeliveryCapability>>,
     ) -> Result<crate::types::ExtensionResponse, ObservationInvocationError> {
         let _permit = self
             .observation_permits
@@ -148,17 +149,33 @@ impl WasmExtensionActor {
             kind: InvocationKind::RoomMessageObserve,
             provider_room_grants: Vec::new(),
         };
-        self.extension
-            .call_handle_event_typed(
-                ExtensionEvent::RoomMessageObserve(event),
-                Arc::clone(&self.host_tools),
-                context,
-                self.config.clone(),
-                self.grants.clone(),
-                self.allowed_http_origins.clone(),
-            )
-            .await
-            .map_err(ObservationInvocationError::Invoked)
+        let result = if let Some(capability) = delivery {
+            self.extension
+                .call_handle_event_typed_with_delivery(
+                    ExtensionEvent::RoomMessageObserve(event),
+                    Arc::clone(&self.host_tools),
+                    crate::host_tools::DeliveryInvocation {
+                        context,
+                        capability,
+                    },
+                    self.config.clone(),
+                    self.grants.clone(),
+                    self.allowed_http_origins.clone(),
+                )
+                .await
+        } else {
+            self.extension
+                .call_handle_event_typed(
+                    ExtensionEvent::RoomMessageObserve(event),
+                    Arc::clone(&self.host_tools),
+                    context,
+                    self.config.clone(),
+                    self.grants.clone(),
+                    self.allowed_http_origins.clone(),
+                )
+                .await
+        };
+        result.map_err(ObservationInvocationError::Invoked)
     }
 
     pub fn manifest(&self) -> ExtensionManifest {

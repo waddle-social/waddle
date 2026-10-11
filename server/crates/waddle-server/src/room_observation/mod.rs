@@ -1,6 +1,7 @@
 //! Supervised installation actors. Room mailboxes carry bounded wake hints;
 //! committed database work, not notification delivery, determines progress.
 mod actor;
+mod capability;
 mod publication;
 mod scheduler;
 mod telemetry;
@@ -63,10 +64,14 @@ impl RoomObservationActors {
         // retractions, so it initializes the store and binds an empty service.
         initialize_room_observations(state.deps.app_state.db_pool.global()).await?;
         let authority = &state.deps.protocol.ingress;
-        let mut tx = authority.observation_transaction().await?;
-        RoomObservationRepository::sync_configured(&mut tx, &configured, crate::time::now_ms())
-            .await?;
-        tx.commit().await?;
+        crate::ingress_uow::run_with_retry(5, || async {
+            let mut tx = authority.observation_transaction().await?;
+            RoomObservationRepository::sync_configured(&mut tx, &configured, crate::time::now_ms())
+                .await?;
+            tx.commit().await
+        })
+        .await
+        .map_err(|error| ObservationRuntimeError::Ingress(error.last_error))?;
         let tasks = TaskTracker::new();
         let process_limit = Arc::new(Semaphore::new(32));
         let cancellation = authority.observation_cancellation();

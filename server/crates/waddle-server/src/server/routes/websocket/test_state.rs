@@ -192,6 +192,10 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         .await
         .expect("notification outbox"),
     );
+    push_service
+        .adopt_notification_ancestry()
+        .await
+        .expect("canonical notification ancestry");
     let call_teardown_node_identity = app_state
         .clustering_claims
         .node_identity

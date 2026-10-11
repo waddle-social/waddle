@@ -148,7 +148,7 @@ pub(crate) mod carbons;
 mod deps;
 pub mod effects;
 mod message_plan;
-mod preview_plan;
+pub(crate) mod preview_plan;
 pub(crate) use message_plan::reject_malformed_message;
 pub use message_plan::{build_plan_deps, plan_message_dispatch};
 mod direct_archive;
@@ -220,7 +220,9 @@ pub(crate) use message_plan::ownership_plan_tests::PlanningClaims;
 use offline_delivery::queue_offline_delivery;
 #[cfg(test)]
 pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
-pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates_for_sweep;
+pub(crate) use offline_delivery::{
+    reconcile_xep0357_notification_candidates_for_sweep, PendingNotificationRecoveryCursor,
+};
 use room_dispatch::dispatch_to_room;
 use room_pin::apply_pin_change_event;
 use room_subject::{

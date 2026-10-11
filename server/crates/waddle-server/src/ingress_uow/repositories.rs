@@ -361,8 +361,8 @@ impl CanonicalMessageRepository {
         }
         let sql = dialect_sql(
             transaction,
-            "UPDATE ingress_messages SET terminal_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
-            "UPDATE ingress_messages SET terminal_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL",
+            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ?::uuid AND terminal_at IS NOT NULL",
+            "UPDATE ingress_messages SET terminal_at = NULL, retention_eligible_at = NULL WHERE message_key = ? AND terminal_at IS NOT NULL",
         );
         transaction
             .transaction_mut()
@@ -478,12 +478,16 @@ impl SmIngressRepository {
         sm_ingress_id: SmIngressId,
         ordinal: IngressOrdinal,
     ) -> Result<u64, IngressUowError> {
+        let message_key = Self::lookup(transaction, sm_ingress_id, ordinal).await?;
+        if let Some(key) = message_key {
+            CanonicalMessageRepository::lock(transaction, key).await?;
+        }
         const POSTGRES: &str =
             "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric";
         const SQLITE: &str =
             "DELETE FROM ingress_sm_refs WHERE sm_ingress_id = ? AND ingress_ordinal = ?";
         let sql = dialect_sql(transaction, POSTGRES, SQLITE);
-        transaction
+        let deleted = transaction
             .transaction_mut()
             .execute(
                 sql,
@@ -492,8 +496,12 @@ impl SmIngressRepository {
                     ordinal.to_storage().to_string()
                 ],
             )
-            .await
-            .map_err(Into::into)
+            .await?;
+        if let Some(key) = message_key {
+            ingress_substrate::refresh_retention_with_db_clock(transaction.transaction_mut(), key)
+                .await?;
+        }
+        Ok(deleted)
     }
 }
 
@@ -955,6 +963,9 @@ impl EffectIntentRepository {
             })
             .transpose()?
             .unwrap_or(0);
+        if !omissions.is_empty() {
+            ingress_substrate::invalidate_retention(transaction, message_key).await?;
+        }
         for intent in omissions {
             insert_effect(transaction, message_key, ordinal, intent, postgres).await?;
             ordinal = ordinal
@@ -1330,6 +1341,20 @@ impl PrincipalRepository {
 pub struct DeliveryEffectRepository;
 
 impl DeliveryEffectRepository {
+    /// Bind a host-owned key to the persisted effect/target authority.
+    pub async fn bind_effect(
+        transaction: &mut IngressUowTransaction<'_>,
+        message_key: MessageKey,
+        effect: &IngressEffectKey,
+    ) -> Result<super::EffectDeliveryBinding, IngressUowError> {
+        super::EffectDescendantRepository::bind_effect_raw(
+            transaction.transaction_mut(),
+            message_key,
+            effect,
+        )
+        .await
+    }
+
     pub async fn record(
         transaction: &mut IngressUowTransaction<'_>,
         delivery_key: DeliveryKey,

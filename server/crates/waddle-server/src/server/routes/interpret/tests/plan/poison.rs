@@ -205,6 +205,35 @@ use waddle_xmpp::pending_delivery::{
 pub(super) struct PoisonPending(pub InMemoryPendingDeliveryStorage);
 #[async_trait::async_trait]
 impl PendingDeliveryStorage for PoisonPending {
+    async fn notification_recovery_high_water(
+        &self,
+    ) -> Result<
+        Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.0.notification_recovery_high_water().await
+    }
+
+    async fn list_unoutboxed_archived_after(
+        &self,
+        after: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        through: Option<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal>,
+        limit: usize,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryRow>,
+        waddle_xmpp::pending_delivery::storage::PendingStorageError,
+    > {
+        self.0
+            .list_unoutboxed_archived_after(after, through, limit)
+            .await
+    }
+
+    fn notification_custody_mode(
+        &self,
+    ) -> waddle_xmpp::pending_delivery::storage::PendingNotificationCustodyMode {
+        self.0.notification_custody_mode()
+    }
+
     fn quota_policy(&self) -> waddle_xmpp::pending_delivery::QuotaPolicy {
         self.0.quota_policy()
     }

@@ -555,3 +555,220 @@ async fn runtime_http_uses_the_configured_body_limit_before_network() {
     .expect_err("configured request limit");
     assert_eq!(error.code, HostToolErrorCode::InvalidRequest);
 }
+
+struct ScopedDelivery {
+    active: std::sync::atomic::AtomicBool,
+}
+
+#[async_trait]
+impl host_domain::ExtensionDeliveryCapability for ScopedDelivery {
+    async fn validate(
+        &self,
+        context: &InvocationContext,
+        source: &crate::types::RoomMessageSource,
+    ) -> Result<(), HostToolError> {
+        if self.active.load(Ordering::SeqCst)
+            && context.kind == InvocationKind::RoomMessageObserve
+            && context.plugin_id.as_str() == "test-extension"
+            && context.source_room.as_ref() == Some(&source.room)
+        {
+            Ok(())
+        } else {
+            Err(HostToolError::denied(
+                DisplayText::new("stale or foreign delivery").expect("text"),
+            ))
+        }
+    }
+}
+
+fn delivery_source() -> crate::types::RoomMessageSource {
+    use crate::types::*;
+    RoomMessageSource {
+        room: "room@muc.example.com".parse().expect("room"),
+        stanza_id: StanzaId::new("source").expect("id"),
+        revision_stanza_id: StanzaId::new("revision").expect("id"),
+        origin_id: Some(OriginId::new("origin").expect("id")),
+        sender: "alice@example.com".parse().expect("sender"),
+        revision: MessageRevision::new(0),
+        body_digest: Sha256Digest::new("a".repeat(64)).expect("digest"),
+        observed_at: Timestamp::new("2026-10-09T00:00:00Z").expect("time"),
+    }
+}
+
+#[tokio::test]
+async fn delivery_resource_revalidates_authority_before_host_effects() {
+    let capability = Arc::new(ScopedDelivery {
+        active: true.into(),
+    });
+    let mut state = host_state_with_kind(
+        Arc::new(MockHostTools::default()),
+        HashSet::from([ExtensionCapability::OutboundHttpRequest]),
+        InvocationKind::RoomMessageObserve,
+    );
+    state
+        .bind_delivery(capability.clone(), delivery_source())
+        .await
+        .expect("issue delivery");
+    state.validate_delivery().await.expect("current delivery");
+    capability.active.store(false, Ordering::SeqCst);
+    let denied = state.validate_delivery().await.expect_err("lease expired");
+    assert_eq!(denied.code, HostToolErrorCode::Denied);
+    use super::waddle::extension::runtime::Host;
+    let response = state
+        .http_request(wit_types::OutgoingHttpRequest {
+            method: wit_types::HttpMethod::Post,
+            url: wit_types::Url {
+                value: "https://provider.example/request".into(),
+            },
+            headers: vec![],
+            body: None,
+        })
+        .await
+        .expect("host call");
+    assert_eq!(
+        response
+            .expect_err("stale delivery denies before HTTP")
+            .code,
+        wit_types::HostToolErrorCode::Denied
+    );
+}
+
+#[tokio::test]
+async fn delivery_resource_rejects_foreign_source_or_invocation() {
+    let capability = Arc::new(ScopedDelivery {
+        active: true.into(),
+    });
+    let mut state = host_state_with_kind(
+        Arc::new(MockHostTools::default()),
+        HashSet::new(),
+        InvocationKind::Command,
+    );
+    assert!(state
+        .bind_delivery(capability.clone(), delivery_source())
+        .await
+        .is_err());
+    let mut state = host_state_with_kind(
+        Arc::new(MockHostTools::default()),
+        HashSet::new(),
+        InvocationKind::RoomMessageObserve,
+    );
+    let mut source = delivery_source();
+    source.room = "foreign@muc.example.com".parse().expect("room");
+    assert!(state.bind_delivery(capability, source).await.is_err());
+}
+
+#[tokio::test]
+async fn wasm_delivery_resource_is_issued_borrowed_and_cannot_be_forged_or_retained() {
+    use super::DeliveryKey;
+    use wasmtime::component::{Component, HasSelf, Linker, Resource};
+    use wasmtime::Store;
+    let runtime = super::WasmRuntime::new().expect("runtime");
+    let component = Component::new(
+        runtime.engine(),
+        include_bytes!("../../tests/fixtures/delivery_resource.wat"),
+    )
+    .expect("resource component");
+    let mut linker = Linker::<HostState>::new(runtime.engine());
+    super::waddle::extension::delivery::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+        .expect("link delivery");
+    let capability = Arc::new(ScopedDelivery {
+        active: true.into(),
+    });
+    let mut state = host_state_with_kind(
+        Arc::new(MockHostTools::default()),
+        HashSet::new(),
+        InvocationKind::RoomMessageObserve,
+    );
+    state
+        .bind_delivery(capability.clone(), delivery_source())
+        .await
+        .expect("host issues key");
+    let mut store = Store::new(runtime.engine(), state);
+    store.set_fuel(1_000_000).expect("fuel");
+    let instance = linker
+        .instantiate_async(&mut store, &component)
+        .await
+        .expect("instantiate");
+    let check = instance
+        .get_typed_func::<(Resource<DeliveryKey>,), (bool,)>(&mut store, "check")
+        .expect("typed check");
+    let issued = store.data().delivery_resource().expect("key");
+    assert_eq!(
+        check
+            .call_async(&mut store, (issued,))
+            .await
+            .expect("issued check"),
+        (true,)
+    );
+    capability.active.store(false, Ordering::SeqCst);
+    let issued = store.data().delivery_resource().expect("key");
+    assert_eq!(
+        check
+            .call_async(&mut store, (issued,))
+            .await
+            .expect("expired check"),
+        (false,)
+    );
+    let reuse = instance
+        .get_typed_func::<(), (bool,)>(&mut store, "reuse")
+        .expect("reuse");
+    assert!(
+        reuse.call_async(&mut store, ()).await.is_err(),
+        "copied guest borrow cannot outlive invocation"
+    );
+    // A trap poisons a component instance. A fresh instance proves a fabricated
+    // integer cannot become a resource of the host-defined nominal type.
+    let instance = linker
+        .instantiate_async(&mut store, &component)
+        .await
+        .expect("fresh instance");
+    let forge = instance
+        .get_typed_func::<(), (bool,)>(&mut store, "forge")
+        .expect("forge");
+    assert!(
+        forge.call_async(&mut store, ()).await.is_err(),
+        "guest cannot forge a delivery key"
+    );
+}
+
+#[tokio::test]
+async fn wasm_observer_receives_delivery_without_claiming_provider_acceptance() {
+    let runtime = super::WasmRuntime::new().expect("runtime");
+    let extension = super::LoadedExtension::load(
+        &runtime,
+        std::path::Path::new(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/message_hook.wat"
+        )),
+    )
+    .expect("load fixture");
+    let result = extension
+        .call_handle_event_typed_with_delivery(
+            crate::types::ExtensionEvent::RoomMessageObserve(crate::types::RoomMessageObserve {
+                source: delivery_source(),
+                body: DisplayText::new("hello").expect("body"),
+            }),
+            Arc::new(MockHostTools::default()),
+            host_domain::DeliveryInvocation {
+                context: InvocationContext {
+                    waddle_id: WaddleId::new("test").expect("waddle"),
+                    plugin_id: PluginId::new("test-extension").expect("plugin"),
+                    requester: None,
+                    source_room: Some(delivery_source().room),
+                    kind: InvocationKind::RoomMessageObserve,
+                    provider_room_grants: Vec::new(),
+                },
+                capability: Arc::new(ScopedDelivery {
+                    active: true.into(),
+                }),
+            },
+            "0".into(),
+            HashSet::new(),
+            Vec::new(),
+        )
+        .await;
+    assert!(
+        result.is_ok(),
+        "host-issued authority survives actual framework invocation: {result:?}"
+    );
+}

@@ -108,6 +108,134 @@ async fn claimed_outbox_job_builds_stable_xep0357_pubsub_item() {
         .find(|child| child.is("context", WADDLE_PUSH_CONTEXT_NS))
         .expect("waddle context");
     assert_eq!(context.attr("stanza-id"), Some("archive-1"));
+    // Item construction proves stable protocol identity only: it performs
+    // no durable Push Service acceptance and no provider request.
+    let recipient = bare("alice@example.com");
+    let (push_service, _, target) = first_party_push_setup(&recipient).await;
+    assert!(push_service
+        .queued_publish_jobs()
+        .await
+        .expect("queue")
+        .is_empty());
+    assert!(push_service
+        .delivery_attempts_for_node(target.node().as_str())
+        .await
+        .expect("provider attempts")
+        .is_empty());
+    assert_eq!(
+        store.pending_outbox_jobs().await.expect("outbox")[0].status(),
+        NotificationOutboxStatus::InProgress
+    );
+}
+
+#[tokio::test]
+async fn lost_acceptance_reply_replays_frozen_payload_without_coalescing_new_work() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    enqueue_jobs_for_test(
+        &store,
+        &candidate("archive-first"),
+        std::slice::from_ref(&target),
+    )
+    .await;
+    let claimed = store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("claim")
+        .remove(0);
+    let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 2).await;
+    store
+        .publish_claimed_job(
+            &claimed,
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("durable queue acceptance");
+    // The downstream accepted, but the upstream failed to observe the reply.
+    store
+        .execute(
+            "UPDATE notification_outbox SET status = ?, published_at_ms = NULL WHERE job_id = ?",
+            waddle_server::db_params!["queued", claimed.job_id().as_str()],
+        )
+        .await
+        .expect("lost reply");
+    enqueue_jobs_for_test(&store, &candidate("archive-second"), &[target]).await;
+    let mut jobs = store.claim_due_outbox_jobs(16).await.expect("reclaim");
+    assert_eq!(
+        jobs.len(),
+        2,
+        "new work must not mutate the already approved delivery"
+    );
+    let retry = jobs.remove(
+        jobs.iter()
+            .position(|job| job.job_id() == claimed.job_id())
+            .expect("same identity"),
+    );
+    assert_eq!(retry.message_count(), 1);
+    let original = retry.to_xep0357_pubsub_item_with_count(99);
+    let read_inbox = inbox_with_read_entry(
+        &recipient,
+        &bare("bob@example.com"),
+        waddle_xmpp::inbox::ConversationKind::Direct,
+    )
+    .await;
+    assert!(
+        matches!(
+            store
+                .publish_claimed_job(
+                    &retry,
+                    &push_service,
+                    &push_store,
+                    &read_inbox,
+                    &blocking,
+                    &bare("push.example.com")
+                )
+                .await
+                .expect("retry"),
+            NotificationOutboxPublishOutcome::Published { .. }
+        ),
+        "approved payload must remain replayable after unread changes"
+    );
+    let accepted = push_service
+        .queued_publish_jobs()
+        .await
+        .expect("accepted jobs");
+    assert_eq!(accepted.len(), 1);
+    assert_eq!(accepted[0].item_id(), claimed.job_id().as_str());
+    let db = push_service.database();
+    let conn = db.guard().await.expect("guard");
+    let mut rows = conn
+        .query(
+            "SELECT payload_xml FROM push_publish_jobs WHERE item_id = ?",
+            waddle_server::db_params![claimed.job_id().as_str()],
+        )
+        .await
+        .expect("payload");
+    let payload: String = rows
+        .next()
+        .await
+        .expect("row")
+        .expect("accepted")
+        .get(0)
+        .expect("payload");
+    assert_eq!(
+        payload,
+        String::from(original.payload.as_ref().expect("frozen payload"))
+    );
+    assert!(
+        push_service
+            .delivery_attempts_for_node(retry.node().as_str())
+            .await
+            .expect("provider attempts")
+            .is_empty(),
+        "durable queue acceptance is not provider acceptance"
+    );
 }
 
 // #779: coalescing must keep the context's stanza-id pointing at the
@@ -1013,6 +1141,16 @@ async fn prune_completed_removes_only_finished_jobs_and_outboxed_candidates() {
         .await
         .expect("age old job");
 
+    store
+        .execute(
+            "UPDATE notification_outbox_lineage SET settled_at_ms = ? WHERE job_id = ?",
+            waddle_server::db_params![
+                waddle_server::time::now_ms().saturating_sub(9 * 24 * 60 * 60 * 1_000),
+                old_job.job_id().as_str()
+            ],
+        )
+        .await
+        .expect("provider scheduling disposition aged beyond the tail");
     let pruned = store
         .prune_completed_before(cutoff_ms, 100)
         .await
@@ -1067,6 +1205,15 @@ async fn prune_completed_deletes_outboxed_candidates_in_ordered_batches() {
         .await
         .expect("keep live candidate");
 
+    store
+        .execute(
+            "UPDATE notification_outbox_lineage SET settled_at_ms = ?",
+            waddle_server::db_params![
+                waddle_server::time::now_ms().saturating_sub(9 * 24 * 60 * 60 * 1_000)
+            ],
+        )
+        .await
+        .expect("terminal scheduling dispositions");
     let pruned = store
         .prune_completed_before(cutoff_ms, 1)
         .await

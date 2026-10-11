@@ -14,12 +14,15 @@ pub(crate) use delivery_progress::DeliveryProgressRepository;
 mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;
+mod effect_descendants;
+pub(crate) use effect_descendants::canonical_nowait_error;
 mod error;
+pub use effect_descendants::{EffectDeliveryBinding, EffectDescendantRepository};
 mod extension_grants;
 mod room_observation;
 pub(crate) use room_observation::ObserverRetentionBatch;
 pub(crate) use room_observation::{
-    initialize_room_observations, CapturedRoomSource, RoomObservationRepository,
+    initialize_room_observations, CapturedRoomSource, ObservationWork, RoomObservationRepository,
 };
 pub use room_observation::{ObservationError, RoomPublication};
 mod pending_receipts;
@@ -30,10 +33,15 @@ pub(crate) use pending_receipts::PendingReceiptRepository;
 mod archive_ordinal;
 mod repositories;
 mod retry;
-pub(crate) use recovery_receipts::{RecoveryCompletion, RecoveryReceiptRepository};
+pub(crate) use recovery_receipts::{
+    PendingNotificationPreparation, PendingNotificationRecovery, RecoveryCompletion,
+    RecoveryReceiptRepository,
+};
 mod send_attempts;
 pub(crate) use send_attempts::{send_attempt_blocks_delivery, SendAttemptStatus};
 pub use send_attempts::{SendAttemptRepository, SendClaim, SendLease, SendObligation};
+mod projections;
+pub(crate) use projections::ProjectionRepository;
 mod settlement;
 pub(crate) use settlement::settle_recorded;
 
@@ -138,7 +146,7 @@ impl IngressUnitOfWork {
     /// held until commit or drop, making the installed GUC proof describe the
     /// exact live epoch observed by this transaction.
     pub async fn begin(&self) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(None).await
+        self.begin_inner(None, false).await
     }
 
     /// Bound even the initial epoch lock wait before taking any row locks.
@@ -150,12 +158,23 @@ impl IngressUnitOfWork {
         lock: Duration,
         statement: Duration,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
-        self.begin_inner(Some((lock, statement))).await
+        self.begin_inner(Some((lock, statement)), false).await
+    }
+
+    /// Fresh source rediscovery must see parents committed after an earlier
+    /// read, even when the pool/server defaults to repeatable-read isolation.
+    pub(crate) async fn begin_read_committed_with_timeouts(
+        &self,
+        lock: Duration,
+        statement: Duration,
+    ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
+        self.begin_inner(Some((lock, statement)), true).await
     }
 
     async fn begin_inner(
         &self,
         bounds: Option<(Duration, Duration)>,
+        read_committed: bool,
     ) -> Result<IngressUowTransaction<'_>, IngressUowError> {
         let acquisition = async {
             match self.db.driver() {
@@ -167,6 +186,13 @@ impl IngressUnitOfWork {
             Some((lock, _)) => acquire_transaction_with_timeout(lock, acquisition).await?,
             None => acquisition.await?,
         };
+        if read_committed && self.db.driver() == DatabaseDriver::Postgres {
+            // Set isolation before the timeout/epoch/lineage SELECTs can pin
+            // the transaction's first snapshot.
+            transaction
+                .execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+                .await?;
+        }
         if let Some((lock, statement)) = bounds {
             if !set_local_transaction_timeouts(&mut transaction, lock, statement).await? {
                 return Err(IngressUowError::TransactionBoundsUnproven);

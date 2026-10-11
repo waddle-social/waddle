@@ -16,9 +16,10 @@ use waddle_xmpp::{
 use crate::{
     ingress::{recorded::RouteProgress, recovery_rebuild},
     ingress_uow::{
-        settle_recorded, CanonicalMessageRepository, DeliveryProgressRepository,
-        EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
-        PendingReceiptRepository, SendAttemptRepository, SendAttemptStatus, SendObligation,
+        settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
+        DeliveryProgressRepository, EffectIntentRepository, EffectReceiptRepository,
+        IngressUnitOfWork, IngressUowError, PendingReceiptRepository, RecoveryReceiptRepository,
+        SendAttemptRepository, SendAttemptStatus, SendObligation,
     },
     server::routes::interpret::Deps,
 };
@@ -161,17 +162,46 @@ pub(super) async fn handoff(
         };
         let existing_custody = match &row.payload {
             PendingPayload::Archived(stanza_id) => {
-                PendingReceiptRepository::has_archived_custody(&mut tx, &row.recipient, stanza_id)
+                PendingReceiptRepository::archived_custody(&mut tx, &row.recipient, stanza_id)
                     .await?
             }
-            PendingPayload::Transient(_) => false,
+            PendingPayload::Transient(_) => None,
         };
-        if !existing_custody
+        if existing_custody.is_none()
             && PendingReceiptRepository::insert(&mut tx, &row, storage.quota_policy()).await?
                 == InsertOutcome::QuotaExceeded
         {
             // Preserve authority for retry; there is no durable custody.
             return Ok(None);
+        }
+        if matches!(row.payload, PendingPayload::Archived(_)) {
+            let physical_id = existing_custody
+                .as_ref()
+                .map(|custody| &custody.row_id)
+                .unwrap_or(&row.id);
+            if !ArchiveDispatchRepository::pin_pending_handoff(
+                &mut tx,
+                key,
+                &intent,
+                &row,
+                physical_id,
+            )
+            .await?
+            {
+                return Ok(None);
+            }
+            if existing_custody
+                .as_ref()
+                .is_some_and(|custody| custody.notification_outboxed)
+                && !RecoveryReceiptRepository::attach_existing_pending_notification(
+                    &mut tx, key, &intent, &envelope, &row,
+                )
+                .await?
+            {
+                // A marker is not proof of candidate acceptance or suppression.
+                // Roll back the pin and preserve the original send obligation.
+                return Ok(None);
+            }
         }
         // Archived rows remain unoutboxed. The existing pending-delivery
         // notification janitor applies normal push policy and retries.
@@ -191,7 +221,7 @@ pub(super) async fn handoff(
     Ok(Some(settled))
 }
 
-fn pending_id(
+pub(crate) fn pending_id(
     key: MessageKey,
     receipt: &crate::ingress::decision::EffectReceiptKey,
 ) -> PendingRowId {

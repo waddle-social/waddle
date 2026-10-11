@@ -658,7 +658,16 @@ or audience drift.
 Alias resolution and sm-ref/delivery insertion lock the canonical row
 `FOR UPDATE` (no share→update upgrades on the write path);
 `terminalize_message` takes an unconditional `FOR UPDATE`; GC keeps
-`FOR UPDATE SKIP LOCKED`. Retention: eight days from `terminal_at`.
+`FOR UPDATE SKIP LOCKED`. Execution completion remains `terminal_at`, while
+retention starts at `retention_eligible_at` only after all canonical receipts,
+scheduled descendants and SM references settle. Aliases, delivery bindings and
+receipts remain together for eight days after that frontier. Attaching a new
+pending reference invalidates it under the canonical lock. Relay ACKs do not
+settle descendants.
+
+Observer transactions acquire additional canonical parents with `FOR UPDATE
+NOWAIT` before source/configuration locks. Contention aborts and retries the
+whole transaction; completion retries reuse the approved callback result.
 
 ### 3.6a Periodic bounded maintenance (#1741)
 

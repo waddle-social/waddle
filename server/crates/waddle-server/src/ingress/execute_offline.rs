@@ -287,6 +287,9 @@ async fn notification_evidence(
             }
             let outcome = match RecoveryReceiptRepository::insert_candidate(
                 tx,
+                decision
+                    .message_key
+                    .ok_or(IngressUowError::EffectIntentMessageMissing)?,
                 candidate,
                 row.original_receipt_at.timestamp_millis(),
             )

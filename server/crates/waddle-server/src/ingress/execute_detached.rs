@@ -26,6 +26,7 @@ use crate::ingress::append_authority::AppendAuthority;
 tokio::task_local! {
     pub(crate) static FAIL_DELIVERY_PROGRESS_TX: bool;
     pub(crate) static CONTEND_DELIVERY_PROGRESS_ONCE: std::sync::Arc<std::sync::atomic::AtomicBool>;
+    pub(crate) static CANCEL_STALLED_DELIVERY: tokio_util::sync::CancellationToken;
     pub(crate) static STALL_DELIVERY_RESOURCE: (FullJid, std::sync::Arc<std::sync::atomic::AtomicBool>);
 }
 
@@ -131,6 +132,12 @@ pub(super) async fn execute(
             })
             .unwrap_or(false)
         {
+            if let Ok(cancel) = CANCEL_STALLED_DELIVERY.try_with(Clone::clone) {
+                cancel.cancelled().await;
+                // Test-controlled cancellation is no acceptance evidence.
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
             std::future::pending::<()>().await;
         }
         // The recorded receipt, rather than today's stanza or audience, owns

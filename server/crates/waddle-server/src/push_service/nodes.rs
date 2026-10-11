@@ -168,9 +168,11 @@ async fn prune_disabled_nodes_for_owner_tx(
         }
     }
     for node in stale_nodes {
+        super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx(tx, owner_bare_jid, &node)
+            .await?;
         tx.execute(
-            "DELETE FROM push_nodes WHERE owner_bare_jid = ? AND node = ? AND status = ?",
-            crate::db_params![owner_bare_jid.to_string(), node, NODE_STATUS_DISABLED],
+            "DELETE FROM push_nodes WHERE owner_bare_jid = ? AND node = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM push_publish_jobs WHERE push_publish_jobs.node = push_nodes.node AND (push_publish_jobs.status IN ('queued', 'in-progress') OR push_publish_jobs.ancestry_job_id IS NOT NULL OR push_publish_jobs.updated_at_ms > ?))",
+            crate::db_params![owner_bare_jid.to_string(), node, NODE_STATUS_DISABLED, crate::time::now_ms().saturating_sub(8 * 24 * 60 * 60 * 1_000)],
         )
         .await
         .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -442,10 +444,16 @@ impl DatabasePushServiceStore {
                 SET status = ?, updated_at_ms = ?
                 WHERE node = ?
                 "#,
-                crate::db_params![PushNodeStatus::Disabled.as_str(), now_ms, node],
+                crate::db_params![PushNodeStatus::Disabled.as_str(), now_ms, node.clone()],
             )
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+            super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx(
+                &mut tx,
+                owner_bare_jid,
+                node,
+            )
+            .await?;
         }
 
         tx.commit()

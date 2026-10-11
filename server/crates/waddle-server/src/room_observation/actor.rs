@@ -39,11 +39,11 @@ pub(super) async fn run(
                 let (id, more_work) = match completed {
                     Ok((id, Ok(more_work))) => (id, more_work),
                     Ok((id, Err(error))) => {
-                        tracing::warn!(plugin = %observer.plugin, %error, "room observation worker deferred");
+                        tracing::warn!(category = "worker_deferred", %error, "room observation worker deferred");
                         (id, false)
                     }
                     Err(error) => {
-                        tracing::warn!(plugin = %observer.plugin, cancelled = error.is_cancelled(), "room observation task ended unexpectedly; started callbacks retry after lease expiry");
+                        tracing::warn!(category = "task_interrupted", cancelled = error.is_cancelled(), "room observation task ended unexpectedly; started callbacks retry after lease expiry");
                         (error.id(), false)
                     }
                 };
@@ -58,7 +58,7 @@ pub(super) async fn run(
                         recovery_cursor = rooms.last().cloned();
                         for room in rooms { scheduler.wake(room); }
                     },
-                    Err(error) => tracing::warn!(plugin = %observer.plugin, %error, "room observation recovery deferred"),
+                    Err(error) => tracing::warn!(category = "recovery_deferred", %error, "room observation recovery deferred"),
                 }
             }
         }
@@ -106,15 +106,14 @@ async fn process_room(
     state: &Arc<WebSocketState>,
     subscription: &RoomObservationSubscription,
 ) -> Result<bool, ObservationRuntimeError> {
-    // Each installation replica services its local room owners. A saved
-    // publication stays discoverable when ownership moves between nodes.
+    // Only the current hosted-room owner invokes an installation observer.
     if !matches!(
         state
             .deps
             .protocol
             .room_registry
             .ask(GetOrRestoreDurableRoom {
-                room_jid: subscription.room.clone()
+                room_jid: subscription.room.clone(),
             })
             .reply_timeout(Duration::from_secs(5))
             .await,
@@ -124,46 +123,75 @@ async fn process_room(
     }
     super::publication::publish_pending(state, subscription).await?;
     let authority = &state.deps.protocol.ingress;
-    let mut tx = authority.observation_transaction().await?;
-    let work =
-        RoomObservationRepository::claim(&mut tx, subscription, crate::time::now_ms()).await?;
-    tx.commit().await?;
+    let work = crate::ingress_uow::run_with_retry(5, || async {
+        let mut tx = authority.observation_transaction().await?;
+        let work =
+            RoomObservationRepository::claim(&mut tx, subscription, crate::time::now_ms()).await?;
+        tx.commit().await?;
+        Ok(work)
+    })
+    .await
+    .map_err(|error| ObservationRuntimeError::Ingress(error.last_error))?;
     let Some(work) = work else {
         return Ok(false);
     };
-    let mut tx = authority.observation_transaction().await?;
-    let may_invoke =
-        RoomObservationRepository::start(&mut tx, &work, crate::time::now_ms()).await?;
     let started = std::time::Instant::now();
-    let outcome = invoke_after_commit(tx, may_invoke, async || {
-        super::telemetry::started(&work.source.observed_at, work.attempt);
-        state
-            .deps
-            .protocol
-            .extension_manager
-            .observe_room_message(subscription, work.source.clone(), work.body.clone())
-            .await
+    let outcome = crate::ingress_uow::run_with_retry(5, || async {
+        let mut tx = authority.observation_transaction().await?;
+        let may_invoke =
+            RoomObservationRepository::start(&mut tx, &work, crate::time::now_ms()).await?;
+        invoke_after_commit(tx, may_invoke, async || {
+            super::telemetry::started(&work.source.observed_at, work.attempt);
+            state
+                .deps
+                .protocol
+                .extension_manager
+                .observe_room_message_with_delivery(
+                    subscription,
+                    work.source.clone(),
+                    work.body.clone(),
+                    super::capability::ObservationDeliveryCapability::new(state, &work),
+                )
+                .await
+        })
+        .await
     })
-    .await?;
+    .await
+    .map_err(|error| ObservationRuntimeError::Ingress(error.last_error))?;
     let Some(outcome) = outcome else {
         return Ok(false);
     };
     let duration = started.elapsed();
-    let mut tx = authority.observation_transaction().await?;
-    let saved =
-        RoomObservationRepository::finish(&mut tx, &work, &outcome, crate::time::now_ms()).await?;
-    tx.commit().await?;
-    super::telemetry::finished(
-        &subscription.plugin,
-        work.attempt,
-        &outcome,
-        duration,
-        saved,
-    );
+    // Retrying persistence reuses the approved response and cannot re-enter
+    // the guest/provider when canonical lock acquisition contends.
+    let saved = persist_outcome(state, &work, &outcome).await?;
+    super::telemetry::finished(work.attempt, &outcome, duration, saved);
     if saved {
         super::publication::publish_pending(state, subscription).await?;
     }
     Ok(saved)
+}
+
+pub(super) async fn persist_outcome(
+    state: &WebSocketState,
+    work: &crate::ingress_uow::ObservationWork,
+    outcome: &waddle_extensions::RoomObservationOutcome,
+) -> Result<bool, ObservationRuntimeError> {
+    crate::ingress_uow::run_with_retry(5, || async {
+        let mut tx = state
+            .deps
+            .protocol
+            .ingress
+            .observation_transaction()
+            .await?;
+        let saved =
+            RoomObservationRepository::finish(&mut tx, work, outcome, crate::time::now_ms())
+                .await?;
+        tx.commit().await?;
+        Ok(saved)
+    })
+    .await
+    .map_err(|error| ObservationRuntimeError::Ingress(error.last_error))
 }
 
 /// The callback must not even be constructed until the started marker commits.
@@ -173,7 +201,8 @@ async fn invoke_after_commit(
     tx: crate::ingress_uow::IngressUowTransaction<'_>,
     may_invoke: bool,
     invoke: impl AsyncFnOnce() -> waddle_extensions::RoomObservationOutcome,
-) -> Result<Option<waddle_extensions::RoomObservationOutcome>, ObservationRuntimeError> {
+) -> Result<Option<waddle_extensions::RoomObservationOutcome>, crate::ingress_uow::IngressUowError>
+{
     tx.commit().await?;
     if !may_invoke {
         return Ok(None);

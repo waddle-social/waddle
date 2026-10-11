@@ -103,6 +103,7 @@ impl DatabasePubSubStorage {
             )
             .await?;
         }
+        self.initialize_publication_watermarks().await?;
         self.repair_legacy_avatar_nodes().await
     }
 

@@ -1,5 +1,7 @@
 //! Pure direct-message candidate reconstruction from the canonical envelope.
-use super::{NotificationCandidate, NotificationMessageHints, NotificationOutboxError};
+use super::{
+    NotificationCandidate, NotificationClass, NotificationMessageHints, NotificationOutboxError,
+};
 use jid::{BareJid, Jid};
 use waddle_xmpp_core::xep0359::StanzaId;
 use xmpp_parsers::message::Message;
@@ -40,6 +42,29 @@ pub(crate) fn direct_candidate_from_envelope(
     // DM the recipient count is 1, but the same pattern is fanned out
     // N× in groupchat so the unified helper keeps both surfaces
     // consistent and avoids redundant XML traversals on the hot path.
+    let (class, hints) = direct_message_intrinsics(message, recipient);
+    let candidate = NotificationCandidate::direct_message_with_hints(
+        recipient.clone(),
+        sender_jid.clone(),
+        archive_stanza_id.clone(),
+        class == NotificationClass::DirectMessageMention,
+        hints,
+    )?;
+    Ok(candidate.with_last_message_body(
+        message
+            .bodies
+            .get("")
+            .or_else(|| message.bodies.values().next())
+            .cloned(),
+    ))
+}
+
+/// Message-intrinsic classification is independent from archive provenance.
+/// Legacy alias adoption may reuse it without relaxing new-candidate authority checks.
+pub(super) fn direct_message_intrinsics(
+    message: &Message,
+    recipient: &BareJid,
+) -> (NotificationClass, NotificationMessageHints) {
     let RecipientMentionBits { is_mention, noping } =
         mention_bits_for_recipient(message, recipient);
     let hints = NotificationMessageHints::none()
@@ -52,20 +77,12 @@ pub(crate) fn direct_candidate_from_envelope(
             ),
         )
         .with_reaction(waddle_xmpp::xep::xep0444::is_reaction_only_message(message));
-    let candidate = NotificationCandidate::direct_message_with_hints(
-        recipient.clone(),
-        sender_jid.clone(),
-        archive_stanza_id.clone(),
-        is_mention,
-        hints,
-    )?;
-    Ok(candidate.with_last_message_body(
-        message
-            .bodies
-            .get("")
-            .or_else(|| message.bodies.values().next())
-            .cloned(),
-    ))
+    let class = if is_mention {
+        NotificationClass::DirectMessageMention
+    } else {
+        NotificationClass::DirectMessage
+    };
+    (class, hints)
 }
 
 /// Typed pair of message-frozen XEP-0513 mention signals for a single

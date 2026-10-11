@@ -362,6 +362,10 @@ pub struct NotificationOutboxJob {
     /// from the recipient's XEP-0492 opt-in and the candidate's
     /// XEP-0334 hints. Defaults to [`RichSummary::minimal`] (opt-out).
     pub(super) rich_summary: RichSummary,
+    pub(super) approved_payload: Option<Element>,
+    pub(super) approved_publish_options: Option<Element>,
+    /// A queue invocation may have committed; freezing XML alone is not acceptance.
+    pub(super) queue_acceptance_may_exist: bool,
     pub(super) status: NotificationOutboxStatus,
     pub(super) attempt_count: i64,
     pub(super) policy_error_count: i64,
@@ -436,11 +440,9 @@ impl NotificationOutboxJob {
     pub fn to_xep0357_pubsub_item_with_count(&self, message_count: u32) -> PubSubItem {
         PubSubItem::new(
             Some(self.job_id.as_str().to_string()),
-            Some(build_xep0357_notification_payload(
-                message_count,
-                &self.rich_summary,
-                &self.context,
-            )),
+            Some(self.approved_payload.clone().unwrap_or_else(|| {
+                build_xep0357_notification_payload(message_count, &self.rich_summary, &self.context)
+            })),
         )
     }
 
@@ -489,6 +491,12 @@ impl NotificationOutboxPruneOutcome {
 
 #[derive(Debug, Error)]
 pub enum NotificationOutboxError {
+    #[error("invalid durable notification delivery identity")]
+    InvalidDeliveryIdentity,
+    #[error("invalid frozen notification payload")]
+    InvalidApprovedPayload,
+    #[error("notification ancestry error: {0}")]
+    Ancestry(#[from] crate::ingress_uow::IngressUowError),
     #[error("database error: {0}")]
     Database(#[from] DatabaseError),
     #[error("push error: {0}")]

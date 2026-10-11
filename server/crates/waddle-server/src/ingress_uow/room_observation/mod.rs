@@ -19,7 +19,7 @@ use waddle_extensions::{
     ConfiguredRoomObserver, DisplayText, ExtensionPayload, RoomMessageSource,
     RoomObservationSubscription,
 };
-use waddle_xmpp::ingress::MessageKey;
+use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey};
 
 pub(crate) use retention::ObserverRetentionBatch;
 pub use schema::initialize_room_observations;
@@ -30,6 +30,8 @@ pub use schema::initialize_room_observations;
 pub enum ObservationError {
     #[error("room observation database operation failed")]
     Database,
+    #[error("room observation transaction requires a retry")]
+    RetryableDatabase(crate::ingress_uow::DbRetryClass),
     #[error("room observation database operation timed out")]
     Timeout,
     #[error("room observation node authority is no longer current")]
@@ -49,8 +51,32 @@ pub enum ObservationError {
 }
 
 impl From<crate::db::DatabaseError> for ObservationError {
-    fn from(_: crate::db::DatabaseError) -> Self {
-        Self::Database
+    fn from(error: crate::db::DatabaseError) -> Self {
+        let class = crate::ingress_uow::DbRetryClass::from_database_error(&error);
+        if class == crate::ingress_uow::DbRetryClass::NotRetryable {
+            Self::Database
+        } else {
+            Self::RetryableDatabase(class)
+        }
+    }
+}
+
+impl From<crate::ingress_uow::IngressUowError> for ObservationError {
+    fn from(error: crate::ingress_uow::IngressUowError) -> Self {
+        let class = error.retry_class();
+        if class != crate::ingress_uow::DbRetryClass::NotRetryable {
+            Self::RetryableDatabase(class)
+        } else if matches!(error, crate::ingress_uow::IngressUowError::Timeout) {
+            Self::Timeout
+        } else {
+            Self::Database
+        }
+    }
+}
+
+impl From<crate::ingress_substrate::IngressSubstrateError> for ObservationError {
+    fn from(error: crate::ingress_substrate::IngressSubstrateError) -> Self {
+        crate::ingress_uow::IngressUowError::from(error).into()
     }
 }
 
@@ -60,6 +86,7 @@ impl From<serde_json::Error> for ObservationError {
     }
 }
 
+#[derive(Clone)]
 pub struct ObservationWork {
     pub id: Uuid,
     pub lease: Uuid,
@@ -69,6 +96,21 @@ pub struct ObservationWork {
     pub body: DisplayText,
     pub attempt: u32,
     owner: waddle_xmpp::ownership::NodeIdentity,
+}
+
+impl ObservationWork {
+    pub fn effect_key(&self) -> IngressEffectKey {
+        IngressEffectKey::RoomObserver(
+            self.subscription.room.clone(),
+            self.subscription.plugin.clone(),
+            self.subscription.generation,
+            self.subscription.identity.clone(),
+        )
+    }
+
+    pub fn delivery_key(&self) -> DeliveryKey {
+        DeliveryKey::effect(self.message_key, &self.effect_key())
+    }
 }
 
 pub(crate) struct CapturedRoomSource<'a> {
@@ -134,6 +176,16 @@ impl RoomObservationRepository {
         now_ms: i64,
     ) -> Result<bool, ObservationError> {
         work::start(tx, work, now_ms).await
+    }
+
+    /// Every guest operation and its returned result rechecks the exact started
+    /// lease, current node incarnation, configured subscription, and source.
+    pub async fn validate_started(
+        tx: &mut super::IngressUowTransaction<'_>,
+        work: &ObservationWork,
+        now_ms: i64,
+    ) -> Result<bool, ObservationError> {
+        work::validate_started(tx, work, now_ms).await
     }
 
     pub async fn finish(

@@ -55,9 +55,12 @@ async fn gone_preserves_newer_activity(fixture: IngressFixture) {
 async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("activity-retry"), "activity");
     let owner = submission.sender.to_bare();
-    let room = "room@muc.example.com".parse().expect("room");
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let store = NotificationActivityStore::new(fixture.db.clone())
+        .await
+        .expect("canonical activity store");
     let mutation = NotificationActivityMutation::ChatStateGone {
-        conversation: room,
+        conversation: room.clone(),
         committed_at_ms: 2000,
     };
     submission.plan.intents = vec![IngressEffectIntent::NotificationActivityPreview {
@@ -65,7 +68,10 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
         mutation: mutation.clone(),
     }];
     submission.plan.plan = vec![PlannedEffect::new(Effect::External(ExternalEffect::Direct(
-        ExternalDirectEffect::NotificationActivity { owner, mutation },
+        ExternalDirectEffect::NotificationActivity {
+            owner: owner.clone(),
+            mutation,
+        },
     )))
     .with_suppression(PlanSuppressionPolicy::Always)];
     let first = commit_submission(&fixture.uow, &submission, 1)
@@ -90,6 +96,28 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
     assert_eq!(completed.outcomes[0].1, ExternalOutcome::Done);
     assert!(completed.receipt_failures.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    let committed = store
+        .read_activity(&owner, &room)
+        .await
+        .expect("canonical activity")
+        .expect("row");
+    assert_eq!(committed.last_active_at_ms, 0);
+    assert_eq!(committed.last_chat_state, Some(NotificationChatState::Gone));
+    assert!(
+        socket
+            .deps
+            .protocol
+            .notification_activity
+            .read_activity(&owner, &room)
+            .await
+            .expect("foreign store")
+            .is_none(),
+        "the socket's unrelated DB is not canonical authority"
+    );
+    store
+        .record_chat_state(&owner, &room, NotificationChatState::Active, 3000)
+        .await
+        .expect("newer activity");
     assert!(terminalize_if_complete(
         &fixture.uow,
         canonical,
@@ -107,7 +135,14 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
         "reconciliation restores recorded activity"
     );
     assert!(duplicate.receipts_pending.is_empty());
-    // An unavailable store would fail if the historical mutation executes again.
+    // Remove the actual canonical projection table. The historical mutation
+    // would fail if receipt suppression let it reach the transaction again.
+    fixture
+        .execute(
+            "ALTER TABLE notification_activity RENAME TO unavailable_notification_activity",
+            (),
+        )
+        .await;
     let unavailable = Deps::new(&registry, "example.com");
     let skipped = execute_effects(
         &fixture.uow,
@@ -121,6 +156,19 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
     assert_eq!(skipped.outcomes[0].1, ExternalOutcome::Done);
     assert!(skipped.receipt_failures.is_empty());
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    fixture
+        .execute(
+            "ALTER TABLE unavailable_notification_activity RENAME TO notification_activity",
+            (),
+        )
+        .await;
+    let newer = store
+        .read_activity(&owner, &room)
+        .await
+        .expect("newer canonical activity")
+        .expect("row");
+    assert_eq!(newer.last_active_at_ms, 3000);
+    assert_eq!(newer.last_chat_state, Some(NotificationChatState::Active));
     fixture.close().await;
 }
 

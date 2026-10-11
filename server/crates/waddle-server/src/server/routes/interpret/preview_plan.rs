@@ -130,8 +130,8 @@ async fn stored_references(
         params: vec![Value::from(archive.to_string()), Value::from(message_id.as_str().to_owned()), Value::from("current".to_owned())],
     }).await {
         Ok(rows) => rows,
-        Err(error) => {
-            warn!(%error, %archive, "could not read preview references during planning");
+        Err(_) => {
+            warn!("could not read preview references during planning");
             deps.effects.fail_plan(PlanFailure::PreviewReferenceRead);
             return BTreeMap::new();
         }
@@ -154,28 +154,115 @@ pub(super) async fn execute(
     deps: &Deps<'_>,
     mutations: Vec<LinkPreviewMediaRefMutation>,
 ) -> super::effects::EffectOutcome {
-    use crate::db::actor::DbExecute;
     let Some(state) = deps.web_socket_state else {
         return super::effects::EffectOutcome::Unavailable;
     };
     for mutation in mutations {
-        let now = chrono::Utc::now().to_rfc3339();
-        let query = match mutation.state {
-            LinkPreviewMediaRefState::Current => DbExecute {
-                sql: "INSERT INTO link_preview_media_refs (upload_slot_id, archive_jid, message_id, current_archive_id, state, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT (upload_slot_id, archive_jid, message_id) DO UPDATE SET current_archive_id = excluded.current_archive_id, state = excluded.state, updated_at = excluded.updated_at".to_owned(),
-                params: vec![Value::from(mutation.upload_slot_id.to_string()), Value::from(mutation.archive.to_string()), Value::from(mutation.message_id.as_str().to_owned()), Value::from(mutation.current_archive_stanza_id.id), Value::from("current".to_owned()), Value::from(now.clone()), Value::from(now)],
-            },
-            LinkPreviewMediaRefState::Unreferenced => DbExecute {
-                sql: "UPDATE link_preview_media_refs SET state = ?, updated_at = ? WHERE upload_slot_id = ? AND archive_jid = ? AND message_id = ? AND current_archive_id = ? AND state = ?".to_owned(),
-                params: vec![Value::from("unreferenced".to_owned()), Value::from(now), Value::from(mutation.upload_slot_id.to_string()), Value::from(mutation.archive.to_string()), Value::from(mutation.message_id.as_str().to_owned()), Value::from(mutation.current_archive_stanza_id.id), Value::from("current".to_owned())],
-            },
-        };
-        if let Err(error) = state.deps.app_state.db_pool.global_actor().ask(query).await {
-            warn!(%error, "planned preview reference write failed");
+        let query = mutation_write(
+            &mutation,
+            chrono::Utc::now(),
+            state.deps.app_state.db_pool.global().driver(),
+        );
+        if state
+            .deps
+            .app_state
+            .db_pool
+            .global_actor()
+            .ask(query)
+            .await
+            .is_err()
+        {
+            warn!("planned preview reference write failed");
             return super::effects::EffectOutcome::Unavailable;
         }
     }
     super::effects::EffectOutcome::Completed
+}
+
+/// Frozen projection write shared by standalone and canonical transaction paths.
+/// Canonical callers pass the original acceptance time, never retry wall time.
+pub(crate) fn mutation_write(
+    mutation: &LinkPreviewMediaRefMutation,
+    now: chrono::DateTime<chrono::Utc>,
+    driver: crate::db::DatabaseDriver,
+) -> crate::db::actor::DbExecute {
+    use crate::db::actor::DbExecute;
+    let now = now.to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let mut query = match mutation.state {
+        LinkPreviewMediaRefState::Current => DbExecute {
+            sql: r#"
+                INSERT INTO link_preview_media_refs
+                    (upload_slot_id, archive_jid, message_id, current_archive_id,
+                     state, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (upload_slot_id, archive_jid, message_id) DO UPDATE SET
+                    current_archive_id = excluded.current_archive_id,
+                    state = excluded.state,
+                    updated_at = excluded.updated_at
+                WHERE link_preview_media_refs.updated_at <= excluded.updated_at
+                  AND (
+                    link_preview_media_refs.updated_at < excluded.updated_at
+                    OR link_preview_media_refs.current_archive_id = excluded.current_archive_id
+                    OR EXISTS (
+                        SELECT 1 FROM mam_messages current_revision
+                        JOIN mam_messages proposed_revision
+                          ON current_revision.room_jid = proposed_revision.room_jid
+                        WHERE current_revision.room_jid = link_preview_media_refs.archive_jid
+                          AND current_revision.id = link_preview_media_refs.current_archive_id
+                          AND proposed_revision.id = excluded.current_archive_id
+                          AND current_revision.archive_seq < proposed_revision.archive_seq
+                    )
+                  )
+                  AND (link_preview_media_refs.state <> 'unreferenced'
+                       OR link_preview_media_refs.current_archive_id <> excluded.current_archive_id)
+                  AND NOT EXISTS (
+                    SELECT 1 FROM mam_messages newer JOIN mam_messages proposed
+                      ON newer.room_jid = proposed.room_jid
+                    WHERE newer.room_jid = link_preview_media_refs.archive_jid
+                      AND newer.id = link_preview_media_refs.current_archive_id
+                      AND proposed.id = excluded.current_archive_id
+                      AND newer.archive_seq > proposed.archive_seq
+                  )
+            "#
+            .to_owned(),
+            params: crate::db_params![
+                mutation.upload_slot_id.to_string(),
+                mutation.archive.to_string(),
+                mutation.message_id.as_str().to_owned(),
+                mutation.current_archive_stanza_id.id.clone(),
+                "current".to_owned(),
+                now.clone(),
+                now,
+            ],
+        },
+        LinkPreviewMediaRefState::Unreferenced => DbExecute {
+            sql: r#"
+                UPDATE link_preview_media_refs SET state = ?, updated_at = ?
+                WHERE upload_slot_id = ? AND archive_jid = ? AND message_id = ?
+                  AND current_archive_id = ? AND state = ? AND updated_at <= ?
+            "#
+            .to_owned(),
+            params: crate::db_params![
+                "unreferenced".to_owned(),
+                now.clone(),
+                mutation.upload_slot_id.to_string(),
+                mutation.archive.to_string(),
+                mutation.message_id.as_str().to_owned(),
+                mutation.current_archive_stanza_id.id.clone(),
+                "current".to_owned(),
+                now,
+            ],
+        },
+    };
+    match driver {
+        crate::db::DatabaseDriver::Sqlite => {
+            query.sql = query.sql.replace("link_preview_media_refs.updated_at <= excluded.updated_at", "julianday(link_preview_media_refs.updated_at) <= julianday(excluded.updated_at)").replace("link_preview_media_refs.updated_at < excluded.updated_at", "julianday(link_preview_media_refs.updated_at) < julianday(excluded.updated_at)").replace("updated_at <= ?", "julianday(updated_at) <= julianday(?)");
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            query.sql = query.sql.replace("link_preview_media_refs.updated_at <= excluded.updated_at", "link_preview_media_refs.updated_at::timestamptz <= excluded.updated_at::timestamptz").replace("link_preview_media_refs.updated_at < excluded.updated_at", "link_preview_media_refs.updated_at::timestamptz < excluded.updated_at::timestamptz").replace("updated_at <= ?", "updated_at::timestamptz <= ?::timestamptz");
+        }
+    }
+    query
 }
 
 #[cfg(test)]

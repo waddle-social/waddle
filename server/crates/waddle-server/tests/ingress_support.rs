@@ -85,6 +85,9 @@ impl IngressFixture {
         waddle_server::inbox::DatabaseInboxStorage::open(Some(db.database_url()))
             .await
             .expect("inbox schema");
+        waddle_server::notification_activity::NotificationActivityStore::new(db.clone())
+            .await
+            .expect("activity schema");
         MigrationRunner::single()
             .run(&db)
             .await

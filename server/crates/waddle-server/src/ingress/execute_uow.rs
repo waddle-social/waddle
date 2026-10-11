@@ -4,8 +4,8 @@ use crate::{
     ingress_uow::IngressUnitOfWork,
     server::routes::interpret::{
         effects::{
-            delivery::ExternalDeliveryEffect, room::ExternalRoomEffect, EffectOutcome,
-            ExternalEffect,
+            delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect,
+            room::ExternalRoomEffect, EffectOutcome, ExternalEffect,
         },
         Deps,
     },
@@ -17,6 +17,9 @@ use super::{decision::IngressDecision, recorded::RouteProgress};
 mod offline;
 #[cfg(test)]
 pub(crate) use offline::{fail_before_offline_settlement, retry_before_offline_settlement};
+
+#[path = "execute_projection.rs"]
+mod projection;
 
 #[path = "execute_archive.rs"]
 mod archive;
@@ -35,6 +38,7 @@ pub(crate) use invite::PAUSE_BEFORE_INVITATION_SETTLEMENT;
 
 #[path = "execute_ambiguous_offline.rs"]
 mod ambiguous_offline;
+pub(crate) use ambiguous_offline::pending_id as ambiguous_offline_pending_id;
 
 #[path = "execute_detached.rs"]
 mod detached;
@@ -42,10 +46,17 @@ pub(in crate::ingress) use detached::record_delivery_progress;
 #[cfg(test)]
 pub(crate) use detached::CONTEND_DELIVERY_PROGRESS_ONCE;
 #[cfg(test)]
-pub(crate) use detached::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE};
+pub(crate) use detached::{
+    CANCEL_STALLED_DELIVERY, FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE,
+};
 
 pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
     match effect {
+        ExternalEffect::Direct(
+            ExternalDirectEffect::NotificationActivity { .. }
+            | ExternalDirectEffect::LinkPreviewRefs { .. }
+            | ExternalDirectEffect::ClearLinkPreviewRefs { .. },
+        ) => true,
         ExternalEffect::Delivery(ExternalDeliveryEffect::QueueOfflineDelivery { .. }) => true,
         ExternalEffect::Room(
             ExternalRoomEffect::ArchiveAfterPin { .. }
@@ -83,6 +94,11 @@ pub(super) async fn execute_with_uow(
     _deadline: tokio::time::Instant,
 ) -> Option<EffectOutcome> {
     match effect {
+        ExternalEffect::Direct(
+            ExternalDirectEffect::NotificationActivity { .. }
+            | ExternalDirectEffect::LinkPreviewRefs { .. }
+            | ExternalDirectEffect::ClearLinkPreviewRefs { .. },
+        ) => Some(projection::execute(uow, decision, index, effect).await),
         ExternalEffect::RouteToPeer(route) | ExternalEffect::QueueOfflineDelivery(route) => {
             Some(Box::pin(invite::execute(uow, decision, index, route, deps)).await)
         }

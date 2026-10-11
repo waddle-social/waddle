@@ -12,6 +12,158 @@ use waddle_xmpp::ingress::{
     EffectMessageIdentity, GroupDmHistoryVisibility, GroupDmMembershipGrant, IngressEffectIntent,
 };
 
+async fn excluded_effects_never_gain_durable_owner_from_operational_receipts(
+    fixture: IngressFixture,
+) {
+    use crate::ingress_uow::{
+        CanonicalMessageRepository, DeliveryEffectRepository, EffectDeliveryBinding,
+        EffectDescendantRepository, EffectIntentRepository, EffectReceiptRepository,
+        IngressUowError,
+    };
+    use waddle_xmpp::ingress::{DeliveryKey, IngressEffectKey, MessageKey, SemanticDigest};
+
+    let excluded: Vec<_> = IngressEffectIntent::storage_round_trip_samples()
+        .into_iter()
+        .filter(|intent| {
+            matches!(
+                intent.semantic_key(),
+                IngressEffectKey::CallSignal(..)
+                    | IngressEffectKey::Pin(..)
+                    | IngressEffectKey::DmPinMutation(..)
+                    | IngressEffectKey::DmCallThreadState(..)
+            )
+        })
+        .collect();
+    assert_eq!(excluded.len(), 4, "exercise every excluded variant");
+    let key = MessageKey::new();
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("record excluded authority");
+    CanonicalMessageRepository::record_message(
+        &mut tx,
+        key,
+        &SemanticDigest::from_storage(1, [51; 32]).expect("digest"),
+        None,
+    )
+    .await
+    .expect("canonical message");
+    EffectIntentRepository::reconcile(&mut tx, key, &excluded, false)
+        .await
+        .expect("record excluded intents");
+    tx.commit().await.expect("authority commit");
+
+    for intent in &excluded {
+        let effect = intent.semantic_key();
+        let receipt = crate::ingress::receipt_key(intent).expect("operational receipt");
+        for received in [false, true] {
+            if received {
+                let mut tx = fixture.uow.begin().await.expect("operational completion");
+                EffectReceiptRepository::record_receipt(
+                    &mut tx,
+                    key,
+                    receipt.kind,
+                    &receipt.semantic_identity_hash,
+                )
+                .await
+                .expect("record operational completion");
+                tx.commit().await.expect("operational completion commit");
+            }
+            let mut tx = fixture.uow.begin().await.expect("test owner boundary");
+            assert_eq!(
+                EffectReceiptRepository::contains(
+                    &mut tx,
+                    key,
+                    receipt.kind,
+                    &receipt.semantic_identity_hash,
+                )
+                .await
+                .expect("receipt state"),
+                received,
+            );
+            assert_eq!(
+                DeliveryEffectRepository::bind_effect(&mut tx, key, &effect)
+                    .await
+                    .expect("excluded binding decision"),
+                EffectDeliveryBinding::AwaitingDurableOwner,
+                "{effect:?}: an operational receipt does not supply a durable owner",
+            );
+            assert!(matches!(
+                EffectDescendantRepository::attach(&mut tx, key, &effect, uuid::Uuid::new_v4())
+                    .await,
+                Err(IngressUowError::EffectIntentConflict)
+            ));
+            assert_eq!(
+                DeliveryEffectRepository::lookup(&mut tx, DeliveryKey::effect(key, &effect))
+                    .await
+                    .expect("excluded delivery lookup"),
+                None,
+                "excluded effects cannot mint a host delivery identity",
+            );
+            tx.commit().await.expect("boundary commit");
+            assert_eq!(fixture.count("ingress_deliveries").await, 0);
+            assert_eq!(fixture.count("ingress_effect_descendants").await, 0);
+        }
+    }
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 4);
+
+    // A supported effect must still bind and own a descendant in this fixture.
+    let supported = IngressEffectIntent::RouteDirect {
+        recipient: fixture.principal.bare_jid().clone(),
+        fanout: vec![],
+        route_identity: EffectMessageIdentity::capture_ordinal(0),
+        prepared: None,
+    };
+    let effect = supported.semantic_key();
+    let mut tx = fixture.uow.begin().await.expect("supported control");
+    let control = MessageKey::new();
+    CanonicalMessageRepository::record_message(
+        &mut tx,
+        control,
+        &SemanticDigest::from_storage(1, [52; 32]).expect("control digest"),
+        None,
+    )
+    .await
+    .expect("control canonical message");
+    EffectIntentRepository::reconcile(&mut tx, control, &[supported], false)
+        .await
+        .expect("record supported authority");
+    assert_eq!(
+        DeliveryEffectRepository::bind_effect(&mut tx, control, &effect)
+            .await
+            .expect("supported binding"),
+        EffectDeliveryBinding::Bound(DeliveryKey::effect(control, &effect)),
+    );
+    EffectDescendantRepository::attach(&mut tx, control, &effect, uuid::Uuid::new_v4())
+        .await
+        .expect("supported descendant custody");
+    tx.commit().await.expect("control commit");
+    assert_eq!(fixture.count("ingress_deliveries").await, 1);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_excluded_effects_never_gain_durable_owner_from_operational_receipts() {
+    excluded_effects_never_gain_durable_owner_from_operational_receipts(
+        IngressFixture::sqlite().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_excluded_effects_never_gain_durable_owner_from_operational_receipts() {
+    if let Some(fixture) = IngressFixture::postgres("excluded_owner_boundary").await {
+        excluded_effects_never_gain_durable_owner_from_operational_receipts(fixture).await;
+    }
+}
+
 async fn empty_accepted_authority(fixture: IngressFixture) {
     // A suppressed invitation commits successfully without any obligations.
     let mut submission = fixture.submission(Some("empty-invite-authority"), "invitation");

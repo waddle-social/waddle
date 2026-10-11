@@ -12,7 +12,7 @@ const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
     "groupchat_active_channel_mention",
     "groupchat_notify_all",
 ];
-const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
+pub(super) const NOTIFICATION_CANDIDATES_REASON_CHECK_SQL: &str = "reason IN ('offline_dm', 'offline_dm_mention', 'groupchat_personal_mention', 'groupchat_channel_mention', 'groupchat_active_channel_mention', 'groupchat_notify_all')";
 const NOTIFICATION_CANDIDATES_CLASS_CHECK_NAME: &str = "notification_candidates_class_check";
 const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
     "dm",
@@ -22,7 +22,7 @@ const NOTIFICATION_CANDIDATES_CLASS_VALUES: [&str; 6] = [
     "active_channel_mention",
     "notify_all",
 ];
-const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
+pub(super) const NOTIFICATION_CANDIDATES_CLASS_CHECK_SQL: &str = "class IN ('dm', 'dm_mention', 'personal_mention', 'channel_mention', 'active_channel_mention', 'notify_all')";
 const NOTIFICATION_OUTBOX_CLASS_CHECK_NAME: &str = "notification_outbox_class_check";
 const NOTIFICATION_OUTBOX_CLASS_VALUES: [&str; 6] = [
     "dm",
@@ -89,6 +89,9 @@ fn notification_candidates_table_sql(i64_type: &str, if_not_exists: bool) -> Str
             no_permanent_store INTEGER NOT NULL DEFAULT 0,
             last_message_body TEXT,
             reaction INTEGER NOT NULL DEFAULT 0,
+            delivery_id TEXT,
+            quarantined_at_ms {i64_type},
+            quarantined_suppressed_reason TEXT,
             PRIMARY KEY (recipient_bare_jid, conversation_jid, thread_id, stanza_id_by, stanza_id, class)
         )
         "#
@@ -119,6 +122,9 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
             -- `sender_jid`, so `RichSummary` round-trips 1:1.
             summary_sender_jid TEXT,
             summary_body TEXT,
+            approved_payload_xml TEXT,
+            approved_publish_options_xml TEXT,
+            queue_acceptance_may_exist INTEGER NOT NULL DEFAULT 1 CHECK (queue_acceptance_may_exist IN (0, 1)),
             status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
             attempt_count INTEGER NOT NULL DEFAULT 0,
             policy_error_count INTEGER NOT NULL DEFAULT 0,
@@ -132,6 +138,15 @@ fn notification_outbox_table_sql(i64_type: &str, if_not_exists: bool) -> String 
         )
         "#
     )
+}
+
+fn copy_notification_candidates_sql(old_table: &str) -> String {
+    let columns = "recipient_bare_jid, conversation_jid, sender_jid, thread_id, \
+        stanza_id_by, stanza_id, class, reason, created_at_ms, policy_error_count, \
+        next_attempt_at_ms, outboxed_at_ms, suppressed_reason, noping, no_store, \
+        no_permanent_store, last_message_body, reaction, delivery_id, \
+        quarantined_at_ms, quarantined_suppressed_reason";
+    format!("INSERT INTO notification_candidates ({columns}) SELECT {columns} FROM {old_table}")
 }
 
 /// Returns `true` iff `definition` quotes `value` as a SQL string literal,
@@ -217,6 +232,8 @@ impl NotificationOutboxStore {
             }
         }
         let i64_type = crate::db::i64_sql_type(self.db.driver());
+        self.execute(&format!("CREATE TABLE IF NOT EXISTS notification_outbox_lineage (candidate_delivery_id TEXT NOT NULL, job_id TEXT NOT NULL, settled_at_ms {i64_type}, PRIMARY KEY (candidate_delivery_id, job_id))"), ()).await?;
+        self.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_lineage_job ON notification_outbox_lineage (job_id)", ()).await?;
         self.execute(&notification_candidates_table_sql(i64_type, true), ())
             .await?;
         self.query("SELECT sender_jid FROM notification_candidates LIMIT 0", ())
@@ -229,17 +246,8 @@ impl NotificationOutboxStore {
         let candidate_next_attempt_column = format!("next_attempt_at_ms {i64_type}");
         self.add_column_if_missing("notification_candidates", &candidate_next_attempt_column)
             .await?;
-        // Reason/class CHECK migrations rebuild the table from a legacy
-        // schema; they MUST run before the slice-2a columns are added
-        // because the rebuild INSERT only copies the original column
-        // set. Adding the slice-2a columns afterward then either creates
-        // the column for-the-first-time (legacy upgrade) or is a no-op
-        // (cold init, since `notification_candidates_table_sql` already
-        // declares them).
-        self.migrate_notification_candidates_reason_constraint(i64_type)
-            .await?;
-        self.migrate_notification_candidates_class_constraint(i64_type)
-            .await?;
+        // Add every copied column before CHECK rebuilds, which must preserve
+        // frozen payloads, scheduling identities and quarantine evidence.
         self.add_column_if_missing("notification_candidates", "suppressed_reason TEXT")
             .await?;
         self.add_column_if_missing(
@@ -269,6 +277,23 @@ impl NotificationOutboxStore {
             "reaction INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
+        self.add_column_if_missing("notification_candidates", "delivery_id TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "notification_candidates",
+            &format!("quarantined_at_ms {i64_type}"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "notification_candidates",
+            "quarantined_suppressed_reason TEXT",
+        )
+        .await?;
+        self.quarantine_legacy_candidates_before_checks().await?;
+        self.migrate_notification_candidates_reason_constraint(i64_type)
+            .await?;
+        self.migrate_notification_candidates_class_constraint(i64_type)
+            .await?;
         self.migrate_notification_candidates_suppressed_reason_constraint(i64_type)
             .await?;
         self.execute(
@@ -311,21 +336,19 @@ impl NotificationOutboxStore {
             "policy_error_count INTEGER NOT NULL DEFAULT 0",
         )
         .await?;
-        self.migrate_notification_outbox_class_constraint(i64_type)
-            .await?;
-        // #719: T1-resolved XEP-0357 §5.4 rich summary fields.
-        // `summary_sender_jid` is the `last-message-sender` (NULL unless
-        // the recipient opted in); `summary_body` is the (hint-stripped)
-        // `last-message-body`.
-        //
-        // These ALTERs run AFTER the class-constraint rebuild: that
-        // rebuild's INSERT…SELECT only copies the original column set,
-        // so columns added before it would be silently dropped on a
-        // legacy-CHECK DB (same ordering rule the candidates side
-        // documents above).
+        // Add frozen state before a CHECK rebuild, then copy it with the
+        // original fields. Older writers may have accepted even unfrozen jobs,
+        // including on another database: unclassified legacy rows retain custody.
         self.add_column_if_missing("notification_outbox", "summary_sender_jid TEXT")
             .await?;
         self.add_column_if_missing("notification_outbox", "summary_body TEXT")
+            .await?;
+        self.add_column_if_missing("notification_outbox", "approved_payload_xml TEXT")
+            .await?;
+        self.add_column_if_missing("notification_outbox", "approved_publish_options_xml TEXT")
+            .await?;
+        self.add_column_if_missing("notification_outbox", "queue_acceptance_may_exist INTEGER NOT NULL DEFAULT 1 CHECK (queue_acceptance_may_exist IN (0, 1))").await?;
+        self.migrate_notification_outbox_class_constraint(i64_type)
             .await?;
         self.execute(
             "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
@@ -340,7 +363,7 @@ impl NotificationOutboxStore {
         self.execute(
             "CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_outbox_queued_coalesce \
              ON notification_outbox (recipient_bare_jid, push_service_jid, node, conversation_jid, thread_id, class) \
-             WHERE status = 'queued'",
+             WHERE status = 'queued' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist = 0",
             (),
         )
         .await?;
@@ -363,7 +386,36 @@ impl NotificationOutboxStore {
             (),
         )
         .await?;
+        self.adopt_legacy_candidate_ids().await?;
+        self.adopt_legacy_ancestry().await?;
         Ok(())
+    }
+
+    /// Scheduling identities confer neither canonical nor provider authority.
+    /// Assign them in bounded batches without changing frozen candidate data.
+    async fn adopt_legacy_candidate_ids(&self) -> Result<(), NotificationOutboxError> {
+        let sql = match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                "UPDATE notification_candidates SET delivery_id = gen_random_uuid()::text WHERE ctid IN (SELECT ctid FROM notification_candidates WHERE delivery_id IS NULL AND quarantined_at_ms IS NULL LIMIT 128) AND delivery_id IS NULL AND quarantined_at_ms IS NULL"
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                // Each row receives an independent UUIDv4 scheduler identity.
+                "UPDATE notification_candidates SET delivery_id = lower(hex(randomblob(4))) || '-' || lower(hex(randomblob(2))) || '-4' || substr(lower(hex(randomblob(2))), 2, 3) || '-8' || substr(lower(hex(randomblob(2))), 2, 3) || '-' || lower(hex(randomblob(6))) WHERE rowid IN (SELECT rowid FROM notification_candidates WHERE delivery_id IS NULL AND quarantined_at_ms IS NULL LIMIT 128) AND delivery_id IS NULL AND quarantined_at_ms IS NULL"
+            }
+        };
+        loop {
+            let mut tx = self.db.begin_immediate().await?;
+            if self.db.driver() == crate::db::DatabaseDriver::Postgres {
+                tx.execute("SET LOCAL lock_timeout = '100ms'", ()).await?;
+                tx.execute("SET LOCAL statement_timeout = '500ms'", ())
+                    .await?;
+            }
+            let adopted = tx.execute(sql, ()).await?;
+            tx.commit().await?;
+            if adopted == 0 {
+                return Ok(());
+            }
+        }
     }
 
     async fn migrate_notification_candidates_reason_constraint(
@@ -419,36 +471,7 @@ impl NotificationOutboxStore {
         tx.execute(&notification_candidates_table_sql(i64_type, false), ())
             .await?;
         tx.execute(
-            r#"
-            INSERT INTO notification_candidates (
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            )
-            SELECT
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            FROM notification_candidates_old_reason_check
-            "#,
+            &copy_notification_candidates_sql("notification_candidates_old_reason_check"),
             (),
         )
         .await?;
@@ -529,36 +552,7 @@ impl NotificationOutboxStore {
         tx.execute(&notification_candidates_table_sql(i64_type, false), ())
             .await?;
         tx.execute(
-            r#"
-            INSERT INTO notification_candidates (
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            )
-            SELECT
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms
-            FROM notification_candidates_old_class_check
-            "#,
+            &copy_notification_candidates_sql("notification_candidates_old_class_check"),
             (),
         )
         .await?;
@@ -651,48 +645,9 @@ impl NotificationOutboxStore {
         // `last_message_body` / `reaction` bits (Codex review on the
         // #780 PR).
         tx.execute(
-            r#"
-            INSERT INTO notification_candidates (
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms,
-                suppressed_reason,
-                noping,
-                no_store,
-                no_permanent_store,
-                last_message_body,
-                reaction
-            )
-            SELECT
-                recipient_bare_jid,
-                conversation_jid,
-                sender_jid,
-                thread_id,
-                stanza_id_by,
-                stanza_id,
-                class,
-                reason,
-                created_at_ms,
-                policy_error_count,
-                next_attempt_at_ms,
-                outboxed_at_ms,
-                suppressed_reason,
-                noping,
-                no_store,
-                no_permanent_store,
-                last_message_body,
-                reaction
-            FROM notification_candidates_old_suppressed_reason_check
-            "#,
+            &copy_notification_candidates_sql(
+                "notification_candidates_old_suppressed_reason_check",
+            ),
             (),
         )
         .await?;
@@ -881,6 +836,11 @@ impl NotificationOutboxStore {
                 class,
                 message_count,
                 context_xml,
+                summary_sender_jid,
+                summary_body,
+                approved_payload_xml,
+                approved_publish_options_xml,
+                queue_acceptance_may_exist,
                 status,
                 attempt_count,
                 policy_error_count,
@@ -904,6 +864,11 @@ impl NotificationOutboxStore {
                 class,
                 message_count,
                 context_xml,
+                summary_sender_jid,
+                summary_body,
+                approved_payload_xml,
+                approved_publish_options_xml,
+                queue_acceptance_may_exist,
                 status,
                 attempt_count,
                 policy_error_count,
@@ -1519,5 +1484,85 @@ mod tests {
             )
             .await
             .expect("reset to NULL");
+    }
+
+    #[tokio::test]
+    async fn stale_outbox_class_check_preserves_frozen_acceptance_state() {
+        let db = Database::in_memory("frozen-outbox-rebuild")
+            .await
+            .expect("db");
+        let legacy_sql = notification_outbox_table_sql("INTEGER", false)
+            .replace(NOTIFICATION_OUTBOX_CLASS_CHECK_SQL, "class IN ('dm')");
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(&legacy_sql, ())
+            .await
+            .expect("legacy table");
+        let payload = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+        let options = Element::builder("x", NS_DATA_FORMS).build();
+        for possible in [0_i64, 1] {
+            db.guard().await.expect("guard").execute(
+                "INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, 1, 1)",
+                crate::db_params![uuid::Uuid::new_v4().to_string(), "alice@example.com", "push.example.com", "web-node", "bob@example.com", "bob@example.com/phone", "[\"bob@example.com/phone\"]", possible.to_string(), "dm", String::from(&payload), "bob@example.com/phone", "frozen body", String::from(&payload), String::from(&options), possible, STATUS_QUEUED],
+            ).await.expect("legacy frozen job");
+        }
+        let store = NotificationOutboxStore::new(db)
+            .await
+            .expect("CHECK rebuild");
+        for _ in 0..2 {
+            let mut rows = store.query("SELECT summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist FROM notification_outbox ORDER BY thread_id", ()).await.expect("frozen state");
+            for possible in [0_i64, 1] {
+                let row = rows.next().await.expect("row").expect("frozen job");
+                assert_eq!(
+                    row.get::<String>(0).expect("summary sender"),
+                    "bob@example.com/phone"
+                );
+                assert_eq!(row.get::<String>(1).expect("summary body"), "frozen body");
+                assert_eq!(
+                    row.get::<String>(2).expect("payload"),
+                    String::from(&payload)
+                );
+                assert_eq!(
+                    row.get::<String>(3).expect("options"),
+                    String::from(&options)
+                );
+                assert_eq!(row.get::<i64>(4).expect("acceptance marker"), possible);
+            }
+            drop(rows);
+            store.initialize().await.expect("repeat initialization");
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_outbox_rows_without_frozen_xml_keep_uncertain_custody() {
+        let db = Database::in_memory("unclassified-outbox-acceptance")
+            .await
+            .expect("db");
+        let legacy_sql = notification_outbox_table_sql("INTEGER", false)
+            .replace("            queue_acceptance_may_exist INTEGER NOT NULL DEFAULT 1 CHECK (queue_acceptance_may_exist IN (0, 1)),\n", "");
+        db.guard()
+            .await
+            .expect("guard")
+            .execute(&legacy_sql, ())
+            .await
+            .expect("legacy table");
+        let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS).build();
+        db.guard().await.expect("guard").execute(
+            "INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, class, message_count, context_xml, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, 1, 1)",
+            crate::db_params![uuid::Uuid::new_v4().to_string(), "alice@example.com", "push.example.com", "web-node", "bob@example.com", "bob@example.com/phone", "[\"bob@example.com/phone\"]", "dm", String::from(&context), STATUS_QUEUED],
+        ).await.expect("unclassified legacy job");
+        let store = NotificationOutboxStore::new(db).await.expect("upgrade");
+        let jobs = store.pending_outbox_jobs().await.expect("legacy jobs");
+        assert_eq!(jobs.len(), 1);
+        assert!(jobs[0].approved_payload.is_none());
+        assert!(
+            jobs[0].queue_acceptance_may_exist,
+            "historical unfrozen XML does not prove a queue on another database never accepted"
+        );
+        store.initialize().await.expect("repeat startup");
+        assert!(
+            store.pending_outbox_jobs().await.expect("legacy jobs")[0].queue_acceptance_may_exist
+        );
     }
 }

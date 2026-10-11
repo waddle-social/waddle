@@ -8,7 +8,9 @@ use wasmtime::{Config, Engine, Store};
 
 use super::exports::waddle::extension as wit_exports;
 use super::{waddle, wasi, HostState, WaddleExtension};
-use crate::host_tools::{ExtensionHostTools, InvocationContext};
+use crate::host_tools::{
+    DeliveryInvocation, ExtensionDeliveryCapability, ExtensionHostTools, InvocationContext,
+};
 use crate::types::{ExtensionCapability, ExtensionEvent, ExtensionManifest, ExtensionResponse};
 
 /// Shared wasmtime engine used for all loaded extensions.
@@ -71,6 +73,9 @@ impl LoadedExtension {
         waddle::extension::host_tools::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add waddle host tool linker imports")?;
+        waddle::extension::delivery::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
+            .map_err(anyhow::Error::from)
+            .context("failed to add delivery capability linker imports")?;
         waddle::extension::runtime::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)
             .map_err(anyhow::Error::from)
             .context("failed to add waddle runtime linker imports")?;
@@ -141,14 +146,24 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> Result<ExtensionResponse> {
-        self.invoke_with_deadline(event, tools, context, config, grants, allowed_http_origins)
-            .await
-            .map_err(|(failure, message)| match message {
-                Some(message) => {
-                    anyhow::anyhow!("extension invocation failed: {failure:?}: {message}")
-                }
-                None => anyhow::anyhow!("extension invocation failed: {failure:?}"),
-            })
+        self.invoke_with_deadline(
+            event,
+            tools,
+            InvocationBinding {
+                context,
+                delivery: None,
+            },
+            config,
+            grants,
+            allowed_http_origins,
+        )
+        .await
+        .map_err(|(failure, message)| match message {
+            Some(message) => {
+                anyhow::anyhow!("extension invocation failed: {failure:?}: {message}")
+            }
+            None => anyhow::anyhow!("extension invocation failed: {failure:?}"),
+        })
     }
 
     pub async fn call_handle_event_typed(
@@ -160,9 +175,44 @@ impl LoadedExtension {
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
     ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
-        self.invoke_with_deadline(event, tools, context, config, grants, allowed_http_origins)
-            .await
-            .map_err(|(failure, _)| failure)
+        self.invoke_with_deadline(
+            event,
+            tools,
+            InvocationBinding {
+                context,
+                delivery: None,
+            },
+            config,
+            grants,
+            allowed_http_origins,
+        )
+        .await
+        .map_err(|(failure, _)| failure)
+    }
+
+    /// Invoke with server-owned authority, without serializing the canonical key.
+    pub async fn call_handle_event_typed_with_delivery(
+        &self,
+        event: ExtensionEvent,
+        tools: Arc<dyn ExtensionHostTools>,
+        invocation: DeliveryInvocation,
+        config: String,
+        grants: HashSet<ExtensionCapability>,
+        allowed_http_origins: Vec<String>,
+    ) -> std::result::Result<ExtensionResponse, crate::types::ObservationFailure> {
+        self.invoke_with_deadline(
+            event,
+            tools,
+            InvocationBinding {
+                context: invocation.context,
+                delivery: Some(invocation.capability),
+            },
+            config,
+            grants,
+            allowed_http_origins,
+        )
+        .await
+        .map_err(|(failure, _)| failure)
     }
 
     /// Like [`Self::call_handle_event_typed`], but keeps the guest's error
@@ -171,7 +221,7 @@ impl LoadedExtension {
         &self,
         event: ExtensionEvent,
         tools: Arc<dyn ExtensionHostTools>,
-        context: InvocationContext,
+        invocation: InvocationBinding,
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
@@ -179,7 +229,14 @@ impl LoadedExtension {
     {
         tokio::time::timeout(
             std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
-            self.invoke(event, tools, context, config, grants, allowed_http_origins),
+            self.invoke(
+                event,
+                tools,
+                invocation,
+                config,
+                grants,
+                allowed_http_origins,
+            ),
         )
         .await
         .map_err(|_| (crate::types::ObservationFailure::DeadlineExceeded, None))?
@@ -189,7 +246,7 @@ impl LoadedExtension {
         &self,
         event: ExtensionEvent,
         tools: Arc<dyn ExtensionHostTools>,
-        context: InvocationContext,
+        invocation: InvocationBinding,
         config: String,
         grants: HashSet<ExtensionCapability>,
         allowed_http_origins: Vec<String>,
@@ -200,7 +257,7 @@ impl LoadedExtension {
             &self.engine,
             HostState::new(
                 tools,
-                context,
+                invocation.context,
                 config,
                 grants,
                 allowed_http_origins,
@@ -208,17 +265,33 @@ impl LoadedExtension {
                 self.http.clone(),
             ),
         );
+        if let Some(capability) = invocation.delivery {
+            let ExtensionEvent::RoomMessageObserve(observation) = &event else {
+                return Err((ObservationFailure::Denied, None));
+            };
+            store
+                .data_mut()
+                .bind_delivery(capability, observation.source.clone())
+                .await
+                .map_err(|error| (classify_delivery_error(error), None))?;
+        }
         self.configure_store(&mut store)
             .map_err(|_| (ObservationFailure::ResourceLimit, None))?;
         let bindings =
             WaddleExtension::instantiate_async(&mut store, &self.component, &self.linker)
                 .await
                 .map_err(|error| (classify_runtime_error(error), None))?;
+        let delivery = store.data().delivery_resource();
         let result = bindings
             .waddle_extension_framework()
-            .call_handle_event(&mut store, &event.into())
+            .call_handle_event(&mut store, &event.into(), delivery)
             .await
             .map_err(|error| (classify_runtime_error(error), None))?;
+        store
+            .data_mut()
+            .validate_delivery()
+            .await
+            .map_err(|error| (classify_delivery_error(error), None))?;
         match result {
             Ok(response) => response
                 .try_into()
@@ -241,6 +314,25 @@ impl LoadedExtension {
                 Some(error.message.value),
             )),
         }
+    }
+}
+
+struct InvocationBinding {
+    context: InvocationContext,
+    delivery: Option<Arc<dyn ExtensionDeliveryCapability>>,
+}
+
+fn classify_delivery_error(
+    error: crate::host_tools::HostToolError,
+) -> crate::types::ObservationFailure {
+    use crate::host_tools::HostToolErrorCode;
+    use crate::types::ObservationFailure;
+    match error.code {
+        HostToolErrorCode::TemporaryFailure => ObservationFailure::TemporaryFailure,
+        HostToolErrorCode::InvalidRequest => ObservationFailure::InvalidRequest,
+        HostToolErrorCode::Denied
+        | HostToolErrorCode::NotFound
+        | HostToolErrorCode::Unsupported => ObservationFailure::Denied,
     }
 }
 

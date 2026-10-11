@@ -59,6 +59,11 @@ pub(super) fn decode_candidate(
         no_permanent_store: row.get::<i64>(11)? != 0,
         last_message_body: row.get::<Option<String>>(12)?,
         reaction: row.get::<i64>(13)? != 0,
+        delivery_id: row
+            .get::<Option<String>>(14)?
+            .map(|raw| uuid::Uuid::parse_str(&raw))
+            .transpose()
+            .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?,
     })
 }
 
@@ -125,6 +130,17 @@ pub(super) fn decode_outbox_job(
             .parse::<Element>()
             .map_err(|error| NotificationOutboxError::InvalidContextXml(error.to_string()))?,
         rich_summary,
+        approved_payload: row
+            .get::<Option<String>>(17)?
+            .map(|raw| raw.parse::<Element>())
+            .transpose()
+            .map_err(|_| NotificationOutboxError::InvalidApprovedPayload)?,
+        approved_publish_options: row
+            .get::<Option<String>>(18)?
+            .map(|raw| raw.parse::<Element>())
+            .transpose()
+            .map_err(|_| NotificationOutboxError::InvalidApprovedPayload)?,
+        queue_acceptance_may_exist: row.get::<i64>(19)? != 0,
         status: NotificationOutboxStatus::from_db_value(&row.get::<String>(11)?)?,
         attempt_count: row.get(12)?,
         policy_error_count: row.get(13)?,

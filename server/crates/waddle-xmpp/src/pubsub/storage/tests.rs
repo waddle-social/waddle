@@ -361,3 +361,205 @@ async fn in_memory_purge_clears_items_keeps_node() {
     assert!(items.is_empty());
     assert!(storage.get_node(&owner, "n").await.expect("get").is_some());
 }
+
+fn push_notification(value: &str, id: &str) -> PubSubItem {
+    PubSubItem {
+        id: Some(id.to_owned()),
+        publisher: None,
+        payload: Some(
+            minidom::Element::builder("notification", crate::xep::xep0357::NS_PUSH)
+                .append(
+                    minidom::Element::builder("value", "urn:test:push-storage")
+                        .append(value)
+                        .build(),
+                )
+                .build(),
+        ),
+    }
+}
+
+#[tokio::test]
+async fn versioned_push_memory_orders_replays_and_preserves_retraction_watermark() {
+    let storage = InMemoryPubSubStorage::new();
+    let service: BareJid = "push@example.com".parse().expect("service");
+    let publisher: BareJid = "alice@example.com".parse().expect("publisher");
+    let node = PublicationNode::new("versioned-push").expect("node");
+    storage
+        .get_or_create_node(&service, node.as_str())
+        .await
+        .expect("node");
+    let token = uuid::Uuid::new_v4();
+    let newer = PublicationVersion::new(2, token).expect("version");
+    let old = PublicationVersion::new(1, uuid::Uuid::new_v4()).expect("version");
+    let item = push_notification("newer", "same");
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(&service, &publisher, &node, &item, newer)
+            .await
+            .expect("new publish"),
+        VersionedPublishResult::Applied(_)
+    ));
+    // Lost reply: retry must preserve both approved XML and original timestamp.
+    let before = storage
+        .get_items(&service, node.as_str(), None, &[])
+        .await
+        .expect("items");
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(&service, &publisher, &node, &item, newer)
+            .await
+            .expect("replay"),
+        VersionedPublishResult::AlreadyApplied
+    ));
+    let after = storage
+        .get_items(&service, node.as_str(), None, &[])
+        .await
+        .expect("items");
+    assert_eq!(before[0].published_at, after[0].published_at);
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(
+                &service,
+                &publisher,
+                &node,
+                &push_notification("older", "different"),
+                old
+            )
+            .await
+            .expect("old publish"),
+        VersionedPublishResult::Superseded
+    ));
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(
+                &service,
+                &publisher,
+                &node,
+                &push_notification("changed", "same"),
+                newer
+            )
+            .await,
+        Err(PublicationError::IntegrityConflict)
+    ));
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(
+                &service,
+                &publisher,
+                &node,
+                &item,
+                PublicationVersion::new(2, uuid::Uuid::new_v4()).expect("version")
+            )
+            .await,
+        Err(PublicationError::IntegrityConflict)
+    ));
+    storage
+        .retract_item(&service, node.as_str(), "same")
+        .await
+        .expect("retract");
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(&service, &publisher, &node, &item, newer)
+            .await
+            .expect("replay tombstone"),
+        VersionedPublishResult::AlreadyApplied
+    ));
+    assert!(storage
+        .get_items(&service, node.as_str(), None, &[])
+        .await
+        .expect("items")
+        .is_empty());
+    assert!(matches!(
+        storage
+            .publish_push_item_versioned(
+                &service,
+                &publisher,
+                &node,
+                &push_notification("changed after retract", "same"),
+                newer
+            )
+            .await,
+        Err(PublicationError::IntegrityConflict)
+    ));
+    storage
+        .delete_node(&service, node.as_str())
+        .await
+        .expect("delete node");
+    let metadata = storage
+        .publication_for_test(&service, &node)
+        .expect("watermark survives node deletion");
+    assert_eq!(std::mem::size_of_val(&metadata.1), 32);
+    assert_eq!(
+        metadata.1,
+        PublicationFingerprint::of(&item, &publisher).expect("fingerprint")
+    );
+    assert!(!format!("{metadata:?}").contains("newer"));
+}
+
+#[tokio::test]
+async fn versioned_push_memory_republication_updates_latest_order_and_retention() {
+    let storage = InMemoryPubSubStorage::new();
+    let service: BareJid = "push@example.com".parse().expect("service");
+    let publisher: BareJid = "alice@example.com".parse().expect("publisher");
+    let node = PublicationNode::new("republication-order").expect("node");
+    storage
+        .get_or_create_node(&service, node.as_str())
+        .await
+        .expect("node");
+    let mut config = NodeConfig::push_service();
+    config.max_items = 2;
+    storage
+        .update_node_config(&service, node.as_str(), &config)
+        .await
+        .expect("config");
+    for (revision, id, body) in [(1, "A", "first A"), (2, "B", "B"), (3, "A", "updated A")] {
+        assert!(matches!(
+            storage
+                .publish_push_item_versioned(
+                    &service,
+                    &publisher,
+                    &node,
+                    &push_notification(body, id),
+                    PublicationVersion::new(revision, uuid::Uuid::new_v4()).expect("version")
+                )
+                .await
+                .expect("publish"),
+            VersionedPublishResult::Applied(_)
+        ));
+    }
+    let latest = storage
+        .get_items(&service, node.as_str(), Some(1), &[])
+        .await
+        .expect("latest");
+    assert_eq!(latest.len(), 1);
+    assert_eq!(latest[0].id, "A");
+    assert_eq!(
+        latest[0].to_pubsub_item().payload,
+        push_notification("updated A", "A").payload
+    );
+    let result = storage
+        .publish_push_item_versioned(
+            &service,
+            &publisher,
+            &node,
+            &push_notification("C", "C"),
+            PublicationVersion::new(4, uuid::Uuid::new_v4()).expect("version"),
+        )
+        .await
+        .expect("publish C");
+    let VersionedPublishResult::Applied(result) = result else {
+        panic!("new publication must apply");
+    };
+    assert_eq!(result.evicted_item_ids, ["B"]);
+    let retained = storage
+        .get_items(&service, node.as_str(), None, &[])
+        .await
+        .expect("retained");
+    assert_eq!(
+        retained
+            .iter()
+            .map(|item| item.id.as_str())
+            .collect::<Vec<_>>(),
+        ["A", "C"]
+    );
+}

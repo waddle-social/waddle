@@ -312,17 +312,17 @@ async fn backlog_and_retention(fixture: IngressFixture) {
     );
     let sql = match fixture.db.driver() {
         DatabaseDriver::Postgres => {
-            "UPDATE ingress_messages SET terminal_at = ?::timestamptz WHERE terminal_at IS NOT NULL"
+            "UPDATE ingress_messages SET terminal_at = ?::timestamptz, retention_eligible_at = ?::timestamptz WHERE terminal_at IS NOT NULL AND retention_eligible_at IS NOT NULL"
         }
         DatabaseDriver::Sqlite => {
-            "UPDATE ingress_messages SET terminal_at = ? WHERE terminal_at IS NOT NULL"
+            "UPDATE ingress_messages SET terminal_at = ?, retention_eligible_at = ? WHERE terminal_at IS NOT NULL AND retention_eligible_at IS NOT NULL"
         }
     };
+    // The backlog test simulates elapsed retention only for rows whose
+    // Foundation eligibility has already been proven after references settled.
+    let elapsed_tail = (chrono::Utc::now() - chrono::Duration::days(9)).to_rfc3339();
     fixture
-        .execute(
-            sql,
-            crate::db_params![(chrono::Utc::now() - chrono::Duration::days(9)).to_rfc3339()],
-        )
+        .execute(sql, crate::db_params![elapsed_tail.clone(), elapsed_tail])
         .await;
     assert_eq!(
         run_maintenance_pass(&fixture.db, &fixture.uow, immediate_budget(), None).await,

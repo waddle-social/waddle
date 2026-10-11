@@ -11,7 +11,7 @@ use xmpp_parsers::iq::Iq;
 use super::publish_jobs::MAX_DELIVERY_ATTEMPTS_PER_NODE;
 use super::pubsub_backing::push_pubsub_item_with_stable_id;
 use super::store::DatabasePushServiceStore;
-use super::types::{PushFanoutResult, PushPublishJobEnqueue};
+use super::types::{PushFanoutResult, PushPublishJobEnqueue, PushQueueAcceptanceError};
 
 impl DatabasePushServiceStore {
     /// Enqueue and immediately try a trusted user-server XEP-0357 publish job.
@@ -66,31 +66,34 @@ impl DatabasePushServiceStore {
         .await
     }
 
-    /// Persist the XEP-0060-backed XEP-0357 publish and enqueue provider
-    /// fanout without attempting delivery inline.
-    ///
-    /// This is the boundary used by the user-server notification outbox: the
-    /// durable PubSub item is canonical, while `push_publish_jobs` remains
-    /// Push Service retry/fanout state.
-    pub async fn enqueue_registered_notification_from_user_server_with_publish_options(
+    /// Accept host-approved provider work under a private delivery identity.
+    /// Queue acceptance freezes its payload/options; the separate versioned
+    /// PubSub projection cannot overwrite a newer wire publication on replay.
+    /// Neither queue nor PubSub acceptance proves a provider accepted a send.
+    pub(crate) async fn enqueue_registered_notification_from_user_server_with_publish_options(
         &self,
-        push_service_jid: &str,
+        push_service_jid: &BareJid,
         node: &str,
         item: &PubSubItem,
         publisher: &BareJid,
         publish_options: Option<&Element>,
-    ) -> Result<PushPublishJobEnqueue, XmppError> {
+        delivery_id: uuid::Uuid,
+    ) -> Result<PushPublishJobEnqueue, PushQueueAcceptanceError> {
         let item = push_pubsub_item_with_stable_id(item);
-        self.persist_xep0060_publish_if_configured(Some(push_service_jid), node, &item, publisher)
+        let accepted = self
+            .enqueue_canonical_notification_publish_job(
+                node,
+                &item,
+                publisher,
+                push_service_jid,
+                publish_options,
+                delivery_id,
+            )
             .await?;
-        self.enqueue_notification_publish_job_from_user_server_with_publish_options(
-            node,
-            &item,
-            publisher,
-            Some(push_service_jid),
-            publish_options,
-        )
-        .await
+        self.complete_versioned_publish_backing(&accepted.job_id.to_string())
+            .await
+            .map_err(PushQueueAcceptanceError::Unknown)?;
+        Ok(accepted)
     }
 
     pub async fn publish_xep0357_pubsub_iq_from_user_server(
@@ -164,8 +167,6 @@ impl DatabasePushServiceStore {
         retention_limit: i64,
     ) -> Result<PushFanoutResult, XmppError> {
         let item = push_pubsub_item_with_stable_id(item);
-        self.persist_xep0060_publish_if_configured(push_service_jid, node, &item, publisher)
-            .await?;
         let enqueue = self
             .enqueue_notification_publish_job_from_user_server_with_publish_options(
                 node,
@@ -176,12 +177,10 @@ impl DatabasePushServiceStore {
             )
             .await?;
 
+        self.complete_versioned_publish_backing(&enqueue.job_id.to_string())
+            .await?;
         match self
-            .process_publish_job_by_node_item_with_retention_limit(
-                node,
-                &enqueue.item_id,
-                retention_limit,
-            )
+            .process_publish_job_with_retention_limit(&enqueue.job_id.to_string(), retention_limit)
             .await
         {
             Ok(Some(result)) => Ok(result),
@@ -190,8 +189,13 @@ impl DatabasePushServiceStore {
                 attempted_devices: 0,
             }),
             Err(error) => {
-                self.record_publish_job_failure(node, &enqueue.item_id, &error.to_string())
-                    .await?;
+                // Repair by acceptance ID does not carry claim authority;
+                // possible sends keep their lease and sticky uncertainty.
+                self.record_publish_job_failure_by_id(
+                    &enqueue.job_id.to_string(),
+                    &error.to_string(),
+                )
+                .await?;
                 Err(error)
             }
         }
@@ -259,7 +263,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn direct_publish_recovers_expired_claim_before_retry() {
+    async fn wire_publication_does_not_reuse_another_acceptance_claim() {
         let store = store().await;
         let owner = owner();
         let node = store.ensure_node(&owner, "web").await.expect("node");
@@ -317,5 +321,22 @@ mod tests {
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].item_id(), "recover-direct-claim");
         assert!(queued.is_empty());
+        let mut rows = store
+            .query(
+                "SELECT COUNT(*) FROM push_publish_jobs WHERE item_id = ? AND status = ?",
+                crate::db_params!["recover-direct-claim", PUBLISH_JOB_STATUS_IN_PROGRESS],
+            )
+            .await
+            .expect("original claim");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("row")
+                .expect("count")
+                .get::<i64>(0)
+                .expect("value"),
+            1,
+            "the new wire publication cannot claim another acceptance's expired lease"
+        );
     }
 }

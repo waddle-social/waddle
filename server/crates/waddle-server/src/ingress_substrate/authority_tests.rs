@@ -832,7 +832,7 @@ async fn gc_rechecks_pending_intents_under_canonical_lock(driver: DatabaseDriver
         .expect("new intent transaction");
     insert_intent(&mut tx, key, [3; 32]).await;
     tx.commit().await.expect("commit pending intent after scan");
-    let outcome = gc_candidate_batch(&fixture.db, &cutoff, candidates, &budget)
+    let outcome = gc_candidate_batch(&fixture.db, now, &cutoff, candidates, &budget)
         .await
         .expect("locked candidate recheck");
     assert_eq!(outcome.deleted_messages, 0);

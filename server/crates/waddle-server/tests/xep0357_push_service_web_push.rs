@@ -1,4 +1,4 @@
-//! XEP-0357 §6 forward cleanup and Web Push dispatch outcome tests.
+//! XEP-0357 §6 publish-error handling and Web Push delivery tests.
 //!
 //! When the Web Push relay reports the subscription is permanently
 //! gone (404/410), the publish-job worker records a `web-gone`
@@ -6,6 +6,9 @@
 //! the same tx so future publish jobs for the node skip it. These
 //! tests exercise the full path with a mock `WebPushSender` so the
 //! cleanup behavior is locked in without needing a live relay.
+//! Known pre-send errors stop at the existing retry cap under the §6.1 error
+//! policy; uncertain sends remain retryable, and PubSub/queue acceptance never
+//! substitutes for a provider reply.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -40,7 +43,7 @@ async fn store() -> DatabasePushServiceStore {
         Database::in_memory("push-service")
             .await
             .expect("push service db"),
-        b"waddle-push-service-test-secret-key",
+        &rand::random::<[u8; 32]>(),
     )
     .await
     .expect("push service store")
@@ -236,13 +239,11 @@ async fn store_with_web_push_sender(sender: Arc<dyn WebPushSender>) -> DatabaseP
     let db = Database::in_memory("push-service-web-push")
         .await
         .expect("db");
-    let store = DatabasePushServiceStore::new_with_secret_key(
-        db.clone(),
-        b"waddle-push-service-test-secret-key-32b",
-    )
-    .await
-    .expect("store");
-    let signer = VapidStorage::load_or_provision(db, b"root-key")
+    let store =
+        DatabasePushServiceStore::new_with_secret_key(db.clone(), &rand::random::<[u8; 32]>())
+            .await
+            .expect("store");
+    let signer = VapidStorage::load_or_provision(db, &rand::random::<[u8; 32]>())
         .await
         .expect("VAPID signer");
     let sub = VapidSub::default_for_domain("example.com").expect("vapid sub");
@@ -262,6 +263,132 @@ async fn device_status(store: &DatabasePushServiceStore, node: &str, device_id: 
         .expect("status query row")
         .expect("device row present");
     row.get::<String>(0).expect("status column")
+}
+
+#[tokio::test]
+async fn missing_backing_retries_are_bounded_without_provider_sends() {
+    use waddle_xmpp::pubsub::PubSubStorage;
+
+    let db = Database::in_memory("missing-push-backing")
+        .await
+        .expect("db");
+    waddle_server::push_registrations::DatabasePushRegistrationStore::new(db.clone())
+        .await
+        .expect("registration store");
+    let backing = Arc::new(
+        waddle_server::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
+            .await
+            .expect("backing"),
+    );
+    let service: BareJid = "push.example.com".parse().expect("service");
+    let sender = FixedOutcomeSender::new(WebPushOutcome::Delivered { status: 201 });
+    let signer = VapidStorage::load_or_provision(db.clone(), &rand::random::<[u8; 32]>())
+        .await
+        .expect("signer");
+    let store = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+        db,
+        &rand::random::<[u8; 32]>(),
+        service.clone(),
+        backing.clone(),
+    )
+    .await
+    .expect("store")
+    .with_web_push_provider(
+        signer,
+        Arc::new(sender.clone()),
+        VapidSub::default_for_domain("example.com").expect("sub"),
+    );
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    let (p256dh, auth) = fresh_subscription_material();
+    store
+        .upsert_device(
+            &owner,
+            PushDeviceRegistration::new("web-1", node.node(), PushDevicePlatform::Web, "test")
+                .with_provider_endpoint(Some("https://push.example.com/subscription".to_string()))
+                .with_provider_token(Some(auth))
+                .with_provider_key_material(Some(p256dh)),
+        )
+        .await
+        .expect("device");
+    store
+        .register_first_party_node_for_owner(&owner, service.as_str(), node.node(), None)
+        .await
+        .expect("registration");
+    backing
+        .delete_node(&service, node.node())
+        .await
+        .expect("remove backing");
+
+    for item_id in ["known-not-sent", "prior-uncertain-send"] {
+        store
+            .publish_registered_notification_from_user_server_with_publish_options(
+                service.as_str(),
+                node.node(),
+                &web_push_notification_item(item_id, "alice@example.com", "dm", 1),
+                &owner,
+                None,
+            )
+            .await
+            .expect_err("backing fails before claim or send");
+    }
+    let conn = store.database().guard().await.expect("guard");
+    conn.execute(
+        "UPDATE push_publish_jobs SET uncertain_send = 1 WHERE item_id = ?",
+        db_params!["prior-uncertain-send"],
+    )
+    .await
+    .expect("prior lost provider reply");
+    drop(conn);
+
+    // Mirrors the existing worker cap; verify every retry rather than relying
+    // only on a seeded attempt count at the boundary.
+    for attempt in 1..=25 {
+        let conn = store.database().guard().await.expect("guard");
+        conn.execute(
+            "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE status = 'queued'",
+            (),
+        )
+        .await
+        .expect("retry due");
+        drop(conn);
+        assert!(store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("drain")
+            .is_empty());
+        let mut rows = query(
+            &store,
+            "SELECT status, attempt_count, next_retry_at_ms, claim_token, claimed_at_ms, published_at_ms FROM push_publish_jobs WHERE item_id = ?",
+            db_params!["known-not-sent"],
+        ).await;
+        let row = rows.next().await.expect("row").expect("acceptance");
+        assert_eq!(
+            row.get::<String>(0).expect("status"),
+            if attempt < 24 { "queued" } else { "failed" }
+        );
+        assert_eq!(row.get::<i64>(1).expect("count"), attempt.min(24));
+        assert_eq!(
+            row.get::<Option<i64>>(2).expect("retry").is_some(),
+            attempt < 24
+        );
+        assert_eq!(row.get::<Option<String>>(3).expect("claim"), None);
+        assert_eq!(row.get::<Option<i64>>(4).expect("claim time"), None);
+        assert_eq!(row.get::<Option<i64>>(5).expect("published time"), None);
+    }
+    let queued = store.queued_publish_jobs().await.expect("queue");
+    assert_eq!(queued.len(), 1, "prior uncertainty must survive the cap");
+    assert_eq!(queued[0].item_id(), "prior-uncertain-send");
+    assert_eq!(sender.call_count(), 0);
+    assert!(store
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("attempts")
+        .is_empty());
+    assert_eq!(
+        device_status(&store, node.node(), "web-1").await,
+        DEVICE_STATUS_ACTIVE
+    );
 }
 
 #[tokio::test]
@@ -516,12 +643,17 @@ async fn transient_outcome_keeps_device_active_and_requeues() {
         )
         .await
         .expect("publish");
+    let db = store.database();
+    db.guard().await.expect("guard").execute(
+        "UPDATE push_publish_jobs SET attempt_count = ?, next_retry_at_ms = NULL WHERE item_id = ?",
+        db_params![50_i64, "transient-item-1"],
+    ).await.expect("many previous unknown outcomes");
     store
         .drain_queued_notification_publish_jobs(16)
         .await
         .expect("drain");
 
-    assert_eq!(sender.call_count(), 1);
+    assert_eq!(sender.call_count(), 2);
     assert_eq!(
         device_status(&store, node.node(), "web-1").await,
         DEVICE_STATUS_ACTIVE,
@@ -560,6 +692,112 @@ async fn force_retry_eligibility(store: &DatabasePushServiceStore) {
     conn.execute("UPDATE push_publish_jobs SET next_retry_at_ms = 0", ())
         .await
         .expect("reset retry deadline");
+}
+
+#[tokio::test]
+async fn earlier_provider_timeout_survives_later_known_failure() {
+    use waddle_xmpp::push::types::TransientFailure;
+    for failure in ["encoder", "parser", "automatic-disable"] {
+        let second = if failure == "automatic-disable" {
+            WebPushOutcome::SubscriptionGone { status: 410 }
+        } else {
+            WebPushOutcome::BadRequest { status: 400 }
+        };
+        let sender = PerEndpointSender::with_sequences(vec![(
+            "sticky-device".to_string(),
+            vec![
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::Timeout,
+                },
+                second,
+            ],
+        )]);
+        let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, failure).await.expect("node");
+        register_web_device(&store, &owner, node.node(), "web-sticky", "sticky-device").await;
+        let registrations =
+            waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+                .await
+                .expect("registrations");
+        store
+            .register_first_party_node_for_owner(&owner, "push.example.com", node.node(), None)
+            .await
+            .expect("registration");
+        let item_id = format!("unknown-before-{failure}");
+        store
+            .publish_registered_notification_from_user_server_with_publish_options(
+                "push.example.com",
+                node.node(),
+                &web_push_notification_item(&item_id, "alice@example.com", "dm", 1),
+                &owner,
+                None,
+            )
+            .await
+            .expect("first provider timeout");
+        assert_eq!(sender.calls_matching("sticky-device"), 1);
+        let db = store.database();
+        let conn = db.guard().await.expect("retry fixture");
+        conn.execute(
+            "UPDATE push_publish_jobs SET attempt_count = 50 WHERE item_id = ?",
+            db_params![&item_id],
+        )
+        .await
+        .expect("past known failure cap");
+        if failure == "parser" {
+            conn.execute(
+                "UPDATE push_publish_jobs SET payload_xml = 'not XML' WHERE item_id = ?",
+                db_params![&item_id],
+            )
+            .await
+            .expect("deterministic stored payload parse error");
+        }
+        drop(conn);
+        if failure == "automatic-disable" {
+            store
+                .publish_registered_notification_from_user_server_with_publish_options(
+                    "push.example.com",
+                    node.node(),
+                    &web_push_notification_item(
+                        "other-job-disables-registration",
+                        "alice@example.com",
+                        "dm",
+                        1,
+                    ),
+                    &owner,
+                    None,
+                )
+                .await
+                .expect("other job loses the last subscription");
+            use waddle_xmpp::push::PushSubscriptionStore as _;
+            assert!(registrations
+                .get_for_user(&owner.to_string())
+                .await
+                .expect("registration disabled")
+                .is_empty());
+        }
+        force_retry_eligibility(&store).await;
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("later known failure");
+        let mut rows = query(&store, "SELECT status, uncertain_send, next_retry_at_ms, claim_token, claimed_at_ms, published_at_ms FROM push_publish_jobs WHERE item_id = ?", db_params![&item_id]).await;
+        let row = rows.next().await.expect("row").expect("uncertain job");
+        assert_eq!(
+            row.get::<String>(0).expect("status"),
+            "queued",
+            "{failure} cannot resolve the earlier provider timeout"
+        );
+        assert_eq!(row.get::<i64>(1).expect("uncertainty"), 1);
+        assert!(row.get::<Option<i64>>(2).expect("retry deadline").is_some());
+        assert_eq!(row.get::<Option<String>>(3).expect("claim token"), None);
+        assert_eq!(row.get::<Option<i64>>(4).expect("claimed time"), None);
+        assert_eq!(row.get::<Option<i64>>(5).expect("published time"), None);
+        assert_eq!(
+            sender.calls_matching("sticky-device"),
+            if failure == "parser" { 1 } else { 2 }
+        );
+    }
 }
 
 // #1123: a retried publish job must not re-push to devices whose
@@ -833,5 +1071,106 @@ async fn web_push_capability_is_ready_when_provider_wired() {
     assert_eq!(
         store.web_push_capability(),
         waddle_xmpp::push::WebPushCapability::Ready
+    );
+}
+
+#[tokio::test]
+async fn phase3_failure_after_web_send_keeps_uncertainty_and_lease_until_recovery() {
+    let sender = PerEndpointSender::with_sequences(vec![(
+        "phase3-repair".to_string(),
+        vec![
+            WebPushOutcome::Delivered { status: 201 },
+            WebPushOutcome::RateLimited {
+                status: 429,
+                retry_after: None,
+            },
+        ],
+    )]);
+    let store = store_with_web_push_sender(Arc::new(sender.clone())).await;
+    let owner = owner();
+    let node = store.ensure_node(&owner, "web").await.expect("node");
+    let (p256dh, auth) = fresh_subscription_material();
+    store
+        .upsert_device(
+            &owner,
+            PushDeviceRegistration::new("device", node.node(), PushDevicePlatform::Web, "test")
+                .with_provider_endpoint(Some("https://push.example.com/phase3-repair".to_string()))
+                .with_provider_token(Some(auth))
+                .with_provider_key_material(Some(p256dh)),
+        )
+        .await
+        .expect("device");
+    let db = store.database();
+    db.guard().await.expect("guard").execute("CREATE TRIGGER fail_phase3_repair BEFORE INSERT ON push_delivery_attempts BEGIN SELECT RAISE(ABORT, 'phase3 failure after send'); END", ()).await.expect("failure injection");
+    assert!(store
+        .publish_notification_from_user_server(
+            node.node(),
+            &web_push_notification_item("phase3-repair", "alice@example.com", "dm", 1),
+            &owner
+        )
+        .await
+        .is_err());
+    assert_eq!(
+        sender.calls_matching("phase3-repair"),
+        1,
+        "the encrypted provider request ran before phase3 failed"
+    );
+    let mut rows = query(&store, "SELECT job_id, status, uncertain_send, claim_token, claimed_at_ms FROM push_publish_jobs WHERE item_id = ?", db_params!["phase3-repair"]).await;
+    let row = rows.next().await.expect("row").expect("acceptance");
+    let job: String = row.get(0).expect("job");
+    assert_eq!(
+        row.get::<String>(1).expect("status"),
+        "in-progress",
+        "a repair without its claim token must preserve ownership"
+    );
+    assert_eq!(
+        row.get::<i64>(2).expect("uncertainty"),
+        1,
+        "failed receipt persistence leaves the send unproved"
+    );
+    assert!(row.get::<Option<String>>(3).expect("claim token").is_some());
+    assert!(row.get::<Option<i64>>(4).expect("lease").is_some());
+    assert!(store
+        .delivery_attempts_for_node(node.node())
+        .await
+        .expect("attempts")
+        .is_empty());
+    db.guard()
+        .await
+        .expect("guard")
+        .execute("DROP TRIGGER fail_phase3_repair", ())
+        .await
+        .expect("remove injection");
+    db.guard()
+        .await
+        .expect("guard")
+        .execute(
+            "UPDATE push_publish_jobs SET claimed_at_ms = 1, attempt_count = 50 WHERE job_id = ?",
+            db_params![job.clone()],
+        )
+        .await
+        .expect("expire lease past cap");
+    store
+        .drain_queued_notification_publish_jobs(1)
+        .await
+        .expect("recover lease");
+    db.guard()
+        .await
+        .expect("guard")
+        .execute(
+            "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
+            db_params![job],
+        )
+        .await
+        .expect("retry now");
+    store
+        .drain_queued_notification_publish_jobs(1)
+        .await
+        .expect("known429 after uncertain send");
+    assert_eq!(sender.calls_matching("phase3-repair"), 2);
+    assert_eq!(
+        store.queued_publish_jobs().await.expect("queue").len(),
+        1,
+        "the later explicit transient and attempt50 cannot erase prior uncertainty"
     );
 }
