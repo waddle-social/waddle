@@ -89,6 +89,17 @@ spec:
               protocol: UDP
             - port: "53"
               protocol: TCP
+    # Redis message bus (#1023): the SFU dispatches recording jobs to the
+    # livekit-egress workers over the shared in-cluster Redis. Without this
+    # allow the SFU cannot reach the bus and egress never receives jobs.
+    - toEndpoints:
+        - matchLabels:
+            k8s:io.kubernetes.pod.namespace: livekit
+            app.kubernetes.io/instance: livekit-redis
+      toPorts:
+        - ports:
+            - port: "6379"
+              protocol: TCP
     # Outbound to the public internet on 443/TCP:
     #   - LiveKit posts SFU-authoritative MUC-call cleanup webhooks to
     #     `https://xmpp.waddle.social/api/v1/livekit/webhook` (a public

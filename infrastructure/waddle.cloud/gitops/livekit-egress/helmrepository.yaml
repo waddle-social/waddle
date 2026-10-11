@@ -1,0 +1,9 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: HelmRepository
+metadata:
+  name: livekit-egress
+  namespace: livekit
+spec:
+  type: oci
+  interval: 12h
+  url: oci://ghcr.io/waddle-social/waddle/charts

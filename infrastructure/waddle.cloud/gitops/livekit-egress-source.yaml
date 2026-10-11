@@ -1,0 +1,10 @@
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: livekit-egress
+  namespace: flux-system
+spec:
+  interval: 5m
+  url: oci://ghcr.io/waddle-social/waddle/gitops-livekit-egress
+  ref:
+    tag: latest
