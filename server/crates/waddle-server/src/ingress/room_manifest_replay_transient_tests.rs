@@ -136,6 +136,55 @@ impl Case {
 }
 
 #[tokio::test]
+async fn xep0045_transient_initial_local_sender_delivery_uses_one_guarded_frame() {
+    for hint in [Hint::NoStore, Hint::NoPermanentStore] {
+        let mut case = Case::new(hint).await;
+        let planned = &mut case.submission.plan.plan[0];
+        let delivery = planned
+            .reflection_delivery
+            .take()
+            .expect("local sender resource resolution");
+        planned.effect = Effect::External(ExternalEffect::Delivery(*delivery));
+        let decision = commit_submission(&case.fixture.uow, &case.submission, 1)
+            .await
+            .expect("initial local acceptance");
+        let [ExternalEffect::Frame(original)] = decision.external.as_slice() else {
+            panic!("local sender sink becomes the one initial response Frame");
+        };
+        assert!(decision.external_receipts[0].is_empty());
+        let report = execute_effects(
+            &case.fixture.uow,
+            &case.fixture.db,
+            &decision,
+            &ImmediateSink,
+            &case.deps(),
+            Duration::from_secs(2),
+        )
+        .await;
+        assert_eq!(report.frame_obligations.len(), 1);
+        assert_eq!(report.frame_obligations[0].frames.len(), 1);
+        let (Stanza::Message(actual), Stanza::Message(expected)) =
+            (&report.frame_obligations[0].frames[0], original.as_ref())
+        else {
+            panic!("canonical initial reflection")
+        };
+        assert_eq!(actual, expected);
+        assert!(report.frame_obligations[0].receipt_keys.is_empty());
+        assert_eq!(case.fixture.count("sm_ingress_appends").await, 0);
+        assert_eq!(case.fixture.count("ingress_send_attempts").await, 0);
+        assert_eq!(case.fixture.count("ingress_effect_receipts WHERE policy_discard_reason = 'storage_hint_forbids_handoff'").await, 1);
+        let retry = commit_submission(&case.fixture.uow, &case.submission, 1)
+            .await
+            .expect("local retry");
+        assert!(
+            retry.external.is_empty(),
+            "settled sender metadata has no historical replay"
+        );
+        case.fixture.close().await;
+    }
+}
+
+#[tokio::test]
 async fn xep0045_transient_initial_no_store_and_no_permanent_store_echo_once_without_keyed_append()
 {
     for hint in [Hint::NoStore, Hint::NoPermanentStore] {
@@ -334,4 +383,153 @@ async fn xep0045_transient_initial_echo_rejects_leave_rejoin_and_success_receipt
     .expect("success receipt remains"));
     tx.commit().await.expect("inspect commit");
     case.fixture.close().await;
+}
+
+/// Seed the historical persisted shape: accepted room routing authority, no
+/// room manifest, and no sender reflection obligation. The synthetic metadata
+/// removal is fixture setup; retries and recovery use their real interfaces.
+async fn seed_legacy_archive_free(case: &Case) -> waddle_xmpp::ingress::MessageKey {
+    let mut legacy = case.submission.clone();
+    legacy.plan.room_execution = RoomExecutionPath::None;
+    let accepted = commit_submission(&case.fixture.uow, &legacy, 1)
+        .await
+        .expect("legacy acceptance");
+    let key = accepted.message_key.expect("legacy key");
+    let kind = waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag();
+    case.fixture
+        .execute(
+            "DELETE FROM ingress_effect_receipts WHERE message_key = ? AND kind = ?",
+            crate::db_params![key.to_storage().to_string(), kind],
+        )
+        .await;
+    case.fixture
+        .execute(
+            "DELETE FROM ingress_effect_intents WHERE message_key = ? AND kind = ?",
+            crate::db_params![key.to_storage().to_string(), kind],
+        )
+        .await;
+    let mut tx = case.fixture.uow.begin().await.expect("legacy shape");
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("legacy envelope")
+        .expect("legacy canonical");
+    assert!(envelope.room_manifest().is_none());
+    let recorded = EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("legacy intents");
+    assert_eq!(recorded.len(), 1);
+    assert!(matches!(
+        recorded[0],
+        IngressEffectIntent::RouteMucGroupchat { .. }
+    ));
+    tx.commit().await.expect("legacy shape commit");
+    key
+}
+
+#[tokio::test]
+async fn xep0045_legacy_archive_free_storage_hints_never_acquire_replayable_reflection() {
+    for hint in [Hint::NoStore, Hint::NoPermanentStore] {
+        let case = Case::new(hint).await;
+        let key = seed_legacy_archive_free(&case).await;
+        for sibling in [false, true] {
+            let mut retry = case.submission.clone();
+            if sibling {
+                retry.sender = retry
+                    .sender
+                    .to_bare()
+                    .with_resource_str("mobile")
+                    .expect("sibling");
+                let Effect::External(ExternalEffect::Frame(stanza)) =
+                    &mut retry.plan.plan[0].effect
+                else {
+                    panic!("current sender frame");
+                };
+                let Stanza::Message(message) = stanza.as_mut() else {
+                    panic!("room frame");
+                };
+                message.to = Some(retry.sender.clone().into());
+            }
+            let decision = commit_submission(&case.fixture.uow, &retry, 1)
+                .await
+                .expect("legacy retry");
+            assert_eq!(decision.message_key, Some(key));
+            assert!(
+                decision
+                    .route_progress
+                    .iter()
+                    .all(|progress| !progress.is_direct()),
+                "retry cannot invent a persistent sender obligation"
+            );
+            let mut tx = case.fixture.uow.begin().await.expect("retry authority");
+            let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+                .await
+                .expect("envelope")
+                .expect("canonical");
+            assert!(
+                envelope.room_manifest().is_none(),
+                "legacy authority is never retrofitted"
+            );
+            let recorded = EffectIntentRepository::load(&mut tx, key)
+                .await
+                .expect("intents");
+            let receipts = EffectReceiptRepository::keys(&mut tx, key)
+                .await
+                .expect("receipt evidence");
+            let pending = recorded
+                .iter()
+                .filter(|intent| {
+                    !receipts.contains(&crate::ingress::receipt_key(intent).expect("receipt key"))
+                })
+                .cloned()
+                .collect::<Vec<_>>();
+            let created_at = CanonicalMessageRepository::created_at(&mut tx, key)
+                .await
+                .expect("acceptance time");
+            assert_eq!(
+                recorded.len(),
+                1,
+                "no synthetic RouteDirect on same or sibling retry"
+            );
+            assert!(recorded
+                .iter()
+                .all(|intent| !matches!(intent, IngressEffectIntent::RouteDirect { .. })));
+            tx.commit().await.expect("retry authority commit");
+            let recovery = crate::ingress::recovery_rebuild::rebuild(
+                crate::ingress::recovery_rebuild::RecoveryInput {
+                    key,
+                    envelope: &envelope,
+                    created_at,
+                    recorded: &recorded,
+                    unreceipted: &pending,
+                    route_progress: decision.route_progress,
+                    host_owned_resources: Vec::new(),
+                    departed_occupants: Vec::new(),
+                    blocked_recipients: &[],
+                },
+            )
+            .expect("maintenance rebuild");
+            assert!(
+                recovery.decision.external.iter().all(|effect| {
+                    !matches!(effect, ExternalEffect::Frame(_))
+                        && crate::ingress::recorded::single_target(effect)
+                            != Some(&case.submission.sender)
+                        && crate::ingress::recorded::single_target(effect) != Some(&retry.sender)
+                }),
+                "maintenance cannot reconstruct a historical sender echo"
+            );
+            let mut deps = case.deps();
+            deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+            let report = execute_effects(
+                &case.fixture.uow,
+                &case.fixture.db,
+                &recovery.decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(2),
+            )
+            .await;
+            assert!(report.frame_obligations.is_empty());
+        }
+        case.fixture.close().await;
+    }
 }

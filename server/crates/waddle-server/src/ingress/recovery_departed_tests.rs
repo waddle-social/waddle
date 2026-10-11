@@ -86,9 +86,7 @@ async fn departed_recovery(f: IngressFixture, case: DepartedCase) {
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
     settle_non_delivery_effects(&f, &state, &decision).await;
     if case != DepartedCase::StillJoined {
@@ -172,6 +170,110 @@ async fn departed_recovery(f: IngressFixture, case: DepartedCase) {
         "one departed copy per settled occupant"
     );
     f.close().await;
+}
+
+/// Seed the pre-manifest #1803 authority these roster-absence regressions
+/// exercise. The original format carried one aggregate occupant route and no
+/// independent original-sender child. No sealed acceptance is ever downgraded.
+pub(super) async fn commit_legacy_roster_fixture(
+    f: &IngressFixture,
+    submission: &IngressSubmission,
+) -> IngressDecision {
+    use crate::ingress_uow::EffectIntentRepository;
+    use waddle_xmpp::ingress::{AliasOutcome, AliasResolution};
+
+    let mut legacy = submission.clone();
+    let crate::ingress::RoomExecutionPath::Local {
+        manifest_snapshot, ..
+    } = &mut legacy.plan.room_execution
+    else {
+        panic!("legacy roster fixture needs local room authority");
+    };
+    *manifest_snapshot = None;
+    // Room snapshots originate from hash-map iteration, while the persistence
+    // codec sorts and deduplicates each frozen audience. Compare the exact
+    // canonical domain representation that storage accepts, including targets.
+    legacy.plan.intents = legacy
+        .plan
+        .intents
+        .iter()
+        .map(|intent| {
+            let normalized = intent
+                .with_encoded_v1(IngressEffectIntent::decode_v1)
+                .expect("encode legacy obligation")
+                .expect("decode canonical legacy obligation");
+            assert_eq!(normalized.semantic_key(), intent.semantic_key());
+            normalized
+        })
+        .collect();
+    let key = MessageKey::new();
+    let digest = waddle_xmpp::ingress::digest::v1::digest(&legacy.digest_input);
+    let mut tx = f.uow.begin().await.expect("seed pre-manifest acceptance");
+    let alias = CanonicalMessageRepository::resolve_and_record_alias(
+        &mut tx,
+        legacy.principal.bare_jid(),
+        &legacy.target,
+        legacy.digest_input.origin().expect("fixture origin"),
+        &digest,
+        || key,
+    )
+    .await
+    .expect("seed legacy alias");
+    assert!(
+        matches!(alias, AliasResolution::Aliased(AliasOutcome::Inserted(saved)) if saved == key),
+        "legacy fixture must start before any accepted canonical source"
+    );
+    let source = legacy
+        .plan
+        .room_canonical_message
+        .as_deref()
+        .expect("frozen room payload");
+    CanonicalMessageRepository::record_message(
+        &mut tx,
+        key,
+        &digest,
+        Some(&crate::ingress_substrate::MessageEnvelope::new(
+            source.clone(),
+        )),
+    )
+    .await
+    .expect("seed unsealed canonical room source");
+    EffectIntentRepository::reconcile(&mut tx, key, &legacy.plan.intents, false)
+        .await
+        .expect("seed pre-manifest obligations");
+    assert!(CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("read seeded source")
+        .expect("canonical source")
+        .room_manifest()
+        .is_none());
+    tx.commit().await.expect("legacy acceptance commit");
+
+    let decision = commit_submission(&f.uow, &legacy, 1)
+        .await
+        .expect("legacy replay commit");
+    assert_eq!(decision.message_key, Some(key));
+    let mut tx = f.uow.begin().await.expect("inspect legacy acceptance");
+    let source = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("read legacy source")
+        .expect("canonical source");
+    assert!(
+        source.room_manifest().is_none(),
+        "legacy recovery must not acquire a manifest on replay"
+    );
+    let recorded = EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("legacy obligations");
+    assert_eq!(recorded.len(), legacy.plan.intents.len());
+    assert!(
+        recorded
+            .iter()
+            .all(|intent| legacy.plan.intents.contains(intent)),
+        "legacy replay must not invent an independent original-sender obligation"
+    );
+    tx.commit().await.expect("legacy authority inspection");
+    decision
 }
 
 /// Leave the row exactly as an interrupted acceptance would: every recorded
@@ -316,9 +418,7 @@ async fn sqlite_rejoin_before_the_settlement_write_keeps_its_copy() {
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
     settle_non_delivery_effects(&f, &state, &decision).await;
     depart(&state, &occupant).await;
@@ -442,9 +542,7 @@ async fn sqlite_a_settled_chunk_survives_a_deadline_that_cuts_the_next_one() {
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
     settle_non_delivery_effects(&f, &state, &decision).await;
     for occupant in &occupants {
@@ -546,9 +644,7 @@ async fn sqlite_departed_copy_resets_the_maintenance_stall_streak() {
     let elsewhere = persistent_sm(&f).await;
     store_detached(&elsewhere, &live).await;
     let submission = planned_room(&f, &state, Case::Lost, &resources).await;
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
     settle_non_delivery_effects(&f, &state, &decision).await;
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(RoomOverrideEnvironment {
@@ -707,9 +803,7 @@ mod fenced_authority {
             .cloned()
             .expect("room fanout intent");
         let receipt = receipt_key(&muc).expect("MUC receipt");
-        let decision = commit_submission(&f.uow, &submission, 1)
-            .await
-            .expect("room commit");
+        let decision = commit_legacy_roster_fixture(&f, &submission).await;
         let key = decision.message_key.expect("key");
         settle_non_delivery_effects(&f, &planning_state, &decision).await;
 
@@ -869,9 +963,7 @@ mod fenced_authority {
             .cloned()
             .expect("room fanout intent");
         let receipt = receipt_key(&muc).expect("MUC receipt");
-        let decision = commit_submission(&f.uow, &submission, 1)
-            .await
-            .expect("room commit");
+        let decision = commit_legacy_roster_fixture(&f, &submission).await;
         let key = decision.message_key.expect("key");
         settle_non_delivery_effects(&f, &planning_state, &decision).await;
 
@@ -960,4 +1052,94 @@ mod fenced_authority {
             clustered_settlement_asserts_the_room_claim(f, true).await;
         }
     }
+}
+
+/// A sealed child cannot inherit the legacy absence proof: missing occupancy
+/// and an unhosted roster never prove a strictly newer seated generation.
+#[tokio::test]
+async fn sqlite_sealed_departed_occupancy_stays_pending_without_fabricated_progress() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before = metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0);
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let state = state_for(&f, sm).await;
+    let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
+    let submission = planned_room(&f, &state, Case::Lost, std::slice::from_ref(&ghost)).await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .expect("room fanout intent");
+    let receipt = receipt_key(muc).expect("MUC receipt");
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("sealed room acceptance");
+    let key = decision.message_key.expect("key");
+    settle_non_delivery_effects(&f, &state, &decision).await;
+    let mut tx = f.uow.begin().await.expect("inspect accepted manifest");
+    assert!(
+        CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("canonical envelope")
+            .expect("accepted source")
+            .room_manifest()
+            .is_some(),
+        "this regression must exercise modern sealed authority"
+    );
+    tx.commit().await.expect("manifest inspection");
+    depart(&state, &ghost).await;
+    let empty_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
+        "muc.example.com".into(),
+        OccupantIdSecret::new(vec![b'd'; 32]).expect("occupant-id secret"),
+    ));
+    for registry in [None, Some(empty_registry)] {
+        let env: Arc<dyn RecoveryEnvironment> = Arc::new(RoomOverrideEnvironment {
+            state: state.clone(),
+            registry,
+        });
+        assert_eq!(
+            pass(&f, &env, &MaintenanceCursor::default()).await,
+            MaintenanceOutcome::Complete
+        );
+        let mut tx = f.uow.begin().await.expect("inspect pending sealed child");
+        assert!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("occupant progress")
+                .is_empty(),
+            "unknown occupancy must not fabricate a transport delivery row"
+        );
+        assert!(
+            !EffectReceiptRepository::contains(
+                &mut tx,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash
+            )
+            .await
+            .expect("aggregate receipt"),
+            "unknown occupancy leaves the aggregate pending"
+        );
+        assert!(!CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"));
+        assert!(
+            CanonicalMessageRepository::load_envelope(&mut tx, key)
+                .await
+                .expect("canonical source")
+                .expect("recorded source")
+                .room_manifest()
+                .is_some(),
+            "maintenance must preserve the accepted manifest"
+        );
+        tx.commit().await.expect("pending inspection");
+    }
+    assert_eq!(f.count("sm_ingress_appends").await, 0);
+    assert_eq!(
+        metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0),
+        before,
+        "unknown sealed occupancy supplies no settlement proof"
+    );
+    f.close().await;
 }

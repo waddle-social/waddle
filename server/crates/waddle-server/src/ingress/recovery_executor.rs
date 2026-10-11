@@ -205,6 +205,24 @@ async fn discharge_departed_copies(
     key: MessageKey,
     frozen: &mut FrozenRecovery,
 ) -> Result<super::recovery_departed::DepartedSettlement, IngressUowError> {
+    if frozen.envelope.room_manifest().is_some() {
+        // Roster absence and reachability are legacy settlement evidence.
+        // A sealed child can retire only through the actor-owned manifest
+        // guard, which proves a strictly newer watermark in the same incarnation.
+        let still_owed = frozen.route_progress.iter().any(|route| {
+            route.room().is_some()
+                && route
+                    .fanout
+                    .iter()
+                    .any(|target| !route.completed.contains(target))
+        });
+        return Ok(super::recovery_departed::DepartedSettlement {
+            occupants: Vec::new(),
+            settled: Vec::new(),
+            classification: AttemptClassification::Evaluable,
+            still_owed,
+        });
+    }
     let departed =
         super::recovery_departed::settle_departed_occupants(uow, deps, key, &frozen.route_progress)
             .await?;

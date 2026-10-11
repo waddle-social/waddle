@@ -148,6 +148,16 @@ async fn planned_room_with_origin(
     submission.plan.plan = effects;
     submission.plan.room_execution = execution;
     submission.plan.intents = capture.snapshot().intents;
+    if matches!(case, Case::OldEnvelope | Case::SenderOnly) {
+        if let crate::ingress::effects::RoomExecutionPath::Local {
+            manifest_snapshot, ..
+        } = &mut submission.plan.room_execution
+        {
+            // These cases model pre-fix rows, before original sender delivery
+            // authority and immutable canonical room payloads were sealed.
+            *manifest_snapshot = None;
+        }
+    }
     submission
 }
 
@@ -212,6 +222,17 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         .expect("envelope")
         .expect("canonical source");
     tx.commit().await.expect("read");
+    if matches!(case, Case::OldEnvelope | Case::SenderOnly) {
+        assert!(
+            frozen.room_manifest().is_none(),
+            "legacy recovery fixtures must never downgrade a sealed accepted source"
+        );
+    } else {
+        assert!(
+            frozen.room_manifest().is_some(),
+            "modern room recovery keeps its immutable accepted manifest"
+        );
+    }
     if matches!(case, Case::OldEnvelope) {
         let mut tx = f.uow.begin().await.expect("old row");
         CanonicalMessageRepository::lock(&mut tx, key)
@@ -250,7 +271,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
             .map(|i| decision.external_receipts[*i].clone())
             .collect();
         let deps = env.recovery_deps();
-        let report = execute_effects(
+        let mut report = execute_effects(
             &f.uow,
             &f.db,
             &mutations,
@@ -263,6 +284,31 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
             report.receipt_failures.is_empty(),
             "non-delivery effects persisted: {report:?}"
         );
+        if matches!(case, Case::SenderOnly) {
+            let [reflection] = report.frame_obligations.as_slice() else {
+                panic!("one genuine original sender reflection");
+            };
+            let [Stanza::Message(message)] = reflection.frames.as_slice() else {
+                panic!("one original sender message");
+            };
+            assert_eq!(message.to, Some(submission.sender.clone().into()));
+            assert_eq!(message.from, frozen.message().from);
+            assert_eq!(
+                waddle_xmpp::xep::extract_stanza_ids(message),
+                waddle_xmpp::xep::extract_stanza_ids(frozen.message())
+            );
+            let mut wire = Vec::new();
+            minidom::Element::from(message.clone())
+                .write_to(&mut wire)
+                .expect("write original accepted sender frame");
+            assert!(
+                report
+                    .complete_frame_obligations(&f.uow, &f.db, Duration::from_secs(5))
+                    .await
+                    .expect("confirm original sender frame"),
+                "original sender acceptance completes the sender-only row before interruption"
+            );
+        }
     }
     if matches!(case, Case::SenderOnly) {
         f.execute("DELETE FROM ingress_effect_receipts WHERE kind = 2", ())
@@ -282,11 +328,30 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
             .into_iter()
             .filter(|intent| !keys.contains(&receipt_key(intent).expect("receipt key")))
             .collect();
-        assert_eq!(
-            pending,
-            vec![muc.clone()],
-            "kind-2-only pending prerequisite"
-        );
+        if matches!(case, Case::Lost) {
+            let IngressEffectIntent::RouteMucGroupchat { route_identity, .. } = &muc else {
+                panic!("room route");
+            };
+            assert_eq!(
+                pending,
+                vec![
+                    IngressEffectIntent::RouteDirect {
+                        recipient: submission.sender.to_bare(),
+                        fanout: vec![submission.sender.clone()],
+                        route_identity: route_identity.clone(),
+                        prepared: None,
+                    },
+                    muc.clone(),
+                ],
+                "modern recovery retains both frozen original sender and occupant obligations"
+            );
+        } else {
+            assert_eq!(
+                pending,
+                vec![muc.clone()],
+                "legacy kind-2-only pending prerequisite"
+            );
+        }
         tx.commit().await.expect("read");
     }
     if matches!(case, Case::Partial | Case::Inbox) {
@@ -418,6 +483,20 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
     );
     tx.commit().await.expect("read");
     assert_eq!(append_count(&sm, &c).await, 0, "audience never widens");
+    if matches!(case, Case::Lost) {
+        assert_eq!(
+            append_count(&sm, &submission.sender).await,
+            1,
+            "modern maintenance accepts the original sender child exactly once"
+        );
+    }
+    if matches!(case, Case::OldEnvelope | Case::SenderOnly) {
+        assert_eq!(
+            append_count(&sm, &submission.sender).await,
+            0,
+            "legacy maintenance cannot invent an original sender delivery obligation"
+        );
+    }
     if !matches!(case, Case::Unavailable) {
         for resource in &resources {
             let session = sm

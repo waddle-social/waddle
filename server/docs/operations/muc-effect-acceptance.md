@@ -24,6 +24,10 @@ No-store and no-permanent-store sender reflections retain the original attempt's
 
 Initial remote copies retain the existing legacy wire transport. They export no new canonical manifest append key; a legacy ACK never completes the new remote child. The durable inter-node executor remains pending P2. Maintenance does not create another remote resend loop merely because this child remains pending.
 
+Live legacy remote transport does not wait for prior sealed remote children to become durably complete. Its existing ordered channel preserves enqueue order; this slice does not establish canonical archive-ordinal order across concurrent cross-node producers. Local keyed sinks retain their archive readiness checks, including when an ownership refresh chooses a local destination.
+
+Sealed rows do not enter the legacy departed-copy or stalled-ghost settlement paths. Those paths use roster absence and reachability, rather than the required incarnation and watermark proof. Their message-triggered ghost eviction also stays disabled for sealed rows until housekeeping can be separated from speculative receipts; ordinary disconnect cleanup is unaffected.
+
 Previously accepted envelopes without a manifest retain their existing authority. A retry never attaches today's occupancy snapshot as fabricated historical proof. New first room-owner acceptance seals atomically, including when the origin already established the canonical alias.
 
 Sealed metadata is an additive storage field read by the updated server. Older strict envelope readers cannot read it: downgrade or mixed-version rollout requires draining the affected canonical rows or a separately designed migration. No protocol feature advertisement or relay wire-version change is introduced.

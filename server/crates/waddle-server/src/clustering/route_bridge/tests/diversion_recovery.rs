@@ -17,6 +17,11 @@ tokio::task_local! {
 
 /// One scripted reply that overrides the in-memory receiver.
 pub(crate) enum ScriptedStep {
+    /// Hold the first wire enqueue before ACK so a second producer overlaps it.
+    PauseBeforeAck {
+        entered: Arc<tokio::sync::Notify>,
+        release: Arc<tokio::sync::Notify>,
+    },
     /// Fail the ask before the receiver sees the envelope.
     AskError(RelayAskError),
     /// Reject before reserving, as ownership validation and gap checks do.
@@ -62,6 +67,11 @@ impl ScriptedOrderedRelay {
         self.destinations.lock().await.push(owner.clone());
         self.sequences.lock().await.push(envelope.sequence.0);
         let abort = match self.script.lock().await.pop_front() {
+            Some(ScriptedStep::PauseBeforeAck { entered, release }) => {
+                entered.notify_one();
+                release.notified().await;
+                None
+            }
             Some(ScriptedStep::AskError(error)) => return Err(error),
             Some(ScriptedStep::Nack(reason)) => {
                 return Ok(OrderedRelayReply::Nack(OrderedRelayNack {
@@ -175,6 +185,95 @@ async fn send_with_inbound(
         .await
         .expect("ordered relay attempted");
     caller_delivery_outcome(outcome)
+}
+
+#[tokio::test]
+async fn xep0045_legacy_same_resource_bridge_serializes_concurrent_enqueues_until_ack() {
+    use std::{future::Future, task::Poll};
+    let (bridge, services) = sender_bridge().await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let relay = ScriptedOrderedRelay::with_script([ScriptedStep::PauseBeforeAck {
+        entered: entered.clone(),
+        release: release.clone(),
+    }]);
+    // Exercise the actual full-resource channel used by the legacy wire path.
+    // This contract is enqueue FIFO; no canonical archive ordinal is supplied.
+    let prepare = |mut next: RemoteDeliverySeed, inbound, id: &str| {
+        next.channel.recipient =
+            crate::clustering::ordered_relay::OrderedRelayRecipient::FullJid(target_full());
+        next.origin_inbound_sequence = inbound;
+        let waddle_xmpp::Stanza::Message(mut message) = next.stanza else {
+            panic!("message seed");
+        };
+        message.to = Some(target_full().into());
+        message.id = Some(xmpp_parsers::message::Id(id.into()));
+        next.stanza = waddle_xmpp::Stanza::Message(message);
+        next.payload = OrderedRelayPayload::Message {
+            ingress_append: None,
+            recipient: target_full().into(),
+            stanza: crate::clustering::codec::RemoteStanza(next.stanza.clone()),
+            received_at: None,
+        };
+        next
+    };
+    let first = prepare(
+        seed(&services).await,
+        OriginInboundSequence(1),
+        "enqueue-first",
+    );
+    let second = prepare(
+        seed(&services).await,
+        OriginInboundSequence(2),
+        "enqueue-second",
+    );
+    assert_eq!(first.channel, second.channel);
+    let first_bridge = bridge.clone();
+    let first_relay = relay.clone();
+    let first_send = tokio::spawn(async move {
+        TEST_ORDERED_RELAY
+            .scope(
+                first_relay,
+                first_bridge.deliver_seeded_remote(first, false),
+            )
+            .await
+            .expect("first legacy enqueue")
+    });
+    entered.notified().await;
+    assert_eq!(
+        *relay.sequences.lock().await,
+        vec![1],
+        "first signed envelope reached the wire boundary"
+    );
+    let mut second_send = Box::pin(
+        TEST_ORDERED_RELAY.scope(relay.clone(), bridge.deliver_seeded_remote(second, false)),
+    );
+    // Poll the actual second bridge future into its wait. A scheduled-but-never
+    // polled task would not demonstrate concurrent channel exclusion.
+    std::future::poll_fn(|cx| match second_send.as_mut().poll(cx) {
+        Poll::Pending => Poll::Ready(()),
+        Poll::Ready(_) => panic!("second producer advanced before the first ACK"),
+    })
+    .await;
+    assert_eq!(
+        *relay.sequences.lock().await,
+        vec![1],
+        "second producer cannot enqueue or reserve on the occupied channel"
+    );
+    release.notify_one();
+    assert_eq!(
+        caller_delivery_outcome(first_send.await.expect("first producer joins")),
+        FullJidDeliveryOutcome::Delivered
+    );
+    assert_eq!(
+        caller_delivery_outcome(second_send.await.expect("second legacy enqueue")),
+        FullJidDeliveryOutcome::Delivered
+    );
+    assert_eq!(
+        *relay.sequences.lock().await,
+        vec![1, 2],
+        "the real signed receiver accepts both original enqueues in channel order"
+    );
 }
 
 fn ask_error(failure: RelaySendFailure, effect: RelaySendEffect) -> RelayAskError {

@@ -370,9 +370,10 @@ async fn subject_broadcast_after_actor_commit(
     assert!(decision.external_receipts[0].contains(&bounce_key));
     assert_eq!(decision.external_receipts[0].len(), 2);
     assert_eq!(decision.external_receipts.len(), 3);
-    assert!(
-        decision.external_receipts[1].is_empty(),
-        "sender reflection carries no aggregate key"
+    assert_eq!(decision.external_receipts[1].len(), 1);
+    assert_ne!(
+        decision.external_receipts[1], decision.external_receipts[2],
+        "sender reflection has its own child receipt and cannot prove aggregate MUC delivery"
     );
     assert_eq!(
         decision.external_receipts[2].len(),

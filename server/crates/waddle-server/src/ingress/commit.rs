@@ -368,7 +368,7 @@ async fn commit_attempt(
     if alias == AliasOutcomeClass::Existing && !owner_first {
         super::recorded::freeze_preview_intents(&mut plan, &recorded);
     }
-    super::reflection_dispatch::freeze(&mut plan, &recorded);
+    super::reflection_dispatch::freeze(&mut plan, &recorded, can_seal);
     let replay_verdict = if sealed_manifest.is_some() {
         Some(EffectIntentRepository::compare_sealed_replan(
             &recorded,

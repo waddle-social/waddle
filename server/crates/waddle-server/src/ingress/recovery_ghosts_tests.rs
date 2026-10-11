@@ -57,9 +57,7 @@ async fn ghost_fixture(f: IngressFixture, case: GhostCase) -> GhostFixture {
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = super::departed::commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
     super::departed::settle_non_delivery_effects(&f, &state, &decision).await;
     // The watcher owns a live socket: its copy lands on the first pass, so the
@@ -711,9 +709,7 @@ async fn sqlite_sibling_row_settles_once_the_ghost_eviction_destroyed_the_room()
         .cloned()
         .expect("sibling room fanout intent");
     let sibling_receipt = receipt_key(&sibling_muc).expect("sibling MUC receipt");
-    let sibling_decision = commit_submission(&f.f.uow, &sibling, 1)
-        .await
-        .expect("sibling room commit");
+    let sibling_decision = super::departed::commit_legacy_roster_fixture(&f.f, &sibling).await;
     let sibling_key = sibling_decision.message_key.expect("sibling key");
     assert_ne!(sibling_key, f.key, "the sibling must be its own row");
     super::departed::settle_non_delivery_effects(&f.f, &f.state, &sibling_decision).await;
@@ -786,6 +782,150 @@ async fn sqlite_ordinary_disconnect_leave_carries_no_removal_status_code() {
         f.watcher_leave_status_codes(),
         Some(Vec::new()),
         "a disconnect is the occupant's own departure, not a service removal"
+    );
+    f.f.close().await;
+}
+
+/// A full stalled maintenance pass must not run the legacy settle-before-evict
+/// repair against sealed children. An unreachable endpoint supplies neither
+/// transport acceptance nor proof of a strictly newer seated occupancy.
+#[tokio::test]
+async fn sqlite_sealed_stalled_ghost_remains_pending_without_eviction_or_fabricated_progress() {
+    use crate::ingress_uow::EffectIntentRepository;
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before_evicted = metrics.counter_sum(EVICTED, &[]).unwrap_or(0);
+    let fixture = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&fixture).await;
+    let state = state_for(&fixture, sm).await;
+    let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
+    let watcher: jid::FullJid = "ben@example.com/phone".parse().expect("watcher");
+    let submission = planned_room(
+        &fixture,
+        &state,
+        Case::Lost,
+        &[ghost.clone(), watcher.clone()],
+    )
+    .await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .expect("room route");
+    let receipt = receipt_key(muc).expect("room receipt");
+    // Real first acceptance: do not use the pre-manifest fixture adapter.
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("sealed acceptance");
+    let key = decision.message_key.expect("key");
+    let mut tx = fixture.uow.begin().await.expect("inspect first acceptance");
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("envelope")
+        .expect("accepted room source");
+    let manifest = envelope
+        .room_manifest()
+        .expect("modern sealed authority")
+        .clone();
+    let recorded = EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("original obligations");
+    let original_sender = recorded.iter().find(|intent| matches!(intent,
+        IngressEffectIntent::RouteDirect { fanout, .. } if fanout.as_slice() == std::slice::from_ref(&submission.sender)))
+        .expect("independent original sender child");
+    let original_sender_receipt = receipt_key(original_sender).expect("original sender receipt");
+    assert!(
+        manifest.contains(&receipt, Some(&ghost)),
+        "the unreachable resource is an accepted child"
+    );
+    tx.commit().await.expect("first acceptance inspection");
+    super::departed::settle_non_delivery_effects(&fixture, &state, &decision).await;
+    let (watcher_tx, watcher_rx) = tokio::sync::mpsc::channel(16);
+    socket_tests::register_test_connection(&state, &watcher, watcher_tx).await;
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let f = GhostFixture {
+        f: fixture,
+        state,
+        env,
+        cursor: MaintenanceCursor::default(),
+        key,
+        receipt,
+        ghost,
+        watcher,
+        watcher_rx,
+        _ghost_rx: None,
+        _durable_writer: None,
+    };
+    f.assert_guard_premise(GhostCase::Evictable).await;
+    f.pass().await;
+    assert_eq!(
+        f.progress().await,
+        vec![f.watcher.clone()],
+        "the reachable child makes real progress"
+    );
+    for _ in 0..3 {
+        f.pass().await;
+    }
+    assert_eq!(
+        super::super::super::attempt_count(key),
+        4,
+        "exercise the full maintenance stall threshold"
+    );
+    assert!(
+        f.occupies(&f.ghost).await,
+        "a sealed message must not claim a legacy ghost eviction"
+    );
+    assert_eq!(
+        f.progress().await,
+        vec![f.watcher.clone()],
+        "no delivery progress is fabricated for the unreachable child"
+    );
+    assert!(
+        !f.terminal().await,
+        "the occupant aggregate and canonical source remain pending"
+    );
+    let mut tx =
+        f.f.uow
+            .begin()
+            .await
+            .expect("inspect stalled sealed authority");
+    assert!(
+        DeliveryProgressRepository::load(&mut tx, key, &original_sender_receipt)
+            .await
+            .expect("original sender progress")
+            .is_empty(),
+        "the original sender has no fabricated acceptance either"
+    );
+    assert!(!EffectReceiptRepository::contains(
+        &mut tx,
+        key,
+        original_sender_receipt.kind,
+        &original_sender_receipt.semantic_identity_hash
+    )
+    .await
+    .expect("original sender receipt"));
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("envelope after maintenance")
+        .expect("accepted source retained");
+    assert_eq!(
+        envelope.room_manifest(),
+        Some(&manifest),
+        "maintenance preserves the original sealed authority"
+    );
+    assert_eq!(
+        EffectIntentRepository::load(&mut tx, key)
+            .await
+            .expect("recorded obligations"),
+        recorded,
+        "maintenance preserves every originally accepted obligation"
+    );
+    tx.commit().await.expect("stalled authority inspection");
+    assert_eq!(
+        metrics.counter_sum(EVICTED, &[]).unwrap_or(0),
+        before_evicted,
+        "the sealed row may not claim message-triggered eviction progress"
     );
     f.f.close().await;
 }

@@ -31,6 +31,37 @@ pub(crate) use recovery::fail_after_recovery_update;
 #[path = "execute_relay_copy.rs"]
 mod relay_copy;
 
+pub(super) async fn execute_legacy_remote(
+    uow: &IngressUnitOfWork,
+    decision: &IngressDecision,
+    index: usize,
+    effect: &ExternalEffect,
+    deps: &Deps<'_>,
+) -> Option<EffectOutcome> {
+    let ExternalEffect::Delivery(
+        delivery @ (ExternalDeliveryEffect::RelayFullJid { target, .. }
+        | ExternalDeliveryEffect::RouteToPeer { jid: target, .. }),
+    ) = effect
+    else {
+        return None;
+    };
+    match relay_copy::attempt_before_readiness(uow, decision, index, delivery, target, deps).await {
+        Ok(Some(outcome)) => Some(EffectOutcome::Settled(
+            crate::server::routes::interpret::effects::SettledOutcome {
+                refusal: None,
+                persisted: Vec::new(),
+                completion: crate::server::routes::interpret::effects::SettledCompletion::Uncertain,
+                detached: Some(vec![(target.clone(), outcome)]),
+            },
+        )),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::debug!(%error, "live legacy remote child authority unavailable");
+            Some(EffectOutcome::Unavailable)
+        }
+    }
+}
+
 #[path = "execute_invite.rs"]
 mod invite;
 #[cfg(test)]
@@ -98,6 +129,19 @@ pub(super) async fn execute_with_uow(
     deps: &Deps<'_>,
     _deadline: tokio::time::Instant,
 ) -> Option<EffectOutcome> {
+    if matches!(
+        effect,
+        ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { .. })
+    ) {
+        match projection::execute_sealed_inbox_push(uow, decision, index, effect, deps).await {
+            Ok(Some(outcome)) => return Some(outcome),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(%error, "sealed inbox refresh authority unavailable");
+                return Some(EffectOutcome::Unavailable);
+            }
+        }
+    }
     if let ExternalEffect::Frame(stanza) = effect {
         if owns(effect, &decision.route_progress) {
             return match super::room_manifest_replay::release_transient_reflection(

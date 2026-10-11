@@ -958,7 +958,12 @@ impl EffectIntentRepository {
         let (verdict, omissions) = compare_effects(&recorded, &planned, true);
         Ok(match verdict {
             ReconcileVerdict::Repaired { .. } => ReconcileVerdict::Divergent {
-                kinds: omissions.iter().map(|intent| intent.kind()).collect::<std::collections::BTreeSet<_>>().into_iter().collect(),
+                kinds: omissions
+                    .iter()
+                    .map(|intent| intent.kind())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
             },
             verdict => verdict,
         })
@@ -1038,17 +1043,22 @@ impl EffectIntentRepository {
             .await?
             .and_then(|envelope| envelope.room_manifest().cloned())
         {
-            if recorded
-                .iter()
-                .any(|row| !manifest.recorded_intents().contains(&row.intent))
-                || manifest
-                    .recorded_intents()
+            // Deferred system archives seal before their position is assigned.
+            // Only a None -> stored ordinal refinement may differ from that
+            // seal; proposed values must match the current authoritative row.
+            if recorded.iter().any(|row| {
+                !manifest.recorded_intents().iter().any(|frozen| {
+                    super::archive_ordinal::archive_intent_matches(&row.intent, frozen)
+                })
+            }) || manifest.recorded_intents().iter().any(|intent| {
+                !recorded
                     .iter()
-                    .any(|intent| !recorded.iter().any(|row| &row.intent == intent))
-                || planned
+                    .any(|row| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+            }) || planned.iter().any(|intent| {
+                !recorded
                     .iter()
-                    .any(|intent| !manifest.recorded_intents().contains(intent))
-            {
+                    .any(|row| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+            }) {
                 return Err(IngressUowError::EffectIntentConflict);
             }
         }

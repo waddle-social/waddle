@@ -550,6 +550,19 @@ async fn pending_groupchat_routes(
     let mut tx = uow
         .begin_with_timeouts(READ_LOCK_TIMEOUT, READ_STATEMENT_TIMEOUT)
         .await?;
+    if !CanonicalMessageRepository::lock(&mut tx, key).await? {
+        tx.commit().await?;
+        return Ok(Vec::new());
+    }
+    if CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await?
+        .is_some_and(|envelope| envelope.room_manifest().is_some())
+    {
+        // This legacy repair settles before evicting. Sealed children require
+        // actor-serialized occupancy proof and cannot use that receipt path.
+        tx.commit().await?;
+        return Ok(Vec::new());
+    }
     let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let recorded = EffectIntentRepository::load(&mut tx, key).await?;
     let receipted = EffectReceiptRepository::keys(&mut tx, key).await?;

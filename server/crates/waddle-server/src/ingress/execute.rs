@@ -561,6 +561,9 @@ pub async fn execute_effects(
                         }
                         return sink.execute_with_applied(planned[index].clone(), &immediate, &decision.applied_durable).await;
                     }
+                    if let Some(outcome) = super::execute_uow::execute_legacy_remote(uow, decision, index, effect, deps).await {
+                        return outcome;
+                    }
                     let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
                         Ok((crate::ingress_uow::DispatchReadiness::Ready, stream)) => stream,
                         Ok((crate::ingress_uow::DispatchReadiness::Blocked(predecessors), _)) => return EffectOutcome::Settled(SettledOutcome {

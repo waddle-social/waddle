@@ -111,6 +111,25 @@ pub(super) fn prepare_sealed_plan(
         Effect, ExternalEffect, PlanSuppressionPolicy,
     };
     plan.plan.retain_mut(|planned| {
+        if let Effect::External(effect @ ExternalEffect::Delivery(_)) = &planned.effect {
+            if child_receipts(effect, manifest).iter().any(|receipt| initial_transient.contains(receipt)) {
+                let stanza = match effect {
+                    ExternalEffect::Delivery(
+                        super::effects::delivery::ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+                        | super::effects::delivery::ExternalDeliveryEffect::RelayFullJid { stanza, .. }
+                        | super::effects::delivery::ExternalDeliveryEffect::QueueDetached { stanza, .. }
+                        | super::effects::delivery::ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+                    ) => stanza.clone(),
+                    _ => return false,
+                };
+                // Local planning resolves the sender through its resource sink;
+                // relayed planning already returns a Frame. Both initial copies
+                // have the same sender-stream lifetime after policy settlement.
+                planned.effect = Effect::External(ExternalEffect::Frame(stanza));
+                planned.suppression = PlanSuppressionPolicy::SenderOnly;
+                return true;
+            }
+        }
         if let Effect::External(effect @ ExternalEffect::Frame(_)) = &planned.effect {
             if child_receipts(effect, manifest).iter().any(|receipt| initial_transient.contains(receipt)) {
                 planned.suppression = PlanSuppressionPolicy::SenderOnly;

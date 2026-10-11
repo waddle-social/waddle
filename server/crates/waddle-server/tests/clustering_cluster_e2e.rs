@@ -1231,7 +1231,7 @@ async fn cluster_exit_criteria_end_to_end() {
         result.expect("concurrent echo task");
     }
 
-    partial_room_fanout_completes_on_retransmission_after_relay_recovery(
+    partial_room_fanout_preserves_local_acceptance_after_relay_recovery(
         &db,
         &server_a,
         &server_b,
@@ -2492,9 +2492,10 @@ async fn muc_join_routes_to_foreign_room_owner() {
 }
 
 /// #1749: both local-owner fan-out and relayed ingress must deliver the
-/// XEP-0045 §7.4 reflection and receipt every canonical obligation.
+/// XEP-0045 §7.4 reflection remains on the legacy wire while local children
+/// accept durably and remote manifest completion awaits P2.
 #[tokio::test]
-async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
+async fn groupchat_fanout_reaches_foreign_node_and_keeps_remote_children_pending() {
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping groupchat fan-out regression: WADDLE_TEST_POSTGRES_URL not set");
         return;
@@ -2557,6 +2558,18 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
     .await
     .expect("client B authenticates on node B");
     join_fanout_room(&mut client_b, &room, "joiner-b").await;
+    let local_jid: jid::FullJid = client_a
+        .full_jid
+        .as_ref()
+        .expect("bound A")
+        .parse()
+        .expect("local JID");
+    let remote_jid: jid::FullJid = client_b
+        .full_jid
+        .as_ref()
+        .expect("bound B")
+        .parse()
+        .expect("remote JID");
 
     let body_a = format!("local-owner-{}", uuid::Uuid::new_v4());
     let body_b = format!("relayed-owner-{}", uuid::Uuid::new_v4());
@@ -2583,7 +2596,7 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
         .expect("B sends relayed groupchat");
     for (client, label) in [
         (&mut client_a, "A receives relayed copy"),
-        (&mut client_b, "B receives ACK self-reflection"),
+        (&mut client_b, "B receives original remote self-reflection"),
     ] {
         if let Err(error) =
             receive_fanout_copy(client, &joiner, "m2", Some(&body_b), FANOUT_COPY_BUDGET).await
@@ -2606,7 +2619,7 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
     {
         failures.push(format!("B receives bodyless composing: {error}"));
     }
-    if let Err(error) = wait_for_fanout_receipts(&db, &started_at).await {
+    if let Err(error) = wait_for_fanout_receipts(&db, &started_at, &local_jid, &remote_jid).await {
         failures.push(error);
     }
     for (client, label) in [(&mut client_a, "A"), (&mut client_b, "B")] {
@@ -2651,11 +2664,11 @@ async fn groupchat_fanout_reaches_foreign_node_occupant_and_terminalizes() {
 /// non-sender only. Reuse the singleton swarm's fault handle; no second
 /// `swarm::spawn` is legal in this integration-test binary.
 ///
-/// A same-origin retransmission after relay recovery completes the remaining
-/// copy before the maintenance grace period. The two subprocesses share
+/// A same-origin retransmission after relay recovery preserves local progress
+/// and the legacy remote wire copy without inventing P2 completion. The two subprocesses share
 /// eligible rows, so aging this row cannot isolate origin-node maintenance:
 /// B's maintenance can legitimately deliver its own local occupant copy.
-async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
+async fn partial_room_fanout_preserves_local_acceptance_after_relay_recovery(
     db: &Database,
     server_a: &TestServer,
     server_b: &TestServer,
@@ -2741,7 +2754,8 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     assert_eq!(local_claim.owner.node_id, node_a);
     assert_eq!(remote_claim.owner.node_id, node_b);
 
-    // Establish a complete broadcast baseline before injecting the fault.
+    // Establish legacy wire reachability and local acceptance before the fault.
+    // A remote wire copy does not complete its sealed manifest child before P2.
     let baseline = send_partial_fanout(&mut sender, &room, "m1").await;
     receive_fanout_copy(&mut local, &from, "m1", None, FANOUT_COPY_BUDGET)
         .await
@@ -2754,12 +2768,18 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         .expect("warm reflection");
     let baseline_key = partial_fanout_key(db, &baseline).await;
     tokio::time::timeout(Duration::from_secs(15), async {
-        while !partial_fanout_terminal(db, baseline_key).await {
+        while partial_fanout_resources(db, baseline_key).await != vec![local_jid.clone()] {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("warm broadcast terminalizes");
+    .expect("warm local non-sender child accepts");
+    assert!(
+        !partial_fanout_terminal(db, baseline_key).await,
+        "warm remote wire delivery remains nonterminal until P2"
+    );
+    let baseline_manifest = partial_fanout_manifest(db, baseline_key).await;
+    assert_remote_fanout_pending(db, baseline_key, &baseline_manifest, &remote_jid).await;
 
     // RelaySleep blocks only the relay actor, preserving B's live resource,
     // fresh user claim and room membership. The fault ask itself times out
@@ -2774,6 +2794,7 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         .await
         .expect("local copy before timeout");
     let pending_key = partial_fanout_key(db, &pending).await;
+    let original_pending_manifest = partial_fanout_manifest(db, pending_key).await;
     tokio::time::timeout(Duration::from_secs(15), async {
         while partial_fanout_resources(db, pending_key).await != vec![local_jid.clone()] {
             tokio::time::sleep(Duration::from_millis(100)).await;
@@ -2866,17 +2887,20 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         .await
         .expect("remaining remote copy arrives after relay recovery");
     assert_eq!(partial_fanout_key(db, &pending).await, pending_key);
-    let mut completed = vec![local_jid, remote_jid];
-    completed.sort();
+    let completed = vec![local_jid];
     tokio::time::timeout(Duration::from_secs(15), async {
-        while partial_fanout_resources(db, pending_key).await != completed
-            || !partial_fanout_terminal(db, pending_key).await
-        {
+        while partial_fanout_resources(db, pending_key).await != completed {
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
     })
     .await
-    .expect("both occupant receipts settle the partial fanout and terminalize the row");
+    .expect("original local non-sender acceptance remains stable after retransmission");
+    let pending_manifest = partial_fanout_manifest(db, pending_key).await;
+    assert_eq!(
+        pending_manifest, original_pending_manifest,
+        "relay recovery cannot rewrite the frozen audience, payload, or child identities"
+    );
+    assert_remote_fanout_pending(db, pending_key, &pending_manifest, &remote_jid).await;
     {
         let conn = db
             .guard()
@@ -2893,10 +2917,13 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
             .expect("aggregate row")
             .get(0)
             .expect("aggregate count");
-        assert_eq!(count, 1, "all non-sender copies settle the aggregate");
+        assert_eq!(
+            count, 0,
+            "legacy remote wire success cannot settle the manifest aggregate before P2"
+        );
     }
-    // The local occupant's append is keyed by (obligation, resource) in
-    // `sm_ingress_appends`, so the retry can never allocate it twice.
+    // The local occupant's exact resource progress and acceptance identity
+    // prevent a same-origin retry from sending another local copy.
     let local_duplicate = local
         .recv_matching_within(Duration::from_millis(500), |frame| {
             frame.parse::<minidom::Element>().is_ok_and(|element| {
@@ -2911,12 +2938,9 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     );
     // The remote occupant's copy is at-least-once: the fault-delayed first
     // relay attempt can land on node B after the relay wakes, and the retry's
-    // relayed copy lands as well. This occupant is LIVE, so its copy is a live
-    // socket send, and live sends carry no idempotency key (#1776). It is NOT
-    // the #1778 residue: since #1778 the receiving node's *detached* append is
-    // keyed by the origin's obligation, which is what the local assertion above
-    // proves. Any extra frame must be the same canonical message, never a
-    // different one.
+    // legacy relayed copy can land as well. Its wire path carries no P2 child
+    // completion authority. Any extra frame must keep the frozen canonical
+    // stanza identity; it cannot prove the pending resource receipt.
     let remote_duplicate = remote
         .recv_matching_within(Duration::from_millis(500), |frame| {
             frame.parse::<minidom::Element>().is_ok_and(|element| {
@@ -2929,9 +2953,22 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         let element: minidom::Element = frame.parse().expect("duplicate remote copy parses");
         assert_eq!(element.attr("from"), Some(from.to_string().as_str()));
         assert_eq!(element.attr("type"), Some("groupchat"));
+        assert_eq!(
+            element
+                .children()
+                .filter(|child| child.is("stanza-id", "urn:xmpp:sid:0")
+                    && child.attr("by") == Some(pending_manifest.stanza_id.by.to_string().as_str())
+                    && child.attr("id") == Some(pending_manifest.stanza_id.id.as_str()))
+                .count(),
+            1,
+            "remote retry retains the original frozen room stanza identity"
+        );
         eprintln!("remote copy delivered at-least-once after relay recovery (live send, #1776)");
     }
-    assert!(partial_fanout_terminal(db, pending_key).await);
+    assert!(
+        !partial_fanout_terminal(db, pending_key).await,
+        "remote completion stays pending after successful legacy recovery"
+    );
     assert!(
         blocked_at.elapsed() < Duration::from_secs(55),
         "check completion before maintenance eligibility"
@@ -3023,6 +3060,124 @@ async fn partial_fanout_resources(db: &Database, key: uuid::Uuid) -> Vec<jid::Fu
         resources.push(resource.parse().expect("typed occupant resource"));
     }
     resources
+}
+
+async fn partial_fanout_manifest(
+    db: &Database,
+    key: uuid::Uuid,
+) -> waddle_server::ingress::FrozenRoomManifest {
+    let uow = waddle_server::ingress_uow::IngressUnitOfWork::open(
+        db.clone(),
+        waddle_server::config::LineageConfig {
+            deployment_uuid: Some(
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1e2"
+                    .parse()
+                    .expect("harness deployment UUID"),
+            ),
+            action: None,
+        },
+    )
+    .expect("read-only ingress UoW");
+    let mut tx = uow
+        .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+        .await
+        .expect("read sealed authority");
+    let envelope = waddle_server::ingress_uow::CanonicalMessageRepository::load_envelope(
+        &mut tx,
+        waddle_xmpp::ingress::MessageKey::from_storage(key),
+    )
+    .await
+    .expect("typed canonical envelope")
+    .expect("canonical row");
+    let manifest = envelope
+        .room_manifest()
+        .expect("real cross-node room submission is sealed")
+        .clone();
+    assert_eq!(manifest.message_key().to_storage(), key);
+    assert!(
+        manifest.claim_fence.is_some(),
+        "owner acceptance carries its exact room claim"
+    );
+    tx.commit().await.expect("seal read commit");
+    manifest
+}
+
+fn frozen_physical_children(
+    manifest: &waddle_server::ingress::FrozenRoomManifest,
+) -> Vec<&waddle_server::ingress::RoomManifestChild> {
+    use waddle_xmpp::ingress::{DeliveryKey, EffectMessageIdentity, IngressEffectIntent};
+    manifest
+        .children
+        .iter()
+        .filter(|child| {
+            let Some(target) = child.target.as_ref() else {
+                return false;
+            };
+            child.disposition == waddle_server::ingress::RoomManifestChildDisposition::Delivery
+                && manifest.recorded_intents().iter().any(|intent| {
+                    let physical = match intent {
+                        IngressEffectIntent::RouteMucGroupchat { .. }
+                        | IngressEffectIntent::RouteMucSystemBroadcast { .. } => true,
+                        IngressEffectIntent::RouteDirect {
+                            route_identity: EffectMessageIdentity::StanzaId(stamp),
+                            ..
+                        } => stamp == &manifest.stanza_id,
+                        _ => false,
+                    };
+                    physical
+                        && child.delivery_key
+                            == DeliveryKey::resource(
+                                manifest.message_key(),
+                                &intent.semantic_key(),
+                                target,
+                            )
+                })
+        })
+        .collect()
+}
+
+async fn fanout_child_state(
+    db: &Database,
+    key: uuid::Uuid,
+    child: &waddle_server::ingress::RoomManifestChild,
+) -> (bool, bool) {
+    let conn = db.guard().await.expect("exact child receipt guard");
+    let mut rows = conn.query(
+        "SELECT EXISTS (SELECT 1 FROM ingress_delivery_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND resource = ?),
+                EXISTS (SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ?)",
+        waddle_server::db_params![key.to_string(), child.receipt.kind.to_storage(), child.receipt.semantic_identity_hash.to_vec(),
+            child.target.as_ref().expect("endpoint child").to_string(), key.to_string(), child.receipt.kind.to_storage(), child.receipt.semantic_identity_hash.to_vec()],
+    ).await.expect("exact child progress and aggregate receipt");
+    let row = rows
+        .next()
+        .await
+        .expect("child state row")
+        .expect("child state");
+    (
+        row.get(0).expect("resource progress"),
+        row.get(1).expect("aggregate receipt"),
+    )
+}
+
+async fn assert_remote_fanout_pending(
+    db: &Database,
+    key: uuid::Uuid,
+    manifest: &waddle_server::ingress::FrozenRoomManifest,
+    remote: &jid::FullJid,
+) {
+    let children = frozen_physical_children(manifest);
+    let remote_children: Vec<_> = children
+        .iter()
+        .filter(|child| child.target.as_ref() == Some(remote))
+        .collect();
+    assert!(
+        !remote_children.is_empty(),
+        "the original foreign endpoint is a frozen child"
+    );
+    for child in remote_children {
+        assert_eq!(fanout_child_state(db, key, child).await, (false, false),
+            "legacy remote wire delivery proves neither resource acceptance nor its aggregate receipt");
+    }
 }
 
 async fn join_fanout_room(client: &mut WsXmppClient, room: &jid::BareJid, nick: &str) {
@@ -3133,7 +3288,12 @@ async fn receive_fanout_copy(
     Ok(())
 }
 
-async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(), String> {
+async fn wait_for_fanout_receipts(
+    db: &Database,
+    started_at: &str,
+    local: &jid::FullJid,
+    remote: &jid::FullJid,
+) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(15);
     let mut diagnostic = Vec::new();
     loop {
@@ -3173,8 +3333,35 @@ async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(),
                 let pending: String = row.get(5).expect("pending kinds");
                 count += 1;
                 route_rows += usize::from(routes > 0);
-                complete &= terminal && missing == 0;
-                details.push(format!("{key} created_at={created} terminal={terminal} route_intents={routes} missing={missing} pending kinds=[{pending}]"));
+                let manifest =
+                    partial_fanout_manifest(db, key.parse().expect("canonical UUID")).await;
+                let children = frozen_physical_children(&manifest);
+                let mut remote_receipts = Vec::new();
+                let mut local_children = 0;
+                let mut remote_children = 0;
+                for child in children {
+                    let (progress, aggregate) =
+                        fanout_child_state(db, key.parse().expect("UUID"), child).await;
+                    if child.target.as_ref() == Some(local) {
+                        local_children += 1;
+                        complete &= progress;
+                    } else if child.target.as_ref() == Some(remote) {
+                        remote_children += 1;
+                        complete &= !progress && !aggregate;
+                        if !remote_receipts.contains(&child.receipt) {
+                            remote_receipts.push(child.receipt.clone());
+                        }
+                    } else {
+                        complete = false;
+                    }
+                }
+                complete &= !terminal
+                    && missing
+                        == i64::try_from(remote_receipts.len())
+                            .expect("bounded remote receipt count")
+                    && local_children > 0
+                    && remote_children > 0;
+                details.push(format!("{key} created_at={created} terminal={terminal} route_intents={routes} local_children={local_children} remote_children={remote_children} missing={missing} pending kinds=[{pending}]"));
             }
             // All three sends, including the bodyless state, must have a
             // canonical route row; zero rows is never success.
@@ -3190,11 +3377,11 @@ async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(),
         };
         diagnostic = details;
         if complete {
-            eprintln!("terminal canonical rows since {started_at}: {diagnostic:#?}");
+            eprintln!("local children accepted and remote manifest receipts pending since {started_at}: {diagnostic:#?}");
             return Ok(());
         }
         if tokio::time::Instant::now() + Duration::from_millis(250) >= deadline {
-            return Err(format!("ingress did not terminalize with all receipts and three route rows within 15s (start={started_at}): {diagnostic:#?}"));
+            return Err(format!("three sealed rows did not prove exact local child acceptance and only frozen remote receipts pending within 15s (start={started_at}): {diagnostic:#?}"));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
     }

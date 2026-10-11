@@ -4,6 +4,78 @@ use crate::server::routes::interpret::{
     effects::delivery::ExternalDeliveryEffect, Deps, FullJidDeliveryOutcome,
 };
 
+/// A pending P2 child cannot act as the completion barrier for the established
+/// live remote wire. Its ordered channel owns enqueue FIFO; this does not prove
+/// canonical archive ordering or authorize any durable manifest settlement.
+pub(super) async fn attempt_before_readiness(
+    uow: &crate::ingress_uow::IngressUnitOfWork,
+    decision: &super::IngressDecision,
+    index: usize,
+    effect: &ExternalDeliveryEffect,
+    resource: &jid::FullJid,
+    deps: &Deps<'_>,
+) -> Result<Option<FullJidDeliveryOutcome>, crate::ingress_uow::IngressUowError> {
+    use crate::server::routes::interpret::{
+        effects::ExternalEffect, DeliveryExecutionContext, SmIngressAppendContext,
+    };
+    if deps.delivery_execution_context != DeliveryExecutionContext::Live
+        || deps
+            .connection_registry
+            .get_entry(resource)
+            .is_some_and(|entry| entry.is_locally_hosted())
+    {
+        return Ok(None);
+    }
+    let external = ExternalEffect::Delivery(effect.clone());
+    let Some(progress) = decision.route_progress.iter().find(|progress| {
+        progress.matches(&external)
+            && progress.fanout.contains(resource)
+            && !progress.completed.contains(resource)
+            && decision.external_receipts[index].contains(&progress.receipt)
+    }) else {
+        return Ok(None);
+    };
+    let Some(key) = decision.message_key else {
+        return Ok(None);
+    };
+    let stanza = match effect {
+        ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+        | ExternalDeliveryEffect::RelayFullJid { stanza, .. }
+        | ExternalDeliveryEffect::QueueDetached { stanza, .. } => stanza,
+        _ => return Ok(None),
+    };
+    let context = SmIngressAppendContext {
+        message_key: key,
+        receipt: progress.receipt.clone(),
+        received_at: progress.received_at,
+        archive_positions: crate::ingress::archive_dispatch::positions(uow, key, &progress.receipt)
+            .await?,
+        dispatch_stream: None,
+        authority: crate::ingress::append_authority::AppendAuthority::Verified,
+    };
+    if crate::ingress::room_manifest_replay::load(uow, &context, resource, stanza)
+        .await?
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let stop = deps.ingress_delivery_stop.clone().or_else(|| {
+        deps.web_socket_state
+            .map(|state| state.deps.protocol.ingress.delivery_stop_token())
+    });
+    if crate::ingress::live_delivery::live_delivery_status(uow, stop.as_ref(), &context, resource)
+        .await?
+        .is_some()
+    {
+        return Ok(None);
+    }
+    let mut live = deps.clone();
+    live.ingress_append_context = Some(context);
+    live.ingress_delivery_uow = Some(uow.clone());
+    live.ingress_delivery_stop = stop;
+    Ok(append_sealed_legacy(&live, effect, resource).await)
+}
+
 pub(super) async fn append(
     deps: &Deps<'_>,
     effect: &ExternalDeliveryEffect,

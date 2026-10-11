@@ -1,14 +1,15 @@
 //! XEP-0045 §7.4: a blocked remote occupant must not stall a ready local
-//! occupant's copy, and recovery must finish the remaining durable fanout.
+//! occupant's copy. Recovery preserves the remote wire copy while its sealed
+//! completion remains pending for the P2 protocol.
 
 use super::*;
 
 const CHILD_PROCESS: &str = "WADDLE_TEST_PARTIAL_FANOUT_CHILD";
 const TEST_NAME: &str =
-    "xep0045_partial_fanout::local_copy_precedes_blocked_remote_and_recovery_completes";
+    "xep0045_partial_fanout::local_copy_precedes_blocked_remote_and_recovery_keeps_remote_pending";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn local_copy_precedes_blocked_remote_and_recovery_completes() {
+async fn local_copy_precedes_blocked_remote_and_recovery_keeps_remote_pending() {
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping XEP-0045 partial fanout: WADDLE_TEST_POSTGRES_URL not set");
         return;
@@ -101,7 +102,7 @@ async fn local_copy_precedes_blocked_remote_and_recovery_completes() {
     ping_until(&mut relay_b, &node_b, Duration::from_secs(30))
         .await
         .expect("remote occupant owner B reachable");
-    partial_room_fanout_completes_on_retransmission_after_relay_recovery(
+    partial_room_fanout_preserves_local_acceptance_after_relay_recovery(
         &db,
         &server_a,
         &server_b,

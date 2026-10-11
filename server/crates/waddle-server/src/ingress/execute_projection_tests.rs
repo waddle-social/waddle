@@ -9,6 +9,215 @@ use waddle_xmpp::{
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 
+async fn sealed_inbox_push_audience(empty_original_audience: bool) {
+    use crate::ingress::{execute_uow::execute_with_uow, IngressEffectCapture};
+    use crate::server::routes::{
+        interpret::{effects::PlanSink, interpret},
+        websocket::{interpret_loop::build_interpret_deps, tests as socket_tests},
+    };
+    use waddle_xmpp::{
+        ingress::{DigestContext, DigestInput, EffectMessageIdentity, NormalizedTarget},
+        muc::{
+            room_actor::{ChangeAffiliation, Join},
+            room_registry_actor::CreateRoom,
+        },
+        protocol::OutboundEvent,
+        Stanza,
+    };
+    let fixture = IngressFixture::sqlite().await;
+    let state = socket_tests::create_test_websocket_state().await;
+    let room: jid::BareJid = "frozen-inbox@muc.example.com".parse().expect("room");
+    let phone: jid::FullJid = "alice@example.com/phone".parse().expect("phone");
+    let laptop: jid::FullJid = "alice@example.com/laptop".parse().expect("laptop");
+    let owner = phone.to_bare();
+    let mut submission =
+        fixture.submission(Some("frozen-inbox-audience"), "frozen room projection");
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(CreateRoom {
+            room_jid: room.clone(),
+            waddle_id: "frozen-inbox".into(),
+            channel_id: "frozen-inbox".into(),
+            config: Default::default(),
+        })
+        .await
+        .expect("room actor");
+    for (jid, nick) in [
+        (submission.sender.clone(), "sender"),
+        (phone.clone(), "alice"),
+    ] {
+        // Inbox audiences come from persistent affiliations, not the live
+        // occupant's Join label. Exercise a real durable recipient projection.
+        actor
+            .ask(ChangeAffiliation {
+                jid: jid.to_bare(),
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("grant inbox membership");
+        actor
+            .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                nick: nick.into(),
+                real_jid: jid,
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("join");
+    }
+    let (phone_sender, mut phone_receiver) = tokio::sync::mpsc::channel(16);
+    if !empty_original_audience {
+        socket_tests::register_test_connection(&state, &phone, phone_sender.clone()).await;
+    }
+    submission.target = NormalizedTarget::Bare(room.clone());
+    submission.plan.sanitized_message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+    submission.plan.sanitized_message.to = Some(room.clone().into());
+    submission.digest_input = DigestInput::from_parsed(
+        &submission.plan.sanitized_message,
+        &DigestContext {
+            target: submission.target.clone(),
+            server_authorities: vec![room.clone()],
+            stanza_lang: None,
+        },
+    )
+    .expect("room digest");
+    let deps = build_interpret_deps(&state, None);
+    let sink = PlanSink::new();
+    let capture = IngressEffectCapture::new();
+    let mut planned = deps.clone();
+    planned.effects = &sink;
+    planned.ingress_effect_capture = Some(capture.clone());
+    interpret(
+        vec![OutboundEvent::DispatchToRoom {
+            room,
+            message: Box::new(submission.plan.sanitized_message.clone()),
+        }],
+        &planned,
+    )
+    .await;
+    submission.plan.room_canonical_message = sink.room_canonical_message();
+    let (plan, execution) = sink.take();
+    submission.plan.plan = plan;
+    submission.plan.room_execution = execution;
+    submission.plan.intents = capture.snapshot().intents;
+    assert!(submission.plan.plan.iter().any(|planned| matches!(&planned.effect,
+        Effect::External(ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { owner: saved, .. })) if saved == &owner
+    )), "durable-member planning must produce the inbox refresh before acceptance");
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("accept captured room projection");
+    let (index, effect, projection) = decision.external.iter().enumerate().find_map(|(index, effect)| {
+        match effect { ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { owner: saved, projection, receipt }) if saved == &owner => {
+            assert!(matches!(receipt.as_deref(), Some(IngressEffectIntent::RouteDirect { recipient, fanout, route_identity: EffectMessageIdentity::InboxPush(_), .. })
+                if recipient == &owner && (if empty_original_audience { fanout.is_empty() } else { fanout.as_slice() == std::slice::from_ref(&phone) })), "the complete original audience is recorded, including empty");
+            Some((index, effect, *projection))
+        }, _ => None }
+    }).expect("captured inbox push");
+    let entry = decision
+        .applied_durable
+        .inbox(projection)
+        .expect("committed Phase-B projection")
+        .clone();
+    if empty_original_audience {
+        socket_tests::register_test_connection(&state, &phone, phone_sender).await;
+    }
+    let (laptop_sender, mut laptop_receiver) = tokio::sync::mpsc::channel(16);
+    socket_tests::register_test_connection(&state, &laptop, laptop_sender).await;
+    let outcome = execute_with_uow(
+        &fixture.uow,
+        &fixture.db,
+        &decision,
+        index,
+        effect,
+        &deps,
+        tokio::time::Instant::now() + std::time::Duration::from_secs(2),
+    )
+    .await
+    .expect("sealed hook owns the refresh");
+    let EffectOutcome::InboxPush(resources) = outcome else {
+        panic!("best-effort refresh policy remains InboxPush");
+    };
+    if empty_original_audience {
+        assert!(resources.is_empty());
+        assert!(
+            phone_receiver.try_recv().is_err(),
+            "a new resource cannot expand an empty original audience"
+        );
+    } else {
+        assert_eq!(resources, vec![phone.clone()]);
+        let Stanza::Message(message) = phone_receiver
+            .try_recv()
+            .expect("phone gets one inbox refresh")
+            .stanza
+        else {
+            panic!("message");
+        };
+        assert_eq!(
+            message,
+            waddle_xmpp::xep::xep0430::build_inbox_push(phone.clone().into(), &entry),
+            "push carries the original committed projection"
+        );
+        assert!(phone_receiver.try_recv().is_err(), "one captured push");
+    }
+    assert!(
+        laptop_receiver.try_recv().is_err(),
+        "a laptop connected after h cannot receive the frozen push"
+    );
+    let mut changed = effect.clone();
+    if let ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { receipt, .. }) =
+        &mut changed
+    {
+        if let Some(IngressEffectIntent::RouteDirect { fanout, .. }) = receipt.as_deref_mut() {
+            fanout.push(laptop.clone());
+        }
+    }
+    assert!(
+        execute_sealed_inbox_push(&fixture.uow, &decision, index, &changed, &deps)
+            .await
+            .is_err(),
+        "a retained effect cannot alter the sealed audience"
+    );
+    assert_eq!(
+        fixture.count("ingress_send_attempts").await,
+        0,
+        "projection refresh creates no durable message send ledger"
+    );
+    assert_eq!(fixture.count("sm_ingress_appends").await, 0);
+    // Mark-read and other unsealed callers intentionally refresh today's devices.
+    let mut read_entry = entry;
+    read_entry.unread = 0;
+    let mut current = crate::server::routes::interpret::push_inbox_update(
+        &state.deps.protocol.connection_registry,
+        Some(&state.deps.protocol.user_registry),
+        &owner,
+        &read_entry,
+    )
+    .await;
+    current.sort();
+    let mut expected = vec![phone, laptop];
+    expected.sort();
+    assert_eq!(
+        current, expected,
+        "the existing mark-read helper remains dynamic"
+    );
+    assert!(phone_receiver.try_recv().is_ok());
+    assert!(laptop_receiver.try_recv().is_ok());
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn xep0045_sealed_inbox_push_keeps_pre_h_phone_and_excludes_late_laptop() {
+    sealed_inbox_push_audience(false).await;
+}
+
+#[tokio::test]
+async fn xep0045_sealed_inbox_push_preserves_an_empty_original_audience() {
+    sealed_inbox_push_audience(true).await;
+}
+
 async fn activity_atomicity(fixture: IngressFixture) {
     let owner = fixture.principal.bare_jid().clone();
     let conversation: jid::BareJid = "juliet@example.com".parse().expect("conversation");

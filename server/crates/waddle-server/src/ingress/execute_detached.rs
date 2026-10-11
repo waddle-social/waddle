@@ -82,6 +82,24 @@ pub(super) async fn execute(
     for resource in resources.iter().filter(|resource| {
         progress.fanout.contains(resource) && !progress.completed.contains(resource)
     }) {
+        match super::relay_copy::attempt_before_readiness(
+            uow, decision, index, effect, resource, &immediate,
+        )
+        .await
+        {
+            Ok(Some(outcome)) => {
+                destinations.push((resource.clone(), outcome));
+                completion = SettledCompletion::Uncertain;
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(%error, %resource, "live legacy remote child authority unavailable");
+                completion = SettledCompletion::Uncertain;
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+        }
         let dispatch_stream = deps.connection_registry.local_sm_stream(resource);
         match crate::ingress::archive_dispatch::resource_ready(
             uow,
@@ -388,16 +406,6 @@ async fn append_resource(
                 };
             }
         }
-        if !matches!(effect, ExternalDeliveryEffect::QueueDetached { .. }) {
-            if let Some(outcome) =
-                super::relay_copy::append_sealed_legacy(deps, effect, resource).await
-            {
-                return ResourceDelivery {
-                    outcome,
-                    certainty: DeliveryCertainty::Uncertain,
-                };
-            }
-        }
         // The ordered relay's legacy ACK has no frozen-child completion proof.
         // A sealed child stays pending until its actual local sink can prove it.
         let outcome = match deps.ingress_append_context.as_ref() {
@@ -412,16 +420,6 @@ async fn append_resource(
             .await
             {
                 Ok(FullJidDeliveryOutcome::Unavailable) => {
-                    if matches!(effect, ExternalDeliveryEffect::QueueDetached { .. }) {
-                        if let Some(outcome) =
-                            super::relay_copy::append_sealed_legacy(deps, effect, resource).await
-                        {
-                            return ResourceDelivery {
-                                outcome,
-                                certainty: DeliveryCertainty::Uncertain,
-                            };
-                        }
-                    }
                     deliver_direct_to_full_locally(deps, resource, effect_stanza(effect)).await
                 }
                 Ok(outcome) => outcome,
