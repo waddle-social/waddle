@@ -467,9 +467,27 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                 )
                 .await
                 .expect("finalized authority");
+                // The JSON manifest preserves the exact accepted timestamp;
+                // PostgreSQL MAM timestamps round-trip at microsecond precision.
+                // Check authority against the seal and storage against its own
+                // original read, as verified by unchanged.timestamp above.
+                let accepted_archive_time = original_manifest
+                    .as_ref()
+                    .expect("original pin manifest")
+                    .recorded_intents()
+                    .iter()
+                    .find_map(|intent| match intent {
+                        IngressEffectIntent::SystemMessageArchive {
+                            stanza_id,
+                            archived_at,
+                            ..
+                        } if stanza_id.id == original_id => Some(*archived_at),
+                        _ => None,
+                    })
+                    .expect("frozen original system archive timestamp");
                 assert!(recorded.iter().any(|intent| matches!(intent,
                     IngressEffectIntent::SystemMessageArchive { stanza_id, archived_at, ordinal: Some(ordinal), .. }
-                        if stanza_id.id == original_id && *archived_at == original_archive.timestamp && Some(*ordinal) == original_archive.ordinal
+                        if stanza_id.id == original_id && *archived_at == accepted_archive_time && Some(*ordinal) == original_archive.ordinal
                 )), "the recorded system archive retains its original stamp, time, and committed position");
                 let mut wrong_position = recorded.clone();
                 for intent in &mut wrong_position {
