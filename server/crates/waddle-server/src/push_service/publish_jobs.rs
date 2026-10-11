@@ -386,6 +386,36 @@ async fn has_notification_lineage_tx(
     })
 }
 
+/// Push schema initialization precedes the outbox's runtime upgrade at boot.
+/// Resolve the actual table, not a same-named table in another PostgreSQL schema.
+async fn has_notification_outbox_frozen_schema_tx(
+    tx: &mut crate::db::Transaction<'_>,
+) -> Result<bool, XmppError> {
+    let sql = match tx.driver() {
+        crate::db::DatabaseDriver::Postgres => {
+            "SELECT COUNT(*) FROM pg_attribute WHERE attrelid = to_regclass('notification_outbox') AND NOT attisdropped AND attname IN ('approved_payload_xml', 'approved_publish_options_xml')"
+        }
+        crate::db::DatabaseDriver::Sqlite => {
+            "SELECT COUNT(*) FROM pragma_table_info('notification_outbox') WHERE name IN ('approved_payload_xml', 'approved_publish_options_xml')"
+        }
+    };
+    let mut rows = tx
+        .query(sql, ())
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    else {
+        return Ok(false);
+    };
+    let columns: i64 = row
+        .get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    Ok(columns == 2)
+}
+
 pub(super) async fn lock_notification_ancestry_tx(
     tx: &mut crate::db::Transaction<'_>,
     job: &PushPublishJob,
@@ -842,7 +872,11 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        if has_notification_lineage_tx(&mut tx).await? {
+        // The HTTP initializer repeats this after upgrading the outbox. Missing
+        // frozen columns defer only cross-store adoption, never trusted bindings.
+        if has_notification_lineage_tx(&mut tx).await?
+            && has_notification_outbox_frozen_schema_tx(&mut tx).await?
+        {
             tx.execute("UPDATE push_publish_jobs SET ancestry_job_id = (SELECT job_id FROM notification_outbox WHERE notification_outbox.job_id = push_publish_jobs.item_id AND notification_outbox.recipient_bare_jid = push_publish_jobs.owner_bare_jid AND notification_outbox.node = push_publish_jobs.node AND notification_outbox.push_service_jid = push_publish_jobs.push_service_jid AND (notification_outbox.approved_payload_xml IS NULL OR (notification_outbox.approved_payload_xml = push_publish_jobs.payload_xml AND (notification_outbox.approved_publish_options_xml = push_publish_jobs.publish_options_xml OR (notification_outbox.approved_publish_options_xml IS NULL AND push_publish_jobs.publish_options_xml IS NULL))))) WHERE ancestry_job_id IS NULL AND acceptance_scope = 'legacy' AND EXISTS (SELECT 1 FROM notification_outbox WHERE notification_outbox.job_id = push_publish_jobs.item_id AND notification_outbox.recipient_bare_jid = push_publish_jobs.owner_bare_jid AND notification_outbox.node = push_publish_jobs.node AND notification_outbox.push_service_jid = push_publish_jobs.push_service_jid)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
         }
         tx.execute("UPDATE push_publish_jobs SET acceptance_scope = 'canonical' WHERE ancestry_job_id IS NOT NULL AND acceptance_scope = 'legacy'", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
