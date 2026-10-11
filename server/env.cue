@@ -200,7 +200,7 @@ schema.#Project & {
 			]
 		}
 		namespaceRustChecks: {
-			mode: "expanded"
+			mode:        "expanded"
 			derivePaths: true
 			when: {
 				pullRequest: true
@@ -532,14 +532,14 @@ schema.#Project & {
 
 		clippy: schema.#Task & {
 			hermetic: false
-			command: "bash"
+			command:  "bash"
 			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace clippy"]
 			inputs: _namespaceRustTaskInputs
 		}
 
 		test: schema.#Task & {
 			hermetic: false
-			command: "bash"
+			command:  "bash"
 			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace test"]
 			inputs: _namespaceRustTaskInputs
 		}
@@ -547,7 +547,7 @@ schema.#Project & {
 		// nextest cannot run doctests; keep them verified via cargo test --doc.
 		doctest: schema.#Task & {
 			hermetic: false
-			command: "bash"
+			command:  "bash"
 			args: ["-euo", "pipefail", "-c", "cd .. && exec cuenv task --package namespace doctest"]
 			inputs: _namespaceRustTaskInputs
 		}
@@ -617,6 +617,7 @@ schema.#Project & {
 					set -euo pipefail
 
 					python3 -m unittest discover -s scripts -p 'test_cutover_*.py'
+					python3 -m unittest discover -s scripts -p 'test_publish_chart.py'
 
 					placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
 					sample_digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -985,7 +986,7 @@ schema.#Project & {
 					  *) echo "published GitOps render must set WADDLE_GIT_SHA, got: ${rendered_git_sha:-<missing>}" >&2; exit 1 ;;
 					esac
 				"""#]
-			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/*cutover*.py"]])
+			inputs: list.Concat([_chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/*cutover*.py", "scripts/*publish_chart.py"]])
 		}
 
 		buildContainerImage: schema.#Task & {
@@ -1088,28 +1089,8 @@ schema.#Project & {
 					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
 					chart_package="$(helm package charts/waddle-server -d /tmp/charts | awk '{print $NF}')"
 					chart_version="$(helm show chart "${chart_package}" | awk '$1 == "version:" {print $2; exit}')"
-					helm_push_log="$(mktemp)"
-					if ! helm push "${chart_package}" oci://ghcr.io/waddle-social/waddle/charts 2>&1 | tee "${helm_push_log}"; then
-					  if grep -Eiq 'already exists|409|conflict' "${helm_push_log}"; then
-					    remote_chart_dir="$(mktemp -d)"
-					    local_chart_dir="$(mktemp -d)"
-					    if helm pull oci://ghcr.io/waddle-social/waddle/charts/waddle-server --version "${chart_version}" --destination "${remote_chart_dir}" >/dev/null 2>&1; then
-					      tar -xzf "${chart_package}" -C "${local_chart_dir}"
-					      tar -xzf "${remote_chart_dir}/waddle-server-${chart_version}.tgz" -C "${remote_chart_dir}"
-					      if diff -qr "${local_chart_dir}/waddle-server" "${remote_chart_dir}/waddle-server" >/dev/null; then
-					        echo "Chart version ${chart_version} already exists with identical content, skipping"
-					      else
-					        echo "Chart version ${chart_version} already exists with different content; bump charts/waddle-server/Chart.yaml version" >&2
-					        exit 1
-					      fi
-					    else
-					      echo "Chart version ${chart_version} already exists but could not pull remote chart for comparison" >&2
-					      exit 1
-					    fi
-					  else
-					    exit 1
-					  fi
-					fi
+					python3 scripts/publish_chart.py "${chart_package}" oci://ghcr.io/waddle-social/waddle/charts \
+					  --name waddle-server --version "${chart_version}"
 					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
 					declare -a EXTENSIONS=(
@@ -1239,7 +1220,7 @@ schema.#Project & {
 					  --source="$(git config --get remote.origin.url)" \
 					  --revision="${SHORT_SHA}"
 				"""#]
-			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/cutover_revisions.py"]])
+			inputs: list.Concat([_nixInputs, _chartInputs, _gitopsWaddleServerInputs, _deploymentInputs, ["scripts/cutover_revisions.py", "scripts/publish_chart.py"]])
 			outputs: ["target/digests/**"]
 			dependsOn: [
 				tasks.checkCiDrift,

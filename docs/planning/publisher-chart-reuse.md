@@ -19,6 +19,9 @@ and the Flux artifact update. Production still runs revision `645db266`.
 - Fail closed on unknown/authentication pull errors and malformed archives.
   Publish a genuinely missing version, with bounded retries for transient registry
   failures and a content check if another publisher wins the race.
+- Re-read the exact version before retrying an ambiguous write, and verify remote
+  contents after a successful write. These checks reject observed version drift;
+  fully atomic tag immutability requires registry policy or serialized writers.
 - Exercise the actual CUE publisher chart step with a fake Helm CLI and real tar
   archives. Reproduce the captured tag-not-found failure before modifying it.
 - Run those regressions in the existing deployment-render gate and include the

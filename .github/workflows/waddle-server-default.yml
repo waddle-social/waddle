@@ -85,8 +85,11 @@ on:
     - server/schema/**
     - server/scripts/**
     - server/scripts/*cutover*.py
+    - server/scripts/*publish_chart.py
     - server/scripts/cutover_revisions.py
     - server/scripts/cutover_revisions.py/**
+    - server/scripts/publish_chart.py
+    - server/scripts/publish_chart.py/**
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml
