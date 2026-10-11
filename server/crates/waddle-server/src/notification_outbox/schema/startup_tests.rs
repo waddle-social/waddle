@@ -319,29 +319,41 @@ async fn index_upgrade_controls(fixture: IngressFixture, scenario: IndexScenario
     retain_unknown_work(&fixture).await;
     let before = snapshot(&fixture.db).await;
     let conn = fixture.db.guard().await.expect("index fixture");
-    let mut setup = fixture
-        .db
-        .begin_immediate()
-        .await
-        .expect("one physical schema setup connection");
-    setup
-        .execute("DROP INDEX idx_notification_outbox_queued_coalesce", ())
-        .await
-        .expect("one-time old index removal");
+    {
+        let mut setup = fixture
+            .db
+            .begin_immediate()
+            .await
+            .expect("one physical setup connection");
+        setup
+            .execute("DROP INDEX idx_notification_outbox_queued_coalesce", ())
+            .await
+            .expect("old index removed once");
+        match scenario {
+            IndexScenario::Missing => {}
+            IndexScenario::LiteralCase => {
+                setup.execute("CREATE UNIQUE INDEX idx_notification_outbox_queued_coalesce ON notification_outbox(recipient_bare_jid,push_service_jid,node,conversation_jid,thread_id,class) WHERE status='QUEUED' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist=0",()).await.expect("wrong literal case");
+            }
+            IndexScenario::Collation => {
+                setup.execute("CREATE UNIQUE INDEX idx_notification_outbox_queued_coalesce ON notification_outbox(recipient_bare_jid,push_service_jid,node,conversation_jid,thread_id COLLATE NOCASE,class) WHERE status='queued' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist=0",()).await.expect("incorrect thread collation");
+            }
+            IndexScenario::Rollback => {
+                setup.execute("CREATE INDEX idx_notification_outbox_queued_coalesce ON notification_outbox(job_id)",()).await.expect("wrong-key index");
+            }
+        }
+        setup
+            .commit()
+            .await
+            .expect("complete setup before verification and cleanup");
+    }
     match scenario {
         IndexScenario::Missing => {
-            setup.commit().await.expect("missing-index setup committed");
             store
                 .migrate_coalescing_index()
                 .await
                 .expect("repair missing index");
         }
         IndexScenario::LiteralCase => {
-            setup.execute("CREATE UNIQUE INDEX idx_notification_outbox_queued_coalesce ON notification_outbox(recipient_bare_jid,push_service_jid,node,conversation_jid,thread_id,class) WHERE status='QUEUED' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist=0",()).await.expect("wrong literal case");
-            setup
-                .commit()
-                .await
-                .expect("stale-predicate setup committed");
             store
                 .migrate_coalescing_index()
                 .await
@@ -359,11 +371,6 @@ async fn index_upgrade_controls(fixture: IngressFixture, scenario: IndexScenario
             assert!(!definition.contains("'QUEUED'"));
         }
         IndexScenario::Collation => {
-            setup.execute("CREATE UNIQUE INDEX idx_notification_outbox_queued_coalesce ON notification_outbox(recipient_bare_jid,push_service_jid,node,conversation_jid,thread_id COLLATE NOCASE,class) WHERE status='queued' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist=0",()).await.expect("incorrect thread collation");
-            setup
-                .commit()
-                .await
-                .expect("stale-collation setup committed");
             store
                 .migrate_coalescing_index()
                 .await
@@ -380,8 +387,6 @@ async fn index_upgrade_controls(fixture: IngressFixture, scenario: IndexScenario
             .expect("remove only collation fixture rows");
         }
         IndexScenario::Rollback => {
-            setup.execute("CREATE INDEX idx_notification_outbox_queued_coalesce ON notification_outbox(job_id)",()).await.expect("old wrong-key index");
-            setup.commit().await.expect("wrong-key setup committed");
             let oid_sql=match fixture.db.driver() { DatabaseDriver::Postgres=>"SELECT to_regclass('idx_notification_outbox_queued_coalesce')::oid::bigint",DatabaseDriver::Sqlite=>"SELECT rowid FROM sqlite_master WHERE name='idx_notification_outbox_queued_coalesce'"};
             let original = scalar(&fixture.db, oid_sql).await;
             let context = Element::builder("context", WADDLE_PUSH_CONTEXT_NS).build();
