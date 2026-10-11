@@ -108,7 +108,6 @@ pub enum IngressUowError {
     #[cfg(feature = "clustering")]
     #[error("this unit of work has no bound canonical node identity")]
     NodeIdentityUnbound,
-    #[cfg(feature = "clustering")]
     #[error("the exact ownership claim is not held")]
     ClaimFenceMissing,
 }
