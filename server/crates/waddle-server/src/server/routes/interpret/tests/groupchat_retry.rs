@@ -221,10 +221,6 @@ async fn groupchat_origin_retry_after_tombstone_silently_suppresses_entire_batch
 
     let outcome = interpret(groupchat_retry_batch(&room, &sender, &other, &retry), &deps).await;
 
-    assert_eq!(
-        outcome.retry_suppression,
-        Some(GroupchatRetrySuppression::TombstoneSwallowed)
-    );
     assert!(
         outcome.frames.is_empty(),
         "tombstone hit is a silent swallow"
@@ -361,7 +357,10 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_write() {
     )
     .await;
 
-    assert_eq!(outcome.retry_suppression, None);
+    assert!(
+        outcome.frames.is_empty(),
+        "reflection uses the frozen recipient routes"
+    );
     let target = mam_concrete
         .get_message(target_id)
         .await
@@ -497,10 +496,6 @@ async fn tombstoned_retraction_retry_still_heals_target_tombstone_silently() {
     )
     .await;
 
-    assert_eq!(
-        outcome.retry_suppression,
-        Some(GroupchatRetrySuppression::TombstoneSwallowed)
-    );
     assert!(outcome.frames.is_empty(), "swallow emits no error frame");
     let target = mam_concrete
         .get_message(target_id)
@@ -555,7 +550,6 @@ async fn fresh_groupchat_origin_fans_out_to_every_recipient() {
     )
     .await;
 
-    assert_eq!(outcome.retry_suppression, None);
     assert_eq!(
         outcome.frames.len(),
         1,
@@ -661,7 +655,6 @@ async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
     ]);
     let outcome = interpret(events, &deps).await;
 
-    assert_eq!(outcome.retry_suppression, None);
     assert!(outcome.frames.is_empty());
     assert!(outcome.close, "post-subject canary must not be suppressed");
     assert_eq!(

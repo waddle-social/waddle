@@ -37,7 +37,8 @@ impl fmt::Debug for MessageKey {
 }
 
 /// Fully opaque per-delivery identity.
-#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+#[serde(transparent)]
 pub struct DeliveryKey(Uuid);
 
 impl DeliveryKey {
@@ -55,6 +56,27 @@ impl DeliveryKey {
         let identity = effect.storage_identity();
         hash.update((identity.len() as u64).to_be_bytes());
         hash.update(identity.as_bytes());
+        let digest = hash.finalize();
+        let mut bytes = [0; 16];
+        bytes.copy_from_slice(&digest[..16]);
+        bytes[6] = (bytes[6] & 0x0f) | 0x80;
+        bytes[8] = (bytes[8] & 0x3f) | 0x80;
+        Self(Uuid::from_bytes(bytes))
+    }
+
+    /// One endpoint child of an immutable canonical effect. A replacement
+    /// resource has a different key even when its account is unchanged.
+    pub fn resource(
+        message_key: MessageKey,
+        effect: &super::IngressEffectKey,
+        target: &jid::FullJid,
+    ) -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"waddle.ingress.resource_delivery.v1");
+        hash.update(Self::effect(message_key, effect).to_storage().as_bytes());
+        let target = target.to_string();
+        hash.update((target.len() as u64).to_be_bytes());
+        hash.update(target.as_bytes());
         let digest = hash.finalize();
         let mut bytes = [0; 16];
         bytes.copy_from_slice(&digest[..16]);
@@ -117,6 +139,30 @@ impl fmt::Debug for DeliveryKey {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn resource_keys_separate_replacement_resources_and_canonical_messages() {
+        let message = MessageKey::new();
+        let room: BareJid = "room@conference.example.com".parse().expect("room");
+        let effect = crate::ingress::IngressEffectKey::RoomSubjectMutation(room);
+        let first = "alice@example.com/first".parse().expect("first");
+        let replacement = "alice@example.com/replacement"
+            .parse()
+            .expect("replacement");
+        let key = DeliveryKey::resource(message, &effect, &first);
+        assert_eq!(key, DeliveryKey::resource(message, &effect, &first));
+        assert_ne!(key, DeliveryKey::resource(message, &effect, &replacement));
+        assert_ne!(
+            key,
+            DeliveryKey::resource(MessageKey::new(), &effect, &first)
+        );
+        assert_ne!(key, DeliveryKey::effect(message, &effect));
+        assert_eq!(
+            serde_json::from_str::<DeliveryKey>(&serde_json::to_string(&key).expect("encode"))
+                .expect("decode"),
+            key
+        );
+    }
 
     #[test]
     fn effect_key_is_stable_and_scoped_to_canonical_effect_kind_and_target() {

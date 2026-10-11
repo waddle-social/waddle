@@ -67,6 +67,10 @@ pub use waddle_xmpp_core::OccupancySessionGeneration;
 pub struct OccupancyWatermark(pub(crate) u64);
 
 impl OccupancyWatermark {
+    pub const fn revision(self) -> u64 {
+        self.0
+    }
+
     pub const fn initial() -> Self {
         Self(0)
     }
@@ -216,7 +220,8 @@ pub enum ProjectionRefusal {
 }
 pub use snapshot_handlers::{
     BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,
-    RoomChainOccupant, RoomChainSnapshot,
+    OccupancyReplayGuardOutcome, RoomChainOccupant, RoomChainSnapshot, RunOccupancyReplayGuarded,
+    RunOccupancyReplayGuardedAsync, RunSupersededOccupancyGuardedAsync,
 };
 
 // ---------------------------------------------------------------------------
@@ -251,6 +256,8 @@ pub struct RoomSnapshot {
     pub occupancy_revision: u64,
     /// Stable effect attempt owned by the predecessor for this live-roster handoff.
     pub live_roster_restore_attempt: super::durable::AdminMutationId,
+    /// Identity scoped to the live roster, independent of admin effect attempts.
+    pub occupancy_incarnation: super::durable::AdminMutationId,
     /// Lost-reply departure state, transferred on live-roster recovery.
     pub departures: DepartureLedger,
     /// Ephemeral admin changes awaiting proof of an ambiguous durable commit.
@@ -393,6 +400,8 @@ pub struct RestoreLiveRoster {
     pub occupancy_revision: u64,
     /// Stable effect attempt owned by the predecessor for this live-roster handoff.
     pub live_roster_restore_attempt: super::durable::AdminMutationId,
+    /// Identity scoped to the live roster, independent of admin effect attempts.
+    pub occupancy_incarnation: super::durable::AdminMutationId,
     /// The predecessor's lost-reply departure state, so a retry that lands on
     /// the successor replays (or refuses) exactly as the predecessor would.
     pub departures: DepartureLedger,
@@ -545,6 +554,7 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             self.admin_receipt_after_publication = Some(projection.attempt);
         }
         self.room = restored;
+        self.occupancy_incarnation = msg.occupancy_incarnation;
         // The predecessor's `Drop` releases its occupants from the pod-wide
         // gauge; the transplanted roster is this actor's to account for now.
         crate::metrics::adjust_muc_occupant_total(
@@ -895,6 +905,7 @@ pub struct RoomActor {
     pending_affiliation_departures: std::collections::BTreeSet<BareJid>,
     admin_receipt_after_publication: Option<super::durable::AdminMutationId>,
     live_roster_restore_attempt: super::durable::AdminMutationId,
+    occupancy_incarnation: super::durable::AdminMutationId,
     restore_receipts_after_publication: Vec<super::durable::AdminMutationId>,
     /// Completed departures retained for attempt replay (see
     /// [`occupancy_handlers::LeaveAttemptId`]).
@@ -1133,6 +1144,7 @@ impl RoomActor {
             pending_affiliation_departures: Default::default(),
             admin_receipt_after_publication: None,
             live_roster_restore_attempt: super::durable::AdminMutationId::generate(),
+            occupancy_incarnation: super::durable::AdminMutationId::generate(),
             restore_receipts_after_publication: Vec::new(),
             departure_receipts: std::collections::VecDeque::new(),
             latest_generations: std::collections::HashMap::new(),
@@ -2768,6 +2780,7 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
                 admission_revision: self.admission_revision,
                 occupancy_revision: self.occupancy_revision,
                 live_roster_restore_attempt: self.live_roster_restore_attempt,
+                occupancy_incarnation: self.occupancy_incarnation,
                 departures: self.departure_ledger(),
                 pending_admin_projection: self.pending_admin_projection.clone(),
                 pending_affiliation_departures: self.pending_affiliation_departures.clone(),
@@ -3384,6 +3397,7 @@ impl kameo::message::Message<GetSnapshot> for RoomActor {
             admission_revision: self.admission_revision,
             occupancy_revision: self.occupancy_revision,
             live_roster_restore_attempt: self.live_roster_restore_attempt,
+            occupancy_incarnation: self.occupancy_incarnation,
             departures: self.departure_ledger(),
             pending_admin_projection: self.pending_admin_projection.clone(),
             admin_mutation_resolutions: self.admin_mutation_resolutions.iter().copied().collect(),

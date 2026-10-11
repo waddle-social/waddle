@@ -3584,6 +3584,7 @@ async fn recover_group_dm_actor_after_demote(
             occupancy_revision: stale_snapshot.occupancy_revision,
             departures: stale_snapshot.departures,
             live_roster_restore_attempt: stale_snapshot.live_roster_restore_attempt,
+            occupancy_incarnation: stale_snapshot.occupancy_incarnation,
             pending_affiliation_departures: stale_snapshot.pending_affiliation_departures,
             pending_admin_projection: stale_snapshot.pending_admin_projection,
             admin_mutation_resolutions: stale_snapshot.admin_mutation_resolutions,

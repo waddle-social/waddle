@@ -183,6 +183,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                 effects::room::RoomFenceRequirement::Unfenced
             },
             snapshot_generation: 0,
+            manifest_snapshot: None,
         };
     }
     let _ = &mut fixture;

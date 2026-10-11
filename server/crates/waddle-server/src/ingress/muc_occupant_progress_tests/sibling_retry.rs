@@ -64,6 +64,16 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
     let mut deps = build_interpret_deps(&state, None);
     deps.inbox_storage = None;
     plan_broadcast(&mut submission, &room, &message, &deps).await;
+    if !canonical {
+        if let effects::RoomExecutionPath::Local {
+            manifest_snapshot, ..
+        } = &mut submission.plan.room_execution
+        {
+            // Missing-provenance cases represent pre-fix rows. Keep the
+            // accepted source unsealed rather than rewriting a sealed payload.
+            *manifest_snapshot = None;
+        }
+    }
     submission
         .plan
         .plan
@@ -123,6 +133,10 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
     let frozen_source =
         super::super::room_canonical::source(&frozen, &intent).expect("canonical source");
     if !canonical {
+        assert!(
+            frozen.room_manifest().is_none(),
+            "the pre-fix fixture must never replace a sealed canonical source"
+        );
         crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
@@ -166,12 +180,8 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         .collect();
     assert_eq!(
         reflections.len(),
-        1,
-        "current-attempt reflection has no kind-2 ownership"
-    );
-    assert!(
-        !super::super::execute_uow::owns(reflections[0].1, &retry.route_progress),
-        "fresh reflection never proves historical delivery"
+        0,
+        "a sibling retry cannot add a current-attempt reflection to the sealed audience"
     );
     let repairs: Vec<_> = sibling_effects
         .iter()
@@ -228,14 +238,12 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
     }
     assert_eq!(
         delivered.len(),
-        1 + usize::from(canonical),
-        "fresh reflection plus optional frozen repair"
+        usize::from(canonical),
+        "the sibling receives only its pending frozen copy"
     );
     assert!(
-        delivered
-            .iter()
-            .any(|copy| copy.from == Some(room.with_resource_str("mobile").expect("nick").into())),
-        "the retry sender receives its fresh reflection"
+        receivers[0].try_recv().is_err(),
+        "the completed original sender reflection is not repeated"
     );
     if canonical {
         assert!(

@@ -252,6 +252,7 @@ pub(crate) struct CrossNodeReceiver {
     receiver: tokio::sync::Mutex<OrderedRelayReceiverState>,
     origin_state: Arc<crate::server::routes::websocket::WebSocketState>,
     delivered_sequences: tokio::sync::Mutex<Vec<u64>>,
+    expects_keyed_obligation: bool,
 }
 
 #[cfg(feature = "clustering")]
@@ -260,6 +261,15 @@ impl CrossNodeReceiver {
         fixture: &IngressFixture,
         sm: Arc<InMemorySmSessionRegistry>,
         recipient: &jid::FullJid,
+    ) -> Self {
+        Self::new_with_origin(fixture, sm, recipient, None).await
+    }
+
+    async fn new_with_origin(
+        fixture: &IngressFixture,
+        sm: Arc<InMemorySmSessionRegistry>,
+        recipient: &jid::FullJid,
+        room_origin: Option<jid::BareJid>,
     ) -> Self {
         use crate::clustering::route_bridge::tests::{
             origin_identity, receiver_identity, services_with_claims,
@@ -274,10 +284,14 @@ impl CrossNodeReceiver {
         )
         .await;
         let store = Arc::new(InProcessClaimStore::new());
-        let origin = Entity::new(
-            EntityType::UserActor,
-            fixture.principal.bare_jid().to_string(),
-        );
+        let expects_keyed_obligation = room_origin.is_none();
+        let origin = match room_origin {
+            Some(room) => Entity::new(EntityType::RoomActor, room.to_string()),
+            None => Entity::new(
+                EntityType::UserActor,
+                fixture.principal.bare_jid().to_string(),
+            ),
+        };
         let target = Entity::new(EntityType::UserActor, recipient.to_bare().to_string());
         store
             .acquire(&origin, &origin_identity())
@@ -334,19 +348,18 @@ impl CrossNodeReceiver {
             receiver: Default::default(),
             origin_state,
             delivered_sequences: Default::default(),
+            expects_keyed_obligation,
         }
     }
 
     pub(crate) async fn deliver(&self, envelope: RemoteStanzaEnvelope) -> OrderedRelayReply {
-        assert!(
-            matches!(
-                &envelope.payload,
-                OrderedRelayPayload::Message {
-                    ingress_append: Some(_),
-                    ..
-                }
-            ),
-            "production origin path must carry its recorded append obligation"
+        let OrderedRelayPayload::Message { ingress_append, .. } = &envelope.payload else {
+            panic!("message relay payload");
+        };
+        assert_eq!(
+            ingress_append.is_some(),
+            self.expects_keyed_obligation,
+            "sealed legacy wire must not export manifest acceptance authority"
         );
         let envelope: RemoteStanzaEnvelope =
             serde_json::from_slice(&serde_json::to_vec(&envelope).expect("encode wire envelope"))
@@ -401,4 +414,260 @@ async fn postgres_cross_node_keyed_append_receipt_failure_recovery_1778() {
 #[cfg(feature = "clustering")]
 tokio::task_local! {
     pub(crate) static CROSS_NODE_RECEIVER: Arc<CrossNodeReceiver>;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keyed_custody() {
+    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::server::routes::interpret::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
+    use waddle_xmpp::ownership::{Entity, EntityType};
+    let fixture = IngressFixture::sqlite().await;
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .expect("SM persistence"),
+    );
+    let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let mut submission = room_submission(&fixture);
+    let IngressEffectIntent::RouteMucGroupchat {
+        room,
+        occupants,
+        route_identity,
+        ..
+    } = &submission.plan.intents[0]
+    else {
+        panic!("room route");
+    };
+    let room = room.clone();
+    let identity = route_identity.clone();
+    let target = occupants
+        .iter()
+        .find(|target| *target != &submission.sender)
+        .expect("remote occupant")
+        .clone();
+    sm.store_session(DetachedSession {
+        stream_id: target.to_string(),
+        user_id: target.to_bare().to_string(),
+        jid: target.clone(),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    })
+    .await
+    .expect("receiver detached session");
+    let mut copy = submission
+        .plan
+        .room_canonical_message
+        .as_ref()
+        .expect("canonical")
+        .as_ref()
+        .clone();
+    copy.to = Some(target.clone().into());
+    let sender_entity = Entity::new(EntityType::RoomActor, room.to_string());
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid {
+            route_identity: Some(identity),
+            origin: Some(OrderedRelayRouteOrigin {
+                kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+                sender_entity,
+                inbound_sequence: 1,
+                handoff: None,
+            }),
+            target: target.clone(),
+            stanza: Box::new(Stanza::Message(copy)),
+            call_setup: None,
+        }),
+    ))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("seal room manifest");
+    let key = decision.message_key.expect("message key");
+    let receiver = Arc::new(
+        CrossNodeReceiver::new_with_origin(&fixture, sm.clone(), &target, Some(room)).await,
+    );
+    let mut deps = Deps::new(
+        &receiver.origin_state.deps.protocol.connection_registry,
+        "example.com",
+    );
+    deps.web_socket_state = Some(&receiver.origin_state);
+    let report = relay_scope(
+        Some(&receiver),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        ),
+    )
+    .await;
+    assert_eq!(
+        report.outcomes[0].1,
+        ExternalOutcome::Uncertain,
+        "legacy ACK is not a manifest child receipt"
+    );
+    assert_eq!(
+        queue_len(&sm, &target).await,
+        1,
+        "existing remote wire remains delivered"
+    );
+    assert_eq!(*receiver.delivered_sequences.lock().await, vec![1]);
+    let accepted = sm
+        .peek_session(&target.to_string())
+        .await
+        .expect("receiver session read")
+        .expect("receiver session");
+    assert!(
+        accepted.unacked_stanzas[0].ingress_receipts.is_empty(),
+        "legacy replay carries no manifest frame receipt"
+    );
+    assert_eq!(
+        accepted.unacked_stanzas[0].original_receipt_at,
+        decision
+            .route_progress
+            .iter()
+            .find_map(|progress| progress.received_at)
+            .expect("canonical receipt time"),
+        "legacy delivery preserves the original XEP-0203 replay timestamp"
+    );
+    assert_eq!(
+        fixture.count("sm_ingress_appends").await,
+        0,
+        "receiver has no canonical child key"
+    );
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending manifest")
+    );
+    deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    let _ = relay_scope(
+        Some(&receiver),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        ),
+    )
+    .await;
+    assert_eq!(
+        *receiver.delivered_sequences.lock().await,
+        vec![1],
+        "maintenance cannot resend legacy wire"
+    );
+    assert_eq!(queue_len(&sm, &target).await, 1);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending() {
+    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::server::routes::interpret::{
+        effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
+    };
+    let fixture = IngressFixture::sqlite().await;
+    let mut submission = room_submission(&fixture);
+    let IngressEffectIntent::RouteMucGroupchat {
+        occupants,
+        route_identity,
+        ..
+    } = &submission.plan.intents[0]
+    else {
+        panic!("room route");
+    };
+    let target = occupants
+        .iter()
+        .find(|target| *target != &submission.sender)
+        .expect("captured peer")
+        .clone();
+    let identity = route_identity.clone();
+    let mut copy = submission
+        .plan
+        .room_canonical_message
+        .as_ref()
+        .expect("canonical")
+        .as_ref()
+        .clone();
+    copy.to = Some(target.clone().into());
+    let stanza = Stanza::Message(copy);
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+            route_identity: Some(identity),
+            jid: target.clone(),
+            stanza: Box::new(stanza.clone()),
+            kind: PeerDeliveryKind::PeerStanza,
+            call_setup: None,
+        }),
+    ))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("sealed peer route");
+    let connections = waddle_xmpp::registry::ConnectionRegistry::new();
+    let mut deps = Deps::new(&connections, "example.com");
+    let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    {
+        let delivered = wire.lock().expect("wire deliveries");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].0, target);
+        let (Stanza::Message(offered), Stanza::Message(expected)) = (&delivered[0].1, &stanza)
+        else {
+            panic!("typed room wire message");
+        };
+        assert_eq!(offered, expected);
+    }
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert_eq!(wire.lock().expect("wire deliveries").len(), 1);
+    fixture.close().await;
 }

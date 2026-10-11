@@ -96,10 +96,6 @@ pub struct InterpretOutcome {
     /// connection-local timer wheel. Only the transport adapter owns a
     /// clock; the interpreter just relays the typed commands.
     pub timer_commands: Vec<TimerCommand>,
-    /// Batch-local reason a groupchat retry was swallowed. The room
-    /// dispatcher consumes this marker to avoid re-running extension
-    /// observers for a delivery whose original attempt already ran them.
-    pub retry_suppression: Option<GroupchatRetrySuppression>,
     /// XEP-0359 archive-id rewrites accumulated while interpreting the
     /// batch. The interpreter
     /// already applies these to later events in the same batch; the
@@ -112,11 +108,6 @@ pub struct InterpretOutcome {
     /// to capture room fanout only when routing actually survived later
     /// archive/subject suppression.
     pub(crate) route_to_connection_events: u32,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum GroupchatRetrySuppression {
-    TombstoneSwallowed,
 }
 
 /// Typed timer instruction relayed from the state machine to the
@@ -225,6 +216,9 @@ pub struct Deps<'a> {
     pub(crate) ingress_delivery_stop: Option<tokio_util::sync::CancellationToken>,
     /// Resources whose planned frames are consumed by an extension host.
     pub host_sender: Option<HostOwnedResources>,
+    /// Actual nested consumer, available only in its authority-owned host continuation.
+    pub(crate) host_copy_consumer:
+        Option<std::sync::Arc<crate::ingress::nested::HostFrameConsumer>>,
     /// Identity scoped to the current direct-routing invocation.
     pub direct_route_identity: Option<waddle_xmpp::ingress::EffectMessageIdentity>,
     pub effects: &'a dyn super::effects::EffectSink,
@@ -375,6 +369,7 @@ impl<'a> Deps<'a> {
             ingress_effect_capture: None,
             direct_route_identity: None,
             host_sender: None,
+            host_copy_consumer: None,
             ingress_append_context: None,
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,
@@ -420,6 +415,7 @@ impl<'a> Deps<'a> {
             ingress_effect_capture: None,
             direct_route_identity: None,
             host_sender: None,
+            host_copy_consumer: None,
             ingress_append_context: None,
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,
@@ -457,6 +453,7 @@ impl<'a> Deps<'a> {
             ingress_effect_capture: None,
             direct_route_identity: None,
             host_sender: None,
+            host_copy_consumer: None,
             ingress_append_context: None,
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,
@@ -492,6 +489,7 @@ impl<'a> Deps<'a> {
             ingress_effect_capture: None,
             direct_route_identity: None,
             host_sender: None,
+            host_copy_consumer: None,
             ingress_append_context: None,
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,

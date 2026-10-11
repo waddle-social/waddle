@@ -85,13 +85,13 @@ impl OrderedRelayDeliveryBridge {
                         if kind == DeliveryKind::DirectFrame {
                             RemoteResourceRouteTarget::ProcessedDirectMessage {
                                 target: target.clone(), stanza: RemoteStanza(stanza.clone()),
-                                ingress_append: crate::ingress::identity::IngressAppendObligationRef::for_message(ingress_append_context.as_ref(), stanza),
+                                ingress_append: crate::ingress::identity::IngressAppendObligationRef::for_remote_message(ingress_append_context.as_ref(), stanza),
                             }
                         } else {
                         RemoteResourceRouteTarget::FullJid {
                             target: target.clone(),
                             stanza: RemoteStanza(stanza.clone()),
-                            ingress_append: match (stanza, ingress_append_context.as_ref()) {
+                            ingress_append: match (stanza, ingress_append_context.as_ref().filter(|context| context.authority.permits_remote_obligation())) {
                                 (Stanza::Message(message), Some(context)) => message
                                     .from
                                     .as_ref()
@@ -104,7 +104,11 @@ impl OrderedRelayDeliveryBridge {
                                 _ => None,
                             },
 
-                            received_at: if ingress_append_context.is_none() { received_at } else { None },
+                            received_at: if ingress_append_context.as_ref().is_some_and(|context| context.authority.permits_remote_obligation()) {
+                                None
+                            } else {
+                                received_at.or_else(|| ingress_append_context.as_ref().and_then(|context| context.received_at))
+                            },
 } },
                         stanza,
                         origin,
@@ -152,10 +156,17 @@ impl OrderedRelayDeliveryBridge {
                 ..
             } = &mut payload
             {
-                *timestamp = if ingress_append_context.is_none() {
-                    received_at
-                } else {
+                *timestamp = if ingress_append_context
+                    .as_ref()
+                    .is_some_and(|context| context.authority.permits_remote_obligation())
+                {
                     None
+                } else {
+                    received_at.or_else(|| {
+                        ingress_append_context
+                            .as_ref()
+                            .and_then(|context| context.received_at)
+                    })
                 };
             }
             let is_iq = matches!(stanza, Stanza::Iq(_));

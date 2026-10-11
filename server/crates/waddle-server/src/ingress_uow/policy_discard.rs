@@ -19,6 +19,34 @@ impl PolicyDiscardReason {
 }
 
 impl EffectReceiptRepository {
+    /// Policy disposition is distinct from proven delivery. A successful receipt
+    /// with no matching reason cannot authorize a transient initial reflection.
+    pub(crate) async fn contains_policy_discard(
+        tx: &mut IngressUowTransaction<'_>,
+        key: MessageKey,
+        receipt: &EffectReceiptKey,
+        reason: PolicyDiscardReason,
+    ) -> Result<bool, IngressUowError> {
+        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
+            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ?::uuid AND kind = ? AND semantic_identity_hash = ? AND policy_discard_reason = ?"
+        } else {
+            "SELECT 1 FROM ingress_effect_receipts WHERE message_key = ? AND kind = ? AND semantic_identity_hash = ? AND policy_discard_reason = ?"
+        };
+        let mut rows = tx
+            .transaction_mut()
+            .query(
+                sql,
+                crate::db_params![
+                    key.to_storage().to_string(),
+                    receipt.kind.to_storage(),
+                    receipt.semantic_identity_hash.to_vec(),
+                    reason.as_storage(),
+                ],
+            )
+            .await?;
+        Ok(rows.next().await?.is_some())
+    }
+
     /// Caller holds canonical authority. An existing receipt always wins:
     /// later policy cannot relabel an earlier completed/custodied obligation.
     pub(crate) async fn record_policy_discard(

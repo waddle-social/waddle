@@ -139,6 +139,26 @@ async fn wire_and_receipts(f: IngressFixture) {
         .expect("intents");
     assert!(recorded.iter().any(|i| matches!(i, IngressEffectIntent::ArchiveAuthoritative { archive, ordinal: Some(_), .. } if archive == &fixture.room)));
     assert!(recorded.iter().any(|i| matches!(i, IngressEffectIntent::RouteMucGroupchat { room, occupants, reflection, .. } if room == &fixture.room && occupants.contains(&"romeo@example.com/web".parse().expect("live")) && reflection == &fixture.invocation().actor_jid)));
+    let host = fixture.invocation().actor_jid;
+    let reflection = recorded
+        .iter()
+        .find(|intent| {
+            matches!(intent,
+        IngressEffectIntent::RouteDirect { fanout, .. } if fanout.as_slice() == [host.clone()])
+        })
+        .expect("frozen host reflection child");
+    let host_obligation = crate::ingress_uow::SendObligation {
+        message: key,
+        receipt: crate::ingress::receipt_key(reflection).expect("host receipt"),
+        recipient: host,
+    };
+    assert_eq!(
+        crate::ingress_uow::SendAttemptRepository::status(&mut tx, &host_obligation)
+            .await
+            .expect("host acceptance"),
+        Some(crate::ingress_uow::SendAttemptStatus::Completed),
+        "the actual nested host consumer durably accepts its child before receipt completion"
+    );
     assert!(EffectReceiptRepository::receipts_complete(&mut tx, key)
         .await
         .expect("full receipts including host reflection"));

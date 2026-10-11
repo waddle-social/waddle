@@ -115,9 +115,16 @@ async fn canonical_owner(fixture: IngressFixture, relayed: bool, available: bool
         #[cfg(feature = "clustering")]
         let room_fence = fixture.room_fence(&room).await;
         #[cfg(feature = "clustering")]
-        if let effects::RoomExecutionPath::Local { fence, .. } = &mut submission.plan.room_execution
+        if let effects::RoomExecutionPath::Local {
+            fence,
+            manifest_snapshot,
+            ..
+        } = &mut submission.plan.room_execution
         {
             *fence = effects::room::RoomFenceRequirement::Guarded(room_fence.clone());
+            // Exercise the legacy owner fence with this ephemeral actor; a
+            // guarded sealed snapshot requires a persisted room lifecycle.
+            *manifest_snapshot = None;
         }
         #[cfg(feature = "clustering")]
         for planned in &mut submission.plan.plan {

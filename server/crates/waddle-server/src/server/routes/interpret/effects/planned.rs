@@ -62,6 +62,8 @@ pub struct PlannedEffect {
     /// Replay may use this route for a separate frozen occupant repair; the
     /// frame itself never owns that delivery's progress.
     pub reflection_delivery: Option<Box<ExternalDeliveryEffect>>,
+    /// Exact nested host consumer selected during planning, independent of wire frames.
+    pub(crate) host_frame_target: Option<jid::FullJid>,
     pub dependencies: Vec<PlanEffectDependency>,
     /// Duplicate policy. A sender reply can survive a duplicate and still be
     /// swallowed by a request tombstone, so these policies are independent.
@@ -74,6 +76,7 @@ impl PlannedEffect {
         Self {
             effect,
             reflection_delivery: None,
+            host_frame_target: None,
             dependencies: Vec::new(),
             suppression: PlanSuppressionPolicy::Always,
             tombstone_suppression: PlanSuppressionPolicy::TombstoneSwallowed,
@@ -98,6 +101,8 @@ pub enum RoomExecutionPath {
         /// Single-node rooms have no distributed claim; never manufacture one.
         fence: RoomFenceRequirement,
         snapshot_generation: u64,
+        /// Frozen room authority and recipient occupancy guards captured in Phase A.
+        manifest_snapshot: Option<crate::ingress::room_manifest::RoomManifestSnapshot>,
     },
     Remote {
         room: BareJid,

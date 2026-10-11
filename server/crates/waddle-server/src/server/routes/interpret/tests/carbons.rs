@@ -363,6 +363,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         ingress_effect_capture: None,
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
@@ -429,6 +430,7 @@ async fn detached_carbon_delivery_still_queues_with_ingress_capture() {
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
     };
 
@@ -495,6 +497,7 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_both_queue() {
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
     };
 

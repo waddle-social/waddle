@@ -296,6 +296,7 @@ async fn ingress_room_generation_stale_postgres() {
         room,
         fence: RoomFenceRequirement::Guarded(fence),
         snapshot_generation: 17,
+        manifest_snapshot: None,
     };
     let failure = commit_submission(&fixture.uow, &submission, 5)
         .await
@@ -368,6 +369,7 @@ async fn local_room_commit(
         room,
         fence,
         snapshot_generation: 999,
+        manifest_snapshot: None,
     };
     let first = commit_submission(&fixture.uow, &submission, 5)
         .await

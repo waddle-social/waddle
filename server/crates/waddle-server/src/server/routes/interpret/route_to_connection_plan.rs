@@ -195,12 +195,12 @@ pub(super) async fn deliver_full(
         .as_ref()
         .is_some_and(|host| host.sender() == target)
     {
-        deps.effects
-            .record(super::super::effects::PlannedEffect::new(
-                super::super::effects::Effect::External(
-                    super::super::effects::ExternalEffect::Frame(Box::new(stanza.clone())),
-                ),
+        let mut planned =
+            super::super::effects::PlannedEffect::new(super::super::effects::Effect::External(
+                super::super::effects::ExternalEffect::Frame(Box::new(stanza.clone())),
             ));
+        planned.host_frame_target = Some(target.clone());
+        deps.effects.record(planned);
         return FullJidDeliveryOutcome::Delivered;
     }
     if deps.owns_host_resource(target) {

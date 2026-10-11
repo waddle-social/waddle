@@ -44,6 +44,7 @@ impl IngressAuthority {
         .await
     }
 
+    #[cfg(any(test, feature = "clustering"))]
     pub(crate) async fn accept_live_delivery(
         &self,
         context: &SmIngressAppendContext,
@@ -58,9 +59,47 @@ impl IngressAuthority {
                 context,
                 target,
                 stanza,
-                enqueue,
+                || async { Ok(enqueue()) },
+                false,
                 || self.check_live_admission(*admission),
             ))
+            .await
+        }))
+        .await;
+        report_outcome(result, context, target)
+    }
+
+    pub(crate) async fn accept_live_delivery_guarded(
+        &self,
+        context: &SmIngressAppendContext,
+        target: &FullJid,
+        stanza: &Stanza,
+        registry: Option<
+            &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+        >,
+        enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
+    ) -> FullJidDeliveryOutcome {
+        let stopped = self.force_stop.clone();
+        let cancelled = self.cancellation.clone();
+        let enqueue = move || {
+            if stopped.is_cancelled() || cancelled.is_cancelled() {
+                BroadcastOutcome::NotConnected
+            } else {
+                enqueue()
+            }
+        };
+        let result = bounded(Box::pin(async {
+            let admission = self.admission.read().await;
+            self.check_live_admission(*admission)?;
+            accept_live_delivery_guarded_inner(
+                &self.uow,
+                context,
+                target,
+                stanza,
+                registry,
+                enqueue,
+                || self.check_live_admission(*admission),
+            )
             .await
         }))
         .await;
@@ -97,26 +136,37 @@ pub(crate) async fn live_delivery_status(
     .await
 }
 
-/// The caller captures a socket-owner witness before entering this method.
-/// `enqueue` synchronously revalidates that witness without network waits or
-/// replacement socket lookup. Execution-owned UOW callers retain their parent
-/// execution admission and its forced-stop token; node rotation is fenced here
-/// at the actual sink. A stop check after database awaits prevents an admitted
-/// but stalled execution from enqueueing beyond its shutdown deadline.
-pub(crate) async fn accept_live_delivery(
+/// The production socket boundary supplies an owned enqueue witness so a room
+/// actor can validate the frozen occupancy and invoke it synchronously.
+pub(crate) async fn accept_live_delivery_guarded(
     uow: &IngressUnitOfWork,
     stop: Option<&CancellationToken>,
     context: &SmIngressAppendContext,
     target: &FullJid,
     stanza: &Stanza,
-    enqueue: impl FnOnce() -> BroadcastOutcome,
+    registry: Option<
+        &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    >,
+    enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
 ) -> FullJidDeliveryOutcome {
+    let stopped = stop.cloned();
+    let enqueue = move || {
+        if stopped
+            .as_ref()
+            .is_some_and(CancellationToken::is_cancelled)
+        {
+            BroadcastOutcome::NotConnected
+        } else {
+            enqueue()
+        }
+    };
     report_outcome(
-        bounded(Box::pin(accept_live_delivery_inner(
+        bounded(Box::pin(accept_live_delivery_guarded_inner(
             uow,
             context,
             target,
             stanza,
+            registry,
             enqueue,
             || check_stop(stop),
         )))
@@ -124,6 +174,46 @@ pub(crate) async fn accept_live_delivery(
         context,
         target,
     )
+}
+
+async fn accept_live_delivery_guarded_inner(
+    uow: &IngressUnitOfWork,
+    context: &SmIngressAppendContext,
+    target: &FullJid,
+    stanza: &Stanza,
+    registry: Option<
+        &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    >,
+    enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
+    check_admission: impl Fn() -> Result<(), IngressUowError>,
+) -> Result<FullJidDeliveryOutcome, IngressUowError> {
+    check_admission()?;
+    let manifest = super::room_manifest_replay::load(uow, context, target, stanza).await?;
+    accept_live_delivery_inner(
+        uow,
+        context,
+        target,
+        stanza,
+        || async {
+            match manifest {
+                Some(manifest) => {
+                    super::room_manifest_replay::enqueue(
+                        &manifest,
+                        uow,
+                        registry,
+                        &context.receipt,
+                        target,
+                        enqueue,
+                    )
+                    .await
+                }
+                None => Ok(enqueue()),
+            }
+        },
+        true,
+        check_admission,
+    )
+    .await
 }
 
 fn check_stop(stop: Option<&CancellationToken>) -> Result<(), IngressUowError> {
@@ -156,14 +246,19 @@ async fn transaction(
         .await
 }
 
-async fn accept_live_delivery_inner(
+async fn accept_live_delivery_inner<F, Fut>(
     uow: &IngressUnitOfWork,
     context: &SmIngressAppendContext,
     target: &FullJid,
     stanza: &Stanza,
-    enqueue: impl FnOnce() -> BroadcastOutcome,
+    enqueue: F,
+    sealed_sink_guarded: bool,
     check_admission: impl Fn() -> Result<(), IngressUowError>,
-) -> Result<FullJidDeliveryOutcome, IngressUowError> {
+) -> Result<FullJidDeliveryOutcome, IngressUowError>
+where
+    F: FnOnce() -> Fut,
+    Fut: Future<Output = Result<BroadcastOutcome, IngressUowError>>,
+{
     check_admission()?;
     let owner = match uow.fencing() {
         #[cfg(feature = "clustering")]
@@ -191,6 +286,13 @@ async fn accept_live_delivery_inner(
     let obligation = obligation(context, target);
     let mut tx = transaction(uow).await?;
     let intents = authorize_resource(&mut tx, context, target).await?;
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, context.message_key)
+        .await?
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+    super::room_manifest_replay::validate_child(&envelope, &context.receipt, target, stanza)?;
+    if envelope.room_manifest().is_some() && !sealed_sink_guarded {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
     authorize_direct_stanza(&mut tx, context, target, stanza, &intents).await?;
     if let Some(status) = delivery_status(&mut tx, &obligation).await? {
         tx.commit().await?;
@@ -203,7 +305,7 @@ async fn accept_live_delivery_inner(
         SendClaim::Acquired(lease) => lease,
         SendClaim::Completed => return Ok(FullJidDeliveryOutcome::Delivered),
         SendClaim::Busy | SendClaim::Ambiguous => {
-            return Ok(FullJidDeliveryOutcome::MaybeCommitted)
+            return Ok(FullJidDeliveryOutcome::MaybeCommitted);
         }
     };
     #[cfg(test)]
@@ -212,6 +314,11 @@ async fn accept_live_delivery_inner(
     // sink call. A previously captured identity is not itself authority.
     #[cfg(feature = "clustering")]
     let _node_guard = match uow.fencing() {
+        IngressFencing::Clustered(_)
+            if sealed_sink_guarded && envelope.room_manifest().is_some() =>
+        {
+            None
+        }
         IngressFencing::Clustered(identity) => Some(
             identity
                 .guard_if_current(&owner)
@@ -236,7 +343,7 @@ async fn accept_live_delivery_inner(
     #[cfg(test)]
     test_hooks::after_start(context.message_key, target).await;
     check_admission()?;
-    let outcome = enqueue();
+    let outcome = enqueue().await?;
     // No transaction or canonical lock is held while touching the sink.
     // Failed completion leaves Started, excluding retry until its recovery deadline.
     let mut tx = transaction(uow).await?;
@@ -282,6 +389,15 @@ async fn authorize_resource(
     // Loading intents takes the canonical lock, protecting subsequent receipt,
     // custody, claim and progress reads against competing writers.
     let intents = EffectIntentRepository::load(tx, context.message_key).await?;
+    let envelope = CanonicalMessageRepository::load_envelope(tx, context.message_key)
+        .await?
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+    if envelope.room_manifest().is_some_and(|manifest| {
+        manifest.message_key() != context.message_key
+            || !manifest.contains(&context.receipt, Some(target))
+    }) {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
     let authorized = intents.iter().any(|intent| {
         if super::receipt_key(intent).ok().as_ref() != Some(&context.receipt) {
             return false;

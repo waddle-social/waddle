@@ -81,6 +81,9 @@ pub(crate) enum AppendAuthority {
     /// Minted by this node's own ingress commit, or already verified against the
     /// canonical row.
     Verified,
+    /// Local sealed-room authority retained for local owner-refresh fallback.
+    /// Legacy remote wire delivery must not export its canonical append key.
+    LocalOnly,
     /// A relayed claim that passed the synchronous checks only (sender claim and
     /// stanza binding). The canonical read runs on the first
     /// [`AppendAuthority::ensure_verified`], once per context clone-tree that
@@ -95,6 +98,7 @@ impl std::fmt::Debug for AppendAuthority {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Verified => f.write_str("Verified"),
+            Self::LocalOnly => f.write_str("LocalOnly"),
             #[cfg(feature = "clustering")]
             Self::Deferred(deferred) => f
                 .debug_struct("Deferred")
@@ -129,6 +133,11 @@ impl DeferredAppendAuthority {
 }
 
 impl AppendAuthority {
+    #[cfg(feature = "clustering")]
+    pub(crate) fn permits_remote_obligation(&self) -> bool {
+        !matches!(self, Self::LocalOnly)
+    }
+
     /// Resolve the canonical authority before the first action that trusts it.
     /// A deferred claim's completed read is cached, and its failure recorded
     /// once (see [`AppendAuthority::Deferred`] for cancellation).
@@ -137,7 +146,7 @@ impl AppendAuthority {
         stanza: &Stanza,
     ) -> Result<(), AppendAuthorityRejection> {
         match self {
-            Self::Verified => {
+            Self::Verified | Self::LocalOnly => {
                 // Only a deferred claim inspects the stanza it is bound to.
                 let _ = stanza;
                 Ok(())

@@ -1506,10 +1506,10 @@ pub(crate) async fn deliver_ordered_local_copy(
         };
         match readiness {
             Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
-                return Some(FullJidDeliveryOutcome::Delivered)
+                return Some(FullJidDeliveryOutcome::Delivered);
             }
             Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
-                return Some(FullJidDeliveryOutcome::MaybeCommitted)
+                return Some(FullJidDeliveryOutcome::MaybeCommitted);
             }
             Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
         }
@@ -1519,14 +1519,16 @@ pub(crate) async fn deliver_ordered_local_copy(
     outbound.ingress_append =
         crate::ingress::identity::IngressAppendObligationRef::for_message(Some(context), stanza)
             .map(|obligation| obligation.into_relayed_for(target.clone()));
-    let enqueue = || {
-        let outcome = deps.connection_registry.try_send_outbound_if_owner(
-            target,
-            &entry.carbons_enabled,
-            outbound,
-        );
+    let socket_enqueue = deps.connection_registry.capture_owned_enqueue_if_owner(
+        target.clone(),
+        entry.carbons_enabled.clone(),
+        outbound,
+    );
+    let delivered_kind = waddle_xmpp::telemetry::messages::delivered_message_kind(stanza);
+    let enqueue = move || {
+        let outcome = socket_enqueue();
         if outcome == waddle_xmpp::registry::BroadcastOutcome::Delivered {
-            if let Some(kind) = waddle_xmpp::telemetry::messages::delivered_message_kind(stanza) {
+            if let Some(kind) = delivered_kind {
                 waddle_xmpp::telemetry::messages::record_delivered_message(kind);
             }
         }
@@ -1534,19 +1536,20 @@ pub(crate) async fn deliver_ordered_local_copy(
     };
     let outcome = match (&deps.ingress_delivery_uow, authority) {
         (Some(uow), _) => {
-            crate::ingress::live_delivery::accept_live_delivery(
+            crate::ingress::live_delivery::accept_live_delivery_guarded(
                 uow,
                 deps.ingress_delivery_stop.as_ref(),
                 context,
                 target,
                 stanza,
+                deps.room_registry,
                 enqueue,
             )
             .await
         }
         (None, Some(authority)) => {
             authority
-                .accept_live_delivery(context, target, stanza, enqueue)
+                .accept_live_delivery_guarded(context, target, stanza, deps.room_registry, enqueue)
                 .await
         }
         (None, None) => FullJidDeliveryOutcome::MaybeCommitted,

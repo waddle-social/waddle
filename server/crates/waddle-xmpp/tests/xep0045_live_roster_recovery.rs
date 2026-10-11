@@ -142,6 +142,7 @@ async fn recovered_bans_and_revocations_own_unavailable_presence_and_sfu_removal
                 room: source,
                 occupancy_revision: 7,
                 live_roster_restore_attempt: AdminMutationId::generate(),
+                occupancy_incarnation: waddle_xmpp::muc::AdminMutationId::generate(),
                 departures: Default::default(),
                 pending_admin_projection: None,
                 admin_mutation_resolutions: Vec::new(),

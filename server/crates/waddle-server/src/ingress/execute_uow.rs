@@ -52,6 +52,11 @@ pub(crate) use detached::{
 
 pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
     match effect {
+        ExternalEffect::Frame(stanza) => {
+            matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat
+                && waddle_xmpp::xep::xep0334::should_skip_storage(message))
+        }
         ExternalEffect::Direct(
             ExternalDirectEffect::NotificationActivity { .. }
             | ExternalDirectEffect::LinkPreviewRefs { .. }
@@ -93,6 +98,54 @@ pub(super) async fn execute_with_uow(
     deps: &Deps<'_>,
     _deadline: tokio::time::Instant,
 ) -> Option<EffectOutcome> {
+    if let ExternalEffect::Frame(stanza) = effect {
+        if owns(effect, &decision.route_progress) {
+            return match super::room_manifest_replay::release_transient_reflection(
+                uow, decision, index, stanza, deps,
+            )
+            .await
+            {
+                Ok(Some(frame)) => Some(EffectOutcome::Frames(vec![frame])),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::debug!(%error, "transient room reflection authority unavailable");
+                    Some(EffectOutcome::Unavailable)
+                }
+            };
+        }
+    }
+    // A sealed reflection uses the ordinary direct child, including when its
+    // captured plan selected relay delivery. Legacy relays keep their old arm.
+    if let ExternalEffect::Delivery(
+        delivery @ ExternalDeliveryEffect::RelayFullJid { stanza, .. },
+    ) = effect
+    {
+        if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat)
+            && !owns(effect, &decision.route_progress)
+            && decision.route_progress.iter().any(|progress| {
+                progress.is_direct()
+                    && progress.matches(effect)
+                    && decision.external_receipts[index].contains(&progress.receipt)
+            })
+        {
+            let Some(key) = decision.message_key else {
+                return Some(EffectOutcome::Unavailable);
+            };
+            let (envelope, _) = match crate::ingress_uow::CarbonReceiptRepository::load_authority(
+                uow.database(),
+                key,
+            )
+            .await
+            {
+                Ok(authority) => authority,
+                Err(_) => return Some(EffectOutcome::Unavailable),
+            };
+            if envelope.room_manifest().is_some() {
+                return Some(detached::execute(uow, decision, index, delivery, deps).await);
+            }
+        }
+    }
     match effect {
         ExternalEffect::Direct(
             ExternalDirectEffect::NotificationActivity { .. }

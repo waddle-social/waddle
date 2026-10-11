@@ -40,7 +40,7 @@ pub use state::{LastActivityState, PresenceState};
 pub struct ConnectionRegistry {
     bind_slots: Arc<binding::BindSlots>,
     /// Map of full JID to connection entry (includes sender and carbons status)
-    connections: DashMap<FullJid, ConnectionEntry>,
+    connections: Arc<DashMap<FullJid, ConnectionEntry>>,
     /// Pending subscription stanzas for offline users (RFC 6121).
     pending_subscription_stanzas: DashMap<BareJid, Vec<Stanza>>,
     /// Per-resource presence state (show/status/priority) for probe responses.
@@ -66,7 +66,7 @@ impl ConnectionRegistry {
         info!("Creating connection registry");
         Self {
             bind_slots: Arc::new(DashMap::new()),
-            connections: DashMap::new(),
+            connections: Arc::new(DashMap::new()),
             pending_subscription_stanzas: DashMap::new(),
             presence_states: DashMap::new(),
             last_activity: DashMap::new(),

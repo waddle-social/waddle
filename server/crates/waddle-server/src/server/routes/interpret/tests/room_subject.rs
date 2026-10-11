@@ -456,6 +456,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         ingress_effect_capture: None,
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };
@@ -551,6 +552,7 @@ async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
     };
     let sender: jid::FullJid = "alice@example.com/web".parse().expect("sender full jid");
@@ -917,6 +919,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
         ingress_effect_capture: None,
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
         effects: &crate::server::routes::interpret::effects::ImmediateSink,
     };

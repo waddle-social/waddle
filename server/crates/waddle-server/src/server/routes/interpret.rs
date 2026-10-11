@@ -259,8 +259,8 @@ pub(crate) struct NotificationRecoverySweepOutcome {
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;
 pub use deps::{
-    Deps, GroupchatRetrySuppression, HostOwnedResources, InterpretOutcome, OrderedRelayRouteOrigin,
-    SmIngressAppendContext, TimerCommand,
+    Deps, HostOwnedResources, InterpretOutcome, OrderedRelayRouteOrigin, SmIngressAppendContext,
+    TimerCommand,
 };
 pub(crate) use groupchat_archive::{project_groupchat_archive, push_inbox_update};
 pub(crate) use notification_activity_ingest::{
@@ -524,7 +524,6 @@ async fn interpret_with_depth(
                     // Retry suppression is local to the nested room batch;
                     // dispatch_to_room consumes it before returning so it
                     // cannot suppress unrelated siblings in this outer batch.
-                    retry_suppression: _,
                     archive_id_rewrites: nested_rewrites,
                     route_to_connection_events: _,
                 } = nested;
@@ -633,8 +632,6 @@ async fn interpret_with_depth(
                         debug!(
                             "ArchiveGroupchat: tombstone hit; silently suppressing remaining dispatch batch"
                         );
-                        outcome.retry_suppression =
-                            Some(GroupchatRetrySuppression::TombstoneSwallowed);
                         batch_suppression = BatchSuppression::TombstoneSwallow;
                     }
                     ArchiveGroupchatEventOutcome::OwnershipLost(bounce) => {

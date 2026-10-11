@@ -4,7 +4,9 @@ use waddle_xmpp::ingress::MessageKey;
 
 use super::{IngressUowError, IngressUowTransaction};
 use crate::{
-    db::DatabaseDriver, ingress::decision::EffectReceiptKey, ingress_substrate::EffectReceiptKind,
+    db::DatabaseDriver,
+    ingress::{decision::EffectReceiptKey, room_manifest::RoomManifestChildDisposition},
+    ingress_substrate::EffectReceiptKind,
 };
 
 pub(crate) struct DeliveryProgressRepository;
@@ -41,11 +43,19 @@ impl DeliveryProgressRepository {
             );
         }
         drop(rows);
+        for (policy_receipt, target) in Self::no_transport_children(tx, message).await? {
+            if &policy_receipt == receipt {
+                recipients.push(target);
+            }
+        }
+        recipients.sort();
+        recipients.dedup();
         Ok(recipients)
     }
 
-    /// Every recorded resource for the row, grouped by delivery obligation. One
-    /// query per row: a lost groupchat row carries one route per inbox owner,
+    /// Settled resources for the row, grouped by delivery obligation, including
+    /// sealed room-host children that require no transport. Bulk reads avoid
+    /// a query per route: a lost groupchat row carries one route per inbox owner,
     /// and a per-route read would spend the recovery row deadline before any
     /// recoverable work on it could run.
     pub(crate) async fn load_all(
@@ -83,7 +93,48 @@ impl DeliveryProgressRepository {
             }
         }
         drop(rows);
+        for (receipt, target) in Self::no_transport_children(tx, message).await? {
+            match progress.iter_mut().find(|(stored, _)| *stored == receipt) {
+                Some((_, recipients)) => recipients.push(target),
+                None => progress.push((receipt, vec![target])),
+            }
+        }
+        progress.sort_by_key(|(receipt, _)| {
+            (receipt.kind.to_storage(), receipt.semantic_identity_hash)
+        });
+        for (_, recipients) in &mut progress {
+            recipients.sort();
+            recipients.dedup();
+        }
         Ok(progress)
+    }
+
+    /// Frozen room-host policy settles only these logical children. It never
+    /// fabricates transport delivery rows, send completion, or aggregate receipts.
+    async fn no_transport_children(
+        tx: &mut IngressUowTransaction<'_>,
+        message: MessageKey,
+    ) -> Result<Vec<(EffectReceiptKey, FullJid)>, IngressUowError> {
+        let Some(envelope) = super::CanonicalMessageRepository::load_envelope(tx, message).await?
+        else {
+            return Ok(Vec::new());
+        };
+        let Some(manifest) = envelope.room_manifest() else {
+            return Ok(Vec::new());
+        };
+        Ok(manifest
+            .children
+            .iter()
+            .filter(|child| {
+                child.disposition == RoomManifestChildDisposition::HostRoomCopyRequiresNoTransport
+            })
+            .filter_map(|child| {
+                child
+                    .target
+                    .as_ref()
+                    .map(|target| (child.receipt.clone(), target.clone()))
+            })
+            .collect())
     }
 
     pub(crate) async fn record(
@@ -114,5 +165,186 @@ impl DeliveryProgressRepository {
                 .await?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        config::LineageConfig,
+        db::{Database, MigrationRunner},
+        ingress::{FrozenRoomManifest, RoomManifestSnapshot},
+        ingress_substrate::MessageEnvelope,
+        ingress_uow::{
+            CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
+            IngressUnitOfWork, SendAttemptRepository, SendObligation,
+        },
+    };
+    use waddle_xmpp::{
+        ingress::{EffectMessageIdentity, EntityGeneration, IngressEffectIntent, SemanticDigest},
+        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
+    };
+    use waddle_xmpp_core::xep0359::StanzaId;
+    use xmpp_parsers::message::Message;
+
+    #[tokio::test]
+    async fn xep0045_frozen_host_policy_settles_only_its_child_without_transport_or_aggregate_receipts(
+    ) {
+        let db = Database::in_memory("host-room-progress")
+            .await
+            .expect("database");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        let uow = IngressUnitOfWork::open(
+            db,
+            LineageConfig {
+                deployment_uuid: None,
+                action: None,
+            },
+        )
+        .expect("uow");
+        let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
+        let sender: FullJid = "sender@example.test/phone".parse().expect("sender");
+        let human: FullJid = "human@example.test/phone".parse().expect("human");
+        let bot: FullJid = "bot@example.test/host".parse().expect("bot");
+        let key = MessageKey::new();
+        let stamp = StanzaId::new("sealed", room.clone().into());
+        let route = IngressEffectIntent::RouteMucGroupchat {
+            room: room.clone(),
+            occupants: vec![sender.clone(), human.clone(), bot.clone()],
+            reflection: sender.clone(),
+            room_generation: EntityGeneration::INITIAL,
+            route_identity: EffectMessageIdentity::stanza(stamp.clone()),
+        };
+        let receipt = crate::ingress::receipt_key(&route).expect("receipt");
+        let mut snapshot = RoomManifestSnapshot {
+            coordinates: None,
+            occupancy_incarnation: AdminMutationId::generate(),
+            occupants: [sender.clone(), human.clone(), bot.clone()]
+                .into_iter()
+                .enumerate()
+                .map(|(index, target)| (target, OccupancyWatermark::from_revision(index as u64)))
+                .collect(),
+            host_no_transport: vec![bot.clone(), sender.clone()],
+        };
+        let manifest = FrozenRoomManifest::build(
+            key,
+            room.clone(),
+            stamp.clone(),
+            &snapshot,
+            None,
+            std::slice::from_ref(&route),
+        )
+        .expect("manifest");
+        assert_eq!(
+            manifest
+                .child(&receipt, Some(&sender))
+                .expect("reflection child")
+                .disposition,
+            RoomManifestChildDisposition::Delivery
+        );
+        let mut message = Message::new(Some(room.clone().into()));
+        message.type_ = xmpp_parsers::message::MessageType::Groupchat;
+        message.from = Some(room.with_resource_str("sender").expect("nick").into());
+        waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
+        let envelope = MessageEnvelope::new(message);
+        let mut tx = uow.begin().await.expect("begin acceptance");
+        CanonicalMessageRepository::record_message(
+            &mut tx,
+            key,
+            &SemanticDigest::from_storage(1, [7; 32]).expect("digest"),
+            Some(&envelope),
+        )
+        .await
+        .expect("canonical");
+        EffectIntentRepository::reconcile(&mut tx, key, std::slice::from_ref(&route), false)
+            .await
+            .expect("route authority");
+        CanonicalMessageRepository::record_room_canonical_envelope(
+            &mut tx,
+            key,
+            &envelope.clone().with_room_manifest(manifest).expect("seal"),
+        )
+        .await
+        .expect("store sealed policy");
+        tx.commit().await.expect("acceptance commit");
+        let mut tx = uow.begin().await.expect("read progress");
+        assert_eq!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("logical host progress"),
+            vec![bot.clone()]
+        );
+        assert_eq!(
+            DeliveryProgressRepository::load_all(&mut tx, key)
+                .await
+                .expect("all logical progress"),
+            vec![(receipt.clone(), vec![bot.clone()])]
+        );
+        assert!(
+            SendAttemptRepository::status(
+                &mut tx,
+                &SendObligation {
+                    message: key,
+                    receipt: receipt.clone(),
+                    recipient: bot.clone()
+                }
+            )
+            .await
+            .expect("host send status")
+            .is_none(),
+            "no fabricated host transport acceptance"
+        );
+        assert!(
+            !EffectReceiptRepository::contains(
+                &mut tx,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash
+            )
+            .await
+            .expect("aggregate receipt"),
+            "missing human and reflection remain owed"
+        );
+        let mut rows = tx
+            .transaction_mut()
+            .query(
+                "SELECT COUNT(*) FROM ingress_delivery_receipts WHERE message_key = ?",
+                crate::db_params![key.to_storage().to_string()],
+            )
+            .await
+            .expect("physical delivery rows");
+        let count: i64 = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("count row")
+            .get(0)
+            .expect("count");
+        assert_eq!(
+            count, 0,
+            "policy is envelope metadata, never a fake delivery row"
+        );
+        drop(rows);
+        snapshot.host_no_transport.clear();
+        let changed = FrozenRoomManifest::build(key, room, stamp, &snapshot, None, &[route])
+            .expect("new host configuration");
+        assert!(
+            CanonicalMessageRepository::record_room_canonical_envelope(
+                &mut tx,
+                key,
+                &envelope.with_room_manifest(changed).expect("new snapshot")
+            )
+            .await
+            .is_err(),
+            "later host configuration cannot rewrite original policy"
+        );
+        assert_eq!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("policy unchanged"),
+            vec![bot]
+        );
+        tx.commit().await.expect("read commit");
     }
 }

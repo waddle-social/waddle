@@ -27,6 +27,13 @@ use crate::ingress::append_authority::AppendAuthority;
 #[path = "execute_dependencies.rs"]
 mod dependencies;
 
+pub(super) fn supplies_dependency(
+    effect: &ExternalEffect,
+    dependency: &crate::server::routes::interpret::effects::PlanEffectDependency,
+) -> bool {
+    dependencies::produces(effect, dependency)
+}
+
 #[path = "execute_carbon_progress.rs"]
 mod carbon_progress;
 
@@ -500,6 +507,7 @@ pub async fn execute_effects(
             effect,
             ExternalEffect::Delivery(ExternalDeliveryEffect::RelayCarbons { .. } | ExternalDeliveryEffect::Carbons { .. })
                 | ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::ObserveRoomMessage { .. })
+                | ExternalEffect::Room(crate::server::routes::interpret::effects::room::ExternalRoomEffect::RoomActorMutation { .. })
                 | ExternalEffect::Direct(ExternalDirectEffect::DmCallThreadState { .. } | ExternalDirectEffect::NotificationActivity { .. })
         )) && !decision.external_receipts[index].is_empty()
             && decision.external_receipts[index]
