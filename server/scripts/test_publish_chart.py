@@ -7,7 +7,9 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
+import sys
 import tarfile
 import tempfile
 import unittest
@@ -28,7 +30,8 @@ pushes = sum(call[0] == 'push' for call in previous)
 if args[0] == 'package':
     print('Successfully packaged chart and saved it to: ' + os.environ['CHART_FIXTURE_LOCAL'])
 elif args[:2] == ['show', 'chart']:
-    print('name: waddle-server\nversion: 0.4.7')
+    print('name: ' + os.environ.get('CHART_FIXTURE_NAME', 'waddle-server'))
+    print('version: ' + os.environ.get('CHART_FIXTURE_VERSION', '0.4.7'))
 elif args[0] == 'pull':
     if mode == 'pull-denied':
         print('Error: 403 Forbidden: insufficient_scope', file=sys.stderr)
@@ -81,7 +84,8 @@ class PublisherChartTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='publisher-chart-')
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
-        self.local = self.root / 'local.tgz'
+        self.local = self.root / 'target' / 'charts' / 'waddle-server-0.4.7.tgz'
+        self.local.parent.mkdir(parents=True)
         self.remote = self.root / 'remote.tgz'
         archive(self.local, b'kind: Deployment\n', 1)
         archive(self.remote, b'kind: Deployment\n', 2)
@@ -114,7 +118,7 @@ class PublisherChartTests(unittest.TestCase):
         return [call for call in self.commands() if call[0] == 'push']
 
     def commands(self) -> list[list[str]]:
-        return [json.loads(line) for line in self.log.read_text().splitlines()]
+        return [json.loads(line) for line in self.log.read_text().splitlines()] if self.log.exists() else []
 
     def assert_success(self, result: subprocess.CompletedProcess[str]) -> None:
         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -139,7 +143,7 @@ class PublisherChartTests(unittest.TestCase):
     def test_missing_version_is_published(self) -> None:
         self.assert_success(self.run_chart_step('missing'))
         self.assertEqual(len(self.pushes()), 1)
-        self.assertEqual(self.pushes()[0][1:], [str(self.local), 'oci://ghcr.io/waddle-social/waddle/charts'])
+        self.assertEqual(self.pushes()[0][1:], ['--', str(self.local.resolve()), 'oci://ghcr.io/waddle-social/waddle/charts'])
 
     def test_unknown_pull_permission_error_cannot_authorize_push(self) -> None:
         result = self.run_chart_step('pull-denied')
@@ -217,6 +221,62 @@ class PublisherChartTests(unittest.TestCase):
                         out.addfile(entry, io.BytesIO(b''))
                 self.assert_stopped(self.run_chart_step('malformed'))
                 self.assertEqual(self.pushes(), [])
+
+    def run_helper(self, package: Path, **overrides: str) -> subprocess.CompletedProcess[str]:
+        env = os.environ.copy()
+        env.update({'PATH': str(self.bin) + os.pathsep + env['PATH'],
+                    'CHART_FIXTURE_LOG': str(self.log), 'CHART_FIXTURE_MODE': 'same',
+                    'CHART_FIXTURE_REMOTE': str(self.remote), **overrides})
+        return subprocess.run([sys.executable, str(SERVER / 'scripts' / 'publish_chart.py'), str(package)],
+                              cwd=self.root, env=env, capture_output=True, text=True, timeout=20)
+
+    def test_package_outside_chart_directory_is_rejected_before_helm(self) -> None:
+        outside = self.root / 'private' / self.local.name
+        outside.parent.mkdir()
+        archive(outside, b'kind: Deployment\n', 1)
+        self.assert_stopped(self.run_helper(outside))
+        self.assertEqual(self.commands(), [])
+
+    def test_package_symlink_cannot_escape_chart_directory(self) -> None:
+        outside = self.root / 'private' / self.local.name
+        outside.parent.mkdir()
+        archive(outside, b'kind: Deployment\n', 1)
+        self.local.unlink()
+        self.local.symlink_to(outside)
+        self.assert_stopped(self.run_helper(self.local))
+        self.assertEqual(self.commands(), [])
+
+    def test_parent_directory_symlink_cannot_redirect_chart_scope(self) -> None:
+        for component in ('target', 'charts'):
+            with self.subTest(component=component):
+                self.log.unlink(missing_ok=True)
+                target = self.root / 'target'
+                if target.is_symlink():
+                    target.unlink()
+                    (target / 'charts').mkdir(parents=True)
+                outside = self.root / f'outside-{component}'
+                output = outside / 'charts' if component == 'target' else outside
+                output.mkdir(parents=True)
+                archive(output / self.local.name, b'kind: Deployment\n', 1)
+                redirected = target if component == 'target' else target / 'charts'
+                shutil.rmtree(redirected)
+                redirected.symlink_to(outside, target_is_directory=True)
+                self.assert_stopped(self.run_helper(self.local))
+                self.assertEqual(self.commands(), [])
+
+    def test_metadata_cannot_inject_registry_arguments(self) -> None:
+        for value in ('--registry-config=/tmp/private', '0.4.7 --username attacker', '../0.4.7', '0.4.7;command'):
+            with self.subTest(value=value):
+                self.log.unlink(missing_ok=True)
+                self.assert_stopped(self.run_helper(self.local, CHART_FIXTURE_VERSION=value))
+                self.assertTrue(all(call[:2] == ['show', 'chart'] for call in self.commands()))
+
+    def test_chart_metadata_name_and_filename_must_match(self) -> None:
+        self.assert_stopped(self.run_helper(self.local, CHART_FIXTURE_NAME='foreign-chart'))
+        self.assertTrue(all(call[:2] == ['show', 'chart'] for call in self.commands()))
+        self.log.unlink()
+        self.assert_stopped(self.run_helper(self.local, CHART_FIXTURE_VERSION='0.4.8'))
+        self.assertTrue(all(call[:2] == ['show', 'chart'] for call in self.commands()))
 
 
 if __name__ == '__main__':

@@ -22,6 +22,10 @@ and the Flux artifact update. Production still runs revision `645db266`.
 - Re-read the exact version before retrying an ambiguous write, and verify remote
   contents after a successful write. These checks reject observed version drift;
   fully atomic tag immutability requires registry policy or serialized writers.
+- Bound CLI inputs to the workspace chart-output directory before file/Helm
+  access. Derive and validate version/name from the package metadata, keep the
+  destination chart/repository fixed, and terminate positional Helm arguments.
+  Keep post-write verification in a separate bounded helper for a small retry loop.
 - Exercise the actual CUE publisher chart step with a fake Helm CLI and real tar
   archives. Reproduce the captured tag-not-found failure before modifying it.
 - Run those regressions in the existing deployment-render gate and include the

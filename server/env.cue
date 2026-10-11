@@ -1087,10 +1087,8 @@ schema.#Project & {
 					docker buildx imagetools inspect "${TAG_ARGS[1]}"
 
 					echo "${GITHUB_TOKEN}" | helm registry login ghcr.io --username "${GITHUB_ACTOR}" --password-stdin
-					chart_package="$(helm package charts/waddle-server -d /tmp/charts | awk '{print $NF}')"
-					chart_version="$(helm show chart "${chart_package}" | awk '$1 == "version:" {print $2; exit}')"
-					python3 scripts/publish_chart.py "${chart_package}" oci://ghcr.io/waddle-social/waddle/charts \
-					  --name waddle-server --version "${chart_version}"
+					chart_package="$(helm package charts/waddle-server -d target/charts | awk '{print $NF}')"
+					python3 scripts/publish_chart.py "${chart_package}"
 					echo "${GITHUB_TOKEN}" | oras login ghcr.io -u "${GITHUB_ACTOR}" --password-stdin
 
 					declare -a EXTENSIONS=(
