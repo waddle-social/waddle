@@ -3,6 +3,23 @@
 
 use super::*;
 
+// Database-local two-key namespace. All outbox schemas share this gate so
+// different search_paths cannot split ownership of the same resolved tables.
+const OUTBOX_SCHEMA_GATE: (i32, i32) = (0x5744444c, 0x4e4f5449);
+const OUTBOX_SCHEMA_GATE_WAIT: std::time::Duration = std::time::Duration::from_secs(30);
+const COALESCE_INDEX_NAME: &str = "idx_notification_outbox_queued_coalesce";
+const LEGACY_COALESCE_INDEX_NAME: &str = "idx_notification_outbox_active_coalesce";
+const COALESCE_COLUMNS: [&str; 6] = [
+    "recipient_bare_jid",
+    "push_service_jid",
+    "node",
+    "conversation_jid",
+    "thread_id",
+    "class",
+];
+const COALESCE_PREDICATE: &str =
+    "status = 'queued' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist = 0";
+
 const NOTIFICATION_CANDIDATES_REASON_CHECK_NAME: &str = "notification_candidates_reason_check";
 const NOTIFICATION_CANDIDATES_REASON_VALUES: [&str; 6] = [
     "offline_dm",
@@ -231,6 +248,62 @@ impl NotificationOutboxStore {
                 )));
             }
         }
+        if self.db.driver() == crate::db::DatabaseDriver::Postgres {
+            // Dropping a caller must not release the session gate while a
+            // separately pooled DDL statement is still executing.
+            let store = self.clone();
+            tokio::spawn(async move {
+                store
+                    .initialize_postgres_schema(OUTBOX_SCHEMA_GATE_WAIT)
+                    .await
+            })
+            .await
+            .map_err(|error| {
+                DatabaseError::QueryFailed(format!("outbox schema task failed: {error}"))
+            })??;
+        } else {
+            self.initialize_schema().await?;
+        }
+        self.adopt_legacy_candidate_ids().await?;
+        self.adopt_legacy_ancestry().await?;
+        Ok(())
+    }
+
+    async fn initialize_postgres_schema(
+        &self,
+        wait: std::time::Duration,
+    ) -> Result<(), NotificationOutboxError> {
+        use sqlx::Connection;
+        let mut connection =
+            tokio::time::timeout(wait, self.db.detached_postgres_startup_connection())
+                .await
+                .map_err(|_| {
+                    DatabaseError::QueryFailed(
+                        "outbox schema session acquisition timed out".to_owned(),
+                    )
+                })??;
+        let result = async {
+            sqlx::query("SELECT set_config('lock_timeout', $1, false)")
+                .bind(format!("{}ms", wait.as_millis()))
+                .execute(&mut connection)
+                .await
+                .map_err(DatabaseError::from)?;
+            sqlx::query("SELECT pg_advisory_lock($1, $2)")
+                .bind(OUTBOX_SCHEMA_GATE.0)
+                .bind(OUTBOX_SCHEMA_GATE.1)
+                .execute(&mut connection)
+                .await
+                .map_err(DatabaseError::from)?;
+            self.initialize_schema().await
+        }
+        .await;
+        let close = connection.close().await.map_err(DatabaseError::from);
+        result?;
+        close?;
+        Ok(())
+    }
+
+    async fn initialize_schema(&self) -> Result<(), NotificationOutboxError> {
         let i64_type = crate::db::i64_sql_type(self.db.driver());
         self.execute(&format!("CREATE TABLE IF NOT EXISTS notification_outbox_lineage (candidate_delivery_id TEXT NOT NULL, job_id TEXT NOT NULL, settled_at_ms {i64_type}, PRIMARY KEY (candidate_delivery_id, job_id))"), ()).await?;
         self.execute("CREATE INDEX IF NOT EXISTS idx_notification_outbox_lineage_job ON notification_outbox_lineage (job_id)", ()).await?;
@@ -350,23 +423,7 @@ impl NotificationOutboxStore {
         self.add_column_if_missing("notification_outbox", "queue_acceptance_may_exist INTEGER NOT NULL DEFAULT 1 CHECK (queue_acceptance_may_exist IN (0, 1))").await?;
         self.migrate_notification_outbox_class_constraint(i64_type)
             .await?;
-        self.execute(
-            "DROP INDEX IF EXISTS idx_notification_outbox_queued_coalesce",
-            (),
-        )
-        .await?;
-        self.execute(
-            "DROP INDEX IF EXISTS idx_notification_outbox_active_coalesce",
-            (),
-        )
-        .await?;
-        self.execute(
-            "CREATE UNIQUE INDEX IF NOT EXISTS idx_notification_outbox_queued_coalesce \
-             ON notification_outbox (recipient_bare_jid, push_service_jid, node, conversation_jid, thread_id, class) \
-             WHERE status = 'queued' AND approved_payload_xml IS NULL AND queue_acceptance_may_exist = 0",
-            (),
-        )
-        .await?;
+        self.migrate_coalescing_index().await?;
         self.execute(
             "CREATE INDEX IF NOT EXISTS idx_notification_outbox_conversation_status \
              ON notification_outbox (recipient_bare_jid, conversation_jid, thread_id, status)",
@@ -386,9 +443,22 @@ impl NotificationOutboxStore {
             (),
         )
         .await?;
-        self.adopt_legacy_candidate_ids().await?;
-        self.adopt_legacy_ancestry().await?;
         Ok(())
+    }
+
+    async fn migrate_coalescing_index(&self) -> Result<(), NotificationOutboxError> {
+        let mut tx = self.db.begin_immediate().await?;
+        let result = migrate_coalescing_index_tx(&mut tx).await;
+        match result {
+            Ok(()) => {
+                tx.commit().await?;
+                Ok(())
+            }
+            Err(error) => {
+                tx.rollback().await?;
+                Err(error)
+            }
+        }
     }
 
     /// Scheduling identities confer neither canonical nor provider authority.
@@ -931,6 +1001,221 @@ impl NotificationOutboxStore {
         Ok(())
     }
 }
+
+fn quoted_identifier(value: &str) -> String {
+    format!("\"{}\"", value.replace('"', "\"\""))
+}
+
+// Compare tokens rather than deleting whitespace inside SQL identifiers or
+// literals. PostgreSQL adds harmless parentheses and text casts when rendering.
+fn predicate_tokens(sql: &str) -> Vec<String> {
+    let chars: Vec<char> = sql.chars().collect();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < chars.len() {
+        let ch = chars[index];
+        if ch.is_whitespace() || matches!(ch, '(' | ')') {
+            index += 1;
+            continue;
+        }
+        if matches!(ch, '\'' | '"') {
+            let quote = ch;
+            let mut token = String::from(ch);
+            index += 1;
+            while index < chars.len() {
+                let next = chars[index];
+                token.push(next);
+                index += 1;
+                if next == quote {
+                    if chars.get(index) == Some(&quote) {
+                        token.push(quote);
+                        index += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+            if quote == '"'
+                && [
+                    "status",
+                    "approved_payload_xml",
+                    "queue_acceptance_may_exist",
+                ]
+                .iter()
+                .any(|name| token == quoted_identifier(name))
+            {
+                token = token.trim_matches('"').to_owned();
+            }
+            tokens.push(token);
+        } else if ch.is_alphanumeric() || ch == '_' {
+            let mut token = String::new();
+            while index < chars.len() && (chars[index].is_alphanumeric() || chars[index] == '_') {
+                token.push(chars[index]);
+                index += 1;
+            }
+            tokens.push(token.to_ascii_lowercase());
+        } else if ch == ':' && chars.get(index + 1) == Some(&':') {
+            tokens.push("::".to_owned());
+            index += 2;
+        } else {
+            tokens.push(ch.to_string());
+            index += 1;
+        }
+    }
+    let mut normalized = Vec::new();
+    let mut position = 0;
+    while position < tokens.len() {
+        if tokens[position] == "::" && tokens.get(position + 1).is_some_and(|next| next == "text") {
+            position += 2;
+        } else {
+            normalized.push(tokens[position].clone());
+            position += 1;
+        }
+    }
+    normalized
+}
+
+async fn migrate_coalescing_index_tx(
+    tx: &mut crate::db::Transaction<'_>,
+) -> Result<(), NotificationOutboxError> {
+    let (namespace, table_oid) = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        let mut rows = tx.query("SELECT n.nspname,c.oid::bigint FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE c.oid=to_regclass('notification_outbox')",()).await?;
+        let row = rows.next().await?.ok_or_else(|| {
+            DatabaseError::QueryFailed("outbox relation missing during schema migration".to_owned())
+        })?;
+        (Some(row.get::<String>(0)?), Some(row.get::<i64>(1)?))
+    } else {
+        (None, None)
+    };
+    let qualified = |name: &str| match namespace.as_ref() {
+        Some(schema) => format!("{}.{}", quoted_identifier(schema), quoted_identifier(name)),
+        None => quoted_identifier(name),
+    };
+    let mut current = false;
+    let mut existing = false;
+    let mut legacy = false;
+    if let Some(oid) = table_oid {
+        let mut rows = tx.query("SELECT c.relname,COALESCE(i.indrelid::bigint,0),COALESCE(i.indisunique AND i.indisvalid AND i.indisready AND i.indnkeyatts=6 AND i.indnatts=6 AND am.amname='btree',false),pg_get_expr(i.indpred,i.indrelid),(SELECT string_agg(a.attname,',' ORDER BY k.ordinality) FROM unnest(i.indkey::smallint[]) WITH ORDINALITY k(attnum,ordinality) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum),(SELECT COALESCE(bool_and(op.opcdefault AND op.opcintype=a.atttypid AND k.collation_oid=a.attcollation),false) FROM unnest(i.indkey::smallint[],i.indclass::oid[],i.indcollation::oid[]) k(attnum,opclass,collation_oid) JOIN pg_attribute a ON a.attrelid=i.indrelid AND a.attnum=k.attnum JOIN pg_opclass op ON op.oid=k.opclass) FROM pg_class c LEFT JOIN pg_index i ON i.indexrelid=c.oid LEFT JOIN pg_am am ON am.oid=c.relam WHERE c.relnamespace=(SELECT relnamespace FROM pg_class WHERE oid=?::oid) AND c.relname IN (?,?)",crate::db_params![oid,COALESCE_INDEX_NAME,LEGACY_COALESCE_INDEX_NAME]).await?;
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(0)?;
+            if row.get::<i64>(1)? != oid {
+                return Err(DatabaseError::QueryFailed(
+                    "outbox index name belongs to another relation".to_owned(),
+                )
+                .into());
+            }
+            if name == LEGACY_COALESCE_INDEX_NAME {
+                legacy = true;
+                continue;
+            }
+            existing = true;
+            let predicate: Option<String> = row.get(3)?;
+            let keys: Option<String> = row.get(4)?;
+            let defaults: Option<bool> = row.get(5)?;
+            current = row.get::<bool>(2)?
+                && defaults == Some(true)
+                && keys.as_deref() == Some(COALESCE_COLUMNS.join(",").as_str())
+                && predicate.as_deref().is_some_and(|sql| {
+                    predicate_tokens(sql) == predicate_tokens(COALESCE_PREDICATE)
+                });
+        }
+    } else {
+        let mut rows = tx
+            .query(
+                "SELECT name,tbl_name,sql FROM sqlite_master WHERE type='index' AND name IN (?,?)",
+                crate::db_params![COALESCE_INDEX_NAME, LEGACY_COALESCE_INDEX_NAME],
+            )
+            .await?;
+        let mut definition = None;
+        while let Some(row) = rows.next().await? {
+            let name: String = row.get(0)?;
+            if row.get::<String>(1)? != "notification_outbox" {
+                return Err(DatabaseError::QueryFailed(
+                    "outbox index name belongs to another relation".to_owned(),
+                )
+                .into());
+            }
+            if name == LEGACY_COALESCE_INDEX_NAME {
+                legacy = true;
+            } else {
+                existing = true;
+                definition = row.get::<Option<String>>(2)?;
+            }
+        }
+        drop(rows);
+        let mut keys = Vec::new();
+        let mut rows = tx
+            .query(
+                "PRAGMA index_xinfo('idx_notification_outbox_queued_coalesce')",
+                (),
+            )
+            .await?;
+        while let Some(row) = rows.next().await? {
+            if row.get::<i64>(5)? == 1 {
+                let collation: Option<String> = row.get(4)?;
+                let name = if collation
+                    .as_deref()
+                    .is_some_and(|value| value.eq_ignore_ascii_case("BINARY"))
+                {
+                    row.get::<Option<String>>(2)?
+                } else {
+                    None
+                };
+                keys.push(name);
+            }
+        }
+        let expected: Vec<Option<String>> = COALESCE_COLUMNS
+            .iter()
+            .map(|name| Some((*name).to_owned()))
+            .collect();
+        current = keys == expected
+            && definition.as_deref().is_some_and(|sql| {
+                let tokens = predicate_tokens(sql);
+                tokens.starts_with(&["create".to_owned(), "unique".to_owned(), "index".to_owned()])
+                    && tokens
+                        .iter()
+                        .position(|token| token == "where")
+                        .is_some_and(|position| {
+                            tokens[position + 1..] == predicate_tokens(COALESCE_PREDICATE)
+                        })
+            });
+    }
+    if existing && !current {
+        tx.execute(
+            &format!("DROP INDEX {}", qualified(COALESCE_INDEX_NAME)),
+            (),
+        )
+        .await?;
+    }
+    if legacy {
+        tx.execute(
+            &format!("DROP INDEX {}", qualified(LEGACY_COALESCE_INDEX_NAME)),
+            (),
+        )
+        .await?;
+    }
+    if !current {
+        let name = if namespace.is_some() {
+            quoted_identifier(COALESCE_INDEX_NAME)
+        } else {
+            qualified(COALESCE_INDEX_NAME)
+        };
+        tx.execute(
+            &format!(
+                "CREATE UNIQUE INDEX {name} ON {} ({}) WHERE {COALESCE_PREDICATE}",
+                qualified("notification_outbox"),
+                COALESCE_COLUMNS.join(", ")
+            ),
+            (),
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[path = "schema/startup_tests.rs"]
+mod startup_tests;
 
 #[cfg(test)]
 mod tests {

@@ -209,6 +209,20 @@ impl Database {
         }
     }
 
+    /// A startup gate owns this physical session and closes it on completion.
+    /// Detaching returns the pool slot immediately, so even a one-slot main
+    /// pool can execute the schema work while this session holds its gate.
+    pub(crate) async fn detached_postgres_startup_connection(
+        &self,
+    ) -> Result<sqlx::PgConnection, DatabaseError> {
+        match &self.backend {
+            DatabaseBackend::Postgres(pool) => Ok(pool.acquire().await?.detach()),
+            DatabaseBackend::Sqlite(_) => Err(DatabaseError::QueryFailed(
+                "PostgreSQL startup session requested for SQLite".to_owned(),
+            )),
+        }
+    }
+
     /// Wrap a physical external SQLx pool so shared database helpers can run
     /// against that exact pool without opening a second connection set.
     pub(crate) fn from_sqlite_pool(name: &str, pool: SqlitePool, in_memory: bool) -> Self {

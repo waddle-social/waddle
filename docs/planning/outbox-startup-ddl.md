@@ -18,7 +18,10 @@ serving writer can observe an absent uniqueness index.
    available for schema helpers and canonical transactions, including pool size
    one. Close the session on completion, failure and cancellation; never return a
    session advisory lock to a pool. Bound the new lock wait. Document the temporary
-   extra startup connection and verify cleanup.
+   extra startup connection and verify cleanup. Own schema initialization in a
+   task that finishes under the gate if its caller is canceled; do not release
+   the gate while a separately pooled DDL statement is still completing. Use a
+   fixed database-local key so search-path aliases cannot select different gates.
 3. Inspect the resolved queued index. Keep a current valid unique definition
    unchanged. Replace only a missing/stale definition and remove the legacy
    active index within one transaction, so serving writers cannot see an
