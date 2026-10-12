@@ -1922,6 +1922,21 @@ async fn group_dm_invite_to_offline_member_is_queued_for_next_presence() {
         .await
         .expect("send offline mediated invite");
 
+    // The offline-before-first-presence premise requires server processing,
+    // not just a WebSocket write. A same-stream XEP-0199 pong follows Bob's
+    // invitation execution before Charlie binds and consumes his first flush.
+    let barrier_id = "offline-add-charlie-processed";
+    let mut ping = xmpp_parsers::iq::Iq::from_get(barrier_id, xmpp_parsers::ping::Ping);
+    *ping.to_mut() = Some(DOMAIN.parse().expect("server JID"));
+    bob.send(&element_to_xml(ping.into()))
+        .await
+        .expect("send invite processing barrier");
+    let pong = bob
+        .recv_matching(|frame| frame.contains("<iq") && frame_has_iq_id(frame, barrier_id))
+        .await
+        .expect("server processed invite before invitee presence");
+    assert!(is_result(&pong), "expected XEP-0199 result: {pong}");
+
     let mut charlie = user_client(
         &server,
         "charlie",
