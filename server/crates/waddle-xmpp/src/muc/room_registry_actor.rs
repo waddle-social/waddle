@@ -403,6 +403,9 @@ pub struct RoomRegistryActor {
     /// `clustering::start_if_enabled` runs, mirroring the `local_claims`/
     /// `resume_bridge` fill-in-later cell pattern).
     claim_store: Arc<dyn ClaimStore>,
+    /// Explicit wiring cannot be inferred from the optional durable store:
+    /// a clustered registry may acquire remote claims without room storage.
+    clustering_wired: bool,
     /// This node's claim identity. Defaults to [`NodeIdentity::local`] —
     /// meaningless but harmless for [`InProcessClaimStore`], which never
     /// checks cross-node identity. Replaced by [`WireClusteringClaims`].
@@ -664,6 +667,7 @@ impl RoomRegistryActor {
             server_hats: Default::default(),
             membership_source: None,
             claim_store: crate::ownership::observed_claim_store(InProcessClaimStore::new()),
+            clustering_wired: false,
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             durable_store: None,
             rollout_backoff: None,
@@ -3952,6 +3956,7 @@ impl kameo::message::Message<WireClusteringClaims> for RoomRegistryActor {
         msg: WireClusteringClaims,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
+        self.clustering_wired = true;
         self.claim_store = msg.claim_store;
         self.node_identity = msg.node_identity;
         self.durable_store = msg.durable_store;
@@ -3966,6 +3971,71 @@ impl kameo::message::Message<WireClusteringClaims> for RoomRegistryActor {
 /// Look up a room actor by JID.
 pub struct GetRoom {
     pub room_jid: BareJid,
+}
+
+/// Whether this registry is the complete, single-node room authority. Wiring
+/// occurs once before client traffic; an optional durable store is not proof.
+pub struct GetSingleNodeRoomRetirementAuthority;
+
+impl kameo::message::Message<GetSingleNodeRoomRetirementAuthority> for RoomRegistryActor {
+    type Reply = bool;
+
+    async fn handle(
+        &mut self,
+        _msg: GetSingleNodeRoomRetirementAuthority,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        !self.clustering_wired && self.durable_store.is_none()
+    }
+}
+
+/// Resolve work only while a single-node registry proves there is no published
+/// room, pending preparation, or live-roster handoff. The callback remains in
+/// the registry turn, so creation cannot race the terminal policy write.
+pub struct RunAbsentRoomGuardedAsync<R> {
+    pub room_jid: BareJid,
+    pub action: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, R> + Send>,
+}
+
+impl<R: Send + 'static> kameo::message::Message<RunAbsentRoomGuardedAsync<R>>
+    for RoomRegistryActor
+{
+    type Reply = Option<R>;
+
+    async fn handle(
+        &mut self,
+        msg: RunAbsentRoomGuardedAsync<R>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let room = &msg.room_jid;
+        if self.clustering_wired
+            || self.durable_store.is_some()
+            || self.rooms.contains_key(room)
+            || self.poisoned_rooms.contains(room)
+            || self.pending_room_preparations.contains_key(room)
+            || self.handoff_pending.contains_key(room)
+            || self.pending_reclaimed_reservations.contains(room)
+            || self
+                .pending_reclaimed_rooms
+                .keys()
+                .any(|(pending, _)| pending == room)
+            || self
+                .pending_room_releases
+                .keys()
+                .any(|(pending, _)| pending == room)
+            || self
+                .pending_room_acquisitions
+                .keys()
+                .any(|(pending, _)| pending == room)
+            || self
+                .pending_unpublished_destroys
+                .keys()
+                .any(|(pending, _)| pending == room)
+        {
+            return None;
+        }
+        Some((msg.action)().await)
+    }
 }
 
 /// Test seam: set (or age) the handoff marker for a room as if a handoff had

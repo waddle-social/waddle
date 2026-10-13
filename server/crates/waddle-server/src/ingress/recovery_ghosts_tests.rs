@@ -49,6 +49,9 @@ async fn ghost_fixture(f: IngressFixture, case: GhostCase) -> GhostFixture {
     let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
     let watcher: jid::FullJid = "ben@example.com/phone".parse().expect("watcher");
     let submission = planned_room(&f, &state, Case::Lost, &[ghost.clone(), watcher.clone()]).await;
+    // The original reflection has its own sealed child. Keep its sink healthy
+    // so this fixture isolates the named ghost and its reachability guard.
+    store_detached(&sm, &submission.sender).await;
     let muc = submission
         .plan
         .intents
@@ -57,7 +60,9 @@ async fn ghost_fixture(f: IngressFixture, case: GhostCase) -> GhostFixture {
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = super::departed::commit_legacy_roster_fixture(&f, &submission).await;
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("production sealed room acceptance");
     let key = decision.message_key.expect("key");
     super::departed::settle_non_delivery_effects(&f, &state, &decision).await;
     // The watcher owns a live socket: its copy lands on the first pass, so the
@@ -709,7 +714,9 @@ async fn sqlite_sibling_row_settles_once_the_ghost_eviction_destroyed_the_room()
         .cloned()
         .expect("sibling room fanout intent");
     let sibling_receipt = receipt_key(&sibling_muc).expect("sibling MUC receipt");
-    let sibling_decision = super::departed::commit_legacy_roster_fixture(&f.f, &sibling).await;
+    let sibling_decision = commit_submission(&f.f.uow, &sibling, 1)
+        .await
+        .expect("sealed sibling acceptance");
     let sibling_key = sibling_decision.message_key.expect("sibling key");
     assert_ne!(sibling_key, f.key, "the sibling must be its own row");
     super::departed::settle_non_delivery_effects(&f.f, &f.state, &sibling_decision).await;
@@ -786,18 +793,17 @@ async fn sqlite_ordinary_disconnect_leave_carries_no_removal_status_code() {
     f.f.close().await;
 }
 
-/// A full stalled maintenance pass must not run the legacy settle-before-evict
-/// repair against sealed children. An unreachable endpoint supplies neither
-/// transport acceptance nor proof of a strictly newer seated occupancy.
+/// Modern sealed traffic must repair ghost occupancies, then retire only the
+/// frozen original children without claiming a successful transport append.
 #[tokio::test]
-async fn sqlite_sealed_stalled_ghost_remains_pending_without_eviction_or_fabricated_progress() {
+async fn sqlite_sealed_stalled_ghost_is_evicted_and_policy_retired() {
     use crate::ingress_uow::EffectIntentRepository;
 
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let before_evicted = metrics.counter_sum(EVICTED, &[]).unwrap_or(0);
     let fixture = IngressFixture::sqlite().await;
     let sm = persistent_sm(&fixture).await;
-    let state = state_for(&fixture, sm).await;
+    let state = state_for(&fixture, sm.clone()).await;
     let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
     let watcher: jid::FullJid = "ben@example.com/phone".parse().expect("watcher");
     let submission = planned_room(
@@ -807,6 +813,7 @@ async fn sqlite_sealed_stalled_ghost_remains_pending_without_eviction_or_fabrica
         &[ghost.clone(), watcher.clone()],
     )
     .await;
+    store_detached(&sm, &submission.sender).await;
     let muc = submission
         .plan
         .intents
@@ -873,17 +880,17 @@ async fn sqlite_sealed_stalled_ghost_remains_pending_without_eviction_or_fabrica
         "exercise the full maintenance stall threshold"
     );
     assert!(
-        f.occupies(&f.ghost).await,
-        "a sealed message must not claim a legacy ghost eviction"
+        !f.occupies(&f.ghost).await,
+        "a stalled sealed message repairs its frozen ghost occupancy"
     );
     assert_eq!(
         f.progress().await,
-        vec![f.watcher.clone()],
-        "no delivery progress is fabricated for the unreachable child"
+        vec![f.ghost.clone(), f.watcher.clone()],
+        "delivery and policy retirement resolve their respective frozen children"
     );
     assert!(
-        !f.terminal().await,
-        "the occupant aggregate and canonical source remain pending"
+        f.terminal().await,
+        "retired ghosts must not retain the canonical source forever"
     );
     let mut tx =
         f.f.uow
@@ -894,10 +901,10 @@ async fn sqlite_sealed_stalled_ghost_remains_pending_without_eviction_or_fabrica
         DeliveryProgressRepository::load(&mut tx, key, &original_sender_receipt)
             .await
             .expect("original sender progress")
-            .is_empty(),
-        "the original sender has no fabricated acceptance either"
+            == vec![submission.sender.clone()],
+        "the healthy original reflection retains its real acceptance"
     );
-    assert!(!EffectReceiptRepository::contains(
+    assert!(EffectReceiptRepository::contains(
         &mut tx,
         key,
         original_sender_receipt.kind,
@@ -924,8 +931,75 @@ async fn sqlite_sealed_stalled_ghost_remains_pending_without_eviction_or_fabrica
     tx.commit().await.expect("stalled authority inspection");
     assert_eq!(
         metrics.counter_sum(EVICTED, &[]).unwrap_or(0),
-        before_evicted,
-        "the sealed row may not claim message-triggered eviction progress"
+        before_evicted + 1,
+        "the sealed row repairs one original ghost occupancy"
     );
     f.f.close().await;
+}
+
+/// The ordinary fanout may already be complete while only the sender's
+/// independent reflection is owed. That frozen direct child still owns room
+/// housekeeping and must not retain a singleton room's ghost forever.
+#[tokio::test]
+async fn sqlite_sealed_reflection_only_ghost_is_evicted_and_retired() {
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let state = state_for(&f, sm).await;
+    let submission = planned_room(&f, &state, Case::Lost, &[]).await;
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("singleton sealed acceptance");
+    let key = decision.message_key.expect("key");
+    super::departed::settle_non_delivery_effects(&f, &state, &decision).await;
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let cursor = MaintenanceCursor::default();
+    for _ in 0..4 {
+        assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+    }
+    let mut tx = f.uow.begin().await.expect("inspect retired reflection");
+    assert!(CanonicalMessageRepository::is_terminal(&mut tx, key)
+        .await
+        .expect("terminal"));
+    tx.commit().await.expect("read commit");
+    let connection = f.db.guard().await.expect("read policy connection");
+    let mut rows = connection.query(
+        "SELECT policy_discard_reason FROM ingress_delivery_receipts WHERE message_key = ? AND resource = ?",
+        crate::db_params![key.to_storage().to_string(), submission.sender.to_string()],
+    ).await.expect("reflection policy");
+    let reason: String = rows
+        .next()
+        .await
+        .expect("read")
+        .expect("retired child")
+        .get(0)
+        .expect("policy reason");
+    assert!(matches!(
+        reason.as_str(),
+        "occupancy_departed" | "room_retired"
+    ));
+    assert!(
+        rows.next().await.expect("end").is_none(),
+        "one original reflection child"
+    );
+    drop(rows);
+    drop(connection);
+    assert_eq!(
+        f.count("sm_ingress_appends").await,
+        0,
+        "retirement is not delivery"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(GetRoom {
+                room_jid: ROOM.parse().expect("room"),
+            })
+            .await
+            .expect("registry")
+            .is_none(),
+        "the empty ghost room is removed"
+    );
+    f.close().await;
 }

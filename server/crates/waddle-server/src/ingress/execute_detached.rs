@@ -4,8 +4,8 @@ use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 
 use crate::{
     ingress_uow::{
-        run_with_retry, settle_recorded, CanonicalMessageRepository, DeliveryProgressRepository,
-        IngressUnitOfWork, IngressUowError,
+        run_with_retry, settle_recorded, CanonicalMessageRepository, DeliveryPolicyDiscardReason,
+        DeliveryProgressRepository, IngressUnitOfWork, IngressUowError,
     },
     server::routes::interpret::{
         close_call_setup_from_outcome, deliver_direct_to_full_locally,
@@ -529,6 +529,30 @@ pub(in crate::ingress) async fn record_delivery_progress(
         &waddle_xmpp::muc::durable::RoomClaimFenceContext,
     )>,
 ) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+    record_progress(uow, key, progress, resources, room_fence, None).await
+}
+
+pub(in crate::ingress) async fn record_policy_progress(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    progress: &RouteProgress,
+    resources: &[FullJid],
+    reason: DeliveryPolicyDiscardReason,
+) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+    record_progress(uow, key, progress, resources, None, Some(reason)).await
+}
+
+async fn record_progress(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    progress: &RouteProgress,
+    resources: &[FullJid],
+    room_fence: Option<(
+        &jid::BareJid,
+        &waddle_xmpp::muc::durable::RoomClaimFenceContext,
+    )>,
+    policy: Option<DeliveryPolicyDiscardReason>,
+) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
     let mut tx = uow
         .begin_with_timeouts(
             std::time::Duration::from_millis(100),
@@ -558,7 +582,32 @@ pub(in crate::ingress) async fn record_delivery_progress(
     }
     #[cfg(not(feature = "clustering"))]
     let _ = room_fence;
-    DeliveryProgressRepository::record(&mut tx, key, &progress.receipt, resources).await?;
+    if let Some(reason) = policy {
+        let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        let manifest = envelope
+            .room_manifest()
+            .ok_or(IngressUowError::EffectIntentConflict)?;
+        if manifest.message_key() != key
+            || resources.iter().any(|target| {
+                !progress.fanout.contains(target)
+                    || !manifest.contains(&progress.receipt, Some(target))
+            })
+        {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        DeliveryProgressRepository::record_policy_discard(
+            &mut tx,
+            key,
+            &progress.receipt,
+            resources,
+            reason,
+        )
+        .await?;
+    } else {
+        DeliveryProgressRepository::record(&mut tx, key, &progress.receipt, resources).await?;
+    }
     #[cfg(test)]
     if CONTEND_DELIVERY_PROGRESS_ONCE
         .try_with(|pending| pending.swap(false, std::sync::atomic::Ordering::SeqCst))

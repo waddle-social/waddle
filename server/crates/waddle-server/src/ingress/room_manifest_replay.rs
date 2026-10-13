@@ -9,9 +9,13 @@ use waddle_xmpp::{
         durable::RoomClaimFenceContext,
         room_actor::{
             GetRoomSnapshot, OccupancyReplayGuardOutcome, RoomActor, RoomChainSnapshot,
-            RunOccupancyReplayGuardedAsync, RunSupersededOccupancyGuardedAsync,
+            RoomChildRetirementReason, RunOccupancyReplayGuardedAsync,
+            RunRoomChildRetirementGuardedAsync,
         },
-        room_registry_actor::{GetRoom, RoomRegistryActor},
+        room_registry_actor::{
+            GetRoom, GetSingleNodeRoomRetirementAuthority, RoomRegistryActor,
+            RunAbsentRoomGuardedAsync,
+        },
     },
     registry::BroadcastOutcome,
     Stanza,
@@ -19,7 +23,9 @@ use waddle_xmpp::{
 
 use crate::{
     ingress_substrate::MessageEnvelope,
-    ingress_uow::{CarbonReceiptRepository, IngressUnitOfWork, IngressUowError},
+    ingress_uow::{
+        CarbonReceiptRepository, DeliveryPolicyDiscardReason, IngressUnitOfWork, IngressUowError,
+    },
     server::routes::interpret::SmIngressAppendContext,
 };
 
@@ -39,7 +45,7 @@ fn validate_current_snapshot(
         })
         || manifest.claim_fence.is_some() && snapshot.claim_fence.is_none()
     {
-        return Err(IngressUowError::EffectIntentConflict);
+        return Err(IngressUowError::RoomGenerationStale);
     }
     if snapshot.claim_fence.as_ref().is_some_and(|fence| {
         fence.entity
@@ -59,15 +65,15 @@ async fn current_actor(
     target: &FullJid,
 ) -> Result<(ActorRef<RoomActor>, Option<RoomClaimFenceContext>), IngressUowError> {
     let actor = registry
-        .ok_or(IngressUowError::EffectIntentConflict)?
+        .ok_or(IngressUowError::RoomGenerationStale)?
         .ask(GetRoom {
             room_jid: manifest.room.clone(),
         })
         .mailbox_timeout(PROBE_TIMEOUT)
         .reply_timeout(PROBE_TIMEOUT)
         .await
-        .map_err(|_| IngressUowError::EffectIntentConflict)?
-        .ok_or(IngressUowError::EffectIntentConflict)?;
+        .map_err(|_| IngressUowError::Timeout)?
+        .ok_or(IngressUowError::RoomGenerationStale)?;
     let snapshot = actor
         .ask(GetRoomSnapshot {
             sender_jid: target.clone(),
@@ -75,7 +81,7 @@ async fn current_actor(
         .mailbox_timeout(PROBE_TIMEOUT)
         .reply_timeout(PROBE_TIMEOUT)
         .await
-        .map_err(|_| IngressUowError::EffectIntentConflict)?;
+        .map_err(|_| IngressUowError::Timeout)?;
     validate_current_snapshot(manifest, &snapshot)?;
     Ok((actor, snapshot.claim_fence))
 }
@@ -204,8 +210,9 @@ pub(super) async fn load(
     Ok(envelope.room_manifest().cloned())
 }
 
-/// A strictly newer occupancy in the same inherited roster cannot take the
-/// old child. Settle that child's policy progress, never a transport send.
+/// Retire only the frozen original child, never a replacement recipient.
+/// Clustered manifests require strictly newer inherited occupancy; single-node
+/// authority also proves departure, published reconstruction, or room absence.
 pub(super) async fn settle_superseded(
     uow: &IngressUnitOfWork,
     manifest: &FrozenRoomManifest,
@@ -246,30 +253,107 @@ pub(super) async fn settle_superseded(
     if !progress.fanout.contains(target) || progress.room() != Some(&manifest.room) {
         return Err(IngressUowError::EffectIntentConflict);
     }
-    let (actor, fence) = match current_actor(manifest, registry, target).await {
-        Ok(proof) => proof,
-        Err(error) => {
-            // A read-only probe cannot prove retirement. The local sink still
-            // validates delivery separately; a legacy remote wire has no new
-            // manifest acceptance authority to complete.
-            tracing::debug!(%error, "superseded occupancy proof unavailable");
+    let (envelope, _) =
+        CarbonReceiptRepository::load_authority(uow.database(), context.message_key).await?;
+    if envelope.room_manifest() != Some(manifest) {
+        return Err(IngressUowError::EffectIntentConflict);
+    }
+    let Some(registry) = registry else {
+        return Ok(None);
+    };
+    let allow_lost_occupancy = matches!(
+        uow.fencing(),
+        crate::ingress_uow::IngressFencing::SingleNode
+    );
+    if allow_lost_occupancy
+        && !registry
+            .ask(GetSingleNodeRoomRetirementAuthority)
+            .mailbox_timeout(PROBE_TIMEOUT)
+            .reply_timeout(PROBE_TIMEOUT)
+            .await
+            .map_err(|_| IngressUowError::Timeout)?
+    {
+        // A half-wired caller is not single-node authority merely because its
+        // ingress UOW lacks the registry's cluster wiring. Prove neither
+        // absence nor replacement through that inconsistent configuration.
+        return Ok(None);
+    }
+    let actor = registry
+        .ask(GetRoom {
+            room_jid: manifest.room.clone(),
+        })
+        .mailbox_timeout(PROBE_TIMEOUT)
+        .reply_timeout(PROBE_TIMEOUT)
+        .await
+        .map_err(|_| IngressUowError::Timeout)?;
+    let uow_owned = uow.clone();
+    let room = manifest.room.clone();
+    let target_owned = target.clone();
+    let key = context.message_key;
+    let Some(actor) = actor else {
+        if !allow_lost_occupancy {
             return Ok(None);
         }
+        return registry
+            .ask(RunAbsentRoomGuardedAsync {
+                room_jid: room,
+                action: Box::new(move || {
+                    Box::pin(async move {
+                        crate::ingress_uow::run_with_retry(5, || {
+                            super::execute_uow::record_policy_progress(
+                                &uow_owned,
+                                key,
+                                &progress,
+                                std::slice::from_ref(&target_owned),
+                                DeliveryPolicyDiscardReason::RoomRetired,
+                            )
+                        })
+                        .await
+                        .map_err(|failure| failure.last_error)
+                    })
+                }),
+            })
+            .mailbox_timeout(PROBE_TIMEOUT)
+            .reply_timeout(PROBE_TIMEOUT)
+            .await
+            .map_err(|_| IngressUowError::Timeout)?
+            .transpose();
     };
-    let uow = uow.clone();
-    let room = manifest.room.clone();
-    let target = target.clone();
-    let key = context.message_key;
+    let snapshot = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: target.clone(),
+        })
+        .mailbox_timeout(PROBE_TIMEOUT)
+        .reply_timeout(PROBE_TIMEOUT)
+        .await
+        .map_err(|_| IngressUowError::Timeout)?;
+    if !allow_lost_occupancy && validate_current_snapshot(manifest, &snapshot).is_err() {
+        return Ok(None);
+    }
+    let fence = snapshot.claim_fence;
     let result = actor
-        .ask(RunSupersededOccupancyGuardedAsync {
-            jid: target.clone(),
+        .ask(RunRoomChildRetirementGuardedAsync {
+            jid: target_owned.clone(),
             occupancy_incarnation: manifest.occupancy_incarnation,
+            coordinates: manifest.coordinates,
             watermark,
-            action: Box::new(move || {
+            allow_lost_occupancy,
+            action: Box::new(move |reason| {
                 Box::pin(async move {
-                    under_current_claim(&uow, &room, fence.as_ref(), async {
+                    let reason = match reason {
+                        RoomChildRetirementReason::Departed => {
+                            DeliveryPolicyDiscardReason::OccupancyDeparted
+                        }
+                        RoomChildRetirementReason::Superseded => {
+                            DeliveryPolicyDiscardReason::OccupancySuperseded
+                        }
+                        RoomChildRetirementReason::IncarnationLost => {
+                            DeliveryPolicyDiscardReason::OccupancyIncarnationLost
+                        }
+                    };
+                    under_current_claim(&uow_owned, &room, fence.as_ref(), async {
                         #[cfg(feature = "clustering")]
-                        let _publication = match uow.fencing() {
+                        let _publication = match uow_owned.fencing() {
                             crate::ingress_uow::IngressFencing::Clustered(identity) => Some(
                                 identity
                                     .guard_if_current(
@@ -284,12 +368,12 @@ pub(super) async fn settle_superseded(
                             crate::ingress_uow::IngressFencing::SingleNode => None,
                         };
                         crate::ingress_uow::run_with_retry(5, || {
-                            super::execute_uow::record_delivery_progress(
-                                &uow,
+                            super::execute_uow::record_policy_progress(
+                                &uow_owned,
                                 key,
                                 &progress,
-                                std::slice::from_ref(&target),
-                                None,
+                                std::slice::from_ref(&target_owned),
+                                reason,
                             )
                         })
                         .await
@@ -302,7 +386,7 @@ pub(super) async fn settle_superseded(
         .mailbox_timeout(PROBE_TIMEOUT)
         .reply_timeout(PROBE_TIMEOUT)
         .await
-        .map_err(|_| IngressUowError::EffectIntentConflict)?;
+        .map_err(|_| IngressUowError::Timeout)?;
     match result {
         OccupancyReplayGuardOutcome::Executed(settled) => settled.map(Some),
         OccupancyReplayGuardOutcome::Superseded | OccupancyReplayGuardOutcome::Unproven => Ok(None),
@@ -345,11 +429,11 @@ pub(super) async fn enqueue(
         .mailbox_timeout(PROBE_TIMEOUT)
         .reply_timeout(PROBE_TIMEOUT)
         .await
-        .map_err(|_| IngressUowError::EffectIntentConflict)?;
+        .map_err(|_| IngressUowError::Timeout)?;
     Ok(match result {
         OccupancyReplayGuardOutcome::Executed(outcome) => outcome?,
         OccupancyReplayGuardOutcome::Superseded => BroadcastOutcome::NotConnected,
-        OccupancyReplayGuardOutcome::Unproven => return Err(IngressUowError::EffectIntentConflict),
+        OccupancyReplayGuardOutcome::Unproven => return Err(IngressUowError::RoomGenerationStale),
     })
 }
 
@@ -527,9 +611,9 @@ pub(super) async fn queue_detached(
         .mailbox_timeout(PROBE_TIMEOUT)
         .reply_timeout(PROBE_TIMEOUT)
         .await
-        .map_err(|_| IngressUowError::EffectIntentConflict)?;
+        .map_err(|_| IngressUowError::Timeout)?;
     match result {
-        OccupancyReplayGuardOutcome::Unproven => Err(IngressUowError::EffectIntentConflict),
+        OccupancyReplayGuardOutcome::Unproven => Err(IngressUowError::RoomGenerationStale),
         OccupancyReplayGuardOutcome::Superseded => Ok(FullJidDeliveryOutcome::Unavailable),
         OccupancyReplayGuardOutcome::Executed(Ok(Ok(outcome)))
             if outcome.is_allocated()
@@ -541,10 +625,10 @@ pub(super) async fn queue_detached(
             Ok(FullJidDeliveryOutcome::QueuedDetached)
         }
         OccupancyReplayGuardOutcome::Executed(Ok(Ok(_))) => Ok(FullJidDeliveryOutcome::Unavailable),
-        OccupancyReplayGuardOutcome::Executed(Ok(Err(_)))
-        | OccupancyReplayGuardOutcome::Executed(Err(_)) => {
+        OccupancyReplayGuardOutcome::Executed(Ok(Err(_))) => {
             Err(IngressUowError::EffectIntentConflict)
         }
+        OccupancyReplayGuardOutcome::Executed(Err(error)) => Err(error),
     }
 }
 
@@ -702,8 +786,8 @@ mod tests {
         assert!(
             settle_superseded(&fixture.uow, &manifest, registry, &context, &replaced)
                 .await
-                .expect("absent occupancy stays pending")
-                .is_none()
+                .expect("departed original occupancy retires by policy")
+                .is_some()
         );
         actor
             .ask(Join {
@@ -778,11 +862,11 @@ mod tests {
         let mut unknown = manifest.clone();
         unknown.occupancy_incarnation = AdminMutationId::generate();
         assert!(
-            settle_superseded(&fixture.uow, &unknown, registry, &context, &other)
-                .await
-                .expect("unknown proof does not settle")
-                .is_none(),
-            "unknown incarnation remains pending"
+            matches!(
+                settle_superseded(&fixture.uow, &unknown, registry, &context, &other).await,
+                Err(IngressUowError::EffectIntentConflict)
+            ),
+            "a modified manifest cannot authorize policy retirement"
         );
         assert_eq!(
             fixture.count("sm_ingress_appends").await,

@@ -271,7 +271,12 @@ async fn commit_attempt(
         }
         _ => false,
     };
-    let can_seal = alias != AliasOutcomeClass::Existing || owner_first || sealed_manifest.is_some();
+    // P1 has no remote frozen-child completion protocol. Clustered production
+    // must retain legacy keyed relay settlement until P2; persisted manifests
+    // remain authoritative even after new seals are disabled.
+    let can_seal = sealed_manifest.is_some()
+        || (super::commit_room::new_manifests_enabled(uow)
+            && (alias != AliasOutcomeClass::Existing || owner_first));
     if can_seal && sealed_manifest.is_none() && rejection.is_none() {
         super::commit_room::assert_snapshot_coordinates(&mut tx, submission).await?;
     }
@@ -555,8 +560,9 @@ async fn commit_attempt(
                 {
                     let receipts =
                         super::durable::external_receipts(std::slice::from_ref(effect), &intents)?;
-                    if receipts[0]
+                    if receipts
                         .iter()
+                        .flatten()
                         .any(|receipt| transient_receipts.contains(receipt))
                     {
                         continue;

@@ -11,6 +11,26 @@ use crate::{
 
 pub(crate) struct DeliveryProgressRepository;
 
+/// Resolves an original child without asserting socket delivery or SM custody.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeliveryPolicyDiscardReason {
+    OccupancyDeparted,
+    OccupancySuperseded,
+    OccupancyIncarnationLost,
+    RoomRetired,
+}
+
+impl DeliveryPolicyDiscardReason {
+    pub(crate) fn as_storage(self) -> &'static str {
+        match self {
+            Self::OccupancyDeparted => "occupancy_departed",
+            Self::OccupancySuperseded => "occupancy_superseded",
+            Self::OccupancyIncarnationLost => "occupancy_incarnation_lost",
+            Self::RoomRetired => "room_retired",
+        }
+    }
+}
+
 impl DeliveryProgressRepository {
     pub(crate) async fn load(
         tx: &mut IngressUowTransaction<'_>,
@@ -160,6 +180,37 @@ impl DeliveryProgressRepository {
                         receipt.kind.to_storage(),
                         receipt.semantic_identity_hash.to_vec(),
                         recipient.to_string()
+                    ],
+                )
+                .await?;
+        }
+        Ok(())
+    }
+
+    /// Existing custody or policy resolution always wins. Never relabel a
+    /// transport receipt when later evidence retires the original occupancy.
+    pub(crate) async fn record_policy_discard(
+        tx: &mut IngressUowTransaction<'_>,
+        message: MessageKey,
+        receipt: &EffectReceiptKey,
+        recipients: &[FullJid],
+        reason: DeliveryPolicyDiscardReason,
+    ) -> Result<(), IngressUowError> {
+        let sql = if tx.transaction_mut().driver() == DatabaseDriver::Postgres {
+            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?::uuid, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
+        } else {
+            "INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource, policy_discard_reason) VALUES (?, ?, ?, ?, ?) ON CONFLICT DO NOTHING"
+        };
+        for recipient in recipients {
+            tx.transaction_mut()
+                .execute(
+                    sql,
+                    crate::db_params![
+                        message.to_storage().to_string(),
+                        receipt.kind.to_storage(),
+                        receipt.semantic_identity_hash.to_vec(),
+                        recipient.to_string(),
+                        reason.as_storage(),
                     ],
                 )
                 .await?;
@@ -326,6 +377,57 @@ mod tests {
             "policy is envelope metadata, never a fake delivery row"
         );
         drop(rows);
+        DeliveryProgressRepository::record(&mut tx, key, &receipt, std::slice::from_ref(&human))
+            .await
+            .expect("existing delivered child");
+        DeliveryProgressRepository::record_policy_discard(
+            &mut tx,
+            key,
+            &receipt,
+            std::slice::from_ref(&human),
+            DeliveryPolicyDiscardReason::OccupancyDeparted,
+        )
+        .await
+        .expect("later departure cannot replace delivery");
+        DeliveryProgressRepository::record_policy_discard(
+            &mut tx,
+            key,
+            &receipt,
+            std::slice::from_ref(&sender),
+            DeliveryPolicyDiscardReason::RoomRetired,
+        )
+        .await
+        .expect("original reflection retirement");
+        DeliveryProgressRepository::record(&mut tx, key, &receipt, std::slice::from_ref(&sender))
+            .await
+            .expect("late progress cannot relabel retirement");
+        let mut rows = tx.transaction_mut().query(
+            "SELECT resource, policy_discard_reason FROM ingress_delivery_receipts WHERE message_key = ? ORDER BY resource",
+            crate::db_params![key.to_storage().to_string()],
+        ).await.expect("dispositions");
+        let row = rows.next().await.expect("delivered row").expect("human");
+        assert_eq!(row.get::<String>(0).expect("resource"), human.to_string());
+        assert_eq!(
+            row.get::<Option<String>>(1).expect("reason"),
+            None,
+            "proven custody stays transport completion"
+        );
+        let row = rows.next().await.expect("retired row").expect("sender");
+        assert_eq!(row.get::<String>(0).expect("resource"), sender.to_string());
+        assert_eq!(
+            row.get::<Option<String>>(1).expect("reason").as_deref(),
+            Some("room_retired"),
+            "policy resolution stays distinct from transport completion"
+        );
+        drop(rows);
+        let mut expected = vec![bot.clone(), human, sender];
+        expected.sort();
+        assert_eq!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("all resolved"),
+            expected
+        );
         snapshot.host_no_transport.clear();
         let changed = FrozenRoomManifest::build(key, room, stamp, &snapshot, None, &[route])
             .expect("new host configuration");

@@ -1,6 +1,11 @@
 //! XEP-0045 ghost users: evict the occupancies a stalled groupchat
 //! obligation proves abandoned, then settle the copies they pinned.
 //!
+//! Sealed rows pin the frozen incarnation and watermark before reachability
+//! probes. They retain the leave sweep, evict the exact session, and then
+//! obtain actor/registry policy retirement separately from delivery evidence.
+//! Original sender reflections participate even when all other copies finished.
+//!
 //! A `route_muc` obligation freezes its occupant full JIDs at acceptance, and
 //! its aggregate receipt lands only once every one of them has delivery
 //! progress. `recovery_departed` settles the copies of occupants the room no
@@ -48,7 +53,7 @@
 //! therefore asked about the exact full JID, and each answers only about its
 //! own sockets and sessions.
 //!
-//! The copy is settled BEFORE the sweep runs, not after it. The sweep is the
+//! For unsealed rows, the copy is settled BEFORE the sweep runs. The sweep is the
 //! full disconnect path, so removing the last occupant of a non-persistent
 //! room also runs the empty-room destroy, and that destroy — immediately, or
 //! on the local-departure janitor's next tick once the departure receipt is
@@ -100,7 +105,10 @@ use kameo::actor::ActorRef;
 use waddle_xmpp::{
     ingress::MessageKey,
     muc::{
-        room_actor::{GetOccupantSessionGeneration, LeaveSessionSelector, RoomActor},
+        room_actor::{
+            GetOccupantSessionGeneration, GetReplayOccupantSessionGeneration, LeaveSessionSelector,
+            RoomActor,
+        },
         MucRemovalCause,
     },
 };
@@ -226,7 +234,7 @@ pub(super) async fn repair_stalled_row(
     let (Some(state), Some(rooms)) = (deps.web_socket_state, deps.room_registry) else {
         return Ok(false);
     };
-    let routes = pending_groupchat_routes(uow, key).await?;
+    let (routes, manifest) = pending_groupchat_routes(uow, key).await?;
     let mut settled_any = false;
     let mut receipted_any = false;
     for route in &routes {
@@ -249,9 +257,58 @@ pub(super) async fn repair_stalled_row(
         // maintenance's repair budget before the first write and discard the
         // prefix it had already proven. See `PROBE_CONCURRENCY`.
         for chunk in owed.chunks(recovery_departed::PROBE_CONCURRENCY) {
-            let ghosts = probe_chunk(&actor, deps, key, chunk).await;
+            let ghosts = probe_chunk(&actor, deps, key, chunk, manifest.as_ref(), route).await;
             let ghosts = still_abandoned(&actor, ghosts).await;
             if ghosts.is_empty() {
+                continue;
+            }
+            if let Some(manifest) = manifest.as_ref() {
+                // Housekeeping must own a retained leave sweep before child
+                // retirement can stop recovery. The sweep pins the original
+                // session; it cannot remove a same-JID replacement.
+                for (occupant, generation) in &ghosts {
+                    retain_abandoned_muc_occupancy_sweep(
+                        state,
+                        occupant,
+                        LeaveSessionSelector::Generation(*generation),
+                        MucRemovalCause::TechnicalProblem,
+                    );
+                }
+                for (occupant, generation) in ghosts {
+                    if evict(state, &actor, &occupant, generation).await {
+                        waddle_xmpp::telemetry::reliability::add_muc_ghost_occupants_evicted(1);
+                        tracing::warn!(?key, %room, %occupant, "evicting a frozen ghost MUC occupancy");
+                        #[cfg(test)]
+                        enter_eviction_window(key, &occupant).await;
+                    }
+                    // Eviction is not delivery evidence. Retirement separately
+                    // proves absence or supersession inside the actor/registry
+                    // turn, including when empty-room cleanup destroys it.
+                    for child in manifest.children.iter().filter(|child| {
+                        child.target.as_ref() == Some(&occupant) && child.occupancy.is_some()
+                    }) {
+                        let context = crate::server::routes::interpret::SmIngressAppendContext {
+                            message_key: key,
+                            receipt: child.receipt.clone(),
+                            received_at: route.received_at,
+                            archive_positions: Vec::new(),
+                            dispatch_stream: None,
+                            authority: super::append_authority::AppendAuthority::Verified,
+                        };
+                        if let Some(settled) = super::room_manifest_replay::settle_superseded(
+                            uow,
+                            manifest,
+                            Some(rooms),
+                            &context,
+                            &occupant,
+                        )
+                        .await?
+                        {
+                            settled_any = true;
+                            receipted_any |= !settled.is_empty();
+                        }
+                    }
+                }
                 continue;
             }
             let occupants: Vec<FullJid> = ghosts.iter().map(|(jid, _)| jid.clone()).collect();
@@ -361,11 +418,13 @@ async fn probe_chunk(
     deps: &Deps<'_>,
     key: MessageKey,
     chunk: &[FullJid],
+    manifest: Option<&super::FrozenRoomManifest>,
+    route: &RouteProgress,
 ) -> Vec<(FullJid, OccupancySessionGeneration)> {
     let probed = futures::future::join_all(
         chunk
             .iter()
-            .map(|occupant| abandoned_occupancy(actor, deps, key, occupant)),
+            .map(|occupant| abandoned_occupancy(actor, deps, key, occupant, manifest, route)),
     )
     .await;
     chunk
@@ -444,18 +503,33 @@ async fn abandoned_occupancy(
     deps: &Deps<'_>,
     key: MessageKey,
     occupant: &FullJid,
+    manifest: Option<&super::FrozenRoomManifest>,
+    route: &RouteProgress,
 ) -> Option<OccupancySessionGeneration> {
-    let generation = match actor
-        .ask(GetOccupantSessionGeneration {
-            jid: occupant.clone(),
-        })
-        .reply_timeout(recovery_departed::PROBE_TIMEOUT)
-        .await
-    {
-        Ok(generation) => generation?,
-        Err(error) => {
-            tracing::debug!(%occupant, ?error, "ghost probe could not pin the occupancy generation");
-            return None;
+    let generation = if let Some(manifest) = manifest {
+        let watermark = manifest.child(&route.receipt, Some(occupant))?.occupancy?;
+        actor
+            .ask(GetReplayOccupantSessionGeneration {
+                jid: occupant.clone(),
+                occupancy_incarnation: manifest.occupancy_incarnation,
+                watermark,
+            })
+            .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+            .await
+            .ok()??
+    } else {
+        match actor
+            .ask(GetOccupantSessionGeneration {
+                jid: occupant.clone(),
+            })
+            .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+            .await
+        {
+            Ok(generation) => generation?,
+            Err(error) => {
+                tracing::debug!(%occupant, ?error, "ghost probe could not pin the occupancy generation");
+                return None;
+            }
         }
     };
     #[cfg(test)]
@@ -485,10 +559,9 @@ async fn abandoned_occupancy(
 /// departure path uses, so XEP-0045 §7.14 presence, SFU teardown, empty-room
 /// eviction and failure retention stay in a single place.
 ///
-/// Runs AFTER the copy is settled: the sweep's own empty-room destroy can
-/// take the room — and its claim — away, and the settlement must not depend
-/// on authority the eviction itself is allowed to destroy. See the module
-/// docs for why that order is the safe one.
+/// Unsealed rows settle before this sweep. Sealed rows retain the sweep first
+/// and retire their children afterwards through separate actor/registry proof,
+/// including when empty-room destruction removes the actor.
 ///
 /// `true` only when the full JID is provably no longer seated at all.
 /// The sweep reports `Completed` for a `Superseded` disposition too — a
@@ -503,11 +576,9 @@ async fn evict(
     occupant: &FullJid,
     generation: OccupancySessionGeneration,
 ) -> bool {
-    // A FRESH pass, not a janitor redrive: if the registry cannot enumerate or
-    // resolve the rooms, the sweep records a `FullJidSweep` and the
-    // local-departure janitor retries the eviction. The copy is already
-    // settled by now, so nothing else would come back for this ghost until
-    // another message stalled on it.
+    // A fresh pass records failed removal for janitor redrive. Every caller
+    // retains the sweep before a child can finish, so retirement cannot lose
+    // the removal responsibility when recovery stops revisiting the row.
     if sweep_abandoned_muc_occupancy(
         state,
         occupant,
@@ -546,23 +617,17 @@ async fn evict(
 async fn pending_groupchat_routes(
     uow: &IngressUnitOfWork,
     key: MessageKey,
-) -> Result<Vec<RouteProgress>, IngressUowError> {
+) -> Result<(Vec<RouteProgress>, Option<super::FrozenRoomManifest>), IngressUowError> {
     let mut tx = uow
         .begin_with_timeouts(READ_LOCK_TIMEOUT, READ_STATEMENT_TIMEOUT)
         .await?;
     if !CanonicalMessageRepository::lock(&mut tx, key).await? {
         tx.commit().await?;
-        return Ok(Vec::new());
+        return Ok((Vec::new(), None));
     }
-    if CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let manifest = CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await?
-        .is_some_and(|envelope| envelope.room_manifest().is_some())
-    {
-        // This legacy repair settles before evicting. Sealed children require
-        // actor-serialized occupancy proof and cannot use that receipt path.
-        tx.commit().await?;
-        return Ok(Vec::new());
-    }
+        .and_then(|envelope| envelope.room_manifest().cloned());
     let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let recorded = EffectIntentRepository::load(&mut tx, key).await?;
     let receipted = EffectReceiptRepository::keys(&mut tx, key).await?;
@@ -577,7 +642,10 @@ async fn pending_groupchat_routes(
         else {
             continue;
         };
-        if route.is_direct() || route.room().is_none() {
+        if manifest.is_some() {
+            super::reflection_dispatch::classify_progress(&mut route, &recorded);
+        }
+        if route.room().is_none() || route.is_direct() && manifest.is_none() {
             continue;
         }
         route.completed = completed
@@ -587,5 +655,5 @@ async fn pending_groupchat_routes(
             .unwrap_or_default();
         routes.push(route);
     }
-    Ok(routes)
+    Ok((routes, manifest))
 }

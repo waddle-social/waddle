@@ -82,6 +82,7 @@ pub(crate) use ambiguous_offline::pending_id as ambiguous_offline_pending_id;
 #[path = "execute_detached.rs"]
 mod detached;
 pub(in crate::ingress) use detached::record_delivery_progress;
+pub(in crate::ingress) use detached::record_policy_progress;
 #[cfg(test)]
 pub(crate) use detached::CONTEND_DELIVERY_PROGRESS_ONCE;
 #[cfg(test)]

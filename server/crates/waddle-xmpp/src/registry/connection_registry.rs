@@ -44,7 +44,7 @@ pub struct ConnectionRegistry {
     /// Pending subscription stanzas for offline users (RFC 6121).
     pending_subscription_stanzas: DashMap<BareJid, Vec<Stanza>>,
     /// Per-resource presence state (show/status/priority) for probe responses.
-    presence_states: DashMap<FullJid, PresenceState>,
+    presence_states: Arc<DashMap<FullJid, PresenceState>>,
     /// Last recorded offline activity for each bare JID.
     last_activity: DashMap<BareJid, LastActivityState>,
     /// Server start time used for XEP-0012 uptime responses.
@@ -68,7 +68,7 @@ impl ConnectionRegistry {
             bind_slots: Arc::new(DashMap::new()),
             connections: Arc::new(DashMap::new()),
             pending_subscription_stanzas: DashMap::new(),
-            presence_states: DashMap::new(),
+            presence_states: Arc::new(DashMap::new()),
             last_activity: DashMap::new(),
             started_at: Instant::now(),
             sm_stream_owners: DashMap::new(),

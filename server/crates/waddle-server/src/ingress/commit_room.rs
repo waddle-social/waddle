@@ -1,6 +1,18 @@
 use super::submission::IngressSubmission;
 use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 
+/// Cluster integration stays dark until remote children can complete. The
+/// test-only scope exercises guarded manifests without enabling production.
+pub(super) fn new_manifests_enabled(uow: &crate::ingress_uow::IngressUnitOfWork) -> bool {
+    match uow.fencing() {
+        crate::ingress_uow::IngressFencing::SingleNode => true,
+        #[cfg(feature = "clustering")]
+        crate::ingress_uow::IngressFencing::Clustered(_) => {
+            super::commit::commit_hooks::allow_clustered_room_manifests()
+        }
+    }
+}
+
 /// Admission coordinates fence the snapshot once. Later revisions do not revoke
 /// the children of an already accepted manifest.
 pub(super) async fn assert_snapshot_coordinates(
@@ -150,7 +162,7 @@ pub(super) fn prepare_sealed_plan(
                         let Ok(receipt) = super::receipt_key(&intent) else { return false; };
                         manifest.contains(&receipt, Some(target))
                             && super::receipts::external_receipts(std::slice::from_ref(&ExternalEffect::Frame(stanza.clone())), std::slice::from_ref(&intent))
-                                .is_ok_and(|receipts| receipts[0].contains(&receipt))
+                                .is_ok_and(|receipts| receipts.iter().flatten().any(|saved| saved == &receipt))
                     });
                 if authorized { planned.suppression = PlanSuppressionPolicy::SenderOnly; }
                 return authorized;

@@ -43,11 +43,10 @@ spec:
     cutoverGuard:
       enabled: true
     updateStrategy:
-      # #1660: the V1025 / ABI 3 Recreate cutover is verified across the fleet.
-      type: RollingUpdate
-      rollingUpdate:
-        maxSurge: 1
-        maxUnavailable: 0
+      # #1945: install V1026 and the strict V2 manifest reader across the fleet.
+      # Restore RollingUpdate only in a later server-free change after the
+      # publisher-derived cutover guard verifies every ready pod's revision.
+      type: Recreate
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main

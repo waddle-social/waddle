@@ -11272,3 +11272,130 @@ async fn superseded_replay_guard_refuses_destroy_seal() {
         ))
     ));
 }
+
+#[tokio::test]
+async fn frozen_child_retirement_classifies_departure_and_reconstruction_without_send() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    let frozen = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("snapshot");
+    let watermark = frozen.occupants[0].watermark;
+    let session = actor
+        .ask(GetReplayOccupantSessionGeneration {
+            jid: alice.clone(),
+            occupancy_incarnation: frozen.occupancy_incarnation,
+            watermark,
+        })
+        .await
+        .expect("exact generation");
+    assert!(session.is_some());
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave");
+    for (incarnation, allow_lost_occupancy, expected) in [
+        (frozen.occupancy_incarnation, false, None),
+        (
+            frozen.occupancy_incarnation,
+            true,
+            Some(RoomChildRetirementReason::Departed),
+        ),
+        (crate::muc::AdminMutationId::generate(), false, None),
+        (
+            crate::muc::AdminMutationId::generate(),
+            true,
+            Some(RoomChildRetirementReason::IncarnationLost),
+        ),
+    ] {
+        let outcome = actor
+            .ask(RunRoomChildRetirementGuardedAsync {
+                jid: alice.clone(),
+                occupancy_incarnation: incarnation,
+                coordinates: None,
+                watermark,
+                allow_lost_occupancy,
+                action: Box::new(|reason| Box::pin(async move { reason })),
+            })
+            .await
+            .expect("retirement guard");
+        match expected {
+            Some(expected) => assert!(
+                matches!(outcome, OccupancyReplayGuardOutcome::Executed(reason) if reason == expected)
+            ),
+            None => assert!(matches!(outcome, OccupancyReplayGuardOutcome::Unproven)),
+        }
+    }
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("rejoin");
+    assert!(
+        actor
+            .ask(GetReplayOccupantSessionGeneration {
+                jid: alice.clone(),
+                occupancy_incarnation: frozen.occupancy_incarnation,
+                watermark,
+            })
+            .await
+            .expect("old ghost proof")
+            .is_none(),
+        "new occupancy must never become an old child's ghost"
+    );
+    let result = actor
+        .ask(RunRoomChildRetirementGuardedAsync {
+            jid: alice,
+            occupancy_incarnation: frozen.occupancy_incarnation,
+            coordinates: None,
+            watermark,
+            allow_lost_occupancy: false,
+            action: Box::new(|reason| Box::pin(async move { reason })),
+        })
+        .await
+        .expect("supersession guard");
+    assert!(matches!(
+        result,
+        OccupancyReplayGuardOutcome::Executed(RoomChildRetirementReason::Superseded)
+    ));
+}
+
+#[tokio::test]
+async fn claimed_actor_cannot_use_single_node_incarnation_retirement() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    let snapshot = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("snapshot");
+    let outcome = actor
+        .ask(RunRoomChildRetirementGuardedAsync::<bool> {
+            jid: alice,
+            occupancy_incarnation: crate::muc::AdminMutationId::generate(),
+            coordinates: snapshot.durable_coordinates,
+            watermark: snapshot.occupants[0].watermark,
+            allow_lost_occupancy: true,
+            action: Box::new(|_| {
+                Box::pin(async { panic!("a claimed actor cannot retire a foreign incarnation") })
+            }),
+        })
+        .await
+        .expect("retirement guard");
+    assert!(matches!(outcome, OccupancyReplayGuardOutcome::Unproven));
+}

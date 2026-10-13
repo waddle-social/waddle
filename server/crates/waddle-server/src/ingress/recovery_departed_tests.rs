@@ -1054,92 +1054,109 @@ mod fenced_authority {
     }
 }
 
-/// A sealed child cannot inherit the legacy absence proof: missing occupancy
-/// and an unhosted roster never prove a strictly newer seated generation.
+/// Single-node retirement resolves the original children, including reflection,
+/// without allocating transport custody. An absent registry actor is proven in
+/// the registry turn, not inferred from a failed lookup.
 #[tokio::test]
-async fn sqlite_sealed_departed_occupancy_stays_pending_without_fabricated_progress() {
-    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
-    let before = metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0);
-    let f = IngressFixture::sqlite().await;
-    let sm = persistent_sm(&f).await;
-    let state = state_for(&f, sm).await;
-    let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
-    let submission = planned_room(&f, &state, Case::Lost, std::slice::from_ref(&ghost)).await;
-    let muc = submission
-        .plan
-        .intents
-        .iter()
-        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
-        .expect("room fanout intent");
-    let receipt = receipt_key(muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("sealed room acceptance");
-    let key = decision.message_key.expect("key");
-    settle_non_delivery_effects(&f, &state, &decision).await;
-    let mut tx = f.uow.begin().await.expect("inspect accepted manifest");
-    assert!(
-        CanonicalMessageRepository::load_envelope(&mut tx, key)
+async fn sqlite_sealed_departed_and_destroyed_room_children_retire_by_policy() {
+    for state_after_acceptance in ["departed", "destroyed", "recreated"] {
+        let f = IngressFixture::sqlite().await;
+        let sm = persistent_sm(&f).await;
+        let state = state_for(&f, sm).await;
+        let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
+        let submission = planned_room(&f, &state, Case::Lost, std::slice::from_ref(&ghost)).await;
+        let decision = commit_submission(&f.uow, &submission, 1)
             .await
-            .expect("canonical envelope")
-            .expect("accepted source")
+            .expect("sealed acceptance");
+        let key = decision.message_key.expect("key");
+        settle_non_delivery_effects(&f, &state, &decision).await;
+        let mut tx = f.uow.begin().await.expect("read accepted manifest");
+        let manifest = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("envelope")
+            .expect("canonical row")
             .room_manifest()
-            .is_some(),
-        "this regression must exercise modern sealed authority"
-    );
-    tx.commit().await.expect("manifest inspection");
-    depart(&state, &ghost).await;
-    let empty_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
-        "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'd'; 32]).expect("occupant-id secret"),
-    ));
-    for registry in [None, Some(empty_registry)] {
+            .expect("manifest")
+            .clone();
+        tx.commit().await.expect("read commit");
+        let registry = &state.deps.protocol.room_registry;
+        if state_after_acceptance == "departed" {
+            depart(&state, &ghost).await;
+            depart(&state, &submission.sender).await;
+        } else {
+            use waddle_xmpp::muc::room_registry_actor::{
+                CreateRoom, DestroyRoom, DestroyRoomOutcome, DestroyRoomReason,
+            };
+            assert_eq!(
+                registry
+                    .ask(DestroyRoom {
+                        room_jid: manifest.room.clone(),
+                        reason: DestroyRoomReason::Destroy,
+                    })
+                    .await
+                    .expect("destroy original room"),
+                DestroyRoomOutcome::Destroyed
+            );
+            if state_after_acceptance == "recreated" {
+                registry
+                    .ask(CreateRoom {
+                        room_jid: manifest.room.clone(),
+                        waddle_id: "replacement".into(),
+                        channel_id: "replacement".into(),
+                        config: Default::default(),
+                    })
+                    .await
+                    .expect("publish reconstructed room");
+            }
+        }
         let env: Arc<dyn RecoveryEnvironment> = Arc::new(RoomOverrideEnvironment {
-            state: state.clone(),
-            registry,
+            state,
+            registry: None,
         });
         assert_eq!(
             pass(&f, &env, &MaintenanceCursor::default()).await,
             MaintenanceOutcome::Complete
         );
-        let mut tx = f.uow.begin().await.expect("inspect pending sealed child");
-        assert!(
-            DeliveryProgressRepository::load(&mut tx, key, &receipt)
-                .await
-                .expect("occupant progress")
-                .is_empty(),
-            "unknown occupancy must not fabricate a transport delivery row"
-        );
-        assert!(
-            !EffectReceiptRepository::contains(
-                &mut tx,
-                key,
-                receipt.kind,
-                &receipt.semantic_identity_hash
-            )
-            .await
-            .expect("aggregate receipt"),
-            "unknown occupancy leaves the aggregate pending"
-        );
-        assert!(!CanonicalMessageRepository::is_terminal(&mut tx, key)
+        let mut tx = f.uow.begin().await.expect("inspect resolved children");
+        assert!(CanonicalMessageRepository::is_terminal(&mut tx, key)
             .await
             .expect("terminal"));
-        assert!(
+        assert_eq!(
             CanonicalMessageRepository::load_envelope(&mut tx, key)
                 .await
-                .expect("canonical source")
-                .expect("recorded source")
-                .room_manifest()
-                .is_some(),
-            "maintenance must preserve the accepted manifest"
+                .expect("source")
+                .expect("retained row")
+                .room_manifest(),
+            Some(&manifest)
         );
-        tx.commit().await.expect("pending inspection");
+        tx.commit().await.expect("inspection commit");
+        assert_eq!(
+            f.count("sm_ingress_appends").await,
+            0,
+            "policy cannot allocate SM custody"
+        );
+        let connection = f.db.guard().await.expect("policy inspection");
+        let mut rows = connection.query(
+            "SELECT policy_discard_reason FROM ingress_delivery_receipts WHERE message_key = ? ORDER BY resource",
+            crate::db_params![key.to_storage().to_string()],
+        ).await.expect("child resolutions");
+        let mut reasons = Vec::new();
+        while let Some(row) = rows.next().await.expect("resolution row") {
+            reasons.push(row.get::<String>(0).expect("explicit policy reason"));
+        }
+        assert_eq!(
+            reasons.len(),
+            2,
+            "occupant and original reflection both retire"
+        );
+        let expected = match state_after_acceptance {
+            "destroyed" => "room_retired",
+            "recreated" => "occupancy_incarnation_lost",
+            _ => "occupancy_departed",
+        };
+        assert!(reasons.iter().all(|reason| reason == expected));
+        drop(rows);
+        drop(connection);
+        f.close().await;
     }
-    assert_eq!(f.count("sm_ingress_appends").await, 0);
-    assert_eq!(
-        metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0),
-        before,
-        "unknown sealed occupancy supplies no settlement proof"
-    );
-    f.close().await;
 }

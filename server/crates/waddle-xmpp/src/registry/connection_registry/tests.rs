@@ -1346,3 +1346,22 @@ fn owned_replay_enqueue_refuses_a_replacement_socket() {
     assert!(old_receiver.try_recv().is_err());
     assert!(new_receiver.try_recv().is_err());
 }
+
+#[test]
+fn owned_replay_enqueue_evicts_its_closed_socket() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("closed-frozen-replay");
+    let (sender, receiver) = mpsc::channel(4);
+    let owner = registry.register(jid.clone(), sender);
+    let enqueue = registry.capture_owned_enqueue_if_owner(
+        jid.clone(),
+        owner,
+        OutboundStanza::peer_stanza(Stanza::Message(make_test_message("alice@example.com"))),
+    );
+    drop(receiver);
+    assert_eq!(enqueue(), BroadcastOutcome::DroppedClosed);
+    assert!(
+        !registry.is_connected(&jid),
+        "closed replay socket is evicted"
+    );
+}

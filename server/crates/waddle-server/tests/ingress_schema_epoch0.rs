@@ -178,7 +178,7 @@ async fn assert_v1014_constraints(db: &Database) {
         .is_err());
     for sql in [
         "UPDATE ingress_messages SET envelope = ?",
-        "UPDATE ingress_messages SET envelope_version = 2, envelope = ?",
+        "UPDATE ingress_messages SET envelope_version = 3, envelope = ?",
     ] {
         assert!(
             conn.execute(sql, waddle_server::db_params![vec![1_u8]])
@@ -193,6 +193,12 @@ async fn assert_v1014_constraints(db: &Database) {
     )
     .await
     .expect("version-one envelope");
+    conn.execute(
+        "UPDATE ingress_messages SET envelope_version = 2, envelope = ?",
+        waddle_server::db_params![vec![2_u8]],
+    )
+    .await
+    .expect("version-two envelope");
     let receipt_sql = "INSERT INTO ingress_effect_receipts (message_key, kind, semantic_identity_hash) VALUES ('00000000-0000-0000-0000-000000000011', 0, ?)";
     assert!(
         conn.execute(receipt_sql, waddle_server::db_params![vec![0_u8; 32]])

@@ -219,9 +219,11 @@ pub enum ProjectionRefusal {
     WrongProjectionKind,
 }
 pub use snapshot_handlers::{
-    BuildGroupchatBroadcast, GetNicknameGeneration, GetRoomSnapshot, GroupchatBroadcastResult,
-    OccupancyReplayGuardOutcome, RoomChainOccupant, RoomChainSnapshot, RunOccupancyReplayGuarded,
-    RunOccupancyReplayGuardedAsync, RunSupersededOccupancyGuardedAsync,
+    BuildGroupchatBroadcast, GetNicknameGeneration, GetReplayOccupantSessionGeneration,
+    GetRoomSnapshot, GroupchatBroadcastResult, OccupancyReplayGuardOutcome, RoomChainOccupant,
+    RoomChainSnapshot, RoomChildRetirementReason, RunOccupancyReplayGuarded,
+    RunOccupancyReplayGuardedAsync, RunRoomChildRetirementGuardedAsync,
+    RunSupersededOccupancyGuardedAsync,
 };
 
 // ---------------------------------------------------------------------------

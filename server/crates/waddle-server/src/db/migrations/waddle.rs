@@ -1461,6 +1461,41 @@ INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_effect_de
 GRANT SELECT ON TABLE ingress_effect_descendants TO pg_monitor;
 "#;
 
+/// Sealed room manifests use envelope V2. Keep V1 envelopes intact and stop
+/// older writers before applying this one-way reader/writer cutover: their
+/// migration catalogs fail closed on V1026, even before any V2 row is written.
+/// SQLite replaces only the two envelope columns so canonical keys, foreign
+/// keys, revisions, timestamps and descendants remain untouched.
+pub const V1026_SEALED_ROOM_ENVELOPES: &str = r#"
+CREATE TEMP TABLE ingress_envelopes_v1026 (
+    message_key TEXT PRIMARY KEY NOT NULL,
+    envelope_version SMALLINT NULL,
+    envelope BLOB NULL
+);
+INSERT INTO ingress_envelopes_v1026
+    SELECT message_key, envelope_version, envelope FROM ingress_messages;
+ALTER TABLE ingress_messages DROP COLUMN envelope;
+ALTER TABLE ingress_messages DROP COLUMN envelope_version;
+ALTER TABLE ingress_messages ADD COLUMN envelope_version SMALLINT NULL
+    CHECK (envelope_version IS NULL OR envelope_version IN (1, 2));
+ALTER TABLE ingress_messages ADD COLUMN envelope BLOB NULL
+    CHECK ((envelope IS NULL) = (envelope_version IS NULL));
+UPDATE ingress_messages SET
+    envelope_version = (SELECT old.envelope_version FROM ingress_envelopes_v1026 old WHERE old.message_key = ingress_messages.message_key),
+    envelope = (SELECT old.envelope FROM ingress_envelopes_v1026 old WHERE old.message_key = ingress_messages.message_key);
+DROP TABLE ingress_envelopes_v1026;
+ALTER TABLE ingress_delivery_receipts ADD COLUMN policy_discard_reason TEXT
+    CHECK (policy_discard_reason IN ('occupancy_departed', 'occupancy_superseded', 'occupancy_incarnation_lost', 'room_retired'));
+"#;
+
+pub const V1026_SEALED_ROOM_ENVELOPES_POSTGRES: &str = r#"
+ALTER TABLE ingress_messages DROP CONSTRAINT ingress_messages_envelope_version_check;
+ALTER TABLE ingress_messages ADD CONSTRAINT ingress_messages_envelope_version_check
+    CHECK (envelope_version IS NULL OR envelope_version IN (1, 2));
+ALTER TABLE ingress_delivery_receipts ADD COLUMN policy_discard_reason TEXT
+    CHECK (policy_discard_reason IN ('occupancy_departed', 'occupancy_superseded', 'occupancy_incarnation_lost', 'room_retired'));
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1614,6 +1649,13 @@ pub fn all() -> Vec<Migration> {
                 .to_string(),
             sql_sqlite: V1025_EFFECT_DESCENDANT_RETENTION,
             sql_postgres: V1025_EFFECT_DESCENDANT_RETENTION_POSTGRES,
+        },
+        Migration {
+            version: 1026,
+            description: "Version sealed room envelopes and record child policy dispositions"
+                .to_string(),
+            sql_sqlite: V1026_SEALED_ROOM_ENVELOPES,
+            sql_postgres: V1026_SEALED_ROOM_ENVELOPES_POSTGRES,
         },
     ]
 }
