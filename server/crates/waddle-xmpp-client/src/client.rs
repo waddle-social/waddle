@@ -465,6 +465,18 @@ impl DriverTask {
     }
 
     async fn apply_client_events(&mut self, client_events: Vec<ClientEvent>) -> bool {
+        if client_events.iter().any(|event| {
+            matches!(
+                event,
+                ClientEvent::Connection(ConnectionEvent::CloseTransport)
+            )
+        }) {
+            // Publish retirement before notifying subscribers or awaiting a
+            // potentially stalled close. New sends must fail immediately.
+            self.commands.close();
+            self.publish_snapshot();
+            self.publish_resume_state_snapshot();
+        }
         for evt in client_events {
             if matches!(
                 evt,
