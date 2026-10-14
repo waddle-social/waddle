@@ -22,7 +22,7 @@ pub use builders::{
     build_file_sharing_element, build_in_call_reaction_message, build_moderation_message,
     build_muc_join_presence, build_outbound_message, build_pinned_chat_message,
     build_pinned_message, build_reaction_message, build_retraction_message,
-    build_unpinned_chat_message, build_unpinned_message,
+    build_unpinned_chat_message, build_unpinned_message, is_muc_join_presence,
 };
 pub use call::{
     build_finish, build_finish_migrated, build_finish_with_options, build_finish_with_reason,

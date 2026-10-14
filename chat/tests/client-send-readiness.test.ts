@@ -2186,7 +2186,7 @@ describe("client keepalive lifecycle", () => {
     }
   });
 
-  test("does not call removed history helper on stream-management resume", async () => {
+  test("does not call removed history helper on a fresh session after a drop", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as { catchup: { recordDmSeen: (peer: string, ts: string) => void; onSessionStarted: () => unknown[] } }).catchup;
     catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z");
@@ -2203,14 +2203,14 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await Promise.resolve();
     await Promise.resolve();
 
     expect(removedHistoryHelper).not.toHaveBeenCalled();
   });
 
-  test("runs Rust MAM catch-up for tracked DMs on stream-management resume", async () => {
+  test("runs Rust MAM catch-up for tracked DMs on a fresh session after a drop", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as { catchup: { recordDmSeen: (peer: string, ts: string) => void; onSessionStarted: () => unknown[] } }).catchup;
     catchup.recordDmSeen("bob@example.com", "2024-01-01T00:00:00.000Z");
@@ -2238,7 +2238,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await Promise.resolve();
     await Promise.resolve();
 
@@ -2347,7 +2347,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(dmHandler).toHaveBeenCalledTimes(1);
@@ -2460,7 +2460,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(1, "bob@example.com", 100, { type: "latest" });
@@ -2545,7 +2545,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(2, "bob@example.com", 100, {
@@ -2583,7 +2583,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await Promise.resolve();
     await Promise.resolve();
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
@@ -2617,7 +2617,7 @@ describe("client keepalive lifecycle", () => {
     expect(readDmCallActivity("bob@example.com")).toBeNull();
   });
 
-  test("resumed timestamp catch-up stops at the reconnect page budget (#1221)", async () => {
+  test("fresh-session timestamp catch-up stops at the reconnect page budget (#1221)", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as {
       catchup: {
@@ -2655,7 +2655,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup(newestIndex + 20);
 
     // #1221: capped at 5 pages instead of walking the whole 52-page
@@ -2726,7 +2726,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledWith("bob@example.com", 100, {
@@ -2803,7 +2803,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await secondCatchupHandled;
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(1, "bob@example.com", 100, {
@@ -2859,7 +2859,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchDmHistoryPage).toHaveBeenCalledTimes(1);
@@ -2933,7 +2933,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchDmHistoryPage).toHaveBeenNthCalledWith(1, "bob@example.com", 100, {
@@ -2949,7 +2949,7 @@ describe("client keepalive lifecycle", () => {
     }));
   });
 
-  test("resumed forward catch-up stops at the reconnect page budget (#1221)", async () => {
+  test("fresh-session forward catch-up stops at the reconnect page budget (#1221)", async () => {
     const client = new BrowserXmppClient(session());
     const catchup = (client as unknown as {
       catchup: {
@@ -2982,7 +2982,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup(finalPage + 20);
 
     // #1221: capped at 5 forward pages; the forward loop applies each
@@ -3240,7 +3240,7 @@ describe("client keepalive lifecycle", () => {
     expect($dmCallOutcomeAnchor.get()).toEqual(existingOutcome);
   });
 
-  test("queryMamThreadPage seeds room reconnect catch-up from XEP-0313 archive ids", async () => {
+  test("queryMamThreadPage does not seed room reconnect catch-up (a thread page cannot vouch for the room)", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
@@ -3266,9 +3266,7 @@ describe("client keepalive lifecycle", () => {
     await client.queryMamThreadPage("w1", "c1", "thread-1", 100, { type: "latest" });
 
     expect(fetchRoomHistoryByThread).toHaveBeenCalledWith(roomJid, "thread-1", 100, null);
-    expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
-      { kind: "room", key: roomJid, after: "mam-thread-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["mam-thread-1", "room-thread-1"] },
-    ]);
+    expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([]);
   });
 
   test("queryPersonalMamThreadPage ignores call events without mutating call activity", async () => {
@@ -3327,7 +3325,7 @@ describe("client keepalive lifecycle", () => {
     expect($dmCallOutcomeAnchor.get()).toEqual(existingOutcome);
   });
 
-  test("queryMamByThread seeds room reconnect catch-up from XEP-0313 archive ids", async () => {
+  test("queryMamByThread does not seed room reconnect catch-up (a thread page cannot vouch for the room)", async () => {
     const client = new BrowserXmppClient(session());
     const roomJid = roomBareJidFor(session(), "c1");
     (client as unknown as { connect: () => Promise<void> }).connect = async () => undefined;
@@ -3353,9 +3351,7 @@ describe("client keepalive lifecycle", () => {
     await client.queryMamByThread("w1", "c1", "thread-1", 100);
 
     expect(fetchRoomHistoryByThread).toHaveBeenCalledWith(roomJid, "thread-1", 100, null);
-    expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([
-      { kind: "room", key: roomJid, after: "mam-thread-list-1", since: "2024-01-01T00:00:01.000Z", seenIds: ["mam-thread-list-1", "room-thread-list-1"] },
-    ]);
+    expect((client as unknown as { catchup: { onSessionStarted: () => unknown[] } }).catchup.onSessionStarted()).toEqual([]);
   });
 
   test("room timestamp fallback skips already-seen messages and learns archive ids", async () => {
@@ -3397,7 +3393,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(activityHandler).toHaveBeenCalledTimes(1);
@@ -3489,7 +3485,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchRoomHistoryPage).toHaveBeenNthCalledWith(1, roomJid, 100, { type: "latest" });
@@ -3573,7 +3569,7 @@ describe("client keepalive lifecycle", () => {
     }));
     client.setActivityHandler(activityHandler);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchRoomHistoryPage).toHaveBeenCalledWith(roomJid, 100, {
@@ -3652,7 +3648,7 @@ describe("client keepalive lifecycle", () => {
 
     (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchRoomHistoryPage).toHaveBeenNthCalledWith(2, roomJid, 100, {
@@ -3708,7 +3704,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchRoomHistoryPage).toHaveBeenCalledTimes(1);
@@ -3786,7 +3782,7 @@ describe("client keepalive lifecycle", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await settleReconnectCatchup();
 
     expect(fetchRoomHistoryPage).toHaveBeenNthCalledWith(1, roomJid, 100, {
@@ -3888,7 +3884,7 @@ describe("room activity adapter", () => {
     (client as unknown as { xmpp: Agent }).xmpp = xmpp;
     (client as unknown as { wireEvents: (xmpp: Agent) => void }).wireEvents(xmpp);
 
-    xmpp.emit("stream:management:resumed");
+    xmpp.emit("session:started");
     await Promise.resolve();
     await Promise.resolve();
 

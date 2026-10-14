@@ -7,7 +7,9 @@
 use chrono::{TimeZone, Utc};
 use minidom::Element;
 use waddle_xmpp_client::{
-    stream_management::{InvalidSmInboundControl, SmInboundControl, SmState},
+    stream_management::{
+        InvalidSmInboundControl, SmAcknowledgementClockAction, SmInboundControl, SmState,
+    },
     SmResumeState, StreamId, UnhandledOutboundEntry,
 };
 
@@ -278,4 +280,74 @@ fn rejection_changes_retry_only_for_the_retained_outbound_recipient() {
             "from {from} for {recipient}"
         );
     }
+}
+
+// XEP-0198 §4 acknowledgement clock across a suspended host (frozen tab,
+// OS sleep): the host cannot observe `<a/>` while suspended, so the first
+// stall restarts the deadlines, but a second stall without `h` progress
+// must still let the stream time out.
+
+fn sm_with_unacked_message(now: chrono::DateTime<Utc>) -> SmState {
+    let mut sm = SmState::new();
+    sm.outbound_enabled = true;
+    let message = "<message xmlns='jabber:client' id='m-1'><body>one</body></message>"
+        .parse::<Element>()
+        .expect("message parses");
+    assert!(sm.record_sent_stanza_at(&message, now));
+    sm
+}
+
+#[test]
+fn xep0198_host_suspension_restarts_the_ack_clock_once_per_stall() {
+    let start = Utc
+        .with_ymd_and_hms(2026, 7, 27, 12, 0, 0)
+        .single()
+        .expect("test timestamp is valid");
+    let mut sm = sm_with_unacked_message(start);
+    let timed_out = |actions: &[SmAcknowledgementClockAction]| {
+        actions.contains(&SmAcknowledgementClockAction::ProgressTimedOut)
+    };
+
+    let woke = start + chrono::Duration::seconds(60);
+    sm.restart_acknowledgement_clock_after_host_suspension(woke);
+    let after_wake = sm.poll_acknowledgement_clock(woke);
+    assert!(
+        !timed_out(&after_wake),
+        "a suspended host does not read its gap as peer silence"
+    );
+    assert!(
+        after_wake.contains(&SmAcknowledgementClockAction::Retry { attempt: 1 }),
+        "the restart asks the peer for `<a/>` again right away",
+    );
+
+    let woke_again = woke + chrono::Duration::seconds(60);
+    sm.restart_acknowledgement_clock_after_host_suspension(woke_again);
+    assert!(
+        timed_out(&sm.poll_acknowledgement_clock(woke_again)),
+        "a second stall without `h` progress lets the stream time out",
+    );
+}
+
+#[test]
+fn xep0198_ack_progress_grants_a_later_suspension_another_restart() {
+    let start = Utc
+        .with_ymd_and_hms(2026, 7, 27, 12, 0, 0)
+        .single()
+        .expect("test timestamp is valid");
+    let mut sm = sm_with_unacked_message(start);
+    let second = "<message xmlns='jabber:client' id='m-2'><body>two</body></message>"
+        .parse::<Element>()
+        .expect("message parses");
+    sm.record_sent_stanza_at(&second, start);
+
+    let woke = start + chrono::Duration::seconds(60);
+    sm.restart_acknowledgement_clock_after_host_suspension(woke);
+    sm.poll_acknowledgement_clock(woke);
+    sm.process_ack_at(1, woke + chrono::Duration::seconds(1));
+
+    let woke_again = woke + chrono::Duration::seconds(60);
+    sm.restart_acknowledgement_clock_after_host_suspension(woke_again);
+    assert!(!sm
+        .poll_acknowledgement_clock(woke_again)
+        .contains(&SmAcknowledgementClockAction::ProgressTimedOut));
 }

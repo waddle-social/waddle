@@ -119,6 +119,7 @@ function dmHarness() {
     activePeerJid: ref("bob@example.com"),
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin: mock(async () => true),
+    isPinnedAtEdge: ref(true),
     persistLastSeen: mock(() => {}),
     isFeedVisible: () => true,
   });
@@ -134,6 +135,7 @@ function channelHarness() {
     activeChannelId: ref("channel-1"),
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin: mock(async () => true),
+    isPinnedAtEdge: ref(true),
     persistLastSeen: mock(() => {}),
   });
   return { messages, liveMerge };

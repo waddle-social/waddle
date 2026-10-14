@@ -100,6 +100,23 @@ function messageStanzaIdFromSerializedXml(xml: string): string | null {
   return match?.[2] ?? null;
 }
 
+/** The room a serialized groupchat stanza (message, reaction, edit) targets. */
+function groupchatRoomFromSerializedXml(xml: string): string | null {
+  if (typeof DOMParser !== "undefined") {
+    try {
+      const root = new DOMParser().parseFromString(xml, "application/xml").documentElement;
+      if (root.localName !== "message" || root.getAttribute("type") !== "groupchat") return null;
+      const to = root.getAttribute("to");
+      return to ? barePeerJid(to) : null;
+    } catch {}
+  }
+
+  const open = xml.match(/^<message\b[^>]*>/i)?.[0];
+  if (!open || !/\stype=(["'])groupchat\1/i.test(open)) return null;
+  const to = open.match(/\sto=(["'])([^"']+)\1/i)?.[2];
+  return to ? barePeerJid(to) : null;
+}
+
 function validResumeMaxSeconds(value: number | undefined): number | undefined {
   return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= 0xFFFF_FFFF
     ? value
@@ -252,6 +269,19 @@ export class ReconnectScheduler {
 
   resetAttempts(): void {
     this.attempt = 0;
+  }
+
+  /**
+   * Cancel an armed backoff timer so the caller can run that attempt now,
+   * refunding it: a user returning to the tab is an explicit signal, and a
+   * fast failure re-schedules the same backoff step instead of burning the
+   * budget toward exhaustion one tab switch at a time.
+   */
+  takePendingRetryEarly(): boolean {
+    if (!this.timer) return false;
+    this.clearTimer();
+    this.attempt = Math.max(0, this.attempt - 1);
+    return true;
   }
 
   /**
@@ -546,6 +576,7 @@ const SUCCESSOR_REPLAY_CONVERGENCE_MS = 90_000;
 export class OfflineSendQueue {
   private readonly inflightQueuedIds = new Set<string>();
   private readonly resumeReplayQueuedIds = new Set<string>();
+  private readonly resumeTailRooms = new Set<string>();
   private readonly pendingSendAt = new Map<string, { at: number; kind: "room" | "dm" }>();
   // Keep identity after an SM ack: the server can reject routing afterwards.
   // Keep this small identity record for the client session: SM supplies no
@@ -624,6 +655,15 @@ export class OfflineSendQueue {
     this.emitQueueDepth();
   }
 
+  /**
+   * Rooms the unacknowledged XEP-0198 tail sends groupchat to. A failed
+   * resume retries that tail on the fresh stream, where each room must be
+   * rejoined before its retry lands (XEP-0045 §7.4), so these join first.
+   */
+  roomsAwaitingResumeTail(): string[] {
+    return [...this.resumeTailRooms];
+  }
+
   /** Undo a live-send claim when the host did not accept its exact id. */
   rollbackLiveAttempt(attempt: LiveSendAttempt): void {
     this.rollbackAttempt(attempt.id, attempt.generation);
@@ -655,7 +695,10 @@ export class OfflineSendQueue {
    */
   seedFromResumeState(state: XmppResumeState | null | undefined): void {
     const persisted = listQueuedMessages(this.deps.queueScope());
+    this.resumeTailRooms.clear();
     for (const entry of state?.unhandledOutboundEntries ?? []) {
+      const room = entry.rejected ? null : groupchatRoomFromSerializedXml(entry.xml);
+      if (room) this.resumeTailRooms.add(room);
       const id = messageStanzaIdFromSerializedXml(entry.xml);
       if (!id) continue;
       const queued = persisted.find((queued) => queued.id === id);

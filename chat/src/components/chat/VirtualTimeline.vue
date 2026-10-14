@@ -81,7 +81,14 @@ watch(
     if (!el) return;
     disconnectMeasurementRecovery = installVirtualTimelineMeasurementRecovery({
       scrollElement: el,
-      measure: () => virtualizer.value.measure(),
+      // Re-measure the mounted rows in place. `virtualizer.measure()` clears
+      // the whole size cache, so every row snaps to the 112px estimate and
+      // the timeline visibly jumps on tab refocus before re-measuring.
+      measure: () => {
+        for (const row of el.firstElementChild?.children ?? []) {
+          virtualizer.value.measureElement(row as HTMLElement);
+        }
+      },
       measureElement: (row) => virtualizer.value.measureElement(row),
     });
   },
@@ -103,13 +110,6 @@ function maybeLoadOlder() {
 }
 
 watchEffect(maybeLoadOlder);
-
-watch(
-  () => props.items.length,
-  () => {
-    void nextTick(() => virtualizer.value.measure());
-  },
-);
 
 async function scrollToMessageId(messageId: string, align: "start" | "center" | "end" = "center") {
   const rowKeyMatches = props.items.filter((item) => item.rowKey === messageId);

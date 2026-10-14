@@ -173,14 +173,12 @@ describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
     ).toBe(true);
   });
 
-  test("a failed catch-up on a RESUMED session emits no catchupFailure", async () => {
-    // Resumed sessions never skipped a reload (the fresh-only lifecycle
-    // path is the only skipper), so there is nothing to fall back to —
-    // emitting here would trigger a spurious wholesale reload for a
-    // gap-free stream.
+  test("a resumed session runs no catch-up (its stream is gap-free)", async () => {
     const { client, state, received } = makeClient();
+    let fetches = 0;
     const xmpp = {
       fetch_room_history_page: () => {
+        fetches += 1;
         throw new Error("boom");
       },
     };
@@ -192,8 +190,40 @@ describe("#1180 fresh lifecycle carries reconnect catch-up coverage", () => {
 
     await state.runSessionReady(xmpp, { type: "resumed" });
 
+    expect(fetches).toBe(0);
     expect(failures).toEqual([]);
     expect(received).toEqual([{ type: "resumed" }]);
+  });
+
+  test("a resume finishes the catch-up an interrupted fresh session promised", async () => {
+    // The fresh event told the timelines this room was covered, so they
+    // skipped their own refetch; a drop mid-catch-up must not leave that
+    // gap for good when the next reconnect resumes the same session.
+    const { state, received } = makeClient();
+    const fetchedOn: string[] = [];
+    const fresh = {
+      fetch_room_history_page: async () => {
+        fetchedOn.push("fresh");
+        state.xmpp = resumedHandle;
+        throw new Error("socket closed");
+      },
+    };
+    const resumedHandle = {
+      fetch_room_history_page: async () => {
+        fetchedOn.push("resumed");
+        return { messages: [], is_complete: true };
+      },
+    };
+    state.xmpp = fresh;
+    state.catchup.onSessionStarted();
+    state.catchup.recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:01.000Z", "archive-1");
+
+    await state.runSessionReady(fresh, { type: "fresh" });
+    (state as unknown as { connected: boolean }).connected = true;
+    await state.runSessionReady(resumedHandle, { type: "resumed" });
+
+    expect(received.map((event) => event.type)).toEqual(["fresh", "resumed"]);
+    expect(fetchedOn).toEqual(["fresh", "resumed"]);
   });
 
   test("resumed session-ready carries no coverage field", async () => {

@@ -116,6 +116,75 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
 
   const isFeedVisible = isFeedTimelineMessage;
 
+  // #414: hydrate the pin store for this room. Fire-and-forget — the
+  // panel + badge tolerate an empty store and the live pin-event
+  // handler will mutate it from now on. Capture the epoch at request
+  // time so a late callback after logout drops itself.
+  function hydratePins(spaceId: string, channelId: string, roomJid: string) {
+    if (xmppClient.value && "fetchRoomPins" in xmppClient.value) {
+      const epoch = pinnedRoomsEpoch();
+      void xmppClient.value
+        .fetchRoomPins(spaceId, channelId)
+        .then((entries) => {
+          hydratePinnedRoom(roomJid, entries, epoch);
+        })
+        .catch((error: unknown) => {
+          console.warn("fetchRoomPins failed", error);
+          hydratePinnedRoom(roomJid, [], epoch);
+        });
+    } else {
+      hydratePinnedRoom(roomJid, []);
+    }
+  }
+
+  /**
+   * Reconnect gap-close: merge the latest page into the rows on screen.
+   * Unlike `loadMessages` this keeps the timeline mounted (no skeleton,
+   * no wipe) along with paged-back history, thread replies, and the
+   * divider. Returns "reload" when a merge would be wrong — no latest
+   * page has loaded yet (or one is in flight), or the page shares no row
+   * with `knownIds`, the rows on screen before the reconnect (the gap is
+   * wider than a page, so merging would hide the hole). The caller must
+   * snapshot `knownIds` before anything from the new session merges.
+   */
+  async function refreshLatestPage(
+    spaceId: string,
+    channelId: string,
+    knownIds: ReadonlySet<string>,
+  ): Promise<"merged" | "reload" | "aborted" | "failed"> {
+    const client = xmppClient.value;
+    const roomJid = roomJidForChannel(channelId);
+    if (!session.value || !client || !roomJid) return "aborted";
+    if (isLoadingMessages.value || !("queryMamPage" in client)) return "reload";
+    if (oldestArchiveId === null && hasOlderMessages.value) return "reload";
+    if (isRoomAccessRequired(roomJid)) return "aborted";
+    // Observe, don't bump, the request id: a newer load or channel switch
+    // supersedes this refresh, but an in-flight older-page load must not
+    // be cancelled by it.
+    const requestId = messageRequestId;
+    hydratePins(spaceId, channelId, roomJid);
+    try {
+      const page = await client.queryMamPage(spaceId, channelId, PAGE_SIZE, { type: "latest" });
+      if (
+        requestId !== messageRequestId ||
+        (activeSpaceId.value ?? "") !== spaceId ||
+        activeChannelId.value !== channelId
+      ) {
+        return "aborted";
+      }
+      if (!page.complete && !page.messages.some((message) => knownIds.has(message.id))) return "reload";
+      messages.value = appendQueuedMessages(
+        buildTimelineFromMamResults(page.messages, stripQueuedSelfMessages(messages.value)),
+        roomJid,
+      );
+      return "merged";
+    } catch (e) {
+      if (requestId !== messageRequestId) return "aborted";
+      actionError.value = normalizeError(e);
+      return "failed";
+    }
+  }
+
   async function loadMessages(
     spaceId: string,
     channelId: string,
@@ -165,24 +234,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
         await xmppClient.value.retryRoomAccess(spaceId, channelId);
       }
 
-      // #414: hydrate the pin store for this room. Fire-and-forget — the
-      // panel + badge tolerate an empty store and the live pin-event
-      // handler will mutate it from now on. Capture the epoch at request
-      // time so a late callback after logout drops itself.
-      if (xmppClient.value && "fetchRoomPins" in xmppClient.value) {
-        const epoch = pinnedRoomsEpoch();
-        void xmppClient.value
-          .fetchRoomPins(spaceId, channelId)
-          .then((entries) => {
-            hydratePinnedRoom(roomJid, entries, epoch);
-          })
-          .catch((error: unknown) => {
-            console.warn("fetchRoomPins failed", error);
-            hydratePinnedRoom(roomJid, [], epoch);
-          });
-      } else {
-        hydratePinnedRoom(roomJid, []);
-      }
+      hydratePins(spaceId, channelId, roomJid);
 
       // XEP-0313: Load message history via MAM.
       const page = xmppClient.value && "queryMamPage" in xmppClient.value
@@ -561,6 +613,7 @@ export function useChannelMamPaging(deps: UseChannelMamPagingDeps) {
     loadingOlderThreadIds,
     threadHasOlder,
     loadMessages,
+    refreshLatestPage,
     loadOlderMessages,
     ensureMessageLoaded,
     backfillThread,

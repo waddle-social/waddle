@@ -24,7 +24,7 @@ const session: WaddleSession = {
   xmpp_websocket_url: "wss://example.com/ws",
 };
 
-function harness() {
+function harness(pinned = true) {
   const messages = ref<TimelineMessage[]>([]);
   const pendingEchoClientIds = new Set<string>();
   const scrollToPinnedEdgeAndPin = mock(async () => true);
@@ -36,10 +36,11 @@ function harness() {
     activeChannelId: ref("general"),
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
+    isPinnedAtEdge: ref(pinned),
     persistLastSeen,
   });
 
-  return { messages, pendingEchoClientIds, liveMerge, persistLastSeen };
+  return { messages, pendingEchoClientIds, liveMerge, persistLastSeen, scrollToPinnedEdgeAndPin };
 }
 
 function makeLive(overrides: Partial<LiveRoomMessage> = {}): LiveRoomMessage {
@@ -54,6 +55,23 @@ function makeLive(overrides: Partial<LiveRoomMessage> = {}): LiveRoomMessage {
     ...overrides,
   } as unknown as LiveRoomMessage;
 }
+
+describe("edge pinning on append", () => {
+  test("follows the edge only when the reader is pinned there", () => {
+    const scrolledUp = harness(false);
+    scrolledUp.liveMerge.handleRoomMessage(makeLive({ id: "m1", stanzaId: "s1" }));
+    expect(scrolledUp.messages.value).toHaveLength(1);
+    expect(scrolledUp.scrollToPinnedEdgeAndPin).not.toHaveBeenCalled();
+    // Own messages from another device (or a replay) do not yank either.
+    scrolledUp.liveMerge.handleRoomMessage(makeLive({ id: "m2", stanzaId: "s2", nick: "alice", isSelf: true }));
+    expect(scrolledUp.messages.value).toHaveLength(2);
+    expect(scrolledUp.scrollToPinnedEdgeAndPin).not.toHaveBeenCalled();
+
+    const atEdge = harness(true);
+    atEdge.liveMerge.handleRoomMessage(makeLive({ id: "m1", stanzaId: "s1" }));
+    expect(atEdge.scrollToPinnedEdgeAndPin).toHaveBeenCalledTimes(1);
+  });
+});
 
 describe("applyDisplayed (XEP-0333)", () => {
   test("appends the reader's nick to readBy", () => {

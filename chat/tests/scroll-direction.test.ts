@@ -1310,7 +1310,8 @@ describe("scroll direction preference", () => {
         actionError.value = "";
       },
     );
-    const timelineEl = makeTimelineEl();
+    // At the bottom edge: live arrivals only follow a pinned reader.
+    const timelineEl = Object.assign(makeTimelineEl(), { clientHeight: 240 });
     dm.timelineEl.value = timelineEl;
 
     dm.onIncomingMessage({
@@ -1363,7 +1364,8 @@ describe("scroll direction preference", () => {
         actionError.value = "";
       },
     );
-    const timelineEl = makeTimelineEl();
+    // At the bottom edge: live arrivals only follow a pinned reader.
+    const timelineEl = Object.assign(makeTimelineEl(), { clientHeight: 240 });
     messaging.timelineEl.value = timelineEl;
     messaging.timelineEdgeScroller.value = virtualScroll;
 

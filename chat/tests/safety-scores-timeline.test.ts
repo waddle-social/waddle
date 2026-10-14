@@ -95,6 +95,7 @@ describe("channel score handling", () => {
       session: ref(session), messages, activeChannelId: ref("general"),
       pendingEchoClientIds: new Set<string>(),
       scrollToPinnedEdgeAndPin: mock(async () => true),
+      isPinnedAtEdge: ref(true),
       persistLastSeen: mock(() => {}),
     });
     const mam = (mamResults: LiveRoomMessage[]) => {

@@ -1,5 +1,5 @@
 import { describe, expect, mock, test } from "bun:test";
-import { nextTick, ref } from "vue";
+import { nextTick, ref, watch } from "vue";
 import type { WaddleSession } from "../src/lib/server-auth";
 import {
   roomBareJidFor,
@@ -306,6 +306,132 @@ describe("XEP-0198 session lifecycle catch-up (group chat)", () => {
 
     const clientAny = client as unknown as { value: { queryMam: ReturnType<typeof mock> } };
     expect(clientAny.value.queryMam).toHaveBeenCalledWith("w1", "c1", 100);
+  });
+
+  test("fresh session merges an overlapping latest page without unmounting the timeline", async () => {
+    const roomMessage = (id: string, createdAt: string): LiveRoomMessage => ({
+      id,
+      roomJid: "w1-c1@rooms.example.com",
+      nick: "bob",
+      authorRealJid: "bob@example.com",
+      body: id,
+      createdAt,
+      type: "message",
+    });
+    const pages = [
+      [roomMessage("older-1", "2024-01-01T00:00:00Z"), roomMessage("seen-1", "2024-01-01T00:01:00Z")],
+      [roomMessage("seen-1", "2024-01-01T00:01:00Z"), roomMessage("missed-1", "2024-01-01T00:02:00Z")],
+    ];
+    const queryMamPage = mock(async () => {
+      const messages = pages.shift() ?? [];
+      return { messages, firstArchiveId: messages[0]?.id, complete: false };
+    });
+    const { messaging } = makeRoomMessaging(ref({ ...handlerStubs(), queryMamPage } as never) as never);
+    await messaging.loadMessages("w1", "c1");
+    const rowKeys = messaging.messages.value.map((m) => m.rowKey);
+    const loadingStates: boolean[] = [];
+    const stop = watch(messaging.isLoadingMessages, (loading) => loadingStates.push(loading), { flush: "sync" });
+
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
+    await new Promise((r) => setTimeout(r, 0));
+    stop();
+
+    expect(queryMamPage).toHaveBeenCalledTimes(2);
+    expect(loadingStates).toEqual([]);
+    expect(messaging.messages.value.map((m) => m.id)).toEqual(["older-1", "seen-1", "missed-1"]);
+    expect(messaging.messages.value.slice(0, 2).map((m) => m.rowKey)).toEqual(rowKeys);
+  });
+
+  test("fresh session falls back to the wholesale reload when the latest page leaves a gap", async () => {
+    const roomMessage = (id: string, createdAt: string): LiveRoomMessage => ({
+      id,
+      roomJid: "w1-c1@rooms.example.com",
+      nick: "bob",
+      authorRealJid: "bob@example.com",
+      body: id,
+      createdAt,
+      type: "message",
+    });
+    const pages = [
+      [roomMessage("seen-1", "2024-01-01T00:01:00Z")],
+      [roomMessage("missed-1", "2024-01-01T00:02:00Z")],
+      [roomMessage("missed-1", "2024-01-01T00:02:00Z")],
+    ];
+    let mergeLiveDuringRefresh: (() => void) | null = null;
+    const queryMamPage = mock(async () => {
+      // A live copy of the newest row merging while the refresh is in
+      // flight must not pass for continuity with the pre-outage rows.
+      mergeLiveDuringRefresh?.();
+      mergeLiveDuringRefresh = null;
+      const messages = pages.shift() ?? [];
+      return { messages, firstArchiveId: messages[0]?.id, complete: false };
+    });
+    const { messaging } = makeRoomMessaging(ref({ ...handlerStubs(), queryMamPage } as never) as never);
+    await messaging.loadMessages("w1", "c1");
+    mergeLiveDuringRefresh = () => {
+      messaging.messages.value = [...messaging.messages.value, {
+        id: "missed-1", author: "bob", body: "missed-1", createdAt: "2024-01-01T00:02:00Z", isSelf: false,
+      }];
+    };
+
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(queryMamPage).toHaveBeenCalledTimes(3);
+    expect(messaging.messages.value.map((m) => m.id)).toEqual(["missed-1"]);
+  });
+
+  test("the user's own retried send in the latest page does not pass for continuity", async () => {
+    const roomMessage = (id: string, createdAt: string, nick = "bob"): LiveRoomMessage => ({
+      id,
+      roomJid: "w1-c1@rooms.example.com",
+      nick,
+      authorRealJid: `${nick}@example.com`,
+      body: id,
+      createdAt,
+      type: "message",
+    });
+    const pages = [
+      [roomMessage("seen-1", "2024-01-01T00:01:00Z")],
+      // The failed resume's fallback retried own-1 just before this query.
+      [roomMessage("missed-200", "2024-01-01T00:02:00Z"), roomMessage("own-1", "2024-01-01T00:03:00Z", "alice")],
+      [roomMessage("missed-200", "2024-01-01T00:02:00Z"), roomMessage("own-1", "2024-01-01T00:03:00Z", "alice")],
+    ];
+    const queryMamPage = mock(async () => {
+      const messages = pages.shift() ?? [];
+      return { messages, firstArchiveId: messages[0]?.id, complete: false };
+    });
+    const { messaging } = makeRoomMessaging(ref({ ...handlerStubs(), queryMamPage } as never) as never);
+    await messaging.loadMessages("w1", "c1");
+    messaging.messages.value = [...messaging.messages.value, {
+      id: "own-1", author: "alice", body: "own-1", createdAt: "2024-01-01T00:00:30Z", isSelf: true, deliveryStatus: "sending",
+    }];
+
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(queryMamPage).toHaveBeenCalledTimes(3);
+    expect(messaging.messages.value.map((m) => m.id)).not.toContain("seen-1");
+  });
+
+  test("fresh session reloads when no latest page has loaded yet", async () => {
+    const queryMamPage = mock(async () => ({ messages: [], complete: true }));
+    const { messaging } = makeRoomMessaging(ref({ ...handlerStubs(), queryMamPage } as never) as never);
+    // Rows kept by a failed first load (#675): there is no paging cursor to keep.
+    messaging.messages.value = [
+      { id: "live-1", author: "bob", body: "live-1", createdAt: "2024-01-01T00:01:00Z", isSelf: false },
+    ];
+    const loadingStates: boolean[] = [];
+    const stop = watch(messaging.isLoadingMessages, (loading) => loadingStates.push(loading), { flush: "sync" });
+
+    messaging.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
+    await new Promise((r) => setTimeout(r, 0));
+    stop();
+
+    expect(queryMamPage).toHaveBeenCalledTimes(1);
+    expect(loadingStates).toEqual([true, false]);
   });
 
   test("fresh session preserves learned thread metadata for matching MAM messages", async () => {
@@ -862,6 +988,40 @@ describe("XEP-0198 delivery status (DM)", () => {
       value: { queryPersonalMam: ReturnType<typeof mock> };
     };
     expect(clientAny.value.queryPersonalMam).toHaveBeenCalledWith("bob@example.com", 100, "account");
+  });
+
+  test("fresh DM session merges an overlapping latest page without unmounting the timeline", async () => {
+    const dmMessage = (id: string, createdAt: string): LiveDmMessage => ({
+      id,
+      peerJid: "bob@example.com",
+      fromJid: "bob@example.com/phone",
+      nick: "bob",
+      body: id,
+      createdAt,
+      type: "message",
+    });
+    const pages = [
+      [dmMessage("older-1", "2024-01-01T00:00:00Z"), dmMessage("seen-1", "2024-01-01T00:01:00Z")],
+      [dmMessage("seen-1", "2024-01-01T00:01:00Z"), dmMessage("missed-1", "2024-01-01T00:02:00Z")],
+    ];
+    const queryPersonalMamPage = mock(async () => {
+      const messages = pages.shift() ?? [];
+      return { messages, firstArchiveId: messages[0]?.id, complete: false };
+    });
+    const { dm } = makeDmMessaging(ref({ queryPersonalMamPage, isMucPmPeer: () => false } as never) as never);
+    await dm.loadMessages("bob@example.com");
+    const rowKeys = dm.messages.value.map((m) => m.rowKey);
+    const loadingStates: boolean[] = [];
+    const stop = watch(dm.isLoadingMessages, (loading) => loadingStates.push(loading), { flush: "sync" });
+
+    dm.onSessionLifecycle({ type: "fresh", catchup: { dmJids: [], roomJids: [] } });
+    await new Promise((r) => setTimeout(r, 0));
+    stop();
+
+    expect(queryPersonalMamPage).toHaveBeenCalledTimes(2);
+    expect(loadingStates).toEqual([]);
+    expect(dm.messages.value.map((m) => m.id)).toEqual(["older-1", "seen-1", "missed-1"]);
+    expect(dm.messages.value.slice(0, 2).map((m) => m.rowKey)).toEqual(rowKeys);
   });
 
   test("MAM-replayed DM reactions attach to the original message after a fresh load", async () => {

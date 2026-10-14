@@ -163,6 +163,65 @@ describe("ReconnectCatchup", () => {
     ]);
   });
 
+  test("archive records behind the live clock still advance the archive cursor", () => {
+    // Live stanzas carry client receipt time, which runs ahead of the
+    // archive's server stamp for the same message.
+    const c = new ReconnectCatchup();
+    c.recordRoomSeen("room@muc.example.com", "2024-01-02T00:00:00Z", "arch-1", ["m1"]);
+    c.recordRoomSeen("room@muc.example.com", "2024-01-02T00:00:05Z", undefined, ["m2"]);
+    c.recordRoomSeen("room@muc.example.com", "2024-01-02T00:00:04Z", "arch-2", ["m2"]);
+    c.recordRoomSeen("room@muc.example.com", "2024-01-02T00:00:01Z", "arch-older", ["m0"]);
+
+    c.onSessionStarted();
+
+    expect(c.onSessionStarted()).toEqual([
+      {
+        kind: "room",
+        key: "room@muc.example.com",
+        after: "arch-2",
+        since: "2024-01-02T00:00:04.000Z",
+        // Live ids keep accumulating; ids behind the cursor are harmless.
+        seenIds: ["m2", "m1"],
+      },
+    ]);
+    expect(c.getRoomLastSeen("room@muc.example.com")).toBe("2024-01-02T00:00:05.000Z");
+  });
+
+  test("a newer live stamp never rewinds the archive cursor (another tab's older shard)", () => {
+    const c = new ReconnectCatchup();
+    c.recordRoomSeen("room@muc.example.com", "2024-01-02T00:00:10Z", "arch-new");
+    // Another tab: later receipt time, but its archive cursor is older.
+    (c as unknown as {
+      absorbRemoteSnapshot: (snapshot: unknown) => void;
+    }).absorbRemoteSnapshot({
+      dmLastSeen: [],
+      roomLastSeen: [["room@muc.example.com", {
+        timestamp: "2024-01-02T00:00:20.000Z",
+        archiveId: "arch-old",
+        archiveTimestamp: "2024-01-02T00:00:05.000Z",
+      }]],
+    });
+
+    c.onSessionStarted();
+
+    expect(c.onSessionStarted()).toEqual([
+      { kind: "room", key: "room@muc.example.com", after: "arch-new", since: "2024-01-02T00:00:10.000Z" },
+    ]);
+    expect(c.getRoomLastSeen("room@muc.example.com")).toBe("2024-01-02T00:00:20.000Z");
+  });
+
+  test("scrolled-back history does not seed a live-only cursor's archive position", () => {
+    const c = new ReconnectCatchup();
+    c.recordRoomSeen("room@muc.example.com", "2024-01-02T00:00:10Z", undefined, ["live-1"]);
+    c.recordRoomSeen("room@muc.example.com", "2024-01-01T00:00:00Z", "arch-ancient", ["old-1"]);
+
+    c.onSessionStarted();
+
+    expect(c.onSessionStarted()).toEqual([
+      { kind: "room", key: "room@muc.example.com", since: "2024-01-02T00:00:10.000Z", seenIds: ["live-1"] },
+    ]);
+  });
+
   test("same-timestamp live ids remain available when catch-up can use an archive cursor", () => {
     const c = new ReconnectCatchup();
     c.recordDmSeen("bob@example.com", "2024-01-02T00:00:00Z", "dm-arch-2");
@@ -227,5 +286,23 @@ describe("ReconnectCatchup", () => {
 
     expect(c.getDmLastSeen("bob@example.com")).toBeUndefined();
     expect(c.getRoomLastSeen("general@muc.example.com")).toBeUndefined();
+  });
+
+  test("catch-up covers only the 20 most recently active conversations", () => {
+    const c = new ReconnectCatchup();
+    c.onSessionStarted();
+    for (let i = 0; i < 25; i += 1) {
+      const at = `2024-01-01T00:00:${String(i).padStart(2, "0")}Z`;
+      if (i % 2 === 0) c.recordRoomSeen(`room-${i}@muc.example.com`, at);
+      else c.recordDmSeen(`peer-${i}@example.com`, at);
+    }
+
+    const keys = c.onSessionStarted().map((entry) => entry.key);
+
+    expect(keys).toHaveLength(20);
+    expect(keys).not.toContain("room-0@muc.example.com");
+    expect(keys).not.toContain("room-4@muc.example.com");
+    expect(keys).toContain("room-6@muc.example.com");
+    expect(c.getRoomLastSeen("room-0@muc.example.com")).toBeUndefined();
   });
 });

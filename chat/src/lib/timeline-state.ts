@@ -57,6 +57,16 @@ export function latestRemoteMessageIdFor(timeline: ReadonlyArray<TimelineMessage
  * `M[]` — callers operate on a Vue `Ref<TimelineMessage[]>` whose `.value`
  * is mutable, so the input is `M[]` rather than `ReadonlyArray<M>`.
  */
+/** The user's own send that the server has not confirmed (or has refused). */
+export function isUnconfirmedOwnSend(message: Pick<TimelineMessage, "isSelf" | "deliveryStatus">): boolean {
+  return !!message.isSelf && (
+    message.deliveryStatus === "queued"
+    || message.deliveryStatus === "sending"
+    || message.deliveryStatus === "failed"
+    || message.deliveryStatus === "rejected"
+  );
+}
+
 export function applyDeliveryEventById<M extends TimelineMessage>(
   timeline: M[],
   messageId: string,
@@ -74,6 +84,12 @@ export function applyDeliveryEventById<M extends TimelineMessage>(
   const nextStatus = applyDeliveryEvent(current.deliveryStatus, event);
   if (nextStatus === current.deliveryStatus) return timeline;
   const next = timeline.slice();
-  next[index] = { ...current, deliveryStatus: nextStatus };
+  next[index] = current.deliveryStatus === "queued" && nextStatus === "sending"
+    // Leaving the outbox: the archive stamps the message when the server
+    // receives it, not when it was composed offline. Keeping the compose
+    // time would slot it above everything caught up since, until the
+    // archive copy moves it down again.
+    ? { ...current, deliveryStatus: nextStatus, createdAt: new Date().toISOString() }
+    : { ...current, deliveryStatus: nextStatus };
   return next;
 }

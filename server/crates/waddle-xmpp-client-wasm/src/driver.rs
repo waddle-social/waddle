@@ -292,6 +292,7 @@ impl WasmDriverTask {
             sm_clock_tx,
             sm_clock_rx,
             sm_clock_schedule: SmClockTimerSchedule::default(),
+            sm_clock_last_pulse: None,
         })
     }
 
@@ -397,11 +398,13 @@ impl WasmDriverTask {
     }
 
     async fn poll_stream_management_clock(&mut self) -> bool {
+        let now = chrono::Utc::now();
+        let previous_pulse = self.sm_clock_last_pulse.replace(now);
         let events = self
             .core
             .borrow_mut()
             .runtime
-            .poll_stream_management_clock(chrono::Utc::now());
+            .pulse_stream_management_clock(previous_pulse, now);
         for event in events {
             if !self.handle_client_event(event).await {
                 return false;
@@ -464,6 +467,7 @@ impl WasmDriverTask {
     }
 
     fn clear_sm_clock_timer(&mut self) {
+        self.sm_clock_last_pulse = None;
         if let Some(timer) = self.sm_clock_timer.take() {
             if let Some(window) = web_sys::window() {
                 window.clear_interval_with_handle(timer);
@@ -818,6 +822,20 @@ impl WasmDriverTask {
         }
     }
 
+    /// Write deferred XEP-0045 join presences ahead of everything else
+    /// deferred, keeping the relative order of both groups.
+    async fn flush_deferred_muc_joins(&mut self) -> bool {
+        if !self.core.borrow().runtime.can_send_app_stanza() {
+            return true;
+        }
+        for (stanza, responder) in take_deferred_muc_joins(&mut self.deferred_commands) {
+            if !self.send_stanza_command(stanza, responder).await {
+                return false;
+            }
+        }
+        true
+    }
+
     async fn flush_deferred_commands(&mut self) -> bool {
         if !self.core.borrow().runtime.can_send_app_stanza() {
             return true;
@@ -881,6 +899,17 @@ impl WasmDriverTask {
             }
         };
         self.publish_resume_state_snapshot();
+
+        // A fresh `<enabled/>` after a failed resume (or a `<failed/>` that
+        // leaves the fresh stream without SM) carries the runtime's retry of
+        // the unacknowledged tail, and the fresh session holds no MUC
+        // occupancy: a room refuses groupchat from a non-occupant
+        // (XEP-0045 §7.4). The server handles one stream's stanzas in order,
+        // so writing the rejoins queued during negotiation first lets the
+        // retried room messages, reactions, and corrections land.
+        if may_carry_fresh_stream_retries(&events) && !self.flush_deferred_muc_joins().await {
+            return false;
+        }
 
         for event in events {
             if !self.handle_client_event(event).await {
@@ -1227,6 +1256,38 @@ pub(crate) fn apply_pagehide_message_sent(
     let events = runtime.apply_transport_event(TransportEvent::MessageSent(message))?;
     publish_resume_state_snapshot(inner, runtime, false);
     Ok(events)
+}
+
+/// Whether a runtime batch can carry the retry of a failed resume's tail on
+/// a fresh stream (after `<enabled/>`, or a `<failed/>` that leaves SM off).
+fn may_carry_fresh_stream_retries(events: &[ClientEvent]) -> bool {
+    events.iter().any(|event| {
+        matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::Enabled { .. } | StreamManagementEvent::Failed
+            ))
+        )
+    })
+}
+
+/// Remove the deferred XEP-0045 join presences, in order, leaving every
+/// other deferred command in place.
+fn take_deferred_muc_joins(
+    deferred_commands: &mut VecDeque<DeferredWasmCommand>,
+) -> Vec<(Element, oneshot::Sender<DriverResult<()>>)> {
+    let mut joins = Vec::new();
+    let mut retained = VecDeque::with_capacity(deferred_commands.len());
+    while let Some(command) = deferred_commands.pop_front() {
+        match command {
+            DeferredWasmCommand::Stanza { stanza, responder } if is_muc_join_presence(&stanza) => {
+                joins.push((stanza, responder));
+            }
+            other => retained.push_back(other),
+        }
+    }
+    *deferred_commands = retained;
+    joins
 }
 
 fn cancel_raw_iq_state(
@@ -1831,6 +1892,84 @@ mod tests {
             .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
             .append(Element::builder("query", DISCO_INFO_NS).build())
             .build()
+    }
+
+    #[test]
+    fn joins_go_first_only_for_batches_that_can_retry_on_a_fresh_stream() {
+        let sm = |event| {
+            vec![ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                event,
+            ))]
+        };
+        assert!(may_carry_fresh_stream_retries(&sm(
+            StreamManagementEvent::Enabled { previd: None }
+        )));
+        assert!(may_carry_fresh_stream_retries(&sm(
+            StreamManagementEvent::Failed
+        )));
+        // A successful resume replays the tail on the same occupancy, and its
+        // SM ordinals must stay in wire order.
+        assert!(!may_carry_fresh_stream_retries(&sm(
+            StreamManagementEvent::Resumed { h: 3 }
+        )));
+        assert!(!may_carry_fresh_stream_retries(&[]));
+    }
+
+    #[test]
+    fn deferred_muc_joins_are_taken_in_order_ahead_of_other_commands() {
+        let room = |name: &str| {
+            format!("{name}@muc.example")
+                .parse()
+                .expect("valid room JID")
+        };
+        let stanza = |element: Element| {
+            let (responder, _rx) = oneshot::channel();
+            DeferredWasmCommand::Stanza {
+                stanza: element,
+                responder,
+            }
+        };
+        let new_message = Element::builder("message", "jabber:client")
+            .attr(
+                minidom::rxml::xml_ncname!("id").to_owned(),
+                "typed-meanwhile",
+            )
+            .build();
+        let mut deferred_commands = VecDeque::from([
+            stanza(new_message),
+            stanza(
+                waddle_xmpp_client::messaging::build_muc_join_presence(&room("general"), "alice")
+                    .expect("join presence"),
+            ),
+            DeferredWasmCommand::Iq {
+                stanza: iq("deferred-1"),
+                responder: oneshot::channel().0,
+            },
+            stanza(
+                waddle_xmpp_client::messaging::build_muc_join_presence(&room("random"), "alice")
+                    .expect("join presence"),
+            ),
+        ]);
+
+        let joins = take_deferred_muc_joins(&mut deferred_commands);
+
+        let joined = joins
+            .iter()
+            .filter_map(|(stanza, _)| stanza.attr("to").map(str::to_owned))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            joined,
+            vec!["general@muc.example/alice", "random@muc.example/alice"]
+        );
+        assert!(matches!(
+            deferred_commands.front(),
+            Some(DeferredWasmCommand::Stanza { stanza, .. }) if stanza.attr("id") == Some("typed-meanwhile")
+        ));
+        assert!(matches!(
+            deferred_commands.back(),
+            Some(DeferredWasmCommand::Iq { .. })
+        ));
+        assert_eq!(deferred_commands.len(), 2);
     }
 
     #[test]

@@ -113,6 +113,123 @@ fn runtime_pagehide_ack_commits_only_after_the_socket_write() {
 }
 
 #[test]
+fn a_suspended_host_restarts_the_acknowledgement_clock_instead_of_reconnecting() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.enabled = true;
+    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let message = Element::builder("message", crate::NS_CLIENT).build();
+    assert!(runtime.sm_state.record_sent_stanza_at(&message, now));
+    let is_reconnect = |event: &ClientEvent| {
+        matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::ReconnectRequired
+            ))
+        )
+    };
+    let is_ack_request = |event: &ClientEvent| {
+        matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Element(element)))
+                if element.name() == "r" && element.ns() == crate::stream_management::NS_SM
+        )
+    };
+
+    let first_pulse = now + Duration::milliseconds(250);
+    runtime.pulse_stream_management_clock(None, first_pulse);
+    // The page froze for 40s: an <a/> may be among the frames not yet read.
+    let resumed = now + Duration::seconds(40);
+    let after_freeze = runtime.pulse_stream_management_clock(Some(first_pulse), resumed);
+    assert!(!after_freeze.iter().any(is_reconnect));
+    assert!(after_freeze.iter().any(is_ack_request));
+
+    // The peer still has 30s from the resume to make progress.
+    let mut previous = resumed;
+    let mut reconnected_at = None;
+    for second in 41..=71 {
+        let pulse = now + Duration::seconds(second);
+        if runtime
+            .pulse_stream_management_clock(Some(previous), pulse)
+            .iter()
+            .any(is_reconnect)
+        {
+            reconnected_at = Some(second);
+            break;
+        }
+        previous = pulse;
+    }
+    assert_eq!(reconnected_at, Some(70));
+}
+
+#[test]
+fn a_throttled_host_still_times_out_a_dead_stream() {
+    // A background tab whose timers run once a minute still handles frames
+    // promptly: only the first gap without `<a/>` progress restarts the clock.
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.enabled = true;
+    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let message = Element::builder("message", crate::NS_CLIENT).build();
+    assert!(runtime.sm_state.record_sent_stanza_at(&message, now));
+    let is_reconnect = |event: &ClientEvent| {
+        matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::ReconnectRequired
+            ))
+        )
+    };
+
+    let first = now + Duration::milliseconds(250);
+    runtime.pulse_stream_management_clock(None, first);
+    let second = now + Duration::seconds(60);
+    assert!(!runtime
+        .pulse_stream_management_clock(Some(first), second)
+        .iter()
+        .any(is_reconnect));
+    let third = now + Duration::seconds(120);
+    assert!(runtime
+        .pulse_stream_management_clock(Some(second), third)
+        .iter()
+        .any(is_reconnect));
+}
+
+#[test]
+fn ack_progress_grants_a_later_suspension_another_restart() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    runtime.sm_state.outbound_enabled = true;
+    runtime.sm_state.enabled = true;
+    let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
+    let message = Element::builder("message", crate::NS_CLIENT).build();
+    assert!(runtime.sm_state.record_sent_stanza_at(&message, now));
+    // A second stanza joins the already-armed clock.
+    assert!(!runtime.sm_state.record_sent_stanza_at(&message, now));
+    let is_reconnect = |event: &ClientEvent| {
+        matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::StreamManagement(
+                StreamManagementEvent::ReconnectRequired
+            ))
+        )
+    };
+
+    let first = now + Duration::milliseconds(250);
+    runtime.pulse_stream_management_clock(None, first);
+    let woke = now + Duration::seconds(60);
+    runtime.pulse_stream_management_clock(Some(first), woke);
+    // The peer answers for one stanza after the first wake-up.
+    runtime
+        .sm_state
+        .process_ack_at(1, woke + Duration::seconds(1));
+    let woke_again = woke + Duration::seconds(60);
+    assert!(!runtime
+        .pulse_stream_management_clock(Some(woke), woke_again)
+        .iter()
+        .any(is_reconnect));
+}
+
+#[test]
 fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
     let mut runtime = XmppRuntime::new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;

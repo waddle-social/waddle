@@ -257,11 +257,14 @@ impl DriverTask {
             Duration::from_millis(250),
         );
         stream_management_clock.set_missed_tick_behavior(MissedTickBehavior::Skip);
+        let mut last_clock_pulse = None;
 
         loop {
             tokio::select! {
                 _ = stream_management_clock.tick() => {
-                    if !self.poll_stream_management_clock_at(chrono::Utc::now()).await {
+                    let now = chrono::Utc::now();
+                    let previous_pulse = last_clock_pulse.replace(now);
+                    if !self.pulse_stream_management_clock_at(previous_pulse, now).await {
                         return;
                     }
                 }
@@ -437,11 +440,22 @@ impl DriverTask {
 
     /// Route runtime-owned XEP-0198 clock events through exactly the same
     /// native event dispatcher and typed transport path as transport events.
+    #[cfg(test)]
     async fn poll_stream_management_clock_at(
         &mut self,
         now: chrono::DateTime<chrono::Utc>,
     ) -> bool {
-        let client_events = self.runtime.poll_stream_management_clock(now);
+        self.pulse_stream_management_clock_at(None, now).await
+    }
+
+    async fn pulse_stream_management_clock_at(
+        &mut self,
+        previous_pulse: Option<chrono::DateTime<chrono::Utc>>,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> bool {
+        let client_events = self
+            .runtime
+            .pulse_stream_management_clock(previous_pulse, now);
         if !self.apply_client_events(client_events).await {
             return false;
         }

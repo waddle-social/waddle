@@ -30,9 +30,10 @@ use waddle_xmpp_client::messaging::{
     self, build_chat_state_message, build_correction_message, build_displayed_message,
     build_in_call_reaction_message, build_moderation_message, build_outbound_message,
     build_pinned_message, build_reaction_message, build_retraction_message, build_unpinned_message,
-    InCallReactionEmoji, InCallReactionRecipient, InCallSessionId, InCallSignal, InboundCallEvent,
-    InboundMessage, InboundPresence, LinkPreviewToken, MarkupSpanData, MarkupSpanType,
-    MucAffiliation, MucRole, ReferenceData, SendMessageOptions, SharedFileDisposition,
+    is_muc_join_presence, InCallReactionEmoji, InCallReactionRecipient, InCallSessionId,
+    InCallSignal, InboundCallEvent, InboundMessage, InboundPresence, LinkPreviewToken,
+    MarkupSpanData, MarkupSpanType, MucAffiliation, MucRole, ReferenceData, SendMessageOptions,
+    SharedFileDisposition,
 };
 use waddle_xmpp_client::pep::{
     build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,

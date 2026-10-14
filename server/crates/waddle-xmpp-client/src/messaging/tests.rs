@@ -2643,3 +2643,15 @@ fn parse_ignores_iq() {
     let e = el("<iq xmlns='jabber:client' type='get' id='iq-1'/>");
     assert!(parse(&e).is_none());
 }
+
+#[test]
+fn muc_join_presence_is_recognised_by_its_xep0045_payload() {
+    let room = "general@muc.example".parse().expect("valid room JID");
+    let join = build_muc_join_presence(&room, "alice").expect("join presence");
+    assert!(is_muc_join_presence(&join));
+
+    let available = Element::builder("presence", "jabber:client").build();
+    assert!(!is_muc_join_presence(&available));
+    let message = Element::builder("message", "jabber:client").build();
+    assert!(!is_muc_join_presence(&message));
+}

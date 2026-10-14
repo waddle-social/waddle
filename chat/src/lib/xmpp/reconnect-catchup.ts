@@ -52,6 +52,8 @@ function dmCursorKey(peerJid: string, scope: DmConversationScope): string {
     : bareJidKey(peerJid);
 }
 
+const RECONNECT_CATCHUP_MAX_CONVERSATIONS = 20;
+
 export class ReconnectCatchup {
   private readonly dmLastSeen = new Map<string, SeenCursor>();
   private readonly roomLastSeen = new Map<string, SeenCursor>();
@@ -116,6 +118,8 @@ export class ReconnectCatchup {
       // higher-timestamp/equal-seenIds `advance()` rule on reload.
       const remote = this.persistence.loadCatchup();
       if (remote) this.absorbRemoteSnapshot(remote);
+      // Shards (this tab's included) still hold pruned cursors.
+      this.pruneToRecentConversations();
       const snapshot: PersistedReconnectCatchup = {
         dmLastSeen: Array.from(this.dmLastSeen.entries()),
         roomLastSeen: Array.from(this.roomLastSeen.entries()),
@@ -177,6 +181,7 @@ export class ReconnectCatchup {
       this.sessionStartedOnce = true;
       return [];
     }
+    if (this.pruneToRecentConversations()) this.schedulePersist();
     const entries: ReconnectCatchupEntry[] = [];
     for (const [key, cursor] of this.dmLastSeen) {
       entries.push(catchupEntry("dm", key, cursor));
@@ -185,6 +190,32 @@ export class ReconnectCatchup {
       entries.push(catchupEntry("room", key, cursor));
     }
     return entries;
+  }
+
+  /** The catch-up entry for one room, e.g. after an out-of-band rejoin. */
+  roomEntry(roomJid: string): ReconnectCatchupEntry | undefined {
+    const key = bareJidKey(roomJid);
+    for (const [roomKey, cursor] of this.roomLastSeen) {
+      if (bareJidKey(roomKey) === key) return catchupEntry("room", roomKey, cursor);
+    }
+    return undefined;
+  }
+
+  /**
+   * Catch-up pages conversations one by one while live delivery waits
+   * behind it, so it covers only the most recently active ones. Older
+   * cursors are dropped: those conversations load their latest page from
+   * MAM when opened, and unread counts come from the inbox hydrate.
+   */
+  private pruneToRecentConversations(): boolean {
+    const cursors = [
+      ...Array.from(this.dmLastSeen, ([key, cursor]) => ({ map: this.dmLastSeen, key, cursor })),
+      ...Array.from(this.roomLastSeen, ([key, cursor]) => ({ map: this.roomLastSeen, key, cursor })),
+    ];
+    if (cursors.length <= RECONNECT_CATCHUP_MAX_CONVERSATIONS) return false;
+    cursors.sort((left, right) => compareTimestamps(right.cursor.timestamp, left.cursor.timestamp));
+    for (const { map, key } of cursors.slice(RECONNECT_CATCHUP_MAX_CONVERSATIONS)) map.delete(key);
+    return true;
   }
 
   /** Clear all state (cursors and the session-started flag). */
@@ -233,6 +264,17 @@ function advance(
   const normalizedArchiveTimestamp = archiveTimestamp ? normalizeTimestamp(archiveTimestamp) : undefined;
   const current = map.get(key);
   const ordering = current ? compareTimestamps(normalizedTimestamp, current.timestamp) : 1;
+  if (
+    archiveId
+    && current?.archiveTimestamp
+    && compareTimestamps(normalizedArchiveTimestamp ?? normalizedTimestamp, current.archiveTimestamp) < 0
+  ) {
+    // Live and archive positions advance independently: a newer live stamp
+    // (e.g. another tab's later receipt time) must not drag the archive
+    // cursor back to an older archive id.
+    archiveId = undefined;
+    archiveSeenIds = undefined;
+  }
   if (current === undefined || ordering > 0) {
     const nextArchiveId = archiveId ?? current?.archiveId;
     const nextArchiveTimestamp = archiveId ? (normalizedArchiveTimestamp ?? normalizedTimestamp) : current?.archiveTimestamp;
@@ -266,7 +308,31 @@ function advance(
       ...nonEmptyArchiveSeenIds(nextArchiveSeenIds),
       ...nonEmptySeenIds(nextSeenIds),
     });
+    return;
   }
+  // Older than the live position, but archive-confirmed: live stamps come
+  // from the client clock and usually run ahead of the server's archive
+  // stamps for the same message, so gating the archive cursor on the live
+  // timestamp would freeze it at the last MAM fetch and every catch-up
+  // would re-page everything since. Advance the archive cursor on archive
+  // order alone and keep the live position (and its seen ids) as is.
+  // A live-only cursor stays live-only here: the record is behind the live
+  // position, so it may come from scrolled-back history, and seeding the
+  // archive cursor there would make the next catch-up re-page all of it.
+  if (!archiveId || !current.archiveTimestamp) return;
+  const nextArchiveTimestamp = normalizedArchiveTimestamp ?? normalizedTimestamp;
+  const archiveOrdering = compareTimestamps(nextArchiveTimestamp, current.archiveTimestamp);
+  const nextArchiveSeenIds = archiveOrdering === 0
+    ? mergeSeenIds(current.archiveSeenIds, mergeSeenIds(archiveSeenIds, seenIds))
+    : mergeSeenIds(archiveSeenIds, seenIds);
+  const { archiveSeenIds: _previousArchiveSeenIds, ...live } = current;
+  map.set(key, {
+    ...live,
+    ...(scope ? { scope } : {}),
+    archiveId,
+    archiveTimestamp: nextArchiveTimestamp,
+    ...nonEmptyArchiveSeenIds(nextArchiveSeenIds),
+  });
 }
 
 function nonEmptyArchiveSeenIds(seenIds: ReadonlyArray<string> | undefined): Partial<Pick<SeenCursor, "archiveSeenIds">> {

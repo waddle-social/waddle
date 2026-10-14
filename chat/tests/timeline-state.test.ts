@@ -61,6 +61,19 @@ describe("applyDeliveryEventById", () => {
     expect(next.find((m) => m.id === "b")?.deliveryStatus).toBe("delivered");
   });
 
+  test("a queued row leaving the outbox is restamped to its send time", () => {
+    const composedOffline = "2024-01-01T10:00:00.000Z";
+    const timeline = [makeMessage("a", { createdAt: composedOffline, createdAtSource: "queued" })];
+    const before = Date.now();
+    const next = applyDeliveryEventById(timeline, "a", "sending");
+    expect(next[0]?.deliveryStatus).toBe("sending");
+    expect(Date.parse(next[0]!.createdAt)).toBeGreaterThanOrEqual(before);
+    expect(next[0]?.createdAtSource).toBe("queued");
+
+    const delivered = applyDeliveryEventById(next, "a", "delivered");
+    expect(delivered[0]?.createdAt).toBe(next[0]?.createdAt);
+  });
+
   test("leaves non-matching messages untouched", () => {
     const timeline = [makeMessage("a"), makeMessage("b", { deliveryStatus: "sending" })];
     const next = applyDeliveryEventById(timeline, "b", "delivered");

@@ -38,6 +38,7 @@ function channelHarness(seed: TimelineMessage[]) {
     activeChannelId: ref("general"),
     pendingEchoClientIds: new Set<string>(),
     scrollToPinnedEdgeAndPin: mock(async () => true),
+    isPinnedAtEdge: ref(true),
     persistLastSeen: mock(() => {}),
   });
   return { messages, liveMerge };
@@ -51,6 +52,7 @@ function dmHarness(seed: TimelineMessage[]) {
     activePeerJid: ref("bob@example.com"),
     pendingEchoClientIds: new Set<string>(),
     scrollToPinnedEdgeAndPin: mock(async () => true),
+    isPinnedAtEdge: ref(true),
     persistLastSeen: mock(() => {}),
     isFeedVisible: () => true,
   });

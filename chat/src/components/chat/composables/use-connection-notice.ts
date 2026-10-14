@@ -1,4 +1,4 @@
-import { computed, ref, watch } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { AlertCircle, CheckCircle2, RefreshCw, WifiOff } from "lucide-vue-next";
 import { getConnectionNoticeCopy } from "@/lib/connection-notice";
 import type { XmppStatusSnapshot } from "@/lib/xmpp-client";
@@ -9,13 +9,28 @@ import type { XmppStatusSnapshot } from "@/lib/xmpp-client";
  * the XMPP status snapshot and derives the banner copy, icon, and tone
  * classes the header chip and banner share.
  */
+// A reconnect that settles within this window (e.g. a tab refocus that
+// finds a dead socket) shows no banner at all: the banner sits in the
+// layout above the timeline, so a flash of it shifts the whole pane.
+const RECONNECTING_NOTICE_DELAY_MS = 3000;
+
 export function useConnectionNotice(input: {
   status: () => XmppStatusSnapshot;
   queuedMessageCount: () => number;
+  reconnectingNoticeDelayMs?: number;
 }) {
   const hasSeenOnline = ref(input.status().state === "online");
   const showReconnectedNotice = ref(false);
+  const outageNoticeShown = ref(input.status().state !== "online");
   let reconnectedNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
+  let reconnectingNoticeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+  function clearReconnectingTimer() {
+    if (reconnectingNoticeTimeout) {
+      clearTimeout(reconnectingNoticeTimeout);
+      reconnectingNoticeTimeout = null;
+    }
+  }
 
   function clearReconnectedNotice() {
     if (reconnectedNoticeTimeout) {
@@ -27,7 +42,9 @@ export function useConnectionNotice(input: {
 
   watch(() => input.status().state, (state, previousState) => {
     if (state === "online") {
-      if (previousState && previousState !== "online" && hasSeenOnline.value) {
+      clearReconnectingTimer();
+      // Celebrate only an outage the user actually saw.
+      if (previousState && previousState !== "online" && hasSeenOnline.value && outageNoticeShown.value) {
         clearReconnectedNotice();
         showReconnectedNotice.value = true;
         reconnectedNoticeTimeout = setTimeout(() => {
@@ -35,20 +52,37 @@ export function useConnectionNotice(input: {
           reconnectedNoticeTimeout = null;
         }, 4200);
       }
+      outageNoticeShown.value = false;
       hasSeenOnline.value = true;
       return;
     }
 
     clearReconnectedNotice();
+    if (state !== "reconnecting") {
+      clearReconnectingTimer();
+      outageNoticeShown.value = true;
+    } else if (!outageNoticeShown.value && !reconnectingNoticeTimeout) {
+      reconnectingNoticeTimeout = setTimeout(() => {
+        reconnectingNoticeTimeout = null;
+        outageNoticeShown.value = true;
+      }, input.reconnectingNoticeDelayMs ?? RECONNECTING_NOTICE_DELAY_MS);
+    }
   });
 
-  const connectionNotice = computed(() =>
-    getConnectionNoticeCopy({
-      status: input.status(),
+  onScopeDispose(() => {
+    clearReconnectingTimer();
+    clearReconnectedNotice();
+  });
+
+  const connectionNotice = computed(() => {
+    const status = input.status();
+    if (status.state === "reconnecting" && !outageNoticeShown.value) return null;
+    return getConnectionNoticeCopy({
+      status,
       queuedMessageCount: input.queuedMessageCount(),
       showReconnected: showReconnectedNotice.value,
-    }),
-  );
+    });
+  });
 
   const connectionStatusIcon = computed(() => {
     switch (connectionNotice.value?.tone) {

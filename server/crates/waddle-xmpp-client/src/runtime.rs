@@ -79,6 +79,10 @@ enum BootstrapState {
     Ready,
 }
 
+/// Hosts pulse the XEP-0198 clock every 250ms; a pulse arriving this long
+/// after the previous one means the host did not run in between.
+const SM_CLOCK_HOST_SUSPENSION_GAP_MS: i64 = 5_000;
+
 impl XmppRuntime {
     pub fn new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
@@ -225,6 +229,24 @@ impl XmppRuntime {
     /// Drive the Rust-owned XEP-0198 acknowledgement clock. Hosts supply time
     /// so browser and native timer implementations cannot redefine protocol
     /// cadence and tests can exercise every boundary deterministically.
+    /// Poll the XEP-0198 clock from a host that pulses it on a fixed short
+    /// cadence. `previous_pulse` is when the host last pulsed; a gap far
+    /// beyond the cadence means the host itself was suspended, so the
+    /// deadlines restart instead of reading that gap as peer silence.
+    pub fn pulse_stream_management_clock(
+        &mut self,
+        previous_pulse: Option<DateTime<Utc>>,
+        now: DateTime<Utc>,
+    ) -> Vec<ClientEvent> {
+        if previous_pulse.is_some_and(|previous| {
+            now >= previous + chrono::Duration::milliseconds(SM_CLOCK_HOST_SUSPENSION_GAP_MS)
+        }) {
+            self.sm_state
+                .restart_acknowledgement_clock_after_host_suspension(now);
+        }
+        self.poll_stream_management_clock(now)
+    }
+
     pub fn poll_stream_management_clock(&mut self, now: DateTime<Utc>) -> Vec<ClientEvent> {
         let mut events = Vec::new();
         for action in self.sm_state.poll_acknowledgement_clock(now) {
