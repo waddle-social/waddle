@@ -880,9 +880,16 @@ async fn repair_stalled_row(
     key: MessageKey,
     pending: &[waddle_xmpp::ingress::IngressEffectKind],
 ) -> bool {
-    // Only a frozen groupchat fanout can be pinned by a ghost occupant, so no
-    // other stalled row pays for the repair's reads.
-    if !pending.contains(&waddle_xmpp::ingress::IngressEffectKind::RouteMucGroupchat) {
+    // A sealed original reflection is an independent direct child. Include
+    // it even after ordinary fanout finishes; the repair admits only frozen
+    // room routes, so unrelated direct deliveries cannot evict occupants.
+    use waddle_xmpp::ingress::IngressEffectKind;
+    if !pending.iter().any(|kind| {
+        matches!(
+            kind,
+            IngressEffectKind::RouteMucGroupchat | IngressEffectKind::RouteDirect
+        )
+    }) {
         return false;
     }
     let Some(environment) = environment else {

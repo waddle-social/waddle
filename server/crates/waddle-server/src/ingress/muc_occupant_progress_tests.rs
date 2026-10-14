@@ -250,7 +250,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         .expect("legacy envelope");
         fixture
             .execute(
-                "UPDATE ingress_messages SET envelope = ?",
+                "UPDATE ingress_messages SET envelope = ?, envelope_version = 1",
                 crate::db_params![bytes],
             )
             .await;

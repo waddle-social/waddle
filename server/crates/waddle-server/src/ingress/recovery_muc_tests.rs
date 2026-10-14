@@ -782,6 +782,10 @@ async fn sqlite_muc_occupant_progress_resets_streak_and_parked_copy_recovers_aft
         store_detached(&elsewhere, resource).await;
     }
     let submission = planned_room(&fixture, &state, Case::Unavailable, &resources).await;
+    // The original reflection is an independent sealed child. Give it real
+    // custody so only the two deliberately remote occupants drive the stall
+    // and cooldown sequence, rather than a third ghost being repaired.
+    store_detached(&sm, &submission.sender).await;
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit room fanout");
@@ -865,9 +869,14 @@ async fn sqlite_muc_occupant_progress_resets_streak_and_parked_copy_recovers_aft
     );
     assert_eq!(append_count(&sm, &resources[1]).await, 1);
     assert_eq!(
+        append_count(&sm, &submission.sender).await,
+        1,
+        "one original reflection allocation"
+    );
+    assert_eq!(
         fixture.count("sm_ingress_appends").await,
-        2,
-        "one keyed allocation per occupant"
+        3,
+        "one keyed allocation per occupant and original reflection"
     );
     let mut tx = fixture.uow.begin().await.expect("inspect completion");
     assert!(EffectReceiptRepository::contains(

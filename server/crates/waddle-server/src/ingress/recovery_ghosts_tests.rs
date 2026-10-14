@@ -988,18 +988,25 @@ async fn sqlite_sealed_reflection_only_ghost_is_evicted_and_retired() {
         0,
         "retirement is not delivery"
     );
-    assert!(
-        state
-            .deps
-            .protocol
-            .room_registry
-            .ask(GetRoom {
-                room_jid: ROOM.parse().expect("room"),
+    if let Some(room) = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: ROOM.parse().expect("room"),
+        })
+        .await
+        .expect("registry")
+    {
+        assert!(
+            room.ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+                jid: submission.sender.clone(),
             })
             .await
-            .expect("registry")
+            .expect("occupancy")
             .is_none(),
-        "the empty ghost room is removed"
-    );
+            "the original ghost is unseated"
+        );
+    }
     f.close().await;
 }

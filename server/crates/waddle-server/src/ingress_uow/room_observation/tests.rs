@@ -155,6 +155,47 @@ async fn revert_v1025(fixture: &IngressFixture) {
         .begin()
         .await
         .expect("downgrade fixture transaction");
+    // Undo V1026 as well: both catalog history and schema must describe
+    // the earlier binary before the real upgrade runs again.
+    tx.execute(
+        "ALTER TABLE ingress_delivery_receipts DROP COLUMN policy_discard_reason",
+        (),
+    )
+    .await
+    .expect("remove child policy schema");
+    let envelope_sql = match fixture.db.driver() {
+        crate::db::DatabaseDriver::Sqlite => {
+            r#"
+CREATE TEMP TABLE ingress_envelopes_pre_v1026 (
+    message_key TEXT PRIMARY KEY NOT NULL,
+    envelope_version SMALLINT NULL,
+    envelope BLOB NULL
+);
+INSERT INTO ingress_envelopes_pre_v1026
+    SELECT message_key, envelope_version, envelope FROM ingress_messages;
+ALTER TABLE ingress_messages DROP COLUMN envelope;
+ALTER TABLE ingress_messages DROP COLUMN envelope_version;
+ALTER TABLE ingress_messages ADD COLUMN envelope_version SMALLINT NULL
+    CHECK (envelope_version IS NULL OR envelope_version = 1);
+ALTER TABLE ingress_messages ADD COLUMN envelope BLOB NULL
+    CHECK ((envelope IS NULL) = (envelope_version IS NULL));
+UPDATE ingress_messages SET
+    envelope_version = (SELECT old.envelope_version FROM ingress_envelopes_pre_v1026 old WHERE old.message_key = ingress_messages.message_key),
+    envelope = (SELECT old.envelope FROM ingress_envelopes_pre_v1026 old WHERE old.message_key = ingress_messages.message_key);
+DROP TABLE ingress_envelopes_pre_v1026;
+"#
+        }
+        crate::db::DatabaseDriver::Postgres => {
+            r#"
+ALTER TABLE ingress_messages DROP CONSTRAINT ingress_messages_envelope_version_check;
+ALTER TABLE ingress_messages ADD CONSTRAINT ingress_messages_envelope_version_check
+    CHECK (envelope_version IS NULL OR envelope_version = 1);
+"#
+        }
+    };
+    tx.execute_batch(envelope_sql)
+        .await
+        .expect("restore version-one envelope schema");
     tx.execute("DROP TABLE ingress_effect_descendants", ())
         .await
         .expect("remove descendant schema");
@@ -172,7 +213,7 @@ async fn revert_v1025(fixture: &IngressFixture) {
         tx.execute("DELETE FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_effect_descendants'", ()).await.expect("remove later manifest entry");
         tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("restore append-only protection");
     }
-    tx.execute("DELETE FROM _migrations WHERE version = 1025", ())
+    tx.execute("DELETE FROM _migrations WHERE version IN (1025, 1026)", ())
         .await
         .expect("remove later ledger entry");
     tx.commit().await.expect("downgrade fixture commit");

@@ -377,6 +377,32 @@ mod tests {
             "policy is envelope metadata, never a fake delivery row"
         );
         drop(rows);
+        snapshot.host_no_transport.clear();
+        let changed = FrozenRoomManifest::build(key, room, stamp, &snapshot, None, &[route])
+            .expect("new host configuration");
+        assert!(
+            CanonicalMessageRepository::record_room_canonical_envelope(
+                &mut tx,
+                key,
+                &envelope.with_room_manifest(changed).expect("new snapshot")
+            )
+            .await
+            .is_err(),
+            "later host configuration cannot rewrite original policy"
+        );
+        assert_eq!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("policy unchanged"),
+            vec![bot.clone()]
+        );
+        tx.commit().await.expect("read commit");
+        // Custody preservation is a separate phase after every frozen host
+        // policy invariant above has been checked without new child progress.
+        let mut tx = uow.begin().await.expect("custody preservation transaction");
+        assert!(CanonicalMessageRepository::lock(&mut tx, key)
+            .await
+            .expect("canonical lock"));
         DeliveryProgressRepository::record(&mut tx, key, &receipt, std::slice::from_ref(&human))
             .await
             .expect("existing delivered child");
@@ -428,25 +454,6 @@ mod tests {
                 .expect("all resolved"),
             expected
         );
-        snapshot.host_no_transport.clear();
-        let changed = FrozenRoomManifest::build(key, room, stamp, &snapshot, None, &[route])
-            .expect("new host configuration");
-        assert!(
-            CanonicalMessageRepository::record_room_canonical_envelope(
-                &mut tx,
-                key,
-                &envelope.with_room_manifest(changed).expect("new snapshot")
-            )
-            .await
-            .is_err(),
-            "later host configuration cannot rewrite original policy"
-        );
-        assert_eq!(
-            DeliveryProgressRepository::load(&mut tx, key, &receipt)
-                .await
-                .expect("policy unchanged"),
-            vec![bot]
-        );
-        tx.commit().await.expect("read commit");
+        tx.commit().await.expect("custody preservation commit");
     }
 }

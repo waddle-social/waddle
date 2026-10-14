@@ -218,21 +218,41 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         tokio_util::sync::CancellationToken::new(),
         &crate::config::ClusteringMessagingConfig::default(),
     );
+    let node_identity = SharedNodeIdentity::new(local);
     let state = socket_tests::create_test_websocket_state_with_clustering(
         ClusteringHandles {
             claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
-            node_identity: Some(SharedNodeIdentity::new(local)),
+            node_identity: Some(node_identity.clone()),
             ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
             ..Default::default()
         },
         sm.clone(),
     )
     .await;
+    if !recovering_local {
+        // Production wires room authority separately from the relay bridge.
+        // A foreign-room recovery fixture must not retain the constructor's
+        // single-node registry, which would falsely prove local absence.
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(
+                waddle_xmpp::muc::room_registry_actor::WireClusteringClaims {
+                    claim_store: Arc::clone(&claims) as Arc<dyn ClaimStore>,
+                    node_identity: node_identity.clone(),
+                    durable_store: None,
+                    rollout_backoff: None,
+                },
+            )
+            .await
+            .expect("wire foreign room recovery authority");
+    }
     wire_for_test(
         &bridge,
         &state,
         claims as Arc<dyn ClaimStore>,
-        SharedNodeIdentity::new(NodeIdentity::new("recovering-owner", "local-epoch")),
+        node_identity,
     )
     .await;
     if !recovering_local {
