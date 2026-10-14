@@ -647,6 +647,7 @@ async fn driver_cleans_up_failed_connects() {
 struct MockTransportShared {
     sent_messages: Arc<Mutex<Vec<TransportMessage>>>,
     close_count: Arc<Mutex<usize>>,
+    close_transport_count: Arc<Mutex<usize>>,
 }
 
 impl MockTransportShared {
@@ -750,6 +751,17 @@ impl WebSocketTransport for MockTransport {
             self.pending_events.extend([
                 TransportEvent::StateChanged(TransportState::Closing),
                 TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+                TransportEvent::StateChanged(TransportState::Closed),
+                TransportEvent::Closed,
+            ]);
+            Ok(())
+        })
+    }
+
+    fn close_transport<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            *self.shared.close_transport_count.lock().unwrap() += 1;
+            self.pending_events.extend([
                 TransportEvent::StateChanged(TransportState::Closed),
                 TransportEvent::Closed,
             ]);
@@ -923,6 +935,7 @@ async fn native_driver_retires_timed_out_transport_without_ending_resumable_stre
         0,
         "recovery must not cleanly end XMPP"
     );
+    assert_eq!(*shared.close_transport_count.lock().unwrap(), 1);
     assert!(!sent
         .iter()
         .any(|message| matches!(message, TransportMessage::Close(_))));

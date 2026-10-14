@@ -270,7 +270,7 @@ fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
         ))
     )));
     let reconnect = runtime.poll_stream_management_clock(now + Duration::seconds(30));
-    assert_eq!(reconnect.len(), 2);
+    assert_eq!(reconnect.len(), 3);
     assert!(reconnect.iter().any(|event| matches!(
         event,
         ClientEvent::Connection(ConnectionEvent::StreamManagement(
@@ -279,7 +279,7 @@ fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
     )));
     assert!(reconnect.iter().any(|event| matches!(
         event,
-        ClientEvent::Connection(ConnectionEvent::OutboundMessage(TransportMessage::Close(_)))
+        ClientEvent::Connection(ConnectionEvent::CloseTransport)
     )));
     assert!(!reconnect.iter().any(|event| matches!(
         event,
@@ -290,6 +290,64 @@ fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
         .poll_stream_management_clock(now + Duration::seconds(35))
         .is_empty());
     assert!(!runtime.acknowledgement_clock_pending());
+}
+
+#[test]
+fn progress_timeout_retains_resume_tail_and_blocks_late_outbound_work() {
+    let mut config = config();
+    config.session.stream_management.resume_state = Some(
+        resume_state_with_sent_messages(["first", "second"]).with_max_resume_seconds(Some(300)),
+    );
+    let mut runtime = XmppRuntime::new(config).unwrap();
+    drive_to_authenticated_stream(&mut runtime);
+    runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            post_auth_features_with_sm(),
+        )))
+        .unwrap();
+    let resumed = runtime
+        .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+            Element::builder("resumed", crate::stream_management::NS_SM)
+                .attr(minidom::rxml::xml_ncname!("previd").to_owned(), "old-sm-id")
+                .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
+                .build(),
+        )))
+        .unwrap();
+    // Replay writes arm the clock without incrementing the previous counters.
+    for event in resumed {
+        if let ClientEvent::Connection(ConnectionEvent::OutboundMessage(message)) = event {
+            runtime
+                .apply_transport_event(TransportEvent::MessageSent(message))
+                .unwrap();
+        }
+    }
+    let before = runtime.resume_state().unwrap();
+    assert!(runtime.can_send_app_stanza());
+    let timeout = runtime.poll_stream_management_clock(Utc::now() + Duration::seconds(31));
+    assert!(timeout.iter().any(|event| matches!(
+        event,
+        ClientEvent::Connection(ConnectionEvent::CloseTransport)
+    )));
+    assert!(!runtime.can_send_app_stanza());
+    assert_eq!(runtime.snapshot().phase, SessionPhase::Disconnected);
+    assert_eq!(runtime.resume_state(), Some(before.clone()));
+    assert!(runtime.request_stream_management_ack().is_empty());
+    assert_eq!(
+        runtime.prepare_pagehide_ack(),
+        PagehideAckRequest::AlreadyPending
+    );
+    assert!(!runtime.commit_pagehide_ack_written(Utc::now()));
+    // A late successful write from the retired socket cannot arm another clock.
+    runtime
+        .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+            Element::builder("message", crate::NS_CLIENT).build(),
+        )))
+        .unwrap();
+    assert!(!runtime.acknowledgement_clock_pending());
+    assert!(runtime
+        .poll_stream_management_clock(Utc::now() + Duration::seconds(62))
+        .is_empty());
+    assert_eq!(runtime.resume_state(), Some(before));
 }
 
 #[test]

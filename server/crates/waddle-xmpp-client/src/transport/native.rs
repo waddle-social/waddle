@@ -47,7 +47,11 @@ pub trait WebSocketTransport: Send + Sync {
 
     fn next_event<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<Option<TransportEvent>>>;
 
+    /// Cleanly end the XMPP session, then close its WebSocket.
     fn close<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
+
+    /// Close only the WebSocket, leaving the XMPP session unfinished for resume.
+    fn close_transport<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>>;
 }
 
 /// Default runtime factory for the concrete WebSocket transport.
@@ -229,6 +233,15 @@ impl WebSocketTransport for ConnectedWebSocketTransport {
                 ));
             }
 
+            self.close_transport().await
+        })
+    }
+
+    fn close_transport<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            if self.state == TransportState::Closed {
+                return Ok(());
+            }
             timeout(WEBSOCKET_WRITE_TIMEOUT, self.sink.close())
                 .await
                 .map_err(|_| ClientError::WebSocketWriteTimeout {

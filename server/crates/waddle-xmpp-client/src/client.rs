@@ -466,6 +466,17 @@ impl DriverTask {
 
     async fn apply_client_events(&mut self, client_events: Vec<ClientEvent>) -> bool {
         for evt in client_events {
+            if matches!(
+                evt,
+                ClientEvent::Connection(ConnectionEvent::CloseTransport)
+            ) {
+                let _ = self.dispatch_client_event(evt);
+                // The runtime has already retired this stream. Do not wait
+                // for another transport event to terminate the driver loop.
+                let _ = self.transport.close_transport().await;
+                self.mark_transport_closed().await;
+                return false;
+            }
             if let Some(msg) = self.dispatch_client_event(evt) {
                 if let Err(error) = self.send_transport_message(msg).await {
                     if is_fatal_transport_error(&error) {
