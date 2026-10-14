@@ -284,13 +284,22 @@ pub(super) async fn repair_stalled_row(
                     // Eviction is not delivery evidence. Retirement separately
                     // proves absence or supersession inside the actor/registry
                     // turn, including when empty-room cleanup destroys it.
-                    for child in manifest.children.iter().filter(|child| {
-                        child.target.as_ref() == Some(&occupant) && child.occupancy.is_some()
+                    // Occupancy metadata alone is not room authority: inbox
+                    // refresh children can name the same frozen endpoint. The
+                    // routes exclude receipted/non-room obligations and retain
+                    // the original reflection's classified room ownership.
+                    for retiring_route in routes.iter().filter(|progress| {
+                        progress.room() == Some(&manifest.room)
+                            && progress.fanout.contains(&occupant)
+                            && !progress.completed.contains(&occupant)
+                            && manifest
+                                .child(&progress.receipt, Some(&occupant))
+                                .is_some_and(|child| child.occupancy.is_some())
                     }) {
                         let context = crate::server::routes::interpret::SmIngressAppendContext {
                             message_key: key,
-                            receipt: child.receipt.clone(),
-                            received_at: route.received_at,
+                            receipt: retiring_route.receipt.clone(),
+                            received_at: retiring_route.received_at,
                             archive_positions: Vec::new(),
                             dispatch_stream: None,
                             authority: super::append_authority::AppendAuthority::Verified,
