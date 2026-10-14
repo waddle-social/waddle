@@ -42,6 +42,7 @@ pub(super) struct BotGroupchatDispatch<'a> {
     pub(super) sender_nickname_generation: u64,
     pub(super) claim_fence: Option<&'a waddle_xmpp::muc::RoomClaimFenceContext>,
     pub(super) snapshot_generation: u64,
+    pub(super) manifest_snapshot: Option<crate::ingress::RoomManifestSnapshot>,
     pub(super) occupant_id_secret: &'a waddle_xmpp::xep::xep0421::OccupantIdSecret,
 }
 
@@ -152,6 +153,7 @@ pub(super) async fn plan_bot_groupchat_message(
             .map(super::effects::room::RoomFenceRequirement::Guarded)
             .unwrap_or(super::effects::room::RoomFenceRequirement::Unfenced),
         snapshot_generation: bot_ctx.snapshot_generation,
+        manifest_snapshot: bot_ctx.manifest_snapshot.clone(),
     });
     let mut planned =
         build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
@@ -230,7 +232,7 @@ pub(super) async fn plan_bot_groupchat_message(
     });
     let events = super::room_dispatch::order_subject_persistence_after_archive(events);
     let nested = Box::pin(interpret_with_depth(events, deps, 0)).await;
-    if nested.retry_suppression.is_none() && nested.route_to_connection_events > 0 {
+    if nested.route_to_connection_events > 0 {
         let room_generation = bot_ctx
             .claim_fence
             .and_then(|fence| u64::try_from(fence.epoch.0).ok())
@@ -621,6 +623,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
             sender_nickname_generation: snapshot.sender_nickname_generation.unwrap_or(0),
             claim_fence: snapshot.claim_fence.as_ref(),
             snapshot_generation: snapshot.admission_revision,
+            manifest_snapshot: Some(crate::ingress::RoomManifestSnapshot::from(&snapshot)),
             occupant_id_secret: &state.deps.occupant_id_secret,
         },
         working,

@@ -269,8 +269,15 @@ impl kameo::message::Message<JoinWithAffiliation> for RoomActor {
                     .room
                     .clear_session_call_state(&msg.nick, &msg.sender_jid);
             }
-            let joined_at =
-                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1));
+            // Refreshing a resumed seated session does not create a new
+            // occupancy. Frozen delivery guards only change on replacement.
+            let joined_at = (actor.room.session_generation(&msg.sender_jid) == Some(msg.session)
+                && actor.room.find_nick_by_real_jid(&msg.sender_jid) == Some(msg.nick.as_str()))
+            .then(|| actor.room.session_watermark(&msg.sender_jid))
+            .flatten()
+            .unwrap_or_else(|| {
+                OccupancyWatermark::from_revision(actor.occupancy_revision.saturating_add(1))
+            });
             let joined_jid = msg.sender_jid.clone();
             let new_occupant = actor.room.add_occupant_with_affiliation(
                 msg.sender_jid,

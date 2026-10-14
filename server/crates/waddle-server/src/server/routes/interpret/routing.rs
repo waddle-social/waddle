@@ -128,7 +128,6 @@ pub(super) async fn run_selected_headless_recipient_pass(
         timer_commands: _,
         // Retry suppression belongs to this discarded transient batch and
         // must not escape into the caller's unrelated recipient work.
-        retry_suppression: _,
         // Headless pass emits no wire copy, so there is nothing to
         // rewrite.
         archive_id_rewrites: _,
@@ -341,7 +340,6 @@ pub(super) async fn run_selected_recipient_pass(
         timer_commands: _,
         // The fanout recipient pass discards its transient outcome; its
         // batch-local retry marker is not meaningful to the outer batch.
-        retry_suppression: _,
         archive_id_rewrites,
         route_to_connection_events: _,
     } = nested;

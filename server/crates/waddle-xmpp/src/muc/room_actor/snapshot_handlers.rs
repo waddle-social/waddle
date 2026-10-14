@@ -2,7 +2,7 @@ use jid::{BareJid, FullJid};
 use kameo::message::Context;
 use xmpp_parsers::message::Message;
 
-use super::{RoomActor, RoomActorError};
+use super::{OccupancyWatermark, RoomActor, RoomActorError};
 use crate::muc::{OutboundMucMessage, RoomClaimFenceContext, RoomConfig};
 use crate::types::{Affiliation, Role};
 
@@ -37,6 +37,10 @@ pub struct RoomChainSnapshot {
     /// cache, which could transplant a later actor's authority onto this
     /// frozen snapshot.
     pub claim_fence: Option<RoomClaimFenceContext>,
+    /// Durable room lifecycle and revision observed by the same actor read.
+    pub durable_coordinates: Option<crate::muc::RoomCommittedCoordinates>,
+    /// Scope for monotonic occupancy watermarks, preserved across live handoff.
+    pub occupancy_incarnation: crate::muc::AdminMutationId,
     /// One entry per active occupant session — same `nick` may appear
     /// multiple times when an occupant has joined under multiple
     /// resources.
@@ -71,6 +75,7 @@ pub struct RoomChainSnapshot {
 #[derive(Debug, Clone)]
 pub struct RoomChainOccupant {
     pub full_jid: FullJid,
+    pub watermark: OccupancyWatermark,
     pub nick: String,
     pub role: Role,
     pub affiliation: Affiliation,
@@ -104,14 +109,21 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
                 let nick = occupant.nick.clone();
                 let role = occupant.role;
                 let affiliation = occupant.affiliation;
+                let room = &self.room;
                 self.room
                     .get_occupant_sessions(&occupant.nick)
                     .into_iter()
-                    .map(move |full_jid| RoomChainOccupant {
-                        full_jid,
-                        nick: nick.clone(),
-                        role,
-                        affiliation,
+                    .map(move |full_jid| {
+                        let watermark = room
+                            .session_watermark(&full_jid)
+                            .unwrap_or(OccupancyWatermark::initial());
+                        RoomChainOccupant {
+                            full_jid,
+                            watermark,
+                            nick: nick.clone(),
+                            role,
+                            affiliation,
+                        }
                     })
             })
             .collect();
@@ -148,6 +160,8 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
 
         Ok(RoomChainSnapshot {
             claim_fence: self.durable_claim_fence.clone(),
+            durable_coordinates: self.durable_coordinates,
+            occupancy_incarnation: self.occupancy_incarnation,
             occupants,
             sender_nick,
             sender_role,
@@ -243,5 +257,193 @@ impl kameo::message::Message<GetNicknameGeneration> for RoomActor {
         self.room
             .current_nickname_generation(&msg.nick)
             .unwrap_or(0)
+    }
+}
+
+/// Execute a local replay delivery while its frozen occupancy is still current.
+/// The callback runs synchronously in the actor turn, so a leave, rejoin, or
+/// live-roster handoff cannot race between the guard check and enqueue.
+pub struct RunOccupancyReplayGuarded<R> {
+    pub jid: FullJid,
+    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub watermark: OccupancyWatermark,
+    pub action: Box<dyn FnOnce() -> R + Send>,
+}
+
+#[derive(Debug)]
+pub enum OccupancyReplayGuardOutcome<R> {
+    /// This actor did not inherit the captured live roster.
+    Unproven,
+    Superseded,
+    Executed(R),
+}
+
+impl<R: Send + 'static> kameo::message::Message<RunOccupancyReplayGuarded<R>> for RoomActor {
+    type Reply = Result<OccupancyReplayGuardOutcome<R>, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: RunOccupancyReplayGuarded<R>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.reject_sealed_effects().await?;
+        if self.occupancy_incarnation != msg.occupancy_incarnation {
+            return Ok(OccupancyReplayGuardOutcome::Unproven);
+        }
+        if self.room.session_watermark(&msg.jid) != Some(msg.watermark) {
+            return Ok(OccupancyReplayGuardOutcome::Superseded);
+        }
+        Ok(OccupancyReplayGuardOutcome::Executed((msg.action)()))
+    }
+}
+
+/// Serialize detached resource acceptance with occupancy changes. Cancellation
+/// of the asking task does not revoke an allocation already owned by its ledger.
+pub struct RunOccupancyReplayGuardedAsync<R> {
+    pub jid: FullJid,
+    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub watermark: OccupancyWatermark,
+    pub action: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, R> + Send>,
+}
+
+impl<R: Send + 'static> kameo::message::Message<RunOccupancyReplayGuardedAsync<R>> for RoomActor {
+    type Reply = Result<OccupancyReplayGuardOutcome<R>, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: RunOccupancyReplayGuardedAsync<R>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.reject_sealed_effects().await?;
+        if self.occupancy_incarnation != msg.occupancy_incarnation {
+            return Ok(OccupancyReplayGuardOutcome::Unproven);
+        }
+        if self.room.session_watermark(&msg.jid) != Some(msg.watermark) {
+            return Ok(OccupancyReplayGuardOutcome::Superseded);
+        }
+        Ok(OccupancyReplayGuardOutcome::Executed((msg.action)().await))
+    }
+}
+
+/// Settle a frozen resource obligation only after a strictly newer seated
+/// occupancy proves its supersession. Missing rosters and missing occupants
+/// remain unproven. The actor serializes settlement with subsequent joins.
+pub struct RunSupersededOccupancyGuardedAsync<R> {
+    pub jid: FullJid,
+    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub watermark: OccupancyWatermark,
+    pub action: Box<dyn FnOnce() -> futures::future::BoxFuture<'static, R> + Send>,
+}
+
+impl<R: Send + 'static> kameo::message::Message<RunSupersededOccupancyGuardedAsync<R>>
+    for RoomActor
+{
+    type Reply = Result<OccupancyReplayGuardOutcome<R>, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: RunSupersededOccupancyGuardedAsync<R>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.reject_sealed_effects().await?;
+        self.gate_join_ownership().await?;
+        if self.occupancy_incarnation != msg.occupancy_incarnation
+            || !self
+                .room
+                .session_watermark(&msg.jid)
+                .is_some_and(|current| current > msg.watermark)
+        {
+            return Ok(OccupancyReplayGuardOutcome::Unproven);
+        }
+        Ok(OccupancyReplayGuardOutcome::Executed((msg.action)().await))
+    }
+}
+
+/// Why an original, frozen occupancy can no longer receive its room copy.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RoomChildRetirementReason {
+    Departed,
+    Superseded,
+    IncarnationLost,
+}
+
+/// Pin a ghost probe to the original frozen occupancy, before asynchronous
+/// reachability checks can observe a rejoined or reconstructed room occupant.
+pub struct GetReplayOccupantSessionGeneration {
+    pub jid: FullJid,
+    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub watermark: OccupancyWatermark,
+}
+
+impl kameo::message::Message<GetReplayOccupantSessionGeneration> for RoomActor {
+    type Reply = Result<Option<waddle_xmpp_core::OccupancySessionGeneration>, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: GetReplayOccupantSessionGeneration,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.reject_sealed_effects().await?;
+        self.gate_join_ownership().await?;
+        if self.occupancy_incarnation != msg.occupancy_incarnation
+            || self.room.session_watermark(&msg.jid) != Some(msg.watermark)
+        {
+            return Ok(None);
+        }
+        Ok(self.room.session_generation(&msg.jid))
+    }
+}
+
+/// Classify and resolve a frozen child in the same actor turn. The caller may
+/// allow absent/reconstructed rosters only under single-node authority; a
+/// clustered caller still needs a strictly newer inherited occupancy.
+pub struct RunRoomChildRetirementGuardedAsync<R> {
+    pub jid: FullJid,
+    pub occupancy_incarnation: crate::muc::AdminMutationId,
+    pub coordinates: Option<crate::muc::RoomCommittedCoordinates>,
+    pub watermark: OccupancyWatermark,
+    pub allow_lost_occupancy: bool,
+    pub action:
+        Box<dyn FnOnce(RoomChildRetirementReason) -> futures::future::BoxFuture<'static, R> + Send>,
+}
+
+impl<R: Send + 'static> kameo::message::Message<RunRoomChildRetirementGuardedAsync<R>>
+    for RoomActor
+{
+    type Reply = Result<OccupancyReplayGuardOutcome<R>, RoomActorError>;
+
+    async fn handle(
+        &mut self,
+        msg: RunRoomChildRetirementGuardedAsync<R>,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.reject_sealed_effects().await?;
+        self.gate_join_ownership().await?;
+        let allow_lost_occupancy = msg.allow_lost_occupancy
+            && self.durable_store.is_none()
+            && self.durable_claim_fence.is_none();
+        let incarnation_lost = self.occupancy_incarnation != msg.occupancy_incarnation;
+        let lifecycle_replaced = match (msg.coordinates, self.durable_coordinates) {
+            (Some(saved), Some(current)) => current.lifecycle != saved.lifecycle,
+            (Some(_), None) if !incarnation_lost => {
+                return Ok(OccupancyReplayGuardOutcome::Unproven);
+            }
+            _ => false,
+        };
+        let reason = if incarnation_lost || lifecycle_replaced {
+            if !allow_lost_occupancy {
+                return Ok(OccupancyReplayGuardOutcome::Unproven);
+            }
+            RoomChildRetirementReason::IncarnationLost
+        } else {
+            match self.room.session_watermark(&msg.jid) {
+                None if allow_lost_occupancy => RoomChildRetirementReason::Departed,
+                Some(current) if current > msg.watermark => RoomChildRetirementReason::Superseded,
+                _ => return Ok(OccupancyReplayGuardOutcome::Unproven),
+            }
+        };
+        Ok(OccupancyReplayGuardOutcome::Executed(
+            (msg.action)(reason).await,
+        ))
     }
 }

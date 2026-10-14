@@ -51,6 +51,31 @@ pub struct SettlementOutcome {
     pub terminal: Result<bool, execute::ExecutionPersistenceFailure>,
 }
 
+/// The admitted host invocation's actual internal frame consumer. Room echoes
+/// are consumed by this host, while errors are surfaced by the settlement.
+#[derive(Debug)]
+pub(crate) struct HostFrameConsumer {
+    sender: jid::FullJid,
+}
+
+impl HostFrameConsumer {
+    pub(crate) fn consume(
+        &self,
+        target: &jid::FullJid,
+        stanza: &Stanza,
+    ) -> waddle_xmpp::registry::BroadcastOutcome {
+        if target != &self.sender
+            || !matches!(stanza, Stanza::Message(message)
+                if message.to.as_ref().and_then(|jid| jid.try_as_full().ok()) == Some(target))
+        {
+            return waddle_xmpp::registry::BroadcastOutcome::NotConnected;
+        }
+        // This is the existing host sink: there is no socket echo. The caller
+        // records its keyed acceptance before returning completion to ingress.
+        waddle_xmpp::registry::BroadcastOutcome::Delivered
+    }
+}
+
 /// Owned backing for the host's borrowed interpreter dependencies.
 pub struct NestedContinuation {
     state: Arc<WebSocketState>,
@@ -89,6 +114,9 @@ impl NestedContinuation {
         deps.host_sender = Some(
             crate::server::routes::interpret::HostOwnedResources::Sender(self.host_sender.clone()),
         );
+        deps.host_copy_consumer = Some(Arc::new(HostFrameConsumer {
+            sender: self.host_sender.clone(),
+        }));
         deps
     }
 }
@@ -147,6 +175,7 @@ impl NestedIngressOperation {
             submission.principal,
             super::IngressPrincipal::Extension(_) | super::IngressPrincipal::RoomResult(_)
         ) || !matches!(submission.connection_generation, TransportGeneration::Host)
+            || submission.sender != continuation.host_sender
         {
             return NestedOutcome::Refused(NestedRefusal::InvalidHostSubmission);
         }
@@ -186,7 +215,10 @@ impl NestedIngressOperation {
                 }
                 // Host frames are consumed here. Receipt writes are idempotent;
                 // retry them without dispatching the committed effects again.
-                let terminal = settle(&authority, &mut report).await;
+                let terminal = match consume_host_frames(&authority, &continuation, &decision, &report).await {
+                    Ok(()) => settle(&authority, &mut report).await,
+                    Err(error) => Err(error.into()),
+                };
                 let _ = settlement_tx.send(SettlementOutcome {
                     rejection,
                     terminal,
@@ -216,6 +248,101 @@ impl NestedIngressOperation {
             Err(_) => NestedOutcome::Refused(NestedRefusal::DecisionUnavailable),
         }
     }
+}
+
+/// Key the actual host consumption before the generic frame receipt. A crash
+/// between these transactions retains acceptance in the existing send ledger.
+async fn consume_host_frames(
+    authority: &IngressAuthority,
+    continuation: &NestedContinuation,
+    decision: &super::IngressDecision,
+    report: &super::ExecutionReport,
+) -> Result<(), crate::ingress_uow::IngressUowError> {
+    use crate::ingress_uow::{CanonicalMessageRepository, IngressUowError};
+    use crate::server::routes::interpret::{FullJidDeliveryOutcome, SmIngressAppendContext};
+    if !report
+        .frame_obligations
+        .iter()
+        .flat_map(|obligation| &obligation.frames)
+        .any(|stanza| {
+            matches!(stanza, Stanza::Message(message)
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat)
+        })
+    {
+        return Ok(());
+    }
+    let Some(key) = decision.message_key else {
+        return Ok(());
+    };
+    let mut tx = authority.uow.begin().await?;
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await?
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+    tx.commit().await?;
+    let Some(manifest) = envelope.room_manifest() else {
+        return Ok(());
+    };
+    let consumer = Arc::new(HostFrameConsumer {
+        sender: continuation.host_sender.clone(),
+    });
+    for obligation in &report.frame_obligations {
+        for stanza in &obligation.frames {
+            let Stanza::Message(message) = stanza else {
+                continue;
+            };
+            if message.type_ != xmpp_parsers::message::MessageType::Groupchat {
+                continue;
+            }
+            // Initial storage-hinted frames were already released through
+            // the guarded transient sink; policy creates no keyed host retry.
+            if obligation.receipt_keys.is_empty()
+                && waddle_xmpp::xep::xep0334::should_skip_storage(message)
+            {
+                continue;
+            }
+            let target = message
+                .to
+                .as_ref()
+                .and_then(|jid| jid.try_as_full().ok())
+                .ok_or(IngressUowError::EffectIntentConflict)?;
+            let receipt = obligation
+                .receipt_keys
+                .iter()
+                .find(|receipt| manifest.contains(receipt, Some(target)))
+                .ok_or(IngressUowError::EffectIntentConflict)?;
+            super::room_manifest_replay::validate_child(&envelope, receipt, target, stanza)?;
+            let context = SmIngressAppendContext {
+                message_key: key,
+                receipt: receipt.clone(),
+                received_at: decision
+                    .route_progress
+                    .iter()
+                    .find(|progress| &progress.receipt == receipt)
+                    .and_then(|progress| progress.received_at),
+                archive_positions: super::archive_dispatch::positions(&authority.uow, key, receipt)
+                    .await?,
+                dispatch_stream: None,
+                authority: super::append_authority::AppendAuthority::Verified,
+            };
+            let owned_consumer = consumer.clone();
+            let owned_target = target.clone();
+            let owned_stanza = stanza.clone();
+            let outcome = super::live_delivery::accept_live_delivery_guarded(
+                &authority.uow,
+                Some(&authority.force_stop),
+                &context,
+                target,
+                stanza,
+                Some(&continuation.state.deps.protocol.room_registry),
+                move || owned_consumer.consume(&owned_target, &owned_stanza),
+            )
+            .await;
+            if outcome != FullJidDeliveryOutcome::Delivered {
+                return Err(IngressUowError::EffectIntentConflict);
+            }
+        }
+    }
+    Ok(())
 }
 
 async fn settle(

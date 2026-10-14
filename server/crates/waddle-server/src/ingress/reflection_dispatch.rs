@@ -6,29 +6,34 @@ use waddle_xmpp::ingress::IngressEffectIntent;
 
 /// Freeze the original reflection before reconciliation. A sibling retransmission
 /// must not expand the audience: the recorded room route still owns that choice.
-pub(super) fn freeze(plan: &mut IngressPlan, recorded: &[IngressEffectIntent]) {
-    let reflections: Vec<_> = plan
-        .intents
-        .iter()
-        .filter_map(|intent| {
-            let IngressEffectIntent::RouteMucGroupchat { room, .. } = intent else {
-                return None;
-            };
-            // Only archived reflections participate in the archive frontier.
-            // Transient room traffic keeps its existing sender-stream lifetime.
-            if !plan.intents.iter().chain(recorded).any(|saved| {
-                matches!(saved,
-                    IngressEffectIntent::ArchiveAuthoritative { archive, .. } if archive == room
-                )
-            }) {
-                return None;
-            }
-            let authority = recorded.iter().find(|saved| matches!(saved,
-            IngressEffectIntent::RouteMucGroupchat { room: saved_room, .. } if saved_room == room
-        )).unwrap_or(intent);
-            original_intent(authority)
-        })
-        .collect();
+pub(super) fn freeze(
+    plan: &mut IngressPlan,
+    recorded: &[IngressEffectIntent],
+    allow_archive_free: bool,
+) {
+    let reflections: Vec<_> =
+        plan.intents
+            .iter()
+            .filter_map(|intent| {
+                let IngressEffectIntent::RouteMucGroupchat { room, .. } = intent else {
+                    return None;
+                };
+                // A new acceptance freezes even archive-free sender metadata.
+                // Legacy rows lack that pre-h choice; do not create it on retry.
+                let archived = plan.intents.iter().chain(recorded).any(|saved| {
+                    matches!(saved, IngressEffectIntent::ArchiveAuthoritative { archive, .. }
+                        if archive == room)
+                });
+                if !allow_archive_free && !archived {
+                    return None;
+                }
+                let authority = recorded.iter().find(|saved| {
+                matches!(saved, IngressEffectIntent::RouteMucGroupchat { room: saved_room, .. }
+                    if saved_room == room)
+            }).unwrap_or(intent);
+                original_intent(authority)
+            })
+            .collect();
     for intent in reflections {
         if !plan.intents.contains(&intent) {
             plan.intents.push(intent);
@@ -148,11 +153,11 @@ mod tests {
             error_reply: None,
             room_execution: RoomExecutionPath::None,
         };
-        freeze(&mut plan, std::slice::from_ref(&original));
+        freeze(&mut plan, std::slice::from_ref(&original), true);
         assert_eq!(
             plan.intents.len(),
-            1,
-            "transient reflections need no archive receipt"
+            2,
+            "storable reflections retain a receipt without an archive"
         );
         let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
         plan.intents
@@ -163,7 +168,7 @@ mod tests {
                 stanza_id: waddle_xmpp_core::xep0359::StanzaId::new("frozen", room.into()),
                 archived_at: chrono::Utc::now(),
             });
-        freeze(&mut plan, std::slice::from_ref(&original));
+        freeze(&mut plan, std::slice::from_ref(&original), false);
         let reflection = original_intent(&original).expect("original reflection");
         assert_eq!(
             plan.intents
@@ -202,5 +207,65 @@ mod tests {
             &plan.plan[0].effect,
             Effect::External(ExternalEffect::Frame(_))
         ));
+    }
+
+    #[test]
+    fn xep0334_transient_reflection_freezes_metadata_without_a_payload() {
+        let route = room_intent("sender@example.com/original");
+        let mut message = Message::new(None);
+        message.type_ = MessageType::Groupchat;
+        waddle_xmpp::xep::xep0334::add_hint(&mut message, waddle_xmpp::xep::xep0334::Hint::NoStore);
+        let mut plan = IngressPlan {
+            failure: None,
+            rejection: None,
+            plan: vec![],
+            intents: vec![route],
+            room_canonical_message: None,
+            sanitized_message: message,
+            error_reply: None,
+            room_execution: RoomExecutionPath::None,
+        };
+        freeze(&mut plan, &[], true);
+        assert_eq!(plan.intents.len(), 2);
+        assert!(matches!(
+            &plan.intents[1],
+            IngressEffectIntent::RouteDirect { prepared: None, .. }
+        ));
+        waddle_xmpp::xep::xep0334::add_hint(
+            &mut plan.sanitized_message,
+            waddle_xmpp::xep::xep0334::Hint::Store,
+        );
+        freeze(&mut plan, &[], true);
+        assert_eq!(plan.intents.len(), 2);
+    }
+
+    #[test]
+    fn legacy_archive_free_reflection_is_not_created_but_archived_authority_still_freezes() {
+        let original = room_intent("sender@example.com/original");
+        let mut plan = IngressPlan {
+            failure: None,
+            rejection: None,
+            plan: Vec::new(),
+            intents: vec![room_intent("sender@example.com/sibling")],
+            room_canonical_message: None,
+            sanitized_message: Message::new(None),
+            error_reply: None,
+            room_execution: RoomExecutionPath::None,
+        };
+        freeze(&mut plan, std::slice::from_ref(&original), false);
+        assert_eq!(plan.intents.len(), 1, "no new legacy archive-free lifetime");
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let archive = IngressEffectIntent::ArchiveAuthoritative {
+            ordinal: None,
+            archive: room.clone(),
+            by: room.clone(),
+            stanza_id: waddle_xmpp_core::xep0359::StanzaId::new("frozen", room.into()),
+            archived_at: chrono::Utc::now(),
+        };
+        freeze(&mut plan, &[original.clone(), archive], false);
+        assert_eq!(plan.intents.len(), 2);
+        assert!(plan
+            .intents
+            .contains(&original_intent(&original).expect("original reflection")));
     }
 }

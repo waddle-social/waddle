@@ -461,6 +461,48 @@ impl ConnectionRegistry {
         }
     }
 
+    /// Capture an owned socket witness for a room actor's synchronous replay
+    /// boundary. The shared map is rechecked when invoked; a replacement
+    /// connection can never inherit this callback's frozen frame.
+    pub fn capture_owned_enqueue_if_owner(
+        &self,
+        jid: FullJid,
+        owner: Arc<AtomicBool>,
+        outbound: OutboundStanza,
+    ) -> impl FnOnce() -> BroadcastOutcome + Send + 'static {
+        let connections = self.connections.clone();
+        let presence_states = self.presence_states.clone();
+        move || {
+            let entry = match connections.get(&jid) {
+                Some(entry) if Arc::ptr_eq(&entry.carbons_enabled, &owner) => entry.value().clone(),
+                _ => {
+                    crate::telemetry::reliability::increment_broadcast_not_connected();
+                    return BroadcastOutcome::NotConnected;
+                }
+            };
+            match entry.try_send_archive_ordered(outbound) {
+                Ok(()) => {
+                    crate::telemetry::reliability::increment_broadcast_delivered();
+                    BroadcastOutcome::Delivered
+                }
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    crate::telemetry::reliability::increment_broadcast_dropped_full();
+                    BroadcastOutcome::DroppedFull
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => {
+                    crate::telemetry::reliability::increment_broadcast_dropped_closed();
+                    Self::remove_closed_owner_entry(
+                        &connections,
+                        &presence_states,
+                        &jid,
+                        &entry.sender,
+                    );
+                    BroadcastOutcome::DroppedClosed
+                }
+            }
+        }
+    }
+
     /// Race-safe eviction of a stale entry whose outbound channel is closed.
     ///
     /// Used on the non-blocking broadcast path to clean up zombies without
@@ -491,12 +533,21 @@ impl ConnectionRegistry {
         jid: &FullJid,
         sender: &mpsc::Sender<OutboundStanza>,
     ) {
-        let removed = self.connections.remove_if(jid, |_, entry| {
+        Self::remove_closed_owner_entry(&self.connections, &self.presence_states, jid, sender);
+    }
+
+    fn remove_closed_owner_entry(
+        connections: &DashMap<FullJid, ConnectionEntry>,
+        presence_states: &DashMap<FullJid, PresenceState>,
+        jid: &FullJid,
+        sender: &mpsc::Sender<OutboundStanza>,
+    ) {
+        let removed = connections.remove_if(jid, |_, entry| {
             entry.sender.is_closed() && entry.sender.same_channel(sender)
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
-            self.presence_states.remove(jid);
+            presence_states.remove(jid);
             debug!(jid = %jid, "Evicted stale owned closed connection entry");
         }
     }

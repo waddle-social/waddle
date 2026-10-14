@@ -89,6 +89,16 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
     deps.inbox_storage = None;
     deps.sm_session_registry = Some(&sm);
     plan_broadcast(&mut submission, &room, &message, &deps).await;
+    if matches!(case, ReplayCase::MissingProvenanceSubject) {
+        if let effects::RoomExecutionPath::Local {
+            manifest_snapshot, ..
+        } = &mut submission.plan.room_execution
+        {
+            // This case seeds an explicitly legacy subject row, never a sealed
+            // row whose accepted canonical source could be replaced later.
+            *manifest_snapshot = None;
+        }
+    }
     submission
         .plan
         .plan
@@ -150,6 +160,14 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .expect("new occupant");
     if matches!(case, ReplayCase::MissingProvenanceSubject) {
         let mut tx = fixture.uow.begin().await.expect("old subject row");
+        let legacy = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("load pre-fix fixture")
+            .expect("pre-fix envelope");
+        assert!(
+            legacy.room_manifest().is_none(),
+            "the pre-fix fixture must never replace a sealed canonical source"
+        );
         crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
@@ -216,7 +234,10 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         !matches!(case, ReplayCase::MissingProvenanceSubject),
         "pending B needs frozen provenance: {targets:?}"
     );
-    assert!(targets.contains(&sender), "reflection retained");
+    assert!(
+        !targets.contains(&sender),
+        "the completed original reflection is not repeated"
+    );
     if matches!(case, ReplayCase::RelayBody) {
         assert!(
             !targets.contains(&a),
@@ -256,32 +277,28 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         ));
     } else {
         assert!(
-            targets.contains(&a),
-            "completed A gets generic subject reapplication: {targets:?}"
+            !targets.contains(&a),
+            "completed A receives no subject reapplication: {targets:?}"
         );
         assert!(
-            targets.contains(&c),
-            "new C gets generic subject reapplication: {targets:?}"
+            !targets.contains(&c),
+            "late C is outside the frozen subject audience: {targets:?}"
         );
         for (index, effect) in retry.external.iter().enumerate() {
-            let Some(target) = super::super::recorded::single_target(effect) else {
-                continue;
-            };
-            assert!(
-                retry.external_dependencies[index]
-                    .iter()
-                    .any(|dependency| matches!(
-                        dependency,
-                        PlanEffectDependency::AfterRoomSubject { .. }
-                    )),
-                "subject dependency retained"
-            );
-            if target == &a || target == &c {
-                assert!(!super::super::execute_uow::owns(
+            if super::super::recorded::single_target(effect) == Some(&b) {
+                assert!(
+                    retry.external_dependencies[index]
+                        .iter()
+                        .any(|dependency| matches!(
+                            dependency,
+                            PlanEffectDependency::AfterRoomSubject { .. }
+                        )),
+                    "the pending subject copy retains its mutation dependency"
+                );
+                assert!(super::super::execute_uow::owns(
                     effect,
                     &retry.route_progress
                 ));
-                assert!(!retry.external_receipts[index].contains(&receipt));
             }
         }
         let report = execute_effects(
@@ -303,22 +320,22 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
             receivers[2].try_recv().is_err(),
             "the completed archived reflection is not repeated"
         );
-        assert!(c_rx.try_recv().is_ok(), "C receives subject reapplication");
+        assert!(c_rx.try_recv().is_err(), "C receives no historical subject");
         if matches!(case, ReplayCase::DetachedSubject) {
             assert_eq!(
                 super::local::append_count(&sm, &a).await,
-                2,
-                "generic reapplication allocates a new frame"
+                1,
+                "a completed frozen subject copy does not allocate a new frame"
             );
             assert_eq!(
                 fixture.count("sm_ingress_appends").await,
                 1,
-                "A reapplication carries no MUC append context"
+                "the original keyed subject append is retained"
             );
         } else {
             assert!(
-                receivers[0].try_recv().is_ok(),
-                "A receives subject reapplication"
+                receivers[0].try_recv().is_err(),
+                "A receives no duplicate subject"
             );
         }
         if matches!(case, ReplayCase::MissingProvenanceSubject) {

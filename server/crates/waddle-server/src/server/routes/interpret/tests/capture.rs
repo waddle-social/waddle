@@ -534,6 +534,7 @@ async fn archived_offline_delivery_captures_without_immediate_storage() {
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");
@@ -611,6 +612,7 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
         ingress_effect_capture: Some(capture.clone()),
         direct_route_identity: None,
         host_sender: None,
+        host_copy_consumer: None,
         ingress_append_context: None,
     };
     let recipient: jid::BareJid = "bob@example.com".parse().expect("recipient");

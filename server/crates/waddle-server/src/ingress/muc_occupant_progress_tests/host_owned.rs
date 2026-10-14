@@ -121,6 +121,27 @@ async fn host_owned_progress(fixture: IngressFixture) {
         .await
         .expect("load envelope")
         .expect("canonical envelope");
+    let manifest = envelope.room_manifest().expect("sealed room audience");
+    let host_child = manifest
+        .children
+        .iter()
+        .find(|child| child.receipt == receipt && child.target.as_ref() == Some(&bot))
+        .expect("frozen host endpoint");
+    assert_eq!(
+        host_child.disposition,
+        crate::ingress::RoomManifestChildDisposition::HostRoomCopyRequiresNoTransport,
+        "trusted pre-admission classification durably resolves this endpoint without transport"
+    );
+    let human_child = manifest
+        .children
+        .iter()
+        .find(|child| child.receipt == receipt && child.target.as_ref() == Some(&b))
+        .expect("frozen human endpoint");
+    assert_eq!(
+        human_child.disposition,
+        crate::ingress::RoomManifestChildDisposition::Delivery,
+        "host policy cannot resolve a disconnected human recipient"
+    );
     tx.commit().await.expect("inspection commit");
     let recovered =
         super::super::recovery_rebuild::rebuild(super::super::recovery_rebuild::RecoveryInput {
@@ -136,12 +157,12 @@ async fn host_owned_progress(fixture: IngressFixture) {
         })
         .expect("rebuild host-owned route");
     assert!(
-        recovered.decision.external.iter().any(|effect| matches!(
+        recovered.decision.external.iter().all(|effect| !matches!(
             effect,
             ExternalEffect::Delivery(ExternalDeliveryEffect::HostOwnedCopy { target, .. })
                 if target == &bot
         )),
-        "maintenance rebuild keeps the bot copy transport-free"
+        "maintenance does not rebuild a policy-resolved host endpoint"
     );
     assert!(
         recovered.decision.external.iter().all(|effect| !matches!(
@@ -188,7 +209,7 @@ async fn host_owned_progress(fixture: IngressFixture) {
             .await
             .expect("partial progress"),
         sorted(vec![bot.clone(), a.clone()]),
-        "the no-transport bot copy and delivered A are both durable"
+        "the accepted no-transport bot disposition and delivered A are both settled"
     );
     assert!(!EffectReceiptRepository::contains(
         &mut tx,
@@ -198,6 +219,20 @@ async fn host_owned_progress(fixture: IngressFixture) {
     )
     .await
     .expect("aggregate receipt"));
+    assert_eq!(
+        crate::ingress_uow::SendAttemptRepository::status(
+            &mut tx,
+            &crate::ingress_uow::SendObligation {
+                message: key,
+                receipt: receipt.clone(),
+                recipient: bot.clone(),
+            },
+        )
+        .await
+        .expect("inspect host send attempt"),
+        None,
+        "logical no-transport settlement cannot fabricate an endpoint send attempt"
+    );
     tx.commit().await.expect("inspection commit");
     assert!(
         !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
@@ -206,6 +241,13 @@ async fn host_owned_progress(fixture: IngressFixture) {
     );
 
     plan_broadcast(&mut submission, &room, &message, &deps).await;
+    if let effects::RoomExecutionPath::Local {
+        manifest_snapshot: Some(snapshot),
+        ..
+    } = &mut submission.plan.room_execution
+    {
+        snapshot.host_no_transport.clear();
+    }
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("duplicate");
@@ -223,7 +265,7 @@ async fn host_owned_progress(fixture: IngressFixture) {
     assert_eq!(
         pending_occupant_targets,
         vec![b.clone()],
-        "retry plans only stalled B"
+        "retry preserves the original host disposition even if today's classification changes"
     );
 
     let report = execute_effects(
@@ -248,8 +290,8 @@ async fn host_owned_progress(fixture: IngressFixture) {
         DeliveryProgressRepository::load(&mut tx, key, &receipt)
             .await
             .expect("final progress"),
-        sorted(vec![bot, a, b]),
-        "every frozen occupant is durably complete"
+        sorted(vec![bot.clone(), a, b]),
+        "every frozen occupant is durably settled"
     );
     assert!(EffectReceiptRepository::contains(
         &mut tx,
@@ -259,6 +301,45 @@ async fn host_owned_progress(fixture: IngressFixture) {
     )
     .await
     .expect("aggregate receipt"));
+    assert_eq!(
+        crate::ingress_uow::SendAttemptRepository::status(
+            &mut tx,
+            &crate::ingress_uow::SendObligation {
+                message: key,
+                receipt: receipt.clone(),
+                recipient: bot.clone(),
+            },
+        )
+        .await
+        .expect("inspect final host send attempt"),
+        None,
+        "terminalization preserves the bot's no-transport disposition without synthetic delivery"
+    );
+    let guard = fixture
+        .db
+        .guard()
+        .await
+        .expect("inspect physical host receipts");
+    let mut rows = guard
+        .query(
+            "SELECT COUNT(*) FROM ingress_delivery_receipts WHERE resource = ?",
+            crate::db_params![bot.to_string()],
+        )
+        .await
+        .expect("inspect physical host receipts");
+    let physical_receipts: i64 = rows
+        .next()
+        .await
+        .expect("host receipt row")
+        .expect("host receipt count")
+        .get(0)
+        .expect("host receipt count integer");
+    assert_eq!(
+        physical_receipts, 0,
+        "logical policy settlement cannot fabricate a transport delivery receipt"
+    );
+    drop(rows);
+    drop(guard);
     tx.commit().await.expect("inspection commit");
     assert!(
         terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())

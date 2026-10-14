@@ -252,6 +252,7 @@ pub(crate) struct CrossNodeReceiver {
     receiver: tokio::sync::Mutex<OrderedRelayReceiverState>,
     origin_state: Arc<crate::server::routes::websocket::WebSocketState>,
     delivered_sequences: tokio::sync::Mutex<Vec<u64>>,
+    expects_keyed_obligation: bool,
 }
 
 #[cfg(feature = "clustering")]
@@ -260,6 +261,15 @@ impl CrossNodeReceiver {
         fixture: &IngressFixture,
         sm: Arc<InMemorySmSessionRegistry>,
         recipient: &jid::FullJid,
+    ) -> Self {
+        Self::new_with_origin(fixture, sm, recipient, None).await
+    }
+
+    async fn new_with_origin(
+        fixture: &IngressFixture,
+        sm: Arc<InMemorySmSessionRegistry>,
+        recipient: &jid::FullJid,
+        room_origin: Option<jid::BareJid>,
     ) -> Self {
         use crate::clustering::route_bridge::tests::{
             origin_identity, receiver_identity, services_with_claims,
@@ -274,10 +284,14 @@ impl CrossNodeReceiver {
         )
         .await;
         let store = Arc::new(InProcessClaimStore::new());
-        let origin = Entity::new(
-            EntityType::UserActor,
-            fixture.principal.bare_jid().to_string(),
-        );
+        let expects_keyed_obligation = room_origin.is_none();
+        let origin = match room_origin {
+            Some(room) => Entity::new(EntityType::RoomActor, room.to_string()),
+            None => Entity::new(
+                EntityType::UserActor,
+                fixture.principal.bare_jid().to_string(),
+            ),
+        };
         let target = Entity::new(EntityType::UserActor, recipient.to_bare().to_string());
         store
             .acquire(&origin, &origin_identity())
@@ -334,19 +348,18 @@ impl CrossNodeReceiver {
             receiver: Default::default(),
             origin_state,
             delivered_sequences: Default::default(),
+            expects_keyed_obligation,
         }
     }
 
     pub(crate) async fn deliver(&self, envelope: RemoteStanzaEnvelope) -> OrderedRelayReply {
-        assert!(
-            matches!(
-                &envelope.payload,
-                OrderedRelayPayload::Message {
-                    ingress_append: Some(_),
-                    ..
-                }
-            ),
-            "production origin path must carry its recorded append obligation"
+        let OrderedRelayPayload::Message { ingress_append, .. } = &envelope.payload else {
+            panic!("message relay payload");
+        };
+        assert_eq!(
+            ingress_append.is_some(),
+            self.expects_keyed_obligation,
+            "sealed legacy wire must not export manifest acceptance authority"
         );
         let envelope: RemoteStanzaEnvelope =
             serde_json::from_slice(&serde_json::to_vec(&envelope).expect("encode wire envelope"))
@@ -401,4 +414,683 @@ async fn postgres_cross_node_keyed_append_receipt_failure_recovery_1778() {
 #[cfg(feature = "clustering")]
 tokio::task_local! {
     pub(crate) static CROSS_NODE_RECEIVER: Arc<CrossNodeReceiver>;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keyed_custody() {
+    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::server::routes::interpret::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
+    use waddle_xmpp::ownership::{Entity, EntityType};
+    let fixture = IngressFixture::sqlite().await;
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .expect("SM persistence"),
+    );
+    let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let mut submission = room_submission(&fixture);
+    let IngressEffectIntent::RouteMucGroupchat {
+        room,
+        occupants,
+        route_identity,
+        ..
+    } = &submission.plan.intents[0]
+    else {
+        panic!("room route");
+    };
+    let room = room.clone();
+    let identity = route_identity.clone();
+    let target = occupants
+        .iter()
+        .find(|target| *target != &submission.sender)
+        .expect("remote occupant")
+        .clone();
+    sm.store_session(DetachedSession {
+        stream_id: target.to_string(),
+        user_id: target.to_bare().to_string(),
+        jid: target.clone(),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    })
+    .await
+    .expect("receiver detached session");
+    let mut copy = submission
+        .plan
+        .room_canonical_message
+        .as_ref()
+        .expect("canonical")
+        .as_ref()
+        .clone();
+    copy.to = Some(target.clone().into());
+    let sender_entity = Entity::new(EntityType::RoomActor, room.to_string());
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RelayFullJid {
+            route_identity: Some(identity),
+            origin: Some(OrderedRelayRouteOrigin {
+                kind: OrderedRelayRouteOriginKind::Entity(sender_entity.clone()),
+                sender_entity,
+                inbound_sequence: 1,
+                handoff: None,
+            }),
+            target: target.clone(),
+            stanza: Box::new(Stanza::Message(copy)),
+            call_setup: None,
+        }),
+    ))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("seal room manifest");
+    let key = decision.message_key.expect("message key");
+    let receiver = Arc::new(
+        CrossNodeReceiver::new_with_origin(&fixture, sm.clone(), &target, Some(room)).await,
+    );
+    let mut deps = Deps::new(
+        &receiver.origin_state.deps.protocol.connection_registry,
+        "example.com",
+    );
+    deps.web_socket_state = Some(&receiver.origin_state);
+    let report = relay_scope(
+        Some(&receiver),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        ),
+    )
+    .await;
+    assert_eq!(
+        report.outcomes[0].1,
+        ExternalOutcome::Uncertain,
+        "legacy ACK is not a manifest child receipt"
+    );
+    assert_eq!(
+        queue_len(&sm, &target).await,
+        1,
+        "existing remote wire remains delivered"
+    );
+    assert_eq!(*receiver.delivered_sequences.lock().await, vec![1]);
+    let accepted = sm
+        .peek_session(&target.to_string())
+        .await
+        .expect("receiver session read")
+        .expect("receiver session");
+    assert!(
+        accepted.unacked_stanzas[0].ingress_receipts.is_empty(),
+        "legacy replay carries no manifest frame receipt"
+    );
+    assert_eq!(
+        accepted.unacked_stanzas[0].original_receipt_at,
+        decision
+            .route_progress
+            .iter()
+            .find_map(|progress| progress.received_at)
+            .expect("canonical receipt time"),
+        "legacy delivery preserves the original XEP-0203 replay timestamp"
+    );
+    assert_eq!(
+        fixture.count("sm_ingress_appends").await,
+        0,
+        "receiver has no canonical child key"
+    );
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert!(
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+            .await
+            .expect("pending manifest")
+    );
+    deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    let _ = relay_scope(
+        Some(&receiver),
+        execute_effects(
+            &fixture.uow,
+            &fixture.db,
+            &decision,
+            &ImmediateSink,
+            &deps,
+            Duration::from_secs(5),
+        ),
+    )
+    .await;
+    assert_eq!(
+        *receiver.delivered_sequences.lock().await,
+        vec![1],
+        "maintenance cannot resend legacy wire"
+    );
+    assert_eq!(queue_len(&sm, &target).await, 1);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending() {
+    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::server::routes::interpret::{
+        effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
+    };
+    let fixture = IngressFixture::sqlite().await;
+    let mut submission = room_submission(&fixture);
+    let IngressEffectIntent::RouteMucGroupchat {
+        occupants,
+        route_identity,
+        ..
+    } = &submission.plan.intents[0]
+    else {
+        panic!("room route");
+    };
+    let target = occupants
+        .iter()
+        .find(|target| *target != &submission.sender)
+        .expect("captured peer")
+        .clone();
+    let identity = route_identity.clone();
+    let mut copy = submission
+        .plan
+        .room_canonical_message
+        .as_ref()
+        .expect("canonical")
+        .as_ref()
+        .clone();
+    copy.to = Some(target.clone().into());
+    let stanza = Stanza::Message(copy);
+    submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+        ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+            route_identity: Some(identity),
+            jid: target.clone(),
+            stanza: Box::new(stanza.clone()),
+            kind: PeerDeliveryKind::PeerStanza,
+            call_setup: None,
+        }),
+    ))];
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("sealed peer route");
+    let connections = waddle_xmpp::registry::ConnectionRegistry::new();
+    let mut deps = Deps::new(&connections, "example.com");
+    let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    {
+        let delivered = wire.lock().expect("wire deliveries");
+        assert_eq!(delivered.len(), 1);
+        assert_eq!(delivered[0].0, target);
+        let (Stanza::Message(offered), Stanza::Message(expected)) = (&delivered[0].1, &stanza)
+        else {
+            panic!("typed room wire message");
+        };
+        assert_eq!(offered, expected);
+    }
+    assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decision,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(5),
+            ),
+        )
+        .await;
+    assert_eq!(wire.lock().expect("wire deliveries").len(), 1);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_without_retirement() {
+    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::ingress_uow::{
+        ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
+    };
+    use crate::server::routes::interpret::{
+        effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
+    };
+    use waddle_xmpp::ingress::{DigestContext, DigestInput};
+    let fixture = IngressFixture::sqlite().await;
+    let connections = waddle_xmpp::registry::ConnectionRegistry::new();
+    let mut deps = Deps::new(&connections, "example.com");
+    let target: jid::FullJid = "alice@example.com/phone".parse().expect("remote occupant");
+    let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+    let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut decisions = Vec::new();
+    let mut submissions = Vec::new();
+    for ordinal in [1, 2] {
+        let mut submission = room_submission(&fixture);
+        submission
+            .plan
+            .sanitized_message
+            .payloads
+            .retain(|payload| !waddle_xmpp_core::xep0359::is_origin_id_element(payload));
+        waddle_xmpp_core::xep0359::add_origin_id(
+            &mut submission.plan.sanitized_message,
+            if ordinal == 1 {
+                "remote-first"
+            } else {
+                "remote-second"
+            },
+        );
+        submission.digest_input = DigestInput::from_parsed(
+            &submission.plan.sanitized_message,
+            &DigestContext {
+                target: submission.target.clone(),
+                server_authorities: vec![room.clone()],
+                stanza_lang: None,
+            },
+        )
+        .expect("distinct canonical row");
+        let mut message = submission
+            .plan
+            .room_canonical_message
+            .as_ref()
+            .expect("canonical")
+            .as_ref()
+            .clone();
+        message.to = Some(target.clone().into());
+        let identity = match &submission.plan.intents[0] {
+            IngressEffectIntent::RouteMucGroupchat { route_identity, .. } => route_identity.clone(),
+            _ => panic!("room route"),
+        };
+        submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+                route_identity: Some(identity),
+                jid: target.clone(),
+                stanza: Box::new(Stanza::Message(message)),
+                kind: PeerDeliveryKind::PeerStanza,
+                call_setup: None,
+            }),
+        ))];
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("sealed acceptance");
+        let key = decision.message_key.expect("key");
+        let receipt = decision.external_receipts[0][0].clone();
+        let mut tx = fixture.uow.begin().await.expect("archive position");
+        ArchiveDispatchRepository::record(
+            &mut tx,
+            key,
+            &room,
+            waddle_xmpp::mam::ArchiveOrdinal::from_storage(ordinal).expect("ordinal"),
+            &[ArchiveDispatchObligation {
+                receipt: receipt.clone(),
+                target: DispatchTarget::Resource(target.clone()),
+            }],
+        )
+        .await
+        .expect("record ordering authority");
+        if ordinal == 2 {
+            assert!(
+                matches!(
+                    ArchiveDispatchRepository::readiness(
+                        &mut tx,
+                        key,
+                        &receipt,
+                        Some(&target),
+                        None
+                    )
+                    .await
+                    .expect("readiness"),
+                    DispatchReadiness::Blocked(_)
+                ),
+                "the first remote child is still a durable predecessor"
+            );
+        }
+        tx.commit().await.expect("position commit");
+        let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+            .scope(
+                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+                execute_effects(
+                    &fixture.uow,
+                    &fixture.db,
+                    &decision,
+                    &ImmediateSink,
+                    &deps,
+                    Duration::from_secs(2),
+                ),
+            )
+            .await;
+        assert_eq!(report.outcomes[0].1, ExternalOutcome::Uncertain);
+        submissions.push(submission);
+        decisions.push(decision);
+    }
+    assert_eq!(
+        wire.lock().expect("live wire").len(),
+        2,
+        "pending P2 predecessor cannot silence the second live remote copy"
+    );
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_send_attempts").await, 0);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 0);
+    let retry = commit_submission(&fixture.uow, &submissions[1], 1)
+        .await
+        .expect("live original retry");
+    assert_eq!(retry.alias, crate::ingress::AliasOutcomeClass::Existing);
+    let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &retry,
+                &ImmediateSink,
+                &deps,
+                Duration::from_secs(2),
+            ),
+        )
+        .await;
+    {
+        let attempts = wire.lock().expect("original retry wire");
+        assert_eq!(attempts.len(), 3);
+        assert_eq!(
+            attempts[1].0, attempts[2].0,
+            "retry retains the original endpoint"
+        );
+        let (Stanza::Message(original), Stanza::Message(replayed)) =
+            (&attempts[1].1, &attempts[2].1)
+        else {
+            panic!("typed room copies");
+        };
+        assert_eq!(original, replayed, "retry retains the exact frozen payload");
+    }
+    let mut widened = submissions[1].clone();
+    let sibling = target
+        .to_bare()
+        .with_resource_str("new-sibling")
+        .expect("new target");
+    let IngressEffectIntent::RouteMucGroupchat { occupants, .. } = &mut widened.plan.intents[0]
+    else {
+        panic!("room route");
+    };
+    occupants.push(sibling.clone());
+    let Effect::External(ExternalEffect::Delivery(ExternalDeliveryEffect::RouteToPeer {
+        jid,
+        stanza,
+        ..
+    })) = &mut widened.plan.plan[0].effect
+    else {
+        panic!("peer route");
+    };
+    *jid = sibling.clone();
+    let Stanza::Message(message) = stanza.as_mut() else {
+        panic!("room copy");
+    };
+    message.to = Some(sibling.into());
+    let rejected_target = commit_submission(&fixture.uow, &widened, 1)
+        .await
+        .expect("current audience cannot expand saved manifest");
+    assert!(
+        rejected_target.external.is_empty(),
+        "live retry cannot add a sibling target"
+    );
+    let (local_tx, mut local_rx) = tokio::sync::mpsc::channel(4);
+    connections.register(target.clone(), local_tx);
+    let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+        .scope(
+            (FullJidDeliveryOutcome::Delivered, wire.clone()),
+            execute_effects(
+                &fixture.uow,
+                &fixture.db,
+                &decisions[1],
+                &ImmediateSink,
+                &deps,
+                Duration::from_millis(100),
+            ),
+        )
+        .await;
+    assert!(
+        local_rx.try_recv().is_err(),
+        "local fallback still waits for its archive predecessor"
+    );
+    assert_eq!(wire.lock().expect("local fallback").len(), 3);
+    connections.unregister(&target);
+    deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+    for decision in decisions {
+        let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+            .scope(
+                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+                execute_effects(
+                    &fixture.uow,
+                    &fixture.db,
+                    &decision,
+                    &ImmediateSink,
+                    &deps,
+                    Duration::from_secs(2),
+                ),
+            )
+            .await;
+    }
+    assert_eq!(wire.lock().expect("maintenance wire").len(), 3);
+    fixture.close().await;
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_wire_attempt() {
+    use crate::ingress::{xep0045_room_manifest_tests::room_submission, RoomManifestSnapshot};
+    use crate::ingress_uow::{CanonicalMessageRepository, DeliveryProgressRepository};
+    use crate::server::routes::interpret::{
+        effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
+    };
+    use waddle_xmpp::muc::{
+        room_actor::{
+            GetRoomSnapshot, Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin,
+            LeaveSessionSelector,
+        },
+        room_registry_actor::CreateRoom,
+    };
+    for (reflection, detached) in [(false, false), (true, false), (false, true), (true, true)] {
+        let fixture = IngressFixture::sqlite().await;
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let mut submission = room_submission(&fixture);
+        let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
+        let peer: jid::FullJid = "alice@example.com/phone".parse().expect("peer");
+        let target = if reflection {
+            submission.sender.clone()
+        } else {
+            peer.clone()
+        };
+        let actor = state
+            .deps
+            .protocol
+            .room_registry
+            .ask(CreateRoom {
+                room_jid: room.clone(),
+                waddle_id: "remote-rejoin".into(),
+                channel_id: "remote-rejoin".into(),
+                config: Default::default(),
+            })
+            .await
+            .expect("room actor");
+        for (jid, nick) in [(submission.sender.clone(), "sender"), (peer, "alice")] {
+            actor
+                .ask(Join {
+                    session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                    nick: nick.into(),
+                    real_jid: jid,
+                    role: waddle_xmpp::Role::Participant,
+                    affiliation: waddle_xmpp::Affiliation::Member,
+                })
+                .await
+                .expect("original occupancy");
+        }
+        let snapshot = actor
+            .ask(GetRoomSnapshot {
+                sender_jid: submission.sender.clone(),
+            })
+            .await
+            .expect("original roster");
+        if let crate::ingress::RoomExecutionPath::Local {
+            manifest_snapshot,
+            snapshot_generation,
+            ..
+        } = &mut submission.plan.room_execution
+        {
+            *manifest_snapshot = Some(RoomManifestSnapshot::from(&snapshot));
+            *snapshot_generation = snapshot.admission_revision;
+        }
+        let mut message = submission
+            .plan
+            .room_canonical_message
+            .as_ref()
+            .expect("canonical")
+            .as_ref()
+            .clone();
+        message.to = Some(target.clone().into());
+        let route_identity = match &submission.plan.intents[0] {
+            IngressEffectIntent::RouteMucGroupchat { route_identity, .. } => route_identity.clone(),
+            _ => panic!("room route"),
+        };
+        let delivery = if detached {
+            ExternalDeliveryEffect::QueueDetached {
+                route_identity: Some(route_identity),
+                bare: target.to_bare(),
+                resources: vec![target.clone()],
+                stanza: Box::new(Stanza::Message(message)),
+                call_setup: None,
+            }
+        } else {
+            ExternalDeliveryEffect::RouteToPeer {
+                route_identity: Some(route_identity),
+                jid: target.clone(),
+                stanza: Box::new(Stanza::Message(message)),
+                kind: PeerDeliveryKind::PeerStanza,
+                call_setup: None,
+            }
+        };
+        submission.plan.plan = vec![PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(delivery),
+        ))];
+        let decision = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("original sealed acceptance");
+        let key = decision.message_key.expect("key");
+        let receipt = decision.external_receipts[0][0].clone();
+        let mut tx = fixture.uow.begin().await.expect("original authority");
+        let original = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("load")
+            .expect("envelope");
+        tx.commit().await.expect("read commit");
+        let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+        deps.room_registry = Some(&state.deps.protocol.room_registry);
+        deps.web_socket_state = Some(&state);
+        let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+            .scope(
+                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+                execute_effects(
+                    &fixture.uow,
+                    &fixture.db,
+                    &decision,
+                    &ImmediateSink,
+                    &deps,
+                    Duration::from_secs(2),
+                ),
+            )
+            .await;
+        assert_eq!(wire.lock().expect("original wire").len(), 1);
+        actor
+            .ask(LeaveByRealJid {
+                sender_jid: target.clone(),
+                cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
+                session: LeaveSessionSelector::Any,
+                attempt: LeaveAttemptId::generate(),
+                origin: LeaveOrigin::Fresh,
+            })
+            .await
+            .expect("leave original occupancy");
+        actor
+            .ask(Join {
+                session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+                nick: "replacement".into(),
+                real_jid: target.clone(),
+                role: waddle_xmpp::Role::Participant,
+                affiliation: waddle_xmpp::Affiliation::Member,
+            })
+            .await
+            .expect("same resource rejoins in the same room incarnation");
+        let retry = commit_submission(&fixture.uow, &submission, 1)
+            .await
+            .expect("live frozen retry");
+        let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
+            .scope(
+                (FullJidDeliveryOutcome::Delivered, wire.clone()),
+                execute_effects(
+                    &fixture.uow,
+                    &fixture.db,
+                    &retry,
+                    &ImmediateSink,
+                    &deps,
+                    Duration::from_secs(2),
+                ),
+            )
+            .await;
+        assert_eq!(
+            wire.lock().expect("replacement wire").len(),
+            1,
+            "old child cannot reach replacement occupancy"
+        );
+        assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
+        let mut tx = fixture.uow.begin().await.expect("logical disposition");
+        assert_eq!(
+            DeliveryProgressRepository::load(&mut tx, key, &receipt)
+                .await
+                .expect("progress"),
+            vec![target]
+        );
+        let saved = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("load")
+            .expect("saved");
+        assert_eq!(original.room_manifest(), saved.room_manifest());
+        tx.commit().await.expect("read commit");
+        assert_eq!(
+            fixture.count("ingress_send_attempts").await,
+            0,
+            "retirement is not a send completion"
+        );
+        assert_eq!(
+            fixture.count("sm_ingress_appends").await,
+            0,
+            "retirement creates no physical replay frame"
+        );
+        fixture.close().await;
+    }
 }

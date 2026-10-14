@@ -78,9 +78,10 @@ pub(super) async fn groupchat_decision(fixture: &IngressFixture) -> IngressDecis
     let receipt = &decision.external_receipts[0];
     assert_eq!(receipt.len(), 1);
     assert_eq!(&decision.external_receipts[1], receipt);
-    assert!(
-        decision.external_receipts[2].is_empty(),
-        "sender reflection has no aggregate key"
+    assert_eq!(decision.external_receipts[2].len(), 1);
+    assert_ne!(
+        &decision.external_receipts[2], receipt,
+        "sender reflection owns a distinct child receipt, never the aggregate MUC key"
     );
     assert!(decision.arm_owned_receipts.contains(&receipt[0]));
     decision
@@ -141,7 +142,16 @@ async fn groupchat_aggregate_receipt(fixture: IngressFixture, relay: FullJidDeli
     // frame cannot replace the transactional per-resource progress arm.
     report.outcomes[2].1 = ExternalOutcome::Done;
     for index in 0..report.outcomes.len() {
-        assert!(completed_receipts(&decision, &report.outcomes, &proven, index).is_empty());
+        let completed = completed_receipts(&decision, &report.outcomes, &proven, index);
+        assert_eq!(
+            completed,
+            if index == 2 {
+                decision.external_receipts[2].clone()
+            } else {
+                Vec::new()
+            },
+            "generic delivery and sender proof cannot complete aggregate occupant progress"
+        );
     }
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
@@ -161,11 +171,25 @@ async fn groupchat_frame_completion(fixture: IngressFixture, relay: FullJidDeliv
     let mut confirmed = report.outcomes.clone();
     confirmed[2].1 = ExternalOutcome::Done;
     report.frame_completion_receipts = completed_receipts(&decision, &confirmed, &proven, 2);
-    assert!(report.frame_completion_receipts.is_empty());
-    assert!(report.frame_obligations[0].receipt_keys.is_empty());
-    assert!(
-        report.frame_receipts().is_empty(),
-        "no aggregate proof is exported to retained frames or owner replies"
+    assert_eq!(
+        report.frame_completion_receipts,
+        decision.external_receipts[2]
+    );
+    assert_eq!(
+        report.frame_obligations[0].receipt_keys,
+        decision.external_receipts[2]
+    );
+    let frame_receipts = report.frame_receipts();
+    assert_eq!(frame_receipts.len(), 1);
+    assert_eq!(
+        frame_receipts[0].semantic_identity_hash,
+        decision.external_receipts[2][0].semantic_identity_hash,
+        "retained frames export only the independent original sender receipt"
+    );
+    assert_ne!(
+        frame_receipts[0].semantic_identity_hash,
+        decision.external_receipts[0][0].semantic_identity_hash,
+        "frame confirmation cannot export aggregate occupant proof"
     );
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
     assert!(!terminalize_if_complete(
@@ -180,7 +204,18 @@ async fn groupchat_frame_completion(fixture: IngressFixture, relay: FullJidDeliv
         .await
         .expect("complete written sender frame"));
     assert_eq!(report.outcomes[2].1, ExternalOutcome::Done);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    let mut tx = fixture.uow.begin().await.expect("inspect frame proof");
+    let aggregate = &decision.external_receipts[0][0];
+    assert!(!EffectReceiptRepository::contains(
+        &mut tx,
+        decision.message_key.expect("canonical key"),
+        aggregate.kind,
+        &aggregate.semantic_identity_hash,
+    )
+    .await
+    .expect("aggregate remains pending"));
+    tx.commit().await.expect("read frame proof");
     fixture.close().await;
 }
 

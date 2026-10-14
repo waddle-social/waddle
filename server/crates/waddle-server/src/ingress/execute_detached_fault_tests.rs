@@ -340,10 +340,33 @@ async fn detached_muc_records_occupant_progress(fixture: IngressFixture) {
             stanza: Box::new(Stanza::Message(message)),
         }),
     ))];
+    store_detached(&sm, &submission.sender).await;
+    let mut reflection = submission
+        .plan
+        .room_canonical_message
+        .as_deref()
+        .expect("room source")
+        .clone();
+    reflection.to = Some(submission.sender.clone().into());
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+                route_identity: Some(identity),
+                call_setup: None,
+                bare: submission.sender.to_bare(),
+                resources: vec![submission.sender.clone()],
+                stanza: Box::new(Stanza::Message(reflection)),
+            }),
+        )));
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("MUC commit");
-    assert_eq!(decision.route_progress.len(), 1);
+    assert_eq!(decision.route_progress.len(), 2);
+    assert_eq!(decision.external_receipts.len(), 2);
+    assert_eq!(decision.external_receipts[1].len(), 1);
+    assert_ne!(decision.external_receipts[0], decision.external_receipts[1]);
     assert!(
         !decision.arm_owned_receipts.is_empty(),
         "MUC occupant delivery owns its aggregate progress"
@@ -360,6 +383,7 @@ async fn detached_muc_records_occupant_progress(fixture: IngressFixture) {
     .await;
     assert_eq!(report.outcomes[0].1, ExternalOutcome::Done);
     assert_eq!(append_count(&sm, &target).await, 1);
+    assert_eq!(append_count(&sm, &submission.sender).await, 1);
     assert!(terminalize_if_complete(
         &fixture.uow,
         decision.message_key.expect("key"),
@@ -465,12 +489,41 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
                 }),
             )));
     }
+    store_detached(&sm, &submission.sender).await;
+    let mut reflection = submission
+        .plan
+        .room_canonical_message
+        .as_deref()
+        .expect("room source")
+        .clone();
+    reflection.to = Some(submission.sender.clone().into());
+    submission
+        .plan
+        .plan
+        .push(PlannedEffect::new(Effect::External(
+            ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
+                route_identity: Some(EffectMessageIdentity::stanza(
+                    waddle_xmpp_core::xep0359::StanzaId::new("mixed-room", room.clone().into()),
+                )),
+                call_setup: None,
+                bare: submission.sender.to_bare(),
+                resources: vec![submission.sender.clone()],
+                stanza: Box::new(Stanza::Message(reflection)),
+            }),
+        )));
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("mixed commit");
-    assert_eq!(decision.route_progress.len(), 3);
-    assert_eq!(decision.arm_owned_receipts.len(), 3);
-    assert_eq!(decision.external_receipts.len(), 3);
+    assert_eq!(decision.route_progress.len(), 4);
+    assert_eq!(decision.arm_owned_receipts.len(), 4);
+    assert_eq!(decision.external_receipts.len(), 4);
+    assert_eq!(decision.external_receipts[3].len(), 1);
+    for receipts in &decision.external_receipts[..3] {
+        assert_ne!(
+            receipts, &decision.external_receipts[3],
+            "the sender child has a separate append identity"
+        );
+    }
     let execute = || {
         execute_effects(
             &fixture.uow,
@@ -485,10 +538,11 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
     let report = FAIL_DELIVERY_PROGRESS_TX.scope(true, execute()).await;
     assert!(report.receipt_failures.is_empty(), "{report:?}");
     assert_eq!(append_count(&sm, &target).await, 3);
-    assert_eq!(fixture.count("sm_ingress_appends").await, 3);
+    assert_eq!(append_count(&sm, &submission.sender).await, 1);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 4);
     assert_eq!(fixture.count("ingress_delivery_receipts").await, 0);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 0);
-    // Re-execute the frozen decision to exercise all three routes again.
+    // Re-execute the frozen decision to exercise all four routes again.
     // Every keyed ledger hit settles without allocating another queue entry.
     let report = execute().await;
     assert!(report.receipt_failures.is_empty(), "{report:?}");
@@ -500,9 +554,10 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
         "{report:?}"
     );
     assert_eq!(append_count(&sm, &target).await, 3);
-    assert_eq!(fixture.count("sm_ingress_appends").await, 3);
-    assert_eq!(fixture.count("ingress_delivery_receipts").await, 3);
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 3);
+    assert_eq!(append_count(&sm, &submission.sender).await, 1);
+    assert_eq!(fixture.count("sm_ingress_appends").await, 4);
+    assert_eq!(fixture.count("ingress_delivery_receipts").await, 4);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 4);
     assert!(terminalize_if_complete(
         &fixture.uow,
         decision.message_key.expect("key"),

@@ -122,6 +122,7 @@ async fn handle_muc_private_message(
                 .map(RoomFenceRequirement::Guarded)
                 .unwrap_or(RoomFenceRequirement::Unfenced),
             snapshot_generation: snapshot.admission_revision,
+            manifest_snapshot: None,
         });
     }
     let Some(sender_occupant) = snapshot.room.find_occupant_by_real_jid(bound_jid) else {

@@ -64,7 +64,7 @@ impl OrderedRelayDeliveryBridge {
             *ingress_append = recipient
                 .is_full()
                 .then(|| {
-                    crate::ingress::identity::IngressAppendObligationRef::for_message(
+                    crate::ingress::identity::IngressAppendObligationRef::for_remote_message(
                         seed.ingress_append_context.as_ref(),
                         &stanza.0,
                     )

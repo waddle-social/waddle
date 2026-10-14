@@ -62,6 +62,11 @@ pub(super) fn historical_repair(
     envelope: &MessageEnvelope,
     progress: &[RouteProgress],
 ) -> Option<PlannedEffect> {
+    // A sealed manifest owns reflection as an ordinary frozen child; never
+    // repair a current-attempt sibling using the historical room route.
+    if envelope.room_manifest().is_some() {
+        return None;
+    }
     let Effect::External(effect) = &reflection.effect else {
         return None;
     };

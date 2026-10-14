@@ -72,8 +72,17 @@ async fn only_unfinished_local_muc_copies_pass_the_remote_copy() {
     );
 
     // A sender reflection expressed as peer delivery still has no occupant receipt.
-    let IngressEffectIntent::RouteMucGroupchat { reflection, .. } =
-        decision.route_progress[0].settle_evidence()
+    let IngressEffectIntent::RouteMucGroupchat { reflection, .. } = decision
+        .route_progress
+        .iter()
+        .find(|progress| {
+            matches!(
+                progress.settle_evidence(),
+                IngressEffectIntent::RouteMucGroupchat { .. }
+            )
+        })
+        .expect("aggregate MUC progress")
+        .settle_evidence()
     else {
         panic!("groupchat")
     };
@@ -146,7 +155,19 @@ async fn different_muc_receipts_do_not_share_scheduling_priority() {
     let other_room: jid::BareJid = "other@muc.example.com".parse().unwrap();
     let stamp =
         waddle_xmpp_core::xep0359::StanzaId::new("other-message", other_room.clone().into());
-    let mut intent = decision.route_progress[0].settle_evidence();
+    let original_progress = decision
+        .route_progress
+        .iter()
+        .find(|progress| {
+            matches!(
+                progress.settle_evidence(),
+                IngressEffectIntent::RouteMucGroupchat { .. }
+            )
+        })
+        .expect("aggregate MUC progress");
+    let original_receipt = original_progress.receipt.clone();
+    let received_at = original_progress.received_at;
+    let mut intent = original_progress.settle_evidence();
     let IngressEffectIntent::RouteMucGroupchat {
         room,
         route_identity,
@@ -168,12 +189,11 @@ async fn different_muc_receipts_do_not_share_scheduling_priority() {
     message.from = Some(other_room.with_resource_str("romeo").unwrap().into());
     message.payloads.clear();
     waddle_xmpp_core::xep0359::add_stanza_id(message, &stamp);
-    let separate =
-        RouteProgress::from_intent(&intent, decision.route_progress[0].received_at, Vec::new())
-            .unwrap()
-            .unwrap();
-    assert_ne!(decision.route_progress[0].receipt, separate.receipt);
-    assert!(decision.route_progress[0].matches(&decision.external[1]));
+    let separate = RouteProgress::from_intent(&intent, received_at, Vec::new())
+        .unwrap()
+        .unwrap();
+    assert_ne!(original_receipt, separate.receipt);
+    assert!(original_progress.matches(&decision.external[1]));
     assert!(separate.matches(&decision.external[0]));
     decision.route_progress.push(separate);
     assert_eq!(

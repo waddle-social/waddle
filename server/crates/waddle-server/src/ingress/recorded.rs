@@ -42,7 +42,7 @@ pub fn restore_delivery_payloads(
     let mut repairs = Vec::new();
     plan.plan.retain_mut(|planned| {
         // A retry's reflection is fresh work, never frozen occupant repair.
-        if reflection::is_attempt_reflection(planned, sender, &plan.intents) {
+        if envelope.room_manifest().is_none() && reflection::is_attempt_reflection(planned, sender, &plan.intents) {
             if let Some(repair) = reflection::historical_repair(
                 planned, envelope, route_progress,
             ) {
@@ -53,6 +53,19 @@ pub fn restore_delivery_payloads(
         let Effect::External(effect) = &mut planned.effect else {
             return true;
         };
+        if let (Some(manifest), ExternalEffect::Frame(stanza)) = (envelope.room_manifest(), &mut *effect) {
+            let waddle_xmpp::Stanza::Message(message) = stanza.as_ref() else { return true; };
+            if message.type_ != xmpp_parsers::message::MessageType::Groupchat { return true; }
+            let Some(target) = message.to.as_ref().and_then(|jid| jid.try_as_full().ok()).cloned() else { return false; };
+            if planned.host_frame_target.as_ref() != Some(&target) { return false; }
+            let Some(source_intent) = manifest.recorded_intents().iter().find(|source| {
+                super::reflection_dispatch::original_intent(source).and_then(|intent| super::receipt_key(&intent).ok())
+                    .is_some_and(|receipt| manifest.contains(&receipt, Some(&target)))
+            }) else { return false; };
+            let Ok(source) = super::room_canonical::source(envelope, source_intent) else { return false; };
+            **stanza = waddle_xmpp::Stanza::Message(super::room_canonical::occupant_copy_message(source, &target));
+            return true;
+        }
         if !matches!(
             effect,
             ExternalEffect::Delivery(

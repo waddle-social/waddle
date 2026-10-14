@@ -563,7 +563,7 @@ mod family_tests {
     use std::{sync::Arc, time::Duration};
     use waddle_xmpp::{
         ingress::{
-            IngressEffectIntent, MessageKey, NotificationActivityMutation,
+            IngressEffectIntent, IngressEffectKind, MessageKey, NotificationActivityMutation,
             NotificationCandidateOutcome, PendingDeliveryMutation,
         },
         pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy},
@@ -844,9 +844,20 @@ mod family_tests {
                 assert!(sibling.invocations().is_empty());
                 assert_eq!(
                     fixture.count("ingress_effect_receipts").await,
-                    1,
-                    "only the settled legacy MUC fanout receipts during ingress recovery"
+                    2,
+                    "legacy MUC and its independent source-less reflection settle; observers stay pending"
                 );
+                let mut tx = fixture.uow.begin().await.expect("receipt evidence");
+                let receipts = EffectReceiptRepository::keys(&mut tx, key)
+                    .await
+                    .expect("stored receipts");
+                assert!(receipts.iter().any(|receipt| receipt.kind.to_storage()
+                    == IngressEffectKind::RouteMucGroupchat.storage_tag()));
+                assert!(receipts.iter().any(|receipt| receipt.kind.to_storage()
+                    == IngressEffectKind::RouteDirect.storage_tag()));
+                assert!(receipts.iter().all(|receipt| receipt.kind.to_storage()
+                    != IngressEffectKind::RoomObserver.storage_tag()));
+                tx.commit().await.expect("release receipt evidence");
             } else {
                 super::assert_pending(&fixture, key).await;
                 assert_eq!(fixture.count("ingress_effect_receipts").await, 0);

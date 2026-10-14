@@ -183,6 +183,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                 effects::room::RoomFenceRequirement::Unfenced
             },
             snapshot_generation: 0,
+            manifest_snapshot: None,
         };
     }
     let _ = &mut fixture;
@@ -251,6 +252,31 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
         .await
         .expect("commit pin plan");
     assert!(decision.class.advances());
+    let original_manifest = if !fail_pin {
+        let mut tx = fixture.uow.begin().await.expect("read pre-h pin manifest");
+        let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+            &mut tx,
+            decision.message_key.expect("canonical key"),
+        )
+        .await
+        .expect("manifest envelope")
+        .expect("canonical envelope");
+        let manifest = envelope
+            .room_manifest()
+            .expect("modern pin broadcast is sealed")
+            .clone();
+        assert!(
+            manifest.recorded_intents().iter().any(|intent| matches!(
+                intent,
+                IngressEffectIntent::SystemMessageArchive { ordinal: None, .. }
+            )),
+            "the generated system archive awaits pin acceptance at the pre-h seal"
+        );
+        tx.commit().await.expect("pre-h manifest read commit");
+        Some(manifest)
+    } else {
+        None
+    };
     for (effect, receipts) in decision.external.iter().zip(&decision.external_receipts) {
         if matches!(
             effect,
@@ -381,6 +407,15 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                     .await
                     .expect("retry with changed pin timestamp");
                 assert_eq!(duplicate.message_key, decision.message_key);
+                assert_eq!(
+                    duplicate.class,
+                    IngressDecisionClass::ExistingDivergent,
+                    "changed pin metadata remains visible as divergent replanning"
+                );
+                assert!(matches!(
+                    duplicate.verdict,
+                    Some(crate::ingress_uow::ReconcileVerdict::Divergent { .. })
+                ));
                 let replay = execute_effects(
                     &fixture.uow,
                     &fixture.db,
@@ -416,6 +451,76 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                 assert_eq!(unchanged.stanza_xml, original_archive.stanza_xml);
                 assert_eq!(unchanged.timestamp, original_archive.timestamp);
                 assert_eq!(unchanged.ordinal, original_archive.ordinal);
+                let mut tx = fixture.uow.begin().await.expect("read immutable pin seal");
+                let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+                    &mut tx,
+                    duplicate.message_key.expect("same canonical key"),
+                )
+                .await
+                .expect("restored envelope")
+                .expect("canonical row");
+                assert_eq!(envelope.room_manifest(), original_manifest.as_ref(),
+                    "derived archive position and changed retry metadata cannot rewrite the pre-h seal");
+                let recorded = crate::ingress_uow::EffectIntentRepository::load(
+                    &mut tx,
+                    duplicate.message_key.expect("key"),
+                )
+                .await
+                .expect("finalized authority");
+                // The JSON manifest preserves the exact accepted timestamp;
+                // PostgreSQL MAM timestamps round-trip at microsecond precision.
+                // Check authority against the seal and storage against its own
+                // original read, as verified by unchanged.timestamp above.
+                let accepted_archive_time = original_manifest
+                    .as_ref()
+                    .expect("original pin manifest")
+                    .recorded_intents()
+                    .iter()
+                    .find_map(|intent| match intent {
+                        IngressEffectIntent::SystemMessageArchive {
+                            stanza_id,
+                            archived_at,
+                            ..
+                        } if stanza_id.id == original_id => Some(*archived_at),
+                        _ => None,
+                    })
+                    .expect("frozen original system archive timestamp");
+                assert!(recorded.iter().any(|intent| matches!(intent,
+                    IngressEffectIntent::SystemMessageArchive { stanza_id, archived_at, ordinal: Some(ordinal), .. }
+                        if stanza_id.id == original_id && *archived_at == accepted_archive_time && Some(*ordinal) == original_archive.ordinal
+                )), "the recorded system archive retains its original stamp, time, and committed position");
+                let mut wrong_position = recorded.clone();
+                for intent in &mut wrong_position {
+                    if let IngressEffectIntent::SystemMessageArchive {
+                        ordinal: Some(ordinal),
+                        ..
+                    } = intent
+                    {
+                        *ordinal = ordinal.next().expect("different supplied position");
+                    }
+                }
+                assert!(matches!(crate::ingress_uow::EffectIntentRepository::reconcile(
+                    &mut tx, duplicate.message_key.expect("key"), &wrong_position, true,
+                ).await, Err(crate::ingress_uow::IngressUowError::EffectIntentConflict)),
+                    "an optional ordinal in the frozen seal cannot authorize an arbitrary proposed position");
+                let mut unfinalized_position = recorded;
+                for intent in &mut unfinalized_position {
+                    if let IngressEffectIntent::SystemMessageArchive { ordinal, .. } = intent {
+                        *ordinal = None;
+                    }
+                }
+                assert_eq!(
+                    crate::ingress_uow::EffectIntentRepository::reconcile(
+                        &mut tx,
+                        duplicate.message_key.expect("key"),
+                        &unfinalized_position,
+                        true,
+                    )
+                    .await
+                    .expect("unfinalized replan uses authoritative position"),
+                    crate::ingress_uow::ReconcileVerdict::Consistent
+                );
+                tx.commit().await.expect("immutable seal read commit");
             }
         }
     }

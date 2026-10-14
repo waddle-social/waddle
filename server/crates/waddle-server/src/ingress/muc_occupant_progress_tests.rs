@@ -122,6 +122,16 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         deps
     };
     plan_broadcast(&mut submission, &room, &message, &deps).await;
+    if retry_case == RetryCase::MissingProvenance {
+        if let effects::RoomExecutionPath::Local {
+            manifest_snapshot, ..
+        } = &mut submission.plan.room_execution
+        {
+            // Seed a pre-fix accepted row before replacing its canonical source;
+            // immutable sealed payloads must never be downgraded by this fixture.
+            *manifest_snapshot = None;
+        }
+    }
     if bodyless {
         assert!(
             !submission.plan.intents.iter().any(|intent| matches!(
@@ -240,13 +250,21 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         .expect("legacy envelope");
         fixture
             .execute(
-                "UPDATE ingress_messages SET envelope = ?",
+                "UPDATE ingress_messages SET envelope = ?, envelope_version = 1",
                 crate::db_params![bytes],
             )
             .await;
     }
     if retry_case == RetryCase::MissingProvenance {
         let mut tx = fixture.uow.begin().await.expect("old row");
+        let legacy = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("load pre-fix fixture")
+            .expect("pre-fix envelope");
+        assert!(
+            legacy.room_manifest().is_none(),
+            "the pre-fix fixture must never replace a sealed canonical source"
+        );
         crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
@@ -426,8 +444,8 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         "only non-sender copies require frozen provenance"
     );
     assert!(
-        targets.contains(&retry_sender),
-        "current sender reflection remains Always"
+        !targets.contains(&retry_sender),
+        "a retry cannot repeat the completed original reflection or create a new resource reflection"
     );
     assert!(!targets.contains(&a), "completed A is not repeated");
     assert!(
@@ -462,10 +480,9 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         );
     }
     assert!(receivers[0].try_recv().is_err(), "A receives no duplicate");
-    assert_eq!(
-        receivers[2].try_recv().is_ok(),
-        bodyless || retry_case == RetryCase::ReconnectedSender,
-        "completed archived reflections are not resent; a new resource gets its attempt reflection"
+    assert!(
+        receivers[2].try_recv().is_err(),
+        "the completed original reflection is not resent, including to a reconnected sender"
     );
     assert!(c_rx.try_recv().is_err(), "C receives no historical copy");
     if retry_case == RetryCase::MissingProvenance {

@@ -26,6 +26,7 @@ mod invitation_authority;
 pub(crate) mod live_delivery;
 pub mod nested;
 pub mod principal;
+pub(crate) mod room_manifest_replay;
 pub use principal::{ExtensionPrincipal, IngressPrincipal};
 pub(crate) mod maintenance;
 mod receipts;
@@ -40,7 +41,11 @@ pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOut
 use recovery_environment::RecoveryBinding;
 pub use recovery_environment::RecoveryEnvironment;
 mod recorded;
+pub(crate) mod room_manifest;
 pub use recorded::{ProgressObligation, RouteProgress};
+pub use room_manifest::{
+    FrozenRoomManifest, RoomManifestChild, RoomManifestChildDisposition, RoomManifestSnapshot,
+};
 mod rejection;
 pub mod restamp;
 mod restore_offline;
@@ -1321,6 +1326,9 @@ mod offline_hardening_tests;
 
 #[cfg(test)]
 mod muc_occupant_progress_tests;
+
+#[cfg(test)]
+mod xep0045_room_manifest_tests;
 
 mod room_canonical;
 pub(crate) mod storage_hint;

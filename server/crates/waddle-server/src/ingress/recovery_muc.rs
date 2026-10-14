@@ -58,6 +58,13 @@ pub(super) fn restore_muc_routes(
         for occupant in progress.fanout.iter().filter(|occupant| {
             !progress.completed.contains(occupant) && !input.departed_occupants.contains(occupant)
         }) {
+            if input
+                .envelope
+                .room_manifest()
+                .is_some_and(|manifest| !manifest.contains(&receipt, Some(occupant)))
+            {
+                continue;
+            }
             let stanza = Box::new(Stanza::Message(room_canonical::occupant_copy_message(
                 source, occupant,
             )));
@@ -119,6 +126,19 @@ fn restore_original_reflections(
         let [target] = fanout.as_slice() else {
             continue;
         };
+        let receipt = crate::ingress::receipt_key(&IngressEffectIntent::RouteDirect {
+            prepared: None,
+            recipient: recipient.clone(),
+            fanout: fanout.clone(),
+            route_identity: route_identity.clone(),
+        })?;
+        if input
+            .envelope
+            .room_manifest()
+            .is_some_and(|manifest| !manifest.contains(&receipt, Some(target)))
+        {
+            continue;
+        }
         let stanza = Box::new(Stanza::Message(room_canonical::occupant_copy_message(
             source, target,
         )));

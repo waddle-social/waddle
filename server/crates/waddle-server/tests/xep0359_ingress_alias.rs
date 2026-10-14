@@ -472,6 +472,28 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
         .await
         .expect("retry after failed resume");
     assert_eq!(duplicate.message_key, first.message_key);
+    let mut tx = fixture
+        .uow
+        .begin()
+        .await
+        .expect("inspect frozen sender child");
+    let envelope = waddle_server::ingress_uow::CanonicalMessageRepository::load_envelope(
+        &mut tx,
+        first.message_key.expect("original key"),
+    )
+    .await
+    .expect("canonical envelope")
+    .expect("accepted room source");
+    let manifest = envelope.room_manifest().expect("sealed original audience");
+    assert!(manifest
+        .children
+        .iter()
+        .any(|child| child.target.as_ref() == Some(&original.sender)));
+    assert!(!manifest
+        .children
+        .iter()
+        .any(|child| child.target.as_ref() == Some(&retry.sender)));
+    tx.commit().await.expect("finish frozen child inspection");
     waddle_server::ingress::execute::execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -482,8 +504,12 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
     )
     .await;
     assert!(
-        retry_rx.try_recv().is_ok(),
-        "new connection receives its reflection"
+        retry_rx.try_recv().is_err(),
+        "a duplicate cannot create a reflection for a new connection"
+    );
+    assert!(
+        old_rx.try_recv().is_err(),
+        "the completed original reflection is not repeated"
     );
     assert!(
         peer_rx.try_recv().is_err(),

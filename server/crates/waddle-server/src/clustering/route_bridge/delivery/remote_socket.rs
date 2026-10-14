@@ -842,14 +842,16 @@ pub(in super::super) fn remote_resource_frame_at(
         registration_id,
         stanza: RemoteStanza(stanza.clone()),
         kind,
-        ingress_append: crate::ingress::identity::IngressAppendObligationRef::for_message(
+        ingress_append: crate::ingress::identity::IngressAppendObligationRef::for_remote_message(
             ingress_append_context,
             stanza,
         ),
-        received_at: if ingress_append_context.is_none() {
-            received_at
-        } else {
+        received_at: if ingress_append_context
+            .is_some_and(|context| context.authority.permits_remote_obligation())
+        {
             None
+        } else {
+            received_at.or_else(|| ingress_append_context.and_then(|context| context.received_at))
         },
     }
 }

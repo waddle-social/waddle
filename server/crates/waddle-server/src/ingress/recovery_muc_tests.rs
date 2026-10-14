@@ -148,6 +148,16 @@ async fn planned_room_with_origin(
     submission.plan.plan = effects;
     submission.plan.room_execution = execution;
     submission.plan.intents = capture.snapshot().intents;
+    if matches!(case, Case::OldEnvelope | Case::SenderOnly) {
+        if let crate::ingress::effects::RoomExecutionPath::Local {
+            manifest_snapshot, ..
+        } = &mut submission.plan.room_execution
+        {
+            // These cases model pre-fix rows, before original sender delivery
+            // authority and immutable canonical room payloads were sealed.
+            *manifest_snapshot = None;
+        }
+    }
     submission
 }
 
@@ -202,9 +212,15 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
                 sender: submission.sender.clone(),
             });
     }
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("commit");
+    let decision = if matches!(case, Case::SenderOnly) {
+        // Seed the historical aggregate-only row before any first acceptance;
+        // today's real planner already assigns an independent sender child.
+        departed::commit_legacy_roster_fixture(&f, &submission).await
+    } else {
+        commit_submission(&f.uow, &submission, 1)
+            .await
+            .expect("commit")
+    };
     let key = decision.message_key.expect("key");
     let mut tx = f.uow.begin().await.expect("frozen source");
     let frozen = CanonicalMessageRepository::load_envelope(&mut tx, key)
@@ -212,6 +228,17 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         .expect("envelope")
         .expect("canonical source");
     tx.commit().await.expect("read");
+    if matches!(case, Case::OldEnvelope | Case::SenderOnly) {
+        assert!(
+            frozen.room_manifest().is_none(),
+            "legacy recovery fixtures must never downgrade a sealed accepted source"
+        );
+    } else {
+        assert!(
+            frozen.room_manifest().is_some(),
+            "modern room recovery keeps its immutable accepted manifest"
+        );
+    }
     if matches!(case, Case::OldEnvelope) {
         let mut tx = f.uow.begin().await.expect("old row");
         CanonicalMessageRepository::lock(&mut tx, key)
@@ -282,11 +309,30 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
             .into_iter()
             .filter(|intent| !keys.contains(&receipt_key(intent).expect("receipt key")))
             .collect();
-        assert_eq!(
-            pending,
-            vec![muc.clone()],
-            "kind-2-only pending prerequisite"
-        );
+        if matches!(case, Case::Lost) {
+            let IngressEffectIntent::RouteMucGroupchat { route_identity, .. } = &muc else {
+                panic!("room route");
+            };
+            assert_eq!(
+                pending,
+                vec![
+                    IngressEffectIntent::RouteDirect {
+                        recipient: submission.sender.to_bare(),
+                        fanout: vec![submission.sender.clone()],
+                        route_identity: route_identity.clone(),
+                        prepared: None,
+                    },
+                    muc.clone(),
+                ],
+                "modern recovery retains both frozen original sender and occupant obligations"
+            );
+        } else {
+            assert_eq!(
+                pending,
+                vec![muc.clone()],
+                "legacy kind-2-only pending prerequisite"
+            );
+        }
         tx.commit().await.expect("read");
     }
     if matches!(case, Case::Partial | Case::Inbox) {
@@ -418,6 +464,20 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
     );
     tx.commit().await.expect("read");
     assert_eq!(append_count(&sm, &c).await, 0, "audience never widens");
+    if matches!(case, Case::Lost) {
+        assert_eq!(
+            append_count(&sm, &submission.sender).await,
+            1,
+            "modern maintenance accepts the original sender child exactly once"
+        );
+    }
+    if matches!(case, Case::OldEnvelope | Case::SenderOnly) {
+        assert_eq!(
+            append_count(&sm, &submission.sender).await,
+            0,
+            "legacy maintenance cannot invent an original sender delivery obligation"
+        );
+    }
     if !matches!(case, Case::Unavailable) {
         for resource in &resources {
             let session = sm
@@ -722,6 +782,10 @@ async fn sqlite_muc_occupant_progress_resets_streak_and_parked_copy_recovers_aft
         store_detached(&elsewhere, resource).await;
     }
     let submission = planned_room(&fixture, &state, Case::Unavailable, &resources).await;
+    // The original reflection is an independent sealed child. Give it real
+    // custody so only the two deliberately remote occupants drive the stall
+    // and cooldown sequence, rather than a third ghost being repaired.
+    store_detached(&sm, &submission.sender).await;
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit room fanout");
@@ -805,9 +869,14 @@ async fn sqlite_muc_occupant_progress_resets_streak_and_parked_copy_recovers_aft
     );
     assert_eq!(append_count(&sm, &resources[1]).await, 1);
     assert_eq!(
+        append_count(&sm, &submission.sender).await,
+        1,
+        "one original reflection allocation"
+    );
+    assert_eq!(
         fixture.count("sm_ingress_appends").await,
-        2,
-        "one keyed allocation per occupant"
+        3,
+        "one keyed allocation per occupant and original reflection"
     );
     let mut tx = fixture.uow.begin().await.expect("inspect completion");
     assert!(EffectReceiptRepository::contains(

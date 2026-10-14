@@ -172,6 +172,7 @@ impl ExtensionHostAdapter {
             ingress_effect_capture: None,
             direct_route_identity: None,
             host_sender: None,
+            host_copy_consumer: None,
             ingress_append_context: None,
         }
     }

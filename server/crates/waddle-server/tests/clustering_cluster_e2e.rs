@@ -2761,6 +2761,24 @@ async fn partial_room_fanout_completes_on_retransmission_after_relay_recovery(
     .await
     .expect("warm broadcast terminalizes");
 
+    // A healthy same-origin retry must use completed canonical progress rather
+    // than sending the legacy remote wire a second time.
+    send_partial_fanout_with_origin(&mut sender, &room, "m1", baseline).await;
+    for (client, label) in [(&mut local, "local"), (&mut remote, "remote")] {
+        let duplicate = client
+            .recv_matching_within(Duration::from_millis(500), |frame| {
+                frame.parse::<minidom::Element>().is_ok_and(|element| {
+                    element.is("message", waddle_xmpp::ns::JABBER_CLIENT)
+                        && element.attr("id") == Some("m1")
+                })
+            })
+            .await;
+        assert!(
+            matches!(duplicate, Err(ref error) if error.starts_with("Timeout waiting")),
+            "completed {label} occupant copy cannot repeat: {duplicate:?}"
+        );
+    }
+
     // RelaySleep blocks only the relay actor, preserving B's live resource,
     // fresh user claim and room membership. The fault ask itself times out
     // before the handler wakes; assertions stay inside the 60s recovery grace.
@@ -3153,7 +3171,8 @@ async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(),
                      FROM ingress_effect_intents i WHERE i.message_key = m.message_key
                        AND NOT EXISTS (SELECT 1 FROM ingress_effect_receipts r
                          WHERE r.message_key = i.message_key AND r.kind = i.kind
-                           AND r.semantic_identity_hash = i.semantic_identity_hash))
+                           AND r.semantic_identity_hash = i.semantic_identity_hash)),
+                    m.envelope_version = 1
                  FROM ingress_messages m WHERE m.created_at >= CAST(? AS timestamptz)
                  ORDER BY m.created_at, m.message_key",
                     waddle_server::db_params![started_at.to_string()],
@@ -3171,10 +3190,11 @@ async fn wait_for_fanout_receipts(db: &Database, started_at: &str) -> Result<(),
                 let routes: i64 = row.get(3).expect("route intent count");
                 let missing: i64 = row.get(4).expect("missing receipt count");
                 let pending: String = row.get(5).expect("pending kinds");
+                let legacy: bool = row.get(6).expect("legacy envelope flag");
                 count += 1;
                 route_rows += usize::from(routes > 0);
-                complete &= terminal && missing == 0;
-                details.push(format!("{key} created_at={created} terminal={terminal} route_intents={routes} missing={missing} pending kinds=[{pending}]"));
+                complete &= terminal && missing == 0 && legacy;
+                details.push(format!("{key} created_at={created} terminal={terminal} legacy={legacy} route_intents={routes} missing={missing} pending kinds=[{pending}]"));
             }
             // All three sends, including the bodyless state, must have a
             // canonical route row; zero rows is never success.

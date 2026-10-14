@@ -114,18 +114,43 @@ pub(super) async fn execute_external(
 ) -> EffectOutcome {
     match effect {
         ExternalDirectEffect::PushInboxUpdate {
-            owner, projection, ..
+            owner,
+            projection,
+            receipt,
         } => {
             let Some(entry) = applied.inbox(projection) else {
                 return EffectOutcome::Unavailable;
             };
-            let resources = super::super::groupchat_archive::push_inbox_update(
-                deps.connection_registry,
-                deps.user_registry,
-                &owner,
-                entry,
-            )
-            .await;
+            let resources = match receipt.as_deref() {
+                Some(waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+                    recipient,
+                    fanout,
+                    route_identity: waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(_),
+                    ..
+                }) if recipient == &owner
+                    && fanout.iter().all(|resource| resource.to_bare() == owner) =>
+                {
+                    super::super::groupchat_archive::push_inbox_update_to(
+                        deps.connection_registry,
+                        fanout,
+                        entry,
+                    )
+                    .await
+                }
+                Some(waddle_xmpp::ingress::IngressEffectIntent::RouteDirect {
+                    route_identity: waddle_xmpp::ingress::EffectMessageIdentity::InboxPush(_),
+                    ..
+                }) => return EffectOutcome::Unavailable,
+                Some(_) | None => {
+                    super::super::groupchat_archive::push_inbox_update(
+                        deps.connection_registry,
+                        deps.user_registry,
+                        &owner,
+                        entry,
+                    )
+                    .await
+                }
+            };
             EffectOutcome::InboxPush(resources)
         }
         ExternalDirectEffect::ScrubReplayForTombstone { target } => {

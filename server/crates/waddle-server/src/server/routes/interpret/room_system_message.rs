@@ -162,6 +162,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
                     room: room.clone(),
                     fence: requirement,
                     snapshot_generation: snapshot.admission_revision,
+                    manifest_snapshot: Some(crate::ingress::RoomManifestSnapshot::from(&snapshot)),
                 });
         }
 

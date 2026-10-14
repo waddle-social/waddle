@@ -6,7 +6,8 @@ use std::{sync::Arc, time::Duration};
 use waddle_server::ingress::{
     commit::commit_submission,
     effects::{delivery::ExternalDeliveryEffect, Effect},
-    ExternalEffect, IngressSubmission, PlanSuppressionPolicy, PlannedEffect, RecoveryEnvironment,
+    EffectReceiptKey, ExternalEffect, IngressDecision, IngressSubmission, PlanSuppressionPolicy,
+    PlannedEffect, RecoveryEnvironment,
 };
 use waddle_xmpp::xep::xep0421::{self, OccupantId, OccupantIdSecret};
 use waddle_xmpp::{
@@ -120,6 +121,59 @@ fn copies(submission: &mut IngressSubmission, source: &Message) {
             .with_suppression(policy)
         })
         .collect();
+}
+
+fn room_receipt(decision: &IngressDecision, recipient: &FullJid) -> EffectReceiptKey {
+    decision
+        .route_progress
+        .iter()
+        .find(|progress| progress.fanout.contains(recipient))
+        .expect("recorded recipient obligation")
+        .receipt
+        .clone()
+}
+
+async fn assert_delivery_receipts(
+    fixture: &IngressFixture,
+    expected: &[(FullJid, EffectReceiptKey)],
+) {
+    let guard = fixture
+        .db
+        .guard()
+        .await
+        .expect("delivery receipt inspection");
+    let mut rows = guard
+        .query(
+            "SELECT resource, kind, semantic_identity_hash FROM ingress_delivery_receipts",
+            (),
+        )
+        .await
+        .expect("delivery receipt rows");
+    let mut observed = Vec::new();
+    while let Some(row) = rows.next().await.expect("delivery receipt row") {
+        let resource: String = row.get(0).expect("receipt resource");
+        let resource: FullJid = resource.parse().expect("stored full resource");
+        let kind: i64 = row.get(1).expect("receipt kind");
+        let hash: Vec<u8> = row.get(2).expect("receipt identity");
+        let receipt = expected
+            .iter()
+            .find(|(target, _)| target == &resource)
+            .map(|(_, receipt)| receipt)
+            .expect("only expected recipient receipts");
+        assert_eq!(kind, i64::from(receipt.kind.to_storage()));
+        assert_eq!(hash, receipt.semantic_identity_hash);
+        observed.push(resource);
+    }
+    observed.sort();
+    let mut expected_resources = expected
+        .iter()
+        .map(|(resource, _)| resource.clone())
+        .collect::<Vec<_>>();
+    expected_resources.sort();
+    assert_eq!(
+        observed, expected_resources,
+        "each frozen endpoint carries only its own receipt identity"
+    );
 }
 
 async fn wire(sm: &InMemorySmSessionRegistry, recipient: &FullJid) -> Message {
@@ -457,7 +511,20 @@ pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
         .await
         .expect("accept");
     detached::execute(&fixture, &first, &ConnectionRegistry::new(), &sm).await;
-    assert_eq!(fixture.count("ingress_delivery_receipts").await, 1);
+    let occupant_receipt = room_receipt(&first, &a);
+    let sender_receipt = room_receipt(&first, &submission.sender);
+    assert_ne!(
+        occupant_receipt, sender_receipt,
+        "sender reflection cannot prove aggregate occupant delivery"
+    );
+    assert_delivery_receipts(
+        &fixture,
+        &[
+            (a.clone(), occupant_receipt.clone()),
+            (submission.sender.clone(), sender_receipt.clone()),
+        ],
+    )
+    .await;
     // `b` keeps a resumable session: this node can still deliver its copy, so
     // the roster's "absent" must not settle (drop) it (#1803 H1).
     detached::attach(&sm, &b).await;
@@ -513,7 +580,15 @@ pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
          dropped on the strength of a memory-only roster"
     );
     assert_eq!(detached::queued(&sm, &a).await.unacked_stanzas.len(), 1);
-    assert_eq!(fixture.count("ingress_delivery_receipts").await, 2);
+    assert_delivery_receipts(
+        &fixture,
+        &[
+            (a.clone(), occupant_receipt.clone()),
+            (b.clone(), occupant_receipt),
+            (submission.sender.clone(), sender_receipt),
+        ],
+    )
+    .await;
     assert!(authority.drain_and_join(Duration::from_secs(15)).await);
     drop(environment);
     drop(authority);
@@ -650,7 +725,20 @@ async fn maintenance_case(fixture: IngressFixture, compare_occupant: bool) {
         .await
         .expect("accept");
     detached::execute(&fixture, &first, &ConnectionRegistry::new(), &sm).await;
-    assert_eq!(fixture.count("ingress_delivery_receipts").await, 1);
+    let occupant_receipt = room_receipt(&first, &a);
+    let sender_receipt = room_receipt(&first, &submission.sender);
+    assert_ne!(
+        occupant_receipt, sender_receipt,
+        "sender reflection cannot prove aggregate occupant delivery"
+    );
+    assert_delivery_receipts(
+        &fixture,
+        &[
+            (a.clone(), occupant_receipt.clone()),
+            (submission.sender.clone(), sender_receipt.clone()),
+        ],
+    )
+    .await;
     let original = wire(&sm, &a).await;
     detached::attach(&sm, &b).await;
     let authority = fixture.authority().await;
@@ -684,8 +772,17 @@ async fn maintenance_case(fixture: IngressFixture, compare_occupant: bool) {
             .unacked_stanzas
             .len(),
         1,
-        "maintenance excludes reflection"
+        "maintenance never repeats the completed original sender reflection"
     );
+    assert_delivery_receipts(
+        &fixture,
+        &[
+            (a.clone(), occupant_receipt.clone()),
+            (b.clone(), occupant_receipt),
+            (submission.sender.clone(), sender_receipt),
+        ],
+    )
+    .await;
     assert!(authority.drain_and_join(Duration::from_secs(15)).await);
     drop(environment);
     drop(authority);

@@ -235,6 +235,46 @@ impl InboxRepository {
 pub struct CanonicalMessageRepository;
 
 impl CanonicalMessageRepository {
+    /// Protect a room's current claim through a nested sink acceptance without
+    /// acquiring a second node publication guard. The inner sink owns that
+    /// guard; retaining one here would deadlock a queued identity rotation.
+    /// Epoch is already locked by the UoW. This takes only the exact claim row,
+    /// never the canonical row that the inner SM transaction must acquire.
+    #[cfg(feature = "clustering")]
+    pub(crate) async fn protect_room_acceptance(
+        transaction: &mut IngressUowTransaction<'_>,
+        room: &BareJid,
+        fence: &waddle_xmpp::muc::RoomClaimFenceContext,
+    ) -> Result<(), IngressUowError> {
+        let identity = transaction
+            .bound_node_identity()
+            .ok_or(IngressUowError::NodeIdentityUnbound)?
+            .current();
+        if !identity.is_active()
+            || identity != fence.owner
+            || fence.entity
+                != waddle_xmpp::ownership::Entity::new(EntityType::RoomActor, room.to_string())
+        {
+            return Err(IngressUowError::ClaimFenceMissing);
+        }
+        let mut rows = transaction.transaction_mut().query(
+            "SELECT 1 FROM clustering_claims WHERE entity = ? AND node_id = ? AND node_epoch = ? AND claim_epoch = ? FOR SHARE",
+            crate::db_params![format!("{}:{room}", EntityType::RoomActor.as_db_str()), identity.node_id, identity.node_epoch, fence.epoch.0],
+        ).await?;
+        if rows.next().await?.is_none() {
+            return Err(IngressUowError::ClaimFenceMissing);
+        }
+        drop(rows);
+        let current = transaction
+            .bound_node_identity()
+            .ok_or(IngressUowError::NodeIdentityUnbound)?
+            .current();
+        if !current.is_active() || current != fence.owner {
+            return Err(IngressUowError::ClaimFenceMissing);
+        }
+        Ok(())
+    }
+
     pub async fn lock(
         transaction: &mut IngressUowTransaction<'_>,
         message_key: MessageKey,
@@ -282,6 +322,32 @@ impl CanonicalMessageRepository {
         )
         .await
         .map_err(Into::into)
+    }
+
+    pub(crate) async fn assert_room_snapshot(
+        transaction: &mut IngressUowTransaction<'_>,
+        room: &BareJid,
+        coordinates: waddle_xmpp::muc::durable::RoomCommittedCoordinates,
+    ) -> Result<(), IngressUowError> {
+        let sql = dialect_sql(transaction,
+            "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ? FOR SHARE NOWAIT",
+            "SELECT lifecycle_id, revision FROM clustering_muc_rooms WHERE room_jid = ?");
+        let mut rows = transaction
+            .transaction_mut()
+            .query(sql, crate::db_params![room.to_string()])
+            .await?;
+        let row = rows
+            .next()
+            .await?
+            .ok_or(IngressUowError::RoomGenerationStale)?;
+        let lifecycle: Option<String> = row.get(0)?;
+        let revision: Option<i64> = row.get(1)?;
+        if lifecycle.as_deref() != Some(coordinates.lifecycle.to_string().as_str())
+            || revision != Some(coordinates.revision.as_i64())
+        {
+            return Err(IngressUowError::RoomGenerationStale);
+        }
+        Ok(())
     }
 
     pub async fn record_room_canonical_envelope(
@@ -878,6 +944,31 @@ pub enum ReconcileVerdict {
 pub struct EffectIntentRepository;
 
 impl EffectIntentRepository {
+    /// Report a changed retry plan without allowing it to revise a sealed audience.
+    pub(crate) fn compare_sealed_replan(
+        recorded: &[IngressEffectIntent],
+        planned: &[IngressEffectIntent],
+    ) -> Result<ReconcileVerdict, IngressUowError> {
+        let recorded = recorded
+            .iter()
+            .cloned()
+            .map(|intent| RecordedEffect { ordinal: 0, intent })
+            .collect::<Vec<_>>();
+        let planned = canonical_effects(planned)?;
+        let (verdict, omissions) = compare_effects(&recorded, &planned, true);
+        Ok(match verdict {
+            ReconcileVerdict::Repaired { .. } => ReconcileVerdict::Divergent {
+                kinds: omissions
+                    .iter()
+                    .map(|intent| intent.kind())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .into_iter()
+                    .collect(),
+            },
+            verdict => verdict,
+        })
+    }
+
     /// Load payload-complete recorded authority while holding the canonical row lock.
     pub async fn load(
         transaction: &mut IngressUowTransaction<'_>,
@@ -948,6 +1039,30 @@ impl EffectIntentRepository {
 
         let planned = canonical_effects(planned)?;
         let recorded = load_effects(transaction, message_key, postgres).await?;
+        if let Some(manifest) = ingress_substrate::load_envelope(transaction, message_key)
+            .await?
+            .and_then(|envelope| envelope.room_manifest().cloned())
+        {
+            // Deferred system archives seal before their position is assigned.
+            // Only a None -> stored ordinal refinement may differ from that
+            // seal; proposed values must match the current authoritative row.
+            if recorded.iter().any(|row| {
+                !manifest.recorded_intents().iter().any(|frozen| {
+                    super::archive_ordinal::archive_intent_matches(&row.intent, frozen)
+                })
+            }) || manifest.recorded_intents().iter().any(|intent| {
+                !recorded
+                    .iter()
+                    .any(|row| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+            }) || planned.iter().any(|intent| {
+                !recorded
+                    .iter()
+                    .any(|row| super::archive_ordinal::archive_intent_matches(&row.intent, intent))
+            }) {
+                return Err(IngressUowError::EffectIntentConflict);
+            }
+        }
+
         let (verdict, omissions) = compare_effects(&recorded, &planned, existing_authority);
         if matches!(verdict, ReconcileVerdict::Contradiction { .. }) {
             return Ok(verdict);

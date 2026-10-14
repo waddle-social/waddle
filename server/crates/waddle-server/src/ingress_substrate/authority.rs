@@ -1,4 +1,5 @@
 use super::*;
+use crate::ingress::room_manifest::{FrozenRoomManifest, StoredRoomManifest};
 use xmpp_parsers::message::Message;
 
 /// Archive-only room metadata, never exposed through the live message accessor.
@@ -12,12 +13,14 @@ pub(crate) struct MucArchiveContext {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EnvelopeVersion {
     V1,
+    V2,
 }
 
 impl EnvelopeVersion {
     pub const fn to_storage(self) -> i32 {
         match self {
             Self::V1 => 1,
+            Self::V2 => 2,
         }
     }
 }
@@ -33,6 +36,7 @@ pub struct MessageEnvelope {
     message: Message,
     observer_request: Option<Message>,
     archive_contexts: Vec<MucArchiveContext>,
+    room_manifest: Option<FrozenRoomManifest>,
 }
 
 impl MessageEnvelope {
@@ -42,6 +46,7 @@ impl MessageEnvelope {
             message,
             observer_request: None,
             archive_contexts: Vec::new(),
+            room_manifest: None,
         }
     }
 
@@ -63,6 +68,7 @@ impl MessageEnvelope {
             message,
             observer_request: Some(request),
             archive_contexts: Vec::new(),
+            room_manifest: None,
         }
     }
 
@@ -73,6 +79,40 @@ impl MessageEnvelope {
             request.subjects = self.message.subjects.clone();
             request
         })
+    }
+
+    pub fn room_manifest(&self) -> Option<&FrozenRoomManifest> {
+        self.room_manifest.as_ref()
+    }
+
+    /// Once sealed, retries may only preserve the exact original manifest.
+    pub fn with_room_manifest(
+        mut self,
+        manifest: FrozenRoomManifest,
+    ) -> Result<Self, IngressSubstrateError> {
+        match &self.room_manifest {
+            Some(stored) if stored != &manifest => {
+                return Err(IngressSubstrateError::MessageContentConflict)
+            }
+            Some(_) => {}
+            None => self.room_manifest = Some(manifest),
+        }
+        self.version = EnvelopeVersion::V2;
+        Ok(self)
+    }
+
+    fn preserve_room_manifest(&mut self, stored: &Self) -> Result<(), IngressSubstrateError> {
+        if let Some(manifest) = &stored.room_manifest {
+            match &self.room_manifest {
+                Some(candidate) if candidate != manifest => {
+                    return Err(IngressSubstrateError::MessageContentConflict)
+                }
+                Some(_) => {}
+                None => self.room_manifest = Some(manifest.clone()),
+            }
+            self.version = EnvelopeVersion::V2;
+        }
+        Ok(())
     }
 
     pub(crate) fn archive_context(
@@ -106,11 +146,28 @@ impl MessageEnvelope {
         version: i64,
         bytes: Vec<u8>,
     ) -> Result<Self, IngressSubstrateError> {
-        if version != i64::from(EnvelopeVersion::V1.to_storage()) {
-            return Err(IngressSubstrateError::InvalidStoredEnvelope);
-        }
-        let stored: StoredEnvelope = serde_json::from_slice(&bytes)
-            .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+        let (version, stored, room_manifest) = match version {
+            1 => {
+                let stored: StoredEnvelopeV1 = serde_json::from_slice(&bytes)
+                    .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+                (EnvelopeVersion::V1, stored, None)
+            }
+            2 => {
+                let stored: StoredEnvelopeV2 = serde_json::from_slice(&bytes)
+                    .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?;
+                let manifest = stored.room_manifest.into_domain()?;
+                (
+                    EnvelopeVersion::V2,
+                    StoredEnvelopeV1 {
+                        message: stored.message,
+                        observer_request: stored.observer_request,
+                        archive_contexts: stored.archive_contexts,
+                    },
+                    Some(manifest),
+                )
+            }
+            _ => return Err(IngressSubstrateError::InvalidStoredEnvelope),
+        };
         if stored
             .archive_contexts
             .iter()
@@ -135,21 +192,34 @@ impl MessageEnvelope {
             return Err(IngressSubstrateError::InvalidStoredEnvelope);
         }
         Ok(Self {
-            version: EnvelopeVersion::V1,
+            version,
             message: parse_envelope_message(&stored.message)?,
             observer_request,
             archive_contexts: stored.archive_contexts,
+            room_manifest,
         })
     }
 }
 
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
-struct StoredEnvelope {
+struct StoredEnvelopeV1 {
     message: String,
     observer_request: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     archive_contexts: Vec<MucArchiveContext>,
+}
+
+/// Sealed room authority is a separate format. V1 stays readable by legacy
+/// readers; V2 requires the seal rather than accepting an unsealed fallback.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+struct StoredEnvelopeV2 {
+    message: String,
+    observer_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    archive_contexts: Vec<MucArchiveContext>,
+    room_manifest: StoredRoomManifest,
 }
 
 fn parse_envelope_message(text: &str) -> Result<Message, IngressSubstrateError> {
@@ -165,12 +235,24 @@ pub(super) fn serialize_envelope(
         waddle_xmpp::parser::message_to_string(message)
             .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
     };
-    let stored = StoredEnvelope {
-        message: encode(envelope.message())?,
-        observer_request: envelope.observer_request.as_ref().map(encode).transpose()?,
-        archive_contexts: envelope.archive_contexts.clone(),
-    };
-    serde_json::to_vec(&stored).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
+    let message = encode(envelope.message())?;
+    let observer_request = envelope.observer_request.as_ref().map(encode).transpose()?;
+    let archive_contexts = envelope.archive_contexts.clone();
+    match (envelope.version, envelope.room_manifest.as_ref()) {
+        (EnvelopeVersion::V1, None) => serde_json::to_vec(&StoredEnvelopeV1 {
+            message,
+            observer_request,
+            archive_contexts,
+        }),
+        (EnvelopeVersion::V2, Some(manifest)) => serde_json::to_vec(&StoredEnvelopeV2 {
+            message,
+            observer_request,
+            archive_contexts,
+            room_manifest: StoredRoomManifest::from_domain(manifest)?,
+        }),
+        _ => return Err(IngressSubstrateError::InvalidStoredEnvelope),
+    }
+    .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)
 }
 
 /// Attach the owner's canonical room payload under the canonical row lock.
@@ -187,14 +269,25 @@ pub async fn record_room_canonical_envelope(
     let stored = load_envelope(tx, key)
         .await?
         .ok_or(IngressSubstrateError::MessageContentConflict)?;
+    if stored.room_manifest().is_some() && envelope.message() != stored.message() {
+        return Err(IngressSubstrateError::MessageContentConflict);
+    }
+    if envelope
+        .room_manifest()
+        .is_some_and(|manifest| manifest.message_key() != key)
+    {
+        return Err(IngressSubstrateError::MessageContentConflict);
+    }
     let mut updated = if stored.observer_request.is_some() {
         let mut original = stored.clone();
         original.preserve_archive_contexts(envelope)?;
+        original.preserve_room_manifest(envelope)?;
         original
     } else {
         envelope.clone()
     };
     updated.preserve_archive_contexts(&stored)?;
+    updated.preserve_room_manifest(&stored)?;
     if updated == stored {
         return Ok(());
     }
@@ -212,6 +305,159 @@ pub async fn record_room_canonical_envelope(
     .await
     .map_err(discard_database_error)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod room_manifest_tests {
+    use super::*;
+    use crate::ingress::RoomManifestSnapshot;
+    use waddle_xmpp::{
+        ingress::{EffectMessageIdentity, IngressEffectIntent},
+        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
+    };
+
+    fn envelope() -> MessageEnvelope {
+        let room = "room@conference.example.com"
+            .parse::<jid::BareJid>()
+            .expect("room");
+        let target = "alice@example.com/phone"
+            .parse::<jid::FullJid>()
+            .expect("target");
+        let intents = vec![IngressEffectIntent::RouteDirect {
+            recipient: target.to_bare(),
+            fanout: vec![target.clone()],
+            route_identity: EffectMessageIdentity::capture_ordinal(0),
+            prepared: None,
+        }];
+        let snapshot = RoomManifestSnapshot {
+            host_no_transport: Vec::new(),
+            coordinates: None,
+            occupancy_incarnation: AdminMutationId::generate(),
+            occupants: vec![(target, OccupancyWatermark::from_revision(7))],
+        };
+        let manifest = FrozenRoomManifest::build(
+            MessageKey::new(),
+            room.clone(),
+            waddle_xmpp_core::xep0359::StanzaId::new("room-stanza", room.into()),
+            &snapshot,
+            None,
+            &intents,
+        )
+        .expect("freeze manifest");
+        MessageEnvelope::new(Message::new(None))
+            .with_room_manifest(manifest)
+            .expect("seal")
+    }
+
+    #[test]
+    fn manifest_codec_preserves_children_and_rejects_changed_keys_or_duplicate_targets() {
+        let envelope = envelope();
+        assert_eq!(envelope.version().to_storage(), 2);
+        let bytes = serialize_envelope(&envelope).expect("serialize manifest");
+        assert_eq!(
+            MessageEnvelope::from_storage(2, bytes.clone()).expect("restore"),
+            envelope
+        );
+        let stored: serde_json::Value = serde_json::from_slice(&bytes).expect("stored envelope");
+        for mutate in ["key", "duplicate", "occupancy", "canonical-key"] {
+            let mut changed = stored.clone();
+            let manifest = &mut changed["room_manifest"];
+            match mutate {
+                "key" => {
+                    manifest["children"][1]["delivery_key"] =
+                        serde_json::json!(uuid::Uuid::new_v4())
+                }
+                "duplicate" => {
+                    let child = manifest["children"][1].clone();
+                    manifest["children"]
+                        .as_array_mut()
+                        .expect("children")
+                        .push(child);
+                }
+                "occupancy" => manifest["children"][0]["occupancy"] = serde_json::json!(7),
+                "canonical-key" => {
+                    manifest["message_key"] = serde_json::json!(uuid::Uuid::new_v4())
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                matches!(
+                    MessageEnvelope::from_storage(
+                        2,
+                        serde_json::to_vec(&changed).expect("encode changed")
+                    ),
+                    Err(IngressSubstrateError::InvalidStoredEnvelope)
+                ),
+                "{mutate}"
+            );
+        }
+    }
+
+    #[test]
+    fn envelope_versions_keep_unsealed_v1_and_require_a_manifest_for_v2() {
+        let unsealed = MessageEnvelope::new(Message::new(None));
+        let bytes = serialize_envelope(&unsealed).expect("serialize V1");
+        assert_eq!(unsealed.version().to_storage(), 1);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).expect("JSON"),
+            serde_json::json!({
+                "message": waddle_xmpp::parser::message_to_string(unsealed.message()).expect("XML"),
+                "observer_request": null
+            })
+        );
+        assert_eq!(
+            MessageEnvelope::from_storage(1, bytes.clone()).expect("V1"),
+            unsealed
+        );
+        assert!(matches!(
+            MessageEnvelope::from_storage(2, bytes),
+            Err(IngressSubstrateError::InvalidStoredEnvelope)
+        ));
+        let sealed = envelope();
+        let sealed_bytes = serialize_envelope(&sealed).expect("serialize V2");
+        assert!(matches!(
+            MessageEnvelope::from_storage(1, sealed_bytes.clone()),
+            Err(IngressSubstrateError::InvalidStoredEnvelope)
+        ));
+        assert!(matches!(
+            MessageEnvelope::from_storage(3, sealed_bytes.clone()),
+            Err(IngressSubstrateError::InvalidStoredEnvelope)
+        ));
+        let mut null_manifest: serde_json::Value =
+            serde_json::from_slice(&sealed_bytes).expect("V2 JSON");
+        null_manifest["room_manifest"] = serde_json::Value::Null;
+        assert!(matches!(
+            MessageEnvelope::from_storage(2, serde_json::to_vec(&null_manifest).expect("JSON")),
+            Err(IngressSubstrateError::InvalidStoredEnvelope)
+        ));
+        assert!(matches!(
+            MessageEnvelope::from_storage(1, serde_json::to_vec(&null_manifest).expect("JSON")),
+            Err(IngressSubstrateError::InvalidStoredEnvelope)
+        ));
+    }
+
+    #[test]
+    fn observer_enrichment_preserves_seal_and_rejects_replacement_manifest() {
+        let original = envelope();
+        let mut observer = MessageEnvelope::with_room_observer(
+            original.message().clone(),
+            original.message().clone(),
+        );
+        observer
+            .preserve_room_manifest(&original)
+            .expect("preserve seal");
+        assert_eq!(observer.room_manifest(), original.room_manifest());
+        assert_eq!(observer.version().to_storage(), 2);
+        assert_eq!(
+            MessageEnvelope::from_storage(2, serialize_envelope(&observer).expect("serialize"))
+                .expect("restore observer"),
+            observer
+        );
+        assert!(matches!(
+            observer.preserve_room_manifest(&envelope()),
+            Err(IngressSubstrateError::MessageContentConflict)
+        ));
+    }
 }
 
 /// Stable effect codec discriminator carried by receipt identities.
@@ -256,7 +502,16 @@ pub async fn load_envelope(
     let bytes: Option<Vec<u8>> = row.get(1).map_err(discard_database_error)?;
     match (version, bytes) {
         (None, None) => Ok(None),
-        (Some(version), Some(bytes)) => MessageEnvelope::from_storage(version, bytes).map(Some),
+        (Some(version), Some(bytes)) => {
+            let envelope = MessageEnvelope::from_storage(version, bytes)?;
+            if envelope
+                .room_manifest()
+                .is_some_and(|manifest| manifest.message_key() != key)
+            {
+                return Err(IngressSubstrateError::InvalidStoredEnvelope);
+            }
+            Ok(Some(envelope))
+        }
         _ => Err(IngressSubstrateError::InvalidStoredEnvelope),
     }
 }

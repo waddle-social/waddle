@@ -38,6 +38,7 @@ async fn semantic_rejections(fixture: IngressFixture) {
             room: "room@conference.example.com".parse().expect("room"),
             fence: waddle_server::ingress::effects::room::RoomFenceRequirement::Unfenced,
             snapshot_generation: 1,
+            manifest_snapshot: None,
         };
         let error = StanzaError::new(ErrorType::Cancel, condition, "en", "rejected");
         let mut reply = submission.plan.sanitized_message.clone();

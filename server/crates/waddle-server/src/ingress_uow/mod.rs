@@ -10,7 +10,7 @@ mod delivery_progress;
 pub(crate) use archive_dispatch::{
     ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
 };
-pub(crate) use delivery_progress::DeliveryProgressRepository;
+pub(crate) use delivery_progress::{DeliveryPolicyDiscardReason, DeliveryProgressRepository};
 mod carbon_receipts;
 pub(crate) use carbon_receipts::CarbonReceiptRepository;
 mod durable_more;

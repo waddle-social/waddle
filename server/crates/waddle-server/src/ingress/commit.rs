@@ -233,6 +233,10 @@ async fn commit_attempt(
     let room_proof =
         super::commit_room::assert_room(&mut tx, submission, rejection.is_none()).await?;
     let recorded = EffectIntentRepository::load(&mut tx, key).await?;
+    let sealed_manifest = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await?
+        .and_then(|envelope| envelope.room_manifest().cloned());
+
     let bound = stream.as_ref().is_some_and(|stream| stream.bound.is_some());
     // A policy change cannot replace an already committed acceptance with a
     // rejection. Preserve its recorded obligations; any work absent from this
@@ -267,6 +271,15 @@ async fn commit_attempt(
         }
         _ => false,
     };
+    // P1 has no remote frozen-child completion protocol. Clustered production
+    // must retain legacy keyed relay settlement until P2; persisted manifests
+    // remain authoritative even after new seals are disabled.
+    let can_seal = sealed_manifest.is_some()
+        || (super::commit_room::new_manifests_enabled(uow)
+            && (alias != AliasOutcomeClass::Existing || owner_first));
+    if can_seal && sealed_manifest.is_none() && rejection.is_none() {
+        super::commit_room::assert_snapshot_coordinates(&mut tx, submission).await?;
+    }
     // A recorded denial is authority: any retransmission that resolves to it
     // re-emits the committed reply, whatever today's policy would decide.
     let mut plan = if alias == AliasOutcomeClass::Existing
@@ -360,7 +373,23 @@ async fn commit_attempt(
     if alias == AliasOutcomeClass::Existing && !owner_first {
         super::recorded::freeze_preview_intents(&mut plan, &recorded);
     }
-    super::reflection_dispatch::freeze(&mut plan, &recorded);
+    super::reflection_dispatch::freeze(&mut plan, &recorded, can_seal);
+    let replay_verdict = if sealed_manifest.is_some() {
+        Some(EffectIntentRepository::compare_sealed_replan(
+            &recorded,
+            &plan.intents,
+        )?)
+    } else {
+        None
+    };
+    if sealed_manifest.is_some() {
+        // Replanning may resolve transports, but the sealed acceptance owns every
+        // complete intent, including payload and audience, not only its hash.
+        // Rewrite dependencies while the current plan still names their original
+        // inputs; replacing that mapping first loses subject/pin prerequisites.
+        plan = super::recorded::apply_recorded_intents(&plan, &recorded);
+        plan.intents = recorded.clone();
+    }
     let verdict = EffectIntentRepository::reconcile(
         &mut tx,
         key,
@@ -368,10 +397,11 @@ async fn commit_attempt(
         alias == AliasOutcomeClass::Existing,
     )
     .await?;
+    let verdict = replay_verdict.unwrap_or(verdict);
     if matches!(verdict, ReconcileVerdict::Contradiction { .. }) {
         return Err(IngressUowError::EffectIntentConflict);
     }
-    let intents = EffectIntentRepository::load(&mut tx, key).await?;
+    let mut intents = EffectIntentRepository::load(&mut tx, key).await?;
     if intents.iter().any(|intent| {
         matches!(
             intent,
@@ -530,8 +560,9 @@ async fn commit_attempt(
                 {
                     let receipts =
                         super::durable::external_receipts(std::slice::from_ref(effect), &intents)?;
-                    if receipts[0]
+                    if receipts
                         .iter()
+                        .flatten()
                         .any(|receipt| transient_receipts.contains(receipt))
                     {
                         continue;
@@ -541,6 +572,34 @@ async fn commit_attempt(
             }
             plan.plan = retained;
         }
+    }
+    let fresh_room_manifest = can_seal && sealed_manifest.is_none() && rejection.is_none();
+    let mut transient_room_reflections = Vec::new();
+    if fresh_room_manifest
+        && waddle_xmpp::xep::xep0334::should_skip_storage(&submission.plan.sanitized_message)
+    {
+        for reflection in plan
+            .intents
+            .iter()
+            .filter_map(super::reflection_dispatch::original_intent)
+        {
+            let receipt = super::receipt_key(&reflection)?;
+            super::storage_hint::settle(&mut tx, key, &reflection, &receipt).await?;
+            transient_room_reflections.push(receipt);
+        }
+    }
+    let sealed_manifest = if can_seal && rejection.is_none() {
+        super::commit_room::seal(&mut tx, key, submission).await?
+    } else {
+        sealed_manifest
+    };
+    if let Some(manifest) = &sealed_manifest {
+        intents = manifest.recorded_intents().to_vec();
+        plan.intents = intents.clone();
+        super::commit_room::prepare_sealed_plan(&mut plan, manifest, &transient_room_reflections);
+    }
+    if sealed_manifest.is_some() && commit_hooks::fail_after_manifest() {
+        return Err(IngressUowError::Timeout);
     }
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);
     super::commit_stream::finish_stream(&mut tx, stream.as_ref(), key).await?;
@@ -561,7 +620,7 @@ async fn commit_attempt(
         &verdict
     };
     let repairable: Vec<_> = unreceipted.iter().filter(|intent| {
-        reconstructed || matches!(intent,
+        sealed_manifest.is_some() || reconstructed || matches!(intent,
             IngressEffectIntent::PendingDelivery { .. }
             | IngressEffectIntent::NotificationActivityPreview {
                 mutation: waddle_xmpp::ingress::NotificationActivityMutation::NotificationCandidate { .. }
@@ -574,7 +633,9 @@ async fn commit_attempt(
     let received_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let all_progress =
         crate::ingress_uow::DeliveryProgressRepository::load_all(&mut tx, key).await?;
-    super::recorded::prepare_attempt_reflections(&mut plan, &submission.sender);
+    if sealed_manifest.is_none() {
+        super::recorded::prepare_attempt_reflections(&mut plan, &submission.sender);
+    }
     super::reflection_dispatch::bind(&mut plan);
     let mut route_progress = Vec::new();
     let mut empty_muc = false;
@@ -595,10 +656,12 @@ async fn commit_attempt(
         {
             continue;
         }
-        if matches!(
-            progress.obligation,
-            super::recorded::ProgressObligation::MucGroupchat { .. }
-        ) {
+        if sealed_manifest.is_none()
+            && matches!(
+                progress.obligation,
+                super::recorded::ProgressObligation::MucGroupchat { .. }
+            )
+        {
             progress.current_attempt_reflection = Some(submission.sender.clone());
         }
         progress.completed = all_progress
@@ -606,7 +669,12 @@ async fn commit_attempt(
             .find(|(receipt, _)| receipt == &progress.receipt)
             .map(|(_, completed)| completed.clone())
             .unwrap_or_default();
-        if !progress.is_direct() && progress.fanout.is_empty() {
+        if !progress.is_direct()
+            && progress
+                .fanout
+                .iter()
+                .all(|target| progress.completed.contains(target))
+        {
             crate::ingress_uow::settle_recorded(&mut tx, key, &[progress.settle_evidence()])
                 .await?;
             empty_muc = true;
@@ -621,6 +689,76 @@ async fn commit_attempt(
             DeliveryExecutionContext::Live.into(),
         )
         .await?;
+    }
+    if let Some(manifest) = &sealed_manifest {
+        let mut complete = Vec::new();
+        for intent in manifest.recorded_intents() {
+            let receipt = super::receipt_key(intent)?;
+            if crate::ingress_uow::EffectReceiptRepository::contains(
+                &mut tx,
+                key,
+                receipt.kind,
+                &receipt.semantic_identity_hash,
+            )
+            .await?
+            {
+                complete.push(receipt);
+            }
+        }
+        let pending_effect = |effect: &super::ExternalEffect| {
+            super::commit_room::child_receipts(effect, manifest)
+                .iter()
+                .any(|receipt| {
+                    if matches!(effect, super::ExternalEffect::Frame(_))
+                        && transient_room_reflections.contains(receipt)
+                    {
+                        return true;
+                    }
+                    !complete.contains(receipt)
+                        && super::recorded::single_target(effect).is_none_or(|target| {
+                            !all_progress.iter().any(|(saved, targets)| {
+                                saved == receipt && targets.contains(target)
+                            })
+                        })
+                })
+        };
+        let required = plan
+            .plan
+            .iter()
+            .filter_map(|planned| {
+                let crate::server::routes::interpret::effects::Effect::External(effect) =
+                    &planned.effect
+                else {
+                    return None;
+                };
+                pending_effect(effect).then_some(&planned.dependencies)
+            })
+            .flatten()
+            .cloned()
+            .collect::<Vec<_>>();
+        plan.plan.retain_mut(|planned| {
+            let crate::server::routes::interpret::effects::Effect::External(effect) =
+                &planned.effect
+            else {
+                return true;
+            };
+            if pending_effect(effect) {
+                return true;
+            }
+            let proven_prerequisite = required
+                .iter()
+                .any(|dependency| super::execute::supplies_dependency(effect, dependency))
+                && super::commit_room::child_receipts(effect, manifest)
+                    .iter()
+                    .any(|receipt| complete.contains(receipt));
+            if proven_prerequisite {
+                // Retain a proof-only predecessor. The executor recognizes its
+                // durable receipt and releases dependents without rerunning it.
+                planned.suppression =
+                    crate::server::routes::interpret::effects::PlanSuppressionPolicy::Always;
+            }
+            proven_prerequisite
+        });
     }
     if alias == AliasOutcomeClass::Existing
         || !matches!(filter_verdict, ReconcileVerdict::FirstCommit)
@@ -704,7 +842,9 @@ async fn commit_attempt(
     let (mut external_receipts, arm_owned_receipts) =
         super::decision::assemble_receipts(&external, &intents, &route_progress)?;
     for receipts in &mut external_receipts {
-        receipts.retain(|receipt| !transient_receipts.contains(receipt));
+        receipts.retain(|receipt| {
+            !transient_receipts.contains(receipt) && !transient_room_reflections.contains(receipt)
+        });
     }
     let decision = IngressDecision {
         class,

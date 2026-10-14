@@ -65,8 +65,14 @@ async fn receipted_aggregate_sender_copies(fixture: IngressFixture) {
     let duplicate = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("duplicate");
-    assert!(duplicate.receipts_pending.is_empty());
-    assert!(duplicate.route_progress.is_empty());
+    assert_eq!(duplicate.receipts_pending.len(), 1);
+    assert_ne!(duplicate.receipts_pending[0], receipt);
+    assert_eq!(duplicate.route_progress.len(), 1);
+    let reflection = &duplicate.route_progress[0];
+    assert!(reflection.is_direct());
+    assert_eq!(reflection.fanout, vec![sender.clone()]);
+    assert_eq!(reflection.receipt, duplicate.receipts_pending[0]);
+    assert!(reflection.completed.is_empty());
     let verdict = duplicate.verdict.as_ref().expect("reconciled duplicate");
     assert!(!matches!(verdict, ReconcileVerdict::FirstCommit));
 

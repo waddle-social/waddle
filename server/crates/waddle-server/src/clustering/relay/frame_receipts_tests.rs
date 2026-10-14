@@ -248,14 +248,14 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
         fixture
             .count("ingress_messages WHERE terminal_at IS NOT NULL")
             .await,
-        1,
-        "empty non-sender fanout is terminal in the commit transaction"
+        0,
+        "empty non-sender fanout cannot settle the independent reflection"
     );
     let registry = ConnectionRegistry::new();
     let report = authority
         .execute(&decision, &ImmediateSink, &Deps::registry_only(&registry))
         .await;
-    assert!(report.frame_receipts().is_empty());
+    assert_eq!(report.frame_receipts().len(), 1);
     let frames = report
         .frame_obligations
         .iter()
@@ -293,9 +293,9 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
     let retained = origin.frame_receipts();
     assert_eq!(retained, owner_receipts);
     assert!(
-        terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
+        !terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await
-            .expect("owner already terminal")
+            .expect("reflection still pending")
     );
     // Disconnect before writing. Neither the origin report nor the owner's
     // expiring token table survives the reconnect.
@@ -303,8 +303,15 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
     drop(pending);
     drop(receiver);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
-    assert!(retained.is_empty(), "reflection retains no kind-2 proof");
-    assert!(crate::ingress::ExecutionReport::replay_frame_completions(&retained).is_empty());
+    assert_eq!(
+        retained.len(),
+        1,
+        "reflection keeps its own transport proof"
+    );
+    assert_eq!(
+        retained[0].kind.to_storage(),
+        waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag()
+    );
     for frame in frames {
         let Stanza::Message(message) = frame else {
             panic!("reflection")
@@ -322,7 +329,7 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
             .await
             .expect("owner confirmation"));
     }
-    assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
+    assert_eq!(fixture.count("ingress_effect_receipts").await, 2);
     assert!(
         terminalize_if_complete(&fixture.uow, key, DeliveryExecutionContext::Live.into())
             .await

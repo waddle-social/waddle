@@ -5,11 +5,57 @@ use crate::clustering::{
     route_bridge::{remote_registration_request, wire_for_test, OrderedRelayDeliveryBridge},
     ClusteringHandles, NodeId,
 };
+use crate::ingress::IngressDecision;
 use crate::ingress::{recorded::RouteProgress, recovery_rebuild};
 use crate::server::routes::interpret::{effects::EffectOutcome, FullJidDeliveryOutcome};
 use waddle_xmpp::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
+
+async fn assert_legacy_room(f: &IngressFixture, key: MessageKey) {
+    let mut tx = f.uow.begin().await.expect("legacy authority");
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("load")
+        .expect("envelope");
+    assert!(
+        envelope.room_manifest().is_none(),
+        "legacy row stays unsealed"
+    );
+    tx.commit().await.expect("read commit");
+}
+
+/// Seeded pre-manifest rows have no independent original-sender child.
+/// Settle their room-side work and retain only the exact occupant aggregate.
+async fn settle_legacy_initial_effects(
+    f: &IngressFixture,
+    state: &Arc<WebSocketState>,
+    decision: &IngressDecision,
+) {
+    super::departed::settle_non_delivery_effects(f, state, decision).await;
+    let key = decision.message_key.expect("key");
+    let mut tx = f.uow.begin().await.expect("remaining original obligation");
+    let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("recorded");
+    let receipts = EffectReceiptRepository::keys(&mut tx, key)
+        .await
+        .expect("receipts");
+    let pending: Vec<_> = recorded
+        .iter()
+        .filter(|intent| !receipts.contains(&receipt_key(intent).expect("receipt")))
+        .collect();
+    let original = recorded
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .expect("original occupant route");
+    assert_eq!(
+        pending,
+        [original],
+        "only the exact original occupant fanout remains"
+    );
+    tx.commit().await.expect("read commit");
+}
 
 async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     let sm = persistent_sm(&f).await;
@@ -25,48 +71,17 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         std::slice::from_ref(&occupant),
     )
     .await;
-    let accepted = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let accepted = if recovering_local {
+        super::departed::commit_legacy_roster_fixture(&f, &submission).await
+    } else {
+        commit_submission(&f.uow, &submission, 1)
+            .await
+            .expect("modern sealed room commit")
+    };
     let key = accepted.message_key.expect("key");
     if recovering_local {
-        // First acceptance completed room-side effects; only occupant delivery
-        // was interrupted before the destination node's maintenance takes over.
-        let mut mutations = accepted.clone();
-        let indices: Vec<_> = accepted
-            .external
-            .iter()
-            .enumerate()
-            .filter_map(|(index, effect)| {
-                (!matches!(effect, ExternalEffect::Delivery(_))).then_some(index)
-            })
-            .collect();
-        mutations.external = indices
-            .iter()
-            .map(|index| accepted.external[*index].clone())
-            .collect();
-        mutations.external_dependencies = indices
-            .iter()
-            .map(|index| accepted.external_dependencies[*index].clone())
-            .collect();
-        mutations.external_receipts = indices
-            .iter()
-            .map(|index| accepted.external_receipts[*index].clone())
-            .collect();
-        let deps = build_interpret_deps(&planning_state, None);
-        let report = execute_effects(
-            &f.uow,
-            &f.db,
-            &mutations,
-            &ImmediateSink,
-            &deps,
-            Duration::from_secs(5),
-        )
-        .await;
-        assert!(
-            report.receipt_failures.is_empty(),
-            "initial room effects persisted: {report:?}"
-        );
+        assert_legacy_room(&f, key).await;
+        settle_legacy_initial_effects(&f, &planning_state, &accepted).await;
     }
     let mut tx = f.uow.begin().await.expect("frozen authority");
     let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
@@ -97,16 +112,31 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         );
     }
     let receipt = receipt_key(muc).expect("receipt");
-    let progress = RouteProgress::from_intent(muc, None, vec![])
-        .expect("progress")
-        .expect("MUC progress");
+    let route_progress = unreceipted
+        .iter()
+        .filter_map(|intent| {
+            let mut progress =
+                RouteProgress::from_intent(intent, None, vec![]).expect("progress")?;
+            crate::ingress::reflection_dispatch::classify_progress(&mut progress, &recorded);
+            Some(progress)
+        })
+        .collect();
+    if !recovering_local {
+        assert!(
+            envelope.room_manifest().is_some(),
+            "modern remote row remains sealed"
+        );
+    }
+    let reflection =
+        crate::ingress::reflection_dispatch::original_intent(muc).expect("original reflection");
+    let reflection_receipt = receipt_key(&reflection).expect("reflection receipt");
     let rebuilt = recovery_rebuild::rebuild(recovery_rebuild::RecoveryInput {
         key,
         envelope: &envelope,
         created_at: chrono::Utc::now(),
         recorded: &recorded,
         unreceipted: &unreceipted,
-        route_progress: vec![progress],
+        route_progress,
         host_owned_resources: vec![],
         departed_occupants: vec![],
         blocked_recipients: &[],
@@ -118,9 +148,17 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
             ExternalEffect::Delivery(ExternalDeliveryEffect::QueueDetached {
                 bare, resources, route_identity, stanza, ..
             }) => {
-                assert!(detached_index.replace(index).is_none(), "one original detached route");
-                assert_eq!(bare, &occupant.to_bare());
-                assert_eq!(resources, std::slice::from_ref(&occupant), "frozen exact resource audience");
+                let is_occupant = rebuilt.decision.external_receipts[index] == [receipt.clone()];
+                let target = if is_occupant {
+                    assert!(detached_index.replace(index).is_none(), "one original occupant route");
+                    &occupant
+                } else {
+                    assert!(!recovering_local, "legacy reflection was already accepted");
+                    assert_eq!(rebuilt.decision.external_receipts[index].as_slice(), std::slice::from_ref(&reflection_receipt));
+                    &submission.sender
+                };
+                assert_eq!(bare, &target.to_bare());
+                assert_eq!(resources, std::slice::from_ref(target), "frozen exact resource audience");
                 let IngressEffectIntent::RouteMucGroupchat { route_identity: approved_identity, .. } = muc else { panic!("MUC intent"); };
                 // MUC copies carry their identity in the frozen stanza and
                 // route progress; the optional direct-route hint is absent.
@@ -128,13 +166,13 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
                     assert_eq!(identity, approved_identity);
                 }
                 let original_progress = rebuilt.decision.route_progress.iter()
-                    .find(|progress| progress.receipt == receipt).expect("original MUC progress");
+                    .find(|progress| progress.receipt == rebuilt.decision.external_receipts[index][0])
+                    .expect("original child progress");
                 assert_eq!(&original_progress.route_identity, approved_identity);
                 assert!(original_progress.matches(effect), "exact original route authority");
                 let source = crate::ingress::room_canonical::source(&envelope, muc).expect("canonical original source");
                 let waddle_xmpp::Stanza::Message(message) = stanza.as_ref() else { panic!("canonical message copy"); };
-                assert_eq!(message, &crate::ingress::room_canonical::occupant_copy_message(source, &occupant), "only personalize the original frozen target");
-                assert_eq!(rebuilt.decision.external_receipts[index], vec![receipt.clone()]);
+                assert_eq!(message, &crate::ingress::room_canonical::occupant_copy_message(source, target), "only personalize the original frozen target");
             }
             ExternalEffect::Direct(crate::server::routes::interpret::effects::direct::ExternalDirectEffect::NotificationActivity { owner, mutation }) => {
                 assert!(matches!(mutation,
@@ -180,21 +218,41 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         tokio_util::sync::CancellationToken::new(),
         &crate::config::ClusteringMessagingConfig::default(),
     );
+    let node_identity = SharedNodeIdentity::new(local);
     let state = socket_tests::create_test_websocket_state_with_clustering(
         ClusteringHandles {
             claim_store: Some(Arc::clone(&claims) as Arc<dyn ClaimStore>),
-            node_identity: Some(SharedNodeIdentity::new(local)),
+            node_identity: Some(node_identity.clone()),
             ordered_relay_delivery_bridge: Some(Arc::clone(&bridge)),
             ..Default::default()
         },
         sm.clone(),
     )
     .await;
+    if !recovering_local {
+        // Production wires room authority separately from the relay bridge.
+        // A foreign-room recovery fixture must not retain the constructor's
+        // single-node registry, which would falsely prove local absence.
+        state
+            .deps
+            .protocol
+            .room_registry
+            .ask(
+                waddle_xmpp::muc::room_registry_actor::WireClusteringClaims {
+                    claim_store: Arc::clone(&claims) as Arc<dyn ClaimStore>,
+                    node_identity: node_identity.clone(),
+                    durable_store: None,
+                    rollout_backoff: None,
+                },
+            )
+            .await
+            .expect("wire foreign room recovery authority");
+    }
     wire_for_test(
         &bridge,
         &state,
         claims as Arc<dyn ClaimStore>,
-        SharedNodeIdentity::new(NodeIdentity::new("recovering-owner", "local-epoch")),
+        node_identity,
     )
     .await;
     if !recovering_local {
@@ -237,7 +295,7 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
             settled.detached,
             Some(vec![(
                 occupant.clone(),
-                FullJidDeliveryOutcome::Unavailable
+                FullJidDeliveryOutcome::MaybeCommitted
             )])
         );
         assert!(settled.persisted.is_empty(), "no foreign delivery proof");
@@ -461,11 +519,10 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         std::slice::from_ref(&occupant),
     )
     .await;
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = super::departed::commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
-    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+    assert_legacy_room(&f, key).await;
+    settle_legacy_initial_effects(&f, &planning_state, &decision).await;
 
     let claims = Arc::new(InProcessClaimStore::new());
     let local = NodeIdentity::new("recovering-node", "local-epoch");
@@ -846,11 +903,10 @@ async fn departed_occupant_cluster_recovery(f: IngressFixture, case: DepartedEls
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = super::departed::commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
-    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+    assert_legacy_room(&f, key).await;
+    settle_legacy_initial_effects(&f, &planning_state, &decision).await;
 
     let local = NodeIdentity::new("recovering-node", "local-epoch");
     let socket_node = NodeIdentity::new("socket-node", "foreign-epoch");
@@ -1099,11 +1155,10 @@ async fn sqlite_departed_occupants_of_one_route_settle_within_the_row_deadline()
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = super::departed::commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
-    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+    assert_legacy_room(&f, key).await;
+    settle_legacy_initial_effects(&f, &planning_state, &decision).await;
 
     let asks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     // The recovering incarnation hosts the room with an EMPTY roster, exactly
@@ -1198,11 +1253,10 @@ async fn sqlite_stalled_ghosts_of_one_room_are_repaired_within_the_repair_budget
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = super::departed::commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
-    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+    assert_legacy_room(&f, key).await;
+    settle_legacy_initial_effects(&f, &planning_state, &decision).await;
 
     let asks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let (state, actor) = one_peer_room(
@@ -1439,11 +1493,10 @@ async fn unhosted_room_recovery(f: IngressFixture, case: UnhostedCase) {
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = super::departed::commit_legacy_roster_fixture(&f, &submission).await;
     let key = decision.message_key.expect("key");
-    super::departed::settle_non_delivery_effects(&f, &planning_state, &decision).await;
+    assert_legacy_room(&f, key).await;
+    settle_legacy_initial_effects(&f, &planning_state, &decision).await;
 
     let local = NodeIdentity::new("recovering-node", "local-epoch");
     let elsewhere = NodeIdentity::new("other-node", "foreign-epoch");
@@ -1678,10 +1731,9 @@ async fn legacy_unrebuildable_row(
         .cloned()
         .expect("room fanout intent");
     let receipt = receipt_key(&muc).expect("MUC receipt");
-    let decision = commit_submission(&f.uow, &submission, 1)
-        .await
-        .expect("room commit");
+    let decision = super::departed::commit_legacy_roster_fixture(f, &submission).await;
     let key = decision.message_key.expect("key");
+    assert_legacy_room(f, key).await;
     // Replace the reflected canonical envelope with the raw sender payload, as
     // rows committed before the room-provenance rule carry it.
     let mut tx = f.uow.begin().await.expect("legacy row");
@@ -1696,7 +1748,7 @@ async fn legacy_unrebuildable_row(
     .await
     .expect("old real-sender envelope");
     tx.commit().await.expect("legacy row commit");
-    super::departed::settle_non_delivery_effects(f, &planning_state, &decision).await;
+    settle_legacy_initial_effects(f, &planning_state, &decision).await;
     let (state, _room) = one_peer_room(sm, Arc::new(SwitchablePeer { answer })).await;
     (key, receipt, Arc::new(StateEnvironment(state)))
 }

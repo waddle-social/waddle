@@ -5066,6 +5066,7 @@ mod ownership_claims_tests {
                 live_room_restore: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
+                occupancy_incarnation: source_snapshot.occupancy_incarnation,
                 departures: source_snapshot.departures,
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,
@@ -5137,6 +5138,7 @@ mod ownership_claims_tests {
                 room: source_snapshot.room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
+                occupancy_incarnation: source_snapshot.occupancy_incarnation,
                 departures: Default::default(),
                 pending_affiliation_departures: source_snapshot.pending_affiliation_departures,
                 pending_admin_projection: source_snapshot.pending_admin_projection,
@@ -5241,6 +5243,7 @@ mod ownership_claims_tests {
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
+                occupancy_incarnation: source_snapshot.occupancy_incarnation,
                 departures: Default::default(),
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,
@@ -5374,6 +5377,7 @@ mod ownership_claims_tests {
                 live_room_restore: stale_room,
                 occupancy_revision: source_snapshot.occupancy_revision,
                 live_roster_restore_attempt: source_snapshot.live_roster_restore_attempt,
+                occupancy_incarnation: source_snapshot.occupancy_incarnation,
                 departures: Default::default(),
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,
@@ -5414,6 +5418,7 @@ mod ownership_claims_tests {
                 live_room_restore: source_snapshot_room_for_refusal,
                 occupancy_revision: 0,
                 live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
+                occupancy_incarnation: crate::muc::AdminMutationId::generate(),
                 departures: Default::default(),
                 pending_affiliation_departures: Default::default(),
                 pending_admin_projection: None,
@@ -12190,4 +12195,91 @@ async fn reap_sealed_room_purges_a_sealed_but_registered_actor() {
         .await
         .expect("reap live");
     assert!(!not_reaped, "an unsealed room must never be reaped");
+}
+
+#[tokio::test]
+async fn absent_room_policy_guard_refuses_live_rooms_and_pending_roster_handoffs() {
+    let registry = spawn_registry().await;
+    let absent: BareJid = "absent@muc.example.com".parse().expect("room");
+    let resolved = registry
+        .ask(RunAbsentRoomGuardedAsync::<bool> {
+            room_jid: absent.clone(),
+            action: Box::new(|| Box::pin(async { true })),
+        })
+        .await
+        .expect("absence proof");
+    assert_eq!(resolved, Some(true));
+    registry
+        .ask(MarkHandoffPendingForTest {
+            room_jid: absent.clone(),
+            age: std::time::Duration::ZERO,
+            restore: None,
+        })
+        .await
+        .expect("retain handoff");
+    let pending = registry
+        .ask(RunAbsentRoomGuardedAsync::<bool> {
+            room_jid: absent,
+            action: Box::new(|| Box::pin(async { panic!("handoff is not retirement") })),
+        })
+        .await
+        .expect("handoff proof");
+    assert!(pending.is_none());
+    let live: BareJid = "live@muc.example.com".parse().expect("room");
+    registry
+        .ask(CreateRoom {
+            room_jid: live.clone(),
+            waddle_id: "waddle".into(),
+            channel_id: "channel".into(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("published room");
+    let pending = registry
+        .ask(RunAbsentRoomGuardedAsync::<bool> {
+            room_jid: live,
+            action: Box::new(|| Box::pin(async { panic!("live room is not absent") })),
+        })
+        .await
+        .expect("live proof");
+    assert!(pending.is_none());
+}
+
+#[tokio::test]
+async fn clustered_registry_without_durable_store_cannot_prove_room_retirement() {
+    let registry = spawn_registry().await;
+    registry
+        .ask(WireClusteringClaims {
+            claim_store: Arc::new(InProcessClaimStore::new()),
+            node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
+            durable_store: None,
+            rollout_backoff: None,
+        })
+        .await
+        .expect("wire clustered claims without room storage");
+    assert!(!registry
+        .ask(GetSingleNodeRoomRetirementAuthority)
+        .await
+        .expect("retirement authority"));
+    let absent: BareJid = "absent@muc.example.com".parse().expect("room");
+    assert!(registry
+        .ask(RunAbsentRoomGuardedAsync::<bool> {
+            room_jid: absent,
+            action: Box::new(|| Box::pin(async { panic!("a remote owner may host this room") })),
+        })
+        .await
+        .expect("clustered absence proof")
+        .is_none());
+    let local: BareJid = "local@muc.example.com".parse().expect("room");
+    registry
+        .ask(CreateRoom {
+            room_jid: local,
+            waddle_id: "waddle".into(),
+            channel_id: "channel".into(),
+            config: RoomConfig::default(),
+        })
+        .await
+        .expect("local room under cluster wiring");
+    assert!(!registry.ask(GetSingleNodeRoomRetirementAuthority).await.expect("local retirement authority"),
+        "even a local room cannot authorize single-node incarnation retirement after cluster wiring");
 }

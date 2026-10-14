@@ -82,6 +82,15 @@ async fn sqlite_stalled_remote_first_preserves_independent_local_muc_progress() 
             ) if target == &remote
         )
     });
+    if let effects::RoomExecutionPath::Local {
+        manifest_snapshot, ..
+    } = &mut submission.plan.room_execution
+    {
+        // This controlled legacy relay models transport outcomes without an
+        // authenticated frozen-child relay envelope. Keep its authority scope
+        // explicitly unsealed; sealed relay proofs have dedicated coverage.
+        *manifest_snapshot = None;
+    }
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit");

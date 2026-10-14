@@ -31,6 +31,45 @@ pub(crate) use recovery::fail_after_recovery_update;
 #[path = "execute_relay_copy.rs"]
 mod relay_copy;
 
+pub(super) async fn execute_legacy_remote(
+    uow: &IngressUnitOfWork,
+    decision: &IngressDecision,
+    index: usize,
+    effect: &ExternalEffect,
+    deps: &Deps<'_>,
+) -> Option<EffectOutcome> {
+    let ExternalEffect::Delivery(
+        delivery @ (ExternalDeliveryEffect::RelayFullJid { target, .. }
+        | ExternalDeliveryEffect::RouteToPeer { jid: target, .. }),
+    ) = effect
+    else {
+        return None;
+    };
+    match relay_copy::attempt_before_readiness(uow, decision, index, delivery, target, deps).await {
+        Ok(Some(relay_copy::LegacyRemoteAttempt::Wire(outcome))) => Some(EffectOutcome::Settled(
+            crate::server::routes::interpret::effects::SettledOutcome {
+                refusal: None,
+                persisted: Vec::new(),
+                completion: crate::server::routes::interpret::effects::SettledCompletion::Uncertain,
+                detached: Some(vec![(target.clone(), outcome)]),
+            },
+        )),
+        Ok(Some(relay_copy::LegacyRemoteAttempt::Superseded(persisted))) => Some(
+            EffectOutcome::Settled(crate::server::routes::interpret::effects::SettledOutcome {
+                refusal: None,
+                persisted,
+                completion: crate::server::routes::interpret::effects::SettledCompletion::Complete,
+                detached: None,
+            }),
+        ),
+        Ok(None) => None,
+        Err(error) => {
+            tracing::debug!(%error, "live legacy remote child authority unavailable");
+            Some(EffectOutcome::Unavailable)
+        }
+    }
+}
+
 #[path = "execute_invite.rs"]
 mod invite;
 #[cfg(test)]
@@ -43,6 +82,7 @@ pub(crate) use ambiguous_offline::pending_id as ambiguous_offline_pending_id;
 #[path = "execute_detached.rs"]
 mod detached;
 pub(in crate::ingress) use detached::record_delivery_progress;
+pub(in crate::ingress) use detached::record_policy_progress;
 #[cfg(test)]
 pub(crate) use detached::CONTEND_DELIVERY_PROGRESS_ONCE;
 #[cfg(test)]
@@ -52,6 +92,11 @@ pub(crate) use detached::{
 
 pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
     match effect {
+        ExternalEffect::Frame(stanza) => {
+            matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat
+                && waddle_xmpp::xep::xep0334::should_skip_storage(message))
+        }
         ExternalEffect::Direct(
             ExternalDirectEffect::NotificationActivity { .. }
             | ExternalDirectEffect::LinkPreviewRefs { .. }
@@ -93,6 +138,67 @@ pub(super) async fn execute_with_uow(
     deps: &Deps<'_>,
     _deadline: tokio::time::Instant,
 ) -> Option<EffectOutcome> {
+    if matches!(
+        effect,
+        ExternalEffect::Direct(ExternalDirectEffect::PushInboxUpdate { .. })
+    ) {
+        match projection::execute_sealed_inbox_push(uow, decision, index, effect, deps).await {
+            Ok(Some(outcome)) => return Some(outcome),
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(%error, "sealed inbox refresh authority unavailable");
+                return Some(EffectOutcome::Unavailable);
+            }
+        }
+    }
+    if let ExternalEffect::Frame(stanza) = effect {
+        if owns(effect, &decision.route_progress) {
+            return match super::room_manifest_replay::release_transient_reflection(
+                uow, decision, index, stanza, deps,
+            )
+            .await
+            {
+                Ok(Some(frame)) => Some(EffectOutcome::Frames(vec![frame])),
+                Ok(None) => None,
+                Err(error) => {
+                    tracing::debug!(%error, "transient room reflection authority unavailable");
+                    Some(EffectOutcome::Unavailable)
+                }
+            };
+        }
+    }
+    // A sealed reflection uses the ordinary direct child, including when its
+    // captured plan selected relay delivery. Legacy relays keep their old arm.
+    if let ExternalEffect::Delivery(
+        delivery @ ExternalDeliveryEffect::RelayFullJid { stanza, .. },
+    ) = effect
+    {
+        if matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
+            if message.type_ == xmpp_parsers::message::MessageType::Groupchat)
+            && !owns(effect, &decision.route_progress)
+            && decision.route_progress.iter().any(|progress| {
+                progress.is_direct()
+                    && progress.matches(effect)
+                    && decision.external_receipts[index].contains(&progress.receipt)
+            })
+        {
+            let Some(key) = decision.message_key else {
+                return Some(EffectOutcome::Unavailable);
+            };
+            let (envelope, _) = match crate::ingress_uow::CarbonReceiptRepository::load_authority(
+                uow.database(),
+                key,
+            )
+            .await
+            {
+                Ok(authority) => authority,
+                Err(_) => return Some(EffectOutcome::Unavailable),
+            };
+            if envelope.room_manifest().is_some() {
+                return Some(detached::execute(uow, decision, index, delivery, deps).await);
+            }
+        }
+    }
     match effect {
         ExternalEffect::Direct(
             ExternalDirectEffect::NotificationActivity { .. }

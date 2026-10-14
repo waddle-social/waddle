@@ -132,6 +132,15 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
     let receipt = receipt_key(&muc).expect("receipt");
     select_remote_copy(&mut submission, &target);
     drop(target_rx);
+    if let effects::RoomExecutionPath::Local {
+        manifest_snapshot, ..
+    } = &mut submission.plan.room_execution
+    {
+        // This controlled legacy relay models transport outcomes without an
+        // authenticated frozen-child relay envelope. Keep its authority scope
+        // explicitly unsealed; sealed relay proofs have dedicated coverage.
+        *manifest_snapshot = None;
+    }
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit");

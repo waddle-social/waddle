@@ -90,6 +90,7 @@ async fn restoring_live_roster_rederives_occupant_authorization() {
             room: stale_room,
             occupancy_revision: 0,
             live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
+            occupancy_incarnation: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -128,6 +129,7 @@ async fn restoring_live_roster_preserves_pending_members_only_config_removals() 
             room: stale_room,
             occupancy_revision: 0,
             live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
+            occupancy_incarnation: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -165,6 +167,7 @@ async fn restoring_live_roster_preserves_explicit_roles_without_authorization_ch
                 room: stale_room,
                 occupancy_revision: 0,
                 live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
+                occupancy_incarnation: crate::muc::AdminMutationId::generate(),
                 departures: Default::default(),
                 pending_admin_projection: None,
                 admin_mutation_resolutions: Vec::new(),
@@ -5191,6 +5194,7 @@ async fn superseded_attempt_tombstones_survive_live_roster_transfer() {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
             live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
+            occupancy_incarnation: snapshot.occupancy_incarnation,
             departures: snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -5954,6 +5958,7 @@ async fn receipts_are_transferred_on_live_roster_restore() {
             room: snapshot.room,
             occupancy_revision: snapshot.occupancy_revision,
             live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
+            occupancy_incarnation: snapshot.occupancy_incarnation,
             departures: snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -6002,6 +6007,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             room: newer_snapshot.room,
             occupancy_revision: newer_snapshot.occupancy_revision,
             live_roster_restore_attempt: newer_snapshot.live_roster_restore_attempt,
+            occupancy_incarnation: newer_snapshot.occupancy_incarnation,
             departures: newer_snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -6014,6 +6020,7 @@ async fn transferred_older_generation_receipt_is_refused() {
             room: older_snapshot.room,
             occupancy_revision: older_snapshot.occupancy_revision,
             live_roster_restore_attempt: older_snapshot.live_roster_restore_attempt,
+            occupancy_incarnation: older_snapshot.occupancy_incarnation,
             departures: older_snapshot.departures,
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -7426,6 +7433,7 @@ async fn live_roster_transfer_adjusts_occupant_gauge_by_roster_delta() {
             room: roster,
             occupancy_revision: 2,
             live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
+            occupancy_incarnation: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -7446,6 +7454,7 @@ async fn live_roster_transfer_preserves_actor_room_jid() {
             room: foreign_room,
             occupancy_revision: 0,
             live_roster_restore_attempt: crate::muc::AdminMutationId::generate(),
+            occupancy_incarnation: crate::muc::AdminMutationId::generate(),
             departures: Default::default(),
             pending_admin_projection: None,
             admin_mutation_resolutions: Vec::new(),
@@ -10788,4 +10797,605 @@ async fn host_owned_join_refuses_outcast_and_group_dm() {
         ),
         "{outcome:?}"
     );
+}
+
+#[tokio::test]
+async fn replay_guard_tracks_replacement_occupancy_and_preserves_other_participants() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    let bob = test_full_jid("bob");
+    let alice_session = OccupancySessionGeneration::mint();
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", alice_session)
+        .await
+        .expect("alice joins");
+    join_as_resolver_with_session(
+        &actor,
+        bob.clone(),
+        "bob",
+        OccupancySessionGeneration::mint(),
+    )
+    .await
+    .expect("bob joins");
+    let original = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("snapshot");
+    let original_alice = original
+        .occupants
+        .iter()
+        .find(|occupant| occupant.full_jid == alice)
+        .expect("alice")
+        .watermark;
+    let original_bob = original
+        .occupants
+        .iter()
+        .find(|occupant| occupant.full_jid == bob)
+        .expect("bob")
+        .watermark;
+
+    // Refreshing the same seated session (including a resumed stream) retains
+    // its occupancy, while a fresh same-full-JID join displaces it.
+    join_as_resolver_with_session(&actor, alice.clone(), "alice", alice_session)
+        .await
+        .expect("alice refreshes");
+    let unchanged = actor
+        .ask(RunOccupancyReplayGuarded {
+            jid: alice.clone(),
+            occupancy_incarnation: original.occupancy_incarnation,
+            watermark: original_alice,
+            action: Box::new(|| true),
+        })
+        .await
+        .expect("refresh guard");
+    assert!(matches!(
+        unchanged,
+        OccupancyReplayGuardOutcome::Executed(true)
+    ));
+    join_as_resolver_with_session(
+        &actor,
+        alice.clone(),
+        "alice",
+        OccupancySessionGeneration::mint(),
+    )
+    .await
+    .expect("alice replaces session");
+    let replaced = actor
+        .ask(RunOccupancyReplayGuarded {
+            jid: alice,
+            occupancy_incarnation: original.occupancy_incarnation,
+            watermark: original_alice,
+            action: Box::new(|| panic!("stale occupancy must not enqueue")),
+        })
+        .await
+        .expect("replacement guard");
+    assert!(matches!(replaced, OccupancyReplayGuardOutcome::Superseded));
+    let unrelated = actor
+        .ask(RunOccupancyReplayGuarded {
+            jid: bob,
+            occupancy_incarnation: original.occupancy_incarnation,
+            watermark: original_bob,
+            action: Box::new(|| true),
+        })
+        .await
+        .expect("unrelated occupant guard");
+    assert!(matches!(
+        unrelated,
+        OccupancyReplayGuardOutcome::Executed(true)
+    ));
+}
+
+#[tokio::test]
+async fn replay_guard_incarnation_survives_live_roster_handoff_but_not_recreation() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver_with_session(
+        &actor,
+        alice.clone(),
+        "alice",
+        OccupancySessionGeneration::mint(),
+    )
+    .await
+    .expect("alice joins");
+    let original = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("chain snapshot");
+    let watermark = original.occupants[0].watermark;
+    let snapshot = actor.ask(GetSnapshot).await.expect("handoff snapshot");
+    let successor = spawn_room_actor().await;
+    successor
+        .ask(RestoreLiveRoster {
+            room: snapshot.room,
+            occupancy_revision: snapshot.occupancy_revision,
+            occupancy_incarnation: snapshot.occupancy_incarnation,
+            live_roster_restore_attempt: snapshot.live_roster_restore_attempt,
+            departures: snapshot.departures,
+            pending_admin_projection: snapshot.pending_admin_projection,
+            admin_mutation_resolutions: snapshot.admin_mutation_resolutions,
+            pending_affiliation_departures: snapshot.pending_affiliation_departures,
+        })
+        .await
+        .expect("handoff");
+    let transferred = successor
+        .ask(RunOccupancyReplayGuarded {
+            jid: alice.clone(),
+            occupancy_incarnation: original.occupancy_incarnation,
+            watermark,
+            action: Box::new(|| true),
+        })
+        .await
+        .expect("transferred guard");
+    assert!(matches!(
+        transferred,
+        OccupancyReplayGuardOutcome::Executed(true)
+    ));
+    let recreated = spawn_room_actor().await;
+    join_as_resolver_with_session(
+        &recreated,
+        alice.clone(),
+        "alice",
+        OccupancySessionGeneration::mint(),
+    )
+    .await
+    .expect("recreated occupancy");
+    let lost = recreated
+        .ask(RunOccupancyReplayGuarded {
+            jid: alice,
+            occupancy_incarnation: original.occupancy_incarnation,
+            watermark,
+            action: Box::new(|| panic!("recreated roster must not inherit authority")),
+        })
+        .await
+        .expect("recreated guard");
+    assert!(matches!(lost, OccupancyReplayGuardOutcome::Unproven));
+}
+
+#[tokio::test]
+async fn detached_replay_acceptance_serializes_with_rejoin() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver_with_session(
+        &actor,
+        alice.clone(),
+        "alice",
+        OccupancySessionGeneration::mint(),
+    )
+    .await
+    .expect("original join");
+    let snapshot = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("snapshot");
+    let watermark = snapshot.occupants[0].watermark;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let (accepted_tx, mut accepted_rx) = tokio::sync::oneshot::channel();
+    let acceptance_actor = actor.clone();
+    let acceptance_jid = alice.clone();
+    let acceptance = tokio::spawn(async move {
+        acceptance_actor
+            .ask(RunOccupancyReplayGuardedAsync {
+                jid: acceptance_jid,
+                occupancy_incarnation: snapshot.occupancy_incarnation,
+                watermark,
+                action: Box::new(move || {
+                    Box::pin(async move {
+                        started_tx.send(()).expect("signal started");
+                        release_rx.await.expect("release acceptance");
+                        accepted_tx.send(()).expect("signal accepted");
+                        true
+                    })
+                }),
+            })
+            .await
+            .expect("guarded acceptance")
+    });
+    started_rx.await.expect("acceptance in progress");
+    let replacement_actor = actor.clone();
+    let replacement_jid = alice.clone();
+    let replacement = tokio::spawn(async move {
+        join_as_resolver_with_session(
+            &replacement_actor,
+            replacement_jid,
+            "alice",
+            OccupancySessionGeneration::mint(),
+        )
+        .await
+        .expect("replacement join");
+        // Detached acceptance must complete before the actor seats a replacement.
+        accepted_rx
+            .try_recv()
+            .expect("acceptance precedes replacement");
+    });
+    release_tx.send(()).expect("release");
+    assert!(matches!(
+        acceptance.await.expect("acceptance task"),
+        OccupancyReplayGuardOutcome::Executed(true)
+    ));
+    replacement.await.expect("replacement task");
+    let stale = actor
+        .ask(RunOccupancyReplayGuarded {
+            jid: alice,
+            occupancy_incarnation: snapshot.occupancy_incarnation,
+            watermark,
+            action: Box::new(|| panic!("replacement cannot inherit old delivery")),
+        })
+        .await
+        .expect("stale replay");
+    assert!(matches!(stale, OccupancyReplayGuardOutcome::Superseded));
+}
+
+#[tokio::test]
+async fn superseded_replay_guard_requires_strictly_newer_occupancy() {
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("original join");
+    let frozen = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("frozen snapshot");
+    let frozen_watermark = frozen.occupants[0].watermark;
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("replacement join");
+    let current = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("current snapshot");
+    let current_watermark = current.occupants[0].watermark;
+    assert!(current_watermark > frozen_watermark);
+    let calls = Arc::new(AtomicUsize::new(0));
+    for (jid, incarnation, watermark, should_run) in [
+        (
+            alice.clone(),
+            frozen.occupancy_incarnation,
+            frozen_watermark,
+            true,
+        ),
+        (
+            alice.clone(),
+            frozen.occupancy_incarnation,
+            current_watermark,
+            false,
+        ),
+        (
+            alice.clone(),
+            frozen.occupancy_incarnation,
+            OccupancyWatermark::from_revision(current_watermark.revision() + 1),
+            false,
+        ),
+        (
+            test_full_jid("missing"),
+            frozen.occupancy_incarnation,
+            frozen_watermark,
+            false,
+        ),
+        (
+            alice.clone(),
+            crate::muc::AdminMutationId::generate(),
+            frozen_watermark,
+            false,
+        ),
+    ] {
+        let action_calls = calls.clone();
+        let outcome = actor
+            .ask(RunSupersededOccupancyGuardedAsync {
+                jid,
+                occupancy_incarnation: incarnation,
+                watermark,
+                action: Box::new(move || {
+                    Box::pin(async move {
+                        action_calls.fetch_add(1, Ordering::SeqCst);
+                        true
+                    })
+                }),
+            })
+            .await
+            .expect("settlement guard");
+        if should_run {
+            assert!(matches!(
+                outcome,
+                OccupancyReplayGuardOutcome::Executed(true)
+            ));
+        } else {
+            assert!(matches!(outcome, OccupancyReplayGuardOutcome::Unproven));
+        }
+    }
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "only strict replacement authorizes settlement"
+    );
+}
+
+#[tokio::test]
+async fn superseded_replay_guard_refuses_non_serving_ownership() {
+    for fenced in [Some(false), None] {
+        let store = FakeDurableStore::owned();
+        let actor = spawn_room_actor_with_store(store.clone()).await;
+        let alice = test_full_jid("alice");
+        join_as_resolver(&actor, alice.clone(), "alice")
+            .await
+            .expect("original join");
+        let frozen = actor
+            .ask(GetRoomSnapshot {
+                sender_jid: alice.clone(),
+            })
+            .await
+            .expect("frozen snapshot");
+        join_as_resolver(&actor, alice.clone(), "alice")
+            .await
+            .expect("replacement join");
+        store.set_fenced(fenced);
+        let outcome = actor
+            .ask(RunSupersededOccupancyGuardedAsync {
+                jid: alice,
+                occupancy_incarnation: frozen.occupancy_incarnation,
+                watermark: frozen.occupants[0].watermark,
+                action: Box::new(|| {
+                    Box::pin(async { panic!("non-serving actor must not settle") })
+                }),
+            })
+            .await;
+        assert!(matches!(
+            outcome,
+            Err(SendError::HandlerError(
+                RoomActorError::RoomSealed | RoomActorError::OwnershipUnavailable
+            ))
+        ));
+    }
+}
+
+#[tokio::test]
+async fn superseded_replay_settlement_serializes_with_queued_join() {
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("original join");
+    let frozen = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("frozen snapshot");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("replacement join");
+    let admission_revision = current_admission_revision(&actor).await;
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let committed = Arc::new(AtomicBool::new(false));
+    let action_committed = committed.clone();
+    let pending_policy = actor
+        .ask(RunSupersededOccupancyGuardedAsync {
+            jid: alice.clone(),
+            occupancy_incarnation: frozen.occupancy_incarnation,
+            watermark: frozen.occupants[0].watermark,
+            action: Box::new(move || {
+                Box::pin(async move {
+                    started_tx.send(()).expect("policy starts");
+                    release_rx.await.expect("policy transaction released");
+                    action_committed.store(true, Ordering::SeqCst);
+                    true
+                })
+            }),
+        })
+        .enqueue()
+        .await
+        .expect("enqueue policy settlement");
+    started_rx.await.expect("policy transaction in progress");
+    let mut queued_join = Box::pin(
+        actor
+            .ask(JoinWithAffiliation {
+                sender_jid: alice,
+                nick: "alice".to_owned(),
+                affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
+                local_domain: "example.com".to_owned(),
+                admission_revision,
+                session: OccupancySessionGeneration::mint(),
+            })
+            .enqueue()
+            .await
+            .expect("queue another join"),
+    );
+    assert!(
+        futures::FutureExt::now_or_never(queued_join.as_mut()).is_none(),
+        "join must wait for policy transaction"
+    );
+    assert!(!committed.load(Ordering::SeqCst));
+    release_tx.send(()).expect("release policy transaction");
+    assert!(matches!(
+        pending_policy.await.expect("settlement"),
+        OccupancyReplayGuardOutcome::Executed(true)
+    ));
+    queued_join.await.expect("queued join completes");
+    assert!(committed.load(Ordering::SeqCst));
+}
+
+#[tokio::test]
+async fn superseded_replay_guard_refuses_destroy_seal() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("original join");
+    let frozen = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("frozen snapshot");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("replacement join");
+    actor
+        .ask(SealForDestroy {
+            attempt: crate::muc::durable::DestroyAttemptId::generate(),
+        })
+        .await
+        .expect("seal for destroy");
+    let outcome = actor
+        .ask(RunSupersededOccupancyGuardedAsync {
+            jid: alice,
+            occupancy_incarnation: frozen.occupancy_incarnation,
+            watermark: frozen.occupants[0].watermark,
+            action: Box::new(|| Box::pin(async { panic!("sealed actor must not settle") })),
+        })
+        .await;
+    assert!(matches!(
+        outcome,
+        Err(SendError::HandlerError(
+            RoomActorError::OwnershipUnavailable
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn frozen_child_retirement_classifies_departure_and_reconstruction_without_send() {
+    let actor = spawn_room_actor().await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    let frozen = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("snapshot");
+    let watermark = frozen.occupants[0].watermark;
+    let session = actor
+        .ask(GetReplayOccupantSessionGeneration {
+            jid: alice.clone(),
+            occupancy_incarnation: frozen.occupancy_incarnation,
+            watermark,
+        })
+        .await
+        .expect("exact generation");
+    assert!(session.is_some());
+    actor
+        .ask(LeaveByRealJid {
+            sender_jid: alice.clone(),
+            cause: crate::muc::durable::OccupancyLeaveCause::Explicit,
+            session: LeaveSessionSelector::Any,
+            attempt: LeaveAttemptId::generate(),
+            origin: LeaveOrigin::Fresh,
+        })
+        .await
+        .expect("leave");
+    for (incarnation, allow_lost_occupancy, expected) in [
+        (frozen.occupancy_incarnation, false, None),
+        (
+            frozen.occupancy_incarnation,
+            true,
+            Some(RoomChildRetirementReason::Departed),
+        ),
+        (crate::muc::AdminMutationId::generate(), false, None),
+        (
+            crate::muc::AdminMutationId::generate(),
+            true,
+            Some(RoomChildRetirementReason::IncarnationLost),
+        ),
+    ] {
+        let outcome = actor
+            .ask(RunRoomChildRetirementGuardedAsync {
+                jid: alice.clone(),
+                occupancy_incarnation: incarnation,
+                coordinates: None,
+                watermark,
+                allow_lost_occupancy,
+                action: Box::new(|reason| Box::pin(async move { reason })),
+            })
+            .await
+            .expect("retirement guard");
+        match expected {
+            Some(expected) => assert!(
+                matches!(outcome, OccupancyReplayGuardOutcome::Executed(reason) if reason == expected)
+            ),
+            None => assert!(matches!(outcome, OccupancyReplayGuardOutcome::Unproven)),
+        }
+    }
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("rejoin");
+    assert!(
+        actor
+            .ask(GetReplayOccupantSessionGeneration {
+                jid: alice.clone(),
+                occupancy_incarnation: frozen.occupancy_incarnation,
+                watermark,
+            })
+            .await
+            .expect("old ghost proof")
+            .is_none(),
+        "new occupancy must never become an old child's ghost"
+    );
+    let result = actor
+        .ask(RunRoomChildRetirementGuardedAsync {
+            jid: alice,
+            occupancy_incarnation: frozen.occupancy_incarnation,
+            coordinates: None,
+            watermark,
+            allow_lost_occupancy: false,
+            action: Box::new(|reason| Box::pin(async move { reason })),
+        })
+        .await
+        .expect("supersession guard");
+    assert!(matches!(
+        result,
+        OccupancyReplayGuardOutcome::Executed(RoomChildRetirementReason::Superseded)
+    ));
+}
+
+#[tokio::test]
+async fn claimed_actor_cannot_use_single_node_incarnation_retirement() {
+    let store = FakeDurableStore::owned();
+    let actor = spawn_room_actor_with_store(store).await;
+    let alice = test_full_jid("alice");
+    join_as_resolver(&actor, alice.clone(), "alice")
+        .await
+        .expect("join");
+    let snapshot = actor
+        .ask(GetRoomSnapshot {
+            sender_jid: alice.clone(),
+        })
+        .await
+        .expect("snapshot");
+    let outcome = actor
+        .ask(RunRoomChildRetirementGuardedAsync::<bool> {
+            jid: alice,
+            occupancy_incarnation: crate::muc::AdminMutationId::generate(),
+            coordinates: snapshot.durable_coordinates,
+            watermark: snapshot.occupants[0].watermark,
+            allow_lost_occupancy: true,
+            action: Box::new(|_| {
+                Box::pin(async { panic!("a claimed actor cannot retire a foreign incarnation") })
+            }),
+        })
+        .await
+        .expect("retirement guard");
+    assert!(matches!(outcome, OccupancyReplayGuardOutcome::Unproven));
 }

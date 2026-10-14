@@ -96,6 +96,19 @@ impl IngressAppendObligationRef {
         Some(Self::from_context(context, sender)).filter(Self::kind_is_append_eligible)
     }
 
+    /// Legacy sealed-room wire copies cannot export a canonical child key.
+    /// Their original context remains available for guarded local fallback.
+    #[cfg(feature = "clustering")]
+    pub(crate) fn for_remote_message(
+        context: Option<&crate::server::routes::interpret::SmIngressAppendContext>,
+        stanza: &waddle_xmpp::Stanza,
+    ) -> Option<Self> {
+        Self::for_message(
+            context.filter(|context| context.authority.permits_remote_obligation()),
+            stanza,
+        )
+    }
+
     /// A context whose authority this node has already established: minted by
     /// its own ingress commit or verified against the canonical row.
     pub fn into_verified_context(self) -> crate::server::routes::interpret::SmIngressAppendContext {

@@ -92,6 +92,10 @@ pub struct RoomCommitOutcome {
 pub struct AdminMutationId(uuid::Uuid);
 
 impl AdminMutationId {
+    pub const fn from_uuid(id: uuid::Uuid) -> Self {
+        Self(id)
+    }
+
     pub fn generate() -> Self {
         Self(uuid::Uuid::now_v7())
     }

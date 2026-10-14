@@ -1,14 +1,15 @@
 //! XEP-0045 §7.4: a blocked remote occupant must not stall a ready local
-//! occupant's copy, and recovery must finish the remaining durable fanout.
+//! occupant's copy. Clustered production retains keyed legacy settlement, so
+//! recovery completes the remote obligation and terminalizes the row.
 
 use super::*;
 
 const CHILD_PROCESS: &str = "WADDLE_TEST_PARTIAL_FANOUT_CHILD";
 const TEST_NAME: &str =
-    "xep0045_partial_fanout::local_copy_precedes_blocked_remote_and_recovery_completes";
+    "xep0045_partial_fanout::local_copy_precedes_blocked_remote_and_recovery_terminalizes";
 
 #[tokio::test(flavor = "multi_thread")]
-async fn local_copy_precedes_blocked_remote_and_recovery_completes() {
+async fn local_copy_precedes_blocked_remote_and_recovery_terminalizes() {
     let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!("skipping XEP-0045 partial fanout: WADDLE_TEST_POSTGRES_URL not set");
         return;

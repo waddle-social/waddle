@@ -205,6 +205,73 @@ async fn discharge_departed_copies(
     key: MessageKey,
     frozen: &mut FrozenRecovery,
 ) -> Result<super::recovery_departed::DepartedSettlement, IngressUowError> {
+    if let Some(manifest) = frozen.envelope.room_manifest().cloned() {
+        let mut settlement = super::recovery_departed::DepartedSettlement {
+            occupants: Vec::new(),
+            settled: Vec::new(),
+            classification: AttemptClassification::Evaluable,
+            still_owed: false,
+        };
+        // Includes original reflections: their direct receipt still names a
+        // room-owned frozen child and must retire with its original occupancy.
+        for route in frozen
+            .route_progress
+            .iter_mut()
+            .filter(|route| route.room().is_some())
+        {
+            let context = crate::server::routes::interpret::SmIngressAppendContext {
+                message_key: key,
+                receipt: route.receipt.clone(),
+                received_at: Some(frozen.created_at),
+                archive_positions: Vec::new(),
+                dispatch_stream: None,
+                authority: super::append_authority::AppendAuthority::LocalOnly,
+            };
+            let owed: Vec<_> = route
+                .fanout
+                .iter()
+                .filter(|target| !route.completed.contains(target))
+                .cloned()
+                .collect();
+            for target in owed {
+                match super::room_manifest_replay::settle_superseded(
+                    uow,
+                    &manifest,
+                    deps.room_registry,
+                    &context,
+                    &target,
+                )
+                .await
+                {
+                    Ok(Some(settled)) => {
+                        route.completed.push(target);
+                        settlement.settled.extend(settled);
+                    }
+                    Ok(None) => settlement.still_owed = true,
+                    Err(error) => {
+                        tracing::debug!(%error, %target, "frozen room child retirement unavailable");
+                        settlement.classification = AttemptClassification::Inconclusive;
+                        settlement.still_owed = true;
+                    }
+                }
+            }
+        }
+        frozen
+            .unreceipted
+            .retain(|intent| !settlement.settled.contains(intent));
+        frozen
+            .route_progress
+            .retain(|route| !settlement.settled.contains(&route.settle_evidence()));
+        if !settlement.settled.is_empty() {
+            super::execute::terminalize_if_complete_outcome(
+                uow,
+                key,
+                DeliveryExecutionContext::MaintenanceRecovery.into(),
+            )
+            .await?;
+        }
+        return Ok(settlement);
+    }
     let departed =
         super::recovery_departed::settle_departed_occupants(uow, deps, key, &frozen.route_progress)
             .await?;

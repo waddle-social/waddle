@@ -317,6 +317,7 @@ pub(super) async fn dispatch_to_room(
                     .map(super::effects::room::RoomFenceRequirement::Guarded)
                     .unwrap_or(super::effects::room::RoomFenceRequirement::Unfenced),
                 snapshot_generation: snapshot.admission_revision,
+                manifest_snapshot: Some(crate::ingress::RoomManifestSnapshot::from(&snapshot)),
             });
     }
 
@@ -658,7 +659,6 @@ pub(super) async fn dispatch_to_room(
                 .set_room_correction_target(&room_jid, &revision, target);
         }
     }
-    let retry_suppression = nested.retry_suppression;
     let routed_connections = nested.route_to_connection_events;
     outcome.frames.extend(nested.frames);
     if nested.close {
@@ -666,7 +666,7 @@ pub(super) async fn dispatch_to_room(
     }
     outcome.feedback.extend(nested.feedback);
 
-    if retry_suppression.is_none() && routed_connections > 0 {
+    if routed_connections > 0 {
         if let Some(capture) = deps.ingress_effect_capture.as_ref() {
             let room_generation = snapshot
                 .claim_fence
@@ -697,18 +697,12 @@ pub(super) async fn dispatch_to_room(
         }
     }
 
-    // The marker controls only this nested room batch. Consume it here rather
-    // than folding it into the returned outcome, where it could leak into an
-    // unrelated sibling event in the enclosing interpreter batch.
     let observer_subscriptions = state
         .deps
         .protocol
         .extension_manager
         .room_observation_subscriptions(&room_jid);
-    if retry_suppression.is_none()
-        && deps.effects.is_planning()
-        && !observer_subscriptions.is_empty()
-    {
+    if deps.effects.is_planning() && !observer_subscriptions.is_empty() {
         // Observer work is captured by the archive transaction. An accepted
         // chat state, marker, or no-store message has no such source and must
         // not leave a deferred obligation that a wake hint can never complete.

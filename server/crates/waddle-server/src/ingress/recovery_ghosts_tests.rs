@@ -49,6 +49,9 @@ async fn ghost_fixture(f: IngressFixture, case: GhostCase) -> GhostFixture {
     let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
     let watcher: jid::FullJid = "ben@example.com/phone".parse().expect("watcher");
     let submission = planned_room(&f, &state, Case::Lost, &[ghost.clone(), watcher.clone()]).await;
+    // The original reflection has its own sealed child. Keep its sink healthy
+    // so this fixture isolates the named ghost and its reachability guard.
+    store_detached(&sm, &submission.sender).await;
     let muc = submission
         .plan
         .intents
@@ -59,7 +62,7 @@ async fn ghost_fixture(f: IngressFixture, case: GhostCase) -> GhostFixture {
     let receipt = receipt_key(&muc).expect("MUC receipt");
     let decision = commit_submission(&f.uow, &submission, 1)
         .await
-        .expect("room commit");
+        .expect("production sealed room acceptance");
     let key = decision.message_key.expect("key");
     super::departed::settle_non_delivery_effects(&f, &state, &decision).await;
     // The watcher owns a live socket: its copy lands on the first pass, so the
@@ -713,7 +716,7 @@ async fn sqlite_sibling_row_settles_once_the_ghost_eviction_destroyed_the_room()
     let sibling_receipt = receipt_key(&sibling_muc).expect("sibling MUC receipt");
     let sibling_decision = commit_submission(&f.f.uow, &sibling, 1)
         .await
-        .expect("sibling room commit");
+        .expect("sealed sibling acceptance");
     let sibling_key = sibling_decision.message_key.expect("sibling key");
     assert_ne!(sibling_key, f.key, "the sibling must be its own row");
     super::departed::settle_non_delivery_effects(&f.f, &f.state, &sibling_decision).await;
@@ -788,4 +791,384 @@ async fn sqlite_ordinary_disconnect_leave_carries_no_removal_status_code() {
         "a disconnect is the occupant's own departure, not a service removal"
     );
     f.f.close().await;
+}
+
+/// Modern sealed traffic must repair ghost occupancies, then retire only the
+/// frozen original children without claiming a successful transport append.
+#[tokio::test]
+async fn sqlite_sealed_stalled_ghost_is_evicted_and_policy_retired() {
+    use crate::ingress_uow::EffectIntentRepository;
+
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let before_evicted = metrics.counter_sum(EVICTED, &[]).unwrap_or(0);
+    let fixture = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&fixture).await;
+    let state = state_for(&fixture, sm.clone()).await;
+    let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
+    let watcher: jid::FullJid = "ben@example.com/phone".parse().expect("watcher");
+    let submission = planned_room(
+        &fixture,
+        &state,
+        Case::Lost,
+        &[ghost.clone(), watcher.clone()],
+    )
+    .await;
+    store_detached(&sm, &submission.sender).await;
+    let muc = submission
+        .plan
+        .intents
+        .iter()
+        .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
+        .expect("room route");
+    let receipt = receipt_key(muc).expect("room receipt");
+    // Real first acceptance: do not use the pre-manifest fixture adapter.
+    let decision = commit_submission(&fixture.uow, &submission, 1)
+        .await
+        .expect("sealed acceptance");
+    let key = decision.message_key.expect("key");
+    let mut tx = fixture.uow.begin().await.expect("inspect first acceptance");
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("envelope")
+        .expect("accepted room source");
+    let manifest = envelope
+        .room_manifest()
+        .expect("modern sealed authority")
+        .clone();
+    let recorded = EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("original obligations");
+    let original_sender = recorded.iter().find(|intent| matches!(intent,
+        IngressEffectIntent::RouteDirect { fanout, .. } if fanout.as_slice() == std::slice::from_ref(&submission.sender)))
+        .expect("independent original sender child");
+    let original_sender_receipt = receipt_key(original_sender).expect("original sender receipt");
+    assert!(
+        manifest.contains(&receipt, Some(&ghost)),
+        "the unreachable resource is an accepted child"
+    );
+    tx.commit().await.expect("first acceptance inspection");
+    super::departed::settle_non_delivery_effects(&fixture, &state, &decision).await;
+    let (watcher_tx, watcher_rx) = tokio::sync::mpsc::channel(16);
+    socket_tests::register_test_connection(&state, &watcher, watcher_tx).await;
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let f = GhostFixture {
+        f: fixture,
+        state,
+        env,
+        cursor: MaintenanceCursor::default(),
+        key,
+        receipt,
+        ghost,
+        watcher,
+        watcher_rx,
+        _ghost_rx: None,
+        _durable_writer: None,
+    };
+    f.assert_guard_premise(GhostCase::Evictable).await;
+    f.pass().await;
+    assert_eq!(
+        f.progress().await,
+        vec![f.watcher.clone()],
+        "the reachable child makes real progress"
+    );
+    for _ in 0..3 {
+        f.pass().await;
+    }
+    assert_eq!(
+        super::super::super::attempt_count(key),
+        4,
+        "exercise the full maintenance stall threshold"
+    );
+    assert!(
+        !f.occupies(&f.ghost).await,
+        "a stalled sealed message repairs its frozen ghost occupancy"
+    );
+    assert_eq!(
+        f.progress().await,
+        vec![f.ghost.clone(), f.watcher.clone()],
+        "delivery and policy retirement resolve their respective frozen children"
+    );
+    assert!(
+        f.terminal().await,
+        "retired ghosts must not retain the canonical source forever"
+    );
+    let mut tx =
+        f.f.uow
+            .begin()
+            .await
+            .expect("inspect stalled sealed authority");
+    assert!(
+        DeliveryProgressRepository::load(&mut tx, key, &original_sender_receipt)
+            .await
+            .expect("original sender progress")
+            == vec![submission.sender.clone()],
+        "the healthy original reflection retains its real acceptance"
+    );
+    assert!(EffectReceiptRepository::contains(
+        &mut tx,
+        key,
+        original_sender_receipt.kind,
+        &original_sender_receipt.semantic_identity_hash
+    )
+    .await
+    .expect("original sender receipt"));
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("envelope after maintenance")
+        .expect("accepted source retained");
+    assert_eq!(
+        envelope.room_manifest(),
+        Some(&manifest),
+        "maintenance preserves the original sealed authority"
+    );
+    assert_eq!(
+        EffectIntentRepository::load(&mut tx, key)
+            .await
+            .expect("recorded obligations"),
+        recorded,
+        "maintenance preserves every originally accepted obligation"
+    );
+    tx.commit().await.expect("stalled authority inspection");
+    assert_eq!(
+        metrics.counter_sum(EVICTED, &[]).unwrap_or(0),
+        before_evicted + 1,
+        "the sealed row repairs one original ghost occupancy"
+    );
+    f.f.close().await;
+}
+
+/// Account-level inbox refreshes share a frozen endpoint and occupancy with a
+/// room child, but never acquire room retirement authority from that metadata.
+async fn sealed_ghost_skips_inbox_refresh_child(inbox_receipted: bool) {
+    use crate::ingress_uow::{settle_recorded, EffectIntentRepository};
+    use waddle_xmpp::ingress::EffectMessageIdentity;
+
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let state = state_for(&f, sm.clone()).await;
+    let ghost: jid::FullJid = "alice@example.com/phone".parse().expect("ghost");
+    let mut submission = planned_room(&f, &state, Case::Lost, std::slice::from_ref(&ghost)).await;
+    store_detached(&sm, &submission.sender).await;
+    let inbox = IngressEffectIntent::RouteDirect {
+        recipient: ghost.to_bare(),
+        fanout: vec![ghost.clone()],
+        route_identity: EffectMessageIdentity::InboxPush(0),
+        prepared: None,
+    };
+    let inbox_receipt = receipt_key(&inbox).expect("inbox receipt");
+    submission.plan.intents.insert(0, inbox.clone());
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("sealed acceptance");
+    let key = decision.message_key.expect("key");
+    let mut tx = f.uow.begin().await.expect("read frozen authority");
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await
+        .expect("envelope")
+        .expect("source");
+    let manifest = envelope.room_manifest().expect("manifest").clone();
+    assert!(
+        manifest
+            .child(&inbox_receipt, Some(&ghost))
+            .expect("inbox child")
+            .occupancy
+            .is_some(),
+        "exercise the review's overlapping occupancy metadata"
+    );
+    let recorded = EffectIntentRepository::load(&mut tx, key)
+        .await
+        .expect("intents");
+    let reflection = recorded
+        .iter()
+        .find_map(crate::ingress::reflection_dispatch::original_intent)
+        .expect("original reflection");
+    assert!(
+        recorded.contains(&reflection),
+        "reflection is frozen before repair"
+    );
+    assert!(CanonicalMessageRepository::lock(&mut tx, key)
+        .await
+        .expect("canonical lock"));
+    // This boundary starts after the original reflection completed. Seeding
+    // that receipt isolates ghost repair from best-effort inbox execution.
+    settle_recorded(&mut tx, key, std::slice::from_ref(&reflection))
+        .await
+        .expect("completed original reflection");
+    if inbox_receipted {
+        settle_recorded(&mut tx, key, std::slice::from_ref(&inbox))
+            .await
+            .expect("best-effort inbox completion");
+    }
+    tx.commit().await.expect("setup commit");
+    super::departed::settle_non_delivery_effects(&f, &state, &decision).await;
+    let deps = build_interpret_deps(&state, None);
+    assert!(
+        crate::ingress::recovery_ghosts::repair_stalled_row(&f.uow, &deps, key)
+            .await
+            .expect("inbox child must not abort room ghost repair")
+    );
+    let actor = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: ROOM.parse().expect("room"),
+        })
+        .await
+        .expect("registry")
+        .expect("persistent room");
+    assert!(
+        actor
+            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid { jid: ghost.clone() })
+            .await
+            .expect("occupancy")
+            .is_none(),
+        "the original ghost is evicted"
+    );
+    let mut tx = f.uow.begin().await.expect("inspect child completion");
+    for intent in &recorded {
+        if matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. })
+            || matches!(
+                intent,
+                IngressEffectIntent::RouteDirect {
+                    route_identity: EffectMessageIdentity::StanzaId(_),
+                    ..
+                }
+            )
+        {
+            let receipt = receipt_key(intent).expect("room receipt");
+            assert!(
+                EffectReceiptRepository::contains(
+                    &mut tx,
+                    key,
+                    receipt.kind,
+                    &receipt.semantic_identity_hash
+                )
+                .await
+                .expect("room completion"),
+                "room delivery and original reflection finish"
+            );
+        }
+    }
+    assert!(
+        DeliveryProgressRepository::load(&mut tx, key, &inbox_receipt)
+            .await
+            .expect("inbox progress")
+            .is_empty(),
+        "ghost repair cannot fabricate inbox delivery or policy progress"
+    );
+    assert_eq!(
+        EffectReceiptRepository::contains(
+            &mut tx,
+            key,
+            inbox_receipt.kind,
+            &inbox_receipt.semantic_identity_hash
+        )
+        .await
+        .expect("inbox completion"),
+        inbox_receipted,
+        "inbox completion keeps its original authority"
+    );
+    assert_eq!(
+        CanonicalMessageRepository::is_terminal(&mut tx, key)
+            .await
+            .expect("terminal"),
+        inbox_receipted,
+        "only a still-owed inbox refresh can keep this row pending"
+    );
+    assert_eq!(
+        CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await
+            .expect("source")
+            .expect("envelope")
+            .room_manifest(),
+        Some(&manifest),
+        "retirement preserves the original manifest"
+    );
+    tx.commit().await.expect("read commit");
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_sealed_ghost_skips_a_pending_inbox_refresh_child() {
+    sealed_ghost_skips_inbox_refresh_child(false).await;
+}
+
+#[tokio::test]
+async fn sqlite_sealed_ghost_skips_a_receipted_inbox_refresh_child() {
+    sealed_ghost_skips_inbox_refresh_child(true).await;
+}
+
+/// The ordinary fanout may already be complete while only the sender's
+/// independent reflection is owed. That frozen direct child still owns room
+/// housekeeping and must not retain a singleton room's ghost forever.
+#[tokio::test]
+async fn sqlite_sealed_reflection_only_ghost_is_evicted_and_retired() {
+    let f = IngressFixture::sqlite().await;
+    let sm = persistent_sm(&f).await;
+    let state = state_for(&f, sm).await;
+    let submission = planned_room(&f, &state, Case::Lost, &[]).await;
+    let decision = commit_submission(&f.uow, &submission, 1)
+        .await
+        .expect("singleton sealed acceptance");
+    let key = decision.message_key.expect("key");
+    super::departed::settle_non_delivery_effects(&f, &state, &decision).await;
+    let env: Arc<dyn RecoveryEnvironment> = Arc::new(StateEnvironment(state.clone()));
+    let cursor = MaintenanceCursor::default();
+    for _ in 0..4 {
+        assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+    }
+    let mut tx = f.uow.begin().await.expect("inspect retired reflection");
+    assert!(CanonicalMessageRepository::is_terminal(&mut tx, key)
+        .await
+        .expect("terminal"));
+    tx.commit().await.expect("read commit");
+    let connection = f.db.guard().await.expect("read policy connection");
+    let mut rows = connection.query(
+        "SELECT policy_discard_reason FROM ingress_delivery_receipts WHERE message_key = ? AND resource = ?",
+        crate::db_params![key.to_storage().to_string(), submission.sender.to_string()],
+    ).await.expect("reflection policy");
+    let reason: String = rows
+        .next()
+        .await
+        .expect("read")
+        .expect("retired child")
+        .get(0)
+        .expect("policy reason");
+    assert!(matches!(
+        reason.as_str(),
+        "occupancy_departed" | "room_retired"
+    ));
+    assert!(
+        rows.next().await.expect("end").is_none(),
+        "one original reflection child"
+    );
+    drop(rows);
+    drop(connection);
+    assert_eq!(
+        f.count("sm_ingress_appends").await,
+        0,
+        "retirement is not delivery"
+    );
+    if let Some(room) = state
+        .deps
+        .protocol
+        .room_registry
+        .ask(GetRoom {
+            room_jid: ROOM.parse().expect("room"),
+        })
+        .await
+        .expect("registry")
+    {
+        assert!(
+            room.ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+                jid: submission.sender.clone(),
+            })
+            .await
+            .expect("occupancy")
+            .is_none(),
+            "the original ghost is unseated"
+        );
+    }
+    f.close().await;
 }

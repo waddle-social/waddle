@@ -8,6 +8,31 @@ pub(super) fn observe_class(_class: IngressDecisionClass) {
     #[cfg(test)]
     let _ = OBSERVED_CLASS.try_with(|observed| observed.set(Some(_class)));
 }
+pub(super) fn fail_after_manifest() -> bool {
+    #[cfg(test)]
+    {
+        FAIL_AFTER_MANIFEST
+            .try_with(|enabled| *enabled)
+            .unwrap_or(false)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
+#[cfg(feature = "clustering")]
+pub(in crate::ingress) fn allow_clustered_room_manifests() -> bool {
+    #[cfg(test)]
+    {
+        ALLOW_CLUSTERED_ROOM_MANIFESTS
+            .try_with(|enabled| *enabled)
+            .unwrap_or(false)
+    }
+    #[cfg(not(test))]
+    {
+        false
+    }
+}
 #[cfg(not(test))]
 pub(super) fn take_failure() -> Option<IngressUowError> {
     None
@@ -28,6 +53,8 @@ mod injected {
     tokio::task_local! {
         pub static SERIALIZATION_FAILURES: std::cell::Cell<usize>;
         pub static AMBIGUOUS_COMMIT: bool;
+        pub static FAIL_AFTER_MANIFEST: bool;
+        pub static ALLOW_CLUSTERED_ROOM_MANIFESTS: bool;
         pub static OBSERVED_CLASS: std::cell::Cell<Option<super::IngressDecisionClass>>;
         pub static FAILURE: std::cell::RefCell<Option<IngressUowError>>;
     }

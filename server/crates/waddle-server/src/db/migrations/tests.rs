@@ -37,10 +37,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1025) still dominates
+    // the ledger max, which the waddle namespace (V1026) still dominates
     // after global V0015.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1025));
+    assert_eq!(version, Some(1026));
 }
 
 #[tokio::test]
@@ -157,7 +157,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
         applied,
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
         ]
     );
 
@@ -178,7 +178,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1025));
+    assert_eq!(version, Some(1026));
 }
 
 #[tokio::test]
@@ -237,7 +237,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1025 (the waddle
+    // so the runner also reports applying 1001 through 1026 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -249,7 +249,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
             1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021,
-            1022, 1023, 1024, 1025
+            1022, 1023, 1024, 1025, 1026
         ]
     );
 
@@ -313,7 +313,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1025),
+        Some(1026),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -473,7 +473,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
         runner.run(&db).await.unwrap(),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
@@ -786,7 +786,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
         applied,
         vec![
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025
+            1024, 1025, 1026
         ]
     );
     assert_eq!(
@@ -959,7 +959,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
         runner.run(&db).await.expect("adopt and run migrations"),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
@@ -2328,7 +2328,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         vec![
             6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
             1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
-            1023, 1024, 1025
+            1023, 1024, 1025, 1026
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2406,7 +2406,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025
+            1024, 1025, 1026
         ]
     );
 
@@ -3060,7 +3060,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025
+            1024, 1025, 1026
         ]
     );
 
@@ -3334,7 +3334,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         applied,
         vec![
             1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016,
-            1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025
+            1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
         ]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
@@ -4036,7 +4036,10 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
+        vec![
+            1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
+            1026
+        ]
     );
     assert_nonterminal_monitoring_index(&db).await;
     assert!(sqlite_table_exists(&db, "sm_sessions").await);
@@ -4099,7 +4102,10 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .run(&db)
             .await
             .expect("apply V1012 through V1014"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
+        vec![
+            1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
+            1026
+        ]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
     assert!(postgres_table_exists(&db, "sm_unacked").await);
@@ -4132,7 +4138,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
             .run(&db)
             .await
             .expect("apply V1014"),
-        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
+        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026]
     );
 
     assert_v1014_cutover_result(&db, 0).await;
@@ -4164,7 +4170,7 @@ async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() 
                 .run(&db)
                 .await
                 .expect("apply V1014 at live epoch"),
-            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
+            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026]
         );
         assert_v1014_cutover_result(&db, epoch).await;
 
@@ -4411,7 +4417,10 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .run(&storage.database())
             .await
             .expect("cutover migration"),
-        vec![1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025]
+        vec![
+            1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
+            1026
+        ]
     );
     drop(storage);
 
@@ -4690,7 +4699,7 @@ async fn assert_v1019_custody_cutover(db: &Database) {
             .run(db)
             .await
             .expect("apply custody cutover migration"),
-        vec![1019, 1020, 1021, 1022, 1023, 1024, 1025]
+        vec![1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026]
     );
     let conn = db
         .guard()
@@ -5147,7 +5156,7 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
             .run(db)
             .await
             .expect("append V1025"),
-        vec![1025]
+        vec![1025, 1026]
     );
     let conn = db.guard().await.expect("catalog");
     let references_query = match db.driver() {
@@ -5194,6 +5203,157 @@ async fn postgres_v1025_adopts_only_matching_pending_publication_authority() {
     let schema = unique_postgres_schema_name("v1025_adoption");
     let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
     assert_v1025_adopts_only_matching_pending_publication_authority(&db).await;
+    drop(db);
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+async fn assert_v1026_preserves_envelopes_and_expands_versions(db: &Database) {
+    MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1026),
+            )
+            .collect(),
+    )
+    .run(db)
+    .await
+    .expect("pre-V1026 catalog");
+    {
+        let conn = db.guard().await.expect("database guard");
+        let sql = match db.driver() {
+            DatabaseDriver::Sqlite => "INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope, row_revision, terminal_at, retention_eligible_at) VALUES ('00000000-0000-0000-0000-000000001026', 1, zeroblob(32), 1, ?, 7, '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z')",
+            DatabaseDriver::Postgres => "INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope, row_revision, terminal_at, retention_eligible_at) VALUES ('00000000-0000-0000-0000-000000001026', 1, decode(repeat('00', 32), 'hex'), 1, ?, 7, '2026-10-01T00:00:00Z', '2026-10-02T00:00:00Z')",
+        };
+        conn.execute(sql, crate::db_params![vec![1_u8, 2, 3]])
+            .await
+            .expect("seed envelope");
+        conn.execute("INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('00000000-0000-0000-0000-000000001027', '00000000-0000-0000-0000-000000001026')", ())
+            .await.expect("seed foreign key descendant");
+        conn.execute("INSERT INTO ingress_effect_intents (message_key, effect_ordinal, kind, semantic_identity_hash, payload_version, payload) VALUES ('00000000-0000-0000-0000-000000001026', '0', 0, ?, 1, ?)", crate::db_params![vec![0_u8; 32], vec![1_u8]])
+            .await.expect("seed effect");
+        conn.execute("INSERT INTO ingress_delivery_receipts (message_key, kind, semantic_identity_hash, resource) VALUES ('00000000-0000-0000-0000-000000001026', 0, ?, 'alice@example.com/web')", crate::db_params![vec![0_u8; 32]])
+            .await.expect("seed delivery receipt");
+    }
+    assert_eq!(
+        MigrationRunner::single().run(db).await.expect("V1026"),
+        vec![1026]
+    );
+    assert!(MigrationRunner::single()
+        .run(db)
+        .await
+        .expect("idempotent migration")
+        .is_empty());
+    {
+        let conn = db.guard().await.expect("database guard");
+        let sql = match db.driver() {
+            DatabaseDriver::Sqlite => "SELECT envelope_version, envelope, row_revision, terminal_at, retention_eligible_at FROM ingress_messages",
+            DatabaseDriver::Postgres => "SELECT envelope_version::int, envelope, row_revision::text, terminal_at::text, retention_eligible_at::text FROM ingress_messages",
+        };
+        let mut rows = conn.query(sql, ()).await.expect("preserved envelope");
+        let row = rows.next().await.expect("read row").expect("canonical row");
+        assert_eq!(row.get::<i64>(0).expect("version"), 1);
+        assert_eq!(row.get::<Vec<u8>>(1).expect("bytes"), vec![1, 2, 3]);
+        assert_eq!(row.get::<String>(2).expect("revision"), "7");
+        assert!(row
+            .get::<String>(3)
+            .expect("terminal timestamp")
+            .starts_with("2026-10-01"));
+        assert!(row
+            .get::<String>(4)
+            .expect("retention timestamp")
+            .starts_with("2026-10-02"));
+        let mut rows = conn
+            .query("SELECT COUNT(*) FROM ingress_deliveries", ())
+            .await
+            .expect("descendant");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("read count")
+                .expect("count")
+                .get::<i64>(0)
+                .expect("count"),
+            1
+        );
+        let mut rows = conn
+            .query(
+                "SELECT policy_discard_reason FROM ingress_delivery_receipts",
+                (),
+            )
+            .await
+            .expect("legacy receipt");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("receipt")
+                .expect("receipt")
+                .get::<Option<String>>(0)
+                .expect("reason"),
+            None
+        );
+        conn.execute("UPDATE ingress_messages SET envelope_version = 2", ())
+            .await
+            .expect("V2 allowed");
+        assert!(conn
+            .execute("UPDATE ingress_messages SET envelope_version = 3", ())
+            .await
+            .is_err());
+        assert!(conn
+            .execute("UPDATE ingress_messages SET envelope_version = NULL", ())
+            .await
+            .is_err());
+        conn.execute(
+            "UPDATE ingress_delivery_receipts SET policy_discard_reason = 'occupancy_departed'",
+            (),
+        )
+        .await
+        .expect("known policy reason");
+        assert!(conn
+            .execute(
+                "UPDATE ingress_delivery_receipts SET policy_discard_reason = 'invented_reason'",
+                ()
+            )
+            .await
+            .is_err());
+    }
+    let pre_v1026 = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .chain(
+                waddle::all()
+                    .into_iter()
+                    .filter(|migration| migration.version < 1026),
+            )
+            .collect(),
+    );
+    assert!(matches!(
+        pre_v1026.run(db).await,
+        Err(DatabaseError::MigrationLedger(
+            MigrationLedgerError::UnknownVersion { version: 1026, .. }
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_v1026_preserves_envelopes_and_expands_versions() {
+    let db = Database::in_memory("v1026-envelope-upgrade")
+        .await
+        .expect("SQLite");
+    assert_v1026_preserves_envelopes_and_expands_versions(&db).await;
+}
+
+#[tokio::test]
+async fn postgres_v1026_preserves_envelopes_and_expands_versions() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V1026 envelopes)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("v1026_envelopes");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    assert_v1026_preserves_envelopes_and_expands_versions(&db).await;
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
 }

@@ -30,8 +30,16 @@ fn groupchat_submission(
 }
 
 fn guard_plan(plan: &mut IngressPlan, fence: &waddle_xmpp::muc::RoomClaimFenceContext) {
-    if let effects::RoomExecutionPath::Local { fence: planned, .. } = &mut plan.room_execution {
+    if let effects::RoomExecutionPath::Local {
+        fence: planned,
+        manifest_snapshot,
+        ..
+    } = &mut plan.room_execution
+    {
         *planned = effects::room::RoomFenceRequirement::Guarded(fence.clone());
+        // This legacy relay fixture supplies claim fencing only. Its ephemeral
+        // actor has no durable room coordinates with which to seal a manifest.
+        *manifest_snapshot = None;
     }
     for planned in &mut plan.plan {
         if let Effect::Durable(effects::DurableEffect::Room(

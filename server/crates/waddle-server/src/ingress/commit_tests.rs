@@ -162,6 +162,7 @@ async fn local_unfenced_room_commits_without_snapshot_revision_proof() {
         room: "room@muc.example.com".parse().expect("room"),
         fence: crate::server::routes::interpret::effects::room::RoomFenceRequirement::Unfenced,
         snapshot_generation: 1,
+        manifest_snapshot: None,
     };
     let decision = commit_submission(&uow, &submission, 3)
         .await

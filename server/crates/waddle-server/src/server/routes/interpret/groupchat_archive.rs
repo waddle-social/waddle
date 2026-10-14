@@ -990,20 +990,16 @@ async fn push_projected_inbox(
             Some(registry) => waddle_xmpp::registry::get_resources_for_user(registry, owner).await,
             None => Vec::new(),
         };
-        let receipt = deps
-            .ingress_effect_capture
-            .as_ref()
-            .filter(|_| !resources.is_empty())
-            .map(|capture| {
-                let intent = IngressEffectIntent::RouteDirect {
-                    prepared: None,
-                    recipient: owner.clone(),
-                    fanout: resources.clone(),
-                    route_identity: capture.next_inbox_push_identity(),
-                };
-                capture.record_intent(intent.clone());
-                Box::new(intent)
-            });
+        let receipt = deps.ingress_effect_capture.as_ref().map(|capture| {
+            let intent = IngressEffectIntent::RouteDirect {
+                prepared: None,
+                recipient: owner.clone(),
+                fanout: resources.clone(),
+                route_identity: capture.next_inbox_push_identity(),
+            };
+            capture.record_intent(intent.clone());
+            Box::new(intent)
+        });
         super::effects::direct::external(
             deps,
             super::effects::direct::ExternalDirectEffect::PushInboxUpdate {
@@ -1055,16 +1051,25 @@ pub(crate) async fn push_inbox_update(
         }
         None => Vec::new(),
     };
+    push_inbox_update_to(connection_registry, &resources, entry).await
+}
+
+/// A captured inbox refresh uses only its original account resources.
+pub(super) async fn push_inbox_update_to(
+    connection_registry: &waddle_xmpp::registry::ConnectionRegistry,
+    resources: &[FullJid],
+    entry: &InboxEntry,
+) -> Vec<FullJid> {
     let mut delivered = Vec::new();
     for resource_jid in resources {
         let msg = build_inbox_push(Jid::from(resource_jid.clone()), entry);
         if matches!(
             connection_registry
-                .send_to(&resource_jid, Stanza::Message(msg))
+                .send_to(resource_jid, Stanza::Message(msg))
                 .await,
             waddle_xmpp::registry::SendResult::Sent
         ) {
-            delivered.push(resource_jid);
+            delivered.push(resource_jid.clone());
         }
     }
     delivered
