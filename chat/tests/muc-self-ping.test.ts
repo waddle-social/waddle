@@ -108,13 +108,16 @@ describe("XEP-0410 MUC self-ping", () => {
     expect(failures).toEqual([{ kind: "room", key: ROOM }]);
   });
 
-  test("a rejoin forgets occupants seen before the room dropped us", async () => {
-    const { state } = harness({ condition: "not-acceptable" });
+  test("a rejoin forgets occupants seen before the room dropped us and tells the UI", async () => {
+    const { client, state } = harness({ condition: "not-acceptable" });
     state.presence.memberJidsFor(ROOM).bob = "bob@example.com";
+    const published: Array<Record<string, unknown>> = [];
+    client.setPresenceHandler((presence) => published.push(presence));
 
     await state.doSelfPing();
 
     expect(state.presence.memberJidsFor(ROOM)).toEqual({});
+    expect(published.at(-1)).toEqual({});
   });
 
   test("keeps the ping timer across a dropped connection and pings only once the room is ready again", async () => {

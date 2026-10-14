@@ -882,9 +882,10 @@ export class BrowserXmppClient {
     if (this.currentRoom) roomsToJoin.add(this.currentRoom);
     for (const roomJid of [...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]) roomsToJoin.add(roomJid);
     // Each worker holds its slot until self-presence, which only follows
-    // `<enabled/>`, so every tail room needs a slot of its own. Bounded well
-    // under the server's per-stream read-ahead (#1219) all the same.
-    const concurrency = Math.min(Math.max(6, tailRooms.length + 1), 24);
+    // `<enabled/>`, so every tail room needs a slot of its own. Still bounded
+    // under the server's 56-frame per-stream read-ahead (#1219): an unbounded
+    // join burst can trip its send-window pause into a reconnect loop.
+    const concurrency = Math.min(Math.max(6, tailRooms.length + 1), 48);
     if (roomsToJoin.size > 0) void this.fanOutAutoJoin([...roomsToJoin], concurrency);
   }
 
@@ -2919,6 +2920,9 @@ export class BrowserXmppClient {
       // Occupancy was lost, so the rejoin rebuilds this room's presence from
       // scratch; anyone who left meanwhile sent us no unavailable.
       this.presence.clearRoom(roomJid);
+      // The UI holds its own snapshots: publish the cleared room now, so a
+      // rejoin that never lands does not leave the old occupants on screen.
+      this.dispatchFocusedRoomHandlers();
       // Owed until paged; a drop before then hands it to the next session.
       const owed = Symbol(key);
       this.rejoinGapOwedRooms.set(key, owed);
