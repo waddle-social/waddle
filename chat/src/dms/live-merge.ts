@@ -37,6 +37,7 @@ type UseDmLiveMergeDeps = {
   activePeerJid: Ref<string | null>;
   pendingEchoClientIds: Set<string>;
   scrollToPinnedEdgeAndPin: () => Promise<boolean>;
+  isPinnedAtEdge: Readonly<Ref<boolean>>;
   persistLastSeen: (peerJid: string, messageId: string) => void;
   isFeedVisible: (m: TimelineMessage) => boolean;
 };
@@ -55,6 +56,7 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     activePeerJid,
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
+    isPinnedAtEdge,
     persistLastSeen,
     isFeedVisible,
   } = deps;
@@ -153,7 +155,10 @@ export function useDmLiveMerge(deps: UseDmLiveMergeDeps) {
     const result = insertLiveMessage(messages.value, msg, pendingEchoClientIds, { conversationKind: "direct" });
     messages.value = result.messages;
     if (!result.appended) return;
-    void scrollToPinnedEdgeAndPin();
+    // Follow the edge only when the reader was already there: catch-up and
+    // resume-buffer drains must not yank a scrolled-up reader. (Sends from
+    // this tab pin when their optimistic row is inserted; the echo merges.)
+    if (isPinnedAtEdge.value) void scrollToPinnedEdgeAndPin();
     if (peerJid && isFeedVisible(msg)) {
       persistLastSeen(peerJid, msg.id);
     }

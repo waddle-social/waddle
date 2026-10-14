@@ -8,7 +8,7 @@
  * join machinery; this module reports self-presence transitions
  * through narrow callbacks.
  */
-import { barePeerJid, fullJidIdentityKey, resourceOf } from "./jid";
+import { bareJidKey, barePeerJid, fullJidIdentityKey, resourceOf } from "./jid";
 import type { ClientEvents, TypedEventBus } from "./client-events";
 import { BOT_HAT_URI, parseMucAffiliation, parseMucRole } from "./types";
 import type { RoomAuthority, RoomHats, RoomPresence } from "./types";
@@ -139,6 +139,13 @@ export class PresenceManager {
       this.roomMemberJidsByRoom.set(roomJid, cached);
     }
     return cached;
+  }
+
+  clearRoom(roomJid: string): void {
+    const key = bareJidKey(roomJid);
+    for (const map of [this.roomHatsByRoom, this.roomAuthorityByRoom, this.roomPresenceByRoom, this.roomMemberJidsByRoom]) {
+      for (const room of [...map.keys()]) if (bareJidKey(room) === key) map.delete(room);
+    }
   }
 
   clearAll(): void {

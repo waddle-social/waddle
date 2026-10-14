@@ -190,7 +190,9 @@ export function useMucSend(deps: UseMucSendDeps) {
         // Optimistic insert: show message immediately with "sending" status
         const optimistic: TimelineMessage = {
           id: msgId,
-          rowKey: crypto.randomUUID(),
+          // Client-generated id: unique, so the row key can be stable and
+          // the queued copy rebuilt from the outbox keeps the same row.
+          rowKey: `self:${msgId}`,
           correctionTargetId: msgId,
           author: session.value.username,
           authorJid: `${currentRoomJid.value}/${session.value.username}`,

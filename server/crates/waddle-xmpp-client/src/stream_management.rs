@@ -294,6 +294,9 @@ pub struct SmState {
     ack_request_timed_out: bool,
     last_ack_progress_at: Option<DateTime<Utc>>,
     progress_timed_out: bool,
+    /// A host-suspension restart has been granted and no `<a/>` has made
+    /// progress since; a further gap must not grant another.
+    suspension_restart_spent: bool,
     outbound_queue: VecDeque<UnhandledOutboundEntry>,
     replay_in_flight: VecDeque<Element>,
 }
@@ -478,6 +481,7 @@ impl SmState {
         if handled_since_last_ack != 0 {
             self.last_ack_progress_at = Some(now);
             self.progress_timed_out = false;
+            self.suspension_restart_spent = false;
         }
         self.server_h = h;
         let mut acked = Vec::new();
@@ -561,7 +565,34 @@ impl SmState {
         actions
     }
 
+    /// The host could not run for a while (frozen tab, OS sleep). Both
+    /// deadlines measure peer silence, but the host could not observe the
+    /// peer meanwhile: an `<a/>` may sit among inbound frames it has yet to
+    /// process. Restart them from `now`, and make the next poll ask again.
+    ///
+    /// Granted once per stretch without progress: a host whose pulses are
+    /// always far apart (a throttled background tab) still processes frames
+    /// promptly, so a second gap with no `<a/>` progress in between must let
+    /// the deadline expire instead of hiding a dead stream indefinitely.
+    pub fn restart_acknowledgement_clock_after_host_suspension(&mut self, now: DateTime<Utc>) {
+        if self.suspension_restart_spent || !self.acknowledgement_clock_pending() {
+            return;
+        }
+        self.suspension_restart_spent = true;
+        if self.last_ack_progress_at.is_some() {
+            self.last_ack_progress_at = Some(now);
+            self.progress_timed_out = false;
+        }
+        if self.ack_request_outstanding {
+            self.ack_request_started_at = Some(now);
+            self.next_ack_retry_at = Some(now);
+            self.ack_retry_attempt = 0;
+            self.ack_request_timed_out = false;
+        }
+    }
+
     pub fn cancel_acknowledgement_clock(&mut self) {
+        self.suspension_restart_spent = false;
         self.ack_request_outstanding = false;
         self.ack_request_started_at = None;
         self.next_ack_retry_at = None;

@@ -1,6 +1,7 @@
 import { ref, computed, nextTick, watch, type Ref } from "vue";
 import { useStore } from "@nanostores/vue";
 import type { ChannelSummary } from "@/lib/chat-types";
+import { isUnconfirmedOwnSend } from "@/lib/timeline-state";
 import type { WaddleSession } from "@/lib/server-auth";
 import {
   BrowserXmppClient,
@@ -443,7 +444,30 @@ export function useChannelMessages(
     if (!channelId) return;
     const roomJid = roomJidForChannel(channelId);
     if (!roomJid || bareJidKey(roomJid) !== bareJidKey(failure.key)) return;
-    refetchTimelineToCloseGap();
+    // The catch-up may have applied its newest pages before failing, so a
+    // merge could no longer tell a hole apart: replace the timeline.
+    reloadTimeline();
+  }
+
+  /**
+   * Close a reconnect gap in the active channel. Merges the latest page
+   * into the rows on screen so the timeline stays mounted; only a gap
+   * wider than a page falls back to the wholesale reload.
+   */
+  function refetchTimelineToCloseGap() {
+    const spaceId = activeSpaceId.value ?? "";
+    const channelId = activeChannelId.value;
+    // Only catch up if we had already loaded this channel; otherwise the
+    // standard loadMessages call on channel-select handles it.
+    if (!channelId || messages.value.length === 0) return;
+    const wasPinned = pinnedEdgeScroller.isPinnedAtEdge.value;
+    // Only rows the archive already confirmed prove continuity: the user's own
+    // unconfirmed sends may reach the latest page by being retried just now.
+    const knownIds = new Set(messages.value.filter((message) => !isUnconfirmedOwnSend(message)).map((message) => message.id));
+    void paging.refreshLatestPage(spaceId, channelId, knownIds).then((result) => {
+      if (result === "reload") reloadTimeline();
+      else if (result === "merged" && wasPinned && pinnedEdgeScroller.isPinnedAtEdge.value) void scrollToPinnedEdgeAndPin();
+    });
   }
 
   /**
@@ -451,23 +475,12 @@ export function useChannelMessages(
    * (queued/sending/failed) are preserved across the reload so the UI
    * doesn't drop unsent entries the user can still retry.
    */
-  function refetchTimelineToCloseGap() {
+  function reloadTimeline() {
     const spaceId = activeSpaceId.value;
     const channelId = activeChannelId.value;
-    if (!channelId) return;
-    // Only catch up if we had already loaded this channel; otherwise the
-    // standard loadMessages call on channel-select handles it.
-    if (messages.value.length === 0) return;
+    if (!channelId || messages.value.length === 0) return;
     const metadataSeed = messages.value;
-    const preserved = messages.value.filter(
-      (m) =>
-        m.isSelf && (
-          m.deliveryStatus === "queued"
-          || m.deliveryStatus === "sending"
-          || m.deliveryStatus === "failed"
-          || m.deliveryStatus === "rejected"
-        ),
-    );
+    const preserved = messages.value.filter(isUnconfirmedOwnSend);
     void (async () => {
       const result = await loadMessages(spaceId ?? "", channelId, 0, metadataSeed);
       // "aborted": a newer request (same or switched conversation) owns
@@ -552,6 +565,7 @@ export function useChannelMessages(
     activeChannelId,
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
+    isPinnedAtEdge: pinnedEdgeScroller.isPinnedAtEdge,
     persistLastSeen,
   });
   const { applyDisplayed, applyReaction } = liveMerge;

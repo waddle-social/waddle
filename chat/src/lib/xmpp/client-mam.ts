@@ -452,7 +452,8 @@ export class MamPager {
     const page = await xmpp.fetch_room_history_by_thread?.(this.deps.roomJidForChannel(channelId), threadId, max, null);
     if (!page) return [];
     const result = this.roomPageToMessages(page);
-    this.recordRoomWatermarks(result.messages);
+    // No catch-up watermark: a thread-filtered page says nothing about the
+    // rest of the conversation, so it cannot vouch for archive continuity.
     return result.messages;
   }
 
@@ -463,7 +464,8 @@ export class MamPager {
     const page = await xmpp.fetch_room_history_by_thread?.(this.deps.roomJidForChannel(channelId), threadId, max, pageParam.type === "before" ? pageParam.before : null);
     if (!page) return { messages: [], complete: true };
     const result = this.roomPageToMessages(page);
-    this.recordRoomWatermarks(result.messages);
+    // No catch-up watermark: a thread-filtered page says nothing about the
+    // rest of the conversation, so it cannot vouch for archive continuity.
     return result;
   }
 
@@ -510,7 +512,8 @@ export class MamPager {
     const page = await xmpp.fetch_dm_history_by_thread?.(archivePeerJid, threadId, max, pageParam.type === "before" ? pageParam.before : null);
     if (!page) return { messages: [], complete: true };
     const result = this.dmPageToMessages(page, { applyCallEvents: false, peerJid: archivePeerJid, dmScope });
-    this.recordDmWatermarks(result.messages);
+    // No catch-up watermark: a thread-filtered page says nothing about the
+    // rest of the conversation, so it cannot vouch for archive continuity.
     return result;
   }
 
@@ -890,9 +893,23 @@ export class MamPager {
       );
     }
     for (const { converted } of accepted) {
-      if (shouldSkipCatchupMessage(converted, since, seenIds)) continue;
+      // Already-seen rows still confirm the archive position (see the room path).
       this.deps.catchup.recordDmSeen(converted.peerJid, converted.createdAt, converted.archiveId, messageSeenIds(converted), converted.mucPm ? "muc-occupant" : "account");
-      this.deps.events.emit("directMessage", converted);
+      if (shouldSkipCatchupMessage(converted, since, seenIds)) continue;
+      if (converted._reactionTarget) {
+        // XEP-0444: an archived reaction updates its target, like the live
+        // `dmReaction` dispatch; emitting it as a message adds a blank row.
+        const fromBare = barePeerJid(converted.fromJid);
+        this.deps.events.emit("dmReaction", {
+          peerJid: converted.peerJid,
+          reactorJid: converted.mucPm && fromBare !== selfBare ? converted.peerJid : fromBare || selfBare,
+          messageId: converted._reactionTarget,
+          emojis: converted._reactionEmojis ?? [],
+          occurredAt: converted.createdAt,
+        });
+      } else {
+        this.deps.events.emit("directMessage", converted);
+      }
       if (options.stats) options.stats.messages += 1;
       lastArchiveId ??= converted.archiveId;
     }
@@ -904,8 +921,11 @@ export class MamPager {
     if (stats) stats.pages += 1;
     for (const message of page?.messages ?? []) {
       const converted = roomMessageFromArchived(message, { trustedMediaOrigin: this.deps.trustedMediaOrigin() });
-      if (!converted || shouldSkipCatchupMessage(converted, since, seenIds)) continue;
+      if (!converted) continue;
+      // Already-seen rows still confirm the archive position, so the next
+      // catch-up starts after them instead of re-paging them again.
       this.deps.catchup.recordRoomSeen(converted.roomJid, converted.createdAt, converted.archiveId, messageSeenIds(converted));
+      if (shouldSkipCatchupMessage(converted, since, seenIds)) continue;
       if (converted.roomJid !== this.deps.currentRoom() && isRoomActivityMessage(converted)) {
         this.deps.events.emit("activity", roomActivityEventFromMessage(converted));
       } else {

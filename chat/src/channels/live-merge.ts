@@ -43,6 +43,7 @@ type UseChannelLiveMergeDeps = {
   activeChannelId: Ref<string | null>;
   pendingEchoClientIds: Set<string>;
   scrollToPinnedEdgeAndPin: () => Promise<boolean>;
+  isPinnedAtEdge: Readonly<Ref<boolean>>;
   persistLastSeen: (channelId: string, messageId: string) => void;
 };
 
@@ -63,6 +64,7 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     activeChannelId,
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
+    isPinnedAtEdge,
     persistLastSeen,
   } = deps;
   function drainPendingUpdates() {
@@ -205,7 +207,10 @@ export function useChannelLiveMerge(deps: UseChannelLiveMergeDeps) {
     messages.value = result.messages;
     drainPendingUpdates();
     if (!result.appended) return;
-    void scrollToPinnedEdgeAndPin();
+    // Follow the edge only when the reader was already there: catch-up and
+    // resume-buffer drains must not yank a scrolled-up reader. (Sends from
+    // this tab pin when their optimistic row is inserted; the echo merges.)
+    if (isPinnedAtEdge.value) void scrollToPinnedEdgeAndPin();
     if (channelId && isFeedVisible(msg)) {
       persistLastSeen(channelId, msg.id);
     }

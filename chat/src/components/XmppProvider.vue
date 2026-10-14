@@ -97,6 +97,10 @@ connectionStore.logout = async () => {
 
 connectionStore.bootstrap = bootstrap;
 
+function resumeXmppWhenVisible() {
+  if (document.visibilityState === "visible") connectionStore.client?.resumeAfterVisible();
+}
+
 onMounted(() => {
   if (typeof window !== "undefined") {
     disposePageLifecycle = installXmppPagehideLifecycle(
@@ -105,6 +109,7 @@ onMounted(() => {
       suspendCallForPageHide,
       reportXmppPageLifecycleFailure,
     );
+    document.addEventListener("visibilitychange", resumeXmppWhenVisible);
   }
   void bootstrap();
 });
@@ -113,6 +118,7 @@ onUnmounted(() => {
   bootstrapCoordinator.detach();
   disposePageLifecycle?.();
   disposePageLifecycle = null;
+  if (typeof document !== "undefined") document.removeEventListener("visibilitychange", resumeXmppWhenVisible);
   connectionStore.selfFullJid = null;
   $xmppStatus.set(OFFLINE_SNAPSHOT);
 });

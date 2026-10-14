@@ -132,7 +132,8 @@ export function queuedRoomMessageToTimeline(
 ): TimelineMessage {
   const message: TimelineMessage = {
     id: queued.id,
-    rowKey: crypto.randomUUID(),
+    // Same key as the optimistic row (`muc-send`): rebuilds must not remount it.
+    rowKey: `self:${queued.id}`,
     correctionTargetId: queued.id,
     author: session.username,
     authorJid: `${roomJid}/${session.username}`,

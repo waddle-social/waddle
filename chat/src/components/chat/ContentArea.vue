@@ -87,6 +87,8 @@ const props = defineProps<{
   isApplyingUpdate: boolean;
   isLoadingMessages: boolean;
   isLoadingOlderMessages: boolean;
+  /** A thread, pinned, or extension panel is open; live replies must not replace it. */
+  rightPanelOpen?: boolean;
   hasOlderMessages: boolean;
   isSending: boolean;
   canManageChannels: boolean;
@@ -546,7 +548,7 @@ watch(() => props.messages, (newMessages, oldMessages) => {
   }
   // Don't auto-open when the user is paging backward through older history —
   // those messages have older timestamps and are not live replies.
-  if (props.isLoadingOlderMessages || props.activeThread) return;
+  if (props.isLoadingOlderMessages || props.rightPanelOpen) return;
   const maxOldCreatedAt = oldMessages.reduce(
     (max, m) => (m.createdAt > max ? m.createdAt : max),
     "",

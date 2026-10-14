@@ -67,6 +67,7 @@ import { MucAdmin, type AdminUsersPage } from "./client-muc-admin";
 import { PresenceManager } from "./client-presence";
 import { VCardManager } from "./client-vcard";
 import {
+  RoomJoinRetryCancelledError,
   RoomJoinRetryCoordinator,
   type ScheduleRoomJoinRetryOptions,
 } from "./room-join-retry";
@@ -108,6 +109,7 @@ import { XMPP_STREAM_ERROR_CONDITIONS } from "./types";
 import { prepareEncryptedAttachmentUpload } from "./encrypted-attachments";
 
 import { discoverChannels, discoverTopology } from "./discovery";
+import { escapeXml } from "./extension-commands/xml";
 import { discoverUploadService, uploadFile, type UploadProgress } from "./file-upload";
 import { createGroupDm, type CreateGroupDmResult } from "./group-dm";
 import {
@@ -227,6 +229,18 @@ type InboundWasmMessage = WasmMessage & {
 // take several seconds to deliver the roster. 110 is the definitive
 // resolve signal; this timeout only bounds genuinely stuck joins.
 const ROOM_SELF_PRESENCE_TIMEOUT_MS = 15_000;
+/**
+ * XEP-0410 §3.2 self-ping errors that do not mean "left the room": still
+ * joined (the ping went to a client without XEP-0199, or a concurrent nick
+ * change), or the service is unreachable so no decision can be made.
+ */
+const SELF_PING_STILL_JOINED_OR_UNDECIDED: ReadonlySet<string> = new Set([
+  "service-unavailable",
+  "feature-not-implemented",
+  "item-not-found",
+  "remote-server-not-found",
+  "remote-server-timeout",
+]);
 
 type XmppStreamErrorPayload = string | {
   detail?: string | null;
@@ -487,6 +501,15 @@ export class BrowserXmppClient {
   private roomSwitchPromise: Promise<void> | null = null;
   private roomSwitchTarget: string | null = null;
   private selfPingTimer: ReturnType<typeof setInterval> | null = null;
+  /** A fresh session's catch-up was interrupted before it finished. */
+  private freshCatchupOwed = false;
+  /**
+   * Rooms a self-ping rejoin still owes their gap catch-up: join key → the
+   * owing rejoin's token, so settling an older gap never clears a newer one.
+   */
+  private readonly rejoinGapOwedRooms = new Map<string, symbol>();
+  /** Room-assigned own nick per room key, for the XEP-0410 self-ping target. */
+  private readonly ownOccupantNicks = new Map<string, string>();
   private readonly joinedMucs = new Map<string, Promise<void>>();
   private readonly joinedMucJoinTokens = new Map<string, symbol>();
   private readonly joinedMucReady = new Set<string>();
@@ -640,7 +663,12 @@ export class BrowserXmppClient {
       canUseConnectedSession: () => this.canUseConnectedSession(),
       roomIsReady: (roomJid) => this.roomIsReady(roomJid),
       enqueueReason: () => this.enqueueReason(),
-      emitStatus: (snapshot) => this.emitStatus(snapshot),
+      emitStatus: (snapshot) => {
+        this.emitStatus(snapshot);
+        // Queued while the browser reports offline over a live stream:
+        // restore the status and drain the queue when the network returns.
+        if (snapshot.state === "offline" && this.xmpp && this.connected) this.armOnlineRecovery();
+      },
       currentStatus: () => this.currentStatusSnapshot,
       roomMemberJids: (roomJid) => this.memberJidsFor(roomJid),
       sendDirect: (peerJid, body, opts) => this.sendQueuedDirectMessage(peerJid, body, opts),
@@ -704,7 +732,8 @@ export class BrowserXmppClient {
       onScheduled: (info) => this.events.emitSafe("reconnectScheduled", info),
       // #1164: the retry budget ran out — an endless "reconnecting"
       // banner would be dishonest. Only a user-explicit recovery
-      // restores the budget: the network-return `online` event fires
+      // restores the budget: the network-return `online` event (or the
+      // tab becoming visible, which fires the same listener) runs
       // `connectWithFreshBudget`, and a page reload constructs a new
       // client. Internal `connect()` calls reject while exhausted and
       // never restart the loop (F1).
@@ -725,6 +754,11 @@ export class BrowserXmppClient {
           detail: "We couldn't reconnect after several attempts. Check your connection, then reload to try again.",
         });
       },
+    });
+    this.events.on("ownOccupantNick", (roomJid, nick) => {
+      const key = this.roomJoinKey(roomJid);
+      if (nick) this.ownOccupantNicks.set(key, nick);
+      else this.ownOccupantNicks.delete(key);
     });
     this.retainedJoinedRoomJids = new Set(this.resumePersistence.loadJoinedRooms());
     for (const block of this.resumePersistence.loadAutoJoinBlocks?.() ?? []) {
@@ -839,9 +873,19 @@ export class BrowserXmppClient {
    * snapshot was lost. Single-flight per epoch via `fanOutAutoJoin`.
    */
   private fanOutJoinableRooms(): void {
-    const roomsToJoin = new Set([...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]);
+    // Rooms the unacknowledged tail targets go first, then the focused room:
+    // the bounded fan-out writes its first joins while SM negotiates, and
+    // the driver puts those ahead of a failed resume's retried room
+    // messages, which a room only accepts from an occupant (XEP-0045 §7.4).
+    const tailRooms = this.outboundQueue.roomsAwaitingResumeTail();
+    const roomsToJoin = new Set(tailRooms);
     if (this.currentRoom) roomsToJoin.add(this.currentRoom);
-    if (roomsToJoin.size > 0) void this.fanOutAutoJoin([...roomsToJoin]);
+    for (const roomJid of [...this.retainedJoinedRoomJids, ...this.autoJoinRoomJids]) roomsToJoin.add(roomJid);
+    // Each worker holds its slot until self-presence, which only follows
+    // `<enabled/>`, so every tail room needs a slot of its own. Bounded well
+    // under the server's per-stream read-ahead (#1219) all the same.
+    const concurrency = Math.min(Math.max(6, tailRooms.length + 1), 24);
+    if (roomsToJoin.size > 0) void this.fanOutAutoJoin([...roomsToJoin], concurrency);
   }
 
   private handleMucPresenceError(presence: WasmPresence): boolean {
@@ -934,7 +978,6 @@ export class BrowserXmppClient {
   setActivityHandler(h: (event: RoomActivityEvent) => void) { this.events.set("activity", h); }
   setInboxPushHandler(h: (entry: InboxEntry) => void) { this.events.set("inboxPush", h); }
   setRoomAvatarHandler(h: (roomJid: string, hash: string) => void) { this.events.set("roomAvatar", h); }
-  setRoomDisconnectHandler(h: () => void) { this.events.set("roomDisconnect", h); }
   setPresenceHandler(h: (presence: RoomPresence) => void) { this.events.set("presence", h); }
   setLastSeenHandler(h: (nick: string, timestamp: number) => void) { this.events.set("lastSeen", h); }
   setMessageAckHandler(h: (messageId: string) => void) { this.events.set("messageAck", h); }
@@ -985,18 +1028,30 @@ export class BrowserXmppClient {
   }
 
   // C2: after retry exhaustion nothing would ever try again when the
-  // network returns. Armed from `onExhausted`; the fresh-budget connect
-  // the listener fires disarms it (via `connectInternal`), as does the
-  // `disconnect()` logout path.
+  // network returns. Armed from `onExhausted` (and when a send queues
+  // while the browser reports offline over a still-live stream); the
+  // fresh-budget connect the listener fires disarms it (via
+  // `connectInternal`), as does the `disconnect()` logout path.
   private onlineRecoveryListener: (() => void) | null = null;
 
   private armOnlineRecovery(): void {
     if (typeof window === "undefined" || this.onlineRecoveryListener) return;
     const listener = () => {
       this.disarmOnlineRecovery();
-      // The network coming back is a user-environment recovery signal —
-      // one of the two fresh-budget entry points (the other being a
-      // page load, which constructs a new client).
+      // Terminal and superseded blocks keep their explicit recovery paths
+      // (the listener can be armed during a live session that ends in one).
+      if (this.reconnectBlock) return;
+      const xmpp = this.xmpp;
+      if (xmpp && this.connected && !this.destroying && !this.disposed) {
+        // The stream outlived the network blip: only the status and the
+        // messages queued while offline need restoring.
+        this.emitStatus({ state: "online", detail: "Connection ready" });
+        this.flushAfterSessionReady(xmpp);
+        return;
+      }
+      // The network coming back (or the user returning to the tab, via
+      // `resumeAfterVisible`) is a user-environment recovery signal; a page
+      // load is the other fresh-budget entry point (a new client).
       void this.connectWithFreshBudget().catch(() => undefined);
     };
     this.onlineRecoveryListener = listener;
@@ -1009,18 +1064,28 @@ export class BrowserXmppClient {
     this.onlineRecoveryListener = null;
   }
 
-  private clearResumeState() {
-    this.resume.clearAll();
+  /**
+   * Consume the resume handle for a transient reconnect. The catch-up
+   * cursors, retained rooms, and auto-join blocks survive so the next
+   * session can close its gap and rejoin.
+   */
+  private releaseResumeHandle() {
+    this.resume.resetForFreshBind();
     this.ownResumePrevidByXmpp.clear();
     this.resumedOwnResumeXmpp.clear();
     this.supersededByOwnResumeXmpp.clear();
-    // Only called from the `destroying` path — i.e. intentional
-    // logout / shutdown. Drop the catch-up cursors too so a future
-    // login on the same account (same browser) doesn't replay
-    // ancient MAM history. (Transient disconnects do NOT go through
-    // this method; they intentionally keep cursors so the next
-    // resume can fill the gap.)
+  }
+
+  private clearResumeState() {
+    this.releaseResumeHandle();
+    this.resume.clearAll();
+    // Only called for intentional logout / shutdown. Drop the catch-up
+    // cursors too so a future login on the same account (same browser)
+    // doesn't replay ancient MAM history. Transient reconnects use
+    // `releaseResumeHandle` and keep them.
     this.catchup.reset();
+    this.freshCatchupOwed = false;
+    this.rejoinGapOwedRooms.clear();
   }
 
   persistResumeStateForPageHide(): void {
@@ -1069,6 +1134,21 @@ export class BrowserXmppClient {
     }
   }
 
+  /**
+   * The tab is visible again. A backoff retry still waiting (up to a
+   * minute) would leave a stale timeline on screen, so run it now; after
+   * an exhausted budget, treat the return like the network coming back.
+   * Terminal and superseded blocks keep their explicit recovery paths.
+   */
+  resumeAfterVisible(): void {
+    if (this.disposed || this.destroying || this.connected || this.reconnectBlock || browserOffline()) return;
+    if (this.reconnect.takePendingRetryEarly()) {
+      void this.connectFromScheduler().catch(() => undefined);
+      return;
+    }
+    this.onlineRecoveryListener?.();
+  }
+
   private async enableCarbons(xmpp: XmppClientInstance & { enableCarbons?: () => Promise<void> }) {
     if (xmpp.enableCarbons) {
       try { await xmpp.enableCarbons(); } catch {}
@@ -1109,7 +1189,7 @@ export class BrowserXmppClient {
     let attemptingResume = false;
     if (this.resume.handle && typeof config.with_resume_state_handle === "function") {
       config.with_resume_state_handle(this.resume.handle);
-      this.clearResumeState();
+      this.releaseResumeHandle();
       attemptingResume = !!resumePrevid;
     } else if (this.resume.state) {
       try {
@@ -1166,9 +1246,9 @@ export class BrowserXmppClient {
    *
    * Fresh-budget recovery is reserved for genuinely user-explicit
    * intents via `connectWithFreshBudget` — currently the window
-   * `online` recovery listener plus explicit superseded-session
-   * retries; a page load gets a fresh budget implicitly by
-   * constructing a new client.
+   * `online` recovery listener (also fired when the tab becomes visible)
+   * plus explicit superseded-session retries; a page load gets a fresh
+   * budget implicitly by constructing a new client.
    */
   async connect(): Promise<void> {
     if (this.disposed) throw new Error("XMPP client is disposed");
@@ -1189,9 +1269,9 @@ export class BrowserXmppClient {
     // `handleDisconnected` → `schedule()`), so <1 min of typing during
     // an outage could exhaust the whole budget into a false terminal
     // error. Fast-reject like any unavailable session; only the
-    // scheduler itself (`connectFromScheduler`) and user-explicit
-    // recovery (`connectWithFreshBudget`) may clear the timer and
-    // launch.
+    // scheduler itself (`connectFromScheduler`, also run early and
+    // refunded by `resumeAfterVisible`) and user-explicit recovery
+    // (`connectWithFreshBudget`) may clear the timer and launch.
     if (this.reconnect.hasPendingRetry()) {
       throw new Error("XMPP session is not ready");
     }
@@ -2816,7 +2896,96 @@ export class BrowserXmppClient {
 
   private startSelfPing() { this.stopSelfPing(); this.selfPingTimer = setInterval(() => { void this.doSelfPing(); }, 60000); }
   private stopSelfPing() { if (this.selfPingTimer) { clearInterval(this.selfPingTimer); this.selfPingTimer = null; } }
-  private async doSelfPing() { if (!this.xmpp?.send_raw_iq || !this.currentRoom) return; try { await this.xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${this.currentRoom}/${this.session.username}"><ping xmlns="urn:xmpp:ping"/></iq>`); } catch { this.events.emit("roomDisconnect"); } }
+  /**
+   * XEP-0410: ping our own occupant JID (the nick the room assigned, §7.2.9
+   * status 210) to notice an occupancy the service dropped without telling
+   * us, e.g. across a long background stretch. Per §3.2 a few errors still
+   * mean "joined" (or say nothing); any other error means we left, so
+   * rejoin instead of silently missing the room's messages.
+   */
+  private async doSelfPing() {
+    const xmpp = this.xmpp;
+    const roomJid = this.currentRoom;
+    if (!xmpp?.send_raw_iq || !roomJid || !this.roomIsReady(roomJid)) return;
+    const key = this.roomJoinKey(roomJid);
+    const nick = this.ownOccupantNicks.get(key) ?? this.session.username;
+    try {
+      await xmpp.send_raw_iq(`<iq type="get" id="${crypto.randomUUID()}" to="${escapeXml(`${roomJid}/${nick}`)}"><ping xmlns="urn:xmpp:ping"/></iq>`);
+    } catch (error) {
+      if (this.xmpp !== xmpp || this.currentRoom !== roomJid || !this.joinedMucReady.has(key)) return;
+      const { condition } = stanzaErrorContext(error);
+      if (!condition || SELF_PING_STILL_JOINED_OR_UNDECIDED.has(condition)) return;
+      this.revokeMucReadiness(roomJid);
+      // Occupancy was lost, so the rejoin rebuilds this room's presence from
+      // scratch; anyone who left meanwhile sent us no unavailable.
+      this.presence.clearRoom(roomJid);
+      // Owed until paged; a drop before then hands it to the next session.
+      const owed = Symbol(key);
+      this.rejoinGapOwedRooms.set(key, owed);
+      void this.awaitRoomJoinChain(xmpp, roomJid)
+        .then((joined) => {
+          if (joined) {
+            // Sends made while the room was not ready waited in the queue.
+            void this.flushQueuedRoomMessages(roomJid);
+            return this.closeRoomGapAfterRejoin(xmpp, roomJid, owed);
+          }
+          // The chain ended without the room: hand it to the timeline's
+          // reload (ignored unless it is still the open conversation).
+          if (this.isCurrentXmpp(xmpp)) {
+            this.settleRejoinGap(key, owed);
+            this.events.emit("catchupFailure", { kind: "room", key: roomJid });
+          }
+        })
+        .catch(() => undefined);
+      // The plain rejoin recreates our occupant without the XEP-0272 call
+      // advertisement, as on a fresh session (see runSessionReady).
+      const call = $callState.get();
+      if (call.phase === "active" && call.kind === "muc" && this.roomJoinKey(call.peer) === key) {
+        void this.readvertiseActiveMucCallPresence(xmpp);
+      }
+    }
+  }
+
+  /**
+   * Await a room's join, following its scheduled retries (a timed-out join
+   * schedules the next window before rejecting), until the room is ready or
+   * the chain ends. True only when the room joined on this handle.
+   */
+  private async awaitRoomJoinChain(xmpp: XmppClientInstance, roomJid: string): Promise<boolean> {
+    const key = this.roomJoinKey(roomJid);
+    for (;;) {
+      try {
+        await this.ensureJoined(roomJid);
+        return this.isCurrentXmpp(xmpp) && this.joinedMucReady.has(key);
+      } catch {
+        if (!this.isCurrentXmpp(xmpp) || !this.roomJoinRetry.pending(key)) return false;
+      }
+    }
+  }
+
+  /**
+   * The rejoin requests no history (XEP-0045 `maxstanzas='0'`), so whatever
+   * the room carried while we were out of it is missing from the timeline.
+   * Page it in from the archive like a reconnect does; without a cursor,
+   * hand the room to the timeline's catch-up-failure reload instead.
+   */
+  private settleRejoinGap(key: string, owed: symbol): void {
+    if (this.rejoinGapOwedRooms.get(key) === owed) this.rejoinGapOwedRooms.delete(key);
+  }
+
+  private async closeRoomGapAfterRejoin(xmpp: XmppClientInstance, roomJid: string, owed: symbol): Promise<void> {
+    if (!this.isCurrentXmpp(xmpp)) return;
+    const key = this.roomJoinKey(roomJid);
+    const entry = this.catchup.roomEntry(roomJid);
+    if (entry) {
+      // "fresh": a failed page hands the room to the timeline's reload.
+      await this.runReconnectCatchup(xmpp, [entry], "fresh");
+      if (this.isCurrentXmpp(xmpp) && this.connected) this.settleRejoinGap(key, owed);
+      return;
+    }
+    this.settleRejoinGap(key, owed);
+    this.events.emit("catchupFailure", { kind: "room", key: roomJid });
+  }
   private handleMessageAck(id: string) { this.outboundQueue.handleAck(id); }
   private handleMessageFailed(id: string) { this.outboundQueue.handleFailed(id); }
   // `lifecycle` is the bare kind here — the emitted
@@ -2850,6 +3019,10 @@ export class BrowserXmppClient {
     if (this.sessionReadyHandledXmpp === xmpp) return;
     this.sessionReadyHandledXmpp = xmpp;
     if (lifecycle.type === "fresh") {
+      // Occupancy was lost, so the rejoin below rebuilds presence from
+      // scratch. A resume keeps occupancy and the server does not resend
+      // occupant presence, so the caches must survive the disconnect.
+      this.clearRoomPresenceCaches();
       this.outboundQueue.clearOrdinaryInflight();
       void this.enableCarbons(xmpp);
       // XEP-0490 §3.1 + §3.2: catch up displayed state and subscribe
@@ -2888,7 +3061,27 @@ export class BrowserXmppClient {
     // consumers skip their own wholesale MAM reload for covered
     // conversations — otherwise two concurrent fetches race to write
     // the timeline and the rebuild clobbers the catch-up's merges.
-    const catchupEntries = this.catchup.onSessionStarted();
+    // A resumed XEP-0198 stream is gap-free (the server refuses to resume a
+    // queue it cannot replay whole), so only a fresh session pages the
+    // archive; a resume keeps the cursors for the next fresh one instead of
+    // holding live delivery behind redundant MAM catch-up. The exception is
+    // a fresh session's catch-up that a drop interrupted: its fresh event
+    // told the timelines to rely on it, so the resume of that session owes
+    // the rest.
+    const trackedEntries = this.catchup.onSessionStarted();
+    const catchupEntries = lifecycle.type === "fresh" || this.freshCatchupOwed
+      ? trackedEntries
+      : trackedEntries.filter((entry) => entry.kind === "room" && this.rejoinGapOwedRooms.has(this.roomJoinKey(entry.key)));
+    // An owed self-ping gap with no cursor left: on a resume nothing else
+    // pages it, so hand it to the timeline's reload (a fresh session's own
+    // refresh covers it).
+    if (lifecycle.type === "resumed") {
+      for (const key of [...this.rejoinGapOwedRooms.keys()]) {
+        if (catchupEntries.some((entry) => entry.kind === "room" && this.roomJoinKey(entry.key) === key)) continue;
+        this.rejoinGapOwedRooms.delete(key);
+        this.events.emit("catchupFailure", { kind: "room", key });
+      }
+    }
     this.emitSessionLifecycle(
       lifecycle.type === "fresh"
         ? {
@@ -2904,6 +3097,7 @@ export class BrowserXmppClient {
         : { type: "resumed" },
     );
     if (catchupEntries.length === 0) {
+      this.rejoinGapOwedRooms.clear();
       // No barrier this session: entries carried from a failed barrier
       // still owe their dispatch (same flush-then-drain order).
       const carried = this.carriedPendingDuringResume.splice(0);
@@ -2912,11 +3106,19 @@ export class BrowserXmppClient {
       this.fulfillOnceConnected();
       return;
     }
-    const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries, lifecycle.type);
+    // Only a fresh session's catch-up stands in for the timelines' refetch;
+    // a resume paging owed rooms keeps its debt in `rejoinGapOwedRooms`.
+    this.freshCatchupOwed ||= lifecycle.type === "fresh";
+    const owedAtBarrier = [...this.rejoinGapOwedRooms];
+    // Always "fresh" semantics: a failure must hand the timelines their reload.
+    const catchupPromise = this.runReconnectCatchup(xmpp, catchupEntries, "fresh");
     const barrierPromise = catchupPromise.finally(() => this.completeResumeBarrier(xmpp));
     this.openResumeBarrier(xmpp, barrierPromise);
     await barrierPromise;
-    if (this.xmpp !== xmpp) return;
+    if (this.xmpp !== xmpp || !this.connected) return;
+    this.freshCatchupOwed = false;
+    // Only the gaps this barrier paged: a self-ping during it owes its own.
+    for (const [key, owed] of owedAtBarrier) this.settleRejoinGap(key, owed);
     this.fulfillOnceConnected();
   }
 
@@ -3068,12 +3270,25 @@ export class BrowserXmppClient {
     // no occupancy, no XEP-0272 advertisement, no control plane — so
     // it is ended cleanly instead of preserved indefinitely (#1621
     // review round 4).
+    let cancellations = 0;
     for (let attempt = 0; attempt < 2; attempt += 1) {
       try {
         await this.ensureJoined(state.peer);
         break;
-      } catch {
+      } catch (error) {
         if (this.xmpp !== xmpp || !stillThisCall()) return;
+        // Navigating away cancels the room's backoff window; that is not a
+        // failed join, so it must not count toward ending the call.
+        // A terminal denial also cancels the chain; that one is final.
+        if (
+          error instanceof RoomJoinRetryCancelledError
+          && !this.roomIsTerminallyDenied(state.peer)
+          && cancellations < 3
+        ) {
+          cancellations += 1;
+          attempt -= 1;
+          continue;
+        }
         if (attempt === 1) {
           await this.endCallAndClearProjections(this.callWireSender());
           return;
@@ -3178,7 +3393,7 @@ export class BrowserXmppClient {
     // trackers clear so a subsequent `resumed` session-ready can restore
     // readiness without re-sending join presence (#1221).
     this.resumedSessionRoomKeys = new Set(this.joinedMucReady);
-    this.connected = false; this.stopSelfPing(); this.xmpp = null;
+    this.connected = false; this.xmpp = null;
     // Established media is independent of the transient XMPP transport.
     // Preserve its UI projections while stream recovery has a bounded
     // chance to restore the signalling plane; setup phases still fail fast.
@@ -3214,7 +3429,6 @@ export class BrowserXmppClient {
     this.roomDiscoveryGeneration += 1;
     this.currentRoomCatalogFingerprintEvidence.clear();
     this.sessionReadyHandledXmpp = null;
-    this.clearRoomPresenceCaches();
     if (this.destroying) { this.clearResumeState(); this.emitStatus({ state: "offline", detail: error?.message ?? "Disconnected" }); return; }
     if (supersededByOwnResume) {
       // The successor owns this exact XEP-0198 stream. Do not retain a live

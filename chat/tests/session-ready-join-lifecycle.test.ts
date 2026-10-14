@@ -213,4 +213,60 @@ describe("#1221 fresh session-ready still rejoins", () => {
     expect(joinRoom).toHaveBeenCalledTimes(1);
     expect(joinRoom).toHaveBeenCalledWith(room, "alice");
   });
+
+  test("a tail spanning more than six rooms gets a join slot for each of them", async () => {
+    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const rooms = Array.from({ length: 12 }, (_, index) => `c${index}@conference.example.com`);
+    const tailRooms = rooms.slice(4);
+    state.retainedJoinedRoomJids = new Set(rooms);
+    (state as unknown as { outboundQueue: { seedFromResumeState: (state: unknown) => void } })
+      .outboundQueue.seedFromResumeState({
+        previd: "old-sm",
+        inboundH: 0,
+        outboundH: tailRooms.length,
+        unhandledOutboundEntries: tailRooms.map((room, index) => ({
+          xml: `<message id="tail-${index}" to="${room}" type="groupchat"><body>hi</body></message>`,
+          sentAt: "2026-07-26T12:34:56.789Z",
+          rejected: false,
+        })),
+      });
+
+    const ready = state.runSessionReady(xmpp, { type: "fresh" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const joined = joinRoom.mock.calls.map((call) => call[0]);
+    for (const room of tailRooms) expect(joined).toContain(room);
+    for (const room of rooms) deliverSelfPresence(room);
+    await ready;
+  });
+
+  test("joins the rooms the unacknowledged tail targets first, within the bounded fan-out", async () => {
+    // The driver puts the joins issued while SM negotiates ahead of a failed
+    // resume's retried room messages; the room a retry targets must be among
+    // them or it refuses the retry from a non-occupant.
+    const { state, xmpp, joinRoom, deliverSelfPresence } = connectedClient();
+    const rooms = Array.from({ length: 9 }, (_, index) => `c${index}@conference.example.com`);
+    state.retainedJoinedRoomJids = new Set(rooms);
+    (state as unknown as { outboundQueue: { seedFromResumeState: (state: unknown) => void } })
+      .outboundQueue.seedFromResumeState({
+        previd: "old-sm",
+        inboundH: 0,
+        outboundH: 1,
+        unhandledOutboundEntries: [{
+          xml: '<message id="tail" to="c8@conference.example.com" type="groupchat"><body>hi</body></message>',
+          sentAt: "2026-07-26T12:34:56.789Z",
+          rejected: false,
+        }],
+      });
+
+    const ready = state.runSessionReady(xmpp, { type: "fresh" });
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(joinRoom.mock.calls.length).toBeLessThanOrEqual(6);
+    expect(joinRoom.mock.calls[0]?.[0]).toBe("c8@conference.example.com");
+    for (const room of rooms) deliverSelfPresence(room);
+    await ready;
+  });
 });

@@ -107,6 +107,43 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     });
   }
 
+  /**
+   * Reconnect gap-close: merge the latest page into the rows on screen,
+   * keeping the timeline mounted with its paged-back history and divider.
+   * Returns "reload" when a merge would be wrong — no latest page has
+   * loaded yet (or one is in flight), or the page shares no row with
+   * `knownIds`, the rows on screen before the reconnect (the gap is wider
+   * than a page, so merging would hide the hole). The caller must snapshot
+   * `knownIds` before anything from the new session merges.
+   */
+  async function refreshLatestPage(
+    peerJid: string,
+    knownIds: ReadonlySet<string>,
+  ): Promise<"merged" | "reload" | "aborted" | "failed"> {
+    const client = xmppClient.value;
+    if (!session.value || !client) return "aborted";
+    if (isLoadingMessages.value || !("queryPersonalMamPage" in client)) return "reload";
+    if (oldestArchiveId === null && hasOlderMessages.value) return "reload";
+    // Observe, don't bump, the request id: a newer load or peer switch
+    // supersedes this refresh, but an in-flight older-page load must not
+    // be cancelled by it.
+    const requestId = messageRequestId;
+    try {
+      const page = await client.queryPersonalMamPage(peerJid, PAGE_SIZE, { type: "latest" }, scopeForPeer(peerJid));
+      if (requestId !== messageRequestId || activePeerJid.value !== peerJid) return "aborted";
+      if (!page.complete && !page.messages.some((message) => knownIds.has(message.id))) return "reload";
+      messages.value = appendQueuedMessages(
+        buildTimelineFromMamResults(page.messages, stripQueuedSelfMessages(messages.value)),
+        peerJid,
+      );
+      return "merged";
+    } catch {
+      if (requestId !== messageRequestId) return "aborted";
+      actionError.value = dmLoadErrorMessage(peerJid);
+      return "failed";
+    }
+  }
+
   async function loadMessages(peerJid: string, unreadAtLoad = 0): Promise<TimelineLoadResult> {
     if (!session.value) return "aborted";
     // Capture the typed conversation scope before the async MAM request.
@@ -444,6 +481,7 @@ export function useDmMamPaging(deps: UseDmMamPagingDeps) {
     loadingOlderThreadIds,
     threadHasOlder,
     loadMessages,
+    refreshLatestPage,
     loadOlderMessages,
     ensureMessageLoaded,
     backfillThread,

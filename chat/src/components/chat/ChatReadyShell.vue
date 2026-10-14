@@ -963,6 +963,7 @@ async function recoverSupersededFromShell() {
               :is-searching="activeIsSearching"
               :upload-progress="activeUploadProgress"
               :thread-index="threads.index.value"
+              :right-panel-open="!!activeRightPanel"
               :xmpp-client="xmppClient"
               :notify-settings="notifySettings"
               :reaction-mode="reactionModeTarget === 'main' ? reactionModeState : null"

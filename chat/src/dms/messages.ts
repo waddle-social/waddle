@@ -1,5 +1,6 @@
 import { getCurrentScope, nextTick, onScopeDispose, ref, watch, type Ref } from "vue";
 import type { TimelineMessage } from "@/lib/chat-ui";
+import { isUnconfirmedOwnSend } from "@/lib/timeline-state";
 import type {
   BrowserXmppClient,
   DmConversationScope,
@@ -222,6 +223,7 @@ export function useDirectMessages(
     activePeerJid,
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
+    isPinnedAtEdge: pinnedEdgeScroller.isPinnedAtEdge,
     persistLastSeen,
     isFeedVisible,
   });
@@ -351,26 +353,35 @@ export function useDirectMessages(
       !peerJid
       || dmConversationIdentityKey(peerJid, isMucPmPeer) !== dmConversationIdentityKey(failure.key, isMucPmPeer)
     ) return;
-    refetchTimelineToCloseGap();
+    // The catch-up may have applied its newest pages before failing, so a
+    // merge could no longer tell a hole apart: replace the timeline.
+    reloadTimeline();
+  }
+
+  /** Close a reconnect gap in the active conversation. Merges the latest
+   *  page into the rows on screen so the timeline stays mounted; only a
+   *  gap wider than a page falls back to the wholesale reload. */
+  function refetchTimelineToCloseGap() {
+    const peerJid = activePeerJid.value;
+    if (!peerJid || messages.value.length === 0) return;
+    const wasPinned = pinnedEdgeScroller.isPinnedAtEdge.value;
+    // Only rows the archive already confirmed prove continuity: the user's own
+    // unconfirmed sends may reach the latest page by being retried just now.
+    const knownIds = new Set(messages.value.filter((message) => !isUnconfirmedOwnSend(message)).map((message) => message.id));
+    void paging.refreshLatestPage(peerJid, knownIds).then((result) => {
+      if (result === "reload") reloadTimeline();
+      else if (result === "merged" && wasPinned && pinnedEdgeScroller.isPinnedAtEdge.value) void scrollToPinnedEdgeAndPin();
+    });
   }
 
   /** Wholesale MAM refetch of the active conversation. Local optimistic
    *  sends are preserved across the reload so the user keeps retry
    *  affordances. */
-  function refetchTimelineToCloseGap() {
+  function reloadTimeline() {
     const peerJid = activePeerJid.value;
-    if (!peerJid) return;
-    if (messages.value.length === 0) return;
+    if (!peerJid || messages.value.length === 0) return;
     const snapshot = messages.value;
-    const preserved = snapshot.filter(
-      (m) =>
-        m.isSelf && (
-          m.deliveryStatus === "queued"
-          || m.deliveryStatus === "sending"
-          || m.deliveryStatus === "failed"
-          || m.deliveryStatus === "rejected"
-        ),
-    );
+    const preserved = snapshot.filter(isUnconfirmedOwnSend);
     void (async () => {
       const result = await loadMessages(peerJid);
       // "aborted": a newer request (same or switched conversation) owns

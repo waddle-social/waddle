@@ -3,7 +3,7 @@ import { effectScope, nextTick, ref } from "vue";
 import { useConnectionNotice } from "../src/components/chat/composables/use-connection-notice";
 import type { XmppStatusSnapshot } from "../src/lib/xmpp-client";
 
-function makeHarness(initialState: XmppStatusSnapshot["state"] = "online") {
+function makeHarness(initialState: XmppStatusSnapshot["state"] = "online", reconnectingNoticeDelayMs = 0) {
   const status = ref<XmppStatusSnapshot>({ state: initialState, detail: "" });
   const queued = ref(0);
   const scope = effectScope();
@@ -12,6 +12,7 @@ function makeHarness(initialState: XmppStatusSnapshot["state"] = "online") {
     api = useConnectionNotice({
       status: () => status.value,
       queuedMessageCount: () => queued.value,
+      reconnectingNoticeDelayMs,
     });
   });
   if (!api) throw new Error("composable did not initialize");
@@ -46,10 +47,23 @@ describe("useConnectionNotice", () => {
     stop();
   });
 
+  test("a reconnect that settles within the grace period shows nothing", async () => {
+    const { api, status, stop } = makeHarness("online", 1000);
+    status.value = { state: "reconnecting", detail: "" };
+    await nextTick();
+    expect(api.connectionNotice.value).toBeNull();
+    status.value = { state: "online", detail: "" };
+    await nextTick();
+    expect(api.connectionNotice.value).toBeNull();
+    stop();
+  });
+
   test("returning online after an outage briefly celebrates the reconnect", async () => {
     const { api, status, stop } = makeHarness("online");
     status.value = { state: "reconnecting", detail: "" };
     await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(api.connectionNotice.value?.tone).toBe("reconnecting");
     status.value = { state: "online", detail: "" };
     await nextTick();
     expect(api.connectionNotice.value?.tone).toBe("reconnected");
@@ -74,6 +88,7 @@ describe("useConnectionNotice", () => {
     const { api, status, stop } = makeHarness("online");
     status.value = { state: "reconnecting", detail: "" };
     await nextTick();
+    await new Promise((resolve) => setTimeout(resolve, 0));
     status.value = { state: "online", detail: "" };
     await nextTick();
     expect(api.connectionNotice.value?.tone).toBe("reconnected");

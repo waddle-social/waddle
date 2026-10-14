@@ -276,6 +276,16 @@ pub fn build_muc_join_presence(room: &jid::BareJid, nick: &str) -> ClientResult<
         .build())
 }
 
+/// Whether `stanza` is an XEP-0045 join presence (an `<x/>` MUC payload).
+pub fn is_muc_join_presence(stanza: &Element) -> bool {
+    xmpp_parsers::presence::Presence::try_from(stanza.clone()).is_ok_and(|presence| {
+        presence
+            .payloads
+            .into_iter()
+            .any(|payload| xmpp_parsers::muc::Muc::try_from(payload).is_ok())
+    })
+}
+
 pub fn build_moderation_message(
     to: &str,
     _message_type: &str,

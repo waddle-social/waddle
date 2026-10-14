@@ -149,6 +149,82 @@ describe("terminal error state (#1164 slice 1)", () => {
   });
 });
 
+describe("transient reconnect with a resume handle", () => {
+  test("keeps the catch-up cursors so the next session can close its gap", async () => {
+    const harness = createHarness();
+    const { state, stub } = harness;
+    const handle = { free: () => {} };
+    stub.get_resume_state_handle = () => handle;
+    state.catchup.onSessionStarted();
+    (state.catchup as unknown as {
+      recordRoomSeen: (room: string, at: string, archiveId?: string) => void;
+    }).recordRoomSeen("c1@muc.example.com", "2026-07-01T10:00:00.000Z", "arch-1");
+    disconnectHarness(harness);
+    state.reconnect.clearTimer();
+
+    const configuredHandles: unknown[] = [];
+    class StubConfig {
+      with_resume_state_handle(value: unknown) { configuredHandles.push(value); }
+    }
+    class StubClient {
+      async connect() {}
+    }
+    state.loadModule = async () => ({ WaddleConfig: StubConfig, WaddleClient: StubClient });
+    await state.doConnect();
+
+    expect(configuredHandles).toEqual([handle]);
+    expect(state.resume.handle).toBeNull();
+    expect(state.catchup.onSessionStarted()).toEqual([
+      { kind: "room", key: "c1@muc.example.com", after: "arch-1", since: "2026-07-01T10:00:00.000Z" },
+    ]);
+  });
+});
+
+describe("tab refocus", () => {
+  test("runs a pending backoff retry immediately without spending the budget", async () => {
+    const harness = createHarness();
+    const { state, scheduled } = harness;
+    let attempts = 0;
+    state.doConnect = async () => {
+      attempts += 1;
+      throw new Error("still down");
+    };
+    harness.fireDisconnected();
+    expect(scheduled).toHaveLength(1);
+    expect(state.reconnect.hasPendingRetry()).toBe(true);
+
+    const refocus = (state as unknown as { resumeAfterVisible: () => void }).resumeAfterVisible.bind(state);
+    refocus();
+    await sleep(0);
+    // The failed attempt surfaces as a transport disconnect, as in the app.
+    disconnectHarness(harness);
+    refocus();
+    await sleep(0);
+    disconnectHarness(harness);
+
+    expect(attempts).toBe(2);
+    // Refocus attempts are refunded: the failures re-arm the same first step.
+    expect(scheduled.map((entry) => entry.attempt)).toEqual([1, 1, 1]);
+    state.reconnect.clearTimer();
+  });
+
+  test("leaves a terminal block to its explicit recovery", async () => {
+    const harness = createHarness();
+    const { state } = harness;
+    let attempts = 0;
+    state.doConnect = async () => {
+      attempts += 1;
+    };
+    harness.fireError({ condition: "not-authorized", detail: "session expired" });
+    harness.fireDisconnected();
+
+    (state as unknown as { resumeAfterVisible: () => void }).resumeAfterVisible();
+    await sleep(0);
+
+    expect(attempts).toBe(0);
+  });
+});
+
 describe("own-resume conflict collateral (#1389)", () => {
   test("a foreign exact-previd resume supersedes the former stream without retaining or re-resuming it", () => {
     // This is deliberately two BrowserXmppClient instances, not two connects
@@ -666,6 +742,87 @@ describe("exhaustion recovery (C2)", () => {
         value: originalNavigator,
         configurable: true,
       });
+    }
+  });
+
+  test("a send queued during a network blip over a live stream recovers on the online event", async () => {
+    const listeners: Record<string, Array<() => void>> = {};
+    const globals = globalThis as { window?: unknown };
+    const originalWindow = globals.window;
+    const originalNavigator = globalThis.navigator;
+    // Keep the mocked storage: the outbox persists queued sends there.
+    globals.window = {
+      ...(originalWindow as object),
+      addEventListener: (name: string, cb: () => void) => { (listeners[name] ??= []).push(cb); },
+      removeEventListener: (name: string, cb: () => void) => {
+        listeners[name] = (listeners[name] ?? []).filter((l) => l !== cb);
+      },
+    };
+    const setOnline = (onLine: boolean) =>
+      Object.defineProperty(globalThis, "navigator", { value: { onLine }, configurable: true });
+    try {
+      const { client, stub, statuses } = createHarness();
+      const sent: string[] = [];
+      Object.assign(stub, {
+        send_chat_message: async (_peer: string, body: string, opts: { stanza_id?: string }) => {
+          sent.push(body);
+          return opts.stanza_id ?? null;
+        },
+      });
+      setOnline(false);
+      await client.sendDirectMessage("bob@example.com", "sent during the blip");
+      expect(statuses.at(-1)?.state).toBe("offline");
+      expect(sent).toEqual([]);
+
+      setOnline(true);
+      for (const cb of listeners.online ?? []) cb();
+      await sleep(1);
+
+      expect(statuses.at(-1)?.state).toBe("online");
+      expect(sent).toEqual(["sent during the blip"]);
+      expect(listeners.online ?? []).toHaveLength(0);
+    } finally {
+      Object.defineProperty(globalThis, "navigator", { value: originalNavigator, configurable: true });
+      if (originalWindow === undefined) delete globals.window;
+      else globals.window = originalWindow;
+    }
+  });
+
+  test("an online listener armed during a live session never reconnects past a terminal block", async () => {
+    const listeners: Record<string, Array<() => void>> = {};
+    const globals = globalThis as { window?: unknown };
+    const originalWindow = globals.window;
+    const originalNavigator = globalThis.navigator;
+    // Keep the mocked storage: the outbox persists queued sends there.
+    globals.window = {
+      ...(originalWindow as object),
+      addEventListener: (name: string, cb: () => void) => { (listeners[name] ??= []).push(cb); },
+      removeEventListener: (name: string, cb: () => void) => {
+        listeners[name] = (listeners[name] ?? []).filter((l) => l !== cb);
+      },
+    };
+    const setOnline = (onLine: boolean) =>
+      Object.defineProperty(globalThis, "navigator", { value: { onLine }, configurable: true });
+    try {
+      const harness = createHarness();
+      const { client, state } = harness;
+      let attempts = 0;
+      state.doConnect = async () => { attempts += 1; };
+      setOnline(false);
+      await client.sendDirectMessage("bob@example.com", "sent during the blip");
+      expect(listeners.online ?? []).toHaveLength(1);
+
+      harness.fireError({ condition: "not-authorized", detail: "session expired" });
+      harness.fireDisconnected();
+      setOnline(true);
+      for (const cb of listeners.online ?? []) cb();
+      await sleep(1);
+
+      expect(attempts).toBe(0);
+    } finally {
+      Object.defineProperty(globalThis, "navigator", { value: originalNavigator, configurable: true });
+      if (originalWindow === undefined) delete globals.window;
+      else globals.window = originalWindow;
     }
   });
 

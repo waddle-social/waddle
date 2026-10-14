@@ -157,6 +157,7 @@ function runPipeline(pipeline: Pipeline, testCase: MergeCase): PipelineOutcome {
       activeChannelId: ref(CHANNEL_ID),
       pendingEchoClientIds,
       scrollToPinnedEdgeAndPin,
+      isPinnedAtEdge: ref(true),
       persistLastSeen,
     });
     for (const event of testCase.events) {
@@ -174,6 +175,7 @@ function runPipeline(pipeline: Pipeline, testCase: MergeCase): PipelineOutcome {
     activePeerJid: ref(PEER),
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
+    isPinnedAtEdge: ref(true),
     persistLastSeen,
     isFeedVisible: (m) => !m.threadId || m.id === m.threadId,
   });

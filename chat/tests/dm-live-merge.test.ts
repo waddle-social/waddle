@@ -32,6 +32,7 @@ function harness(peerJid = "bob@example.com") {
     activePeerJid: ref(peerJid),
     pendingEchoClientIds,
     scrollToPinnedEdgeAndPin,
+    isPinnedAtEdge: ref(true),
     persistLastSeen,
     isFeedVisible,
   });

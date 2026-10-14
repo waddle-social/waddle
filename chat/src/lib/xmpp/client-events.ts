@@ -147,7 +147,6 @@ export type ClientEvents = {
   activity: [event: RoomActivityEvent];
   inboxPush: [entry: InboxEntry];
   roomAvatar: [roomJid: string, hash: string];
-  roomDisconnect: [];
   presence: [presence: RoomPresence];
   lastSeen: [nick: string, timestamp: number];
   messageAck: [messageId: string];

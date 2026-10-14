@@ -668,6 +668,9 @@ pub(crate) struct WasmDriverTask {
     pub(crate) sm_clock_tx: mpsc::Sender<u64>,
     pub(crate) sm_clock_rx: mpsc::Receiver<u64>,
     pub(crate) sm_clock_schedule: super::driver::SmClockTimerSchedule,
+    /// When the armed clock interval last pulsed; a long gap means the page
+    /// was frozen or the device slept, not that the peer went silent.
+    pub(crate) sm_clock_last_pulse: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 #[cfg(test)]

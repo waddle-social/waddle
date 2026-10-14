@@ -11,7 +11,7 @@ import { TypedEventBus, type ClientEvents } from "../src/lib/xmpp/client-events"
 import { MamPager, rawMessageSeenIds, type MamWasmClient } from "../src/lib/xmpp/client-mam";
 import { ReconnectCatchup } from "../src/lib/xmpp/reconnect-catchup";
 import { clearDmCallActivities, readDmCallActivity } from "../src/lib/calls/dm-call-activity";
-import type { LiveDmMessage, XmppErrorEvent } from "../src/lib/xmpp/types";
+import type { DmReactionEvent, LiveDmMessage, XmppErrorEvent } from "../src/lib/xmpp/types";
 import type { WasmArchivedMessage, WasmMamPage } from "../src/lib/xmpp/wasm-types";
 
 const SELF = "alice@example.com";
@@ -224,6 +224,34 @@ describe("MamPager reconnect catch-up cursor handling", () => {
     expect(cursors).toEqual(["a0", "a1"]);
     expect(delivered.map((message) => message.body)).toEqual(["one", "two"]);
     expect(errors).toEqual([]);
+  });
+
+  test("archived reactions are emitted as reactions, not blank message rows", async () => {
+    const reaction: WasmArchivedMessage = {
+      ...archivedDm("a2", "", "2024-01-01T00:00:02Z"),
+      reaction_target_id: "msg-a1",
+      reaction_emojis: ["👍"],
+    };
+    const xmpp: MamWasmClient = {
+      fetch_dm_history_page: async () =>
+        page([archivedDm("a1", "one", "2024-01-01T00:00:01Z"), reaction], { complete: true }),
+    };
+    const { pager, events } = createPager(xmpp);
+    const delivered: LiveDmMessage[] = [];
+    const reactions: DmReactionEvent[] = [];
+    events.on("directMessage", (message) => delivered.push(message));
+    events.on("dmReaction", (event) => reactions.push(event));
+
+    await pager.runReconnectCatchup(xmpp, [{ kind: "dm", key: PEER, scope: "account", after: "a0" }]);
+
+    expect(delivered.map((message) => message.body)).toEqual(["one"]);
+    expect(reactions).toEqual([{
+      peerJid: PEER,
+      reactorJid: PEER,
+      messageId: "msg-a1",
+      emojis: ["👍"],
+      occurredAt: "2024-01-01T00:00:02Z",
+    }]);
   });
 
   test("a non-advancing cursor is reported as a recoverable history error, not an infinite loop", async () => {
@@ -855,7 +883,9 @@ describe("MUC-PM classification and archive isolation (#1256, #1281)", () => {
 
     expect(requestedPeers).toEqual([MUC_PM_ALICE]);
     expect(result.messages.map((message) => message.body)).toEqual(["alice reply"]);
-    expect(catchup.getDmLastSeen(MUC_PM_ALICE)).toBe("2026-07-01T10:00:01.000Z");
+    // Thread pages never seed catch-up cursors (they cannot vouch for the
+    // rest of the conversation), for the requested occupant or a sibling.
+    expect(catchup.getDmLastSeen(MUC_PM_ALICE)).toBeUndefined();
     expect(catchup.getDmLastSeen(MUC_PM_BOB)).toBeUndefined();
   });
 

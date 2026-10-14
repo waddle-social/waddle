@@ -94,7 +94,7 @@ describe("message rejection across the browser and timeline", () => {
     const h = harness();
     const merge = useDmLiveMerge({ session: ref(session), messages: h.messages,
       activePeerJid: ref("chat@example.com"), pendingEchoClientIds: h.send.pendingEchoClientIds,
-      scrollToPinnedEdgeAndPin: async () => true, persistLastSeen: () => {}, isFeedVisible: () => true });
+      scrollToPinnedEdgeAndPin: async () => true, isPinnedAtEdge: ref(true), persistLastSeen: () => {}, isFeedVisible: () => true });
     h.client.setDirectMessageHandler(merge.handleIncomingMessage);
     const internal = h.client as unknown as {
       openResumeBarrier: (host: typeof h.xmpp, promise: Promise<void>) => void;

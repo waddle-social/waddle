@@ -53,6 +53,14 @@ export function roomJoinRetryDelayMs(
   return Math.round(exponentialDelay * jitter);
 }
 
+/** The retry chain was cancelled (navigation, teardown), not a failed join. */
+export class RoomJoinRetryCancelledError extends Error {
+  constructor() {
+    super("Room join retry cancelled");
+    this.name = "RoomJoinRetryCancelledError";
+  }
+}
+
 /**
  * Owns one pending retry per canonical room JID. Callers arriving during the
  * backoff window receive the same promise, so they cannot turn one rejected
@@ -129,7 +137,7 @@ export class RoomJoinRetryCoordinator {
     // it settles. Preserve its exponent until then; run() cleans it up when
     // the cancelled chain actually ends.
     if (!running) this.failureCounts.delete(roomKey);
-    const cancellation = new Error("Room join retry cancelled");
+    const cancellation = new RoomJoinRetryCancelledError();
     if (entry) {
       this.scheduled.delete(roomKey);
       this.timer.clearTimeout(entry.timer);
@@ -172,7 +180,7 @@ export class RoomJoinRetryCoordinator {
     this.scheduled.delete(roomKey);
     if (!options.isEligible()) {
       this.failureCounts.delete(roomKey);
-      reject(new Error("Room join retry cancelled"));
+      reject(new RoomJoinRetryCancelledError());
       return;
     }
     const running: RunningRoomJoinRetry = {
@@ -198,7 +206,7 @@ export class RoomJoinRetryCoordinator {
 }
 
 function cancelledRoomJoinRetry(): Promise<void> {
-  const promise = Promise.reject<void>(new Error("Room join retry cancelled"));
+  const promise = Promise.reject<void>(new RoomJoinRetryCancelledError());
   void promise.catch(() => undefined);
   return promise;
 }
