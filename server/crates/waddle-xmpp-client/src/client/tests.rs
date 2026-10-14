@@ -876,7 +876,7 @@ async fn drive_task_to_resume_attempt(task: &mut DriverTask) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn native_driver_routes_stream_management_clock_retries_timeout_and_terminal_close() {
+async fn native_driver_retires_timed_out_transport_without_ending_resumable_stream() {
     let shared = MockTransportShared::default();
     let (mut task, _cmd_tx, mut events) = make_driver_task_with_config(
         config_with_resume_state(),
@@ -902,8 +902,10 @@ async fn native_driver_routes_stream_management_clock_retries_timeout_and_termin
             .await
     );
     assert!(
-        task.poll_stream_management_clock_at(now + chrono::Duration::seconds(30))
-            .await
+        !task
+            .poll_stream_management_clock_at(now + chrono::Duration::seconds(30))
+            .await,
+        "the timed-out driver must exit immediately"
     );
 
     let sent = shared.sent_messages();
@@ -916,7 +918,23 @@ async fn native_driver_routes_stream_management_clock_retries_timeout_and_termin
             .count(),
         3,
     );
-    assert_eq!(shared.close_count(), 1);
+    assert_eq!(
+        shared.close_count(),
+        0,
+        "recovery must not cleanly end XMPP"
+    );
+    assert!(!sent
+        .iter()
+        .any(|message| matches!(message, TransportMessage::Close(_))));
+    assert_eq!(task.runtime.snapshot().phase, SessionPhase::Disconnected);
+    assert!(!task.runtime.can_send_app_stanza());
+    let resume = task
+        .runtime
+        .resume_state()
+        .expect("timeout preserves SM state");
+    assert_eq!(resume.previd().as_str(), "prev-stream");
+    assert_eq!(resume.outbound_h(), 1);
+    assert!(resume.has_unhandled_outbound_stanzas());
     assert!(
         std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
             event,
