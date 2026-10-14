@@ -43,10 +43,12 @@ spec:
     cutoverGuard:
       enabled: true
     updateStrategy:
-      # #1945: install V1026 and the strict V2 manifest reader across the fleet.
-      # Restore RollingUpdate only in a later server-free change after the
-      # publisher-derived cutover guard verifies every ready pod's revision.
-      type: Recreate
+      # #1945: V1026 and the manifest reader reached both replicas via Recreate.
+      # Keep the publisher-derived live cutover guard enabled for rolling upgrades.
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
