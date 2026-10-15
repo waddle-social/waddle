@@ -1,6 +1,6 @@
 use super::super::send::{
     close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
-    send_ws_text_frames_with_authority, AuthoritySendOutcome,
+    send_ws_text_frames_with_authority, AuthoritySendOutcome, InterruptibleSink,
 };
 use axum::extract::ws::Message;
 use futures::Sink;
@@ -134,6 +134,175 @@ struct RevokeBeforeStartSendSink {
 /// prove no stale frame reaches the synchronous `start_send` commit point.
 struct PendingReadySink {
     sent: Vec<Message>,
+}
+
+struct PendingFlushSink {
+    sent: Vec<Message>,
+}
+
+struct DetachOnReadySink {
+    interrupt: tokio_util::sync::CancellationToken,
+    sent: Vec<Message>,
+}
+
+impl Sink<Message> for DetachOnReadySink {
+    type Error = &'static str;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        self.interrupt.cancel();
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.sent.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn forced_detach_between_ready_and_start_send_suppresses_the_frame() {
+    let interrupt = tokio_util::sync::CancellationToken::new();
+    let mut sink = InterruptibleSink::new(
+        DetachOnReadySink {
+            interrupt: interrupt.clone(),
+            sent: Vec::new(),
+        },
+        interrupt,
+    );
+    assert!(!send_ws_message(&mut sink, Message::Text("<stale/>".into()), "detach").await);
+    assert!(sink.uninterrupted().sent.is_empty());
+}
+
+impl Sink<Message> for PendingFlushSink {
+    type Error = &'static str;
+
+    fn poll_ready(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn start_send(mut self: Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        self.sent.push(item);
+        Ok(())
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Pending
+    }
+
+    fn poll_close(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+#[tokio::test]
+async fn forced_detach_interrupts_ordinary_write_waiting_for_readiness() {
+    let interrupt = tokio_util::sync::CancellationToken::new();
+    let mut sink = InterruptibleSink::new(PendingReadySink { sent: Vec::new() }, interrupt.clone());
+    let send = send_ws_message(&mut sink, Message::Text("<message/>".into()), "detach");
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    interrupt.cancel();
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_millis(100), send)
+            .await
+            .expect("forced detach must wake the parked readiness wait")
+    );
+}
+
+#[tokio::test]
+async fn forced_detach_interrupts_ordinary_write_waiting_for_flush() {
+    let interrupt = tokio_util::sync::CancellationToken::new();
+    let mut sink = InterruptibleSink::new(PendingFlushSink { sent: Vec::new() }, interrupt.clone());
+    {
+        let send = send_ws_message(&mut sink, Message::Text("<message/>".into()), "detach");
+        tokio::pin!(send);
+        assert!(futures::poll!(send.as_mut()).is_pending());
+        interrupt.cancel();
+        assert!(
+            !tokio::time::timeout(std::time::Duration::from_millis(100), send)
+                .await
+                .expect("forced detach must wake the parked flush wait")
+        );
+    }
+    assert_eq!(
+        sink.uninterrupted().sent.len(),
+        1,
+        "flush interruption follows transport acceptance"
+    );
+}
+
+async fn interrupted_batch_retains_replay<S>(sink: S)
+where
+    S: Sink<Message, Error = &'static str> + Unpin,
+{
+    use super::super::batch_write::{
+        write_response_batch_with_admission, BatchAuthority, BatchSmPolicy, BatchWriteOutcome,
+    };
+
+    let state = super::create_test_websocket_state().await;
+    let lifecycle = crate::clustering::NodeLifecycle::new();
+    let permit = lifecycle.admit().expect("serving permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut conn = super::super::state::WsConnState::new();
+    conn.sm_state
+        .enable("interrupted-batch".to_owned(), true, Some(300));
+    let interrupt = conn.write_interruption.clone();
+    let mut sink = InterruptibleSink::new(sink, interrupt.clone());
+    let mut reader = futures::stream::pending::<Result<Message, std::convert::Infallible>>();
+    let frames: Vec<String> = ["first", "second"]
+        .into_iter()
+        .map(|id| {
+            super::super::transport_xml::element_to_xml(
+                xmpp_parsers::minidom::Element::builder("message", waddle_xmpp::ns::JABBER_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .build(),
+            )
+        })
+        .collect();
+    let outcome = {
+        let write = write_response_batch_with_admission(
+            &mut sink,
+            &mut reader,
+            state.as_ref(),
+            &mut conn,
+            frames.clone(),
+            BatchSmPolicy::Record,
+            BatchAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        );
+        tokio::pin!(write);
+        assert!(futures::poll!(write.as_mut()).is_pending());
+        interrupt.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(100), write)
+            .await
+            .expect("force detach must promptly return the batch to cleanup")
+    };
+    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(conn.sm_state.outbound_count, 2);
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].stanza_xml, frames[0]);
+    assert_eq!(replay[1].stanza_xml, frames[1]);
+}
+
+#[tokio::test]
+async fn forced_detach_retains_batch_replay_while_ordinary_readiness_is_blocked() {
+    interrupted_batch_retains_replay(PendingReadySink { sent: Vec::new() }).await;
+}
+
+#[tokio::test]
+async fn forced_detach_retains_batch_replay_while_ordinary_flush_is_blocked() {
+    interrupted_batch_retains_replay(PendingFlushSink { sent: Vec::new() }).await;
 }
 
 impl Sink<Message> for PendingReadySink {

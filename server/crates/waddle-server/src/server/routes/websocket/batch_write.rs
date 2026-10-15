@@ -568,6 +568,9 @@ where
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    if conn.write_interruption.is_cancelled() {
+        return SendWindowOutcome::TransportClosed;
+    }
     if !batch_authoritative(authority) {
         return SendWindowOutcome::AuthorityRevoked;
     }
@@ -595,6 +598,9 @@ where
     }
     conn.sm_state.note_ack_request_sent();
     loop {
+        if conn.write_interruption.is_cancelled() {
+            return SendWindowOutcome::TransportClosed;
+        }
         if !batch_authoritative(authority) {
             return SendWindowOutcome::AuthorityRevoked;
         }
@@ -611,6 +617,9 @@ where
         }
         let next = match tokio::select! {
             biased;
+            _ = conn.write_interruption.cancelled() => {
+                return SendWindowOutcome::TransportClosed;
+            }
             _ = batch_authority_revoked(authority) => {
                 return SendWindowOutcome::AuthorityRevoked;
             }
@@ -630,6 +639,9 @@ where
                 return SendWindowOutcome::TimedOut;
             }
         };
+        if conn.write_interruption.is_cancelled() {
+            return SendWindowOutcome::TransportClosed;
+        }
         if !batch_authoritative(authority) {
             return SendWindowOutcome::AuthorityRevoked;
         }
@@ -775,10 +787,13 @@ where
         .iter()
         .position(|text| is_client_sm_request(text.as_str()))
     {
-        conn.deferred_inbound.remove(index);
+        if conn.write_interruption.is_cancelled() {
+            return Err(SendWindowOutcome::TransportClosed);
+        }
         if !batch_authoritative(authority) {
             return Err(SendWindowOutcome::AuthorityRevoked);
         }
+        conn.deferred_inbound.remove(index);
         super::stream_management::flush_ingress_checkpoint(
             state,
             &conn.sm_state,
@@ -960,6 +975,9 @@ where
     RE: std::fmt::Display,
 {
     loop {
+        if conn.write_interruption.is_cancelled() {
+            return DrainSignal::TransportClosed;
+        }
         if !batch_authoritative(authority) {
             return DrainSignal::AuthorityRevoked;
         }
@@ -970,6 +988,9 @@ where
             // Nothing buffered right now — back to writing.
             return DrainSignal::Idle;
         };
+        if conn.write_interruption.is_cancelled() {
+            return DrainSignal::TransportClosed;
+        }
         match next {
             Some(Ok(Message::Text(text))) => {
                 conn.note_transport_activity();

@@ -339,6 +339,10 @@ pub struct ConnectionEntry {
     /// own asker-side ack timeout instead (a bounded, not indefinite, wait).
     force_detach_tx: mpsc::Sender<ForceDetachRequest>,
     force_detach_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<ForceDetachRequest>>>>,
+    /// Per-generation socket I/O interruption, shared only with its owning
+    /// transport. Cancel after successfully queueing an identity-verified
+    /// force detach so blocked writes yield to connection-owned cleanup.
+    pub write_interruption: tokio_util::sync::CancellationToken,
 }
 
 /// See [`ConnectionEntry::force_detach_tx`]'s doc comment for why this is
@@ -365,6 +369,7 @@ impl ConnectionEntry {
             occupancy_session: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
+            write_interruption: tokio_util::sync::CancellationToken::new(),
         }
     }
 

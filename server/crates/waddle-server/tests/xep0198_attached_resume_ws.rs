@@ -1,0 +1,269 @@
+//! XEP-0198 §5: resuming an unfinished session also replaces its live stream.
+
+use jid::FullJid;
+use minidom::Element;
+use std::time::Duration;
+use waddle_ws_test_support::{TestServer, WsXmppClient};
+use waddle_xmpp::{
+    parser::ns::{STREAM, STREAMS},
+    pending_delivery::SmSessionId,
+    stream_management::SM_NS,
+};
+use xmpp_parsers::{
+    iq::Iq,
+    message::{Id, Lang, Message, MessageType},
+    ping::Ping,
+};
+
+const ACCOUNTS: &[(&str, &str)] = &[
+    ("alice", "attached-resume-alice"),
+    ("bob", "attached-resume-bob"),
+];
+
+async fn send(client: &mut WsXmppClient, element: Element) {
+    let mut bytes = Vec::new();
+    element.write_to(&mut bytes).expect("serialize XML");
+    client
+        .send(&String::from_utf8(bytes).expect("XML UTF-8"))
+        .await
+        .expect("send XML");
+}
+
+async fn recv(client: &mut WsXmppClient) -> Element {
+    client
+        .recv()
+        .await
+        .expect("server frame")
+        .parse()
+        .expect("server XML")
+}
+
+async fn authenticate(server: &TestServer, account: usize) -> WsXmppClient {
+    let mut client = WsXmppClient::connect(&server.ws_url())
+        .await
+        .expect("fresh WebSocket");
+    client
+        .authenticate("localhost", ACCOUNTS[account].0, ACCOUNTS[account].1)
+        .await
+        .expect("SASL authentication");
+    assert!(
+        client.full_jid.is_none(),
+        "resume precedes resource binding"
+    );
+    client
+}
+
+async fn original(server: &TestServer) -> (WsXmppClient, SmSessionId) {
+    let mut client = authenticate(server, 0).await;
+    client.bind("phone").await.expect("original resource bind");
+    send(
+        &mut client,
+        Element::builder("enable", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+            .build(),
+    )
+    .await;
+    let enabled = recv(&mut client).await;
+    assert!(enabled.is("enabled", SM_NS));
+    assert!(matches!(enabled.attr("resume"), Some("true" | "1")));
+    let stream = SmSessionId::new(enabled.attr("id").expect("resumable stream ID"));
+    (client, stream)
+}
+
+async fn resume(client: &mut WsXmppClient, stream: &SmSessionId, handled: u32) -> Element {
+    send(
+        client,
+        Element::builder("resume", SM_NS)
+            .attr(
+                minidom::rxml::xml_ncname!("previd").to_owned(),
+                stream.as_str(),
+            )
+            .attr(
+                minidom::rxml::xml_ncname!("h").to_owned(),
+                handled.to_string(),
+            )
+            .build(),
+    )
+    .await;
+    recv(client).await
+}
+
+async fn ping(client: &mut WsXmppClient, id: &str) {
+    send(client, Iq::from_get(id, Ping).into()).await;
+    let result = client
+        .recv_matching(|frame| {
+            frame
+                .parse::<Element>()
+                .is_ok_and(|element| element.attr("id") == Some(id))
+        })
+        .await
+        .expect("ping result");
+    let result: Element = result.parse().expect("ping XML");
+    assert!(result.is("iq", xmpp_parsers::ns::JABBER_CLIENT));
+    assert_eq!(result.attr("type"), Some("result"));
+}
+
+async fn assert_handled(client: &mut WsXmppClient, handled: u32) {
+    send(client, Element::builder("r", SM_NS).build()).await;
+    let ack = client
+        .recv_matching(|frame| {
+            frame
+                .parse::<Element>()
+                .is_ok_and(|element| element.is("a", SM_NS))
+        })
+        .await
+        .expect("SM acknowledgement");
+    let ack: Element = ack.parse().expect("ack XML");
+    assert_eq!(ack.attr("h"), Some(handled.to_string().as_str()));
+}
+
+async fn send_message(client: &mut WsXmppClient, to: FullJid, id: &str) {
+    let mut message = Message::new(Some(to.into()));
+    message.id = Some(Id(id.to_owned()));
+    message.type_ = MessageType::Chat;
+    message.bodies.insert(Lang::new(), id.to_owned());
+    send(client, message.into()).await;
+}
+
+async fn receive_message(client: &mut WsXmppClient, id: &str) -> Message {
+    let frame = client
+        .recv_matching(|frame| {
+            frame
+                .parse::<Element>()
+                .is_ok_and(|element| element.name() == "message" && element.attr("id") == Some(id))
+        })
+        .await
+        .expect("routed message");
+    Message::try_from(frame.parse::<Element>().expect("message XML")).expect("typed message")
+}
+
+/// A close must arrive; the SHOULD-level conflict is inspected when present.
+async fn assert_replaced_transport_closes(client: &mut WsXmppClient) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            match client.recv_raw_timeout(Duration::from_secs(10)).await {
+                Ok(Some(frame)) if frame.is_close() => return,
+                Ok(Some(frame)) => {
+                    if let Ok(text) = frame.to_text() {
+                        let element: Element = text.parse().expect("old stream XML");
+                        if element.is("error", STREAM) {
+                            assert!(element.get_child("conflict", STREAMS).is_some());
+                        }
+                    }
+                }
+                Ok(None) => return,
+                Err(error) if !error.contains("Timeout") => return,
+                Err(error) => panic!("old transport did not close: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("replaced transport closes promptly");
+}
+
+#[tokio::test]
+async fn attached_resume_replays_in_order_and_fences_the_replaced_transport() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let (mut old, stream) = original(&server).await;
+    let old_jid: FullJid = old
+        .full_jid
+        .as_deref()
+        .expect("bound JID")
+        .parse()
+        .expect("full JID");
+    for id in ["acked", "retained-first", "retained-second"] {
+        ping(&mut old, id).await;
+    }
+    assert_handled(&mut old, 3).await;
+
+    // Keep the original socket alive and send no XMPP close or transport drop.
+    let mut replacement = authenticate(&server, 0).await;
+    let response = resume(&mut replacement, &stream, 1).await;
+    assert!(
+        response.is("resumed", SM_NS),
+        "resume response: {response:?}"
+    );
+    assert_eq!(response.attr("previd"), Some(stream.as_str()));
+    assert_eq!(response.attr("h"), Some("3"));
+    for id in ["retained-first", "retained-second"] {
+        let replay = recv(&mut replacement).await;
+        assert!(replay.is("iq", xmpp_parsers::ns::JABBER_CLIENT));
+        assert_eq!(replay.attr("id"), Some(id));
+        assert_eq!(replay.attr("type"), Some("result"));
+    }
+
+    // These may already fail at the socket. If accepted by the OS, they must
+    // not acknowledge the successor's queue, count inbound, or end its session.
+    for element in [
+        Element::builder("a", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "3")
+            .build(),
+        Iq::from_get("late-old-ping", Ping).into(),
+    ] {
+        let mut bytes = Vec::new();
+        element.write_to(&mut bytes).expect("serialize stale frame");
+        let _ = old
+            .send(&String::from_utf8(bytes).expect("XML UTF-8"))
+            .await;
+    }
+    assert_replaced_transport_closes(&mut old).await;
+    drop(old);
+
+    ping(&mut replacement, "successor-ping").await;
+    assert_handled(&mut replacement, 4).await;
+    let mut peer = authenticate(&server, 1).await;
+    peer.bind("observer").await.expect("peer binds");
+    let peer_jid: FullJid = peer
+        .full_jid
+        .as_deref()
+        .expect("peer JID")
+        .parse()
+        .expect("full JID");
+    send_message(&mut replacement, peer_jid, "same-bound-jid").await;
+    let routed = receive_message(&mut peer, "same-bound-jid").await;
+    assert_eq!(routed.from, Some(old_jid.clone().into()));
+    send_message(&mut peer, old_jid, "new-owner-routing").await;
+    receive_message(&mut replacement, "new-owner-routing").await;
+    replacement.close().await.expect("successor closes");
+    peer.close().await.expect("peer closes");
+}
+
+#[tokio::test]
+async fn another_principal_cannot_detach_the_attached_owner() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let (mut owner, stream) = original(&server).await;
+    let mut stranger = authenticate(&server, 1).await;
+    let failed = resume(&mut stranger, &stream, 0).await;
+    assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+    assert!(failed
+        .get_child("not-authorized", xmpp_parsers::ns::XMPP_STANZAS)
+        .is_some());
+    // Positive barriers prove both the old stream and its SM state survived.
+    ping(&mut owner, "owner-still-live").await;
+    assert_handled(&mut owner, 1).await;
+    let mut legitimate = authenticate(&server, 0).await;
+    let response = resume(&mut legitimate, &stream, 1).await;
+    assert!(
+        response.is("resumed", SM_NS),
+        "resume response: {response:?}"
+    );
+    assert_eq!(response.attr("h"), Some("1"));
+    ping(&mut legitimate, "authorized-successor").await;
+    assert_handled(&mut legitimate, 2).await;
+    legitimate
+        .close()
+        .await
+        .expect("legitimate successor closes");
+    stranger.close().await.expect("stranger closes");
+}
+
+#[tokio::test]
+async fn intentional_logout_cannot_be_force_resumed() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let (owner, stream) = original(&server).await;
+    owner.close().await.expect("terminal XMPP close");
+    let mut replacement = authenticate(&server, 0).await;
+    let failed = resume(&mut replacement, &stream, 0).await;
+    assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+    replacement.close().await.expect("replacement closes");
+}

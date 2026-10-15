@@ -28,7 +28,7 @@ const FORCE_DETACH_BUSY_UNREGISTER_ATTEMPTS: usize = 3;
 
 #[cfg(test)]
 tokio::task_local! {
-    static POST_DETACH_STORE_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+    pub(super) static POST_DETACH_STORE_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 }
 
 #[cfg(all(test, feature = "clustering"))]

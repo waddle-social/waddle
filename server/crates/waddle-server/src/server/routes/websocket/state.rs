@@ -1767,6 +1767,7 @@ pub(super) struct WsConnState {
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
+    pub(super) write_interruption: tokio_util::sync::CancellationToken,
     /// One-shot flag: when set, the main loop must NOT push the current
     /// frame's responses into `sm_state.record_outbound`. The flag is
     /// raised by `handle_sm_resume` because the responses it returns are
@@ -1891,6 +1892,7 @@ impl WsConnState {
             post_sm_finalization_test_hook: None,
             registry_owner: None,
             socket_lifecycle: None,
+            write_interruption: tokio_util::sync::CancellationToken::new(),
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
             deferred_inbound: std::collections::VecDeque::new(),

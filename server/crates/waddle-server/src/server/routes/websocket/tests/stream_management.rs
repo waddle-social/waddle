@@ -12441,3 +12441,240 @@ mod terminal_ordering_release_tests {
         held_release_terminal_recovery(true).await;
     }
 }
+
+#[tokio::test]
+async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup() {
+    use super::super::cleanup::{
+        finish_socket_cleanup, ConnectionShutdownOutcome, POST_DETACH_STORE_GATE,
+    };
+    use super::super::registration::{
+        register_bound_connection_after_frame, RegistrationAfterFrame,
+    };
+    use super::super::stream_management::SmRegistrationFinalization;
+    use std::time::Duration;
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::registry::SocketCleanupState;
+
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let jid: FullJid = "alice@example.com/resume-race".parse().expect("JID");
+    let stream_id = SmSessionId::new("live-resume-cleanup-race");
+    let mut old = WsConnState::new();
+    old.phase = ConnectionPhase::ready(jid.clone(), false);
+    old.authenticated_session = Some(session.clone());
+    let (old_tx, mut old_rx) = mpsc::channel(4);
+    let mut pending = Some(old_tx);
+    assert!(matches!(
+        register_bound_connection_after_frame(&state, "example.com", &mut old, &mut pending).await,
+        RegistrationAfterFrame::Registered(_)
+    ));
+    old.sm_state
+        .enable(stream_id.as_str().to_owned(), true, Some(300));
+    state
+        .deps
+        .protocol
+        .connection_registry
+        .set_sm_stream_id(&jid, Some(stream_id.clone()));
+    state
+        .deps
+        .protocol
+        .ingress
+        .enroll_stream(&stream_id)
+        .await
+        .expect("enroll stream");
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim(stream_id.as_str())
+            .await
+            .expect("enabled stream claim"),
+    );
+    let old_owner = old.registry_owner.clone().expect("old owner");
+    let lifecycle = old.socket_lifecycle.clone().expect("old socket lifecycle");
+    let generation = old.occupancy_session;
+    let mut detach_requests = lifecycle
+        .entry
+        .take_force_detach_rx()
+        .expect("socket receiver");
+
+    // Capture both resume requests on the old entry before allowing its
+    // ordinary transport-drop cleanup to make a detached snapshot visible.
+    let claimed = Arc::new(Notify::new());
+    let release_claim = Arc::new(Notify::new());
+    let winner = tokio::spawn({
+        let state = state.clone();
+        let jid = jid.clone();
+        let session = session.clone();
+        let stream_id = stream_id.clone();
+        let hook = (claimed.clone(), release_claim.clone());
+        async move {
+            let mut conn = WsConnState::new();
+            conn.phase = ConnectionPhase::authenticated(&jid);
+            conn.authenticated_session = Some(session);
+            conn.pre_final_principal_recheck_test_hook = Some(hook);
+            let responses = handle_xmpp_frame(
+                &resume_frame_xml(stream_id.as_str(), 0),
+                "example.com",
+                &state,
+                &mut conn,
+            )
+            .await;
+            (responses, conn)
+        }
+    });
+    let first = tokio::time::timeout(Duration::from_secs(2), detach_requests.recv())
+        .await
+        .expect("first request arrives")
+        .expect("first request");
+    let loser = tokio::spawn({
+        let state = state.clone();
+        let jid = jid.clone();
+        let stream_id = stream_id.clone();
+        async move {
+            let mut conn = WsConnState::new();
+            conn.phase = ConnectionPhase::authenticated(&jid);
+            conn.authenticated_session = Some(session);
+            let responses = handle_xmpp_frame(
+                &resume_frame_xml(stream_id.as_str(), 0),
+                "example.com",
+                &state,
+                &mut conn,
+            )
+            .await;
+            (responses, conn)
+        }
+    });
+    let second = tokio::time::timeout(Duration::from_secs(2), detach_requests.recv())
+        .await
+        .expect("second request arrives")
+        .expect("second request");
+    let stored = Arc::new(Notify::new());
+    let release_cleanup = Arc::new(Notify::new());
+    let cleanup = tokio::spawn({
+        let state = state.clone();
+        let gate = (stored.clone(), release_cleanup.clone());
+        POST_DETACH_STORE_GATE.scope(gate, async move {
+            let outcome = cleanup_connection_shutdown(&state, &mut old_rx, &mut old, false).await;
+            finish_socket_cleanup(&state, &old, outcome).await;
+            outcome
+        })
+    });
+    tokio::time::timeout(Duration::from_secs(2), stored.notified())
+        .await
+        .expect("snapshot is visible while old cleanup is paused");
+
+    // A lost acknowledgment is deliberately not cleanup proof. Both requests
+    // continue through the actual SM claim path against the visible snapshot.
+    drop(first);
+    tokio::time::timeout(Duration::from_secs(2), claimed.notified())
+        .await
+        .expect("first contender acquires the real snapshot claim");
+    drop(second);
+    let (responses, rejected) = tokio::time::timeout(Duration::from_secs(2), loser)
+        .await
+        .expect("competing resume returns")
+        .expect("loser task");
+    assert!(
+        responses.iter().any(|frame| {
+            let element = Element::from_str(frame).expect("response XML");
+            element.name() == "failed" && element.ns() == SM_NS
+        }),
+        "the competing resume must fail: {responses:?}"
+    );
+    assert!(
+        responses.iter().all(|frame| {
+            let element = Element::from_str(frame).expect("response XML");
+            element.name() != "resumed"
+        }),
+        "only the winning contender may resume"
+    );
+    assert!(!rejected.phase.is_ready());
+    assert!(rejected.pending_resume_claim.is_none());
+
+    release_claim.notify_one();
+    let (responses, mut resumed) = tokio::time::timeout(Duration::from_secs(2), winner)
+        .await
+        .expect("winning frame finishes")
+        .expect("winner task");
+    assert!(
+        responses.iter().any(|frame| {
+            let element = Element::from_str(frame).expect("response XML");
+            element.name() == "resumed" && element.ns() == SM_NS
+        }),
+        "one contender must stage resumed output: {responses:?}"
+    );
+    assert_eq!(resumed.occupancy_session, generation);
+
+    let registration = tokio::spawn({
+        let state = state.clone();
+        async move {
+            let (sender, receiver) = mpsc::channel(4);
+            let mut pending = Some(sender);
+            let outcome = register_bound_connection_after_frame(
+                &state,
+                "example.com",
+                &mut resumed,
+                &mut pending,
+            )
+            .await;
+            (outcome, resumed, receiver)
+        }
+    });
+    let _ = tokio::time::timeout(Duration::from_secs(2), detach_requests.recv())
+        .await
+        .expect("admission reaches the old socket lifecycle")
+        .expect("lifecycle request");
+    assert_eq!(lifecycle.state(), SocketCleanupState::Running);
+    assert!(
+        !registration.is_finished(),
+        "visible snapshot cannot bypass old cleanup"
+    );
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .is_owned_by(&jid, &old_owner));
+
+    release_cleanup.notify_one();
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(2), cleanup)
+            .await
+            .expect("cleanup completes")
+            .expect("cleanup task"),
+        ConnectionShutdownOutcome::Detached
+    );
+    let (outcome, mut resumed, mut receiver) =
+        tokio::time::timeout(Duration::from_secs(2), registration)
+            .await
+            .expect("winner registers after cleanup")
+            .expect("registration task");
+    assert!(matches!(
+        outcome,
+        RegistrationAfterFrame::Registered(SmRegistrationFinalization::ReplaceWithResumed { .. })
+    ));
+    assert_eq!(resumed.occupancy_session, generation);
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .get_entry(&jid)
+            .expect("winner route")
+            .sm_stream_id(),
+        Some(stream_id)
+    );
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .is_owned_by(&jid, resumed.registry_owner.as_ref().expect("winner owner"),));
+    assert!(matches!(
+        detach_requests.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    let outcome = cleanup_connection_shutdown(&state, &mut receiver, &mut resumed, false).await;
+    finish_socket_cleanup(&state, &resumed, outcome).await;
+}

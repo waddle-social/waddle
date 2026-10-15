@@ -85,7 +85,6 @@ pub mod resume_asker;
 /// Phase 3 Slice 6). Public for the same reason as [`local_claims`]: the
 /// harness wires/drives it directly in the cross-node live-steal handshake
 /// scenario.
-#[cfg(feature = "clustering")]
 pub mod resume_bridge;
 #[cfg(feature = "clustering")]
 pub mod route_bridge;

@@ -12,7 +12,7 @@ use super::{
     replay::drive_interpret_loop,
     send::{
         close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
-        send_ws_text_frames_with_authority, AuthoritySendOutcome,
+        send_ws_text_frames_with_authority, AuthoritySendOutcome, InterruptibleSink,
     },
     session_init::build_internal_server_error_stream_error,
     state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
@@ -234,7 +234,7 @@ async fn handle_xmpp_websocket(
     let shutdown_token = state.deps.shutdown.stop_token();
     info!(domain = %domain, "XMPP WebSocket connection established");
 
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (ws_sender, mut ws_receiver) = socket.split();
 
     // Create outbound channel for receiving messages from other connections.
     // After the session is registered, `pending_tx` is handed to the
@@ -263,6 +263,7 @@ async fn handle_xmpp_websocket(
 
     // Track connection state
     let mut conn = WsConnState::new();
+    let mut ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone());
     let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<
         crate::server::routes::interpret::OrderedRelayHandoffCompletion,
     >();
@@ -423,7 +424,7 @@ async fn handle_xmpp_websocket(
                         } else {
                             info!("force-detaching this session (<conflict/> close)");
                             close_live_session_for_force_detach(
-                                &mut ws_sender,
+                                ws_sender.uninterrupted(),
                                 &conn,
                                 &admission_permit,
                                 &shutdown_token,
@@ -709,6 +710,26 @@ async fn handle_xmpp_websocket(
         }
     }
 
+    // A blocked ready/flush can end the loop before its queued control arm
+    // runs. Collect that request before any deferred old-client input can
+    // mutate state that is about to be resumed elsewhere.
+    if let Some(bound_bare) = conn.phase.bound_jid().map(|jid| jid.to_bare()) {
+        let was_detaching = !pending_force_detach.is_empty();
+        pending_force_detach.extend(drain_ready_force_detach_requests(
+            &mut force_detach_rx,
+            &bound_bare,
+        ));
+        if !was_detaching && !pending_force_detach.is_empty() {
+            close_live_session_for_force_detach(
+                ws_sender.uninterrupted(),
+                &conn,
+                &admission_permit,
+                &shutdown_token,
+            )
+            .await;
+        }
+    }
+
     // Frames the mid-batch ack drain had already pulled off the
     // socket when the transport went away (issue #1089). The old loop
     // would have processed them before ever seeing the close, so
@@ -755,7 +776,8 @@ async fn handle_xmpp_websocket(
                     .current_sm_claim_fence(stream_id)
                     .is_none()
             });
-        if shutdown_token.is_cancelled()
+        if !pending_force_detach.is_empty()
+            || shutdown_token.is_cancelled()
             || admission_permit.revalidate().is_err()
             || fenceless_teardown
         {
@@ -869,7 +891,7 @@ where
     }
 }
 
-/// Close a live stream displaced by a cross-node XEP-0198 resume.  The
+/// Close a live stream displaced by an XEP-0198 resume. The
 /// conflict wire frames are deliberately gated on a committed live stream;
 /// regardless of that gate the WebSocket transport is closed.
 async fn close_live_session_for_force_detach<S, E>(
@@ -881,19 +903,25 @@ async fn close_live_session_for_force_detach<S, E>(
     S: Sink<Message, Error = E> + Unpin,
     E: std::fmt::Display,
 {
-    if conn.has_committed_live_stream_open() {
-        let _ = send_ws_text_frames_with_authority(
+    // XEP-0198 §5 recommends conflict closure, but a black-holed transport
+    // must not delay detach persistence and recovery. The socket is discarded
+    // after this attempt, so cancelling a pending write is safe.
+    let _ = tokio::time::timeout(std::time::Duration::from_millis(250), async {
+        if conn.has_committed_live_stream_open() {
+            let _ = send_ws_text_frames_with_authority(
+                ws_sender,
+                [build_conflict_stream_error(), websocket_stream_close_xml()],
+                "Failed to send conflict stream error",
+                (admission_permit, shutdown_token),
+            )
+            .await;
+        }
+        let _ = close_ws_connection(
             ws_sender,
-            [build_conflict_stream_error(), websocket_stream_close_xml()],
-            "Failed to send conflict stream error",
-            (admission_permit, shutdown_token),
+            "Failed to send WebSocket close frame after conflict",
         )
         .await;
-    }
-    let _ = close_ws_connection(
-        ws_sender,
-        "Failed to send WebSocket close frame after conflict",
-    )
+    })
     .await;
 }
 
@@ -2503,6 +2531,26 @@ mod tests {
             ]
         );
         assert!(sender.closed, "force-detach completes the WebSocket close");
+    }
+
+    #[tokio::test]
+    async fn force_detach_does_not_wait_for_a_blocked_conflict_write() {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.begin_server_stream_open_response();
+        conn.commit_server_stream_open_response();
+        let mut sender = Box::pin(futures::sink::unfold((), |(), _message: Message| async {
+            futures::future::pending::<Result<(), &'static str>>().await
+        }));
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown),
+        )
+        .await
+        .expect("optional conflict writes must not block SM detach cleanup");
     }
 
     #[tokio::test]

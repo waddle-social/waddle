@@ -1,5 +1,91 @@
 use super::*;
 
+/// Interrupt only socket I/O when a verified resume targets this exact live
+/// connection. Protocol handlers finish their current durable work normally.
+pub(super) struct InterruptibleSink<S> {
+    inner: S,
+    interrupt: tokio_util::sync::CancellationToken,
+    cancelled: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+}
+
+impl<S> InterruptibleSink<S> {
+    pub(super) fn new(inner: S, interrupt: tokio_util::sync::CancellationToken) -> Self {
+        let cancelled = Box::pin(interrupt.clone().cancelled_owned());
+        Self {
+            inner,
+            interrupt,
+            cancelled,
+        }
+    }
+
+    /// Conflict closure is optional and bounded by its caller, but still gets
+    /// one attempt after ordinary writes have been interrupted.
+    pub(super) fn uninterrupted(&mut self) -> &mut S {
+        &mut self.inner
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub(super) enum InterruptedWrite<E> {
+    #[error("connection force-detached")]
+    Detached,
+    #[error("{0}")]
+    Transport(E),
+}
+
+impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
+    type Error = InterruptedWrite<S::Error>;
+
+    fn poll_ready(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        if std::future::Future::poll(this.cancelled.as_mut(), cx).is_ready() {
+            return std::task::Poll::Ready(Err(InterruptedWrite::Detached));
+        }
+        std::pin::Pin::new(&mut this.inner)
+            .poll_ready(cx)
+            .map_err(InterruptedWrite::Transport)
+    }
+
+    fn start_send(self: std::pin::Pin<&mut Self>, item: Message) -> Result<(), Self::Error> {
+        let this = self.get_mut();
+        if this.interrupt.is_cancelled() {
+            return Err(InterruptedWrite::Detached);
+        }
+        std::pin::Pin::new(&mut this.inner)
+            .start_send(item)
+            .map_err(InterruptedWrite::Transport)
+    }
+
+    fn poll_flush(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        if std::future::Future::poll(this.cancelled.as_mut(), cx).is_ready() {
+            return std::task::Poll::Ready(Err(InterruptedWrite::Detached));
+        }
+        std::pin::Pin::new(&mut this.inner)
+            .poll_flush(cx)
+            .map_err(InterruptedWrite::Transport)
+    }
+
+    fn poll_close(
+        self: std::pin::Pin<&mut Self>,
+        cx: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<Result<(), Self::Error>> {
+        let this = self.get_mut();
+        if std::future::Future::poll(this.cancelled.as_mut(), cx).is_ready() {
+            return std::task::Poll::Ready(Err(InterruptedWrite::Detached));
+        }
+        std::pin::Pin::new(&mut this.inner)
+            .poll_close(cx)
+            .map_err(InterruptedWrite::Transport)
+    }
+}
+
 /// Result of a WebSocket write that is bound to one admitted node generation.
 ///
 /// `start_send` is the transport commit point: once it has run under a valid

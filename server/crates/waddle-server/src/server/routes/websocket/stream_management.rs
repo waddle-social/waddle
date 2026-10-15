@@ -919,6 +919,42 @@ async fn handle_sm_resume_terminal(
         );
     }
 
+    // Capture and retire the old transport before claiming its snapshot. The
+    // connection-owned handshake retains counters, replay and occupancy and
+    // acknowledges only after cleanup. Never re-resolve/retry the live owner:
+    // another resume can publish the same SM ID on a replacement meanwhile.
+    if let ConnectionPhase::Authenticated { bare_jid } = &*phase {
+        use crate::clustering::resume_bridge::{
+            request_local_forced_detach, LocalForcedDetachOutcome,
+        };
+        let shutdown = state.deps.shutdown.stop_token();
+        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(&resume.previd);
+        let outcome = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                return SmResumeTerminal::failed(
+                    waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                    SmResumeOutcome::ShutdownAbandoned,
+                );
+            }
+            outcome = request_local_forced_detach(
+                &state.deps.protocol.connection_registry,
+                &stream_id,
+                bare_jid,
+                std::time::Duration::from_secs(5),
+            ) => outcome,
+        };
+        if outcome == LocalForcedDetachOutcome::IdentityMismatch {
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::IdentityMismatch,
+            );
+        }
+        // NotLiveLocally is not proof of cleanup. A snapshot must still be
+        // claimable below; prepare_socket_bind separately waits for the exact
+        // incumbent to stop before <resumed/>, replay or route publication.
+    }
+
     let mut detached = match state
         .deps
         .protocol

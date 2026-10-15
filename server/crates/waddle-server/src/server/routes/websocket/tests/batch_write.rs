@@ -1175,6 +1175,91 @@ async fn backpressured_send_window_write_stops_promptly_on_authority_revocation(
     );
 }
 
+#[tokio::test]
+async fn forced_detach_interrupts_parked_send_window_recovery_and_retains_tail() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 100);
+    conn.sm_state
+        .enable("detach-paused".to_owned(), true, Some(300));
+    let interrupt = conn.write_interruption.clone();
+    let mut sink = CollectSink::default();
+    let mut reader = reader_with(vec![]);
+    let frames: Vec<_> = (1..=9).map(countable_message).collect();
+    let outcome = {
+        let writer = write_response_batch(
+            &mut sink,
+            &mut reader,
+            state.as_ref(),
+            &mut conn,
+            frames.clone(),
+            BatchSmPolicy::Record,
+        );
+        tokio::pin!(writer);
+        assert!(futures::poll!(writer.as_mut()).is_pending());
+        interrupt.cancel();
+        tokio::time::timeout(std::time::Duration::from_millis(100), writer)
+            .await
+            .expect("force detach must interrupt the 15 second ack wait")
+    };
+    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
+    assert_eq!(conn.sm_state.last_acked, 0);
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 9);
+    for (stanza, frame) in replay.iter().zip(&frames) {
+        assert_eq!(&stanza.stanza_xml, frame);
+    }
+}
+
+#[tokio::test]
+async fn forced_detach_stops_ready_pong_drain_before_late_ack_is_applied() {
+    let state = create_test_websocket_state().await;
+    let mut conn = WsConnState::new();
+    conn.sm_state = StreamManagementState::with_config(10, 1);
+    conn.sm_state
+        .enable("detach-drain".to_owned(), true, Some(300));
+    let interrupt = conn.write_interruption.clone();
+    let mut polls = 0;
+    // The cancellation lands in the same poll that returns the old socket's
+    // ack. The post-read check must reject it before SM queue mutation.
+    let mut reader = stream::poll_fn(|_cx| {
+        polls += 1;
+        match polls {
+            1 | 2 => Poll::Ready(Some(Ok::<_, Infallible>(Message::Pong(Vec::new().into())))),
+            3 => {
+                interrupt.cancel();
+                Poll::Ready(Some(Ok(ack_frame(1))))
+            }
+            _ => Poll::Pending,
+        }
+    });
+    let mut sink = CollectSink::default();
+    let frames: Vec<_> = (1..=2).map(countable_message).collect();
+    let outcome = write_response_batch(
+        &mut sink,
+        &mut reader,
+        state.as_ref(),
+        &mut conn,
+        frames.clone(),
+        BatchSmPolicy::Record,
+    )
+    .await;
+    assert!(matches!(outcome, BatchWriteOutcome::TransportClosed));
+    assert_eq!(
+        conn.sm_state.last_acked, 0,
+        "a post-detach ack cannot retire replay"
+    );
+    let replay = conn.sm_state.get_stanzas_to_resend(0);
+    assert_eq!(replay.len(), 2);
+    assert_eq!(replay[0].stanza_xml, frames[0]);
+    assert_eq!(replay[1].stanza_xml, frames[1]);
+    assert_eq!(
+        sink_texts(&sink).len(),
+        2,
+        "only the first stanza and its ack request committed"
+    );
+}
+
 /// A dead/stalled peer never acks the window down. The pause deadline fires
 /// and the untransmitted tail is recorded for replay via `record_outbound` —
 /// which, once the queue is over capacity, evicts the oldest entry AND marks
