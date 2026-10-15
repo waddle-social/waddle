@@ -158,7 +158,7 @@ async fn send_window_message<S, E>(
 ) -> Result<(), SendWindowOutcome>
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
     match send_ws_message_with_authority(sender, message, failure_message, authority).await {
         AuthoritySendOutcome::Sent => Ok(()),
@@ -184,7 +184,7 @@ pub(super) async fn write_response_batch_with_admission<S, SE, R, RE, F>(
 ) -> BatchWriteOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
     F: Into<ResponseFrame>,
@@ -208,7 +208,7 @@ pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
@@ -264,7 +264,7 @@ pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
     F: Into<ResponseFrame>,
@@ -295,7 +295,7 @@ async fn write_response_batch_impl<S, SE, R, RE>(
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
@@ -564,7 +564,7 @@ async fn await_send_window_recovery<S, SE, R, RE>(
 ) -> SendWindowOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
@@ -773,7 +773,7 @@ async fn service_paused_sm_requests_from_deferred<S, E>(
 ) -> Result<(), SendWindowOutcome>
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
     // Service every parked SM request, not only one sitting at the queue
     // front: ordinary frames parked ahead of an `<r/>` must not keep it
@@ -970,7 +970,7 @@ async fn drain_ready_inbound<S, SE, R, RE>(
 ) -> DrainSignal
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {

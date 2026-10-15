@@ -162,7 +162,7 @@ async fn assert_replaced_transport_closes(client: &mut WsXmppClient) {
 }
 
 #[tokio::test]
-async fn attached_resume_replays_in_order_and_fences_the_replaced_transport() {
+async fn attached_resume_replays_in_order_and_retires_the_original_transport() {
     let server = TestServer::start_with_extra_accounts(ACCOUNTS);
     let (mut old, stream) = original(&server).await;
     let old_jid: FullJid = old
@@ -192,8 +192,9 @@ async fn attached_resume_replays_in_order_and_fences_the_replaced_transport() {
         assert_eq!(replay.attr("type"), Some("result"));
     }
 
-    // These may already fail at the socket. If accepted by the OS, they must
-    // not acknowledge the successor's queue, count inbound, or end its session.
+    // Cleanup is complete by <resumed/>. These writes check the retired
+    // socket stays unusable and successor routing survives its later drop.
+    // Interruption during writes/drains is exercised by the transport tests.
     for element in [
         Element::builder("a", SM_NS)
             .attr(minidom::rxml::xml_ncname!("h").to_owned(), "3")

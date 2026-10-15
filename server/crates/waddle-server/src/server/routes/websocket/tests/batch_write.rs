@@ -478,7 +478,7 @@ async fn write_response_batch<S, SE, R, RE>(
 ) -> BatchWriteOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::super::send::WebSocketWriteError,
     R: Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {

@@ -32,7 +32,7 @@ pub(super) async fn handle_outbound_stanza<S, SE, R, RE>(
 ) -> bool
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {

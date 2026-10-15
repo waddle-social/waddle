@@ -33,6 +33,37 @@ pub(super) enum InterruptedWrite<E> {
     Transport(E),
 }
 
+/// Classify expected resume interruption without hiding transport failures.
+pub(super) trait WebSocketWriteError: std::fmt::Display {
+    fn is_detached(&self) -> bool {
+        false
+    }
+}
+
+impl WebSocketWriteError for axum::Error {}
+
+impl WebSocketWriteError for std::io::Error {}
+
+#[cfg(test)]
+impl WebSocketWriteError for &'static str {}
+
+#[cfg(test)]
+impl WebSocketWriteError for std::convert::Infallible {}
+
+impl<E: std::fmt::Display> WebSocketWriteError for InterruptedWrite<E> {
+    fn is_detached(&self) -> bool {
+        matches!(self, Self::Detached)
+    }
+}
+
+fn log_write_failure(error: &impl WebSocketWriteError, failure_message: &'static str) {
+    if error.is_detached() {
+        debug!(error = %error, "{failure_message}");
+    } else {
+        error!(error = %error, "{failure_message}");
+    }
+}
+
 impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
     type Error = InterruptedWrite<S::Error>;
 
@@ -119,7 +150,7 @@ pub(super) async fn send_ws_text_frames<S, E, I>(
 ) -> bool
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: WebSocketWriteError,
     I: IntoIterator<Item = String>,
 {
     for frame in frames {
@@ -150,7 +181,7 @@ pub(super) async fn send_ws_text_frames_with_authority<S, E, I>(
 ) -> AuthoritySendOutcome
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: WebSocketWriteError,
     I: IntoIterator<Item = String>,
 {
     for frame in frames {
@@ -181,12 +212,12 @@ pub(super) async fn send_ws_message<S, E>(
 ) -> bool
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: WebSocketWriteError,
 {
     match tokio::time::timeout(SEND_STALL_TIMEOUT, sender.send(message)).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
-            error!(error = %error, "{failure_message}");
+            log_write_failure(&error, failure_message);
             false
         }
         Err(_elapsed) => {
@@ -221,7 +252,7 @@ pub(super) async fn send_ws_message_with_authority<S, E>(
 ) -> AuthoritySendOutcome
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: WebSocketWriteError,
 {
     let authoritative = || {
         authority.is_none_or(|(permit, shutdown)| {
@@ -251,7 +282,7 @@ where
     match ready_result {
         Ok(Ok(())) => {}
         Ok(Err(error)) => {
-            error!(error = %error, "{failure_message}");
+            log_write_failure(&error, failure_message);
             return AuthoritySendOutcome::TransportClosed;
         }
         Err(_elapsed) => {
@@ -270,14 +301,14 @@ where
         return AuthoritySendOutcome::AuthorityRevoked;
     }
     if let Err(error) = std::pin::Pin::new(&mut *sender).start_send(message) {
-        error!(error = %error, "{failure_message}");
+        log_write_failure(&error, failure_message);
         return AuthoritySendOutcome::TransportClosed;
     }
 
     match tokio::time::timeout(SEND_STALL_TIMEOUT, sender.flush()).await {
         Ok(Ok(())) => AuthoritySendOutcome::Sent,
         Ok(Err(error)) => {
-            error!(error = %error, "{failure_message}");
+            log_write_failure(&error, failure_message);
             AuthoritySendOutcome::TransportClosed
         }
         Err(_elapsed) => {
@@ -294,12 +325,12 @@ where
 pub(super) async fn close_ws_connection<S, E>(sender: &mut S, failure_message: &'static str) -> bool
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: WebSocketWriteError,
 {
     match tokio::time::timeout(SEND_STALL_TIMEOUT, sender.close()).await {
         Ok(Ok(())) => true,
         Ok(Err(error)) => {
-            error!(error = %error, "{failure_message}");
+            log_write_failure(&error, failure_message);
             false
         }
         Err(_elapsed) => {

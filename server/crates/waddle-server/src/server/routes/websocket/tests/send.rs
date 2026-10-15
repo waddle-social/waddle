@@ -97,6 +97,181 @@ async fn close_ws_connection_closes_sink() {
     assert!(sink.closed);
 }
 
+#[tokio::test(flavor = "current_thread")]
+async fn forced_detach_logs_debug_while_transport_errors_stay_errors() {
+    use std::sync::{Arc, Mutex};
+
+    #[derive(Clone, Default)]
+    struct CaptureWriter(Arc<Mutex<Vec<u8>>>);
+
+    impl std::io::Write for CaptureWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0
+                .lock()
+                .expect("capture buffer lock")
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for CaptureWriter {
+        type Writer = CaptureWriter;
+
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    struct CancelAndFailSink(tokio_util::sync::CancellationToken);
+
+    impl Sink<Message> for CancelAndFailSink {
+        type Error = &'static str;
+
+        fn poll_ready(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn start_send(self: Pin<&mut Self>, _item: Message) -> Result<(), Self::Error> {
+            self.0.cancel();
+            // A real transport error must remain ERROR even if its text happens
+            // to match the detach error and cancellation has just occurred.
+            Err("connection force-detached")
+        }
+
+        fn poll_flush(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+
+        fn poll_close(
+            self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Result<(), Self::Error>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+
+    let writer = CaptureWriter::default();
+    let buffer = writer.0.clone();
+    let _subscriber = tracing::subscriber::set_default(
+        tracing_subscriber::fmt()
+            .with_max_level(tracing::Level::DEBUG)
+            .with_ansi(false)
+            .with_writer(writer)
+            .finish(),
+    );
+    let interrupt = tokio_util::sync::CancellationToken::new();
+    interrupt.cancel();
+    let mut detached = InterruptibleSink::new(TestSink::succeeds(), interrupt);
+    assert!(
+        !send_ws_message(
+            &mut detached,
+            Message::Ping(Vec::new().into()),
+            "detached-send"
+        )
+        .await
+    );
+    assert!(matches!(
+        send_ws_message_with_authority(
+            &mut detached,
+            Message::Ping(Vec::new().into()),
+            "detached-authority-ready",
+            None
+        )
+        .await,
+        AuthoritySendOutcome::TransportClosed
+    ));
+    assert!(!close_ws_connection(&mut detached, "detached-close").await);
+
+    let interrupt = tokio_util::sync::CancellationToken::new();
+    let mut detach_on_ready = InterruptibleSink::new(
+        DetachOnReadySink {
+            interrupt: interrupt.clone(),
+            sent: Vec::new(),
+        },
+        interrupt,
+    );
+    assert!(matches!(
+        send_ws_message_with_authority(
+            &mut detach_on_ready,
+            Message::Ping(Vec::new().into()),
+            "detached-authority-start",
+            None
+        )
+        .await,
+        AuthoritySendOutcome::TransportClosed
+    ));
+
+    let interrupt = tokio_util::sync::CancellationToken::new();
+    let mut flushing =
+        InterruptibleSink::new(PendingFlushSink { sent: Vec::new() }, interrupt.clone());
+    let send = send_ws_message_with_authority(
+        &mut flushing,
+        Message::Ping(Vec::new().into()),
+        "detached-authority-flush",
+        None,
+    );
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    interrupt.cancel();
+    assert!(matches!(send.await, AuthoritySendOutcome::TransportClosed));
+
+    let interrupt = tokio_util::sync::CancellationToken::new();
+    let mut failing = InterruptibleSink::new(CancelAndFailSink(interrupt.clone()), interrupt);
+    assert!(
+        !send_ws_message(
+            &mut failing,
+            Message::Ping(Vec::new().into()),
+            "wrapped-transport-error"
+        )
+        .await
+    );
+    let mut raw = TestSink::fails_after(0);
+    assert!(
+        !send_ws_message(
+            &mut raw,
+            Message::Ping(Vec::new().into()),
+            "raw-transport-error"
+        )
+        .await
+    );
+
+    let logs =
+        String::from_utf8(buffer.lock().expect("capture buffer lock").clone()).expect("UTF-8 logs");
+    for message in [
+        "detached-send",
+        "detached-authority-ready",
+        "detached-authority-start",
+        "detached-authority-flush",
+        "detached-close",
+    ] {
+        let line = logs
+            .lines()
+            .find(|line| line.contains(message))
+            .expect("detach log");
+        assert!(line.contains("DEBUG"), "expected debug detach log: {line}");
+    }
+    for message in ["wrapped-transport-error", "raw-transport-error"] {
+        let line = logs
+            .lines()
+            .find(|line| line.contains(message))
+            .expect("transport error log");
+        assert!(
+            line.contains("ERROR"),
+            "expected error transport log: {line}"
+        );
+    }
+}
+
 /// A sink whose peer never drains: `poll_ready` pends forever, the
 /// shape of a black-holed TCP path with a full send buffer.
 struct StalledSink;

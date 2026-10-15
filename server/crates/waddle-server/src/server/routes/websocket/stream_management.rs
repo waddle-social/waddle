@@ -4,6 +4,8 @@ use super::{
     transport_xml::websocket_stream_close_element,
 };
 mod observe;
+#[cfg(test)]
+mod timeout_tests;
 use observe::{apply_sm_ack_observation, observe_sm_ack, SmAckObservation};
 
 /// Operation-owned resume claim.  Dropping an uncommitted guard returns the
@@ -929,6 +931,12 @@ async fn handle_sm_resume_terminal(
         };
         let shutdown = state.deps.shutdown.stop_token();
         let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(&resume.previd);
+        let handshake_budget = state
+            .deps
+            .app_state
+            .clustering_claims
+            .resume_handshake_timeout()
+            .unwrap_or_else(|| crate::config::ClusteringResumeHandshakeConfig::default().timeout);
         let outcome = tokio::select! {
             biased;
             _ = shutdown.cancelled() => {
@@ -941,7 +949,7 @@ async fn handle_sm_resume_terminal(
                 &state.deps.protocol.connection_registry,
                 &stream_id,
                 bare_jid,
-                std::time::Duration::from_secs(5),
+                handshake_budget,
             ) => outcome,
         };
         if outcome == LocalForcedDetachOutcome::IdentityMismatch {
