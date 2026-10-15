@@ -18,9 +18,9 @@ import social.waddle.client.ffi.WaddleSafetyCategory
 import social.waddle.client.ffi.WaddleSafetyScore
 import social.waddle.client.ffi.WaddleSafetyScores
 
-/** XEP-0422 safety-score affordance and breakdown sheet on a MessageCard. */
+/** XEP-0422 safety-score affordance and breakdown sheet on a MessageRow. */
 @RunWith(AndroidJUnit4::class)
-class MessageCardSafetyScoresTest {
+class MessageRowSafetyScoresTest {
     private companion object {
         const val HARASSMENT_DESCRIPTION = "Harassment score; view message scores"
     }
@@ -54,8 +54,8 @@ class MessageCardSafetyScoresTest {
             body = "is anyone around?",
         )
         composeRule.setContent {
-            MessageCard(
-                row = ConversationRow.Stored(
+            MessageRow(
+                entry = feedEntryOf(
                     TimelineItem(
                         id = "s1",
                         conversationJid = "room@muc.waddle.test",
@@ -67,7 +67,8 @@ class MessageCardSafetyScoresTest {
                         safetyScores = safetyScores,
                     ),
                 ),
-                onRetry = {},
+                actions = MessageRowActions(),
+                context = MessageRowContext(),
             )
         }
     }

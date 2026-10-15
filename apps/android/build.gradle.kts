@@ -4,6 +4,7 @@ plugins {
     alias(libs.plugins.kotlin.compose) apply false
     alias(libs.plugins.kotlin.serialization) apply false
     alias(libs.plugins.detekt)
+    alias(libs.plugins.roborazzi) apply false
 }
 
 // Static analysis mirroring the repo's clippy `-D warnings` posture:

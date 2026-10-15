@@ -112,6 +112,13 @@
     <string name="message_retry">Retry</string>
     <string name="message_sticker">Sticker</string>
     <string name="message_attachment">Attachment</string>
+    <string name="timeline_today">Today</string>
+    <string name="timeline_yesterday">Yesterday</string>
+    <string name="timeline_unread_divider">New</string>
+    <string name="timeline_unread_divider_description">New messages below</string>
+    <string name="timeline_jump_to_latest">Jump to latest</string>
+    <string name="timeline_start_of_history">This is the start of the conversation.</string>
+    <string name="timeline_empty">No messages yet. Say hello.</string>
 
     <!-- Message search -->
     <string name="search_messages">Search messages</string>

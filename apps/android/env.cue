@@ -93,7 +93,7 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: {contents: "write", "id-token": "write"}
-			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.publishDebugApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.publishApk]
 		}
 		pullRequest: {
 			when: {
@@ -130,12 +130,23 @@ schema.#Project & {
 		}
 
 		// Cross-compiles libwaddle_xmpp_client_ffi.so for arm64-v8a and
-		// x86_64 into the gitignored jniLibs tree (debug profile: the PR
-		// pipeline only proves the build; release .so's are built by the
-		// release pipeline once signing lands).
+		// x86_64 into the gitignored jniLibs tree. Unoptimised dev profile:
+		// PR builds and emulator suites only prove the cross-compile and
+		// the bindings; nothing built from it is ever distributed.
 		buildRustJni: schema.#Task & {
 			command: "bash"
 			args: ["-c", "../../scripts/build-android-rust.sh --debug --skip-bindings"]
+			dependsOn: [setupSdk]
+			inputs: _ffiInputs
+			outputs: ["core/client/src/main/jniLibs/**"]
+		}
+
+		// The distributed core: `mobile` cargo profile (opt-level 3, LTO).
+		// Same outputs as buildRustJni; the publish task depends on this
+		// one so the shipped APK never carries an opt-level-0 library.
+		buildRustJniMobile: schema.#Task & {
+			command: "bash"
+			args: ["-c", "../../scripts/build-android-rust.sh --skip-bindings"]
 			dependsOn: [setupSdk]
 			inputs: _ffiInputs
 			outputs: ["core/client/src/main/jniLibs/**"]
@@ -174,9 +185,12 @@ schema.#Project & {
 			outputs: ["app/build/outputs/apk/debug/app-debug.apk"]
 		}
 
+		// JVM unit tests plus the Roborazzi golden screenshots
+		// (app/src/test/screenshots): a visual change that was not
+		// re-recorded fails here.
 		test: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon testDebugUnitTest"]
+			args: ["-c", "./gradlew --no-daemon testDebugUnitTest -Proborazzi.test.verify=true"]
 			dependsOn: [setupSdk]
 			inputs: _gradleInputs
 		}
@@ -205,16 +219,17 @@ schema.#Project & {
 			inputs: list.Concat([_gradleInputs, ["env.cue"]])
 		}
 
-		// Install-in-place artifact: every merge to main rebuilds the
-		// debug APK (shared checked-in debug keystore -> signature is
-		// stable across builders, so `adb install -r` upgrades without an
-		// uninstall) with a monotonic timestamp-derived versionCode, and
-		// publishes it as the repo's "latest" release.
+		// Install-in-place artifact: every merge to main builds the
+		// `preview` APK — release-optimised (R8, shrinking, non-debuggable,
+		// mobile-profile Rust core) but signed with the shared checked-in
+		// key, so `adb install -r` upgrades over earlier rolling and debug
+		// builds without an uninstall — with a monotonic timestamp-derived
+		// versionCode, and publishes it as the repo's "latest" release.
 		//
 		// Each build uses a UNIQUE tag `android-b<versionCode>-<sha>` and
 		// `gh release create --latest`; the stable download URL is
 		// GitHub's tag-agnostic
-		//   releases/latest/download/waddle-android-debug.apk
+		//   releases/latest/download/waddle-android.apk
 		// which always resolves to whichever release is marked latest.
 		// A fixed reused tag is deliberately NOT used: GitHub's immutable
 		// releases permanently reserve a tag name once it has backed a
@@ -224,7 +239,7 @@ schema.#Project & {
 		// Unique-tag-per-build sidesteps both: no tag is ever reused and
 		// no published release is ever mutated. Older rolling releases
 		// are pruned to a bounded window.
-		publishDebugApk: schema.#Task & {
+		publishApk: schema.#Task & {
 			command: "bash"
 			env: {
 				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
@@ -235,22 +250,22 @@ schema.#Project & {
 				# Commit-timestamp minutes: monotonic across builds and immune
 				# to shallow CI clones (rev-list --count would report 1).
 				version_code="$(( $(git show -s --format=%ct HEAD) / 60 ))"
-				./gradlew --no-daemon :app:assembleDebug \
+				./gradlew --no-daemon :app:assemblePreview \
 				  -PversionCode="${version_code}" \
 				  -PversionName="$(git rev-parse --short HEAD)"
 				sha="$(git rev-parse --short HEAD)"
 				# The asset's FILENAME (not the `file#label` display text)
 				# is the path segment in releases/latest/download/<name>,
 				# so upload the file under the advertised name rather than
-				# gradle's app-debug.apk.
-				apk="waddle-android-debug.apk"
-				cp app/build/outputs/apk/debug/app-debug.apk "${apk}"
+				# gradle's app-preview.apk.
+				apk="waddle-android.apk"
+				cp app/build/outputs/apk/preview/app-preview.apk "${apk}"
 				# Unique per build (never reused -> never hits the immutable
 				# tag-name lock); versionCode prefix keeps tags sortable.
 				tag="android-b${version_code}-${sha}"
 				gh release create "${tag}" --latest \
-				  --title "Android debug ${sha}" \
-				  --notes "commit ${sha} — install: adb install -r waddle-android-debug.apk (stable URL: releases/latest/download/waddle-android-debug.apk; shared debug signature, no uninstall needed)" \
+				  --title "Android ${sha}" \
+				  --notes "commit ${sha} — optimised preview build (R8, opt-level 3 core). Install: adb install -r waddle-android.apk (stable URL: releases/latest/download/waddle-android.apk; shared install-in-place signature, upgrades earlier rolling and debug builds without an uninstall)" \
 				  "${apk}"
 				# Prune older rolling releases beyond the newest 10, tag and
 				# all (--cleanup-tag): the tags are never reused, so there
@@ -266,14 +281,14 @@ schema.#Project & {
 				    done
 				} || true
 				"""#]
-			dependsOn: [setupSdk, buildRustJni]
+			dependsOn: [setupSdk, buildRustJniMobile]
 			// env.cue is in the input set so a change to THIS publish
 			// script (not just the app) re-runs the task — otherwise
 			// cuenv's incremental engine reports "no affected tasks" for
 			// a script-only fix and the rolling release is never
 			// rebuilt.
 			inputs: list.Concat([_gradleInputs, ["env.cue"]])
-			outputs: ["app/build/outputs/apk/debug/app-debug.apk"]
+			outputs: ["app/build/outputs/apk/preview/app-preview.apk"]
 		}
 	}
 }

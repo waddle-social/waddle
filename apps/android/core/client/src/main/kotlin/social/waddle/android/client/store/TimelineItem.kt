@@ -68,6 +68,12 @@ data class TimelineItem(
     val authorJid: String? = null,
     /** Stable local row identity for rendering; wire ids can collide even under the same nick. */
     val presentationId: String = UUID.randomUUID().toString(),
+    /**
+     * Local wall-clock time the row was first stored. Undelayed live
+     * messages carry no wire timestamp, so this is the only time they
+     * have for display, day separators and grouping.
+     */
+    val receivedAtMillis: Long = System.currentTimeMillis(),
 ) {
     /**
      * Every wire identity of the underlying stanza: XEP-0359 stanza id(s),

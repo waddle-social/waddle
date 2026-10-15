@@ -10,6 +10,7 @@ import social.waddle.android.client.mentionCandidatesOf
 import social.waddle.android.feature.channel.ChannelIo
 import social.waddle.android.feature.dm.DmIo
 import social.waddle.android.viewModelFactoryOf
+import social.waddle.android.jid.bareJidOf as selfBareJidOf
 
 /**
  * One XEP-0201 thread of a channel or DM: the shared conversation
@@ -24,6 +25,7 @@ class ThreadViewModel(
     nick: String,
     uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
+    selfBareJid: String? = null,
 ) : ConversationViewModel(
     conversationJid = conversationJid,
     isGroupchat = isGroupchat,
@@ -62,6 +64,7 @@ class ThreadViewModel(
     threadId = threadId,
     uploader = uploader,
     onConversationRead = onConversationRead,
+    selfBareJid = selfBareJid,
 ) {
     companion object {
         fun factory(
@@ -78,6 +81,7 @@ class ThreadViewModel(
                 nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                 uploader = graph.attachmentUploader,
                 onConversationRead = graph.messageNotifier::clearConversationNotification,
+                    selfBareJid = graph.currentSession.value?.jid?.let(::selfBareJidOf),
             )
         }
     }

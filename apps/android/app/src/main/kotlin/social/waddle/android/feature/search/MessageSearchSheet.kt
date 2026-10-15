@@ -196,7 +196,7 @@ private fun SearchResultText(hit: MessageSearchHit, author: String) {
 private val STAMP_FORMAT: DateTimeFormatter =
     DateTimeFormatter.ofLocalizedDateTime(FormatStyle.SHORT)
 
-/** MessageCard-parity parsing: instant first, offset form as fallback. */
+/** MessageRow-parity parsing: instant first, offset form as fallback. */
 private fun formatSearchStamp(timestamp: String?): String? {
     timestamp ?: return null
     val instant = runCatching { Instant.parse(timestamp) }.getOrElse {

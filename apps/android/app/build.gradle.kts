@@ -4,6 +4,7 @@ plugins {
     // Nav keys are @Serializable so the Navigation 3 back stack survives
     // process death via rememberNavBackStack.
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.roborazzi)
 }
 
 android {
@@ -62,6 +63,15 @@ android {
     }
 
     testOptions {
+        // Robolectric screenshot tests render real resources (fonts, the
+        // icon) with native graphics.
+        unitTests {
+            isIncludeAndroidResources = true
+            all { test ->
+                test.systemProperty("robolectric.graphicsMode", "NATIVE")
+                test.systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+            }
+        }
         managedDevices {
             localDevices {
                 // Headless automated-test device for CI (no GPU, low
@@ -151,6 +161,13 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
     testImplementation(testFixtures(project(":core:client")))
+    testImplementation(composeBom)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.roborazzi.junit.rule)
+    testImplementation(libs.compose.ui.test.junit4)
+    testImplementation(libs.androidx.test.ext.junit)
 
     // Hosts ComponentActivity for createAndroidComposeRule in androidTest.
     debugImplementation(libs.compose.ui.test.manifest)
@@ -161,4 +178,11 @@ dependencies {
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(testFixtures(project(":core:client")))
+}
+
+// Golden screenshots live in the source tree so CI can verify them:
+// `./gradlew :app:verifyRoborazziDebug`; re-record with
+// `./gradlew :app:recordRoborazziDebug` after an intended visual change.
+roborazzi {
+    outputDir.set(file("src/test/screenshots"))
 }

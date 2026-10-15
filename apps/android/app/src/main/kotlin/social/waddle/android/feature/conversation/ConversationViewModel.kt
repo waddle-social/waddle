@@ -3,6 +3,8 @@ package social.waddle.android.feature.conversation
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineDispatcher
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
@@ -12,6 +14,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
+import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
@@ -95,6 +98,13 @@ open class ConversationViewModel(
      * alongside the next backgrounded arrival.
      */
     private val onConversationRead: suspend (String) -> Unit = {},
+    /** The signed-in account's bare JID (own-row avatars, mention highlight). */
+    private val selfBareJid: String? = null,
+    /**
+     * Where the feed is derived. Off the main thread in production: the
+     * derivation walks every loaded row on each change.
+     */
+    feedDispatcher: CoroutineDispatcher = Dispatchers.Default,
 ) : ViewModel() {
     private val tracker = PendingSendTracker()
     private val composer = ComposerController(conversationJid, isGroupchat, threadId)
@@ -144,6 +154,14 @@ open class ConversationViewModel(
     fun typingAuthorJid(name: String): String? =
         if (isGroupchat) authorJids.value[name] else conversationJid
 
+    /**
+     * Incoming rows still unread when the screen opened: where the
+     * "unread" divider sits for as long as the screen stays open. Read
+     * before [onConversationVisible] clears the count.
+     */
+    private val unreadAtOpen: Int =
+        if (threadId == null) unreadStore.counts.value[conversationJid] ?: 0 else 0
+
     val uiState: StateFlow<ConversationUiState> =
         combine(
             timeline,
@@ -153,20 +171,28 @@ open class ConversationViewModel(
             canModerate,
         ) { items, unconfirmed, load, pins, moderate ->
             ConversationUiState(
-                rows = visibleRows(items, unconfirmed, threadId),
+                entries = feedEntriesOf(
+                    items = items,
+                    pending = unconfirmed,
+                    context = FeedContext(
+                        threadId = threadId,
+                        selfBareJid = selfBareJid,
+                        pinnedIds = pins,
+                        unreadAtOpen = unreadAtOpen,
+                    ),
+                ),
                 isLoadingOlder = load.inFlight,
                 reachedHistoryStart = load.reachedStart,
                 pinnedIds = pins,
                 canPin = io.canPin,
                 canModerate = moderate,
-                threadReplyCounts = if (threadId == null) replyCountsOf(items) else emptyMap(),
                 threads = if (threadId == null) {
                     threadSummariesOf(items) { authorNameOf(it, isGroupchat) }
                 } else {
                     emptyList()
                 },
             )
-        }.stateIn(viewModelScope, SharingStarted.Eagerly, ConversationUiState())
+        }.flowOn(feedDispatcher).stateIn(viewModelScope, SharingStarted.Eagerly, ConversationUiState())
 
     /** Normal sends vs editing an existing own message (XEP-0308). */
     val composerMode: StateFlow<ComposerMode> = composer.mode

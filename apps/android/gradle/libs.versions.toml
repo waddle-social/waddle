@@ -28,6 +28,9 @@ profileinstaller = "1.4.1"
 browser = "1.10.0"
 coil = "3.5.0"
 detekt = "1.23.8"
+# JVM screenshot tests: Robolectric native graphics + Roborazzi capture.
+robolectric = "4.17"
+roborazzi = "1.76.0"
 # LiveKit media plane for A/V calls; 2.27.0 is the latest stable of the
 # 2.x line (Maven Central, 2026-07-13). Bundles libwebrtc — release
 # builds stay arm64-only via the existing abiFilters.
@@ -72,6 +75,10 @@ compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-mani
 junit = { group = "junit", name = "junit", version.ref = "junit" }
 detekt-formatting = { group = "io.gitlab.arturbosch.detekt", name = "detekt-formatting", version.ref = "detekt" }
 jna = { group = "net.java.dev.jna", name = "jna", version.ref = "jna" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+roborazzi = { group = "io.github.takahirom.roborazzi", name = "roborazzi", version.ref = "roborazzi" }
+roborazzi-compose = { group = "io.github.takahirom.roborazzi", name = "roborazzi-compose", version.ref = "roborazzi" }
+roborazzi-junit-rule = { group = "io.github.takahirom.roborazzi", name = "roborazzi-junit-rule", version.ref = "roborazzi" }
 livekit-android = { group = "io.livekit", name = "livekit-android", version.ref = "livekit" }
 
 [plugins]
@@ -80,3 +87,4 @@ android-library = { id = "com.android.library", version.ref = "agp" }
 kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlinCompose" }
 kotlin-serialization = { id = "org.jetbrains.kotlin.plugin.serialization", version.ref = "kotlinSerialization" }
 detekt = { id = "io.gitlab.arturbosch.detekt", version.ref = "detekt" }
+roborazzi = { id = "io.github.takahirom.roborazzi", version.ref = "roborazzi" }

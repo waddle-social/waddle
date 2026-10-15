@@ -1,13 +1,20 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <!-- Compose draws everything; this is only the pre-Compose window. -->
-    <style name="Theme.Waddle" parent="android:Theme.Material.NoActionBar" />
+    <!-- Compose draws everything; this is only the pre-Compose window,
+         grounded in the same background token as the first frame. -->
+    <style name="Theme.Waddle" parent="android:Theme.DeviceDefault.DayNight">
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowBackground">@color/window_background</item>
+    </style>
 
     <!-- core-splashscreen theme; MainActivity holds the splash until the
-         app state leaves Loading, then swaps to Theme.Waddle. -->
+         app state leaves Loading, then swaps to Theme.Waddle. A calm
+         ground in the system theme, not a full-bleed accent flash. -->
     <style name="Theme.Waddle.Splash" parent="Theme.SplashScreen">
-        <item name="windowSplashScreenBackground">@color/ic_launcher_background</item>
-        <item name="windowSplashScreenAnimatedIcon">@drawable/ic_launcher_foreground</item>
+        <item name="windowSplashScreenBackground">@color/window_background</item>
+        <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>
+        <item name="windowSplashScreenIconBackgroundColor">@color/ic_launcher_background</item>
         <item name="postSplashScreenTheme">@style/Theme.Waddle</item>
     </style>
 </resources>

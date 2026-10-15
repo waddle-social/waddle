@@ -86,7 +86,7 @@ class CallNotifier(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         val notification = NotificationCompat.Builder(context, NotificationChannels.INCOMING_CALLS)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_waddle)
             .setContentTitle(localpartOf(peerBare))
             .setContentText(
                 context.getString(

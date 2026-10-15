@@ -8,6 +8,8 @@ on:
     - .cargo/**
     - .github/workflows/waddle-chat-pullrequest.yml
     - apps/android/**/build.gradle.kts
+    - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt
+    - apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt/**
     - apps/android/gradle/libs.versions.toml
     - apps/android/gradle/libs.versions.toml/**
     - apps/android/settings.gradle.kts

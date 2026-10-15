@@ -192,6 +192,7 @@ schema.#Project & {
 				"src/styles/global/tokens.css",
 				"../website/src/styles/global/brand-palette.css",
 				"../apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
+				"../apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
 			]
 		}
 

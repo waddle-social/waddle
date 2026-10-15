@@ -236,7 +236,7 @@ class MessageNotifier(
         messages.forEach(style::addMessage)
 
         val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_waddle)
             .setStyle(style)
             .setGroup(conversationJid)
             .setAutoCancel(true)
@@ -309,7 +309,7 @@ class MessageNotifier(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
         )
         return NotificationCompat.Action.Builder(
-            R.drawable.ic_launcher_foreground,
+            R.drawable.ic_stat_waddle,
             context.getString(R.string.notification_reply_label),
             pendingIntent,
         )
@@ -342,7 +342,7 @@ class MessageNotifier(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Action.Builder(
-            R.drawable.ic_launcher_foreground,
+            R.drawable.ic_stat_waddle,
             context.getString(R.string.notification_mark_read_label),
             pendingIntent,
         ).build()

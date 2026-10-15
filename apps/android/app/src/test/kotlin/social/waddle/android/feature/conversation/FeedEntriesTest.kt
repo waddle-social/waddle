@@ -8,9 +8,11 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
+import java.time.LocalDate
+import java.time.ZoneOffset
 
-/** Timeline avatar gutters: sender groups and author JID resolution. */
-class MessageAvatarTest {
+/** Feed derivation: author groups, avatars, separators and dividers. */
+class FeedEntriesTest {
     private val room = "room@muc.waddle.test"
     private val self = "me@waddle.test"
 
@@ -35,18 +37,33 @@ class MessageAvatarTest {
         ),
     )
 
-    private fun avatarOf(avatars: Map<String, MessageAvatar>, row: ConversationRow.Stored) =
-        avatars[avatarKeyOf(row.item)]
+    /** (author JID, starts a group) for [row] — the avatar the row shows, if any. */
+    private data class Gutter(val jid: String?, val visible: Boolean)
+
+    private fun gutters(rows: List<ConversationRow.Stored>, unreadAtOpen: Int = 0): Map<String, Gutter> =
+        feedEntriesOf(
+            items = rows.map { it.item },
+            pending = emptyList(),
+            context = FeedContext(
+                threadId = null,
+                selfBareJid = self,
+                pinnedIds = emptySet(),
+                unreadAtOpen = unreadAtOpen,
+                zone = ZoneOffset.UTC,
+            ),
+        ).associate { it.key to Gutter(it.authorJid, it.startsGroup) }
+
+    private fun avatarOf(avatars: Map<String, Gutter>, row: ConversationRow.Stored) = avatars[rowKeyOf(row)]
 
     @Test
     fun `sender id collisions under one nick retain independent avatar rows`() {
         val earlier = row("reused", "sam")
         val later = row("reused", "sam", authorJid = "later@waddle.test")
-        val avatars = messageAvatarsOf(listOf(earlier, later), self)
+        val avatars = gutters(listOf(earlier, later))
 
         assertEquals(2, avatars.size)
-        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, earlier))
-        assertEquals(MessageAvatar("later@waddle.test", visible = true), avatarOf(avatars, later))
+        assertEquals(Gutter(null, visible = true), avatarOf(avatars, earlier))
+        assertEquals(Gutter("later@waddle.test", visible = true), avatarOf(avatars, later))
     }
 
     @Test
@@ -81,23 +98,24 @@ class MessageAvatarTest {
         val second = row("2", "alice", "2026-07-15T10:04:59Z", authorJid = stamp)
         val later = row("3", "alice", "2026-07-15T10:10:00Z", authorJid = stamp)
         val other = row("4", "bob", "2026-07-15T10:10:30Z")
-        val avatars = messageAvatarsOf(listOf(first, second, later, other), self)
+        val avatars = gutters(listOf(first, second, later, other))
 
-        assertEquals(MessageAvatar("alice@waddle.test", visible = true), avatarOf(avatars, first))
-        assertEquals(MessageAvatar("alice@waddle.test", visible = false), avatarOf(avatars, second))
+        assertEquals(Gutter("alice@waddle.test", visible = true), avatarOf(avatars, first))
+        assertEquals(Gutter("alice@waddle.test", visible = false), avatarOf(avatars, second))
         assertTrue(avatarOf(avatars, later)!!.visible)
         // Unknown room author: initials, never a nick-derived guess.
-        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, other))
+        assertEquals(Gutter(null, visible = true), avatarOf(avatars, other))
     }
 
     @Test
-    fun `own rows get no gutter and break the previous group`() {
+    fun `own rows sit on the same edge with the account avatar and break the previous group`() {
         val a1 = row("1", "alice")
         val mine = row("2", "me", mine = true)
         val a2 = row("3", "alice")
-        val avatars = messageAvatarsOf(listOf(a1, mine, a2), self)
+        val avatars = gutters(listOf(a1, mine, a2))
 
-        assertNull(avatarOf(avatars, mine))
+        // A room row is attributed by its stamp only; unstamped, it gets initials.
+        assertEquals(Gutter(null, visible = true), avatarOf(avatars, mine))
         assertTrue(avatarOf(avatars, a2)!!.visible)
     }
 
@@ -121,7 +139,7 @@ class MessageAvatarTest {
                 authorJid = "gone@waddle.test",
             ),
         )
-        val avatars = messageAvatarsOf(listOf(archived), self)
+        val avatars = gutters(listOf(archived))
 
         assertEquals("gone@waddle.test", avatarOf(avatars, archived)?.jid)
     }
@@ -170,18 +188,18 @@ class MessageAvatarTest {
         val alice = row("1", "bob", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
         // Alice wrote as "bob"; the nick then passed to Bob within 5 min.
         val bob = row("2", "bob", "2026-07-15T10:01:00Z", authorJid = "bob@waddle.test")
-        val avatars = messageAvatarsOf(listOf(alice, bob), self)
+        val avatars = gutters(listOf(alice, bob))
 
-        assertEquals(MessageAvatar("bob@waddle.test", visible = true), avatarOf(avatars, bob))
+        assertEquals(Gutter("bob@waddle.test", visible = true), avatarOf(avatars, bob))
     }
 
     @Test
     fun `consecutive unknown-author rows from one nick share one avatar`() {
         val rows = (1..5).map { row("$it", "carol", "2026-07-15T10:0$it:00Z") }
-        val avatars = messageAvatarsOf(rows, self)
+        val avatars = gutters(rows)
 
-        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, rows.first()))
-        rows.drop(1).forEach { assertEquals(MessageAvatar(null, visible = false), avatarOf(avatars, it)) }
+        assertEquals(Gutter(null, visible = true), avatarOf(avatars, rows.first()))
+        rows.drop(1).forEach { assertEquals(Gutter(null, visible = false), avatarOf(avatars, it)) }
     }
 
     @Test
@@ -189,19 +207,60 @@ class MessageAvatarTest {
         val unknown = row("1", "dana", "2026-07-15T10:00:00Z")
         val known = row("2", "dana", "2026-07-15T10:01:00Z", authorJid = "dana@waddle.test")
         val unknownAgain = row("3", "dana", "2026-07-15T10:02:00Z")
-        val avatars = messageAvatarsOf(listOf(unknown, known, unknownAgain), self)
+        val avatars = gutters(listOf(unknown, known, unknownAgain))
 
-        assertEquals(MessageAvatar("dana@waddle.test", visible = true), avatarOf(avatars, known))
-        assertEquals(MessageAvatar(null, visible = true), avatarOf(avatars, unknownAgain))
+        assertEquals(Gutter("dana@waddle.test", visible = true), avatarOf(avatars, known))
+        assertEquals(Gutter(null, visible = true), avatarOf(avatars, unknownAgain))
     }
 
     @Test
     fun `a row matching our nick but stamped with another JID gets their avatar`() {
         val theirs = row("1", "me", mine = true, authorJid = "bob@waddle.test")
         val ours = row("2", "me", mine = true, authorJid = self)
-        val avatars = messageAvatarsOf(listOf(theirs, ours), self)
+        val avatars = gutters(listOf(theirs, ours))
 
-        assertEquals(MessageAvatar("bob@waddle.test", visible = true), avatarOf(avatars, theirs))
-        assertNull(avatarOf(avatars, ours))
+        assertEquals(Gutter("bob@waddle.test", visible = true), avatarOf(avatars, theirs))
+        assertEquals(Gutter(self, visible = true), avatarOf(avatars, ours))
+    }
+
+    @Test
+    fun `a new day starts a group and carries a separator`() {
+        val late = row("1", "alice", "2026-07-15T23:58:00Z", authorJid = "alice@waddle.test")
+        val early = row("2", "alice", "2026-07-16T00:01:00Z", authorJid = "alice@waddle.test")
+        val entries = feedEntriesOf(
+            items = listOf(late.item, early.item),
+            pending = emptyList(),
+            context = FeedContext(null, self, emptySet(), unreadAtOpen = 0, zone = ZoneOffset.UTC),
+        )
+
+        assertEquals(LocalDate.of(2026, 7, 15), entries[0].daySeparator)
+        assertEquals(LocalDate.of(2026, 7, 16), entries[1].daySeparator)
+        assertTrue("a day boundary always restarts the header", entries[1].startsGroup)
+    }
+
+    @Test
+    fun `the unread divider sits above the oldest unread incoming row and splits the group`() {
+        val a1 = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
+        val a2 = row("2", "alice", "2026-07-15T10:01:00Z", authorJid = "alice@waddle.test")
+        val mine = row("3", "me", "2026-07-15T10:02:00Z", mine = true, authorJid = self)
+        val a3 = row("4", "alice", "2026-07-15T10:03:00Z", authorJid = "alice@waddle.test")
+        val entries = feedEntriesOf(
+            items = listOf(a1, a2, mine, a3).map { it.item },
+            pending = emptyList(),
+            context = FeedContext(null, self, emptySet(), unreadAtOpen = 2, zone = ZoneOffset.UTC),
+        )
+
+        assertEquals(listOf(false, true, false, false), entries.map { it.unreadDivider })
+        assertTrue(entries[1].startsGroup)
+    }
+
+    @Test
+    fun `undelayed live rows group by local receipt time`() {
+        val first = row("1", "alice", timestamp = null, authorJid = "alice@waddle.test")
+        val second = row("2", "alice", timestamp = null, authorJid = "alice@waddle.test")
+        val avatars = gutters(listOf(first, second))
+
+        assertTrue(avatarOf(avatars, first)!!.visible)
+        assertEquals(false, avatarOf(avatars, second)!!.visible)
     }
 }

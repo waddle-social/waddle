@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -26,7 +27,6 @@ import androidx.compose.ui.text.LinkAnnotation
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.TextLinkStyles
 import androidx.compose.ui.text.buildAnnotatedString
-import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextDecoration
@@ -35,6 +35,8 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import social.waddle.android.client.RichBlock
 import social.waddle.android.client.RichInlineRun
+import social.waddle.android.theme.JetBrainsMonoFamily
+import social.waddle.android.theme.Waddle
 
 /**
  * Rich message body: the block/run model from `richBlocksOf` rendered
@@ -73,14 +75,16 @@ private fun ParagraphText(paragraph: RichBlock.Paragraph) {
 @Composable
 private fun CodeBlockSurface(block: RichBlock.CodeBlock) {
     Surface(
-        shape = RoundedCornerShape(6.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        shape = RoundedCornerShape(Waddle.radius.sm),
+        color = Waddle.colors.codeBackground,
+        contentColor = Waddle.colors.codeForeground,
+        border = BorderStroke(1.dp, Waddle.colors.codeBorder),
         modifier = Modifier.fillMaxWidth(),
     ) {
         Text(
             text = block.text,
             style = MaterialTheme.typography.bodySmall,
-            fontFamily = FontFamily.Monospace,
+            fontFamily = JetBrainsMonoFamily,
             modifier = Modifier
                 .horizontalScroll(rememberScrollState())
                 .padding(8.dp),
@@ -97,7 +101,7 @@ private fun BlockquoteColumn(quote: RichBlock.Blockquote) {
                 .width(3.dp)
                 .fillMaxHeight()
                 .background(
-                    color = MaterialTheme.colorScheme.primary,
+                    color = Waddle.colors.quoteBorder,
                     shape = RoundedCornerShape(1.dp),
                 ),
         )
@@ -114,8 +118,8 @@ private fun BlockquoteColumn(quote: RichBlock.Blockquote) {
 private fun annotatedParagraph(runs: List<RichInlineRun>): AnnotatedString {
     val uriHandler = LocalUriHandler.current
     val mentionColor = MaterialTheme.colorScheme.primary
-    val linkColor = MaterialTheme.colorScheme.primary
-    val codeBackground = MaterialTheme.colorScheme.surfaceContainerHighest
+    val linkColor = Waddle.colors.link
+    val codeBackground = Waddle.colors.codeBackground
     return buildAnnotatedString {
         runs.forEach { run ->
             val style = run.spanStyle(mentionColor, codeBackground)
@@ -142,12 +146,12 @@ private fun RichInlineRun.spanStyle(mentionColor: Color, codeBackground: Color):
     SpanStyle(
         fontWeight = when {
             bold -> FontWeight.Bold
-            mentionUri != null -> FontWeight.Medium
+            mentionUri != null -> FontWeight.SemiBold
             else -> null
         },
         fontStyle = if (italic) FontStyle.Italic else null,
         textDecoration = if (strikethrough) TextDecoration.LineThrough else null,
-        fontFamily = if (code) FontFamily.Monospace else null,
+        fontFamily = if (code) JetBrainsMonoFamily else null,
         background = if (code) codeBackground else Color.Unspecified,
         color = if (mentionUri != null) mentionColor else Color.Unspecified,
     )

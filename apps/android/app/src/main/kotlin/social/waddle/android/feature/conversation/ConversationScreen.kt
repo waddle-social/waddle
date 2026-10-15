@@ -240,27 +240,31 @@ fun ConversationScreen(
                 .imePadding(),
         ) {
             aboveTimeline()
+            val rowActions = remember(viewModel, onOpenThread) {
+                MessageRowActions(
+                    onLongPress = { item -> sheetTarget = item },
+                    onToggleReaction = viewModel::toggleReaction,
+                    onOpenThread = onOpenThread?.let { open -> { item -> open(viewModel.threadIdFor(item)) } },
+                    onRetry = viewModel::retry,
+                )
+            }
+            val rowContext = remember(selfBareJid, authorPresence, declaredBotJids, trustedMediaOrigin) {
+                MessageRowContext(
+                    selfBareJid = selfBareJid,
+                    authorPresence = authorPresence,
+                    declaredBotJids = declaredBotJids,
+                    trustedMediaOrigin = trustedMediaOrigin,
+                )
+            }
             TimelineList(
-                rows = state.rows,
+                entries = state.entries,
                 isLoadingOlder = state.isLoadingOlder,
+                reachedHistoryStart = state.reachedHistoryStart,
                 onTopReached = viewModel::loadOlder,
-                onRetry = viewModel::retry,
+                actions = rowActions,
+                context = rowContext,
                 modifier = Modifier.weight(1f),
-                pinnedIds = state.pinnedIds,
-                threadReplyCounts = state.threadReplyCounts,
-                onLongPress = { item -> sheetTarget = item },
-                onToggleReaction = viewModel::toggleReaction,
-                onOpenThread = onOpenThread?.let { open ->
-                    {
-                        item ->
-                            open(viewModel.threadIdFor(item))
-                        }
-                },
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
-                selfBareJid = selfBareJid,
-                authorPresence = authorPresence,
-                declaredBotJids = declaredBotJids,
-                trustedMediaOrigin = trustedMediaOrigin,
             )
             TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)
             val slashCommands = slashCommandHost

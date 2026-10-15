@@ -127,7 +127,7 @@ class MessageSearchViewModel(
     private fun hitOf(message: WaddleArchivedMessage): MessageSearchHit? {
         if (message.isRetracted) return null
         val body = message.body?.takeIf { it.isNotBlank() } ?: return null
-        // MessageCard parity: a MUC occupant JID's display name is its
+        // MessageRow parity: a MUC occupant JID's display name is its
         // resource (nick); a DM author's is their localpart.
         val author = message.from?.let { from ->
             if (target.isGroupchat) resourcepartOf(from) ?: localpartOf(from) else localpartOf(from)
