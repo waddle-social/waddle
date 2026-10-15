@@ -647,6 +647,7 @@ async fn driver_cleans_up_failed_connects() {
 struct MockTransportShared {
     sent_messages: Arc<Mutex<Vec<TransportMessage>>>,
     close_count: Arc<Mutex<usize>>,
+    close_transport_count: Arc<Mutex<usize>>,
 }
 
 impl MockTransportShared {
@@ -692,6 +693,7 @@ struct MockTransport {
     pending_events: VecDeque<TransportEvent>,
     next_events: VecDeque<ClientResult<Option<TransportEvent>>>,
     shared: MockTransportShared,
+    close_transport_gate: Option<(oneshot::Sender<()>, oneshot::Receiver<()>)>,
 }
 
 impl MockTransport {
@@ -704,6 +706,7 @@ impl MockTransport {
             pending_events: pending_events.into(),
             next_events: next_events.into(),
             shared,
+            close_transport_gate: None,
         }
     }
 }
@@ -750,6 +753,21 @@ impl WebSocketTransport for MockTransport {
             self.pending_events.extend([
                 TransportEvent::StateChanged(TransportState::Closing),
                 TransportEvent::MessageSent(TransportMessage::Close(StreamClose)),
+                TransportEvent::StateChanged(TransportState::Closed),
+                TransportEvent::Closed,
+            ]);
+            Ok(())
+        })
+    }
+
+    fn close_transport<'a>(&'a mut self) -> BoxFuture<'a, ClientResult<()>> {
+        Box::pin(async move {
+            *self.shared.close_transport_count.lock().unwrap() += 1;
+            if let Some((started, release)) = self.close_transport_gate.take() {
+                let _ = started.send(());
+                let _ = release.await;
+            }
+            self.pending_events.extend([
                 TransportEvent::StateChanged(TransportState::Closed),
                 TransportEvent::Closed,
             ]);
@@ -876,7 +894,7 @@ async fn drive_task_to_resume_attempt(task: &mut DriverTask) {
 }
 
 #[tokio::test(flavor = "current_thread")]
-async fn native_driver_routes_stream_management_clock_retries_timeout_and_terminal_close() {
+async fn native_driver_retires_timed_out_transport_without_ending_resumable_stream() {
     let shared = MockTransportShared::default();
     let (mut task, _cmd_tx, mut events) = make_driver_task_with_config(
         config_with_resume_state(),
@@ -902,8 +920,10 @@ async fn native_driver_routes_stream_management_clock_retries_timeout_and_termin
             .await
     );
     assert!(
-        task.poll_stream_management_clock_at(now + chrono::Duration::seconds(30))
-            .await
+        !task
+            .poll_stream_management_clock_at(now + chrono::Duration::seconds(30))
+            .await,
+        "the timed-out driver must exit immediately"
     );
 
     let sent = shared.sent_messages();
@@ -916,7 +936,24 @@ async fn native_driver_routes_stream_management_clock_retries_timeout_and_termin
             .count(),
         3,
     );
-    assert_eq!(shared.close_count(), 1);
+    assert_eq!(
+        shared.close_count(),
+        0,
+        "recovery must not cleanly end XMPP"
+    );
+    assert_eq!(*shared.close_transport_count.lock().unwrap(), 1);
+    assert!(!sent
+        .iter()
+        .any(|message| matches!(message, TransportMessage::Close(_))));
+    assert_eq!(task.runtime.snapshot().phase, SessionPhase::Disconnected);
+    assert!(!task.runtime.can_send_app_stanza());
+    let resume = task
+        .runtime
+        .resume_state()
+        .expect("timeout preserves SM state");
+    assert_eq!(resume.previd().as_str(), "prev-stream");
+    assert_eq!(resume.outbound_h(), 1);
+    assert!(resume.has_unhandled_outbound_stanzas());
     assert!(
         std::iter::from_fn(|| events.try_recv().ok()).any(|event| matches!(
             event,
@@ -945,4 +982,77 @@ async fn native_driver_drops_its_stream_management_clock_on_teardown() {
     // No detached timer owns the transport after DriverTask exits.
     assert!(shared.sent_messages().is_empty());
     assert_eq!(shared.close_count(), 0);
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn native_handle_rejects_sends_while_retired_socket_close_is_stalled() {
+    let shared = MockTransportShared::default();
+    let (started_tx, started_rx) = oneshot::channel();
+    let (release_tx, release_rx) = oneshot::channel();
+    let mut transport = MockTransport::new(vec![], vec![], shared.clone());
+    transport.close_transport_gate = Some((started_tx, release_rx));
+    let (mut task, commands, _events) =
+        make_driver_task_with_config(config_with_resume_state(), transport);
+    let handle = ClientHandle::from_parts(commands, task.events.clone(), task.state.clone());
+    let mut events = handle.events();
+    drive_task_to_resume_attempt(&mut task).await;
+    task.apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
+        resumed("prev-stream", 0),
+    )))
+    .await;
+    task.apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
+        message_stanza("already-written"),
+    )))
+    .await;
+    assert_eq!(handle.state(), ClientState::Ready);
+    let retained = task.runtime.resume_state();
+    let timeout_at = chrono::Utc::now() + chrono::Duration::seconds(31);
+    let closing = tokio::spawn(async move {
+        let keep_running = task.poll_stream_management_clock_at(timeout_at).await;
+        (keep_running, task)
+    });
+    tokio::time::timeout(Duration::from_secs(5), started_rx)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        !closing.is_finished(),
+        "the transport close is still blocked"
+    );
+    assert_eq!(handle.state(), ClientState::Disconnected);
+    assert!(matches!(
+        handle.send_stanza(message_stanza("late-send")).await,
+        Err(ClientError::Disconnected)
+    ));
+    assert!(matches!(
+        handle
+            .send_iq(
+                Element::builder("iq", crate::NS_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), "late-iq")
+                    .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+                    .build()
+            )
+            .await,
+        Err(ClientError::Disconnected)
+    ));
+    let published_resume_state = std::iter::from_fn(|| events.try_recv().ok())
+        .filter_map(|event| match event {
+            ClientEvent::ResumeStateChanged(state) => Some(state),
+            _ => None,
+        })
+        .last();
+    assert_eq!(
+        published_resume_state,
+        Some(retained.clone()),
+        "the preserved resume snapshot is available while close is stalled"
+    );
+    let sent_before_release = shared.sent_messages();
+    assert!(!sent_before_release
+        .iter()
+        .any(|message| transport_message_id(message) == Some("late-send")));
+    release_tx.send(()).unwrap();
+    let (keep_running, task) = closing.await.unwrap();
+    assert!(!keep_running);
+    assert_eq!(task.runtime.resume_state(), retained);
+    assert_eq!(shared.sent_messages(), sent_before_release);
 }

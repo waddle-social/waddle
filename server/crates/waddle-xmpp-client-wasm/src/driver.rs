@@ -931,6 +931,16 @@ impl WasmDriverTask {
     }
 
     async fn handle_client_event(&mut self, event: ClientEvent) -> bool {
+        if matches!(
+            event,
+            ClientEvent::Connection(ConnectionEvent::CloseTransport)
+        ) {
+            let _ = self.dispatch_client_event(event).await;
+            let _ = self.core.borrow().web_socket.close();
+            // Finish now: queued commands and clock wakeups must not wait
+            // for the browser's asynchronous WebSocket close callback.
+            return false;
+        }
         if let Some(message) = self.dispatch_client_event(event).await {
             if let Err(err) = self.send_transport_message(message).await {
                 self.emit_error(err.to_string()).await;

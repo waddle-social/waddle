@@ -268,15 +268,21 @@ impl XmppRuntime {
                     // A reconnect terminates this stream's acknowledgement
                     // policy. Actions returned earlier in the same poll (such
                     // as a retry on the five-second plateau) must not reach
-                    // the transport after the terminal decision.
-                    self.sm_state.cancel_acknowledgement_clock();
+                    // the transport after retirement. XEP-0198 closure must
+                    // leave the session unfinished so its ID and tail resume.
+                    let previous = self.snapshot.clone();
+                    self.sm_state.stop();
+                    self.sm_negotiation = SmNegotiationState::Inactive;
+                    self.bootstrap = BootstrapState::Idle;
+                    self.snapshot.binding = None;
+                    self.snapshot.phase = SessionPhase::Disconnected;
+                    self.snapshot.transport = TransportState::Closed;
                     events.clear();
                     events.push(ClientEvent::Connection(ConnectionEvent::StreamManagement(
                         StreamManagementEvent::ReconnectRequired,
                     )));
-                    events.push(ClientEvent::Connection(ConnectionEvent::OutboundMessage(
-                        TransportMessage::Close(StreamClose),
-                    )));
+                    self.push_state_change(previous, &mut events);
+                    events.push(ClientEvent::Connection(ConnectionEvent::CloseTransport));
                     break;
                 }
             }
@@ -320,7 +326,7 @@ impl XmppRuntime {
     /// Commit a pagehide acknowledgement request only after its exact typed
     /// `<r/>` frame has synchronously reached the WebSocket API.
     pub fn commit_pagehide_ack_written(&mut self, now: DateTime<Utc>) -> bool {
-        self.sm_state.arm_acknowledgement_clock(now)
+        self.sm_state.enabled && self.sm_state.arm_acknowledgement_clock(now)
     }
 
     fn resolved_event(&self, pending: PendingRequest) -> ClientEvent {

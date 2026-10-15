@@ -97,6 +97,9 @@ pub enum LifecycleEvent {
 #[derive(Debug, Clone)]
 pub enum ConnectionEvent {
     OutboundMessage(TransportMessage),
+    /// Retire this connection without ending its XMPP session. Hosts close
+    /// only the WebSocket, preserve the resume snapshot, and stop the driver.
+    CloseTransport,
     StreamOpening(StreamOpen),
     StreamOpened(StreamOpen),
     StreamError {

@@ -308,3 +308,76 @@ async fn concrete_transport_rejects_self_signed_tls_certificates() {
 
     server.await.unwrap();
 }
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "current_thread")]
+async fn recoverable_teardown_sends_only_websocket_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, assert_xmpp_subprotocol)
+            .await
+            .unwrap();
+        let frame = socket.next().await.unwrap().unwrap();
+        assert!(
+            matches!(frame, Message::Close(_)),
+            "no terminal XMPP frame: {frame:?}"
+        );
+    });
+    let mut live_config = config();
+    live_config.transport =
+        WebSocketConfig::new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
+    let mut transport = DefaultTransportFactory.connect(&live_config).await.unwrap();
+    transport.drain_events();
+    transport.close_transport().await.unwrap();
+    assert!(transport
+        .drain_events()
+        .iter()
+        .any(|event| matches!(event, TransportEvent::Closed)));
+    assert!(matches!(
+        transport
+            .send(TransportMessage::Element(
+                Element::builder("presence", NS_CLIENT).build()
+            ))
+            .await,
+        Err(ClientError::TransportClosed)
+    ));
+    tokio::time::timeout(std::time::Duration::from_secs(5), peer)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+#[tokio::test(flavor = "current_thread")]
+async fn intentional_teardown_sends_xmpp_close_before_websocket_close() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let peer = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await.unwrap();
+        let mut socket = accept_hdr_async(stream, assert_xmpp_subprotocol)
+            .await
+            .unwrap();
+        let Message::Text(frame) = socket.next().await.unwrap().unwrap() else {
+            panic!("intentional logout must send XMPP close first");
+        };
+        assert_eq!(
+            decode_message(frame.as_ref()).unwrap(),
+            TransportMessage::Close(StreamClose)
+        );
+        assert!(matches!(
+            socket.next().await.unwrap().unwrap(),
+            Message::Close(_)
+        ));
+    });
+    let mut live_config = config();
+    live_config.transport =
+        WebSocketConfig::new(Url::parse(&format!("ws://{address}/xmpp")).unwrap()).unwrap();
+    let mut transport = DefaultTransportFactory.connect(&live_config).await.unwrap();
+    transport.close().await.unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), peer)
+        .await
+        .unwrap()
+        .unwrap();
+}
