@@ -12678,3 +12678,116 @@ async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup(
     let outcome = cleanup_connection_shutdown(&state, &mut receiver, &mut resumed, false).await;
     finish_socket_cleanup(&state, &resumed, outcome).await;
 }
+
+#[tokio::test]
+async fn intentional_close_wins_inflight_force_resume_without_persisting_a_snapshot() {
+    use std::time::Duration;
+
+    let state = create_test_websocket_state().await;
+    let session = create_test_session(state.as_ref(), "alice").await;
+    let jid: FullJid = "alice@example.com/logout-race".parse().expect("JID");
+    let mut owner = WsConnState::new();
+    owner.phase = ConnectionPhase::ready(jid.clone(), false);
+    owner.authenticated_session = Some(session.clone());
+    register_sm_publish_owner(&state, &mut owner, &jid);
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("owner entry");
+    let mut detach_requests = entry
+        .take_force_detach_rx()
+        .expect("owner control receiver");
+    let enabled = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        &state,
+        &mut owner,
+    )
+    .await;
+    let stream_id = Element::from_str(&enabled[0])
+        .expect("enabled XML")
+        .attr("id")
+        .expect("resumable stream ID")
+        .to_owned();
+    owner.publish_pending_sm_enable(&state);
+
+    // The logout frame has been processed, but terminal cleanup has not yet
+    // removed the published stream. A concurrent resume can still discover it.
+    handle_xmpp_frame(
+        "<close xmlns='urn:ietf:params:xml:ns:xmpp-framing'/>",
+        "example.com",
+        &state,
+        &mut owner,
+    )
+    .await;
+    assert!(owner.phase.is_closing());
+    assert!(
+        owner.sm_state.is_resumable(),
+        "Closing must override the prior resumable flag"
+    );
+    let replacement = tokio::spawn({
+        let state = state.clone();
+        let jid = jid.clone();
+        let stream_id = stream_id.clone();
+        async move {
+            let mut conn = WsConnState::new();
+            conn.phase = ConnectionPhase::authenticated(&jid);
+            conn.authenticated_session = Some(session);
+            let responses = handle_xmpp_frame(
+                &resume_frame_xml(&stream_id, 0),
+                "example.com",
+                &state,
+                &mut conn,
+            )
+            .await;
+            (responses, conn)
+        }
+    });
+    let request = tokio::time::timeout(Duration::from_secs(2), detach_requests.recv())
+        .await
+        .expect("resume reaches the closing owner")
+        .expect("force-detach request");
+    assert_eq!(request.origin, ForceDetachOrigin::CrossNodeResume);
+    let (_sender, mut receiver) = mpsc::channel(1);
+    let outcome = cleanup_force_detach_connection_shutdown(
+        &state,
+        &mut receiver,
+        &mut owner,
+        false,
+        request.origin,
+    )
+    .await;
+    assert_eq!(
+        outcome,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    request
+        .ack
+        .send(ForceDetachOutcome::NotPersisted)
+        .expect("resume awaits cleanup");
+
+    let (responses, replacement) = tokio::time::timeout(Duration::from_secs(2), replacement)
+        .await
+        .expect("resume observes terminal cleanup")
+        .expect("replacement task");
+    assert!(
+        responses.iter().any(|frame| {
+            let element = Element::from_str(frame).expect("response XML");
+            element.name() == "failed" && element.ns() == SM_NS
+        }),
+        "intentional logout must reject the competing resume: {responses:?}"
+    );
+    assert!(!replacement.phase.is_ready());
+    assert!(replacement.pending_resume_claim.is_none());
+    assert!(state
+        .deps
+        .protocol
+        .sm_session_registry
+        .peek_session(&stream_id)
+        .await
+        .expect("snapshot lookup")
+        .is_none());
+    assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+}
