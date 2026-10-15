@@ -91,6 +91,28 @@ android {
             ndk {
                 abiFilters += "arm64-v8a"
             }
+            // Store releases sign with the upload key from the environment
+            // (never committed). Absent credentials leave the APK unsigned.
+            val uploadKeystore = System.getenv("WADDLE_ANDROID_UPLOAD_KEYSTORE")
+            if (uploadKeystore != null) {
+                signingConfig = signingConfigs.create("upload") {
+                    storeFile = file(uploadKeystore)
+                    storePassword = System.getenv("WADDLE_ANDROID_UPLOAD_STORE_PASSWORD")
+                    keyAlias = System.getenv("WADDLE_ANDROID_UPLOAD_KEY_ALIAS")
+                    keyPassword = System.getenv("WADDLE_ANDROID_UPLOAD_KEY_PASSWORD")
+                }
+            }
+        }
+        // The sideloaded rolling build: release-optimised (R8, shrinking,
+        // non-debuggable, mobile-profile Rust core) but signed with the
+        // shared checked-in key so it installs in place over earlier
+        // rolling and debug builds without wiping app data. The key is
+        // public, so this APK proves nothing about its origin; store
+        // distribution uses `release` and the upload key instead.
+        create("preview") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
         }
     }
 }
@@ -111,6 +133,9 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.process)
+    // Installs the bundled Compose/AndroidX baseline profiles (and the
+    // app's own, when generated) so release builds skip JIT warm-up.
+    implementation(libs.androidx.profileinstaller)
     implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.navigation3.ui)
     implementation(libs.coil.compose)
