@@ -7,6 +7,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.store.MessageMutation
 import social.waddle.android.client.store.SessionStores
+import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleLinkPreviewLookup
@@ -28,6 +29,8 @@ internal class ConversationVerbs(
     private val activeSession: ActiveSession,
     private val stores: SessionStores,
     private val sessionPrefs: SessionPrefs,
+    /** Single archive ingest path: timeline rows plus catch-up cursors. */
+    private val ingestArchivedPage: (List<WaddleArchivedMessage>) -> Unit = stores.timelineStore::onArchivedPage,
 ) {
     /** Serializes reaction send+rollback pairs (see [toggleReaction]). */
     private val reactionMutex = Mutex()
@@ -524,14 +527,7 @@ internal class ConversationVerbs(
         fetch: suspend (WaddleClientInterface) -> WaddleMamPage,
     ): WaddleMamPage? {
         val page = activeSession.fetchIfCurrent(lease, fetch) ?: return null
-        // Per-message guard: one malformed archived stanza must not kill
-        // the caller's paging coroutine (and crash-loop on every reopen
-        // of the conversation, since the archive re-serves it).
-        page.messages.forEach { message ->
-            activeSession.applyIfCurrent(lease) {
-                runCatching { stores.timelineStore.onArchivedMessage(message) }
-            }
-        }
+        activeSession.applyIfCurrent(lease) { ingestArchivedPage(page.messages) }
         return page
     }
 }

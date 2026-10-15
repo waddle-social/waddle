@@ -13,6 +13,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -65,6 +66,8 @@ class XmppSessionManager(
     reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+    /** Periodic liveness probe cadence while ready; production passes `fixedRateTicks()`. */
+    livenessTicks: Flow<Unit> = emptyFlow(),
     /** Test seam for the stale terminal-auth completion race. */
     private val beforeTerminalAuthCommit: suspend () -> Unit = {},
     /** Wall clock for the peer-avatar TTLs. */
@@ -135,9 +138,19 @@ class XmppSessionManager(
             persistDmSeen(peer, timestamp)
         }
 
-    private val messenger = OutboundMessenger(activeSession, stores, sessionPrefs, router::dispatch)
+    private val messenger: OutboundMessenger = OutboundMessenger(
+        activeSession,
+        stores,
+        sessionPrefs,
+        router::dispatch,
+        // A send the transport refused while "ready" is the strongest
+        // hint the stream is half-open: prove it or replace it now
+        // instead of leaving the queued row waiting for a reconnect that
+        // nothing else would trigger.
+        onTransportError = { loop.requestLivenessCheck() },
+    )
 
-    private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
+    private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs, router::ingestArchivedPage)
 
     private val roomAdmin = RoomAdminVerbs(activeSession, stores)
 
@@ -165,7 +178,7 @@ class XmppSessionManager(
     private val catchup =
         SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
 
-    private val loop = ConnectionLoop(
+    private val loop: ConnectionLoop = ConnectionLoop(
         clientFactory = clientFactory,
         networkSignal = networkSignal,
         sessionPrefs = sessionPrefs,
@@ -179,11 +192,12 @@ class XmppSessionManager(
         ),
         reconnectPolicy = reconnectPolicy,
         connectTimeoutMillis = connectTimeoutMillis,
+        livenessTicks = livenessTicks,
     )
 
     val connectionState: StateFlow<ConnectionState> = loop.state
 
-    /** Every domain event, after store fan-out; drops oldest under burst. */
+    /** Every domain event, after store fan-out. */
     val events: SharedFlow<XmppEvent> = router.events
 
     /**
@@ -547,8 +561,18 @@ class XmppSessionManager(
         submission: ExtensionCommandSubmission,
     ): ExtensionCommandCall = extensions.submitExtensionCommandForm(submission)
 
-    /** Manual retry from the Failed banner: fresh budget immediately. */
+    /** Manual retry from the connection banner: skip the remaining backoff. */
     fun requestReconnect() {
+        loop.requestReconnect()
+    }
+
+    /**
+     * The app came to the foreground. A ready stream may have died while
+     * the process was frozen (Doze, cached-app freezer): probe it. A
+     * stream that is not ready stops waiting out its backoff.
+     */
+    fun onAppForeground() {
+        loop.requestLivenessCheck()
         loop.requestReconnect()
     }
 

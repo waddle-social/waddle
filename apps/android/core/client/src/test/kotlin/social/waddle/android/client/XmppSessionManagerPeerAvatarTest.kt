@@ -381,17 +381,18 @@ class XmppSessionManagerPeerAvatarTest {
     fun `archive authors and delayed rows never label a nick's later holder`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
-        harness.factory.emit(
-            WaddleClientEvent.MamResult(
-                testArchivedMessage(
-                    mamId = "m1",
-                    id = "a1",
-                    stanzaId = "a1",
-                    from = "$room/sam",
-                    to = "icepuma@waddle.test",
-                    messageType = "groupchat",
-                    authorRealJid = "Sam.Old@waddle.test/web",
-                ),
+        harness.manager.deliverArchivedPage(
+            harness.factory.clients.last(),
+            room,
+            isGroupchat = true,
+            testArchivedMessage(
+                mamId = "m1",
+                id = "a1",
+                stanzaId = "a1",
+                from = "$room/sam",
+                to = "icepuma@waddle.test",
+                messageType = "groupchat",
+                authorRealJid = "Sam.Old@waddle.test/web",
             ),
         )
         // No presence for "sam": the archived author must not leak onto it.

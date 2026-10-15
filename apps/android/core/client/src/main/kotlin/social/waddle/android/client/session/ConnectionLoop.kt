@@ -1,6 +1,7 @@
 package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.async
@@ -9,17 +10,21 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.ReceiveChannel
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.currentCoroutineContext
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.filter
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flow
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.merge
 import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.job
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -41,6 +46,14 @@ import social.waddle.client.ffi.WaddleSaslCondition
  * waits up to the connect budget for `SessionReady`. Failed attempts
  * back off via [ReconnectPolicy]; credential-shaped SASL failures are
  * terminal and reported via [onTerminalAuthFailure].
+ *
+ * A ready stream is never trusted on faith. Nothing in the WebSocket
+ * transport notices a half-open socket (Doze, NAT timeout, a network
+ * handoff), so while `Ready` the loop probes the server with an XEP-0199
+ * ping whenever the app comes to the foreground, the default network
+ * changes, an ordinary send fails at the transport, and periodically.
+ * A failed or late probe retires the attempt and reconnects at once;
+ * losing the network retires it without a probe.
  */
 internal class ConnectionLoop(
     private val clientFactory: ClientFactory,
@@ -51,20 +64,36 @@ internal class ConnectionLoop(
     private val callbacks: ConnectionLoopCallbacks,
     private val reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+    /**
+     * Periodic probe cadence while ready, injected by the app (see
+     * [fixedRateTicks]). Empty by default: a perpetual timer would keep
+     * virtual-time test schedulers from ever going idle.
+     */
+    private val livenessTicks: Flow<Unit> = emptyFlow(),
+    private val pingTimeoutMillis: Long = PING_TIMEOUT_MILLIS,
 ) {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
 
     private val retryRequests = Channel<Unit>(Channel.CONFLATED)
+    private val livenessRequests = Channel<Unit>(Channel.CONFLATED)
 
     /** Logout: the loop is cancelled; publish `Idle` for the UI. */
     fun resetToIdle() {
         _state.value = ConnectionState.Idle
     }
 
-    /** Manual retry from the Failed banner: fresh budget immediately. */
+    /** Skip the remaining backoff and attempt now (manual retry, foreground). */
     fun requestReconnect() {
         retryRequests.trySend(Unit)
+    }
+
+    /**
+     * Ask the ready stream to prove it is alive. Called on app foreground
+     * and after a transport-level send failure; a no-op unless `Ready`.
+     */
+    fun requestLivenessCheck() {
+        livenessRequests.trySend(Unit)
     }
 
     suspend fun run(session: WaddleSessionInfo, sessionScope: CoroutineScope) {
@@ -90,19 +119,15 @@ internal class ConnectionLoop(
                     return
                 }
                 AttemptEnd.DROPPED_AFTER_READY -> attempt = 0
+                // A ready stream that failed its liveness probe was dead
+                // for an unknown time already: reconnect without waiting.
+                AttemptEnd.STALE_AFTER_READY -> {
+                    attempt = 0
+                    continue
+                }
                 AttemptEnd.CONNECT_FAILED -> Unit
             }
             val delayMillis = reconnectPolicy.delayMillisFor(attempt)
-            if (delayMillis == null) {
-                // Budget spent: park instead of abandoning the session.
-                // Web parity (armOnlineRecovery/connectWithFreshBudget):
-                // a genuine offline->online transition or an explicit user
-                // retry restarts the loop with a fresh attempt budget.
-                _state.value = ConnectionState.Failed
-                awaitRecoveryTrigger()
-                attempt = 0
-                continue
-            }
             attempt += 1
             _state.value = ConnectionState.Reconnecting(attempt, delayMillis)
             awaitRetryWindow(delayMillis)
@@ -202,11 +227,58 @@ internal class ConnectionLoop(
         // phase: after the session is bound, "not-authorized"/"forbidden"
         // shaped text also arrives on per-operation stanza errors, and
         // treating those as terminal would sign the user out mid-session.
-        for (event in consumer.events) {
-            dispatch(event)
-            if (event is XmppEvent.Disconnected) return AttemptEnd.DROPPED_AFTER_READY
+        // A request queued while the previous attempt was not ready is
+        // moot: this stream is brand new.
+        livenessRequests.tryReceive()
+        val retired = CompletableDeferred<AttemptEnd>()
+        val watchdog = consumer.scope.launch { superviseLiveness(consumer.client, retired) }
+        try {
+            while (true) {
+                val end = select<AttemptEnd?> {
+                    retired.onAwait { it }
+                    consumer.events.onReceiveCatching { result ->
+                        val event = result.getOrNull() ?: return@onReceiveCatching AttemptEnd.DROPPED_AFTER_READY
+                        dispatch(event)
+                        if (event is XmppEvent.Disconnected) AttemptEnd.DROPPED_AFTER_READY else null
+                    }
+                }
+                if (end != null) return end
+            }
+        } finally {
+            watchdog.cancel()
         }
-        return AttemptEnd.DROPPED_AFTER_READY
+    }
+
+    /**
+     * Completes [retired] once the ready stream can no longer be trusted:
+     * the network disappeared ([AttemptEnd.DROPPED_AFTER_READY], the
+     * outer loop parks in `Offline`) or a liveness probe failed
+     * ([AttemptEnd.STALE_AFTER_READY], reconnect immediately).
+     */
+    private suspend fun superviseLiveness(
+        client: WaddleClientInterface,
+        retired: CompletableDeferred<AttemptEnd>,
+    ) = coroutineScope {
+        launch {
+            networkSignal.online.first { online -> !online }
+            retired.complete(AttemptEnd.DROPPED_AFTER_READY)
+        }
+        val triggers = merge(
+            livenessRequests.receiveAsFlow(),
+            networkSignal.networkChanges,
+            livenessTicks,
+        )
+        triggers.first { !isAlive(client) }
+        retired.complete(AttemptEnd.STALE_AFTER_READY)
+    }
+
+    /** XEP-0199 round trip within [pingTimeoutMillis]; any failure means dead. */
+    private suspend fun isAlive(client: WaddleClientInterface): Boolean = try {
+        withTimeoutOrNull(pingTimeoutMillis) { client.pingServer() } != null
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        false
     }
 
     private suspend fun awaitReadiness(events: ReceiveChannel<XmppEvent>): Readiness {
@@ -255,33 +327,26 @@ internal class ConnectionLoop(
     }
 
     /**
-     * Wait out the backoff delay — unless the network drops, in which
-     * case park in `Offline` and retry immediately once it returns
-     * (bypassing the remaining timer, web `navigator.onLine` parity).
+     * Wait out the backoff delay unless something better happens first:
+     * an explicit retry request (user tap, app foreground) or a network
+     * handoff skips the rest of the wait; losing the network parks in
+     * `Offline` and retries as soon as it returns.
      */
     private suspend fun awaitRetryWindow(delayMillis: Long) {
-        val wentOffline = withTimeoutOrNull(delayMillis) {
-            networkSignal.online.first { online -> !online }
-        } != null
-        if (wentOffline) {
+        val outcome = withTimeoutOrNull(delayMillis) {
+            merge(
+                retryRequests.receiveAsFlow().map { RetryWake.REQUESTED },
+                networkSignal.networkChanges.map { RetryWake.REQUESTED },
+                networkSignal.online.filter { online -> !online }.map { RetryWake.OFFLINE },
+            ).first()
+        }
+        if (outcome == RetryWake.OFFLINE) {
             _state.value = ConnectionState.Offline
             networkSignal.online.first { it }
         }
     }
 
-    /**
-     * Parks the exhausted loop until either a real offline->online edge
-     * (`drop(1)` skips the replayed current value of the StateFlow-shaped
-     * signal) or an explicit retry request. Covers both failure shapes:
-     * connectivity loss recovers on the edge, server-side outages recover
-     * via user retry (the device never went offline).
-     */
-    private suspend fun awaitRecoveryTrigger() {
-        merge(
-            retryRequests.receiveAsFlow(),
-            networkSignal.online.drop(1).filter { it }.map { },
-        ).first()
-    }
+    private enum class RetryWake { REQUESTED, OFFLINE }
 
     /**
      * Credential-shaped conditions invalidate the stored token; every
@@ -303,6 +368,9 @@ internal class ConnectionLoop(
         data class AuthFailed(val lease: ActiveSession.OwnerLease) : AttemptEnd
         data object CONNECT_FAILED : AttemptEnd
         data object DROPPED_AFTER_READY : AttemptEnd
+
+        /** The ready stream failed a liveness probe (half-open socket). */
+        data object STALE_AFTER_READY : AttemptEnd
     }
 
     private enum class Readiness { READY, AUTH_FAILED, CLOSED }
@@ -310,6 +378,16 @@ internal class ConnectionLoop(
     companion object {
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = 15_000L
+
+        /**
+         * Production probe cadence while ready. Foreground and network
+         * changes probe immediately; this only bounds how long a silently
+         * dead stream can go unnoticed when nothing else happens.
+         */
+        const val LIVENESS_INTERVAL_MILLIS = 180_000L
+
+        /** The Rust ping gives up after 8s; allow a little scheduling slack. */
+        const val PING_TIMEOUT_MILLIS = 10_000L
 
         private const val RESOURCE_PREFIX = "waddle-android-"
     }
@@ -340,3 +418,11 @@ internal class ConnectionLoopCallbacks(
      */
     val onTerminalAuthFailure: (ActiveSession.OwnerLease, CoroutineScope) -> Unit,
 )
+
+/** A tick every [intervalMillis], forever, for [ConnectionLoop]'s liveness cadence. */
+fun fixedRateTicks(intervalMillis: Long = ConnectionLoop.LIVENESS_INTERVAL_MILLIS): Flow<Unit> = flow {
+    while (true) {
+        delay(intervalMillis)
+        emit(Unit)
+    }
+}

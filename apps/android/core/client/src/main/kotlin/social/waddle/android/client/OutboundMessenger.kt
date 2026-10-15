@@ -20,6 +20,8 @@ internal class OutboundMessenger(
     private val stores: SessionStores,
     private val sessionPrefs: SessionPrefs,
     private val dispatchEvent: (XmppEvent) -> Unit,
+    /** The live transport refused a send: the stream may be half-open. */
+    private val onTransportError: () -> Unit = {},
 ) {
     private val outboundQueue = OutboundQueue(sessionPrefs)
     private val sendMutex = Mutex()
@@ -90,6 +92,7 @@ internal class OutboundMessenger(
             return@withLock SendResult(WaddleSendMessageOutcome.Error)
         }
         val outcome = (attempt as ActiveSession.LeaseSendResult.Attempted).outcome
+        if (outcome == WaddleSendMessageOutcome.TransportError) onTransportError()
         when (outcome) {
             is WaddleSendMessageOutcome.Sent,
             WaddleSendMessageOutcome.NotConnected,

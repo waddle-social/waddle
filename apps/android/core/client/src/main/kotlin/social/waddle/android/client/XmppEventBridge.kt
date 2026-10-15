@@ -33,7 +33,9 @@ class XmppEventBridge : WaddleEventListener {
             is WaddleClientEvent.Disconnected -> channel.trySend(XmppEvent.Disconnected)
             is WaddleClientEvent.Message -> channel.trySend(XmppEvent.Message(event.message))
             is WaddleClientEvent.Presence -> channel.trySend(XmppEvent.Presence(event.presence))
-            is WaddleClientEvent.MamResult -> channel.trySend(XmppEvent.MamResult(event.message))
+            // History arrives as the page a fetch returns; the per-result
+            // echo would ingest every archived row a second time.
+            is WaddleClientEvent.MamResult -> Unit
             is WaddleClientEvent.DeliveryAcked -> channel.trySend(XmppEvent.DeliveryAcked(event.stanzaId))
             is WaddleClientEvent.DeliveryFailed -> channel.trySend(XmppEvent.DeliveryFailed(event.stanzaId))
             is WaddleClientEvent.MessageRejected ->

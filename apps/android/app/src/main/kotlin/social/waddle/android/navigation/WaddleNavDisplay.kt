@@ -1,10 +1,12 @@
 package social.waddle.android.navigation
 
 import androidx.compose.runtime.Composable
+import androidx.lifecycle.viewmodel.navigation3.rememberViewModelStoreNavEntryDecorator
 import androidx.navigation3.runtime.NavBackStack
 import androidx.navigation3.runtime.NavKey
 import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
+import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
 import social.waddle.android.feature.admin.CommunityUsersScreen
 import social.waddle.android.feature.channel.ChannelScreen
@@ -29,6 +31,13 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
     NavDisplay(
         backStack = backStack,
         onBack = { backStack.popSafely() },
+        // Each entry owns its ViewModels: popping a conversation clears
+        // its ViewModel (and its collectors, joins and refetches) instead
+        // of leaking it into the Activity's store for the process lifetime.
+        entryDecorators = listOf(
+            rememberSaveableStateHolderNavEntryDecorator(),
+            rememberViewModelStoreNavEntryDecorator(),
+        ),
         entryProvider = entryProvider {
             entry<WaddleNavKey.Home> {
                 HomeScreen(

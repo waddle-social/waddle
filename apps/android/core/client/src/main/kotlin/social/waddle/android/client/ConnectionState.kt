@@ -19,7 +19,4 @@ sealed interface ConnectionState {
 
     /** Terminal: the server rejected the credentials — re-login required. */
     data object AuthFailed : ConnectionState
-
-    /** Terminal: the reconnect attempt budget is exhausted. */
-    data object Failed : ConnectionState
 }

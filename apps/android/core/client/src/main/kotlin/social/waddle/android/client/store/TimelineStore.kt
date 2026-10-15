@@ -70,6 +70,13 @@ class TimelineStore(
     private val newestWireInstant = HashMap<String, Instant>()
     private var insertionCounter = 0L
 
+    /**
+     * Conversations changed while a batch ([onArchivedPage]) holds [lock];
+     * `null` outside a batch. A page of 50 archived rows publishes once,
+     * not 50 times — every publish wakes every collector of the list.
+     */
+    private var batchedPublishes: MutableSet<String>? = null
+
     @Volatile
     private var ownBareJid: String? = null
     private var ownNick: String? = null
@@ -158,6 +165,25 @@ class TimelineStore(
         val from = message.from ?: return false
         val nick = resourcepart(from) ?: return false
         return actualOwnNickIn(bareJid(from)) == nick
+    }
+
+    /**
+     * Ingest one MAM page as a single store transaction: one publish per
+     * touched conversation, however many rows the page carries. One
+     * malformed archived stanza must not drop the rest of the page (the
+     * archive re-serves it on every reopen).
+     */
+    fun onArchivedPage(messages: List<WaddleArchivedMessage>) {
+        synchronized(lock) {
+            val touched = mutableSetOf<String>()
+            batchedPublishes = touched
+            try {
+                messages.forEach { message -> runCatching { onArchivedMessage(message) } }
+            } finally {
+                batchedPublishes = null
+                touched.forEach { conversation -> entries[conversation]?.let { publish(conversation, it) } }
+            }
+        }
     }
 
     fun onArchivedMessage(message: WaddleArchivedMessage) {
@@ -263,13 +289,17 @@ class TimelineStore(
                 val merged = mergedTwin(existing, item, isGroupchat)
                 // The MAM UID is private dedupe metadata, retained even
                 // when a live source supersedes its archived copy.
-                list[existingIndex] = (merged ?: existing).copy(
+                val replacement = (merged ?: existing).copy(
                     dedupeArchiveId = existing.dedupeArchiveId ?: archiveIdOf(item),
                 )
-                if (merged != null) {
-                    list.sortWith(ENTRY_ORDER)
-                    publish(conversation, list)
+                if (merged != null && replacement.sortInstant != existing.sortInstant) {
+                    // The twin carried a different timestamp: move it.
+                    list.removeAt(existingIndex)
+                    list.add(insertionPointOf(list, replacement), replacement)
+                } else {
+                    list[existingIndex] = replacement
                 }
+                if (merged != null) publish(conversation, list)
                 recordWireInstant(conversation, item.timestamp)
                 return false
             }
@@ -282,8 +312,9 @@ class TimelineStore(
             )
             recordWireInstant(conversation, item.timestamp)
             entry = drainPendingMutationsInto(conversation, entry, isGroupchat)
-            list += entry
-            list.sortWith(ENTRY_ORDER)
+            // The list is always sorted: a binary-searched insert keeps it
+            // so in O(log n) instead of re-sorting every row per message.
+            list.add(insertionPointOf(list, entry), entry)
             if (item.source is TimelineSource.Live) {
                 // Live-append overflow only — see the class KDoc invariant.
                 while (list.size > maxItemsPerConversation) list.removeAt(0)
@@ -647,22 +678,25 @@ class TimelineStore(
         )
     }
 
-    private fun publish(conversation: String, list: List<Entry>) {
-        flowFor(conversation).value = list.map { it.enriched() }
+    /** Index at which [entry] keeps [list] in [ENTRY_ORDER] (after equal keys). */
+    private fun insertionPointOf(list: List<Entry>, entry: Entry): Int {
+        val found = list.binarySearch(entry, ENTRY_ORDER)
+        return if (found >= 0) found + 1 else -(found + 1)
     }
 
-    private fun Entry.enriched(): TimelineItem {
-        val state = mutations
-        if (state == MutationState()) return item
-        // Cleared senders linger as empty entries (rank retention);
-        // aggregation naturally renders them as no chips.
-        return item.copy(
-            body = state.correctedBody ?: item.body,
-            edited = state.correctedBody != null,
-            tombstone = state.tombstone,
-            reactions = aggregateReactions(state.reactionsBySender),
-            safetyScores = if (state.tombstone == null) state.safetyScores else null,
-        )
+    /**
+     * Rows are re-used across publishes: an [Entry] is immutable and its
+     * rendered item is computed once, so an unchanged message keeps the
+     * same [TimelineItem] instance from one emission to the next and the
+     * UI can skip it by identity.
+     */
+    private fun publish(conversation: String, list: List<Entry>) {
+        val batch = batchedPublishes
+        if (batch != null) {
+            batch += conversation
+            return
+        }
+        flowFor(conversation).value = list.map { it.rendered }
     }
 
     private fun flowFor(conversation: String): MutableStateFlow<List<TimelineItem>> =
@@ -675,7 +709,10 @@ class TimelineStore(
         val mutations: MutationState = MutationState(),
         /** First valid MAM UID; survives live-source replacement and never enters wire identities. */
         val dedupeArchiveId: String? = null,
-    )
+    ) {
+        /** What the UI sees: [item] with [mutations] applied, built once per entry. */
+        val rendered: TimelineItem by lazy(LazyThreadSafetyMode.NONE) { enrichedOf(item, mutations) }
+    }
 
     /**
      * Latest-wins ordering for mutations: by timestamp when carried
@@ -727,6 +764,19 @@ class TimelineStore(
 
         val ENTRY_ORDER: Comparator<Entry> =
             compareBy<Entry> { it.sortInstant ?: Instant.MAX }.thenBy { it.order }
+
+        fun enrichedOf(item: TimelineItem, state: MutationState): TimelineItem {
+            if (state == MutationState()) return item
+            // Cleared senders linger as empty entries (rank retention);
+            // aggregation naturally renders them as no chips.
+            return item.copy(
+                body = state.correctedBody ?: item.body,
+                edited = state.correctedBody != null,
+                tombstone = state.tombstone,
+                reactions = aggregateReactions(state.reactionsBySender),
+                safetyScores = if (state.tombstone == null) state.safetyScores else null,
+            )
+        }
 
         fun aggregateReactions(bySender: Map<String, SenderReactions>): List<ReactionGroup> {
             if (bySender.isEmpty()) return emptyList()

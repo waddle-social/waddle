@@ -1,7 +1,6 @@
 package social.waddle.android.client
 
 import org.junit.Assert.assertEquals
-import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -33,17 +32,18 @@ class ReconnectPolicyTest {
     }
 
     @Test
-    fun `terminal after ten attempts`() {
+    fun `never gives up and never overflows`() {
         val policy = ReconnectPolicy(PinnedRandom(0.5))
-        assertNull(policy.delayMillisFor(10))
-        assertNull(policy.delayMillisFor(11))
+        assertEquals(30_000L, policy.delayMillisFor(10))
+        assertEquals(30_000L, policy.delayMillisFor(1_000))
+        assertEquals(30_000L, policy.delayMillisFor(Int.MAX_VALUE))
     }
 
     @Test
     fun `default random stays within the jitter window`() {
         val policy = ReconnectPolicy()
         repeat(100) {
-            val delay = policy.delayMillisFor(0) ?: error("attempt 0 must yield a delay")
+            val delay = policy.delayMillisFor(0)
             assertTrue("delay $delay below jitter floor", delay >= 1_000L)
             assertTrue("delay $delay above jitter ceiling", delay < 2_000L)
         }

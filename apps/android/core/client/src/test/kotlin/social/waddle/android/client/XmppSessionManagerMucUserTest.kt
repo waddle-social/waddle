@@ -60,9 +60,13 @@ class XmppSessionManagerMucUserTest {
             ),
         )
         // Archived twin of a private message.
-        harness.emit(
-            WaddleClientEvent.MamResult(testArchivedMessage(mamId = "mam-1", from = "$ROOM/alice", mucUser = true)),
+        harness.manager.deliverArchivedPage(
+            harness.factory.clients.last(),
+            ROOM,
+            isGroupchat = true,
+            testArchivedMessage(mamId = "mam-1", from = "$ROOM/alice", mucUser = true),
         )
+        runCurrent()
 
         assertEquals(emptyList<String>(), harness.manager.dmStore.peers.value)
         assertEquals(emptyMap<String, String>(), harness.prefs.lastSeen.first())

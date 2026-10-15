@@ -29,6 +29,7 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
+import social.waddle.android.client.session.fixedRateTicks
 import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.call.CallMediaController
 import social.waddle.android.feature.call.CallSessionController
@@ -99,6 +100,7 @@ class AppGraph(
         clientFactory = clientFactory,
         networkSignal = this.networkSignal,
         userPrefs = userPrefs,
+        livenessTicks = fixedRateTicks(),
     )
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
@@ -123,6 +125,7 @@ class AppGraph(
         context = appContext,
         appState = appState,
         scope = applicationScope,
+        onForeground = sessionManager::onAppForeground,
     )
 
     val attachmentUploader: AttachmentUploader = AttachmentUploader(

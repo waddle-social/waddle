@@ -30,7 +30,6 @@ fun ConnectionBanner(
             stringResource(R.string.connection_reconnecting, state.attempt)
         ConnectionState.Offline -> stringResource(R.string.connection_offline)
         ConnectionState.AuthFailed -> stringResource(R.string.connection_auth_failed)
-        ConnectionState.Failed -> stringResource(R.string.connection_failed)
         ConnectionState.Idle, ConnectionState.Ready -> null
     } ?: return
 
@@ -45,9 +44,8 @@ fun ConnectionBanner(
                     .padding(vertical = 4.dp)
                     .semantics { liveRegion = LiveRegionMode.Polite },
             )
-            // Server-side outages never produce an offline->online edge,
-            // so the parked loop needs a manual trigger.
-            if (state == ConnectionState.Failed) {
+            // Backoff can reach a minute; let the user skip the wait.
+            if (state is ConnectionState.Reconnecting) {
                 TextButton(onClick = onRetry) {
                     Text(text = stringResource(R.string.connection_retry))
                 }

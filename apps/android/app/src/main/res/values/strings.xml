@@ -36,7 +36,6 @@
     <string name="connection_reconnecting">Reconnecting (attempt %1$d)…</string>
     <string name="connection_offline">Offline — waiting for network</string>
     <string name="connection_auth_failed">Session expired — sign in again</string>
-    <string name="connection_failed">Connection failed</string>
     <string name="connection_status_connected">Connected</string>
     <string name="connection_status_idle">Not connected</string>
 

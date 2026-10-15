@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -108,6 +109,14 @@ class InMemoryPreferencesDataStore : DataStore<Preferences> {
 class FakeNetworkSignal(initiallyOnline: Boolean = true) : NetworkSignal {
     val state = MutableStateFlow(initiallyOnline)
     override val online: Flow<Boolean> = state
+
+    private val changes = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+    override val networkChanges: Flow<Unit> = changes
+
+    /** Simulate the default network being replaced (Wi-Fi ↔ cellular). */
+    fun handoff() {
+        changes.tryEmit(Unit)
+    }
 }
 
 /**
@@ -859,7 +868,18 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         disconnectCalls += 1
     }
 
-    override suspend fun pingServer() = Unit
+    /** XEP-0199 probes issued; [ping] decides each probe's fate. */
+    @Volatile
+    var pingCalls = 0
+
+    /** Default: the server answers. Throw to fail, suspend to time out. */
+    @Volatile
+    var ping: suspend () -> Unit = {}
+
+    override suspend fun pingServer() {
+        pingCalls += 1
+        ping()
+    }
 
     /** Topology fake state: canned result, call count, failure knob. */
     val topology = FakeTopologyState()
@@ -1422,4 +1442,23 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         environment: WaddlePushEnvironment,
         credentials: WaddlePushDeviceCredentials,
     ): WaddleRegisterDeviceResult? = unused()
+}
+
+/**
+ * Deliver [messages] the way production does: as the page a history
+ * fetch returns. (The FFI's per-result `MamResult` echo is deliberately
+ * ignored by the bridge.)
+ */
+suspend fun XmppSessionManager.deliverArchivedPage(
+    client: FakeWaddleClient,
+    conversationJid: String,
+    isGroupchat: Boolean,
+    vararg messages: social.waddle.client.ffi.WaddleArchivedMessage,
+) {
+    client.mamPage = WaddleMamPage(messages = messages.toList(), firstId = null, lastId = null, isComplete = true)
+    if (isGroupchat) {
+        fetchRoomHistory(conversationJid, 50u, null)
+    } else {
+        fetchDmHistory(conversationJid, 50u, null)
+    }
 }

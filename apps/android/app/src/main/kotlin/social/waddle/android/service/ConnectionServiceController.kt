@@ -18,6 +18,8 @@ class ConnectionServiceController(
     private val context: Context,
     private val appState: StateFlow<WaddleAppState>,
     private val scope: CoroutineScope,
+    /** Foreground entry: the session should prove its stream is still alive. */
+    private val onForeground: () -> Unit = {},
 ) {
     fun start() {
         scope.launch {
@@ -38,6 +40,7 @@ class ConnectionServiceController(
             override fun onStart(owner: LifecycleOwner) {
                 if (appState.value == WaddleAppState.Ready) {
                     startService()
+                    onForeground()
                 }
             }
         })

@@ -66,16 +66,17 @@ class XmppSessionManagerCatchupTest {
         )
 
         // An older MAM backfill row must never move the cursor backwards.
-        harness.factory.emit(
-            WaddleClientEvent.MamResult(
-                testArchivedMessage(
-                    mamId = "mam-old",
-                    stanzaId = "s-old",
-                    from = "alice@waddle.test",
-                    to = "icepuma@waddle.test",
-                    messageType = "chat",
-                    timestamp = "2026-07-15T09:00:00Z",
-                ),
+        harness.manager.deliverArchivedPage(
+            harness.factory.clients.last(),
+            "alice@waddle.test",
+            isGroupchat = false,
+            testArchivedMessage(
+                mamId = "mam-old",
+                stanzaId = "s-old",
+                from = "alice@waddle.test",
+                to = "icepuma@waddle.test",
+                messageType = "chat",
+                timestamp = "2026-07-15T09:00:00Z",
             ),
         )
         runCurrent()

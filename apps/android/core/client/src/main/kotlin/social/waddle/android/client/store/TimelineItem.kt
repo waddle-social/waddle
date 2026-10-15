@@ -75,9 +75,8 @@ data class TimelineItem(
      * must match against all of them — the send returns the origin id
      * while the MUC reflection is keyed by the room-assigned stanza id.
      */
-    val identityIds: Set<String>
-        get() = setOfNotNull(source.stanzaId, source.originId, source.messageId) +
-            source.stanzaIds.map { it.id }
+    val identityIds: Set<String> =
+        setOfNotNull(source.stanzaId, source.originId, source.messageId) + source.stanzaIds.map { it.id }
 
     /** Every XEP-0359 `<stanza-id/>` on the stanza, document order. */
     val stanzaIds: List<WaddleStanzaId> get() = source.stanzaIds
