@@ -56,15 +56,15 @@ describe("renderStyledBody", () => {
     expect(list).not.toContain("- one");
   });
 
-  test("renders stargate quote fallback as one blockquote without an orphan marker", () => {
-    const quote = "Oh, bloody hell! We're all doomed!";
-    const body = `> ${quote}\n\nRush, Stargate Universe`;
+  test("renders quote fallback as one blockquote without an orphan marker", () => {
+    const quote = "Penguins don't fly, they waddle!";
+    const body = `> ${quote}\n\nA penguin, probably`;
     const html = renderStyledBody(body, [
       { type: "bquote", start: 0, end: 2 + quote.length },
     ]);
 
     expect(html).toBe(
-      "<blockquote><p>Oh, bloody hell! We&#39;re all doomed!</p></blockquote><p>Rush, Stargate Universe</p>",
+      "<blockquote><p>Penguins don&#39;t fly, they waddle!</p></blockquote><p>A penguin, probably</p>",
     );
     expect(html).not.toContain("<p>&gt;</p>");
   });
