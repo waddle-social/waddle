@@ -11,7 +11,11 @@
         android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
         tools:node="remove" />
 
-    <application>
+    <!-- Restates the main manifest (and the platform default since API 28)
+         so this overlay reads safely on its own. -->
+    <application
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false">
         <service
             android:name=".service.WaddleConnectionService"
             tools:node="remove" />
