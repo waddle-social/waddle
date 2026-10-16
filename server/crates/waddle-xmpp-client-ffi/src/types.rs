@@ -1341,6 +1341,11 @@ pub enum WaddleClientEvent {
     },
     /// XEP-0084 metadata transition announced by a peer's PEP service.
     AvatarChanged { jid: Jid, avatar_id: Option<String> },
+    /// ADR-010: another resource of this account published a presence
+    /// mode to its own `urn:waddle:status-preference:0` PEP node.
+    StatusPreferenceChanged {
+        preference: crate::WaddleStatusPreference,
+    },
     /// Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
     /// a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
     /// query-response entries resolve the `fetch_inbox` verb and are

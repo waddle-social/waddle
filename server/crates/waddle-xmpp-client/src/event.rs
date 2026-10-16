@@ -56,6 +56,11 @@ pub enum ClientEvent {
     PubsubAttachmentSummary(PubsubAttachmentSummaryUpdate),
     /// XEP-0084 metadata transition announced by a peer's PEP service.
     AvatarChanged(AvatarChanged),
+    /// ADR-010 cross-device manual status: another resource of this
+    /// account published a pick to its own `urn:waddle:status-preference:0`
+    /// PEP node. Emitted alongside the [`ClientEvent::Messaging`] event
+    /// that carried the notification, which the wasm client still reads.
+    StatusPreferenceChanged(waddle_xmpp_core::waddle_status_preference::StatusPreference),
     /// Transport-level delivery status for outbound message stanzas.
     MessageDelivery(MessageDeliveryEvent),
     /// A parsed message error. Echoed bodies and extensions are never dispatched.

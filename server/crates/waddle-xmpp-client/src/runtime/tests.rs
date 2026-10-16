@@ -4,6 +4,7 @@ use chrono::{Duration, TimeZone, Utc};
 use jid::{BareJid, FullJid};
 use minidom::Element;
 use url::Url;
+use waddle_xmpp_core::waddle_status_preference::{ManualStatus, StatusPreference};
 
 use super::*;
 use crate::bootstrap::{NS_BIND, NS_SASL, NS_STREAMS};
@@ -474,6 +475,59 @@ fn app_stanza_emits_standalone_pubsub_retract_and_summary_events() {
                 && update.summary.reactions[0].count == 2
     )));
     assert_eq!(events.len(), 3);
+}
+
+#[test]
+fn app_stanza_emits_own_status_preference_beside_the_pubsub_message() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element = "<message xmlns='jabber:client' type='headline' \
+            from='alice@example.com' to='alice@example.com/phone'>\
+        <event xmlns='http://jabber.org/protocol/pubsub#event'>\
+          <items node='urn:waddle:status-preference:0'>\
+            <item id='current'>\
+              <status-preference xmlns='urn:waddle:status-preference:0' mode='manual' status='away'/>\
+            </item>\
+          </items>\
+        </event>\
+    </message>"
+        .parse()
+        .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    // The wasm client still reads the pick from the message's pubsub events.
+    assert!(matches!(
+        &events[0],
+        ClientEvent::Messaging(crate::messaging::MessagingEvent::Message(message))
+            if message.pubsub_events.len() == 1
+    ));
+    assert!(events.iter().any(|event| matches!(
+        event,
+        ClientEvent::StatusPreferenceChanged(StatusPreference::Manual(ManualStatus::Away))
+    )));
+}
+
+#[test]
+fn app_stanza_ignores_a_status_preference_from_another_account() {
+    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let stanza: Element = "<message xmlns='jabber:client' type='headline' \
+            from='mallory@example.com' to='alice@example.com/phone'>\
+        <event xmlns='http://jabber.org/protocol/pubsub#event'>\
+          <items node='urn:waddle:status-preference:0'>\
+            <item id='current'>\
+              <status-preference xmlns='urn:waddle:status-preference:0' mode='manual' status='dnd'/>\
+            </item>\
+          </items>\
+        </event>\
+    </message>"
+        .parse()
+        .unwrap();
+
+    let events = runtime.handle_app_stanza(&stanza);
+
+    assert!(!events
+        .iter()
+        .any(|event| matches!(event, ClientEvent::StatusPreferenceChanged(_))));
 }
 
 #[test]
