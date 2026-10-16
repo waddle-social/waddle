@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CompletableDeferred
+import social.waddle.client.ffi.WaddleStatusPreference
 import java.util.concurrent.CopyOnWriteArrayList
 
 /**
@@ -33,5 +34,28 @@ class FakePresenceState {
     suspend fun send(call: RecordedPresence) {
         calls += call
         stall?.await()
+    }
+
+    /** What the account's `urn:waddle:status-preference:0` node holds. */
+    @Volatile
+    var storedPreference: WaddleStatusPreference = WaddleStatusPreference.Automatic
+
+    /** Number of status-preference fetches served (or parked). */
+    @Volatile
+    var preferenceFetches = 0
+
+    /** When set, each fetch parks on it before answering. */
+    @Volatile
+    var preferenceStall: CompletableDeferred<Unit>? = null
+
+    /** When set, each fetch throws it instead of answering. */
+    @Volatile
+    var preferenceFailure: Throwable? = null
+
+    suspend fun fetchPreference(): WaddleStatusPreference {
+        preferenceFetches += 1
+        preferenceStall?.await()
+        preferenceFailure?.let { throw it }
+        return storedPreference
     }
 }

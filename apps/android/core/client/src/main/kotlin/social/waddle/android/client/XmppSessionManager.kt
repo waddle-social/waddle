@@ -152,6 +152,7 @@ class XmppSessionManager(
             readState,
             callStore,
             onAvatarChanged = { jid, avatarId -> avatarRepository.onAvatarChanged(jid, avatarId) },
+            onStatusPreference = { selfPresence.onPreferenceChanged(it) },
         ) { peer, timestamp ->
             persistDmSeen(peer, timestamp)
         }
@@ -776,6 +777,7 @@ class XmppSessionManager(
         readState.clearPending()
         resume.clear()
         callStore.clear()
+        selfPresence.clear()
     }
 
     /**

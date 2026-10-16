@@ -3,15 +3,24 @@ package social.waddle.android.client.session
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.async
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.conflate
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.DesiredPresence
+import social.waddle.client.ffi.WaddleManualStatus
+import social.waddle.client.ffi.WaddleStatusPreference
 import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 /**
  * Advertises this device's own presence (RFC 6121 §4) on every ready
- * stream, following [desired].
+ * stream: the app's [desired] automatic presence, overridden by the
+ * account-wide manual status (ADR-010 decision 5).
  *
  * Android never resumes a stream, so each ready stream starts without
  * presence: until it sends some, the server routes bare-JID messages
@@ -24,41 +33,94 @@ import java.time.temporal.ChronoUnit
  * Each attempt gets ONE collector, so presence stanzas leave in order
  * ([ActiveSession.invokeIfCurrent] does not serialise its callers).
  * It uses `collect`, not `collectLatest`: cancelling an FFI send part
- * way could leave it unknown whether the stanza went out. [desired] is
- * a [StateFlow], so values that change during a send conflate and the
+ * way could leave it unknown whether the stanza went out. Its input is
+ * conflated, so values that change during a send are skipped and the
  * collector always ends on the latest one.
  */
 internal class SelfPresence(
     private val activeSession: ActiveSession,
     private val desired: StateFlow<DesiredPresence>,
+    /** How long the first presence waits for the stored manual status. */
+    private val preferenceWaitMillis: Long = PREFERENCE_WAIT_MILLIS,
 ) {
     /**
-     * Launch [lease]'s collector in [attemptScope] and return once its
-     * first value has been handled (sent, skipped or refused), so the
-     * caller can order the rest of the ready pipeline behind it. The
-     * collector ends with the attempt scope; a stale lease sends nothing.
+     * The account's presence mode, from the `urn:waddle:status-preference:0`
+     * fetch on each ready stream and its live PEP updates. It outlives a
+     * stream, so a reconnect advertises the last known pick at once.
+     */
+    private val preference = MutableStateFlow<WaddleStatusPreference>(WaddleStatusPreference.Automatic)
+
+    private val preferenceLock = Any()
+
+    /** Live updates seen; a fetch that started before the latest one is stale. */
+    private var preferenceUpdates = 0L
+
+    /**
+     * Fetch the stored manual status (waiting at most [preferenceWaitMillis]
+     * for it), then launch [lease]'s collector in [attemptScope] and return
+     * once its first value has been handled (sent, skipped or refused), so
+     * the caller can order the rest of the ready pipeline behind it. A fetch
+     * slower than the wait still lands, and the collector re-advertises.
+     * Everything ends with the attempt scope; a stale lease sends nothing.
      */
     suspend fun start(attemptScope: CoroutineScope, lease: ActiveSession.OwnerLease) {
+        val updatesAtFetch = synchronized(preferenceLock) { preferenceUpdates }
+        val fetch = attemptScope.async { fetchPreference(lease, updatesAtFetch) }
+        withTimeoutOrNull(preferenceWaitMillis) { fetch.await() }
+
         val firstHandled = CompletableDeferred<Unit>()
         attemptScope.launch {
             try {
                 var advertised: DesiredPresence = DesiredPresence.None
-                desired.collect { next ->
-                    // None keeps whatever this stream last advertised. The FFI
-                    // cannot send `type='unavailable'`, and a lease-only stream
-                    // must not flash an away presence either; it closes soon,
-                    // and the server then broadcasts unavailable (RFC 6121
-                    // §4.5.2). Repeats are not re-broadcast to contacts.
-                    if (next != DesiredPresence.None && next != advertised && advertise(lease, next)) {
-                        advertised = next
+                combine(desired, preference, ::effectivePresenceOf)
+                    .distinctUntilChanged()
+                    .conflate()
+                    .collect { next ->
+                        // None keeps whatever this stream last advertised. The
+                        // FFI cannot send `type='unavailable'`, and a lease-only
+                        // stream must not flash an away presence either; it
+                        // closes soon, and the server then broadcasts
+                        // unavailable (RFC 6121 §4.5.2). Repeats are not
+                        // re-broadcast to contacts.
+                        if (next != DesiredPresence.None && next != advertised && advertise(lease, next)) {
+                            advertised = next
+                        }
+                        firstHandled.complete(Unit)
                     }
-                    firstHandled.complete(Unit)
-                }
             } finally {
                 firstHandled.complete(Unit)
             }
         }
         firstHandled.await()
+    }
+
+    /** Another resource published a pick (the PEP `+notify` event). */
+    fun onPreferenceChanged(update: WaddleStatusPreference) {
+        synchronized(preferenceLock) {
+            preferenceUpdates += 1
+            preference.value = update
+        }
+    }
+
+    /** Sign-out: the next account starts in Automatic mode. */
+    fun clear() {
+        onPreferenceChanged(WaddleStatusPreference.Automatic)
+    }
+
+    private suspend fun fetchPreference(lease: ActiveSession.OwnerLease, updatesAtFetch: Long) {
+        val fetched = try {
+            activeSession.invokeIfCurrent(lease) { it.fetchStatusPreference() }
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Throwable) {
+            // Keep the last known pick: a failed fetch is not a reset.
+            return
+        }
+        if (fetched !is ActiveSession.LeaseInvocation.Completed) return
+        synchronized(preferenceLock) {
+            // A live update that arrived meanwhile is newer than this read.
+            if (preferenceUpdates == updatesAtFetch) preference.value = fetched.value
+        }
     }
 
     /** One presence stanza on [lease]'s transport; `true` once it was handed to the client. */
@@ -81,14 +143,43 @@ internal class SelfPresence(
      */
     private fun wireShapeOf(presence: DesiredPresence): Pair<String?, String?> = when (presence) {
         DesiredPresence.None, DesiredPresence.Available -> null to null
+        DesiredPresence.Chat -> SHOW_CHAT to null
+        DesiredPresence.DoNotDisturb -> SHOW_DND to null
         is DesiredPresence.Away -> SHOW_AWAY to xep0082(presence.idleSince)
         is DesiredPresence.ExtendedAway -> SHOW_EXTENDED_AWAY to xep0082(presence.idleSince)
     }
 
     private fun xep0082(instant: Instant?): String? = instant?.truncatedTo(ChronoUnit.SECONDS)?.toString()
 
-    private companion object {
-        const val SHOW_AWAY = "away"
-        const val SHOW_EXTENDED_AWAY = "xa"
+    companion object {
+        /** Bounds how long a slow fetch can hold up the ready pipeline. */
+        const val PREFERENCE_WAIT_MILLIS = 3_000L
+
+        private const val SHOW_CHAT = "chat"
+        private const val SHOW_AWAY = "away"
+        private const val SHOW_EXTENDED_AWAY = "xa"
+        private const val SHOW_DND = "dnd"
+    }
+}
+
+/**
+ * ADR-010 precedence: a manual status wins over the automatic computation
+ * on every device and carries no idle stamp (it is a choice, not
+ * inactivity; Extended Away is only ever automatic). Automatic mode
+ * adopts [automatic] as is. A lease-only stream ([DesiredPresence.None])
+ * advertises nothing whatever the mode, so the user never flashes online
+ * for a notification action.
+ */
+internal fun effectivePresenceOf(
+    automatic: DesiredPresence,
+    preference: WaddleStatusPreference,
+): DesiredPresence {
+    if (automatic == DesiredPresence.None) return DesiredPresence.None
+    val manual = (preference as? WaddleStatusPreference.Manual)?.status ?: return automatic
+    return when (manual) {
+        WaddleManualStatus.AVAILABLE -> DesiredPresence.Available
+        WaddleManualStatus.CHAT -> DesiredPresence.Chat
+        WaddleManualStatus.AWAY -> DesiredPresence.Away(idleSince = null)
+        WaddleManualStatus.DND -> DesiredPresence.DoNotDisturb
     }
 }
