@@ -86,6 +86,11 @@ pub(super) fn dispatch_event(
                 avatar_id: change.avatar_id.map(|id| id.to_string()),
             });
         }
+        ClientEvent::StatusPreferenceChanged(preference) => {
+            listener.on_event(WaddleClientEvent::StatusPreferenceChanged {
+                preference: crate::status_preference::status_preference_to_ffi(preference),
+            });
+        }
         ClientEvent::Call(call) => {
             listener.on_event(WaddleClientEvent::Call {
                 event: call_event_to_ffi(*call),

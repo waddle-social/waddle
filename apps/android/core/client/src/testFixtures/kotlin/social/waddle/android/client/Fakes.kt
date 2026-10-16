@@ -70,6 +70,7 @@ import social.waddle.client.ffi.WaddleSendOptions
 import social.waddle.client.ffi.WaddleSetDmNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSetRoomNotificationModeOutcome
 import social.waddle.client.ffi.WaddleSpaceRole
+import social.waddle.client.ffi.WaddleStatusPreference
 import social.waddle.client.ffi.WaddleStickerPack
 import social.waddle.client.ffi.WaddleTopology
 import social.waddle.client.ffi.WaddleTune
@@ -1345,7 +1346,14 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         body: String,
         options: WaddleSendOptions?,
     ): WaddleSendMessageOutcome = messageSends.send(roomJid, body, options)
-    override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
+
+    /** Own-presence sends (RFC 6121 §4), ordered against joins and sends. */
+    val presence = FakePresenceState()
+
+    override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) =
+        presence.send(RecordedPresence(status, show, idleSince, joinRoomCalls.size, sendCalls.size))
+
+    override suspend fun fetchStatusPreference(): WaddleStatusPreference = presence.fetchPreference()
 
     /** Recorded (conversation, targetId, emojis) reaction sends. */
     val reactionCalls = CopyOnWriteArrayList<Triple<String, String, List<String>>>()

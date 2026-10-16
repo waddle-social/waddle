@@ -1366,6 +1366,14 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch) async throws
 
     /**
+     * The account's stored presence mode from its own
+     * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
+     * stored. Errors (not connected, timeout, other stanza errors) let
+     * the caller keep what it knew.
+     */
+    func fetchStatusPreference() async throws  -> WaddleStatusPreference
+
+    /**
      * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
      * (XEP-0060 items-by-id). `node: None` defaults to the PEP
      * `urn:xmpp:stickers:0` node; `Some(node)` targets a generic
@@ -3822,6 +3830,29 @@ open func submitRoomConfig(roomJid: String, patch: WaddleRoomConfigPatch)async t
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_void,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_void,
             liftFunc: { $0 },
+            errorHandler: FfiConverterTypeWaddleError_lift
+        )
+}
+
+    /**
+     * The account's stored presence mode from its own
+     * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
+     * stored. Errors (not connected, timeout, other stanza errors) let
+     * the caller keep what it knew.
+     */
+open func fetchStatusPreference()async throws  -> WaddleStatusPreference  {
+    return
+        try  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_status_preference(
+                    self.uniffiCloneHandle()
+
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddleStatusPreference_lift,
             errorHandler: FfiConverterTypeWaddleError_lift
         )
 }
@@ -12476,6 +12507,12 @@ public enum WaddleClientEvent: Equatable, Hashable {
     case avatarChanged(jid: Jid, avatarId: String?
     )
     /**
+     * ADR-010: another resource of this account published a presence
+     * mode to its own `urn:waddle:status-preference:0` PEP node.
+     */
+    case statusPreferenceChanged(preference: WaddleStatusPreference
+    )
+    /**
      * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
      * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
      * query-response entries resolve the `fetch_inbox` verb and are
@@ -12550,16 +12587,19 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
         case 9: return .avatarChanged(jid: try FfiConverterTypeJid.read(from: &buf), avatarId: try FfiConverterOptionString.read(from: &buf)
         )
 
-        case 10: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
+        case 10: return .statusPreferenceChanged(preference: try FfiConverterTypeWaddleStatusPreference.read(from: &buf)
         )
 
-        case 11: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
+        case 11: return .inboxPush(entry: try FfiConverterTypeWaddleInboxEntry.read(from: &buf)
         )
 
-        case 12: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        case 12: return .call(event: try FfiConverterTypeWaddleCallEvent.read(from: &buf)
         )
 
-        case 13: return .error(description: try FfiConverterString.read(from: &buf)
+        case 13: return .authenticationFailed(condition: try FfiConverterTypeWaddleSaslCondition.read(from: &buf)
+        )
+
+        case 14: return .error(description: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -12616,23 +12656,28 @@ public struct FfiConverterTypeWaddleClientEvent: FfiConverterRustBuffer {
             FfiConverterOptionString.write(avatarId, into: &buf)
 
 
-        case let .inboxPush(entry):
+        case let .statusPreferenceChanged(preference):
             writeInt(&buf, Int32(10))
+            FfiConverterTypeWaddleStatusPreference.write(preference, into: &buf)
+
+
+        case let .inboxPush(entry):
+            writeInt(&buf, Int32(11))
             FfiConverterTypeWaddleInboxEntry.write(entry, into: &buf)
 
 
         case let .call(event):
-            writeInt(&buf, Int32(11))
+            writeInt(&buf, Int32(12))
             FfiConverterTypeWaddleCallEvent.write(event, into: &buf)
 
 
         case let .authenticationFailed(condition):
-            writeInt(&buf, Int32(12))
+            writeInt(&buf, Int32(13))
             FfiConverterTypeWaddleSaslCondition.write(condition, into: &buf)
 
 
         case let .error(description):
-            writeInt(&buf, Int32(13))
+            writeInt(&buf, Int32(14))
             FfiConverterString.write(description, into: &buf)
 
         }
@@ -13598,6 +13643,94 @@ public func FfiConverterTypeWaddleLinkPreviewLookupStatus_lift(_ buf: RustBuffer
 #endif
 public func FfiConverterTypeWaddleLinkPreviewLookupStatus_lower(_ value: WaddleLinkPreviewLookupStatus) -> RustBuffer {
     return FfiConverterTypeWaddleLinkPreviewLookupStatus.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * A status the user pinned by hand (ADR-010): an RFC 6121 §4.7.2.1
+ * `<show/>` value, or plain available.
+ */
+
+public enum WaddleManualStatus: Equatable, Hashable {
+
+    case available
+    /**
+     * `<show>chat</show>`, free for chat.
+     */
+    case chat
+    case away
+    case dnd
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleManualStatus: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleManualStatus: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleManualStatus
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleManualStatus {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .available
+
+        case 2: return .chat
+
+        case 3: return .away
+
+        case 4: return .dnd
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleManualStatus, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .available:
+            writeInt(&buf, Int32(1))
+
+
+        case .chat:
+            writeInt(&buf, Int32(2))
+
+
+        case .away:
+            writeInt(&buf, Int32(3))
+
+
+        case .dnd:
+            writeInt(&buf, Int32(4))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleManualStatus_lift(_ buf: RustBuffer) throws -> WaddleManualStatus {
+    return try FfiConverterTypeWaddleManualStatus.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleManualStatus_lower(_ value: WaddleManualStatus) -> RustBuffer {
+    return FfiConverterTypeWaddleManualStatus.lower(value)
 }
 
 
@@ -15193,6 +15326,81 @@ public func FfiConverterTypeWaddleStanzaErrorType_lift(_ buf: RustBuffer) throws
 #endif
 public func FfiConverterTypeWaddleStanzaErrorType_lower(_ value: WaddleStanzaErrorType) -> RustBuffer {
     return FfiConverterTypeWaddleStanzaErrorType.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
+ * The account-wide presence mode (ADR-010 decision 5). `Automatic` lets
+ * each device's auto-away govern; `Manual` pins one status on every
+ * device until the user resets it.
+ */
+
+public enum WaddleStatusPreference: Equatable, Hashable {
+
+    case automatic
+    case manual(status: WaddleManualStatus
+    )
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleStatusPreference: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleStatusPreference: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleStatusPreference
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleStatusPreference {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .automatic
+
+        case 2: return .manual(status: try FfiConverterTypeWaddleManualStatus.read(from: &buf)
+        )
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddleStatusPreference, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case .automatic:
+            writeInt(&buf, Int32(1))
+
+
+        case let .manual(status):
+            writeInt(&buf, Int32(2))
+            FfiConverterTypeWaddleManualStatus.write(status, into: &buf)
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStatusPreference_lift(_ buf: RustBuffer) throws -> WaddleStatusPreference {
+    return try FfiConverterTypeWaddleStatusPreference.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleStatusPreference_lower(_ value: WaddleStatusPreference) -> RustBuffer {
+    return FfiConverterTypeWaddleStatusPreference.lower(value)
 }
 
 
@@ -17900,6 +18108,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference() != 15536) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {

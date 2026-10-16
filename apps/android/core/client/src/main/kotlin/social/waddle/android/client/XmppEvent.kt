@@ -9,6 +9,7 @@ import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSaslCondition
+import social.waddle.client.ffi.WaddleStatusPreference
 
 /**
  * Kotlin domain event stream the app consumes — a thin mirror of the FFI
@@ -47,6 +48,12 @@ sealed interface XmppEvent {
      * current avatar id, or `null` when the avatar was disabled.
      */
     data class AvatarChanged(val jid: Jid, val avatarId: String?) : XmppEvent
+
+    /**
+     * ADR-010: a resource of this account published a presence mode to
+     * its own `urn:waddle:status-preference:0` PEP node.
+     */
+    data class StatusPreferenceChanged(val preference: WaddleStatusPreference) : XmppEvent
 
     /**
      * XEP-0490 catch-up entries from the connect bootstrap, injected

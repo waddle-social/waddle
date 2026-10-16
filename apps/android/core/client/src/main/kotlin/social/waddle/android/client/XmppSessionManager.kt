@@ -37,6 +37,7 @@ import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ConnectionLoop
 import social.waddle.android.client.session.ConnectionLoopCallbacks
 import social.waddle.android.client.session.ResumePersistence
+import social.waddle.android.client.session.SelfPresence
 import social.waddle.android.client.session.SessionCatchup
 import social.waddle.android.client.store.MentionStore
 import social.waddle.android.client.store.PeopleDirectorySnapshot
@@ -87,6 +88,12 @@ class XmppSessionManager(
      * its demand; while false the session stays signed in but closed.
      */
     connectionWanted: StateFlow<Boolean> = MutableStateFlow(true),
+    /**
+     * The presence this device advertises on each ready stream (see
+     * [DesiredPresence]). Plainly available unless the app derives it
+     * from what holds the stream open.
+     */
+    desiredPresence: StateFlow<DesiredPresence> = MutableStateFlow(DesiredPresence.Available),
     /** Wall clock for the peer-avatar TTLs. */
     clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -175,6 +182,7 @@ class XmppSessionManager(
             readState,
             callStore,
             onAvatarChanged = { jid, avatarId -> avatarRepository.onAvatarChanged(jid, avatarId) },
+            onStatusPreference = { selfPresence.onPreferenceChanged(it) },
         ) { peer, timestamp ->
             persistDmSeen(peer, timestamp)
         }
@@ -218,6 +226,8 @@ class XmppSessionManager(
 
     private val catchup =
         SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
+
+    private val selfPresence = SelfPresence(activeSession, desiredPresence)
 
     private val loop: ConnectionLoop = ConnectionLoop(
         clientFactory = clientFactory,
@@ -668,6 +678,13 @@ class XmppSessionManager(
         submission: ExtensionCommandSubmission,
     ): ExtensionCommandCall = extensions.submitExtensionCommandForm(submission)
 
+    /**
+     * Returns once the ready stream has advertised (or had nothing to send
+     * for) the automatic presence [automatic], or at once while no stream is
+     * ready. The app holds a wake lock across an auto-away step until then.
+     */
+    suspend fun awaitPresenceAdvertised(automatic: DesiredPresence) = selfPresence.awaitHandled(automatic)
+
     /** Manual retry from the connection banner: skip the remaining backoff. */
     fun requestReconnect() {
         loop.requestReconnect()
@@ -721,8 +738,13 @@ class XmppSessionManager(
                 stores.unreadStore.resetMentions()
             }
         }
-        // The ready pipeline: queued sends, topology, joins, catch-up.
+        // The ready pipeline: own presence, queued sends, topology, joins,
+        // catch-up. Presence leads: the stream is fresh, and until it
+        // advertises, the server routes bare-JID messages here only when
+        // no other resource is available and holds the XEP-0160 queue.
         attemptScope.launch {
+            if (!activeSession.isCurrent(lease)) return@launch
+            selfPresence.start(attemptScope, lease)
             if (activeSession.isCurrent(lease)) catchup.onSessionReady(session, freshStream)
         }
         // Push registration runs beside the ready pipeline, never in it:
@@ -800,6 +822,7 @@ class XmppSessionManager(
         readState.clearPending()
         resume.clear()
         callStore.clear()
+        selfPresence.clear()
     }
 
     /**

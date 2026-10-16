@@ -30,6 +30,7 @@ mod room_admin;
 mod safety_scores;
 mod send_outcome;
 mod stanza;
+mod status_preference;
 mod sticker_verbs;
 mod types;
 
@@ -62,6 +63,8 @@ mod room_admin_tests;
 #[cfg(test)]
 mod safety_scores_tests;
 #[cfg(test)]
+mod status_preference_tests;
+#[cfg(test)]
 mod sticker_verbs_tests;
 
 pub use community_admin::{
@@ -86,6 +89,7 @@ pub use room_admin::{
     WaddlePinPermission, WaddleRoomConfig, WaddleRoomConfigPatch, WaddleRoomMemberEntry,
     WaddleUserSearchEntry,
 };
+pub use status_preference::{WaddleManualStatus, WaddleStatusPreference};
 pub use types::*;
 
 use convert::dispatch_event;
