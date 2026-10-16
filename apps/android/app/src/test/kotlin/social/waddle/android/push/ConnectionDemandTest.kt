@@ -1,6 +1,7 @@
 package social.waddle.android.push
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
@@ -208,6 +209,22 @@ class ConnectionDemandTest {
         advanceMinutes(EXTENDED_AWAY_MINUTES - AWAY_MINUTES)
         assertEquals("nothing after extended away", null, phone.dueAt)
         assertTrue(demand.presence.value is DesiredPresence.ExtendedAway)
+    }
+
+    @Test
+    fun `the presence after a wake-up is the step it produced`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        val left = leaveApp(demand)
+        phone.pass(AWAY_MINUTES)
+
+        // The alarm callback only asks for a re-evaluation; the wake lock
+        // holder waits for its result rather than reading a stale value.
+        demand.reevaluate()
+        val afterWake = async { demand.presenceAfterWake() }
+        runCurrent()
+
+        assertEquals(DesiredPresence.Away(left), afterWake.await())
     }
 
     @Test

@@ -10,6 +10,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.SessionPrefs
@@ -111,6 +112,27 @@ class XmppSessionManagerPresenceTest {
         gate.complete(Unit)
         runCurrent()
         assertEquals(listOf(ROOM to "icepuma"), harness.client.joinRoomCalls.toList())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `waiting for an automatic step returns once its presence is sent`() = runTest {
+        val harness = Harness(this)
+        val notReady = async { harness.manager.awaitPresenceAdvertised(DesiredPresence.Away(LEFT_AT)) }
+        runCurrent()
+        assertTrue("no ready stream: nothing to wait for", notReady.isCompleted)
+
+        ready(harness)
+        val gate = CompletableDeferred<Unit>()
+        harness.client.presence.stall = gate
+        harness.desired.value = DesiredPresence.Away(LEFT_AT)
+        val sent = async { harness.manager.awaitPresenceAdvertised(DesiredPresence.Away(LEFT_AT)) }
+        runCurrent()
+        assertFalse("the send is still in flight", sent.isCompleted)
+
+        gate.complete(Unit)
+        runCurrent()
+        assertTrue(sent.isCompleted)
         harness.manager.logout()
     }
 

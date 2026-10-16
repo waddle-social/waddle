@@ -647,6 +647,13 @@ class XmppSessionManager(
         submission: ExtensionCommandSubmission,
     ): ExtensionCommandCall = extensions.submitExtensionCommandForm(submission)
 
+    /**
+     * Returns once the ready stream has advertised (or had nothing to send
+     * for) the automatic presence [automatic], or at once while no stream is
+     * ready. The app holds a wake lock across an auto-away step until then.
+     */
+    suspend fun awaitPresenceAdvertised(automatic: DesiredPresence) = selfPresence.awaitHandled(automatic)
+
     /** Manual retry from the connection banner: skip the remaining backoff. */
     fun requestReconnect() {
         loop.requestReconnect()

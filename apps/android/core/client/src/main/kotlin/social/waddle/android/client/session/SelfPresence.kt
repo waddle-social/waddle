@@ -9,6 +9,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.conflate
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.DesiredPresence
@@ -55,6 +57,20 @@ internal class SelfPresence(
     /** Live updates seen; a fetch that started before the latest one is stale. */
     private var preferenceUpdates = 0L
 
+    /** Collectors running, and the last automatic value one finished handling. */
+    private data class Handling(val collectors: Int, val handled: DesiredPresence?)
+
+    private val handling = MutableStateFlow(Handling(collectors = 0, handled = null))
+
+    /**
+     * Returns once a ready stream's collector has handled [automatic]
+     * (advertised it, or found nothing to send), or at once while no ready
+     * stream is advertising: a wake lock held for the send can then go.
+     */
+    suspend fun awaitHandled(automatic: DesiredPresence) {
+        handling.first { it.collectors == 0 || it.handled == automatic }
+    }
+
     /**
      * Fetch the stored manual status (waiting at most [preferenceWaitMillis]
      * for it), then launch [lease]'s collector in [attemptScope] and return
@@ -70,12 +86,13 @@ internal class SelfPresence(
 
         val firstHandled = CompletableDeferred<Unit>()
         attemptScope.launch {
+            handling.update { it.copy(collectors = it.collectors + 1) }
             try {
                 var advertised: DesiredPresence = DesiredPresence.None
-                combine(desired, preference, ::effectivePresenceOf)
+                combine(desired, preference) { automatic, pick -> automatic to effectivePresenceOf(automatic, pick) }
                     .distinctUntilChanged()
                     .conflate()
-                    .collect { next ->
+                    .collect { (automatic, next) ->
                         // None keeps whatever this stream last advertised. The
                         // FFI cannot send `type='unavailable'`, and a lease-only
                         // stream must not flash an away presence either; it
@@ -85,9 +102,11 @@ internal class SelfPresence(
                         if (next != DesiredPresence.None && next != advertised && advertise(lease, next)) {
                             advertised = next
                         }
+                        handling.update { it.copy(handled = automatic) }
                         firstHandled.complete(Unit)
                     }
             } finally {
+                handling.update { it.copy(collectors = it.collectors - 1) }
                 firstHandled.complete(Unit)
             }
         }

@@ -56,6 +56,8 @@ import social.waddle.android.feature.login.WaddleLoginAuthGateway
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.push.AlarmWakeTimer
 import social.waddle.android.push.ConnectionDemand
+import social.waddle.android.push.HeldWakeTimer
+import social.waddle.android.push.PowerManagerWakeLocks
 import social.waddle.android.push.PushDistributor
 import social.waddle.android.push.PushMessageHandler
 import social.waddle.android.push.needsStream
@@ -122,8 +124,16 @@ class AppGraph(
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))
 
     /** What needs the XMPP stream right now (see [ConnectionDemand]). */
-    val connectionDemand: ConnectionDemand =
-        ConnectionDemand(applicationScope, wakeTimer = AlarmWakeTimer(appContext))
+    val connectionDemand: ConnectionDemand = ConnectionDemand(
+        applicationScope,
+        wakeTimer = HeldWakeTimer(
+            alarm = AlarmWakeTimer(appContext),
+            wakeLocks = PowerManagerWakeLocks(appContext),
+            scope = applicationScope,
+            // Awake until the step the alarm produced is on the wire.
+            settled = { sessionManager.awaitPresenceAdvertised(connectionDemand.presenceAfterWake()) },
+        ),
+    )
 
     val sessionManager: XmppSessionManager = XmppSessionManager(
         sessionPrefs = sessionPrefs,

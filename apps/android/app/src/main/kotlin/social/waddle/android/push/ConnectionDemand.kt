@@ -9,6 +9,7 @@ import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
@@ -73,6 +74,26 @@ class ConnectionDemand(
         }
         .stateIn(scope, SharingStarted.Eagerly, initialValue = false)
 
+    /** One evaluation of [presence], tagged with the wake-ups it has seen. */
+    private data class Evaluation(val wakeup: Long, val presence: DesiredPresence)
+
+    /** Auto-away, evaluated afresh on every input change and wake-up. */
+    private val evaluation: StateFlow<Evaluation> = combine(
+        attention,
+        stayConnected,
+        callActive,
+        wakeups,
+    ) { seen, stay, call, wakeup ->
+        val holdsStream = stay || call
+        val now = elapsedRealtime()
+        when (val next = autoAway.nextStepAt(seen, holdsStream, now)) {
+            null -> wakeTimer.cancel()
+            else -> wakeTimer.schedule(next, ::reevaluate)
+        }
+        Evaluation(wakeup, autoAway.presenceOf(seen, holdsStream, now))
+    }
+        .stateIn(scope, SharingStarted.Eagerly, initialValue = Evaluation(wakeup = 0L, presence = DesiredPresence.None))
+
     /**
      * What this device advertises on the stream while [wanted] holds it,
      * stepping through [autoAway] while the user is away. Every evaluation
@@ -80,25 +101,19 @@ class ConnectionDemand(
      * phone slept applies on the next one, and re-arms [wakeTimer] for the
      * step after it (or cancels it, e.g. on returning to the foreground).
      */
-    val presence: StateFlow<DesiredPresence> = combine(
-        attention,
-        stayConnected,
-        callActive,
-        wakeups,
-    ) { seen, stay, call, _ ->
-        val holdsStream = stay || call
-        val now = elapsedRealtime()
-        when (val next = autoAway.nextStepAt(seen, holdsStream, now)) {
-            null -> wakeTimer.cancel()
-            else -> wakeTimer.schedule(next, ::reevaluate)
-        }
-        autoAway.presenceOf(seen, holdsStream, now)
-    }
+    val presence: StateFlow<DesiredPresence> = evaluation
+        .map { it.presence }
         .stateIn(scope, SharingStarted.Eagerly, initialValue = DesiredPresence.None)
 
     /** Re-check auto-away now: the wake timer fired, or the process woke. */
     fun reevaluate() {
         wakeups.update { it + 1 }
+    }
+
+    /** The presence once every [reevaluate] so far has been evaluated. */
+    suspend fun presenceAfterWake(): DesiredPresence {
+        val target = wakeups.value
+        return evaluation.first { it.wakeup >= target }.presence
     }
 
     fun setProcessStarted(started: Boolean) {
