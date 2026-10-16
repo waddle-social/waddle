@@ -8,16 +8,20 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
-/** Theme mode pref, mirroring web `waddle:theme` (`light|system|dark`). */
+/**
+ * Theme, mirroring web `waddle:theme` and Huddle's two themes: night is
+ * home, daylight is the alternative. The stored values stay `dark` and
+ * `light`; a stored `system` (the old three-way switch) or nothing at all
+ * reads as night, as on the web.
+ */
 enum class ThemeMode(val storageValue: String) {
-    LIGHT("light"),
-    SYSTEM("system"),
-    DARK("dark"),
+    NIGHT("dark"),
+    DAYLIGHT("light"),
     ;
 
     companion object {
         fun fromStorage(value: String?): ThemeMode =
-            entries.firstOrNull { it.storageValue == value } ?: SYSTEM
+            entries.firstOrNull { it.storageValue == value } ?: NIGHT
     }
 }
 
@@ -33,6 +37,13 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
 
     /** XEP-0333 outbound gate, web `waddle:read-receipts` (default send). */
     val readReceiptsEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_READ_RECEIPTS] ?: true }
+
+    /**
+     * Material You: take action and surface colours from the wallpaper
+     * (Android dynamic colour). Off by default: Huddle's teal and ember
+     * are the product's colours, and live things stay ember either way.
+     */
+    val wallpaperColors: Flow<Boolean> = dataStore.data.map { it[KEY_WALLPAPER_COLORS] ?: false }
 
     /**
      * Background delivery override: `true` keeps the stream up in a
@@ -76,6 +87,10 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { it[KEY_READ_RECEIPTS] = enabled }
     }
 
+    suspend fun setWallpaperColors(enabled: Boolean) {
+        dataStore.edit { it[KEY_WALLPAPER_COLORS] = enabled }
+    }
+
     suspend fun clear() {
         dataStore.edit { it.clear() }
     }
@@ -86,6 +101,7 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         val KEY_MESSAGE_SOUNDS = booleanPreferencesKey("message_sounds_enabled")
         val KEY_READ_RECEIPTS = booleanPreferencesKey("read_receipts_enabled")
         val KEY_STAY_CONNECTED = booleanPreferencesKey("stay_connected")
+        val KEY_WALLPAPER_COLORS = booleanPreferencesKey("wallpaper_colors")
         val KEY_LAST_PUSH_INSTANCE = stringPreferencesKey("last_push_instance")
     }
 }

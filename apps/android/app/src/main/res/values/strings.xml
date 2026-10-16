@@ -183,9 +183,10 @@
     <string name="settings_account">Account</string>
     <string name="settings_avatar">Avatar</string>
     <string name="settings_appearance">Appearance</string>
-    <string name="settings_theme_light">Light</string>
-    <string name="settings_theme_system">System</string>
-    <string name="settings_theme_dark">Dark</string>
+    <string name="settings_theme_night">Night</string>
+    <string name="settings_theme_daylight">Daylight</string>
+    <string name="settings_wallpaper_colors">Match wallpaper</string>
+    <string name="settings_wallpaper_colors_detail">Material You: buttons and surfaces take your wallpaper\'s colours. Live things stay ember.</string>
     <string name="settings_notifications">Notifications</string>
     <string name="settings_notifications_enabled">Show message notifications</string>
     <string name="settings_message_sounds">Message sounds</string>
@@ -418,4 +419,11 @@
     <string name="call_roster_muted">Muted</string>
     <string name="call_leave_retained">Leave call</string>
     <string name="home_channel_call_badge">Active call</string>
+    <!-- Huddle presence (avatar dots and rings, screen readers) -->
+    <string name="presence_available">available</string>
+    <string name="presence_away">away</string>
+    <string name="presence_dnd">do not disturb</string>
+    <string name="presence_offline">offline</string>
+    <string name="presence_in_huddle">in a huddle</string>
+    <string name="presence_speaking">speaking</string>
 </resources>

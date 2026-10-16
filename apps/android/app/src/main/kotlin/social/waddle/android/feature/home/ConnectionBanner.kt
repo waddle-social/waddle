@@ -64,7 +64,7 @@ fun ConnectionBanner(
             modifier = Modifier
                 .fillMaxWidth()
                 .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xxs)
-                .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(Waddle.radius.lg))
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(Waddle.radius.panel))
                 .padding(start = Waddle.space.sm, end = Waddle.space.xxs, top = 2.dp, bottom = 2.dp)
                 .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
         ) {

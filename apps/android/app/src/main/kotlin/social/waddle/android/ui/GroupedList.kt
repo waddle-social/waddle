@@ -30,7 +30,7 @@ fun GroupedSection(
     Column(modifier = modifier.fillMaxWidth()) {
         title?.let { SectionKicker(text = it) }
         Surface(
-            shape = RoundedCornerShape(Waddle.radius.lg),
+            shape = RoundedCornerShape(Waddle.radius.panel),
             color = MaterialTheme.colorScheme.surfaceContainer,
             border = BorderStroke(1.dp, Waddle.colors.hairline),
             modifier = Modifier

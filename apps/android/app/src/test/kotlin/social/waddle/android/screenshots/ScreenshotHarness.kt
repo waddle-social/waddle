@@ -22,7 +22,7 @@ private const val FULL_TURN = 360
 
 /** Render [content] on the theme's ground in both schemes and record it. */
 internal fun captureThemed(name: String, content: @Composable () -> Unit) {
-    listOf(ThemeMode.LIGHT to "light", ThemeMode.DARK to "dark").forEach { (mode, suffix) ->
+    listOf(ThemeMode.DAYLIGHT to "light", ThemeMode.NIGHT to "dark").forEach { (mode, suffix) ->
         captureRoboImage("src/test/screenshots/${name}_$suffix.png") {
             CompositionLocalProvider(LocalConsistentHue provides ::stableTestHue) {
                 WaddleTheme(themeMode = mode) {

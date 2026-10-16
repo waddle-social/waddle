@@ -241,6 +241,14 @@ object WaddleTokens {
             val pill = 999.dp
         }
 
+        /** Avatar fallback tints (web `avatarTints`), one picked per name; same in both schemes. */
+        val avatarTints = listOf(
+            Color(0xFFD6F3EF),
+            Color(0xFFFFE3CD),
+            Color(0xFFE3E8F7),
+            Color(0xFFC9D4DC),
+        )
+
         /** Control heights (web `sizes.control.*`). */
         object ControlHeight {
             val xs = 28.dp

@@ -61,7 +61,7 @@ fun LinkPreviewCard(
     val href = httpsHrefOrNull(preview.originalUrl)
     val open: (() -> Unit)? = href?.let { url -> { runCatching { uriHandler.openUri(url) } } }
     Surface(
-        shape = RoundedCornerShape(Waddle.radius.md),
+        shape = RoundedCornerShape(Waddle.radius.control),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         onClick = open ?: {},
@@ -138,7 +138,7 @@ private fun PreviewMedia(preview: WaddleLinkPreview, trustedMediaOrigin: String?
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 192.dp)
-                    .clip(RoundedCornerShape(Waddle.radius.sm)),
+                    .clip(RoundedCornerShape(Waddle.radius.control)),
             )
             if (playable) PlayGlyph()
         }

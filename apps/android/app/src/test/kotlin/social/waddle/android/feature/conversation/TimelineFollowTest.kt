@@ -106,7 +106,7 @@ class TimelineFollowTest {
     @Composable
     private fun Timeline() {
         CompositionLocalProvider(LocalConsistentHue provides { 0.0 }) {
-            WaddleTheme(themeMode = ThemeMode.LIGHT) {
+            WaddleTheme(themeMode = ThemeMode.DAYLIGHT) {
                 TimelineList(
                     entries = shown.value,
                     isLoadingOlder = false,

@@ -103,6 +103,7 @@ fun SettingsScreen(
             onOpenProfile = onOpenProfile,
             onOpenCommunityUsers = onOpenCommunityUsers,
             onSetTheme = viewModel::setTheme,
+            onSetWallpaperColors = viewModel::setWallpaperColors,
             onSetNotificationsEnabled = viewModel::setNotificationsEnabled,
             onSetMessageSoundsEnabled = viewModel::setMessageSoundsEnabled,
             onSetReadReceiptsEnabled = viewModel::setReadReceiptsEnabled,
@@ -131,6 +132,7 @@ internal data class SettingsActions(
     val onLogout: () -> Unit,
     val onSetStayConnected: (Boolean) -> Unit = {},
     val onPickDistributor: () -> Unit = {},
+    val onSetWallpaperColors: (Boolean) -> Unit = {},
 )
 
 /** Stateless settings surface: grouped cards on the screen ground. */
@@ -169,6 +171,14 @@ internal fun SettingsContent(
             }
             GroupedSection(title = stringResource(R.string.settings_appearance)) {
                 ThemeSelector(selected = state.theme, onSelect = actions.onSetTheme)
+                GroupDivider()
+                ToggleRow(
+                    title = stringResource(R.string.settings_wallpaper_colors),
+                    supporting = stringResource(R.string.settings_wallpaper_colors_detail),
+                    checked = state.wallpaperColors,
+                    onCheckedChange = actions.onSetWallpaperColors,
+                    toggleTestTag = SettingsScreenTestTags.WALLPAPER_COLORS_TOGGLE,
+                )
             }
             GroupedSection(title = stringResource(R.string.settings_notifications)) {
                 ToggleRow(
@@ -216,7 +226,7 @@ internal fun SettingsContent(
             }
             OutlinedButton(
                 onClick = actions.onLogout,
-                shape = RoundedCornerShape(Waddle.radius.lg),
+                shape = RoundedCornerShape(Waddle.radius.panel),
                 border = BorderStroke(1.dp, Waddle.colors.hairline),
                 colors = ButtonDefaults.outlinedButtonColors(contentColor = Waddle.colors.dangerText),
                 modifier = Modifier
@@ -365,7 +375,7 @@ private val ACCOUNT_AVATAR_SIZE = 52.dp
 
 @Composable
 private fun ThemeSelector(selected: ThemeMode, onSelect: (ThemeMode) -> Unit) {
-    val modes = listOf(ThemeMode.LIGHT, ThemeMode.SYSTEM, ThemeMode.DARK)
+    val modes = listOf(ThemeMode.NIGHT, ThemeMode.DAYLIGHT)
     SingleChoiceSegmentedButtonRow(
         modifier = Modifier
             .fillMaxWidth()
@@ -389,9 +399,11 @@ private fun ToggleRow(
     checked: Boolean,
     onCheckedChange: (Boolean) -> Unit,
     toggleTestTag: String,
+    supporting: String? = null,
 ) {
     ListItem(
         headlineContent = { Text(text = title) },
+        supportingContent = supporting?.let { { Text(text = it) } },
         trailingContent = {
             Switch(
                 checked = checked,
@@ -412,6 +424,7 @@ object SettingsScreenTestTags {
     const val COMMUNITY_USERS_ROW = "settings-community-users-row"
     const val DELIVERY_STATUS = "settings-delivery-status"
     const val STAY_CONNECTED_TOGGLE = "settings-stay-connected-toggle"
+    const val WALLPAPER_COLORS_TOGGLE = "settings-wallpaper-colors-toggle"
 }
 
 @Composable
@@ -462,7 +475,6 @@ private fun requestBatteryExemption(context: Context) {
 }
 
 private fun ThemeMode.labelRes(): Int = when (this) {
-    ThemeMode.LIGHT -> R.string.settings_theme_light
-    ThemeMode.SYSTEM -> R.string.settings_theme_system
-    ThemeMode.DARK -> R.string.settings_theme_dark
+    ThemeMode.NIGHT -> R.string.settings_theme_night
+    ThemeMode.DAYLIGHT -> R.string.settings_theme_daylight
 }

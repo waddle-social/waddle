@@ -5,7 +5,6 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
@@ -68,23 +67,23 @@ class MainActivity : ComponentActivity() {
         watchPushKey(graph)
         setContent {
             val themeMode by graph.userPrefs.theme
-                .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
+                // Night until the stored choice loads: the window ground is
+                // night too, so a night first frame never flashes.
+                .collectAsStateWithLifecycle(initialValue = ThemeMode.NIGHT)
             // enableEdgeToEdge derives bar-icon contrast from the SYSTEM
-            // night mode once at onCreate; the in-app theme override is
-            // independent of it, so a Light app on a dark phone would get
-            // invisible white status icons. Track the effective theme.
-            val darkTheme = when (themeMode) {
-                ThemeMode.LIGHT -> false
-                ThemeMode.DARK -> true
-                ThemeMode.SYSTEM -> isSystemInDarkTheme()
-            }
+            // night mode once at onCreate; the in-app theme is independent
+            // of it, so a daylight app on a dark phone would get invisible
+            // white status icons. Track the app's theme.
+            val darkTheme = themeMode == ThemeMode.NIGHT
+            val wallpaperColors by graph.userPrefs.wallpaperColors
+                .collectAsStateWithLifecycle(initialValue = false)
             val view = LocalView.current
             SideEffect {
                 val controller = WindowInsetsControllerCompat(window, view)
                 controller.isAppearanceLightStatusBars = !darkTheme
                 controller.isAppearanceLightNavigationBars = !darkTheme
             }
-            WaddleTheme(themeMode) {
+            WaddleTheme(themeMode, wallpaperColors = wallpaperColors) {
                 CompositionLocalProvider(
                     LocalAppGraph provides graph,
                     LocalPeerAvatars provides graph.sessionManager.peerAvatars,

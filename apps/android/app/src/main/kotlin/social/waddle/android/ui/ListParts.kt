@@ -226,7 +226,7 @@ fun GlyphTile(icon: ImageVector, modifier: Modifier = Modifier, size: Dp = 40.dp
         contentAlignment = Alignment.Center,
         modifier = modifier
             .size(size)
-            .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(Waddle.radius.md)),
+            .background(MaterialTheme.colorScheme.surfaceContainerHigh, RoundedCornerShape(Waddle.radius.control)),
     ) {
         Icon(
             icon,

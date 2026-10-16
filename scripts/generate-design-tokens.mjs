@@ -460,6 +460,11 @@ ${scheme("daylight")}
 ${dims("radii", huddle.tokenNames("radii"), "dp")}
         }
 
+        /** Avatar fallback tints (web \`avatarTints\`), one picked per name; same in both schemes. */
+        val avatarTints = listOf(
+${indent(huddle.tokenNames("colors").filter((n) => n.startsWith("avatarTints.")).map((n) => `Color(${huddleColor(n, "night")}),`), 3)}
+        )
+
         /** Control heights (web \`sizes.control.*\`). */
         object ControlHeight {
 ${dims("sizes", controls, "dp", (n) => n.slice("control.".length))}

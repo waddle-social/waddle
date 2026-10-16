@@ -189,7 +189,7 @@ private fun AddMemberSearch(state: MembersUiState, viewModel: MembersViewModel) 
         placeholder = { Text(text = stringResource(R.string.members_search_hint)) },
         leadingIcon = { Icon(Icons.Outlined.PersonAdd, contentDescription = null) },
         singleLine = true,
-        shape = RoundedCornerShape(Waddle.radius.lg),
+        shape = RoundedCornerShape(Waddle.radius.panel),
         modifier = Modifier
             .fillMaxWidth()
             .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xs)
@@ -323,7 +323,7 @@ private fun AffiliationChip(affiliation: WaddleMucAffiliation) {
         style = MaterialTheme.typography.labelMedium,
         color = color,
         modifier = Modifier
-            .border(1.dp, color.copy(alpha = CHIP_BORDER_ALPHA), RoundedCornerShape(Waddle.radius.sm))
+            .border(1.dp, color.copy(alpha = CHIP_BORDER_ALPHA), RoundedCornerShape(Waddle.radius.control))
             .padding(horizontal = Waddle.space.xs, vertical = 2.dp),
     )
 }
@@ -335,7 +335,7 @@ private fun PresentNow() {
         Box(
             modifier = Modifier
                 .size(6.dp)
-                .background(Waddle.colors.presenceOnline, CircleShape),
+                .background(Waddle.colors.presenceAvailable, CircleShape),
         )
         Text(
             text = stringResource(R.string.members_present_now),

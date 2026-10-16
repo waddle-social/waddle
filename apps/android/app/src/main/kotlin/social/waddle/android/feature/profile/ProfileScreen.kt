@@ -29,6 +29,7 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.ExposedDropdownMenu
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
 import androidx.compose.material3.ExposedDropdownMenuBox
 import androidx.compose.material3.ExposedDropdownMenuDefaults
@@ -175,7 +176,7 @@ private fun AvatarSection(
                     )
                 },
                 enabled = !state.busy,
-                shape = RoundedCornerShape(Waddle.radius.md),
+                shape = RoundedCornerShape(Waddle.radius.control),
                 modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_CHANGE),
             ) {
                 Text(text = stringResource(R.string.profile_avatar_change))
@@ -584,7 +585,7 @@ private fun ProfileField(
         enabled = enabled,
         singleLine = singleLine,
         isError = isError,
-        shape = RoundedCornerShape(Waddle.radius.md),
+        shape = RoundedCornerShape(Waddle.radius.control),
         modifier = Modifier
             .fillMaxWidth()
             .testTag(testTag),
@@ -607,7 +608,7 @@ private fun PublishClearRow(
         Button(
             onClick = onPublish,
             enabled = !busy,
-            shape = RoundedCornerShape(Waddle.radius.md),
+            shape = RoundedCornerShape(Waddle.radius.control),
             modifier = Modifier.testTag(publishTag),
         ) {
             Text(text = stringResource(R.string.profile_publish))
@@ -615,7 +616,7 @@ private fun PublishClearRow(
         OutlinedButton(
             onClick = onClear,
             enabled = !busy,
-            shape = RoundedCornerShape(Waddle.radius.md),
+            shape = RoundedCornerShape(Waddle.radius.control),
             modifier = Modifier.testTag(clearTag),
         ) {
             Text(text = stringResource(R.string.profile_clear))

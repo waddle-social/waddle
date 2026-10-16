@@ -33,8 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import social.waddle.android.client.PeerAvatarSource
 import social.waddle.android.client.normalizedBareJid
-import social.waddle.android.theme.LocalConsistentHue
-import social.waddle.android.theme.consistentColor
+import social.waddle.android.theme.WaddleTokens
 
 /**
  * The session's peer-avatar cache. `null` (screen tests, previews)
@@ -64,9 +63,9 @@ fun PeerAvatar(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            // Initials are white on the identity colour: keep its daylight
-            // lightness in both themes so they stay legible.
-            .background(if (image == null) initialsFill(displayName) else Color.Transparent),
+            // Web AppAvatar parity: ink initials on a soft tint picked from
+            // the name, the same tint on every platform and in both themes.
+            .background(if (image == null) avatarTintOf(displayName) else Color.Transparent),
         contentAlignment = Alignment.Center,
     ) {
         if (image != null) {
@@ -79,8 +78,8 @@ fun PeerAvatar(
         } else {
             Text(
                 text = initialsOf(displayName),
-                color = Color.White,
-                fontWeight = FontWeight.Medium,
+                color = AVATAR_INK,
+                fontWeight = FontWeight.Bold,
                 // Scales with the circle, not the user's font scale.
                 fontSize = with(LocalDensity.current) { (size * INITIALS_SCALE).toSp() },
                 maxLines = 1,
@@ -89,9 +88,29 @@ fun PeerAvatar(
     }
 }
 
-@Composable
-private fun initialsFill(displayName: String): Color =
-    consistentColor(displayName, onDark = false, hueOf = LocalConsistentHue.current)
+/** Initials ink: Huddle `ink.900`, readable on every tint (≥ 11:1). */
+private val AVATAR_INK = WaddleTokens.Huddle.Night.bg
+
+/**
+ * The fallback tint for [name]: web `AppAvatar`'s djb2 over code points
+ * (unsigned 32-bit), modulo the four Huddle avatar tints, so a person
+ * keeps one colour across web and Android.
+ */
+fun avatarTintOf(name: String): Color {
+    val tints = WaddleTokens.Huddle.avatarTints
+    var hash = DJB2_SEED
+    var index = 0
+    while (index < name.length) {
+        val codePoint = name.codePointAt(index)
+        hash = (hash * DJB2_MULTIPLIER + codePoint) and UINT32_MASK
+        index += Character.charCount(codePoint)
+    }
+    return tints[(hash % tints.size).toInt()]
+}
+
+private const val DJB2_SEED = 5381L
+private const val DJB2_MULTIPLIER = 33L
+private const val UINT32_MASK = 0xFFFF_FFFFL
 
 @Composable
 private fun rememberAvatarImage(source: PeerAvatarSource, key: String): ImageBitmap? {

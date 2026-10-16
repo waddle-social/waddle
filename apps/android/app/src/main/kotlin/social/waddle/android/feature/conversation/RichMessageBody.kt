@@ -75,7 +75,7 @@ private fun ParagraphText(paragraph: RichBlock.Paragraph) {
 @Composable
 private fun CodeBlockSurface(block: RichBlock.CodeBlock) {
     Surface(
-        shape = RoundedCornerShape(Waddle.radius.sm),
+        shape = RoundedCornerShape(Waddle.radius.control),
         color = Waddle.colors.codeBackground,
         contentColor = Waddle.colors.codeForeground,
         border = BorderStroke(1.dp, Waddle.colors.codeBorder),

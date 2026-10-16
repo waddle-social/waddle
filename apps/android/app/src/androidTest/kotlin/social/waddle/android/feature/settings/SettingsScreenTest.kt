@@ -75,12 +75,12 @@ class SettingsScreenTest {
     @Test
     fun themeSelectionPersistsToUserPrefs() {
         waitForText("Appearance")
-        composeRule.onNodeWithText("Dark").performClick()
-        waitForPref(harness.graph.userPrefs.theme, ThemeMode.DARK)
-        composeRule.onNodeWithText("Dark").assertIsSelected()
-        composeRule.onNodeWithText("Light").performClick()
-        waitForPref(harness.graph.userPrefs.theme, ThemeMode.LIGHT)
-        composeRule.onNodeWithText("Light").assertIsSelected()
+        composeRule.onNodeWithText("Daylight").performClick()
+        waitForPref(harness.graph.userPrefs.theme, ThemeMode.DAYLIGHT)
+        composeRule.onNodeWithText("Daylight").assertIsSelected()
+        composeRule.onNodeWithText("Night").performClick()
+        waitForPref(harness.graph.userPrefs.theme, ThemeMode.NIGHT)
+        composeRule.onNodeWithText("Night").assertIsSelected()
     }
 
     @Test

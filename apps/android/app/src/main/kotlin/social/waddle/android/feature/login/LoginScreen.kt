@@ -136,7 +136,7 @@ private fun ProviderPicker(providers: List<AuthProvider>, onSelect: (String) -> 
         if (index == 0) {
             Button(
                 onClick = { onSelect(provider.id) },
-                shape = RoundedCornerShape(Waddle.radius.lg),
+                shape = RoundedCornerShape(Waddle.radius.panel),
                 modifier = Modifier
                     .fillMaxWidth()
                     .defaultMinSize(minHeight = BUTTON_HEIGHT),
@@ -145,7 +145,7 @@ private fun ProviderPicker(providers: List<AuthProvider>, onSelect: (String) -> 
         } else {
             OutlinedButton(
                 onClick = { onSelect(provider.id) },
-                shape = RoundedCornerShape(Waddle.radius.lg),
+                shape = RoundedCornerShape(Waddle.radius.panel),
                 modifier = Modifier
                     .fillMaxWidth()
                     .defaultMinSize(minHeight = BUTTON_HEIGHT),
@@ -164,7 +164,7 @@ private fun Verifying(userCode: String, onCancel: () -> Unit) {
     )
     // The code a person may type on another device: mono, spaced, boxed.
     Surface(
-        shape = RoundedCornerShape(Waddle.radius.lg),
+        shape = RoundedCornerShape(Waddle.radius.panel),
         color = MaterialTheme.colorScheme.surfaceContainer,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
     ) {

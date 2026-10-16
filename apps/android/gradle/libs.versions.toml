@@ -8,7 +8,10 @@ kotlinCompose = "2.3.21"
 # exactly like kotlinCompose above.
 kotlinSerialization = "2.3.21"
 kotlinxSerializationJson = "1.9.0"
-composeBom = "2026.06.01"
+composeBom = "2026.09.00"
+# Material 3 Expressive (the current Material You) is public only on the
+# 1.5 line; the BOM still pins stable 1.4.0, where it is internal.
+material3 = "1.5.0-beta01"
 activityCompose = "1.11.0"
 coreKtx = "1.17.0"
 datastore = "1.2.1"
@@ -65,7 +68,7 @@ coil-network-okhttp = { group = "io.coil-kt.coil3", name = "coil-network-okhttp"
 compose-bom = { group = "androidx.compose", name = "compose-bom", version.ref = "composeBom" }
 compose-ui = { group = "androidx.compose.ui", name = "ui" }
 compose-ui-tooling-preview = { group = "androidx.compose.ui", name = "ui-tooling-preview" }
-compose-material3 = { group = "androidx.compose.material3", name = "material3" }
+compose-material3 = { group = "androidx.compose.material3", name = "material3", version.ref = "material3" }
 # Version comes from the compose BOM (icons stayed on the 1.7.x line).
 compose-material-icons-extended = { group = "androidx.compose.material", name = "material-icons-extended" }
 kotlinx-coroutines-core = { group = "org.jetbrains.kotlinx", name = "kotlinx-coroutines-core", version.ref = "coroutines" }

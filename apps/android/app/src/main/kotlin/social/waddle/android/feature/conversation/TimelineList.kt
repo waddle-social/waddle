@@ -357,14 +357,14 @@ fun TimelineSkeleton(modifier: Modifier = Modifier) {
                         Modifier
                             .width(96.dp)
                             .height(10.dp)
-                            .background(block, RoundedCornerShape(Waddle.radius.xs)),
+                            .background(block, RoundedCornerShape(Waddle.radius.tag)),
                     )
                     widths.forEach { w ->
                         Box(
                             Modifier
                                 .width(w.dp)
                                 .height(12.dp)
-                                .background(block, RoundedCornerShape(Waddle.radius.xs)),
+                                .background(block, RoundedCornerShape(Waddle.radius.tag)),
                         )
                     }
                 }

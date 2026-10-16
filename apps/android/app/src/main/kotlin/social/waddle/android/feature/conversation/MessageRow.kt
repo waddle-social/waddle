@@ -307,7 +307,7 @@ private fun PendingMessageRow(
                     style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier
-                        .clip(RoundedCornerShape(Waddle.radius.xs))
+                        .clip(RoundedCornerShape(Waddle.radius.tag))
                         .clickable { actions.onRetry(message.localId) }
                         .padding(horizontal = Waddle.space.xs, vertical = Waddle.space.xxs),
                 )
@@ -491,7 +491,7 @@ private fun ReplyPreview(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
         modifier = Modifier
-            .clip(RoundedCornerShape(Waddle.radius.xs))
+            .clip(RoundedCornerShape(Waddle.radius.tag))
             .clickable(enabled = parent != null, onClick = onClick)
             .padding(vertical = 2.dp),
     ) {
@@ -576,7 +576,7 @@ private fun ThreadChip(count: Int, onClick: () -> Unit) {
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
         modifier = Modifier
             .padding(top = 2.dp)
-            .clip(RoundedCornerShape(Waddle.radius.xs))
+            .clip(RoundedCornerShape(Waddle.radius.tag))
             .clickable(onClick = onClick)
             .padding(vertical = 2.dp, horizontal = 2.dp),
     ) {
@@ -616,7 +616,7 @@ private fun SharedFileContent(file: WaddleSharedFile) {
                 .widthIn(max = MEDIA_MAX_WIDTH)
                 .fillMaxWidth()
                 .aspectRatio(ratio)
-                .clip(RoundedCornerShape(Waddle.radius.md))
+                .clip(RoundedCornerShape(Waddle.radius.control))
                 .background(MaterialTheme.colorScheme.surfaceContainerHigh)
                 .clickable { viewerOpen = true },
         )
@@ -659,7 +659,7 @@ private fun FileCard(
     onClick: (() -> Unit)?,
 ) {
     Surface(
-        shape = RoundedCornerShape(Waddle.radius.md),
+        shape = RoundedCornerShape(Waddle.radius.control),
         color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         modifier = Modifier
@@ -677,7 +677,7 @@ private fun FileCard(
                 contentAlignment = Alignment.Center,
                 modifier = Modifier
                     .size(36.dp)
-                    .clip(RoundedCornerShape(Waddle.radius.sm))
+                    .clip(RoundedCornerShape(Waddle.radius.control))
                     .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f)),
             ) {
                 CompositionLocalProvider(LocalContentColor provides MaterialTheme.colorScheme.primary) { icon() }
@@ -759,7 +759,7 @@ private fun StickerContent(file: WaddleSharedFile, altText: String) {
         contentScale = ContentScale.Fit,
         modifier = Modifier
             .size(STICKER_SIZE)
-            .clip(RoundedCornerShape(Waddle.radius.sm))
+            .clip(RoundedCornerShape(Waddle.radius.control))
             .clickable { viewerOpen = true },
     )
     if (viewerOpen) {
