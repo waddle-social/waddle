@@ -5,6 +5,7 @@ import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.async
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -102,6 +103,35 @@ class XmppSessionManagerVerbsTest {
         harness.client.joinRoomStall = null
         assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
         assertEquals("a fresh join goes out after the cancelled one", 2, harness.client.joinRoomCalls.size)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a join in flight across a reconnect does not count for the new stream`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val first = harness.client
+        val stall = CompletableDeferred<Unit>()
+        first.joinRoomStall = stall
+        val stale = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        runCurrent()
+
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        advanceTimeBy(1_000L)
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertEquals("a new stream is up", 2, harness.factory.clients.size)
+        stall.complete(Unit)
+        runCurrent()
+        stale.await()
+
+        // The old stream's join must not pass for membership on this one.
+        val second = harness.client
+        val before = second.joinRoomCalls.size
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals("the new stream sends its own join", before + 1, second.joinRoomCalls.size)
         harness.manager.logout()
     }
 

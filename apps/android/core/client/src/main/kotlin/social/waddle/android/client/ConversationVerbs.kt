@@ -2,10 +2,8 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
-import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
-import kotlinx.coroutines.withContext
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.store.MessageMutation
@@ -84,7 +82,24 @@ internal class ConversationVerbs(
 
     /** One in-flight join per room, shared by every caller; see [singleFlightJoin]. */
     private val joinsInFlight = HashMap<String, CompletableDeferred<Boolean>>()
-    private val joinsLock = Mutex()
+    private val joinsLock = Any()
+
+    /** Bumped per fresh stream: a join begun before it says nothing about the new one. */
+    private var joinEpoch = 0L
+
+    /**
+     * A new transport stream (not an SM resume) is ready: joins still in
+     * flight belong to the old one. Their waiters hear "not joined", and
+     * their late success is not recorded as this stream's membership, so
+     * the rejoin and any screen open send a fresh join here.
+     */
+    fun onFreshStream() {
+        val orphaned = synchronized(joinsLock) {
+            joinEpoch += 1
+            joinsInFlight.values.toList().also { joinsInFlight.clear() }
+        }
+        orphaned.forEach { it.complete(false) }
+    }
 
     /**
      * Join [roomJid] unless this stream is already in it or joining it
@@ -95,7 +110,7 @@ internal class ConversationVerbs(
         val joined = singleFlightJoin(roomJid) {
             joinRoom(roomJid, nick).also { sent = it } == VerbResult.Ok
         }
-        return sent ?: if (joined) VerbResult.Ok else VerbResult.NotConnected
+        return if (joined) VerbResult.Ok else sent?.takeIf { it != VerbResult.Ok } ?: VerbResult.NotConnected
     }
 
     /**
@@ -114,37 +129,35 @@ internal class ConversationVerbs(
      * the huddle (§Leaving).
      *
      * "In the room" is this stream's membership (self-presence 110, or a
-     * join sent moments ago), never the persisted intent, so a kicked or
-     * failed room stays joinable. Returns whether the room is joined or
-     * joining once this call is done.
+     * join sent moments ago on this stream), never the persisted intent,
+     * so a kicked or failed room stays joinable. Returns whether the room
+     * is joined or joining on the current stream once this call is done.
      */
     private suspend fun singleFlightJoin(roomJid: String, send: suspend () -> Boolean): Boolean {
-        val (pending, owner) = joinsLock.withLock {
+        val flight = synchronized(joinsLock) {
             if (stores.occupantJidStore.isInOrJoining(roomJid, nowMillis(), JOIN_PENDING_MILLIS)) return true
-            val existing = joinsInFlight[roomJid]
-            if (existing != null) {
-                existing to false
-            } else {
-                CompletableDeferred<Boolean>().also { joinsInFlight[roomJid] = it } to true
-            }
+            joinsInFlight[roomJid]?.let { JoinFlight(it, owner = false, epoch = joinEpoch) }
+                ?: JoinFlight(CompletableDeferred<Boolean>().also { joinsInFlight[roomJid] = it }, true, joinEpoch)
         }
-        if (!owner) return pending.await()
+        if (!flight.owner) return flight.pending.await()
         var ok = false
         try {
-            ok = send()
-            if (ok) stores.occupantJidStore.markJoinSent(roomJid, nowMillis())
+            val sent = send()
+            synchronized(joinsLock) {
+                // Only a join sent on the stream that is still current counts.
+                ok = sent && flight.epoch == joinEpoch
+                if (ok) stores.occupantJidStore.markJoinSent(roomJid, nowMillis())
+            }
             return ok
         } finally {
-            // Waiters first (complete never suspends): a cancelled owner
-            // hands them "not joined", not its cancellation.
-            pending.complete(ok)
-            // Then retire the entry even while cancelled, or every later
-            // open of this room would await a finished join forever.
-            withContext(NonCancellable) {
-                joinsLock.withLock { joinsInFlight.remove(roomJid, pending) }
-            }
+            // Nothing here suspends, so a cancelled owner still releases its
+            // waiters ("not joined") and the room.
+            flight.pending.complete(ok)
+            synchronized(joinsLock) { joinsInFlight.remove(roomJid, flight.pending) }
         }
     }
+
+    private class JoinFlight(val pending: CompletableDeferred<Boolean>, val owner: Boolean, val epoch: Long)
 
     /**
      * Fetch a MAM page for a room and fan it into the timeline store

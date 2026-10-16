@@ -112,6 +112,25 @@ class MembersViewModelTest {
         assertEquals(PresenceShow.AVAILABLE, owen.presence)
     }
 
+    @Test
+    fun `a member on two devices is one row, most available and in the huddle`() {
+        val rows = memberRowsOf(
+            members = RoomMembersState(
+                status = MemberListStatus.LOADED,
+                members = listOf(entry("bob@waddle.test", WaddleMucAffiliation.MEMBER)),
+            ),
+            occupants = mapOf(
+                "bob-phone" to testPresence(from = "$ROOM/bob-phone", mucJid = "bob@waddle.test/phone", show = "away"),
+                "bob-web" to testPresence(from = "$ROOM/bob-web", mucJid = "bob@waddle.test/web"),
+            ),
+            huddleNicks = setOf("bob-phone"),
+        )
+        val bob = rows.single()
+        assertTrue("the phone seat is in the huddle", bob.inHuddle)
+        assertEquals("the web seat is available", PresenceShow.AVAILABLE, bob.presence)
+        assertEquals("actions target a stable nick", "bob-phone", bob.nick)
+    }
+
     private fun seedSelfAsOwner(harness: Harness) {
         harness.factory.emit(
             WaddleClientEvent.Presence(

@@ -272,24 +272,28 @@ internal fun memberRowsOf(
     huddleNicks: Set<String> = emptySet(),
     knownShows: Map<String, PresenceShow> = emptyMap(),
 ): List<MemberRow> {
+    // A member can sit in the room under several nicks (phone and web):
+    // one row, most-available presence, in the huddle if any nick is.
     val occupantsByBareJid = occupants.entries
-        .mapNotNull { (nick, presence) ->
-            presence.mucJid?.let { real -> bareJidOf(real) to (nick to presence) }
-        }
-        .toMap()
+        .mapNotNull { (nick, presence) -> presence.mucJid?.let { real -> bareJidOf(real) to (nick to presence) } }
+        .groupBy({ it.first }, { it.second })
+        .mapValues { (_, seats) -> seats.sortedBy { it.first } }
     val listedJids = members.members.map { it.jid }.toSet()
     val listed = members.members.map { entry ->
-        val occupant = occupantsByBareJid[entry.jid]
+        val seats = occupantsByBareJid[entry.jid].orEmpty()
+        // Management actions target one nick: the first, by name, for stability.
+        val representative = seats.firstOrNull()
         MemberRow(
             jid = entry.jid,
             displayName = entry.nick ?: localpartOf(entry.jid),
             affiliation = entry.affiliation,
-            nick = occupant?.first,
-            presentNow = occupant != null,
-            hats = occupant?.second?.hats?.map { it.title }.orEmpty(),
+            nick = representative?.first,
+            presentNow = seats.isNotEmpty(),
+            hats = representative?.second?.hats?.map { it.title }.orEmpty(),
             inferred = false,
-            presence = occupant?.second?.let(::presenceShowOf) ?: knownShows[normalizedBareJid(entry.jid)],
-            inHuddle = occupant?.first in huddleNicks,
+            presence = seats.map { presenceShowOf(it.second) }.minByOrNull { it.ordinal }
+                ?: knownShows[normalizedBareJid(entry.jid)],
+            inHuddle = seats.any { it.first in huddleNicks },
         )
     }
     val inferred = occupants.entries

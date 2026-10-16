@@ -738,6 +738,8 @@ class XmppSessionManager(
             // stream's first post-ready event is dispatched.
             if (freshStream) {
                 stores.occupantJidStore.clear()
+                // Joins in flight belonged to the old stream.
+                verbs.onFreshStream()
                 // Presence and mentions are per stream: the server
                 // re-sends current presence, and anyone who left while
                 // we were away must not linger. Mentions are live-only.
