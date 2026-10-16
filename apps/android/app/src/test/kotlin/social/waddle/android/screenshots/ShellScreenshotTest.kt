@@ -3,52 +3,46 @@ package social.waddle.android.screenshots
 import android.app.Application
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.size
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.filled.Home
-import androidx.compose.material.icons.outlined.Add
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.Group
-import androidx.compose.material.icons.outlined.MoreVert
-import androidx.compose.material.icons.outlined.Notifications
-import androidx.compose.material.icons.outlined.Person
-import androidx.compose.material.icons.outlined.Search
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.NavigationBar
-import androidx.compose.material3.NavigationBarItem
-import androidx.compose.material3.NavigationBarItemDefaults
-import androidx.compose.material3.Text
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Density
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Before
 import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
-import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.ConnectionState
-import social.waddle.android.feature.conversation.MessageComposer
-import social.waddle.android.feature.conversation.MessageRowActions
-import social.waddle.android.feature.conversation.MessageRowContext
-import social.waddle.android.feature.conversation.TimelineList
-import social.waddle.android.feature.home.ChannelListBody
-import social.waddle.android.feature.home.ChannelListItem
-import social.waddle.android.feature.home.ConnectionBanner
-import social.waddle.android.feature.home.SpaceSection
-import social.waddle.android.ui.ConversationListRow
-import social.waddle.android.ui.GlyphTile
-import social.waddle.android.ui.WaddleTopBar
+import social.waddle.android.client.store.PresenceShow
+import social.waddle.android.feature.home.HomeActions
+import social.waddle.android.feature.home.HomeContent
+import social.waddle.android.feature.home.HomeContentState
+import social.waddle.android.feature.people.PeopleContent
+import social.waddle.android.feature.people.PersonRow
+import social.waddle.android.feature.rooms.HuddleParticipant
+import social.waddle.android.feature.rooms.RoomActivity
+import social.waddle.android.feature.rooms.RoomActivityOrder
+import social.waddle.android.feature.rooms.RoomsContent
+import social.waddle.android.feature.rooms.RoomsUiState
+import social.waddle.android.navigation.MainTab
+import social.waddle.android.navigation.MainTabBar
+import social.waddle.android.navigation.TabBadges
+import social.waddle.android.ui.huddle.LocalReducedMotion
+import java.time.ZoneOffset
+import java.time.ZonedDateTime
 import java.util.Locale
 import java.util.TimeZone
 
-/** Root tabs and the conversation screen, composed from their real parts. */
+/**
+ * The shell's root tabs, rendered from their real stateless content
+ * composables over fixed fixtures, with the real tab bar under them.
+ * Locale, zone, clock and reduced motion are pinned.
+ */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)
-@Config(sdk = [35], qualifiers = "w411dp-h891dp-xxhdpi", application = Application::class)
+@Config(sdk = [35], qualifiers = "en-rGB-w411dp-h891dp-xxhdpi", application = Application::class)
 class ShellScreenshotTest {
     @Before
     fun pinLocale() {
@@ -57,139 +51,202 @@ class ShellScreenshotTest {
     }
 
     @Test
-    fun home() = captureThemed("home") {
-        Column(Modifier.fillMaxSize()) {
-            WaddleTopBar(
-                title = { Text("Waddle") },
-                actions = { IconButton(onClick = {}) { Icon(Icons.Outlined.Add, contentDescription = null) } },
-            )
-            // Offline, not reconnecting: an indeterminate spinner never lets the capture go idle.
-            ConnectionBanner(state = ConnectionState.Offline, onRetry = {})
-            ChannelListBody(
-                sections = SECTIONS,
-                filter = "",
-                onFilterChange = {},
-                onChannelClick = {},
-                modifier = Modifier.weight(1f),
-            )
-            BottomBar()
+    fun homeBusy() = captureThemed("home_busy") {
+        Shell(MainTab.HOME, TabBadges(dmUnread = 3, roomsLive = true)) {
+            HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions())
         }
     }
 
     @Test
-    fun dms() = captureThemed("dms") {
-        Column(Modifier.fillMaxSize()) {
-            WaddleTopBar(title = { Text("Direct messages") })
-            Column(Modifier.weight(1f)) {
-                DM_ROWS.forEach { row ->
-                    val name = row.name
-                    ConversationListRow(
-                        title = name,
-                        leading = {
-                            if (name.contains(",")) {
-                                GlyphTile(Icons.Outlined.Group)
-                            } else {
-                                PeerAvatar(jid = "$name@waddle.test", displayName = name, size = 40.dp)
-                            }
-                        },
-                        onClick = {},
-                        preview = row.preview,
-                        time = row.time,
-                        unreadCount = row.unread,
-                    )
-                }
-            }
-            BottomBar(selected = 1)
+    fun homeQuiet() = captureThemed("home_quiet") {
+        Shell(MainTab.HOME, TabBadges()) {
+            HomeContent(state = Fixtures.quietHome, now = Fixtures.EVENING, actions = HomeActions())
         }
     }
 
     @Test
-    fun conversation() = captureThemed("conversation") {
-        Column(Modifier.fillMaxSize()) {
-            WaddleTopBar(
-                title = {
-                    Column {
-                        Text("#general", style = MaterialTheme.typography.titleMedium)
-                        Text(
-                            "Storage, infra and launch chatter",
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        )
-                    }
-                },
-                navigationIcon = {
-                    IconButton(onClick = {}) { Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = null) }
-                },
-                actions = {
-                    IconButton(onClick = {}) { Icon(Icons.Outlined.Search, contentDescription = null) }
-                    IconButton(onClick = {}) { Icon(Icons.Outlined.MoreVert, contentDescription = null) }
-                },
-            )
-            TimelineList(
-                entries = ScreenshotFixtures.channelEntries(),
-                isLoadingOlder = false,
-                reachedHistoryStart = false,
-                onTopReached = {},
-                actions = MessageRowActions(onOpenThread = {}),
-                context = MessageRowContext(selfBareJid = ScreenshotFixtures.SELF),
-                today = ScreenshotFixtures.TODAY,
-                modifier = Modifier.weight(1f),
-            )
-            MessageComposer(onSend = { _, _ -> }, onAttach = {}, onGif = {}, onSticker = {})
+    fun homeLoading() = captureThemed("home_loading") {
+        Shell(MainTab.HOME, TabBadges()) {
+            HomeContent(state = Fixtures.loadingHome, now = Fixtures.MORNING, actions = HomeActions())
         }
     }
 
-    @androidx.compose.runtime.Composable
-    private fun BottomBar(selected: Int = 0) {
-        NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
-            listOf(
-                Triple("Home", Icons.Filled.Home, 0),
-                Triple("DMs", Icons.Outlined.ChatBubbleOutline, 1),
-                Triple("Activity", Icons.Outlined.Notifications, 2),
-                Triple("You", Icons.Outlined.Person, 3),
-            ).forEach { (label, icon, index) ->
-                NavigationBarItem(
-                    selected = index == selected,
-                    onClick = {},
-                    icon = { Icon(icon, contentDescription = null, modifier = Modifier.size(24.dp)) },
-                    label = { Text(label) },
-                    colors = NavigationBarItemDefaults.colors(
-                        selectedIconColor = MaterialTheme.colorScheme.primary,
-                        indicatorColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.14f),
-                    ),
-                )
+    /** 1.3× text: nothing may clip or collide. */
+    @Test
+    fun homeBusyLargeText() = captureThemed("home_busy_large_text") {
+        val density = LocalDensity.current
+        CompositionLocalProvider(LocalDensity provides Density(density.density, fontScale = LARGE_TEXT)) {
+            Shell(MainTab.HOME, TabBadges(dmUnread = 3, roomsLive = true)) {
+                HomeContent(state = Fixtures.busyHome, now = Fixtures.AFTERNOON, actions = HomeActions())
             }
         }
     }
 
-    private data class DmRow(val name: String, val preview: String, val time: String, val unread: Int)
+    @Test
+    fun rooms() = captureThemed("rooms") {
+        Shell(MainTab.ROOMS, TabBadges(dmUnread = 3, roomsLive = true)) {
+            RoomsContent(
+                state = RoomsUiState(rooms = Fixtures.rooms.sortedWith(RoomActivityOrder), settled = true),
+                query = "",
+                onQueryChange = {},
+                nowMillis = Fixtures.AFTERNOON.toInstant().toEpochMilli(),
+                canCreate = true,
+                onCreate = {},
+                onEnter = {},
+                onJoin = {},
+            )
+        }
+    }
+
+    @Test
+    fun people() = captureThemed("people") {
+        Shell(MainTab.PEOPLE, TabBadges(dmUnread = 3, roomsLive = true)) {
+            PeopleContent(
+                people = Fixtures.people,
+                settled = true,
+                query = "",
+                onQueryChange = {},
+                awayOpen = false,
+                onToggleAway = {},
+                onOpen = {},
+            )
+        }
+    }
+
+    @Composable
+    private fun Shell(tab: MainTab, badges: TabBadges, content: @Composable () -> Unit) {
+        CompositionLocalProvider(LocalReducedMotion provides true) {
+            Column(Modifier.fillMaxSize()) {
+                Column(Modifier.weight(1f)) { content() }
+                MainTabBar(selected = tab, badges = badges, onSelect = {})
+            }
+        }
+    }
 
     private companion object {
-        val SECTIONS = listOf(
-            SpaceSection(
-                id = "eng",
-                name = "Engineering",
-                channels = listOf(
-                    ChannelListItem("general@muc", "general", unreadCount = 3),
-                    ChannelListItem("storage@muc", "storage", unreadCount = 0, inCallCount = 2),
-                    ChannelListItem("releases@muc", "releases", unreadCount = 12),
-                    ChannelListItem("random@muc", "random", unreadCount = 0, isMuted = true),
-                ),
-            ),
-            SpaceSection(
-                id = "community",
-                name = "Community",
-                channels = listOf(
-                    ChannelListItem("welcome@muc", "welcome", unreadCount = 0),
-                    ChannelListItem("showcase@muc", "showcase", unreadCount = 1),
-                ),
-            ),
-        )
-        val DM_ROWS = listOf(
-            DmRow("alice", "Pushed the Parquet compaction fix", "09:41", 2),
-            DmRow("bob", "Sounds good, let's ship it Monday", "Wed", 0),
-            DmRow("alice, bob, carol", "carol: dashboards are up", "Tue", 0),
-            DmRow("dana", "thanks!", "12 Oct", 0),
-        )
+        const val LARGE_TEXT = 1.3f
     }
+}
+
+/** A small, believable community: the same people and rooms in every shell golden. */
+private object Fixtures {
+    val AFTERNOON: ZonedDateTime = ZonedDateTime.of(2026, 10, 16, 14, 5, 0, 0, ZoneOffset.UTC)
+    val EVENING: ZonedDateTime = ZonedDateTime.of(2026, 10, 16, 19, 40, 0, 0, ZoneOffset.UTC)
+    val MORNING: ZonedDateTime = ZonedDateTime.of(2026, 10, 16, 8, 15, 0, 0, ZoneOffset.UTC)
+    private val now = AFTERNOON.toInstant().toEpochMilli()
+    private const val MINUTE = 60_000L
+
+    private fun huddle(vararg nicks: String) = nicks.map { HuddleParticipant(it, "$it@waddle.test") }
+
+    val rooms = listOf(
+        RoomActivity(
+            roomJid = "storage@muc.waddle.test",
+            name = "storage",
+            joined = true,
+            here = 6,
+            huddle = huddle("mara", "sol", "priya"),
+            preview = "Parquet compaction is green on staging",
+            previewAuthor = "sol",
+            lastUpdated = now - 4 * MINUTE,
+        ),
+        RoomActivity(
+            roomJid = "general@muc.waddle.test",
+            name = "general",
+            joined = true,
+            here = 14,
+            mentions = 2,
+            unread = 5,
+            preview = "@david the Grafana board is pinned in here now",
+            previewAuthor = "carol",
+            lastUpdated = now - 11 * MINUTE,
+        ),
+        RoomActivity(
+            roomJid = "releases@muc.waddle.test",
+            name = "releases",
+            joined = true,
+            here = 0,
+            unread = 12,
+            preview = "v0.42 is tagged. Changelog and binaries are up.",
+            previewAuthor = "release-bot",
+            lastUpdated = now - 38 * MINUTE,
+        ),
+        RoomActivity(
+            roomJid = "design@muc.waddle.test",
+            name = "design",
+            forum = true,
+            joined = true,
+            here = 3,
+            threadUnread = 2,
+            preview = "New tab bar mocks for Android are in the thread",
+            previewAuthor = "noor",
+            lastUpdated = now - 2 * 60 * MINUTE,
+        ),
+        RoomActivity(
+            roomJid = "random@muc.waddle.test",
+            name = "random",
+            joined = true,
+            here = 0,
+            unread = 30,
+            muted = true,
+            lastUpdated = now - 5 * 60 * MINUTE,
+        ),
+        RoomActivity(roomJid = "welcome@muc.waddle.test", name = "welcome", joined = true, here = 0),
+        RoomActivity(
+            roomJid = "events@muc.waddle.test",
+            name = "events",
+            description = "Meetups, talks and the monthly community call.",
+        ),
+    )
+
+    private fun person(name: String, show: PresenceShow = PresenceShow.AVAILABLE, huddleRoom: String? = null) =
+        PersonRow(
+            jid = "$name@waddle.test",
+            name = name,
+            show = show,
+            huddleRoomName = huddleRoom,
+            inHuddle = huddleRoom != null,
+        )
+
+    val people = listOf(
+        person("mara", huddleRoom = "storage"),
+        person("sol", huddleRoom = "storage"),
+        person("priya", PresenceShow.DND, huddleRoom = "storage"),
+        person("carol"),
+        person("devon"),
+        person("kai"),
+        person("noor"),
+        person("ines", PresenceShow.DND),
+        person("jules"),
+        person("tomasz"),
+        person("lena", PresenceShow.AWAY),
+        person("oskar", PresenceShow.XA),
+        person("ravi", PresenceShow.AWAY),
+    )
+
+    val busyHome = HomeContentState(
+        greetingName = "David",
+        accountName = "David Flanagan",
+        accountJid = "david@waddle.test",
+        rooms = rooms,
+        people = people,
+        dmUnread = 3,
+        connection = ConnectionState.Ready,
+        settled = true,
+        canCreateRoom = true,
+    )
+
+    val quietHome = busyHome.copy(
+        rooms = rooms.map { it.copy(huddle = emptyList(), mentions = 0, unread = 0, threadUnread = 0) },
+        people = emptyList(),
+        dmUnread = 0,
+    )
+
+    val loadingHome = busyHome.copy(
+        rooms = emptyList(),
+        people = emptyList(),
+        dmUnread = 0,
+        settled = false,
+        canCreateRoom = false,
+        connection = ConnectionState.Offline,
+    )
 }

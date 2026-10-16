@@ -5,6 +5,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -23,6 +24,7 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testSessionInfo
+import social.waddle.android.feature.rooms.TOPOLOGY_GRACE_MILLIS
 import social.waddle.client.ffi.WaddleChannel
 import social.waddle.client.ffi.WaddleClientEvent
 import social.waddle.client.ffi.WaddleSpace
@@ -81,7 +83,7 @@ class HomeViewModelTest {
     )
 
     @Test
-    fun `sections sort channels by position and map unread counts`() = runTest {
+    fun `rooms carry unread and mentions, and group dms stay off the room list`() = runTest {
         val harness = Harness(this)
         harness.manager.roomStore.setTopology(
             WaddleTopology(
@@ -89,109 +91,61 @@ class HomeViewModelTest {
                 channels = listOf(
                     channel("c2", "random@muc.waddle.test", "random", position = 2, spaceId = "s1"),
                     channel("c1", "general@muc.waddle.test", "general", position = 1, spaceId = "s1"),
+                    channel("g1", "gdm@muc.waddle.test", "trio", position = 3, spaceId = "s1", isGroupDm = true),
                 ),
             ),
         )
+        harness.manager.unreadStore.onLiveMessage("general@muc.waddle.test", isMine = false, mentionsSelf = true)
         harness.manager.unreadStore.onLiveMessage("general@muc.waddle.test", isMine = false)
-        harness.manager.unreadStore.onLiveMessage("general@muc.waddle.test", isMine = false)
 
         harness.viewModel.uiState.test {
             skipItems(1)
             runCurrent()
-            assertEquals(
-                listOf(
-                    SpaceSection(
-                        id = "s1",
-                        name = "Waddle HQ",
-                        channels = listOf(
-                            ChannelListItem("general@muc.waddle.test", "general", unreadCount = 2),
-                            ChannelListItem("random@muc.waddle.test", "random", unreadCount = 0),
-                        ),
-                    ),
-                ),
-                awaitItem().sections,
-            )
+            val rooms = expectMostRecentItem().rooms
+            assertEquals(listOf("random", "general"), rooms.map { it.name })
+            val general = rooms.single { it.name == "general" }
+            assertEquals(2, general.unread)
+            assertEquals(1, general.mentions)
+            assertEquals(false, general.joined)
+            cancelAndIgnoreRemainingEvents()
         }
     }
 
     @Test
-    fun `channels of unknown spaces collect into the unnamed orphan bucket`() = runTest {
+    fun `the topology counts as settled once it has channels`() = runTest {
         val harness = Harness(this)
-        harness.manager.roomStore.setTopology(
-            WaddleTopology(
-                spaces = listOf(space("s1", "Waddle HQ")),
-                channels = listOf(
-                    channel("c1", "general@muc.waddle.test", "general", position = 1, spaceId = "s1"),
-                    channel("c9", "stray-b@muc.waddle.test", "stray-b", position = 9, spaceId = "gone"),
-                    channel("c8", "stray-a@muc.waddle.test", "stray-a", position = 8, spaceId = "gone"),
-                ),
-            ),
-        )
 
         harness.viewModel.uiState.test {
-            skipItems(1)
-            runCurrent()
-            val sections = awaitItem().sections
-            assertEquals(2, sections.size)
-            val orphans = sections.last()
-            assertEquals(null, orphans.name)
-            assertEquals(
-                listOf("stray-a@muc.waddle.test", "stray-b@muc.waddle.test"),
-                orphans.channels.map { it.roomJid },
+            assertEquals(false, awaitItem().settled)
+            harness.manager.roomStore.setTopology(
+                WaddleTopology(
+                    spaces = emptyList(),
+                    channels = listOf(channel("c1", "general@muc.waddle.test", "general", 1, "s1")),
+                ),
             )
+            runCurrent()
+            assertEquals(true, expectMostRecentItem().settled)
+            cancelAndIgnoreRemainingEvents()
         }
     }
 
     @Test
-    fun `group dm rooms never appear in channel sections`() = runTest {
+    fun `an empty community settles after the ready grace`() = runTest {
         val harness = Harness(this)
-        harness.manager.roomStore.setTopology(
-            WaddleTopology(
-                spaces = listOf(space("s1", "Waddle HQ")),
-                channels = listOf(
-                    channel("c1", "general@muc.waddle.test", "general", position = 1, spaceId = "s1"),
-                    // Autojoin group DM: joined for live traffic, but it
-                    // belongs on the DM surface (stage 3), not here.
-                    channel(
-                        "g1",
-                        "gdm@muc.waddle.test",
-                        "trio",
-                        position = 2,
-                        spaceId = "standalone",
-                        isGroupDm = true,
-                    ),
-                ),
-            ),
-        )
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
 
         harness.viewModel.uiState.test {
-            skipItems(1)
             runCurrent()
-            val sections = awaitItem().sections
-            assertEquals(
-                listOf("general@muc.waddle.test"),
-                sections.flatMap { section -> section.channels.map { it.roomJid } },
-            )
-        }
-    }
-
-    @Test
-    fun `no orphan section appears when every channel has its space`() = runTest {
-        val harness = Harness(this)
-        harness.manager.roomStore.setTopology(
-            WaddleTopology(
-                spaces = listOf(space("s1", "Waddle HQ")),
-                channels = listOf(
-                    channel("c1", "general@muc.waddle.test", "general", position = 1, spaceId = "s1"),
-                ),
-            ),
-        )
-
-        harness.viewModel.uiState.test {
-            skipItems(1)
+            assertEquals(false, expectMostRecentItem().settled)
+            advanceTimeBy(TOPOLOGY_GRACE_MILLIS + 1)
             runCurrent()
-            assertEquals(listOf("s1"), awaitItem().sections.map { it.id })
+            assertEquals(true, expectMostRecentItem().settled)
+            cancelAndIgnoreRemainingEvents()
         }
+        harness.manager.logout()
     }
 
     @Test
@@ -207,7 +161,7 @@ class HomeViewModelTest {
         harness.viewModel.uiState.test {
             skipItems(1)
             runCurrent()
-            assertEquals(3, awaitItem().dmUnreadCount)
+            assertEquals(3, expectMostRecentItem().dmUnreadCount)
         }
     }
 
@@ -236,7 +190,7 @@ class HomeViewModelTest {
         harness.viewModel.uiState.test {
             skipItems(1)
             runCurrent()
-            assertEquals(2, awaitItem().dmUnreadCount)
+            assertEquals(2, expectMostRecentItem().dmUnreadCount)
         }
     }
 
