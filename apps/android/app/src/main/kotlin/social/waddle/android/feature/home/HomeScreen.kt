@@ -1,87 +1,81 @@
 package social.waddle.android.feature.home
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.Call
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
-import androidx.compose.material.icons.outlined.NotificationsOff
-import androidx.compose.material.icons.outlined.Settings
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Tag
-import androidx.compose.material3.Badge
-import androidx.compose.material3.DrawerValue
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalDrawerSheet
-import androidx.compose.material3.ModalNavigationDrawer
-import androidx.compose.material3.NavigationDrawerItem
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
-import androidx.compose.material3.rememberDrawerState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.CreateRoomResult
 import social.waddle.android.jid.localpartOf
+import social.waddle.android.theme.MonoMeta
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.ConversationListRow
+import social.waddle.android.ui.EmptyState
+import social.waddle.android.ui.SectionKicker
+import social.waddle.android.ui.WaddleTopBar
 
 /**
- * Home: spaces→channels drawer + channel list body, unread badges, DM
- * and Settings entries, connection banner.
+ * The Home tab: the community's channels by space, a filter, unread
+ * state and the connection banner. Direct messages, activity and
+ * settings are sibling tabs, not a drawer.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun HomeScreen(
     onOpenChannel: (roomJid: String, name: String) -> Unit,
-    onOpenDmList: () -> Unit,
-    onOpenSettings: () -> Unit,
+    contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: HomeViewModel = viewModel(factory = HomeViewModel.factory(graph))
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val canCreateChannel by viewModel.canCreateChannel.collectAsStateWithLifecycle()
-    val drawerState = rememberDrawerState(DrawerValue.Closed)
-    val scope = rememberCoroutineScope()
     var createDialogOpen by remember { mutableStateOf(false) }
     var creating by remember { mutableStateOf(false) }
+    var filter by rememberSaveable { mutableStateOf("") }
     val snackbarHostState = remember { SnackbarHostState() }
     val createFailedText = stringResource(R.string.create_channel_failed)
     val createNotPermittedText = stringResource(R.string.create_channel_not_permitted)
-
-    fun closeDrawerAnd(action: () -> Unit) {
-        scope.launch { drawerState.close() }
-        action()
-    }
 
     fun openChannel(channel: ChannelListItem) {
         viewModel.openChannel(channel.roomJid)
@@ -104,59 +98,40 @@ fun HomeScreen(
         }
     }
 
-    ModalNavigationDrawer(
-        drawerState = drawerState,
-        drawerContent = {
-            ModalDrawerSheet {
-                DrawerContent(
-                    state = state,
-                    onChannelClick = { channel -> closeDrawerAnd { openChannel(channel) } },
-                    onOpenDmList = { closeDrawerAnd(onOpenDmList) },
-                    onOpenSettings = { closeDrawerAnd(onOpenSettings) },
-                )
-            }
+    Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        contentWindowInsets = contentWindowInsets,
+        topBar = {
+            WaddleTopBar(
+                title = { Text(text = stringResource(R.string.app_name)) },
+                actions = {
+                    // Web parity: the "+" is owner-gated (canManageChannels);
+                    // creation is also re-authorized server-side.
+                    if (canCreateChannel) {
+                        IconButton(
+                            onClick = { createDialogOpen = true },
+                            modifier = Modifier.testTag(HomeScreenTestTags.CREATE_CHANNEL_ACTION),
+                        ) {
+                            Icon(Icons.Outlined.Add, contentDescription = stringResource(R.string.create_channel_title))
+                        }
+                    }
+                },
+            )
         },
-    ) {
-        Scaffold(
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            topBar = {
-                TopAppBar(
-                    title = { Text(text = stringResource(R.string.app_name)) },
-                    navigationIcon = {
-                        IconButton(onClick = { scope.launch { drawerState.open() } }) {
-                            Icon(
-                                Icons.Default.Menu,
-                                contentDescription = stringResource(R.string.home_open_menu),
-                            )
-                        }
-                    },
-                    actions = {
-                        // Web parity: the "+" is owner-gated
-                        // (canManageChannels); creation is also
-                        // re-authorized server-side.
-                        if (canCreateChannel) {
-                            IconButton(
-                                onClick = { createDialogOpen = true },
-                                modifier = Modifier.testTag(HomeScreenTestTags.CREATE_CHANNEL_ACTION),
-                            ) {
-                                Icon(
-                                    Icons.Outlined.Add,
-                                    contentDescription = stringResource(R.string.create_channel_title),
-                                )
-                            }
-                        }
-                    },
-                )
-            },
-        ) { padding ->
-            Column(
-                modifier = Modifier
-                    .padding(padding)
-                    .fillMaxSize(),
-            ) {
-                ConnectionBanner(state = state.connectionState, onRetry = viewModel::retryConnection)
-                ChannelListBody(sections = state.sections, onChannelClick = ::openChannel)
-            }
+    ) { padding ->
+        Column(
+            modifier = Modifier
+                .padding(padding)
+                .consumeWindowInsets(padding)
+                .fillMaxSize(),
+        ) {
+            ConnectionBanner(state = state.connectionState, onRetry = viewModel::retryConnection)
+            ChannelListBody(
+                sections = state.sections,
+                filter = filter,
+                onFilterChange = { filter = it },
+                onChannelClick = ::openChannel,
+            )
         }
     }
 
@@ -176,163 +151,131 @@ fun HomeScreen(
 object HomeScreenTestTags {
     const val CREATE_CHANNEL_ACTION = "home-create-channel-action"
     const val CHANNEL_CALL_BADGE = "home-channel-call-badge"
+    const val FILTER_FIELD = "home-channel-filter"
 }
 
 @Composable
-private fun DrawerContent(
-    state: HomeUiState,
-    onChannelClick: (ChannelListItem) -> Unit,
-    onOpenDmList: () -> Unit,
-    onOpenSettings: () -> Unit,
-) {
-    LazyColumn {
-        state.sections.forEach { section ->
-            item(key = "header:${section.id}") {
-                SectionHeader(name = section.name ?: stringResource(R.string.home_section_channels))
-            }
-            items(items = section.channels, key = { "drawer:${it.roomJid}" }) { channel ->
-                NavigationDrawerItem(
-                    label = {
-                        Text(text = stringResource(R.string.home_channel_label, channel.name))
-                    },
-                    selected = false,
-                    onClick = { onChannelClick(channel) },
-                    icon = { Icon(Icons.Outlined.Tag, contentDescription = null) },
-                    badge = {
-                        ChannelRowBadges(
-                            isMuted = channel.isMuted,
-                            unreadCount = channel.unreadCount,
-                            inCallCount = channel.inCallCount,
-                        )
-                    },
-                    modifier = Modifier.padding(horizontal = 12.dp),
-                )
-            }
-        }
-        item(key = "drawer-divider") {
-            HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp))
-        }
-        item(key = "drawer-dms") {
-            NavigationDrawerItem(
-                label = { Text(text = stringResource(R.string.home_direct_messages)) },
-                selected = false,
-                onClick = onOpenDmList,
-                icon = { Icon(Icons.Outlined.ChatBubbleOutline, contentDescription = null) },
-                badge = { UnreadBadge(count = state.dmUnreadCount) },
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
-        }
-        item(key = "drawer-settings") {
-            NavigationDrawerItem(
-                label = { Text(text = stringResource(R.string.home_settings)) },
-                selected = false,
-                onClick = onOpenSettings,
-                icon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
-                modifier = Modifier.padding(horizontal = 12.dp),
-            )
-        }
-    }
-}
-
-@Composable
-private fun ChannelListBody(
+internal fun ChannelListBody(
     sections: List<SpaceSection>,
+    filter: String,
+    onFilterChange: (String) -> Unit,
     onChannelClick: (ChannelListItem) -> Unit,
+    modifier: Modifier = Modifier,
 ) {
     if (sections.all { it.channels.isEmpty() }) {
-        Box(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(32.dp),
-            contentAlignment = Alignment.Center,
-        ) {
-            Text(
-                text = stringResource(R.string.home_empty),
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                textAlign = TextAlign.Center,
-            )
-        }
+        EmptyState(
+            icon = Icons.Outlined.Tag,
+            title = stringResource(R.string.home_empty_title),
+            body = stringResource(R.string.home_empty),
+            modifier = modifier,
+        )
         return
     }
-    LazyColumn {
-        sections.forEach { section ->
+    val query = filter.trim()
+    val visible = if (query.isEmpty()) {
+        sections
+    } else {
+        sections.map { section ->
+            section.copy(channels = section.channels.filter { it.name.contains(query, ignoreCase = true) })
+        }
+    }
+    LazyColumn(modifier = modifier.fillMaxSize()) {
+        item(key = "filter") { ChannelFilterField(value = filter, onValueChange = onFilterChange) }
+        visible.forEach { section ->
             if (section.channels.isEmpty()) return@forEach
-            item(key = "body-header:${section.id}") {
-                SectionHeader(name = section.name ?: stringResource(R.string.home_section_channels))
+            item(key = "header:${section.id}", contentType = "header") {
+                SectionKicker(text = section.name ?: stringResource(R.string.home_section_channels))
             }
-            items(items = section.channels, key = { "body:${it.roomJid}" }) { channel ->
-                ListItem(
-                    headlineContent = {
-                        Text(text = stringResource(R.string.home_channel_label, channel.name))
-                    },
-                    leadingContent = { Icon(Icons.Outlined.Tag, contentDescription = null) },
-                    trailingContent = {
-                        ChannelRowBadges(
-                            isMuted = channel.isMuted,
-                            unreadCount = channel.unreadCount,
-                            inCallCount = channel.inCallCount,
+            items(items = section.channels, key = { "channel:${it.roomJid}" }, contentType = { "channel" }) { channel ->
+                ConversationListRow(
+                    title = channel.name,
+                    leading = {
+                        Icon(
+                            Icons.Outlined.Tag,
+                            contentDescription = null,
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.size(20.dp),
                         )
                     },
-                    modifier = Modifier.clickable { onChannelClick(channel) },
+                    onClick = { onChannelClick(channel) },
+                    unreadCount = channel.unreadCount,
+                    isMuted = channel.isMuted,
+                    trailingExtra = { CallBadge(inCallCount = channel.inCallCount) },
                 )
             }
         }
+        if (visible.all { it.channels.isEmpty() }) {
+            item(key = "no-match") {
+                Text(
+                    text = stringResource(R.string.home_filter_no_match, query),
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.padding(Waddle.space.md),
+                )
+            }
+        }
+        item(key = "bottom-space") { Spacer(Modifier.height(Waddle.space.lg)) }
     }
 }
 
+/** Pill filter over the channel list: the mobile quick switcher. */
 @Composable
-private fun SectionHeader(name: String) {
-    Text(
-        text = name,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(start = 16.dp, top = 16.dp, end = 16.dp, bottom = 4.dp),
+private fun ChannelFilterField(value: String, onValueChange: (String) -> Unit) {
+    val textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface)
+    BasicTextField(
+        value = value,
+        onValueChange = onValueChange,
+        singleLine = true,
+        textStyle = textStyle,
+        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xxs)
+            .testTag(HomeScreenTestTags.FILTER_FIELD),
+        decorationBox = { inner ->
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+                modifier = Modifier
+                    .background(MaterialTheme.colorScheme.surfaceContainerHigh, CircleShape)
+                    .padding(horizontal = Waddle.space.md, vertical = 10.dp),
+            ) {
+                Icon(
+                    Icons.Outlined.Search,
+                    contentDescription = null,
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.size(18.dp),
+                )
+                Box(Modifier.weight(1f)) {
+                    if (value.isEmpty()) {
+                        Text(
+                            text = stringResource(R.string.home_filter_placeholder),
+                            style = textStyle,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    inner()
+                }
+            }
+        },
     )
 }
 
+/** XEP-0272 live-call chip: ember, because it is happening now. */
 @Composable
-private fun UnreadBadge(count: Int) {
-    if (count > 0) {
-        Badge { Text(text = count.toString()) }
-    }
-}
-
-/**
- * XEP-0492 mute glyph and the XEP-0272 live-call chip next to the
- * unread badge.
- */
-@Composable
-private fun ChannelRowBadges(isMuted: Boolean, unreadCount: Int, inCallCount: Int = 0) {
+private fun CallBadge(inCallCount: Int) {
+    if (inCallCount <= 0) return
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(2.dp),
+        modifier = Modifier.testTag(HomeScreenTestTags.CHANNEL_CALL_BADGE),
     ) {
-        if (inCallCount > 0) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(2.dp),
-                modifier = Modifier.testTag(HomeScreenTestTags.CHANNEL_CALL_BADGE),
-            ) {
-                Icon(
-                    Icons.Outlined.Call,
-                    contentDescription = stringResource(R.string.home_channel_call_badge),
-                    tint = MaterialTheme.colorScheme.primary,
-                )
-                Text(
-                    text = inCallCount.toString(),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
-                )
-            }
-        }
-        if (isMuted) {
-            Icon(
-                Icons.Outlined.NotificationsOff,
-                contentDescription = stringResource(R.string.notify_muted_badge),
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        UnreadBadge(count = unreadCount)
+        Icon(
+            Icons.Outlined.Call,
+            contentDescription = stringResource(R.string.home_channel_call_badge),
+            tint = Waddle.colors.liveText,
+            modifier = Modifier.size(16.dp),
+        )
+        Text(text = inCallCount.toString(), style = MonoMeta, color = Waddle.colors.liveText)
     }
 }

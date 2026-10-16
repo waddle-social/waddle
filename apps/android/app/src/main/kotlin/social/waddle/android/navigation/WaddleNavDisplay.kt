@@ -8,13 +8,13 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
+import social.waddle.android.LocalAppGraph
 import social.waddle.android.feature.admin.CommunityUsersScreen
 import social.waddle.android.feature.channel.ChannelScreen
 import social.waddle.android.feature.conversation.ThreadScreen
 import social.waddle.android.feature.dm.DmListScreen
 import social.waddle.android.feature.dm.DmScreen
 import social.waddle.android.feature.dm.GroupDmScreen
-import social.waddle.android.feature.home.HomeScreen
 import social.waddle.android.feature.members.MembersScreen
 import social.waddle.android.feature.profile.ProfileScreen
 import social.waddle.android.feature.settings.SettingsScreen
@@ -27,6 +27,14 @@ import social.waddle.android.feature.settings.SettingsScreen
 @Composable
 fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
     val backStack = rememberNavBackStack(WaddleNavKey.Home)
+    val graph = LocalAppGraph.current
+
+    /** Activity rows name a JID; topology decides channel, group DM or DM. */
+    fun openConversationKey(jid: String): WaddleNavKey = conversationNavKeyFor(
+        topology = graph.sessionManager.roomStore.topology.value,
+        joinedRooms = graph.sessionManager.roomStore.joinedRooms.value,
+        conversationJid = jid,
+    )
     sideEffects(backStack)
     NavDisplay(
         backStack = backStack,
@@ -40,12 +48,19 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
         ),
         entryProvider = entryProvider {
             entry<WaddleNavKey.Home> {
-                HomeScreen(
-                    onOpenChannel = { roomJid, name ->
-                        backStack.add(WaddleNavKey.Channel(roomJid = roomJid, name = name))
-                    },
-                    onOpenDmList = { backStack.add(WaddleNavKey.DmList) },
-                    onOpenSettings = { backStack.add(WaddleNavKey.Settings) },
+                MainTabs(
+                    actions = MainTabsActions(
+                        openChannel = { roomJid, name ->
+                            backStack.add(WaddleNavKey.Channel(roomJid = roomJid, name = name))
+                        },
+                        openDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name)) },
+                        openGroupDm = { roomJid, name ->
+                            backStack.add(WaddleNavKey.GroupDm(roomJid = roomJid, name = name))
+                        },
+                        openConversation = { jid -> backStack.add(openConversationKey(jid)) },
+                        openProfile = { backStack.add(WaddleNavKey.Profile) },
+                        openSettings = { backStack.add(WaddleNavKey.Settings) },
+                    ),
                 )
             }
             entry<WaddleNavKey.Channel> { key ->

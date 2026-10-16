@@ -6,6 +6,7 @@ import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithContentDescription
+import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -16,6 +17,7 @@ import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
+import social.waddle.android.navigation.MainTab
 
 /**
  * App-state switch and Navigation 3 shell over a fully-faked graph:
@@ -68,10 +70,8 @@ class AppShellNavigationTest {
         waitForText("No channels yet. They appear here once the server topology loads.")
     }
 
-    private fun openDrawerAndTap(itemText: String) {
-        composeRule.onNodeWithContentDescription("Open navigation menu").performClick()
-        waitForText(itemText)
-        composeRule.onNodeWithText(itemText).performClick()
+    private fun openTab(tab: MainTab) {
+        composeRule.onNodeWithTag(tab.testTag).performClick()
     }
 
     @Test
@@ -94,7 +94,9 @@ class AppShellNavigationTest {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        openDrawerAndTap("Settings")
+        openTab(MainTab.YOU)
+        waitForText("Settings")
+        composeRule.onNodeWithText("Settings").performClick()
         waitForText("Appearance")
         composeRule.onNodeWithContentDescription("Back").performClick()
         waitForHome()
@@ -105,9 +107,9 @@ class AppShellNavigationTest {
         harness.signInAndConnect()
         composeAppShell()
         waitForHome()
-        openDrawerAndTap("Direct messages")
+        openTab(MainTab.DMS)
         waitForText("No direct messages yet.")
-        composeRule.onNodeWithContentDescription("Back").performClick()
+        openTab(MainTab.HOME)
         waitForHome()
     }
 }

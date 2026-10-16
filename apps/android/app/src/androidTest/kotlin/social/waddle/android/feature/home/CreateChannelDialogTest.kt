@@ -48,8 +48,6 @@ class CreateChannelDialogTest {
             CompositionLocalProvider(LocalAppGraph provides harness.graph) {
                 HomeScreen(
                     onOpenChannel = { roomJid, name -> openedChannels += roomJid to name },
-                    onOpenDmList = {},
-                    onOpenSettings = {},
                 )
             }
         }

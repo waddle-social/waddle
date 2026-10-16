@@ -18,20 +18,40 @@ import social.waddle.client.ffi.WaddleNotifyMode
 
 /** One row of the merged DM surface: a 1:1 peer or a group DM. */
 sealed interface DmListRow {
+    val unreadCount: Int
+    val isMuted: Boolean
+
+    /** XEP-0430 inbox last message preview, when the server sent one. */
+    val preview: String?
+
+    /** Inbox last-updated (epoch millis), for the row's time. */
+    val lastUpdated: Long?
+
     data class Peer(
         val peerJid: String,
         val name: String,
-        val unreadCount: Int,
+        override val unreadCount: Int,
         /** XEP-0492: an explicit `never` override mutes this DM. */
-        val isMuted: Boolean = false,
+        override val isMuted: Boolean = false,
+        override val preview: String? = null,
+        override val lastUpdated: Long? = null,
     ) : DmListRow
 
     data class Group(
         val roomJid: String,
         val name: String,
-        val unreadCount: Int,
-        val isMuted: Boolean = false,
+        override val unreadCount: Int,
+        override val isMuted: Boolean = false,
+        override val preview: String? = null,
+        override val lastUpdated: Long? = null,
     ) : DmListRow
+}
+
+/** "author: text" for group previews, the bare text for 1:1. */
+internal fun previewOf(entry: InboxEntrySnapshot?, withAuthor: Boolean): String? {
+    val text = entry?.preview?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+    val author = entry.author?.let { localpartOf(it.substringAfter('/', it)) }
+    return if (withAuthor && author != null) "$author: $text" else text
 }
 
 /**
@@ -88,6 +108,8 @@ internal fun mergedDmRows(inputs: DmSurfaceInputs): List<DmListRow> {
             name = localpartOf(peerJid),
             unreadCount = inputs.counts[peerJid] ?: 0,
             isMuted = mutedOf(peerJid),
+            preview = previewOf(inputs.directInbox[peerJid], withAuthor = false),
+            lastUpdated = inputs.directInbox[peerJid]?.lastUpdated,
         )
         row to inputs.directInbox[peerJid]?.lastUpdated
     }
@@ -97,6 +119,8 @@ internal fun mergedDmRows(inputs: DmSurfaceInputs): List<DmListRow> {
             name = channel.name,
             unreadCount = inputs.counts[channel.roomJid] ?: 0,
             isMuted = mutedOf(channel.roomJid),
+            preview = previewOf(inputs.mucInbox[channel.roomJid], withAuthor = true),
+            lastUpdated = inputs.mucInbox[channel.roomJid]?.lastUpdated,
         )
         row to inputs.mucInbox[channel.roomJid]?.lastUpdated
     }

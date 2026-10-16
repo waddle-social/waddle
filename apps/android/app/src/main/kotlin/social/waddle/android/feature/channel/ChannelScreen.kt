@@ -3,13 +3,17 @@ package social.waddle.android.feature.channel
 import android.Manifest
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.layout.Box
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.Settings
 import androidx.compose.material.icons.outlined.Videocam
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -140,7 +144,7 @@ fun ChannelScreen(
     }
 
     ConversationScreen(
-        title = name,
+        title = stringResource(R.string.home_channel_label, name),
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,
@@ -156,28 +160,30 @@ fun ChannelScreen(
                 controls = channelCallControlsOf(callState, roomJid, resolvedNicks, roomHasVideoCall),
                 onStart = ::requestCall,
             )
-            IconButton(
-                onClick = onOpenMembers,
+        },
+        overflowItems = { dismiss ->
+            DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.members_action)) },
+                leadingIcon = { Icon(Icons.Outlined.Group, contentDescription = null) },
+                onClick = {
+                    dismiss()
+                    onOpenMembers()
+                },
                 modifier = Modifier.testTag(ChannelScreenTestTags.MEMBERS_ACTION),
-            ) {
-                Icon(
-                    Icons.Outlined.Group,
-                    contentDescription = stringResource(R.string.members_action),
-                )
-            }
-            // XEP-0045 §10 owner use cases: settings entry is
-            // owner-gated by the self-presence affiliation; the
-            // server enforces ownership on every config IQ anyway.
+            )
+            // XEP-0045 §10 owner use cases: settings entry is owner-gated
+            // by the self-presence affiliation; the server enforces
+            // ownership on every config IQ anyway.
             if (isRoomOwner) {
-                IconButton(
-                    onClick = { roomSettingsOpen = true },
+                DropdownMenuItem(
+                    text = { Text(text = stringResource(R.string.room_settings_title)) },
+                    leadingIcon = { Icon(Icons.Outlined.Settings, contentDescription = null) },
+                    onClick = {
+                        dismiss()
+                        roomSettingsOpen = true
+                    },
                     modifier = Modifier.testTag(ChannelScreenTestTags.ROOM_SETTINGS_ACTION),
-                ) {
-                    Icon(
-                        Icons.Outlined.Settings,
-                        contentDescription = stringResource(R.string.room_settings_title),
-                    )
-                }
+                )
             }
         },
         aboveTimeline = {
@@ -221,23 +227,31 @@ private fun ChannelCallTopBarActions(
     when (controls) {
         ChannelCallControls.Hidden -> Unit
         ChannelCallControls.Start -> {
-            IconButton(
-                onClick = { onStart(false) },
-                modifier = Modifier.testTag(ChannelCallTestTags.TOP_BAR_AUDIO),
-            ) {
-                Icon(
-                    Icons.Outlined.Call,
-                    contentDescription = stringResource(R.string.call_start_audio),
-                )
-            }
-            IconButton(
-                onClick = { onStart(true) },
-                modifier = Modifier.testTag(ChannelCallTestTags.TOP_BAR_VIDEO),
-            ) {
-                Icon(
-                    Icons.Outlined.Videocam,
-                    contentDescription = stringResource(R.string.call_start_video),
-                )
+            var open by remember { mutableStateOf(false) }
+            Box {
+                IconButton(onClick = { open = true }) {
+                    Icon(Icons.Outlined.Call, contentDescription = stringResource(R.string.call_start))
+                }
+                DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+                    DropdownMenuItem(
+                        text = { Text(text = stringResource(R.string.call_start_audio)) },
+                        leadingIcon = { Icon(Icons.Outlined.Call, contentDescription = null) },
+                        onClick = {
+                            open = false
+                            onStart(false)
+                        },
+                        modifier = Modifier.testTag(ChannelCallTestTags.TOP_BAR_AUDIO),
+                    )
+                    DropdownMenuItem(
+                        text = { Text(text = stringResource(R.string.call_start_video)) },
+                        leadingIcon = { Icon(Icons.Outlined.Videocam, contentDescription = null) },
+                        onClick = {
+                            open = false
+                            onStart(true)
+                        },
+                        modifier = Modifier.testTag(ChannelCallTestTags.TOP_BAR_VIDEO),
+                    )
+                }
             }
         }
         is ChannelCallControls.Join -> IconButton(

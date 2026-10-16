@@ -63,7 +63,7 @@ class DmListViewModelTest {
                     DmListRow.Peer("bob@waddle.test", name = "bob", unreadCount = 1),
                     DmListRow.Peer("alice@waddle.test", name = "alice", unreadCount = 0),
                 ),
-                awaitItem(),
+                awaitItem().withoutInboxDetail(),
             )
         }
     }
@@ -101,14 +101,14 @@ class DmListViewModelTest {
                     DmListRow.Peer("alice@waddle.test", name = "alice", unreadCount = 0),
                     DmListRow.Peer("bob@waddle.test", name = "bob", unreadCount = 0),
                 ),
-                awaitItem(),
+                awaitItem().withoutInboxDetail(),
             )
         }
     }
 
     @Test
     fun `merge orders timed rows first and stamps mute overrides`() {
-        val rows = mergedDmRows(
+        val rows = mergedDmRowsShape(
             DmSurfaceInputs(
                 peers = listOf("alice@waddle.test", "carol@waddle.test"),
                 groupDms = listOf(
@@ -161,3 +161,13 @@ class DmListViewModelTest {
             author = null,
         )
 }
+
+/** Row identity and order only; preview/time are covered by the inbox tests. */
+private fun List<DmListRow>.withoutInboxDetail(): List<DmListRow> = map { row ->
+    when (row) {
+        is DmListRow.Peer -> row.copy(preview = null, lastUpdated = null)
+        is DmListRow.Group -> row.copy(preview = null, lastUpdated = null)
+    }
+}
+
+private fun mergedDmRowsShape(inputs: DmSurfaceInputs): List<DmListRow> = mergedDmRows(inputs).withoutInboxDetail()

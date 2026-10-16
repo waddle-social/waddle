@@ -1,52 +1,51 @@
 package social.waddle.android.feature.dm
 
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.GroupAdd
-import androidx.compose.material.icons.outlined.NotificationsOff
-import androidx.compose.material3.Badge
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.ScaffoldDefaults
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.style.TextAlign
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.avatar.LIST_AVATAR_SIZE
 import social.waddle.android.avatar.PeerAvatar
+import social.waddle.android.ui.ConversationListRow
+import social.waddle.android.ui.EmptyState
+import social.waddle.android.ui.GlyphTile
+import social.waddle.android.ui.WaddleTopBar
+import social.waddle.android.ui.listTimeOf
+import java.time.Instant
 
-/** The merged DM surface: 1:1 peers and group DMs by inbox recency. */
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * The merged DM surface: 1:1 peers and group DMs by inbox recency. As a
+ * tab it has no back affordance ([onBack] null).
+ */
 @Composable
 fun DmListScreen(
     onOpenDm: (peerJid: String, name: String) -> Unit,
     onOpenGroupDm: (roomJid: String, name: String) -> Unit,
-    onBack: () -> Unit,
+    onBack: (() -> Unit)? = null,
+    contentWindowInsets: WindowInsets = ScaffoldDefaults.contentWindowInsets,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: DmListViewModel = viewModel(factory = DmListViewModel.factory(graph))
@@ -54,15 +53,18 @@ fun DmListScreen(
     var newGroupOpen by remember { mutableStateOf(false) }
 
     Scaffold(
+        contentWindowInsets = contentWindowInsets,
         topBar = {
-            TopAppBar(
+            WaddleTopBar(
                 title = { Text(text = stringResource(R.string.dm_list_title)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
-                        Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
-                            contentDescription = stringResource(R.string.action_back),
-                        )
+                    if (onBack != null) {
+                        IconButton(onClick = onBack) {
+                            Icon(
+                                Icons.AutoMirrored.Filled.ArrowBack,
+                                contentDescription = stringResource(R.string.action_back),
+                            )
+                        }
                     }
                 },
                 actions = {
@@ -80,41 +82,37 @@ fun DmListScreen(
         },
     ) { padding ->
         if (rows.isEmpty()) {
-            Box(
-                modifier = Modifier
-                    .padding(padding)
-                    .fillMaxSize()
-                    .padding(32.dp),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = stringResource(R.string.dm_list_empty),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    textAlign = TextAlign.Center,
-                )
-            }
+            EmptyState(
+                icon = Icons.Outlined.ChatBubbleOutline,
+                title = stringResource(R.string.dm_list_empty_title),
+                body = stringResource(R.string.dm_list_empty),
+                modifier = Modifier.padding(padding),
+            )
         } else {
-            LazyColumn(modifier = Modifier.padding(padding)) {
-                items(items = rows, key = ::dmRowKey) { row ->
+            LazyColumn(modifier = Modifier.padding(padding).consumeWindowInsets(padding)) {
+                items(items = rows, key = ::dmRowKey, contentType = { "dm" }) { row ->
                     when (row) {
-                        is DmListRow.Peer -> DmSurfaceRow(
-                            name = row.name,
-                            subtitle = row.peerJid,
-                            peerJid = row.peerJid,
-                            unreadCount = row.unreadCount,
-                            isMuted = row.isMuted,
-                            testTag = DmListTestTags.PEER_ROW_PREFIX + row.peerJid,
+                        is DmListRow.Peer -> ConversationListRow(
+                            title = row.name,
+                            leading = {
+                                PeerAvatar(jid = row.peerJid, displayName = row.name, size = LIST_AVATAR_SIZE)
+                            },
                             onClick = { onOpenDm(row.peerJid, row.name) },
-                        )
-                        is DmListRow.Group -> DmSurfaceRow(
-                            name = row.name,
-                            subtitle = stringResource(R.string.dm_list_group_subtitle),
-                            peerJid = null,
+                            preview = row.preview ?: row.peerJid,
+                            time = row.lastUpdated?.let { listTimeOf(Instant.ofEpochMilli(it)) },
                             unreadCount = row.unreadCount,
                             isMuted = row.isMuted,
-                            testTag = DmListTestTags.GROUP_ROW_PREFIX + row.roomJid,
+                            modifier = Modifier.testTag(DmListTestTags.PEER_ROW_PREFIX + row.peerJid),
+                        )
+                        is DmListRow.Group -> ConversationListRow(
+                            title = row.name,
+                            leading = { GlyphTile(Icons.Outlined.Group) },
                             onClick = { onOpenGroupDm(row.roomJid, row.name) },
+                            preview = row.preview ?: stringResource(R.string.dm_list_group_subtitle),
+                            time = row.lastUpdated?.let { listTimeOf(Instant.ofEpochMilli(it)) },
+                            unreadCount = row.unreadCount,
+                            isMuted = row.isMuted,
+                            modifier = Modifier.testTag(DmListTestTags.GROUP_ROW_PREFIX + row.roomJid),
                         )
                     }
                 }
@@ -131,50 +129,6 @@ fun DmListScreen(
             },
         )
     }
-}
-
-@Composable
-private fun DmSurfaceRow(
-    name: String,
-    subtitle: String,
-    /** The 1:1 peer's bare JID; `null` marks a group DM. */
-    peerJid: String?,
-    unreadCount: Int,
-    isMuted: Boolean,
-    testTag: String,
-    onClick: () -> Unit,
-) {
-    ListItem(
-        headlineContent = { Text(text = name) },
-        supportingContent = { Text(text = subtitle) },
-        leadingContent = {
-            if (peerJid != null) {
-                PeerAvatar(jid = peerJid, displayName = name, size = LIST_AVATAR_SIZE)
-            } else {
-                Icon(Icons.Outlined.Group, contentDescription = null)
-            }
-        },
-        trailingContent = {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(4.dp),
-            ) {
-                if (isMuted) {
-                    Icon(
-                        Icons.Outlined.NotificationsOff,
-                        contentDescription = stringResource(R.string.notify_muted_badge),
-                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    )
-                }
-                if (unreadCount > 0) {
-                    Badge { Text(text = unreadCount.toString()) }
-                }
-            }
-        },
-        modifier = Modifier
-            .testTag(testTag)
-            .clickable(onClick = onClick),
-    )
 }
 
 private fun dmRowKey(row: DmListRow): String = when (row) {
