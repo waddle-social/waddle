@@ -10,6 +10,7 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.core.graphics.Insets
 import androidx.core.view.ViewCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -118,17 +119,24 @@ class AppShellNavigationTest {
         waitForHome()
         openTab(MainTab.ACTIVITY)
         waitForText("Activity")
+        // The CI emulator image has no system UI, so it reports no status
+        // bar: hand the window one, as a phone would.
+        composeRule.runOnUiThread {
+            val insets = WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.statusBars(), Insets.of(0, FAKE_STATUS_BAR_PX, 0, 0))
+                .build()
+            ViewCompat.dispatchApplyWindowInsets(composeRule.activity.window.decorView, insets)
+        }
         composeRule.waitForIdle()
 
-        val statusBar = ViewCompat.getRootWindowInsets(composeRule.activity.window.decorView)
-            ?.getInsets(WindowInsetsCompat.Type.statusBars())
-            ?.top ?: 0
-        assertTrue("the device reports a status bar", statusBar > 0)
         // The tab label says "Activity" too; the title is the higher one.
         val titleTop = composeRule.onAllNodesWithText("Activity")
             .fetchSemanticsNodes()
             .minOf { it.boundsInWindow.top }
-        assertTrue("title at $titleTop px sits under the $statusBar px status bar", titleTop >= statusBar)
+        assertTrue(
+            "title at $titleTop px sits under the $FAKE_STATUS_BAR_PX px status bar",
+            titleTop >= FAKE_STATUS_BAR_PX,
+        )
     }
 
     @Test
@@ -140,5 +148,9 @@ class AppShellNavigationTest {
         waitForText("No direct messages yet.")
         openTab(MainTab.HOME)
         waitForHome()
+    }
+
+    private companion object {
+        const val FAKE_STATUS_BAR_PX = 100
     }
 }
