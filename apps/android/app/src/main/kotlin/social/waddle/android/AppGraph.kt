@@ -36,6 +36,7 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.calls.CallState
+import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
@@ -53,11 +54,16 @@ import social.waddle.android.feature.conversation.EncryptedAttachmentOpener
 import social.waddle.android.feature.conversation.StickerPackCreator
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
+import social.waddle.android.flavour.Distribution
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.push.AlarmWakeTimer
+import social.waddle.android.push.AndroidKeystoreWrapper
 import social.waddle.android.push.ConnectionDemand
+import social.waddle.android.push.FcmTokens
 import social.waddle.android.push.HeldWakeTimer
+import social.waddle.android.push.KeyWrapper
 import social.waddle.android.push.PowerManagerWakeLocks
+import social.waddle.android.push.PushCoordinator
 import social.waddle.android.push.PushDistributor
 import social.waddle.android.push.PushMessageHandler
 import social.waddle.android.push.needsStream
@@ -97,6 +103,15 @@ class AppGraph(
      * flow: they drive sessions without a process lifecycle.
      */
     connectionWanted: StateFlow<Boolean>? = null,
+    /** FCM where the build has it (Play); `null` in the FOSS build. */
+    fcmTokens: FcmTokens? = Distribution.fcmTokens(),
+    /**
+     * Whether the build may hold the stream in the background with a
+     * foreground service. The Play build relies on push instead.
+     */
+    val stayConnectedSupported: Boolean = Distribution.stayConnectedSupported,
+    /** Seals the FCM envelope private key at rest. */
+    keyWrapper: KeyWrapper = AndroidKeystoreWrapper(),
 ) {
     private val appContext: Context = context.applicationContext
 
@@ -150,17 +165,29 @@ class AppGraph(
         combine(sessionManager.pushState, sessionPrefs.ownerBareJid, ::pushStatusOf)
             .stateIn(applicationScope, SharingStarted.Eagerly, null)
 
+    /** Which transport holds the signed-in account's push endpoint, if any. */
+    val pushEndpointKind: StateFlow<PushEndpointKind?> =
+        combine(sessionManager.pushState, sessionPrefs.ownerBareJid) { state, owner ->
+            state?.takeIf { owner != null && it.owner == owner }?.endpoint?.kind
+        }
+            .stateIn(applicationScope, SharingStarted.Eagerly, null)
+
     /**
      * Whether to hold the stream in the background: the user's choice, or
      * by default whenever push is not delivering. `null` until loaded.
      */
     val stayConnected: StateFlow<Boolean?> =
-        // Unknown until BOTH stores have loaded: guessing from one would
-        // briefly hold the stream (or start the service) in push mode.
-        combine(userPrefs.stayConnected, pushStatus) { choice, status ->
-            status?.let { choice ?: (it != PushStatus.ACTIVE) }
+        if (stayConnectedSupported) {
+            // Unknown until BOTH stores have loaded: guessing from one would
+            // briefly hold the stream (or start the service) in push mode.
+            combine(userPrefs.stayConnected, pushStatus) { choice, status ->
+                status?.let { choice ?: (it != PushStatus.ACTIVE) }
+            }
+                .stateIn(applicationScope, SharingStarted.Eagerly, null)
+        } else {
+            // No background connection service in this build.
+            MutableStateFlow(false).asStateFlow()
         }
-            .stateIn(applicationScope, SharingStarted.Eagerly, null)
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
 
@@ -265,6 +292,17 @@ class AppGraph(
         summarize = { envelope -> pushSummaryOf(envelope, appContext.resources, ::conversationTitleOf) },
     )
 
+    /** Which push transport holds the account's endpoint, and its callbacks. */
+    val push: PushCoordinator = PushCoordinator(
+        scope = applicationScope,
+        sessionManager = sessionManager,
+        userPrefs = userPrefs,
+        distributor = pushDistributor,
+        fcm = fcmTokens,
+        keyWrapper = keyWrapper,
+        handler = pushMessageHandler,
+    )
+
     /** Keep the stream up until [ConnectionDemand.Lease.release] (notification actions). */
     fun holdConnection(): ConnectionDemand.Lease = connectionDemand.acquire()
 
@@ -301,7 +339,15 @@ class AppGraph(
                 .map { it?.advertised?.kid }
                 .distinctUntilChanged()
                 .filterNotNull()
-                .collect { runCatching { pushDistributor.onKeyChanged() } }
+                .collect { runCatching { push.onKeyChanged() } }
+        }
+        // FCM needs no activity to register: do it as soon as an account
+        // is signed in, without waiting for the server's VAPID key.
+        applicationScope.launch {
+            sessionPrefs.ownerBareJid
+                .filterNotNull()
+                .distinctUntilChanged()
+                .collect { runCatching { push.onAccountReady() } }
         }
         pushDistributor.refresh()
     }
@@ -341,7 +387,7 @@ class AppGraph(
                     encryptedAttachmentOpener.clearCache()
                     // Also covers a server-side sign-out that already
                     // wiped the session: the endpoint must die with it.
-                    runCatching { pushDistributor.unregister() }
+                    runCatching { push.unregister() }
                 }
             }
         }
@@ -353,7 +399,7 @@ class AppGraph(
         messageNotifier.clearAll()
         _currentSession.value = null
         sessionManager.logout()
-        runCatching { pushDistributor.unregister() }
+        runCatching { push.unregister() }
         // After local state is gone: revoking the server session may block
         // for the full HTTP timeout and must never delay the visible
         // sign-out.

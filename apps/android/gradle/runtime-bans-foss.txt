@@ -1,0 +1,5 @@
+# Module prefixes (group:module) the foss runtime classpath must not
+# contain: no Google code at all. Read by :app:verifyFossRuntimeClasspath.
+com.google.firebase:
+com.google.android.gms:
+com.google.android.datatransport:

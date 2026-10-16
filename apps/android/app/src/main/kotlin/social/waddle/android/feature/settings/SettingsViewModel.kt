@@ -15,6 +15,7 @@ import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.normalizedBareJid
+import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.push.PushStatus
@@ -42,6 +43,12 @@ data class DeliveryUiState(
     val distributorInstalled: Boolean = false,
     /** Effective stay-connected mode (choice, else automatic). */
     val stayConnected: Boolean = true,
+    /** The build can hold a background connection (not the Play build). */
+    val stayConnectedSupported: Boolean = true,
+    /** The build can push over FCM (the Play build). */
+    val fcmAvailable: Boolean = false,
+    /** Which transport holds the endpoint, if any. */
+    val endpointKind: PushEndpointKind? = null,
 ) {
     /** The mode the app would pick without a choice. */
     val automaticStayConnected: Boolean get() = status != PushStatus.ACTIVE
@@ -54,6 +61,9 @@ class DeliverySource(
     val distributorLabel: StateFlow<String?>,
     val distributorInstalled: StateFlow<Boolean>,
     val stayConnected: StateFlow<Boolean?>,
+    val endpointKind: StateFlow<PushEndpointKind?>,
+    val stayConnectedSupported: Boolean,
+    val fcmAvailable: Boolean,
 )
 
 /** Account row, theme mode, notification prefs, background delivery, logout. */
@@ -71,13 +81,17 @@ class SettingsViewModel(
             delivery.distributorLabel,
             delivery.distributorInstalled,
             delivery.stayConnected,
-        ) { loaded, label, installed, stay ->
+            delivery.endpointKind,
+        ) { loaded, label, installed, stay, kind ->
             val status = loaded ?: PushStatus.NONE
             DeliveryUiState(
                 status = status,
                 distributorLabel = label,
                 distributorInstalled = installed,
                 stayConnected = stay ?: (status != PushStatus.ACTIVE),
+                stayConnectedSupported = delivery.stayConnectedSupported,
+                fcmAvailable = delivery.fcmAvailable,
+                endpointKind = kind,
             )
         }.stateIn(viewModelScope, SharingStarted.Eagerly, DeliveryUiState())
     }
@@ -195,6 +209,9 @@ class SettingsViewModel(
                     distributorLabel = graph.pushDistributor.distributorLabel,
                     distributorInstalled = graph.pushDistributor.installed,
                     stayConnected = graph.stayConnected,
+                    endpointKind = graph.pushEndpointKind,
+                    stayConnectedSupported = graph.stayConnectedSupported,
+                    fcmAvailable = graph.push.fcmAvailable,
                 ),
             )
         }

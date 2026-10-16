@@ -116,8 +116,9 @@ class MainActivity : ComponentActivity() {
     override fun onStart() {
         super.onStart()
         // Foreground is the one place a distributor may be chosen (it can
-        // show UI); UnifiedPush also asks for a register on every start.
-        (application as WaddleApplication).graph.pushDistributor.onForeground(this)
+        // show UI); UnifiedPush also asks for a register on every start,
+        // and FCM tokens are re-checked here.
+        (application as WaddleApplication).graph.push.onForeground(this)
     }
 
     /**
@@ -133,7 +134,7 @@ class MainActivity : ComponentActivity() {
                     .distinctUntilChanged()
                     .drop(1)
                     .filterNotNull()
-                    .collect { graph.pushDistributor.onForeground(this@MainActivity) }
+                    .collect { graph.push.onForeground(this@MainActivity) }
             }
         }
     }

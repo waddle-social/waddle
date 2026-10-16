@@ -20,7 +20,7 @@ class WaddlePushService : PushService() {
         // connector's key pair cannot receive encrypted payloads.
         val keys = endpoint.pubKeySet ?: return
         graph.applicationScope.launch {
-            runCatching { graph.pushDistributor.onNewEndpoint(instance, endpoint.url, keys.pubKey, keys.auth) }
+            runCatching { graph.push.onUnifiedPushEndpoint(instance, endpoint.url, keys.pubKey, keys.auth) }
         }
     }
 
@@ -38,8 +38,7 @@ class WaddlePushService : PushService() {
 
     override fun onUnregistered(instance: String) {
         graph.applicationScope.launch {
-            runCatching { graph.sessionManager.recordPushEndpointRevoked(instance) }
-            graph.pushDistributor.refresh()
+            runCatching { graph.push.onUnifiedPushUnregistered(instance) }
         }
     }
 }

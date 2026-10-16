@@ -5,6 +5,7 @@ import coil3.ImageLoader
 import coil3.PlatformContext
 import coil3.SingletonImageLoader
 import coil3.network.okhttp.OkHttpNetworkFetcherFactory
+import social.waddle.android.flavour.Distribution
 import social.waddle.android.media.EncryptedAttachmentFetcher
 import social.waddle.android.media.EncryptedAttachmentKeyer
 import social.waddle.android.service.NotificationChannels
@@ -20,6 +21,8 @@ class WaddleApplication : Application(), SingletonImageLoader.Factory {
 
     override fun onCreate() {
         super.onCreate()
+        // Before the graph: the Play build's FCM must exist when it is wired.
+        Distribution.initialize(this)
         graph = AppGraph(this)
         NotificationChannels.ensure(this)
         graph.start()

@@ -1,0 +1,12 @@
+# Module prefixes (group:module) the play runtime classpath must not
+# contain: FCM is the one Google service it uses, so no analytics, crash,
+# performance or remote-config reporting. Read by
+# :app:verifyPlayRuntimeClasspath. Kept out of the Gradle scripts so the
+# native telemetry guard can ban these names there outright.
+com.google.firebase:firebase-analytics
+com.google.firebase:firebase-crashlytics
+com.google.firebase:firebase-perf
+com.google.firebase:firebase-sessions
+com.google.firebase:firebase-config
+com.google.firebase:firebase-inappmessaging
+com.google.android.gms:play-services-measurement
