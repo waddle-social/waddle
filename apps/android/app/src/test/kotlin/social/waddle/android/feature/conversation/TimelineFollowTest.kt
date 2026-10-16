@@ -5,12 +5,15 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.hasScrollAction
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollToIndex
+import androidx.compose.ui.test.performTouchInput
+import androidx.compose.ui.test.swipe
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import org.junit.Rule
 import org.junit.Test
@@ -93,6 +96,21 @@ class TimelineFollowTest {
     }
 
     @Test
+    fun `a reader nudged just off the bottom still follows new messages`() {
+        showTimeline()
+        // A slow drag of a few dozen pixels: the newest message is still on
+        // screen, just no longer flush with the bottom edge.
+        compose.onNode(hasScrollAction()).performTouchInput {
+            swipe(start = center, end = center + Offset(0f, NUDGE_PX), durationMillis = 600)
+        }
+        compose.onNodeWithText("message 40").assertIsDisplayed()
+
+        shown.value = entries(history + item(41))
+
+        compose.onNodeWithText("message 41").assertIsDisplayed()
+    }
+
+    @Test
     fun `a reader scrolled back through history is not pulled down`() {
         showTimeline()
         compose.onNode(hasScrollAction()).performScrollToIndex(35)
@@ -119,5 +137,9 @@ class TimelineFollowTest {
         shown.value = entries(history, pending = listOf(sent))
 
         compose.onNodeWithText("my reply").assertIsDisplayed()
+    }
+
+    private companion object {
+        const val NUDGE_PX = 60f
     }
 }

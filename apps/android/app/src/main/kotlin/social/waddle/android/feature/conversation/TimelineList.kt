@@ -174,7 +174,7 @@ fun TimelineList(
         }
     }
 
-    // disabled
+    FollowNewest(listState, newestFirst.firstOrNull())
 
     // Web isPinnedAtEdge parity: in reverse layout, item 0 visible ==
     // scrolled to the newest message. Read markers gate on this.
