@@ -54,6 +54,12 @@ import social.waddle.client.ffi.WaddleSaslCondition
  * changes, an ordinary send fails at the transport, and periodically.
  * A failed or late probe retires the attempt and reconnects at once;
  * losing the network retires it without a probe.
+ *
+ * The loop only connects while [wanted] says something needs the stream.
+ * When demand drops, the live attempt ends with a clean close (no
+ * XEP-0198 resumption is ever requested, so the server ends the session
+ * at once and pushes flow) and the loop parks in `Paused` until demand
+ * returns.
  */
 internal class ConnectionLoop(
     private val clientFactory: ClientFactory,
@@ -71,6 +77,8 @@ internal class ConnectionLoop(
      */
     private val livenessTicks: Flow<Unit> = emptyFlow(),
     private val pingTimeoutMillis: Long = PING_TIMEOUT_MILLIS,
+    /** Whether anything needs the stream now (the app derives it). */
+    private val wanted: StateFlow<Boolean> = MutableStateFlow(true),
 ) {
     private val _state = MutableStateFlow<ConnectionState>(ConnectionState.Idle)
     val state: StateFlow<ConnectionState> = _state.asStateFlow()
@@ -99,7 +107,7 @@ internal class ConnectionLoop(
     suspend fun run(session: WaddleSessionInfo, sessionScope: CoroutineScope) {
         var attempt = 0
         while (currentCoroutineContext().isActive) {
-            waitUntilOnline()
+            awaitConnectable()
             _state.value = ConnectionState.Connecting
             // The attempt touches DataStore (buildConfig reads the resume
             // snapshot/resource suffix): IOException on a corrupt or full
@@ -121,7 +129,9 @@ internal class ConnectionLoop(
                 AttemptEnd.DROPPED_AFTER_READY -> attempt = 0
                 // A ready stream that failed its liveness probe was dead
                 // for an unknown time already: reconnect without waiting.
-                AttemptEnd.STALE_AFTER_READY -> {
+                // A released stream ended on purpose: no backoff either,
+                // the loop parks until demand returns.
+                AttemptEnd.STALE_AFTER_READY, AttemptEnd.RELEASED -> {
                     attempt = 0
                     continue
                 }
@@ -171,12 +181,20 @@ internal class ConnectionLoop(
                         ),
                     )
                 }
+                val released = async {
+                    wanted.first { !it }
+                    AttemptEnd.RELEASED
+                }
                 val end = select<AttemptEnd?> {
                     consumer.onAwait { it }
+                    released.onAwait { it }
                     connector.onAwait { failure ->
                         if (failure == null) null else AttemptEnd.CONNECT_FAILED
                     }
-                } ?: consumer.await()
+                } ?: select {
+                    consumer.onAwait { it }
+                    released.onAwait { it }
+                }
                 coroutineContext.job.cancelChildren()
                 end
             }
@@ -317,36 +335,53 @@ internal class ConnectionLoop(
         jid = session.jid,
         accessToken = session.sessionId,
         resource = RESOURCE_PREFIX + sessionPrefs.resourceSuffix(),
+        // Android never resumes: a session the server parks for a
+        // resumption that never comes suppresses DM pushes until it
+        // expires.
+        resumable = false,
     )
 
-    /** Park in `Offline` until connectivity exists. */
-    private suspend fun waitUntilOnline() {
-        if (networkSignal.online.first()) return
-        _state.value = ConnectionState.Offline
-        networkSignal.online.first { it }
+    /**
+     * Park until a connect makes sense: `Paused` while nothing wants the
+     * stream, `Offline` while there is no network. Either can change
+     * while the other is awaited, so both are rechecked together.
+     */
+    private suspend fun awaitConnectable() {
+        while (true) {
+            when {
+                !wanted.value -> {
+                    _state.value = ConnectionState.Paused
+                    wanted.first { it }
+                }
+                !networkSignal.online.first() -> {
+                    _state.value = ConnectionState.Offline
+                    merge(
+                        networkSignal.online.filter { it },
+                        wanted.filter { !it },
+                    ).first()
+                }
+                else -> return
+            }
+        }
     }
 
     /**
      * Wait out the backoff delay unless something better happens first:
      * an explicit retry request (user tap, app foreground) or a network
-     * handoff skips the rest of the wait; losing the network parks in
-     * `Offline` and retries as soon as it returns.
+     * handoff skips the rest of the wait; losing the network or the
+     * demand ends it too, and [awaitConnectable] parks in `Offline` or
+     * `Paused` until that comes back.
      */
     private suspend fun awaitRetryWindow(delayMillis: Long) {
-        val outcome = withTimeoutOrNull(delayMillis) {
+        withTimeoutOrNull(delayMillis) {
             merge(
-                retryRequests.receiveAsFlow().map { RetryWake.REQUESTED },
-                networkSignal.networkChanges.map { RetryWake.REQUESTED },
-                networkSignal.online.filter { online -> !online }.map { RetryWake.OFFLINE },
+                retryRequests.receiveAsFlow(),
+                networkSignal.networkChanges,
+                networkSignal.online.filter { online -> !online }.map { },
+                wanted.filter { !it }.map { },
             ).first()
         }
-        if (outcome == RetryWake.OFFLINE) {
-            _state.value = ConnectionState.Offline
-            networkSignal.online.first { it }
-        }
     }
-
-    private enum class RetryWake { REQUESTED, OFFLINE }
 
     /**
      * Credential-shaped conditions invalidate the stored token; every
@@ -371,6 +406,9 @@ internal class ConnectionLoop(
 
         /** The ready stream failed a liveness probe (half-open socket). */
         data object STALE_AFTER_READY : AttemptEnd
+
+        /** Nothing wanted the stream any more; it was closed on purpose. */
+        data object RELEASED : AttemptEnd
     }
 
     private enum class Readiness { READY, AUTH_FAILED, CLOSED }

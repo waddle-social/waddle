@@ -70,6 +70,12 @@ class XmppSessionManager(
     livenessTicks: Flow<Unit> = emptyFlow(),
     /** Test seam for the stale terminal-auth completion race. */
     private val beforeTerminalAuthCommit: suspend () -> Unit = {},
+    /**
+     * Whether anything needs the stream now (foreground, stay-connected
+     * mode, a call, an inline reply). Always-on unless the app supplies
+     * its demand; while false the session stays signed in but closed.
+     */
+    connectionWanted: StateFlow<Boolean> = MutableStateFlow(true),
     /** Wall clock for the peer-avatar TTLs. */
     clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -193,6 +199,7 @@ class XmppSessionManager(
         reconnectPolicy = reconnectPolicy,
         connectTimeoutMillis = connectTimeoutMillis,
         livenessTicks = livenessTicks,
+        wanted = connectionWanted,
     )
 
     val connectionState: StateFlow<ConnectionState> = loop.state

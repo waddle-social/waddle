@@ -50,7 +50,7 @@ fun ConnectionBanner(
         is ConnectionState.Reconnecting -> stringResource(R.string.connection_reconnecting, state.attempt)
         ConnectionState.Offline -> stringResource(R.string.connection_offline)
         ConnectionState.AuthFailed -> stringResource(R.string.connection_auth_failed)
-        ConnectionState.Idle, ConnectionState.Ready -> null
+        ConnectionState.Idle, ConnectionState.Ready, ConnectionState.Paused -> null
     }
     AnimatedVisibility(
         visible = text != null,

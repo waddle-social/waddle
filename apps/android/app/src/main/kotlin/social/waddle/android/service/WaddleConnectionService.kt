@@ -97,7 +97,7 @@ class WaddleConnectionService : Service() {
             getString(R.string.connection_reconnecting, state.attempt)
         ConnectionState.Offline -> getString(R.string.connection_offline)
         ConnectionState.AuthFailed -> getString(R.string.connection_auth_failed)
-        ConnectionState.Idle -> getString(R.string.connection_status_idle)
+        ConnectionState.Idle, ConnectionState.Paused -> getString(R.string.connection_status_idle)
     }
 
     companion object {
