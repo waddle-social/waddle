@@ -153,10 +153,25 @@ fun PillButton(
 
 /**
  * A loading placeholder bar (web `.chat-skeleton`: muted fill, radius 8,
- * opacity pulse 1 → .55 over 1.8s). Still under reduced motion.
+ * opacity pulse 1 → .55 over 1.8s), with a little vertical air and a
+ * minimum line height. Still under reduced motion.
  */
 @Composable
 fun SkeletonBlock(modifier: Modifier = Modifier, height: Dp = SKELETON_LINE, radius: Dp = Waddle.radius.tag) {
+    SkeletonBox(
+        modifier = modifier
+            .padding(vertical = SKELETON_GAP)
+            .defaultMinSize(minHeight = height),
+        radius = radius,
+    )
+}
+
+/**
+ * The bare pulsing skeleton fill, sized entirely by [modifier]: avatar
+ * discs, name bars and grid cells.
+ */
+@Composable
+fun SkeletonBox(modifier: Modifier = Modifier, radius: Dp = Waddle.radius.tag) {
     val pulse = if (reducedMotion) {
         null
     } else {
@@ -172,11 +187,9 @@ fun SkeletonBlock(modifier: Modifier = Modifier, height: Dp = SKELETON_LINE, rad
     }
     Box(
         modifier = modifier
-            .padding(vertical = SKELETON_GAP)
             // Read in the layer: the pulse redraws, never recomposes.
             .graphicsLayer { alpha = pulse?.value ?: 1f }
-            .background(skeletonFill(), RoundedCornerShape(radius))
-            .defaultMinSize(minHeight = height),
+            .background(skeletonFill(), RoundedCornerShape(radius)),
     )
 }
 

@@ -1,10 +1,5 @@
 package social.waddle.android.feature.conversation
 
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
@@ -29,7 +24,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Paint
 import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
-import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.semantics.heading
@@ -40,8 +34,6 @@ import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.theme.Waddle
 import social.waddle.android.theme.WaddleTokens
-import social.waddle.android.ui.huddle.HuddleMotion
-import social.waddle.android.ui.huddle.reducedMotion
 
 /**
  * Huddle's overlay shadow (web `shadows.overlay`: 0 16px 40px, 45% black)
@@ -219,38 +211,6 @@ private fun Mascot() {
     }
 }
 
-/**
- * A loading placeholder bar on the neutral fill (web `.chat-skeleton`:
- * radius, opacity pulse 1 → .55 over 1.8s, still under reduced motion).
- * The shared `SkeletonBlock` fills with `surface.2`, which in daylight is
- * the ground itself; this uses the neutral badge tone, visible in both
- * themes and on cards.
- */
-@Composable
-internal fun PlaceholderBar(modifier: Modifier = Modifier, radius: Dp = Waddle.radius.tag) {
-    val pulse = if (reducedMotion) {
-        null
-    } else {
-        rememberInfiniteTransition(label = "placeholder").animateFloat(
-            initialValue = 1f,
-            targetValue = PLACEHOLDER_DIM,
-            animationSpec = infiniteRepeatable(
-                animation = tween(PLACEHOLDER_CYCLE_MILLIS / 2, easing = HuddleMotion.easing),
-                repeatMode = RepeatMode.Reverse,
-            ),
-            label = "placeholder",
-        )
-    }
-    Box(
-        modifier = modifier
-            // Read in the layer: the pulse redraws, never recomposes.
-            .graphicsLayer { alpha = pulse?.value ?: 1f }
-            .background(Waddle.colors.neutralBadge, RoundedCornerShape(radius)),
-    )
-}
-
-private const val PLACEHOLDER_DIM = 0.55f
-private const val PLACEHOLDER_CYCLE_MILLIS = 1800
 private val HANDLE_WIDTH = 40.dp
 private val HANDLE_HEIGHT = 4.dp
 private val MASCOT = 72.dp

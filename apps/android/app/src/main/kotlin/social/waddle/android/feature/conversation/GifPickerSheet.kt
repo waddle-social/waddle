@@ -39,6 +39,7 @@ import social.waddle.android.client.GifResult
 import social.waddle.android.client.GifSearchGateway
 import social.waddle.android.client.GifSearchResult
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.huddle.SkeletonBox
 
 /**
  * GIF picker bottom sheet (web `GifPicker.vue` parity): trending on
@@ -133,7 +134,7 @@ internal fun PickerGridSkeleton(label: String, columns: Int) {
         repeat(SKELETON_ROWS) {
             Row(horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs)) {
                 repeat(columns) {
-                    PlaceholderBar(
+                    SkeletonBox(
                         modifier = Modifier
                             .weight(1f)
                             .aspectRatio(1f),

@@ -104,6 +104,10 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     roomJid = key.roomJid,
                     name = key.name,
                     onBack = { backStack.popSafely() },
+                    // Pushed on top, so back returns to the member list.
+                    onOpenDm = { peerJid, name ->
+                        backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name))
+                    },
                 )
             }
             entry<WaddleNavKey.CommunityUsers> {

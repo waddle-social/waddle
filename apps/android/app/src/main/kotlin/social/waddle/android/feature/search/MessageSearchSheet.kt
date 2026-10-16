@@ -40,12 +40,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import social.waddle.android.R
 import social.waddle.android.feature.conversation.AuthorStyle
 import social.waddle.android.feature.conversation.ConversationSheet
-import social.waddle.android.feature.conversation.PlaceholderBar
 import social.waddle.android.feature.conversation.parseInstant
 import social.waddle.android.feature.conversation.rememberConversationClock
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.huddle.AvatarSize
 import social.waddle.android.ui.huddle.HuddleAvatar
+import social.waddle.android.ui.huddle.SkeletonBox
 
 /**
  * Full-text search over one conversation's archive: an autofocused
@@ -115,14 +115,14 @@ private fun SearchingRows() {
                 horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
                 modifier = Modifier.padding(vertical = Waddle.space.xs),
             ) {
-                PlaceholderBar(modifier = Modifier.size(AvatarSize.MD.dp), radius = AvatarSize.MD.dp / 2)
+                SkeletonBox(modifier = Modifier.size(AvatarSize.MD.dp), radius = AvatarSize.MD.dp / 2)
                 Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
-                    PlaceholderBar(
+                    SkeletonBox(
                         modifier = Modifier
                             .fillMaxWidth(NAME_FRACTION)
                             .height(SKELETON_LINE),
                     )
-                    PlaceholderBar(
+                    SkeletonBox(
                         modifier = Modifier
                             .fillMaxWidth()
                             .height(SKELETON_LINE),

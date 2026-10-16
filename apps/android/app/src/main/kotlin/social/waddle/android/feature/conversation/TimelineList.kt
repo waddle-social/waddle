@@ -58,6 +58,7 @@ import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.huddle.AvatarSize
 import social.waddle.android.ui.huddle.HuddleMotion
 import social.waddle.android.ui.huddle.Kicker
+import social.waddle.android.ui.huddle.SkeletonBox
 import social.waddle.android.ui.huddle.reducedMotion
 import java.time.LocalDate
 
@@ -438,11 +439,11 @@ private fun SkeletonRow(lines: List<Float>) {
             .fillMaxWidth()
             .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xs),
     ) {
-        PlaceholderBar(modifier = Modifier.size(AvatarSize.MESSAGE.dp), radius = AvatarSize.MESSAGE.dp / 2)
+        SkeletonBox(modifier = Modifier.size(AvatarSize.MESSAGE.dp), radius = AvatarSize.MESSAGE.dp / 2)
         Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
-            PlaceholderBar(modifier = Modifier.size(width = SKELETON_NAME, height = SKELETON_NAME_HEIGHT))
+            SkeletonBox(modifier = Modifier.size(width = SKELETON_NAME, height = SKELETON_NAME_HEIGHT))
             lines.forEach { fraction ->
-                PlaceholderBar(
+                SkeletonBox(
                     modifier = Modifier
                         .fillMaxWidth(fraction)
                         .height(SKELETON_LINE_HEIGHT),
