@@ -22,6 +22,7 @@ val OutfitFamily = FontFamily(
 /** Space Grotesk: display and screen titles (web `--font-display`). */
 val SpaceGroteskFamily = FontFamily(
     Font(R.font.space_grotesk_medium, FontWeight.Medium),
+    Font(R.font.space_grotesk_semibold, FontWeight.SemiBold),
     Font(R.font.space_grotesk_bold, FontWeight.Bold),
 )
 
