@@ -15,6 +15,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.android.client.prefs.PushDeviceRef
 import social.waddle.android.client.prefs.PushEndpoint
+import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.push.PushRegistrar
@@ -27,9 +28,9 @@ import social.waddle.client.ffi.WaddlePushEnvironment
 import social.waddle.client.ffi.WaddlePushVapidLookup
 
 /**
- * XEP-0357 registration over the Web Push provider (UnifiedPush): the
- * Push Service must always know exactly the endpoint this install holds,
- * and nothing it registered may be lost track of.
+ * XEP-0357 registration over the Web Push (UnifiedPush) and FCM
+ * providers: the Push Service must always know exactly the one endpoint
+ * this install holds, and nothing it registered may be lost track of.
  */
 @OptIn(ExperimentalCoroutinesApi::class)
 class PushRegistrarTest {
@@ -145,7 +146,7 @@ class PushRegistrarTest {
         val harness = signedIn { it.push.disableSucceeds = false }
         harness.manager.recordPushEndpoint(INSTANCE, ENDPOINT)
         connect(harness)
-        harness.manager.recordPushEndpointRevoked(INSTANCE)
+        harness.manager.recordPushEndpointRevoked(INSTANCE, PushEndpointKind.WEB_PUSH)
         runCurrent()
         assertEquals(listOf(PushDeviceRef(SERVICE, "node-1", "dev-1")), harness.state()!!.pendingDisables)
 
@@ -286,15 +287,93 @@ class PushRegistrarTest {
         assertNull(harness.state())
     }
 
+    @Test
+    fun `an fcm endpoint registers as an fcm device without needing the server's vapid key`() = runTest {
+        val harness = signedIn { it.push.vapid = WaddlePushVapidLookup.NotAdvertised }
+        harness.manager.recordPushEndpoint(INSTANCE, FCM_ENDPOINT)
+        connect(harness)
+
+        val push = harness.client.push
+        assertTrue("FCM delivery does not depend on a Web Push provider", push.vapidLookups.isEmpty())
+        assertEquals(
+            listOf(
+                RecordedPushRegister(
+                    serviceJid = SERVICE,
+                    appId = PushRegistrar.APP_ID,
+                    environment = WaddlePushEnvironment.PRODUCTION,
+                    credentials = WaddlePushDeviceCredentials.Fcm(
+                        registrationToken = FCM_ENDPOINT.token,
+                        p256dh = FCM_ENDPOINT.p256dh,
+                        auth = FCM_ENDPOINT.auth,
+                    ),
+                ),
+            ),
+            push.registers,
+        )
+        assertEquals(listOf(SERVICE to "node-1"), push.enables)
+        assertEquals(PushStatus.ACTIVE, harness.status())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `switching from unifiedpush to fcm retires the web push device first`() = runTest {
+        val harness = signedIn()
+        harness.manager.recordPushEndpoint(INSTANCE, ENDPOINT)
+        connect(harness)
+
+        harness.manager.recordPushEndpoint(INSTANCE, FCM_ENDPOINT)
+        runCurrent()
+
+        val push = harness.client.push
+        assertEquals(listOf(RecordedPushDisable(SERVICE, "node-1", "dev-1")), push.disables)
+        assertTrue(push.registers.last().credentials is WaddlePushDeviceCredentials.Fcm)
+        val state = harness.state()!!
+        assertEquals(PushDeviceRef(SERVICE, "node-1", "dev-2"), state.device?.ref)
+        assertEquals(FCM_ENDPOINT, state.device?.endpoint)
+        assertTrue(state.pendingDisables.isEmpty())
+        assertEquals(PushStatus.ACTIVE, harness.status())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a late revocation from the transport switched away from keeps the current endpoint`() = runTest {
+        val harness = signedIn()
+        harness.manager.recordPushEndpoint(INSTANCE, ENDPOINT)
+        connect(harness)
+        harness.manager.recordPushEndpoint(INSTANCE, FCM_ENDPOINT)
+        runCurrent()
+
+        // UnifiedPush reports its unregistration after the switch.
+        harness.manager.recordPushEndpointRevoked(INSTANCE, PushEndpointKind.WEB_PUSH)
+        runCurrent()
+
+        assertEquals(FCM_ENDPOINT, harness.state()!!.endpoint)
+        assertEquals(1, harness.client.push.disables.size)
+        assertEquals(PushStatus.ACTIVE, harness.status())
+
+        harness.manager.recordPushEndpointRevoked(INSTANCE, PushEndpointKind.FCM)
+        runCurrent()
+        assertNull(harness.state()!!.endpoint)
+        assertEquals(2, harness.client.push.disables.size)
+        assertEquals(PushStatus.NONE, harness.status())
+        harness.manager.logout()
+    }
+
     private companion object {
         const val OWNER = "icepuma@waddle.test"
         const val SERVICE = "push.waddle.test"
         val INSTANCE = pushInstanceFor(OWNER)
-        val ENDPOINT = PushEndpoint(
+        val ENDPOINT = PushEndpoint.WebPush(
             url = "https://push.example/up/1",
             p256dh = "p256dh-1",
             auth = "auth-1",
             vapidKid = FakePushServiceState.TEST_VAPID_KID,
+        )
+        val FCM_ENDPOINT = PushEndpoint.Fcm(
+            token = "fcm-token-1",
+            p256dh = "fcm-p256dh-1",
+            auth = "fcm-auth-1",
+            wrappedPrivateKey = "wrapped-1",
         )
     }
 }

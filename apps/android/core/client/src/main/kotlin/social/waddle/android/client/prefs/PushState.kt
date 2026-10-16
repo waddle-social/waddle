@@ -7,25 +7,82 @@ import androidx.datastore.preferences.core.stringPreferencesKey
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.map
+import kotlinx.serialization.DeserializationStrategy
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
+import kotlinx.serialization.json.JsonContentPolymorphicSerializer
+import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.jsonObject
 
 /** A Push Service VAPID key as advertised in its disco#info. */
 @Serializable
 data class VapidKey(val publicKey: String, val kid: String)
 
 /**
- * The push endpoint the UnifiedPush distributor handed out, with the Web
- * Push key pair the connector holds for it and the VAPID key it was
- * registered under (endpoints are bound to one VAPID key).
+ * Where the Push Service delivers for this install, with the RFC 8291 key
+ * pair the payload is encrypted to. One transport at a time: the account
+ * has exactly one endpoint, so it has exactly one device and every push
+ * notifies once.
+ *
+ * Persisted without a type discriminator; [PushEndpointSerializer] tells
+ * the shapes apart, so state written before FCM existed (a bare Web Push
+ * object) still reads as [WebPush].
  */
-@Serializable
-data class PushEndpoint(
-    val url: String,
-    val p256dh: String,
-    val auth: String,
-    val vapidKid: String,
-)
+@Serializable(with = PushEndpointSerializer::class)
+sealed interface PushEndpoint {
+    /** Base64url P-256 public key the payload is encrypted to. */
+    val p256dh: String
+
+    /** Base64url 16-byte RFC 8291 auth secret. */
+    val auth: String
+
+    val kind: PushEndpointKind
+
+    /**
+     * An endpoint the UnifiedPush distributor handed out, with the key
+     * pair the connector holds for it and the VAPID key it was registered
+     * under (endpoints are bound to one VAPID key).
+     */
+    @Serializable
+    data class WebPush(
+        val url: String,
+        override val p256dh: String,
+        override val auth: String,
+        val vapidKid: String,
+    ) : PushEndpoint {
+        override val kind: PushEndpointKind get() = PushEndpointKind.WEB_PUSH
+    }
+
+    /**
+     * An FCM registration token, with the key pair this install generated
+     * for it. [wrappedPrivateKey] is the private key sealed by a key that
+     * never leaves the platform keystore; it is opaque here.
+     */
+    @Serializable
+    data class Fcm(
+        val token: String,
+        override val p256dh: String,
+        override val auth: String,
+        val wrappedPrivateKey: String,
+    ) : PushEndpoint {
+        override val kind: PushEndpointKind get() = PushEndpointKind.FCM
+
+        // The token and the private key stay out of logs.
+        override fun toString(): String = "Fcm(p256dh=$p256dh)"
+    }
+}
+
+/** Which transport an endpoint belongs to. */
+enum class PushEndpointKind {
+    WEB_PUSH,
+    FCM,
+}
+
+/** Picks the [PushEndpoint] shape from its fields; FCM endpoints carry a token. */
+internal object PushEndpointSerializer : JsonContentPolymorphicSerializer<PushEndpoint>(PushEndpoint::class) {
+    override fun selectDeserializer(element: JsonElement): DeserializationStrategy<PushEndpoint> =
+        if ("token" in element.jsonObject) PushEndpoint.Fcm.serializer() else PushEndpoint.WebPush.serializer()
+}
 
 /** A device row at the Push Service (XEP-0050 `register-device` result). */
 @Serializable
@@ -48,7 +105,7 @@ data class PushState(
     val owner: String,
     /** The key the server advertises; `null` until looked up. */
     val advertised: VapidKey? = null,
-    /** The server runs no Web Push provider. */
+    /** The server runs no Web Push provider (FCM endpoints do not need one). */
     val unsupported: Boolean = false,
     /** The kid the app last asked the distributor to register under. */
     val requestedKid: String? = null,
