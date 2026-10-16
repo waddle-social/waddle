@@ -72,7 +72,8 @@ class XmppSessionManagerVerbsTest {
         harness.client.joinRoomStall = stall
 
         val first = async { harness.manager.ensureRoomJoined(room, "icepuma") }
-        val second = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        // The same room spelt differently (topology keeps original case).
+        val second = async { harness.manager.ensureRoomJoined(room.uppercase(), "icepuma") }
         runCurrent()
         assertEquals("one join on the wire while it is in flight", 1, harness.client.joinRoomCalls.size)
 

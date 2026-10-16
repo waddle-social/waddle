@@ -134,10 +134,13 @@ internal class ConversationVerbs(
      * is joined or joining on the current stream once this call is done.
      */
     private suspend fun singleFlightJoin(roomJid: String, send: suspend () -> Boolean): Boolean {
+        // One key per room however it is spelt (topology and persisted ids
+        // keep their original case), as the membership check already does.
+        val key = normalizedBareJid(roomJid)
         val flight = synchronized(joinsLock) {
-            if (stores.occupantJidStore.isInOrJoining(roomJid, nowMillis(), JOIN_PENDING_MILLIS)) return true
-            joinsInFlight[roomJid]?.let { JoinFlight(it, owner = false, epoch = joinEpoch) }
-                ?: JoinFlight(CompletableDeferred<Boolean>().also { joinsInFlight[roomJid] = it }, true, joinEpoch)
+            if (stores.occupantJidStore.isInOrJoining(key, nowMillis(), JOIN_PENDING_MILLIS)) return true
+            joinsInFlight[key]?.let { JoinFlight(it, owner = false, epoch = joinEpoch) }
+                ?: JoinFlight(CompletableDeferred<Boolean>().also { joinsInFlight[key] = it }, true, joinEpoch)
         }
         if (!flight.owner) return flight.pending.await()
         var ok = false
@@ -146,14 +149,14 @@ internal class ConversationVerbs(
             synchronized(joinsLock) {
                 // Only a join sent on the stream that is still current counts.
                 ok = sent && flight.epoch == joinEpoch
-                if (ok) stores.occupantJidStore.markJoinSent(roomJid, nowMillis())
+                if (ok) stores.occupantJidStore.markJoinSent(key, nowMillis())
             }
             return ok
         } finally {
             // Nothing here suspends, so a cancelled owner still releases its
             // waiters ("not joined") and the room.
             flight.pending.complete(ok)
-            synchronized(joinsLock) { joinsInFlight.remove(roomJid, flight.pending) }
+            synchronized(joinsLock) { joinsInFlight.remove(key, flight.pending) }
         }
     }
 
