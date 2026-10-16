@@ -610,7 +610,9 @@ mod tests {
     use minidom::Element;
     use tempfile::tempdir;
 
-    use crate::push_service::test_support::{assert_item_not_found, notification_item, owner};
+    use crate::push_service::test_support::{
+        assert_item_not_found, fcm_registration, notification_item, owner, FCM_TEST_APP_ID,
+    };
     use crate::push_service::types::PushNodeStatus;
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
 
@@ -678,10 +680,76 @@ mod tests {
 
         assert_eq!(node.status, PushNodeStatus::Disabled);
         assert_eq!(device.provider_endpoint(), None);
+        assert_eq!(device.provider_auth(), None);
         assert_eq!(device.provider_token(), None);
         assert_eq!(device.provider_key_material(), None);
         assert_item_not_found(publish_err);
     }
+    #[tokio::test]
+    async fn fcm_device_seals_its_auth_secret_and_disable_scrubs_every_secret() {
+        let store = DatabasePushServiceStore::new(
+            Database::in_memory("push-service-fcm-secrets")
+                .await
+                .expect("database"),
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
+        store
+            .upsert_device(&owner, fcm_registration("android-1", node.node()))
+            .await
+            .expect("device");
+
+        let device = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("device");
+        assert_eq!(device.provider_token(), Some("fcm-token-android-1"));
+        assert!(device.provider_key_material().is_some());
+        let auth = device
+            .provider_auth()
+            .expect("FCM auth secret is stored")
+            .to_string();
+        let mut rows = store
+            .query(
+                "SELECT provider_auth FROM push_devices WHERE node = ? AND device_id = ?",
+                crate::db_params![node.node(), "android-1"],
+            )
+            .await
+            .expect("sealed auth");
+        let sealed: String = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("device row")
+            .get(0)
+            .expect("provider_auth column");
+        drop(rows);
+        assert!(
+            sealed.starts_with("waddle-push-secret-v1:"),
+            "provider_auth is sealed at rest"
+        );
+        assert!(!sealed.contains(&auth), "no plaintext auth secret at rest");
+
+        store
+            .disable_device_for_owner(&owner, node.node(), "android-1", Some("revoked"))
+            .await
+            .expect("disable device");
+        let disabled = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("disabled device");
+        assert_eq!(disabled.provider_token(), None);
+        assert_eq!(disabled.provider_key_material(), None);
+        assert_eq!(disabled.provider_auth(), None);
+    }
+
     async fn disposition_schema_upgrade(
         fixture: crate::ingress::test_support::IngressFixture,
         rebuild: bool,
