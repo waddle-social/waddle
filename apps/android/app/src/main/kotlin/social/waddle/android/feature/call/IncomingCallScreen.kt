@@ -31,6 +31,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -113,6 +114,9 @@ fun IncomingCallContent(
             modifier = modifier
                 .fillMaxSize()
                 .background(colors.nightGround)
+                // Opaque to touch as well as to sight: the call is drawn
+                // over the app, and a tap in a gap must not reach it.
+                .pointerInput(Unit) {}
                 .windowInsetsPadding(WindowInsets.safeDrawing)
                 .testTag(CallTestTags.INCOMING_SCREEN),
             horizontalAlignment = Alignment.CenterHorizontally,

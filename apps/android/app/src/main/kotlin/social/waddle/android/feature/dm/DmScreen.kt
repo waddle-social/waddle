@@ -27,6 +27,7 @@ import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.IdleAge
 import social.waddle.android.client.idleAgeOf
+import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.presenceShowsIdle
 import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.feature.conversation.ConversationKind
@@ -58,9 +59,13 @@ fun DmScreen(
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
     val contacts by graph.sessionManager.presenceStore.contacts.collectAsStateWithLifecycle()
-    // Contacts hold online people only: absent means offline.
-    val peer = contacts[peerJid]
-    val peerShow = peer?.show ?: PresenceShow.OFFLINE
+    val directory by graph.sessionManager.peopleDirectory.collectAsStateWithLifecycle()
+    val peerBare = normalizedBareJid(peerJid)
+    // Same lookup as the DM list: the People directory (rooms and contacts,
+    // most-available), then contact presence. Seen nowhere this stream is
+    // unknown, not "offline": no dot and no presence word.
+    val peer = contacts[peerBare]
+    val peerShow: PresenceShow? = directory.people.firstOrNull { it.bareJid == peerBare }?.show ?: peer?.show
     val scope = rememberCoroutineScope()
     var newGroupOpen by remember { mutableStateOf(false) }
 
@@ -89,7 +94,7 @@ fun DmScreen(
         selfBareJid = session?.jid?.let(::bareJidOf),
         kind = ConversationKind.Dm(name),
         titleLeading = { DmHeaderAvatar(jid = bareJidOf(peerJid), name = name, presence = peerShow) },
-        titleSubline = { DmHeaderSubline(presenceWordOf(peerShow, idleAge(peer?.presence))) },
+        titleSubline = peerShow?.let { show -> { DmHeaderSubline(presenceWordOf(show, idleAge(peer?.presence))) } },
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
         slashCommandHost = SlashCommandHost(
             controller = rememberExtensionCommandController(graph),

@@ -6,7 +6,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.CompositionLocalProvider
-import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalView
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
@@ -78,10 +78,15 @@ class MainActivity : ComponentActivity() {
             val wallpaperColors by graph.userPrefs.wallpaperColors
                 .collectAsStateWithLifecycle(initialValue = false)
             val view = LocalView.current
-            SideEffect {
+            // An effect keyed on the theme, not a SideEffect: it runs only
+            // when the theme changes and before any child's effect, so a
+            // night call surface (LightSystemBarIcons) still wins after an
+            // unrelated recomposition such as the wallpaper toggle.
+            DisposableEffect(view, darkTheme) {
                 val controller = WindowInsetsControllerCompat(window, view)
                 controller.isAppearanceLightStatusBars = !darkTheme
                 controller.isAppearanceLightNavigationBars = !darkTheme
+                onDispose { }
             }
             WaddleTheme(themeMode, wallpaperColors = wallpaperColors) {
                 CompositionLocalProvider(

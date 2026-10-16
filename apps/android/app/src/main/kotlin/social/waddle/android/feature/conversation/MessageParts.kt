@@ -23,6 +23,7 @@ import androidx.compose.material.icons.outlined.PushPin
 import androidx.compose.material.icons.outlined.Schedule
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Text
+import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
 import androidx.compose.ui.Alignment
@@ -252,7 +253,10 @@ private fun ReactionPill(group: ReactionGroup, onClick: () -> Unit) {
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
+        // 48dp touch target around the 28dp pill: the message row's
+        // long-press would otherwise take every near miss.
         modifier = Modifier
+            .minimumInteractiveComponentSize()
             .height(REACTION_HEIGHT)
             .clip(shape)
             .background(colors.surface2, shape)

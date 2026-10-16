@@ -49,6 +49,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.clearAndSetSemantics
@@ -224,6 +225,9 @@ fun ActiveCallContent(
             modifier = modifier
                 .fillMaxSize()
                 .background(colors.nightGround)
+                // Opaque to touch as well as to sight: the call is drawn
+                // over the app, and a tap in a gap must not reach it.
+                .pointerInput(Unit) {}
                 .testTag(CallTestTags.ACTIVE_SCREEN),
         ) {
             if (fullBleed != null) {

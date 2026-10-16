@@ -85,7 +85,7 @@ fun RoomHeaderSubline(here: Int?, huddle: HeaderHuddle?) {
 
 /** A DM peer's face with their presence dot, for [ConversationTitle]'s leading slot. */
 @Composable
-fun DmHeaderAvatar(jid: String, name: String, presence: PresenceShow) {
+fun DmHeaderAvatar(jid: String, name: String, presence: PresenceShow?) {
     HuddleAvatar(jid = jid, name = name, size = AvatarSize.MD, presence = presence)
 }
 
