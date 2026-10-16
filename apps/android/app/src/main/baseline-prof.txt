@@ -1,0 +1,13 @@
+# Baseline profile for Waddle's own code. AGP expands the wildcards at
+# build time and profileinstaller ships the result with the APK, so ART
+# compiles these classes ahead of time instead of interpreting them on
+# first launch. Compose, Material 3 and AndroidX ship their own profiles.
+#
+# Hand-written and deliberately broad: the app is small, and nearly all
+# of it runs within the first minute (session core, timeline, composer).
+# Replace with a generated profile once a device and a test account can
+# drive the macrobenchmark (cold start, open channel, scroll, send).
+HSPLsocial/waddle/android/**;->**(**)**
+Lsocial/waddle/android/**;
+HSPLsocial/waddle/client/ffi/**;->**(**)**
+Lsocial/waddle/client/ffi/**;
