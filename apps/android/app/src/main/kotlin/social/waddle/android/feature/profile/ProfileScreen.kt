@@ -10,9 +10,11 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -107,7 +109,11 @@ fun ProfileScreen(onBack: () -> Unit) {
         Column(
             modifier = Modifier
                 .padding(padding)
+                .consumeWindowInsets(padding)
                 .fillMaxSize()
+                // The keyboard shrinks the scroll viewport, so a focused
+                // field low in the form scrolls into view above it.
+                .imePadding()
                 .verticalScroll(rememberScrollState())
                 .padding(bottom = Waddle.space.xl),
         ) {
