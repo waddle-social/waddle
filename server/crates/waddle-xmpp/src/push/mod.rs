@@ -9,6 +9,7 @@ pub mod constants;
 pub mod disco;
 pub mod encrypt;
 pub mod envelope;
+pub mod fcm;
 pub mod limiter;
 mod sender;
 mod store;

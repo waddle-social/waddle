@@ -7863,6 +7863,7 @@ dependencies = [
  "aes-gcm",
  "anyhow",
  "async-trait",
+ "aws-lc-rs",
  "base64",
  "chrono",
  "chrono-tz",
