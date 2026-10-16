@@ -68,6 +68,13 @@ internal object ScreenshotFixtures {
         )
     }
 
+    /** One message from someone else, for single-message surfaces. */
+    fun otherMessage(): TimelineItem = row(
+        nick = "alice",
+        body = "Shipped the reconnect fix. Can someone on a flaky train line try it?",
+        at = "2026-10-16T09:12:00Z",
+    )
+
     fun channelItems(): List<TimelineItem> {
         counter = 0
         return yesterday() + today()

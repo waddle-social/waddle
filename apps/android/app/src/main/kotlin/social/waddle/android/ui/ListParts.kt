@@ -31,6 +31,10 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -94,7 +98,11 @@ fun UnreadCountBadge(count: Int, modifier: Modifier = Modifier, emphasized: Bool
     }
 }
 
-/** Quiet uppercase section kicker (web `.type-kicker`). */
+/**
+ * Quiet uppercase section kicker (web `.type-kicker`). Uppercase is
+ * presentation only: accessibility and tests see [text] as written, so
+ * screen readers do not spell short headings out letter by letter.
+ */
 @Composable
 fun SectionKicker(text: String, modifier: Modifier = Modifier) {
     Text(
@@ -102,12 +110,17 @@ fun SectionKicker(text: String, modifier: Modifier = Modifier) {
         style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.08.em),
         fontWeight = FontWeight.SemiBold,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = modifier.padding(
-            start = Waddle.space.md,
-            end = Waddle.space.md,
-            top = Waddle.space.lg,
-            bottom = Waddle.space.xs,
-        ),
+        modifier = modifier
+            .clearAndSetSemantics {
+                this.text = AnnotatedString(text)
+                heading()
+            }
+            .padding(
+                start = Waddle.space.md,
+                end = Waddle.space.md,
+                top = Waddle.space.lg,
+                bottom = Waddle.space.xs,
+            ),
     )
 }
 
