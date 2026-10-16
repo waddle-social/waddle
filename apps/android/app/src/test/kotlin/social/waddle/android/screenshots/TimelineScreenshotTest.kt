@@ -22,7 +22,7 @@ import java.util.TimeZone
  * shared channel fixture plus a failed and a sending own message, and
  * the skeleton shown while the first page loads. Clock, locale, the
  * 24-hour setting and reduced motion are pinned.
- * Re-record after an intended change: `./gradlew :app:recordRoborazziDebug`.
+ * Re-record after an intended change: `./gradlew :app:recordRoborazziFossDebug`.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)

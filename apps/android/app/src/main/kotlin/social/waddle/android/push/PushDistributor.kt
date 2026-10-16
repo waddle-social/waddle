@@ -72,11 +72,16 @@ class PushDistributor(
         }
     }
 
-    /** Let the user pick among installed distributors (Settings). */
-    fun pick(activity: Activity) {
+    /** Let the user pick among installed distributors (Settings); [onChosen] runs before registering. */
+    fun pick(activity: Activity, onChosen: suspend () -> Unit = {}) {
         UnifiedPush.tryPickDistributor(activity) { chosen ->
             refresh()
-            if (chosen) scope.launch { currentKey()?.let { register(it) } }
+            if (chosen) {
+                scope.launch {
+                    onChosen()
+                    currentKey()?.let { register(it) }
+                }
+            }
         }
     }
 

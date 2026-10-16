@@ -294,7 +294,6 @@ class PushRegistrarTest {
         connect(harness)
 
         val push = harness.client.push
-        assertTrue("FCM delivery does not depend on a Web Push provider", push.vapidLookups.isEmpty())
         assertEquals(
             listOf(
                 RecordedPushRegister(
@@ -311,6 +310,17 @@ class PushRegistrarTest {
             push.registers,
         )
         assertEquals(listOf(SERVICE to "node-1"), push.enables)
+        assertEquals(PushStatus.ACTIVE, harness.status())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `while on fcm the server's vapid key is still recorded for a later switch`() = runTest {
+        val harness = signedIn()
+        harness.manager.recordPushEndpoint(INSTANCE, FCM_ENDPOINT)
+        connect(harness)
+
+        assertEquals(FakePushServiceState.TEST_VAPID_KID, harness.state()!!.advertised?.kid)
         assertEquals(PushStatus.ACTIVE, harness.status())
         harness.manager.logout()
     }

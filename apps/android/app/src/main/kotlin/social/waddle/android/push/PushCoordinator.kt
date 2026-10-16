@@ -6,6 +6,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.prefs.PushEndpoint
 import social.waddle.android.client.prefs.PushEndpointKind
@@ -67,19 +68,34 @@ class PushCoordinator(
         }
     }
 
+    /**
+     * Whether to keep the FCM endpoint registered: FCM is the transport,
+     * or it still holds the account's endpoint because the switch to a
+     * distributor has not produced one yet (a refused registration, a
+     * distributor that never answers). Until it is replaced, a rotated
+     * FCM token must still reach the server.
+     */
+    private suspend fun fcmWanted(): Boolean =
+        fcm != null && (transport() == PushTransport.FCM || heldFcmEndpoint() != null)
+
+    private suspend fun heldFcmEndpoint(): PushEndpoint.Fcm? {
+        val instance = sessionManager.pushInstance() ?: return null
+        return sessionManager.pushState.first()
+            ?.takeIf { pushInstanceFor(it.owner) == instance }
+            ?.endpoint as? PushEndpoint.Fcm
+    }
+
     /** The app came to the foreground: (re-)register with the transport in use. */
     fun onForeground(activity: Activity) {
         scope.launch {
-            when (transport()) {
-                PushTransport.UNIFIED_PUSH -> distributor.onForeground(activity)
-                PushTransport.FCM -> runCatching { registerFcm() }
-            }
+            if (transport() == PushTransport.UNIFIED_PUSH) distributor.onForeground(activity)
+            if (fcmWanted()) runCatching { registerFcm() }
         }
     }
 
     /** An account signed in (or restored): FCM registers without an activity. */
     suspend fun onAccountReady() {
-        if (fcm != null && transport() == PushTransport.FCM) registerFcm()
+        if (fcmWanted()) registerFcm()
     }
 
     /** The server's VAPID key changed; only UnifiedPush endpoints are bound to it. */
@@ -100,7 +116,7 @@ class PushCoordinator(
 
     /** FCM rotated the registration token. */
     suspend fun onFcmToken(token: String) {
-        if (fcm != null && transport() == PushTransport.FCM) registerFcm(token)
+        if (fcmWanted()) registerFcm(token)
     }
 
     /**
@@ -111,10 +127,7 @@ class PushCoordinator(
     suspend fun onFcmMessage(data: Map<String, String>) {
         val payload = data[FCM_PAYLOAD_KEY] ?: return
         val instance = sessionManager.pushInstance() ?: return
-        val endpoint = sessionManager.pushState.first()
-            ?.takeIf { pushInstanceFor(it.owner) == instance }
-            ?.endpoint as? PushEndpoint.Fcm
-            ?: return
+        val endpoint = heldFcmEndpoint() ?: return
         val plaintext = FcmEnvelopeKeys.decrypt(endpoint, payload, keyWrapper) ?: return
         handler.handle(instance, plaintext, decrypted = true)
     }
@@ -128,11 +141,16 @@ class PushCoordinator(
         }
     }
 
-    /** Settings: push through a UnifiedPush distributor the user picks. */
+    /**
+     * Settings: push through a UnifiedPush distributor the user picks. The
+     * choice is kept only once a distributor is actually chosen; until its
+     * endpoint arrives, any FCM endpoint stays registered.
+     */
     fun useUnifiedPush(activity: Activity) {
-        scope.launch {
-            if (fcm != null) userPrefs.setPushTransport(PushTransportChoice.UNIFIED_PUSH)
-            activity.runOnUiThread { distributor.pick(activity) }
+        activity.runOnUiThread {
+            distributor.pick(activity) {
+                if (fcm != null) userPrefs.setPushTransport(PushTransportChoice.UNIFIED_PUSH)
+            }
         }
     }
 
@@ -146,7 +164,10 @@ class PushCoordinator(
         val fcm = fcm ?: return
         fcmLock.withLock {
             fcm.setAutoInit(false)
-            if (!fcm.delete()) userPrefs.setFcmTokenDeletionPending(true)
+            // Bounded: sign-out must not wait on the network. A deletion
+            // that does not finish now finishes before the next token.
+            val deleted = withTimeoutOrNull(TOKEN_DELETE_TIMEOUT_MILLIS) { fcm.delete() } ?: false
+            if (!deleted) userPrefs.setFcmTokenDeletionPending(true)
         }
     }
 
@@ -163,9 +184,7 @@ class PushCoordinator(
             val instance = sessionManager.pushInstance() ?: return
             fcm.setAutoInit(true)
             val token = rotated ?: fcm.token() ?: return
-            val held = sessionManager.pushState.first()
-                ?.takeIf { pushInstanceFor(it.owner) == instance }
-                ?.endpoint as? PushEndpoint.Fcm
+            val held = heldFcmEndpoint()
             // Keep the keys while they still open; a new install, a
             // restored backup or a lost keystore key gets fresh ones.
             val usable = held?.takeIf { keyWrapper.unwrap(it.wrappedPrivateKey) != null }
@@ -185,5 +204,8 @@ class PushCoordinator(
     companion object {
         /** The FCM data key the Push Service puts the ciphertext under. */
         const val FCM_PAYLOAD_KEY = "payload"
+
+        /** How long sign-out waits for FCM to delete the token. */
+        const val TOKEN_DELETE_TIMEOUT_MILLIS = 5_000L
     }
 }

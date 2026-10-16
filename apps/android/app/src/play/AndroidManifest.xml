@@ -10,6 +10,10 @@
     <uses-permission
         android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
         tools:node="remove" />
+    <!-- Boot only ever raised the connection service. -->
+    <uses-permission
+        android:name="android.permission.RECEIVE_BOOT_COMPLETED"
+        tools:node="remove" />
 
     <!-- Restates the main manifest (and the platform default since API 28)
          so this overlay reads safely on its own. -->
@@ -18,6 +22,10 @@
         android:usesCleartextTraffic="false">
         <service
             android:name=".service.WaddleConnectionService"
+            tools:node="remove" />
+
+        <receiver
+            android:name=".service.BootCompletedReceiver"
             tools:node="remove" />
 
         <!-- FCM data messages: the Push Service's RFC 8291 ciphertext only. -->

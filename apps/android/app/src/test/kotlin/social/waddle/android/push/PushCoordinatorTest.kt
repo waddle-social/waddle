@@ -4,6 +4,7 @@ import android.app.Application
 import androidx.test.core.app.ApplicationProvider
 import com.google.crypto.tink.apps.fixed_webpush.WebPushHybridEncrypt
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -45,6 +46,7 @@ class PushCoordinatorTest {
     private class FakeFcm : FcmTokens {
         var current: String? = "fcm-token-1"
         var deleteSucceeds = true
+        var deleteHangs = false
         var autoInit: Boolean? = null
         val calls = mutableListOf<String>()
 
@@ -55,6 +57,7 @@ class PushCoordinatorTest {
 
         override suspend fun delete(): Boolean {
             calls += "delete"
+            if (deleteHangs) awaitCancellation()
             return deleteSucceeds
         }
 
@@ -213,6 +216,19 @@ class PushCoordinatorTest {
         harness.coordinator.onAccountReady()
         assertEquals(listOf("delete", "token"), fcm.calls)
         assertFalse(harness.userPrefs.fcmTokenDeletionPending.first())
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `sign-out does not wait on the network to delete the token`() = runTest {
+        val harness = signedIn()
+        val fcm = checkNotNull(harness.fcm)
+        harness.coordinator.onAccountReady()
+        fcm.deleteHangs = true
+
+        harness.coordinator.unregister()
+
+        assertTrue("the deletion finishes before the next token", harness.userPrefs.fcmTokenDeletionPending.first())
         harness.manager.logout()
     }
 

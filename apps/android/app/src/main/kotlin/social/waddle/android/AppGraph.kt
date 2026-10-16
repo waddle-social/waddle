@@ -344,9 +344,11 @@ class AppGraph(
         // FCM needs no activity to register: do it as soon as an account
         // is signed in, without waiting for the server's VAPID key.
         applicationScope.launch {
+            // Distinct before dropping nulls: signing out and back into the
+            // same account must register again.
             sessionPrefs.ownerBareJid
-                .filterNotNull()
                 .distinctUntilChanged()
+                .filterNotNull()
                 .collect { runCatching { push.onAccountReady() } }
         }
         pushDistributor.refresh()
@@ -399,11 +401,11 @@ class AppGraph(
         messageNotifier.clearAll()
         _currentSession.value = null
         sessionManager.logout()
-        runCatching { push.unregister() }
         // After local state is gone: revoking the server session may block
         // for the full HTTP timeout and must never delay the visible
-        // sign-out.
+        // sign-out, nor wait on the push teardown below.
         applicationScope.launch { authApi.logout(sessionId) }
+        runCatching { push.unregister() }
     }
 }
 

@@ -265,8 +265,10 @@ private fun DeliverySection(delivery: DeliveryUiState, actions: SettingsActions)
             supporting = stringResource(
                 if (usingFcm) R.string.settings_delivery_fcm_in_use else R.string.settings_delivery_fcm_use,
             ),
-            trailing = { if (!usingFcm) RowChevron() },
-            onClick = if (usingFcm) null else actions.onUseFcm,
+            trailing = { RowChevron() },
+            // Always available: it also brings back FCM after a distributor
+            // choice that never produced an endpoint.
+            onClick = actions.onUseFcm,
         )
     }
     if (delivery.distributorInstalled) {

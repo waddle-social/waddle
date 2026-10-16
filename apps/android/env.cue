@@ -178,10 +178,13 @@ schema.#Project & {
 		}
 
 		// Both distributions: `foss` (Obtainium, no Google code) and
-		// `play` (FCM push, no background connection service).
+		// `play` (FCM push, no background connection service). R8 also
+		// runs over the Play release code (FCM library, reflective
+		// serializers) with placeholder FCM values: the real ones are
+		// secrets, and R8 only needs the build to configure.
 		build: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon :app:assembleFossDebug :app:assemblePlayDebug"]
+			args: ["-c", "./gradlew --no-daemon :app:assembleFossDebug :app:assemblePlayDebug :app:minifyPlayReleaseWithR8 -PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder -PWADDLE_FIREBASE_APP_ID=1:0:android:0 -PWADDLE_FIREBASE_API_KEY=ci-placeholder -PWADDLE_FIREBASE_SENDER_ID=0"]
 			dependsOn: [setupSdk, buildRustJni]
 			inputs: _gradleInputs
 			outputs: [

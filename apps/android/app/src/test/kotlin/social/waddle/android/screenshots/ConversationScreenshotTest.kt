@@ -46,7 +46,7 @@ import java.util.TimeZone
  * header, a thread; plus the message action sheet and the mention
  * popover. Locale, zone, clock, the 24-hour setting and reduced motion
  * are pinned. Re-record after an intended change:
- * `./gradlew :app:recordRoborazziDebug`.
+ * `./gradlew :app:recordRoborazziFossDebug`.
  */
 @RunWith(AndroidJUnit4::class)
 @GraphicsMode(GraphicsMode.Mode.NATIVE)

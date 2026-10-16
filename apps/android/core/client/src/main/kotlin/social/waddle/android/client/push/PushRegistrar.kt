@@ -98,14 +98,27 @@ internal class PushRegistrar(
         val owner = lease.ownerBareJid
         val service = pushServiceJidFor(owner) ?: return
         if (!retryPendingDisables(lease, owner)) return
+        val lookup = call(lease) { it.fetchPushVapidPublicKey(service) } ?: return
         // FCM endpoints are not bound to the server's VAPID key, and the
-        // server needs no Web Push provider to deliver to them.
+        // server needs no Web Push provider to deliver to them. The key is
+        // still recorded, so a switch to a distributor can request an
+        // endpoint for it.
         val held = store.read(owner).endpoint
         if (held is PushEndpoint.Fcm) {
-            reconcileDevice(lease, owner, service, held)
+            if (recordLookup(lease, owner, lookup)) reconcileDevice(lease, owner, service, held)
             return
         }
-        val key = when (val lookup = call(lease) { it.fetchPushVapidPublicKey(service) } ?: return) {
+        reconcileWebPush(lease, owner, service, lookup)
+    }
+
+    /** The Web Push path: endpoints are bound to the server's VAPID key. */
+    private suspend fun reconcileWebPush(
+        lease: ActiveSession.OwnerLease,
+        owner: String,
+        service: String,
+        lookup: WaddlePushVapidLookup,
+    ) {
+        val key = when (lookup) {
             // Transient: keep what is registered, just re-assert it.
             WaddlePushVapidLookup.Failed -> {
                 refreshEnable(lease, owner)
@@ -128,6 +141,19 @@ internal class PushRegistrar(
             }
             // Switched to FCM while the key was being looked up.
             is PushEndpoint.Fcm -> reconcileDevice(lease, owner, service, endpoint)
+        }
+    }
+
+    /** Persist what [lookup] says about the server's key; `false` once the lease is stale. */
+    private suspend fun recordLookup(
+        lease: ActiveSession.OwnerLease,
+        owner: String,
+        lookup: WaddlePushVapidLookup,
+    ): Boolean = when (lookup) {
+        WaddlePushVapidLookup.Failed -> true
+        WaddlePushVapidLookup.NotAdvertised -> write(lease, owner) { it.copy(unsupported = true, advertised = null) }
+        is WaddlePushVapidLookup.Advertised -> write(lease, owner) {
+            it.copy(unsupported = false, advertised = VapidKey(publicKey = lookup.publicKey, kid = lookup.kid))
         }
     }
 
