@@ -56,8 +56,7 @@
 
     <!-- Conversation -->
     <string name="composer_placeholder">Message</string>
-    <string name="typing_one">%1$s is typing…</string>
-    <string name="typing_many">%1$s are typing…</string>
+    <string name="typing_one">%1$s is typing</string>
     <string name="composer_editing">Editing message</string>
     <string name="composer_cancel_edit">Cancel edit</string>
     <string name="message_edited">(edited)</string>
@@ -70,7 +69,7 @@
     <string name="action_unpin_message">Unpin from channel</string>
     <string name="action_reply">Reply</string>
     <string name="action_reply_in_thread">Reply in thread</string>
-    <string name="composer_replying_to">Replying to %1$s</string>
+    <string name="composer_replying_to">Replying to @%1$s</string>
     <string name="composer_cancel_reply">Cancel reply</string>
     <string name="reply_original_unloaded">Original message isn\'t in this loaded history yet.</string>
     <string name="thread_title">Thread</string>
@@ -140,11 +139,10 @@
     <string name="message_attachment">Attachment</string>
     <string name="timeline_today">Today</string>
     <string name="timeline_yesterday">Yesterday</string>
-    <string name="timeline_unread_divider">New</string>
+    <string name="timeline_unread_divider">New messages</string>
     <string name="timeline_unread_divider_description">New messages below</string>
-    <string name="timeline_jump_to_latest">Jump to latest</string>
+    <string name="timeline_jump_to_latest">Latest</string>
     <string name="timeline_start_of_history">This is the start of the conversation.</string>
-    <string name="timeline_empty">No messages yet. Say hello.</string>
 
     <!-- Message search -->
     <string name="search_messages">Search messages</string>
@@ -276,8 +274,8 @@
     <string name="sticker_create_failed">Creating the pack failed. Check the images and try again.</string>
 
     <!-- XEP-0319 idle display (web ChatHeader parity: "away · idle 20m") -->
-    <string name="dm_presence_away">away</string>
-    <string name="dm_presence_away_idle">away · idle %1$s</string>
+    <string name="dm_presence_away">Away</string>
+    <string name="dm_presence_away_idle">Away · idle %1$s</string>
     <string name="idle_under_minute">&lt;1m</string>
     <string name="idle_minutes">%1$dm</string>
     <string name="idle_hours">%1$dh</string>
@@ -426,4 +424,48 @@
     <string name="presence_offline">offline</string>
     <string name="presence_in_huddle">in a huddle</string>
     <string name="presence_speaking">speaking</string>
+    <!-- Huddle: conversation -->
+    <string name="message_actions_label">Message actions</string>
+    <string name="action_more_reactions">More reactions</string>
+    <string name="reply_chip_author">↳ @%1$s</string>
+    <string name="thread_more_faces">+%1$d</string>
+    <plurals name="reaction_description">
+        <item quantity="one">%1$s, %2$d reaction</item>
+        <item quantity="other">%1$s, %2$d reactions</item>
+    </plurals>
+    <plurals name="reaction_description_mine">
+        <item quantity="one">%1$s, %2$d reaction, yours</item>
+        <item quantity="other">%1$s, %2$d reactions including yours</item>
+    </plurals>
+    <string name="typing_two">%1$s and %2$s are typing</string>
+    <plurals name="typing_many">
+        <item quantity="one">%1$s and %2$d other are typing</item>
+        <item quantity="other">%1$s and %2$d others are typing</item>
+    </plurals>
+    <string name="media_viewer_open">View image</string>
+    <string name="media_viewer_close">Close</string>
+    <string name="composer_placeholder_to">Message %1$s</string>
+    <string name="composer_placeholder_thread">Reply in thread</string>
+    <string name="timeline_empty_room_title">It\'s quiet in %1$s</string>
+    <string name="timeline_empty_room_title_unnamed">It\'s quiet in here</string>
+    <string name="timeline_empty_room_body">Be the one who breaks the silence. Drop a hello, share what you\'re working on, ask the room something interesting.</string>
+    <string name="timeline_empty_dm_title">Just you and @%1$s</string>
+    <string name="timeline_empty_dm_body">Send the first message to get the conversation going.</string>
+    <string name="timeline_empty_thread_title">No replies yet</string>
+    <string name="timeline_empty_thread_body">Start the thread. Your reply lands here and under the message it answers.</string>
+    <plurals name="room_header_here">
+        <item quantity="one">%d here</item>
+        <item quantity="other">%d here</item>
+    </plurals>
+    <plurals name="room_header_huddle">
+        <item quantity="one">Huddle · %d in</item>
+        <item quantity="other">Huddle · %d in</item>
+    </plurals>
+    <plurals name="room_header_video_huddle">
+        <item quantity="one">Video huddle · %d in</item>
+        <item quantity="other">Video huddle · %d in</item>
+    </plurals>
+    <string name="dm_presence_available">Available</string>
+    <string name="dm_presence_dnd">Do not disturb</string>
+    <string name="dm_presence_offline">Offline</string>
 </resources>

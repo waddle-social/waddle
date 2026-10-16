@@ -1,36 +1,38 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
+import social.waddle.android.theme.Waddle
 import social.waddle.client.ffi.WaddleSafetyCategory
 import social.waddle.client.ffi.WaddleSafetyScores
 
 /**
- * Compact marker for the highest visible safety category. Colour and icon
- * describe the category, while probability only controls visibility.
+ * Compact marker for the highest visible safety category: a quiet
+ * outlined tag on the message's 28dp rhythm. Colour and icon describe
+ * the category, while probability only controls visibility.
  */
 @Composable
 fun SafetyScoresChip(category: WaddleSafetyCategory, onClick: () -> Unit) {
@@ -38,66 +40,47 @@ fun SafetyScoresChip(category: WaddleSafetyCategory, onClick: () -> Unit) {
     val description = stringResource(R.string.safety_scores_chip_description, label)
     val style = safetyScoreStyle(category)
     val tint = style.color()
-    Surface(
-        shape = RoundedCornerShape(10.dp),
-        color = MaterialTheme.colorScheme.surface,
-        onClick = onClick,
+    val shape = RoundedCornerShape(Waddle.radius.tag)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
         modifier = Modifier
-            .padding(top = 2.dp)
-            .semantics { contentDescription = description },
+            .padding(top = Waddle.space.xxs)
+            .height(Waddle.control.xs)
+            .clip(shape)
+            .border(1.dp, Waddle.colors.border, shape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .semantics(mergeDescendants = true) { contentDescription = description }
+            .padding(horizontal = Waddle.space.xs),
     ) {
-        Row(
-            verticalAlignment = Alignment.CenterVertically,
-            modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
-        ) {
-            Icon(
-                style.icon,
-                contentDescription = null,
-                tint = tint,
-                modifier = Modifier.size(14.dp),
-            )
-            Text(
-                text = label,
-                style = MaterialTheme.typography.labelSmall,
-                color = tint,
-                modifier = Modifier.padding(start = 4.dp),
-            )
-        }
+        Icon(style.icon, contentDescription = null, tint = tint, modifier = Modifier.size(CHIP_ICON))
+        Text(text = label, style = MetaStyle, color = tint)
     }
 }
 
 /** Breakdown of the categories at or above the visibility threshold. */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun SafetyScoresSheet(
     scores: WaddleSafetyScores,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ConversationSheet(onDismissRequest = onDismiss, title = stringResource(R.string.safety_scores_title)) {
+        // Several categories plus copy can outgrow a short screen or
+        // large font scale; the sheet content must scroll.
         Column(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
-            // Several categories plus copy can outgrow a short screen or
-            // large font scale; the sheet content must scroll.
-            modifier = Modifier
-                .navigationBarsPadding()
-                .verticalScroll(rememberScrollState())
-                .padding(horizontal = 24.dp)
-                .padding(bottom = 16.dp),
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.md),
+            modifier = Modifier.verticalScroll(rememberScrollState()),
         ) {
             Text(
-                text = stringResource(R.string.safety_scores_title),
-                style = MaterialTheme.typography.titleMedium,
-            )
-            Text(
                 text = stringResource(R.string.safety_scores_explainer),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MetaStyle,
+                color = Waddle.colors.fgMuted,
             )
             safetyScoreRowsOf(scores).forEach { row -> SafetyScoreLine(row) }
             Text(
                 text = stringResource(R.string.safety_scores_model, scores.modelVersion),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = Waddle.type.time,
+                color = Waddle.colors.fgMuted,
             )
         }
     }
@@ -107,34 +90,40 @@ fun SafetyScoresSheet(
 private fun SafetyScoreLine(row: SafetyScoreRow) {
     val style = safetyScoreStyle(row.category)
     val tint = style.color()
-    Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Icon(
-                imageVector = style.icon,
-                contentDescription = null,
-                tint = tint,
-                modifier = Modifier.size(18.dp),
-            )
+    Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs)) {
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+        ) {
+            Icon(imageVector = style.icon, contentDescription = null, tint = tint, modifier = Modifier.size(LINE_ICON))
             Text(
                 text = stringResource(safetyScoreLabelRes(row.category)),
-                style = MaterialTheme.typography.bodyMedium,
-                color = tint,
-                modifier = Modifier.weight(1f).padding(start = 6.dp),
+                style = Waddle.type.control,
+                color = Waddle.colors.fg,
+                modifier = Modifier.weight(1f),
             )
             Text(
                 text = stringResource(R.string.safety_scores_percent, row.percent),
-                style = MaterialTheme.typography.labelLarge,
+                style = Waddle.type.time,
+                color = tint,
             )
         }
         LinearProgressIndicator(
             progress = { row.fraction },
             color = tint,
-            modifier = Modifier.fillMaxWidth(),
+            trackColor = Waddle.colors.surface2,
+            drawStopIndicator = {},
+            modifier = Modifier
+                .fillMaxWidth()
+                .clip(RoundedCornerShape(Waddle.radius.tag)),
         )
         Text(
             text = stringResource(R.string.safety_scores_taxonomy, row.taxonomyVersion),
-            style = MaterialTheme.typography.labelSmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = Waddle.type.time,
+            color = Waddle.colors.fgMuted,
         )
     }
 }
+
+private val CHIP_ICON = 14.dp
+private val LINE_ICON = 18.dp

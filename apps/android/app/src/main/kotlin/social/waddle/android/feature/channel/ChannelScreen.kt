@@ -13,6 +13,7 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -42,7 +43,10 @@ import social.waddle.android.feature.call.channelCallControlsOf
 import social.waddle.android.feature.call.normalizeCallRoomJid
 import social.waddle.android.feature.call.resolveRoomParticipantList
 import social.waddle.android.feature.call.shouldOfferRetainedLeave
+import social.waddle.android.feature.conversation.ConversationKind
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.conversation.HeaderHuddle
+import social.waddle.android.feature.conversation.RoomHeaderSubline
 import social.waddle.android.feature.conversation.SlashCommandHost
 import social.waddle.android.feature.conversation.rememberExtensionCommandController
 import social.waddle.android.feature.conversation.trustedPreviewOriginOf
@@ -51,6 +55,7 @@ import social.waddle.android.feature.room.RoomSettingsViewModel
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.domainOf
+import social.waddle.android.theme.Waddle
 import social.waddle.client.ffi.WaddleCallMedia
 
 /** Channel timeline + composer over the shared conversation scaffold. */
@@ -85,6 +90,8 @@ fun ChannelScreen(
         normalizedRoom, participants, owners, liveParticipants, leavingRooms,
     )
     val roomHasVideoCall = roomMedia[normalizedRoom]?.video == true
+    val directory by graph.sessionManager.peopleDirectory.collectAsStateWithLifecycle()
+    val headcount = directory.rooms[roomJid]
 
     // Retained-call cleanup (web leaveRetainedMucCallAction wiring):
     // re-read the cache whenever the Muji view or the slot moves, plus
@@ -143,8 +150,16 @@ fun ChannelScreen(
         )
     }
 
+    val title = stringResource(R.string.home_channel_label, name)
     ConversationScreen(
-        title = stringResource(R.string.home_channel_label, name),
+        title = title,
+        kind = ConversationKind.Room(title),
+        titleSubline = {
+            RoomHeaderSubline(
+                here = headcount?.here,
+                huddle = resolvedNicks.size.takeIf { it > 0 }?.let { HeaderHuddle(it, video = roomHasVideoCall) },
+            )
+        },
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,
@@ -254,8 +269,10 @@ private fun ChannelCallTopBarActions(
                 }
             }
         }
+        // Ember: joining something that is live right now.
         is ChannelCallControls.Join -> IconButton(
             onClick = { onStart(controls.video) },
+            colors = IconButtonDefaults.iconButtonColors(contentColor = Waddle.colors.liveText),
             modifier = Modifier.testTag(ChannelCallTestTags.TOP_BAR_JOIN),
         ) {
             Icon(

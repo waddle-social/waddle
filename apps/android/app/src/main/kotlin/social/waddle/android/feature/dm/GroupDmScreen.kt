@@ -5,17 +5,17 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.ListItem
+import androidx.compose.material3.ListItemDefaults
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
@@ -30,23 +30,28 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
-import social.waddle.android.avatar.LIST_AVATAR_SIZE
-import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.feature.channel.ChannelViewModel
+import social.waddle.android.feature.conversation.ConversationKind
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.conversation.ConversationSheet
+import social.waddle.android.feature.conversation.RoomHeaderSubline
 import social.waddle.android.feature.conversation.trustedPreviewOriginOf
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.jid.bareJidOf
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.huddle.AvatarSize
+import social.waddle.android.ui.huddle.HuddleAvatar
 import social.waddle.client.ffi.WaddleUserSearchEntry
 
 /**
@@ -75,6 +80,7 @@ fun GroupDmScreen(
     // Renames land via the topology refresh (server-rewritten
     // bookmarks), so the live store name wins over the nav argument.
     val title = groupDms.firstOrNull { it.roomJid == roomJid }?.name ?: name
+    val directory by graph.sessionManager.peopleDirectory.collectAsStateWithLifecycle()
 
     var renameOpen by remember { mutableStateOf(false) }
     var addMemberOpen by remember { mutableStateOf(false) }
@@ -82,6 +88,8 @@ fun GroupDmScreen(
 
     ConversationScreen(
         title = title,
+        kind = ConversationKind.Room(title),
+        titleSubline = { RoomHeaderSubline(here = directory.rooms[roomJid]?.here, huddle = null) },
         viewModel = viewModel,
         onBack = onBack,
         onOpenThread = onOpenThread,
@@ -170,7 +178,7 @@ private fun GroupDmRenameDialog(
         onDismissRequest = onDismiss,
         title = { Text(text = stringResource(R.string.group_dm_rename_title)) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
                 OutlinedTextField(
                     value = name,
                     onValueChange = {
@@ -187,7 +195,7 @@ private fun GroupDmRenameDialog(
                     Text(
                         text = stringResource(R.string.action_failed),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = Waddle.colors.dangerText,
                     )
                 }
             }
@@ -218,7 +226,6 @@ private fun GroupDmRenameDialog(
  * history-access choice (default from-join; the full-archive grant is
  * server-validated against the inviter's own visibility).
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 private fun GroupDmAddMemberSheet(
     roomJid: String,
@@ -241,19 +248,15 @@ private fun GroupDmAddMemberSheet(
         results = graph.sessionManager.searchUsers(trimmed).orEmpty()
     }
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ConversationSheet(
+        onDismissRequest = onDismiss,
+        title = stringResource(R.string.group_dm_add_member_title),
+        modifier = Modifier.testTag(GroupDmTestTags.ADD_MEMBER_SHEET),
+    ) {
         Column(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp)
-                .testTag(GroupDmTestTags.ADD_MEMBER_SHEET),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            modifier = Modifier.fillMaxWidth(),
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         ) {
-            Text(
-                text = stringResource(R.string.group_dm_add_member_title),
-                style = MaterialTheme.typography.titleLarge,
-            )
             OutlinedTextField(
                 value = query,
                 onValueChange = {
@@ -267,13 +270,16 @@ private fun GroupDmAddMemberSheet(
                     .testTag(GroupDmTestTags.ADD_MEMBER_SEARCH),
             )
             Row(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = Waddle.space.xxl),
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.SpaceBetween,
+                horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
             ) {
                 Text(
                     text = stringResource(R.string.group_dm_full_history_toggle),
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = Waddle.type.control,
+                    modifier = Modifier.weight(1f),
                 )
                 Switch(
                     checked = fullHistory,
@@ -285,19 +291,33 @@ private fun GroupDmAddMemberSheet(
                 Text(
                     text = stringResource(R.string.action_failed),
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+                    color = Waddle.colors.dangerText,
                 )
             }
             results.forEach { entry ->
                 key(entry.jid) {
                     ListItem(
-                        headlineContent = { Text(text = memberLabelOf(entry)) },
-                        supportingContent = { Text(text = entry.jid) },
-                        leadingContent = {
-                            PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
+                        headlineContent = { Text(text = memberLabelOf(entry), style = Waddle.type.control) },
+                        supportingContent = {
+                            Text(
+                                text = entry.jid,
+                                style = Waddle.type.time,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
                         },
+                        leadingContent = {
+                            HuddleAvatar(
+                                jid = entry.jid,
+                                name = memberLabelOf(entry),
+                                size = AvatarSize.MD,
+                                ground = Waddle.colors.surface,
+                            )
+                        },
+                        colors = ListItemDefaults.colors(containerColor = Waddle.colors.surface),
                         modifier = Modifier
                             .testTag(GroupDmTestTags.ADD_MEMBER_RESULT_PREFIX + entry.jid)
+                            .clip(RoundedCornerShape(Waddle.radius.control))
                             .clickable {
                                 scope.launch {
                                     val result = graph.sessionManager.inviteToGroupDm(
@@ -331,13 +351,13 @@ private fun GroupDmLeaveDialog(
         onDismissRequest = onDismiss,
         title = { Text(text = stringResource(R.string.group_dm_leave_confirm_title)) },
         text = {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
                 Text(text = stringResource(R.string.group_dm_leave_confirm_body, name))
                 if (failed) {
                     Text(
                         text = stringResource(R.string.action_failed),
                         style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.error,
+                        color = Waddle.colors.dangerText,
                     )
                 }
             }
@@ -354,7 +374,7 @@ private fun GroupDmLeaveDialog(
             ) {
                 Text(
                     text = stringResource(R.string.group_dm_leave_action),
-                    color = MaterialTheme.colorScheme.error,
+                    color = Waddle.colors.dangerText,
                 )
             }
         },

@@ -2,46 +2,50 @@ package social.waddle.android.feature.conversation
 
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.tween
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.automirrored.outlined.Reply
-import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
 import androidx.compose.material.icons.outlined.AlternateEmail
 import androidx.compose.material.icons.outlined.AttachFile
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material.icons.outlined.CloudUpload
 import androidx.compose.material.icons.outlined.Code
 import androidx.compose.material.icons.outlined.Edit
+import androidx.compose.material.icons.outlined.EmojiEmotions
 import androidx.compose.material.icons.outlined.FormatBold
 import androidx.compose.material.icons.outlined.FormatItalic
 import androidx.compose.material.icons.outlined.FormatQuote
 import androidx.compose.material.icons.outlined.FormatStrikethrough
 import androidx.compose.material.icons.outlined.Gif
-import androidx.compose.material.icons.outlined.Mood
 import androidx.compose.material.icons.outlined.Terminal
-import androidx.compose.material.icons.outlined.TextFormat
+import androidx.compose.material.icons.outlined.TextFields
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.MenuDefaults
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -54,14 +58,24 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.geometry.CornerRadius
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
+import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
 import androidx.compose.ui.text.input.TextFieldValue
 import androidx.compose.ui.text.style.TextOverflow
@@ -72,6 +86,8 @@ import social.waddle.android.client.ExtensionCommand
 import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.MentionRef
 import social.waddle.android.theme.Waddle
+import social.waddle.android.theme.WaddleTokens
+import social.waddle.android.ui.huddle.HuddleMotion
 
 /**
  * The composer card (web/iOS parity): reply/edit/upload context, an
@@ -115,6 +131,8 @@ fun MessageComposer(
     onSlashArmed: () -> Unit = {},
     /** Runs a resolved invocation; `null` disables slash handling. */
     slashDispatch: (suspend (SlashInvocation) -> Boolean)? = null,
+    /** "Message #general", "Message alice"; `null` reads "Message". */
+    placeholder: String? = null,
 ) {
     var draft by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(""))
@@ -242,12 +260,15 @@ fun MessageComposer(
         onDraftChanged()
     }
 
+    var focused by remember { mutableStateOf(false) }
+    val colors = Waddle.colors
     Column(
         modifier = modifier
             .fillMaxWidth()
-            .background(MaterialTheme.colorScheme.background)
+            .background(colors.bg)
+            .drawBehind { drawLine(colors.borderSoft, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
             .navigationBarsPadding()
-            .padding(start = Waddle.space.sm, end = Waddle.space.sm, top = Waddle.space.xxs, bottom = Waddle.space.xs),
+            .padding(horizontal = Waddle.space.sm, vertical = Waddle.space.sm),
     ) {
         if (slashCandidates.isNotEmpty()) {
             SlashCommandPopover(
@@ -258,24 +279,6 @@ fun MessageComposer(
                     onDraftChanged()
                 },
                 onDismiss = { dismissedSlashPrefix = slashTrigger?.prefix },
-            )
-        }
-        slashBlockedPrefix?.let { blocked ->
-            // Dismissing the hint is the mobile Esc: it disarms interception
-            // for this prefix so the next send posts the draft as plain text.
-            // Without it, a prefix that matches no command (no popover to
-            // dismiss) would be unsendable.
-            ComposerNotice(
-                text = stringResource(R.string.composer_slash_unknown, blocked),
-                icon = null,
-                isError = true,
-                cancelContentDescription = stringResource(R.string.composer_slash_send_as_text),
-                onCancel = {
-                    dismissedSlashPrefix = blocked.removePrefix("/")
-                    slashBlockedPrefix = null
-                },
-                modifier = Modifier.testTag(SlashCommandTestTags.BLOCKED_HINT),
-                cancelModifier = Modifier.testTag(SlashCommandTestTags.BLOCKED_HINT_DISMISS),
             )
         }
         if (mentionToken != null && mentionResults.isNotEmpty()) {
@@ -293,7 +296,24 @@ fun MessageComposer(
                 },
             )
         }
-        ComposerCard {
+        ComposerCard(focused = focused) {
+            slashBlockedPrefix?.let { blocked ->
+                // Dismissing the hint is the mobile Esc: it disarms interception
+                // for this prefix so the next send posts the draft as plain text.
+                // Without it, a prefix that matches no command (no popover to
+                // dismiss) would be unsendable.
+                ComposerBanner(
+                    title = stringResource(R.string.composer_slash_unknown, blocked),
+                    tone = BannerTone.DANGER,
+                    cancelContentDescription = stringResource(R.string.composer_slash_send_as_text),
+                    onCancel = {
+                        dismissedSlashPrefix = blocked.removePrefix("/")
+                        slashBlockedPrefix = null
+                    },
+                    modifier = Modifier.testTag(SlashCommandTestTags.BLOCKED_HINT),
+                    cancelModifier = Modifier.testTag(SlashCommandTestTags.BLOCKED_HINT_DISMISS),
+                )
+            }
             ComposerContext(
                 editing = editing,
                 onCancelEdit = onCancelEdit,
@@ -307,6 +327,8 @@ fun MessageComposer(
             }
             ComposerTextField(
                 value = draft,
+                placeholder = placeholder ?: stringResource(R.string.composer_placeholder),
+                onFocusChanged = { focused = it },
                 onValueChange = { value ->
                     if (value.text != draft.text) onDraftChanged()
                     updateDraft(value)
@@ -328,39 +350,76 @@ fun MessageComposer(
     }
 }
 
-/** The rounded composer surface; its border takes the accent while focused. */
+/**
+ * The composer card (web `.composer`): radius 14 on the card colour with
+ * a hairline border; focus turns the border teal with a 1dp teal ring.
+ */
 @Composable
-private fun ComposerCard(content: @Composable ColumnScope.() -> Unit) {
+private fun ComposerCard(focused: Boolean, content: @Composable ColumnScope.() -> Unit) {
+    val colors = Waddle.colors
+    val shape = RoundedCornerShape(COMPOSER_RADIUS)
+    val border by animateColorAsState(
+        if (focused) colors.action else colors.border,
+        animationSpec = HuddleMotion.fast(),
+        label = "composer-border",
+    )
+    val ring by animateColorAsState(
+        if (focused) colors.action.copy(alpha = FOCUS_RING_ALPHA) else Color.Transparent,
+        animationSpec = HuddleMotion.fast(),
+        label = "composer-ring",
+    )
     Surface(
-        shape = RoundedCornerShape(COMPOSER_RADIUS),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
-        modifier = Modifier.fillMaxWidth(),
+        shape = shape,
+        color = colors.surface,
+        contentColor = colors.fg,
+        border = BorderStroke(1.dp, border),
+        modifier = Modifier
+            .fillMaxWidth()
+            .drawBehind {
+                // The focus ring sits just outside the border, like CSS outline.
+                val inset = -FOCUS_RING.toPx() / 2f
+                drawRoundRect(
+                    color = ring,
+                    topLeft = Offset(inset, inset),
+                    size = Size(size.width - inset * 2, size.height - inset * 2),
+                    cornerRadius = CornerRadius(COMPOSER_RADIUS.toPx() - inset),
+                    style = Stroke(FOCUS_RING.toPx()),
+                )
+            },
     ) {
         Column(content = content)
     }
 }
 
 @Composable
-private fun ComposerTextField(value: TextFieldValue, onValueChange: (TextFieldValue) -> Unit) {
-    val textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface)
+private fun ComposerTextField(
+    value: TextFieldValue,
+    placeholder: String,
+    onFocusChanged: (Boolean) -> Unit,
+    onValueChange: (TextFieldValue) -> Unit,
+) {
+    val colors = Waddle.colors
+    val textStyle = Waddle.type.body.copy(color = colors.fg)
     BasicTextField(
         value = value,
         onValueChange = onValueChange,
         textStyle = textStyle,
-        cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+        cursorBrush = SolidColor(colors.action),
         maxLines = COMPOSER_MAX_LINES,
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = 14.dp, end = 14.dp, top = Waddle.space.sm, bottom = Waddle.space.xxs),
+            .onFocusChanged { onFocusChanged(it.isFocused) }
+            .padding(start = Waddle.space.md, end = Waddle.space.md, top = Waddle.space.sm),
         decorationBox = { inner ->
             Box {
                 if (value.text.isEmpty()) {
                     Text(
-                        text = stringResource(R.string.composer_placeholder),
+                        text = placeholder,
                         style = textStyle,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        color = colors.fgMuted,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
                     )
                 }
                 inner()
@@ -380,47 +439,46 @@ private fun ComposerContext(
     onClearUpload: () -> Unit,
 ) {
     if (editing != null) {
-        ComposerNotice(
-            text = stringResource(R.string.composer_editing),
+        ComposerBanner(
+            title = stringResource(R.string.composer_editing),
+            quote = editing.originalBody,
             icon = Icons.Outlined.Edit,
             cancelContentDescription = stringResource(R.string.composer_cancel_edit),
             onCancel = onCancelEdit,
         )
     }
     if (replying != null && editing == null) {
-        ComposerNotice(
-            text = stringResource(R.string.composer_replying_to, replying.authorName),
-            icon = Icons.AutoMirrored.Outlined.Reply,
+        ComposerBanner(
+            title = stringResource(R.string.composer_replying_to, replying.authorName),
+            quote = replying.previewBody,
             cancelContentDescription = stringResource(R.string.composer_cancel_reply),
             onCancel = onCancelReply,
         )
     }
     when (uploadState) {
         UploadState.Idle -> Unit
-        UploadState.Uploading -> ComposerNotice(
-            text = stringResource(R.string.upload_in_progress),
+        UploadState.Uploading -> ComposerBanner(
+            title = stringResource(R.string.upload_in_progress),
             icon = Icons.Outlined.CloudUpload,
             cancelContentDescription = null,
             onCancel = null,
         )
-        UploadState.TooLarge -> ComposerNotice(
-            text = stringResource(R.string.upload_too_large),
-            icon = null,
-            isError = true,
+        UploadState.TooLarge -> ComposerBanner(
+            title = stringResource(R.string.upload_too_large),
+            tone = BannerTone.DANGER,
             cancelContentDescription = stringResource(R.string.upload_dismiss),
             onCancel = onClearUpload,
         )
-        UploadState.Failed -> ComposerNotice(
-            text = stringResource(R.string.upload_failed),
-            icon = null,
-            isError = true,
+        UploadState.Failed -> ComposerBanner(
+            title = stringResource(R.string.upload_failed),
+            tone = BannerTone.DANGER,
             cancelContentDescription = stringResource(R.string.upload_dismiss),
             onCancel = onClearUpload,
         )
     }
 }
 
-/** + menu · Aa · @ · / … send. */
+/** + · Aa · @ · / … send; every control is a 48dp target. */
 @Composable
 private fun ComposerActionRow(
     canAttach: Boolean,
@@ -439,16 +497,18 @@ private fun ComposerActionRow(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier
             .fillMaxWidth()
-            .padding(start = Waddle.space.xxs, end = Waddle.space.xs, bottom = Waddle.space.xs),
+            .padding(horizontal = Waddle.space.xxs),
     ) {
         if (onAttach != null || onGif != null || onSticker != null) {
             Box {
-                ComposerIconButton(
-                    icon = Icons.Outlined.Add,
-                    contentDescription = stringResource(R.string.composer_more),
-                    onClick = { menuOpen = true },
-                )
-                DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
+                PlusButton(open = menuOpen, onClick = { menuOpen = true })
+                DropdownMenu(
+                    expanded = menuOpen,
+                    onDismissRequest = { menuOpen = false },
+                    shape = RoundedCornerShape(Waddle.radius.panel),
+                    containerColor = Waddle.colors.surface,
+                    border = BorderStroke(1.dp, Waddle.colors.border),
+                ) {
                     onAttach?.let { attach ->
                         ComposerMenuItem(Icons.Outlined.AttachFile, R.string.composer_attach, enabled = canAttach) {
                             menuOpen = false
@@ -462,7 +522,7 @@ private fun ComposerActionRow(
                         }
                     }
                     onSticker?.let { sticker ->
-                        ComposerMenuItem(Icons.Outlined.Mood, R.string.composer_sticker) {
+                        ComposerMenuItem(Icons.Outlined.EmojiEmotions, R.string.composer_sticker) {
                             menuOpen = false
                             sticker()
                         }
@@ -471,7 +531,7 @@ private fun ComposerActionRow(
             }
         }
         ComposerIconButton(
-            icon = Icons.Outlined.TextFormat,
+            icon = Icons.Outlined.TextFields,
             contentDescription = stringResource(R.string.composer_formatting),
             onClick = onToggleFormatting,
             selected = formattingOpen,
@@ -495,6 +555,32 @@ private fun ComposerActionRow(
     }
 }
 
+/** The "+" menu button: a 32dp muted circle whose plus turns 45° while the menu is open. */
+@Composable
+private fun PlusButton(open: Boolean, onClick: () -> Unit) {
+    val colors = Waddle.colors
+    val turn by animateFloatAsState(if (open) PLUS_TURN else 0f, HuddleMotion.fast(), label = "plus-turn")
+    IconButton(
+        onClick = onClick,
+        colors = IconButtonDefaults.iconButtonColors(contentColor = colors.fgMuted),
+    ) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .size(Waddle.control.sm)
+                .background(colors.surface2, CircleShape),
+        ) {
+            Icon(
+                Icons.Outlined.Add,
+                contentDescription = stringResource(R.string.composer_more),
+                modifier = Modifier
+                    .size(COMPOSER_ICON)
+                    .graphicsLayer { rotationZ = turn },
+            )
+        }
+    }
+}
+
 @Composable
 private fun ComposerMenuItem(
     icon: ImageVector,
@@ -503,10 +589,14 @@ private fun ComposerMenuItem(
     onClick: () -> Unit,
 ) {
     DropdownMenuItem(
-        text = { Text(text = stringResource(label)) },
+        text = { Text(text = stringResource(label), style = Waddle.type.control) },
         leadingIcon = { Icon(icon, contentDescription = null) },
         enabled = enabled,
         onClick = onClick,
+        colors = MenuDefaults.itemColors(
+            textColor = Waddle.colors.fg,
+            leadingIconColor = Waddle.colors.fgMuted,
+        ),
     )
 }
 
@@ -517,46 +607,51 @@ private fun ComposerIconButton(
     onClick: () -> Unit,
     selected: Boolean = false,
 ) {
+    val colors = Waddle.colors
     IconButton(
         onClick = onClick,
+        shape = RoundedCornerShape(Waddle.radius.control),
         colors = IconButtonDefaults.iconButtonColors(
-            containerColor = if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.12f) else Color.Transparent,
-            contentColor = if (selected) {
-                MaterialTheme.colorScheme.primary
-            } else {
-                MaterialTheme.colorScheme.onSurfaceVariant
-            },
+            containerColor = if (selected) colors.action.copy(alpha = SELECTED_ALPHA) else Color.Transparent,
+            contentColor = if (selected) colors.actionText else colors.fgMuted,
         ),
-        modifier = Modifier.size(40.dp),
     ) {
-        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(20.dp))
+        Icon(icon, contentDescription = contentDescription, modifier = Modifier.size(COMPOSER_ICON))
     }
 }
 
-/** Filled accent circle when there is something to send; quiet otherwise. */
+/**
+ * Send (web `.composer-send`): a radius-10 tile, muted until there is
+ * something to send, then teal with dark ink.
+ */
 @Composable
 private fun SendButton(enabled: Boolean, onClick: () -> Unit) {
+    val colors = Waddle.colors
     val container by animateColorAsState(
-        if (enabled) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceContainerHigh,
-        animationSpec = tween(MOTION_FAST),
+        if (enabled) colors.action else colors.surface2,
+        animationSpec = HuddleMotion.fast(),
         label = "send-container",
     )
-    val content = if (enabled) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+    val content by animateColorAsState(
+        if (enabled) colors.actionFg else colors.fgSoft,
+        animationSpec = HuddleMotion.fast(),
+        label = "send-content",
+    )
     IconButton(
         onClick = onClick,
         enabled = enabled,
+        shape = RoundedCornerShape(Waddle.radius.control),
         colors = IconButtonDefaults.iconButtonColors(
             containerColor = container,
             contentColor = content,
             disabledContainerColor = container,
             disabledContentColor = content,
         ),
-        modifier = Modifier.size(36.dp),
     ) {
         Icon(
-            Icons.AutoMirrored.Filled.Send,
+            Icons.AutoMirrored.Outlined.Send,
             contentDescription = stringResource(R.string.composer_send),
-            modifier = Modifier.size(18.dp),
+            modifier = Modifier.size(COMPOSER_ICON),
         )
     }
 }
@@ -623,47 +718,98 @@ fun insertTrigger(value: TextFieldValue, trigger: String): TextFieldValue {
     return TextFieldValue(next, TextRange(at + inserted.length))
 }
 
-/** One line of composer context (reply, edit, upload, a blocked command). */
+/** What a [ComposerBanner] is about, which decides its colour. */
+private enum class BannerTone { ACTION, DANGER }
+
+/**
+ * One line of composer context (web reply banner): a 3dp bar on a muted
+ * tint, the title, an optional italic quote, and a close button. Reply,
+ * edit and upload are teal; a refused upload or command is danger.
+ */
 @Composable
-private fun ComposerNotice(
-    text: String,
-    icon: ImageVector?,
+private fun ComposerBanner(
+    title: String,
     cancelContentDescription: String?,
     onCancel: (() -> Unit)?,
     modifier: Modifier = Modifier,
-    isError: Boolean = false,
+    quote: String? = null,
+    icon: ImageVector? = null,
+    tone: BannerTone = BannerTone.ACTION,
     cancelModifier: Modifier = Modifier,
 ) {
-    val tint = if (isError) Waddle.colors.dangerText else MaterialTheme.colorScheme.primary
+    val colors = Waddle.colors
+    val accent = if (tone == BannerTone.DANGER) colors.dangerText else colors.action
+    val ink = if (tone == BannerTone.DANGER) colors.dangerText else colors.fg
+    val shape = RoundedCornerShape(Waddle.radius.control)
     Row(
         verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
         modifier = modifier
             .fillMaxWidth()
-            .padding(start = 14.dp, end = Waddle.space.xxs, top = Waddle.space.xxs),
+            .padding(start = Waddle.space.xs, end = Waddle.space.xs, top = Waddle.space.xs)
+            .height(IntrinsicSize.Min)
+            .clip(shape)
+            .background(colors.surface2.copy(alpha = BANNER_FILL_ALPHA), shape),
     ) {
-        icon?.let { Icon(it, contentDescription = null, tint = tint, modifier = Modifier.size(16.dp)) }
-        Text(
-            text = text,
-            style = MaterialTheme.typography.labelMedium,
-            color = tint,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.weight(1f),
+        Box(
+            Modifier
+                .width(BANNER_BAR)
+                .fillMaxHeight()
+                .background(accent),
         )
+        icon?.let {
+            Icon(
+                it,
+                contentDescription = null,
+                tint = accent,
+                modifier = Modifier
+                    .padding(start = Waddle.space.sm)
+                    .size(BANNER_ICON),
+            )
+        }
+        Column(
+            modifier = Modifier
+                .weight(1f)
+                .padding(start = Waddle.space.sm, top = Waddle.space.xs, bottom = Waddle.space.xs),
+        ) {
+            Text(
+                text = title,
+                style = MetaStyle.copy(fontWeight = FontWeight.SemiBold),
+                color = ink,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            quote?.takeIf { it.isNotBlank() }?.let {
+                Text(
+                    text = it.lineSequence().first { line -> line.isNotBlank() },
+                    style = MetaStyle,
+                    fontStyle = FontStyle.Italic,
+                    color = colors.fgMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
         if (onCancel != null) {
-            IconButton(onClick = onCancel, modifier = cancelModifier.size(32.dp)) {
+            IconButton(onClick = onCancel, modifier = cancelModifier) {
                 Icon(
-                    Icons.Filled.Close,
+                    Icons.Outlined.Close,
                     contentDescription = cancelContentDescription,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                    modifier = Modifier.size(16.dp),
+                    tint = colors.fgMuted,
+                    modifier = Modifier.size(BANNER_ICON),
                 )
             }
         }
     }
 }
 
-private val COMPOSER_RADIUS = 20.dp
+/** Web composer radius (14); between the control (10) and panel (12) radii on purpose. */
+private val COMPOSER_RADIUS = WaddleTokens.Radius.xl
+private val FOCUS_RING = 1.dp
+private val COMPOSER_ICON = 20.dp
+private val BANNER_BAR = 3.dp
+private val BANNER_ICON = 16.dp
 private const val COMPOSER_MAX_LINES = 6
-private const val MOTION_FAST = 160
+private const val FOCUS_RING_ALPHA = 0.45f
+private const val SELECTED_ALPHA = 0.12f
+private const val BANNER_FILL_ALPHA = 0.7f
+private const val PLUS_TURN = 45f
