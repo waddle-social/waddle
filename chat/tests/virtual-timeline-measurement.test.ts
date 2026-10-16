@@ -1,5 +1,7 @@
 import { describe, expect, mock, test } from "bun:test";
+import { Virtualizer } from "@tanstack/vue-virtual";
 import {
+  adjustScrollForRowsAboveViewport,
   createVirtualTimelineElementMeasureScheduler,
   createVirtualTimelineMeasureScheduler,
   installVirtualTimelineMeasurementRecovery,
@@ -221,5 +223,29 @@ describe("virtual timeline measurement recovery", () => {
     expect(scrollElement.listenerCount("load")).toBe(0);
     expect(windowTarget.listenerCount("focus")).toBe(0);
     expect(documentTarget.listenerCount("visibilitychange")).toBe(0);
+  });
+});
+
+describe("virtual timeline scroll compensation", () => {
+  test("keeps the viewport stable when a row above it grows while scrolling up", () => {
+    const scrolls: Array<[number, number | undefined]> = [];
+    const virtualizer = new Virtualizer<HTMLDivElement, Element>({
+      count: 20,
+      estimateSize: () => 112,
+      getScrollElement: () => null,
+      scrollToFn: (offset, { adjustments }) => scrolls.push([offset, adjustments]),
+      observeElementRect: () => {},
+      observeElementOffset: () => {},
+    });
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = adjustScrollForRowsAboveViewport;
+    virtualizer.getMeasurements();
+    virtualizer.scrollOffset = 1000;
+    virtualizer.scrollDirection = "backward";
+    virtualizer.isScrolling = true;
+
+    virtualizer.resizeItem(5, 400); // starts at 560, above the viewport
+    virtualizer.resizeItem(12, 400); // starts below the viewport top
+
+    expect(scrolls).toEqual([[1000, 288]]);
   });
 });

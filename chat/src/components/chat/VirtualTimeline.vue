@@ -8,7 +8,10 @@ import {
   isTopPinnedScrollDirection,
   type ScrollDirectionMode,
 } from "@/lib/scroll-direction";
-import { installVirtualTimelineMeasurementRecovery } from "@/ui/virtual-timeline-measurement";
+import {
+  adjustScrollForRowsAboveViewport,
+  installVirtualTimelineMeasurementRecovery,
+} from "@/ui/virtual-timeline-measurement";
 
 const props = withDefaults(defineProps<{
   items: TimelineMessage[];
@@ -70,6 +73,7 @@ const virtualizer = useVirtualizer(computed(() => ({
     return message ? timelineRowKey(message) : "older-history-sentinel";
   },
 })));
+virtualizer.value.shouldAdjustScrollPositionOnItemSizeChange = adjustScrollForRowsAboveViewport;
 
 let disconnectMeasurementRecovery: (() => void) | null = null;
 

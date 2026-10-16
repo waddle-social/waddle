@@ -1237,6 +1237,12 @@
   max-width: var(--chat-attachment-image-width);
   max-height: 16rem;
   border-radius: var(--radius-sm);
+  /* With XEP-0446 dimensions, reserve the box the loaded image will fit into,
+   * so a virtualized row does not grow under the reader once the image arrives.
+   * Without them the vars are unset, both declarations fall back to `auto`,
+   * and the image sizes itself on load. */
+  aspect-ratio: var(--image-width) / var(--image-height);
+  width: min(var(--image-width) * 1px, 16rem * var(--image-width) / var(--image-height));
 }
 
 .chat-attachment-card {
