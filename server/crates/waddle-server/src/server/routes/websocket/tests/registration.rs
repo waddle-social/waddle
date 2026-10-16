@@ -239,7 +239,7 @@ where
     )
     .await;
     assert_eq!(shutdown, ConnectionShutdownOutcome::NotPersisted);
-    finish_socket_cleanup(&state, &mut incumbent, shutdown).await;
+    finish_socket_cleanup(&state, &incumbent, shutdown).await;
     assert_eq!(lifecycle.state(), SocketCleanupState::Retired);
 
     let (outcome, mut successor, mut successor_rx, pending) =
