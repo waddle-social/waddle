@@ -56,7 +56,30 @@ data class FeedContext(
     /** Incoming rows unread when the screen opened (divider placement). */
     val unreadAtOpen: Int,
     val zone: ZoneId = ZoneId.systemDefault(),
+    /**
+     * Pins the divider to the first unread message once it is known, so
+     * messages arriving while the screen is open do not move it.
+     */
+    val unreadAnchor: UnreadAnchor? = null,
 )
+
+/**
+ * The unread divider's position for one screen visit: resolved once to
+ * the first unread message (the oldest of the last [unreadAtOpen]
+ * incoming rows, as soon as that many are loaded), then held there by
+ * identity. Derivations run one at a time on the feed dispatcher.
+ */
+class UnreadAnchor(private val unreadAtOpen: Int) {
+    @Volatile
+    private var anchorKey: String? = null
+
+    internal fun dividerIndex(rows: List<ConversationRow>): Int {
+        anchorKey?.let { key -> return rows.indexOfFirst { rowKeyOf(it) == key } }
+        val index = unreadDividerIndex(rows, unreadAtOpen)
+        if (index >= 0) anchorKey = rowKeyOf(rows[index])
+        return index
+    }
+}
 
 /**
  * The visible rows ([visibleRows]) turned into feed entries, oldest first.
@@ -73,7 +96,7 @@ fun feedEntriesOf(
     val derived = Derived(
         replyCounts = if (context.threadId == null) replyCountsOf(items) else emptyMap(),
         byIdentity = quotedMessagesByIdentity(rows),
-        dividerIndex = unreadDividerIndex(rows, context.unreadAtOpen),
+        dividerIndex = context.unreadAnchor?.dividerIndex(rows) ?: unreadDividerIndex(rows, context.unreadAtOpen),
     )
     val out = ArrayList<FeedEntry>(rows.size)
     var previous: Placed? = null

@@ -11,19 +11,17 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.R
 import social.waddle.android.WaddleApplication
-import social.waddle.android.client.ConnectionState
 import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Finishes what a notification action started when its receiver's few
  * seconds were not enough: holds the stream until the queued replies are
- * acknowledged, or until it is ready and queued markers have drained.
+ * acknowledged and a ready pipeline has drained queued read markers.
  *
  * A short foreground service (Android allows one from a notification
  * action) keeps the process active meanwhile; a cached process could be
@@ -39,6 +37,10 @@ class PendingDeliveryService : Service() {
     private val pendingReplies = ConcurrentHashMap<String, PendingReply>()
 
     private data class PendingReply(val conversationJid: String, val isGroupchat: Boolean)
+
+    /** Queued read markers are out once a ready pipeline completes after this; -1 when none. */
+    @Volatile
+    private var markerRunAfter = NO_MARKER
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -56,6 +58,8 @@ class PendingDeliveryService : Service() {
                 pendingReplies[id] = PendingReply(conversationJid, isGroupchat)
             }
         }
+        val runAfter = intent?.getLongExtra(EXTRA_MARKER_RUN_AFTER, NO_MARKER) ?: NO_MARKER
+        markerRunAfter = maxOf(markerRunAfter, runAfter)
         // One waiter over everything still pending; a new start restarts
         // its window rather than dropping what earlier starts were owed.
         work?.cancel()
@@ -84,18 +88,17 @@ class PendingDeliveryService : Service() {
         }
     }
 
-    /** Ready, every pending reply acknowledged, markers drained: within the window? */
+    /** Every pending reply acknowledged and markers drained, within the window? */
     private suspend fun awaitDelivered(): Boolean {
         val graph = (application as WaddleApplication).graph
         return withTimeoutOrNull(WINDOW_MILLIS) {
-            graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
             graph.sessionPrefs.outboundQueue.first { queue ->
                 val queued = queue.mapTo(HashSet()) { it.clientStanzaId }
                 pendingReplies.keys.removeAll { it !in queued }
                 pendingReplies.isEmpty()
             }
-            // Queued markers drain right after the ready pipeline's sends.
-            delay(MARKER_DRAIN_MILLIS)
+            val runAfter = markerRunAfter
+            if (runAfter != NO_MARKER) graph.sessionManager.readyPipelineRuns.first { it > runAfter }
         } != null
     }
 
@@ -136,7 +139,8 @@ class PendingDeliveryService : Service() {
 
         /** Inside the system's three-minute short-service limit. */
         private const val WINDOW_MILLIS = 150_000L
-        private const val MARKER_DRAIN_MILLIS = 1_000L
+        private const val EXTRA_MARKER_RUN_AFTER = "social.waddle.android.extra.MARKER_RUN_AFTER"
+        private const val NO_MARKER = -1L
 
         /**
          * Start from a notification-action receiver that is still running
@@ -148,9 +152,12 @@ class PendingDeliveryService : Service() {
             queuedIds: Collection<String> = emptyList(),
             conversationJid: String? = null,
             isGroupchat: Boolean = false,
+            /** A queued read marker is out once a ready pipeline completes after this. */
+            markerRunAfter: Long = NO_MARKER,
         ) {
             val intent = Intent(context, PendingDeliveryService::class.java)
                 .putExtra(EXTRA_QUEUED_IDS, queuedIds.toTypedArray())
+                .putExtra(EXTRA_MARKER_RUN_AFTER, markerRunAfter)
                 .putExtra(EXTRA_CONVERSATION_JID, conversationJid)
                 .putExtra(EXTRA_IS_GROUPCHAT, isGroupchat)
             val started = runCatching { context.startForegroundService(intent) }.isSuccess

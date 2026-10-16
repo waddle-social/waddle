@@ -42,7 +42,11 @@ class PushMessageHandler(
             delay(liveGraceMillis)
             if (notifier.handledLive(envelope.item)) return
         }
-        notifier.postPushSummary(summarize(envelope))
+        // Re-checked under the notifier's lock: the account may have signed
+        // out (or switched) since, and sign-out clears under the same lock.
+        notifier.postPushSummary(summarize(envelope)) {
+            sessionManager.pushInstance() == instance && !isAppVisible()
+        }
     }
 
     companion object {
@@ -55,7 +59,8 @@ class PushMessageHandler(
 interface PushSummarySink {
     fun handledLive(item: String): Boolean
 
-    suspend fun postPushSummary(summary: PushSummary)
+    /** Post [summary] unless [stillWanted], checked under the post lock, says no. */
+    suspend fun postPushSummary(summary: PushSummary, stillWanted: suspend () -> Boolean)
 }
 
 /**

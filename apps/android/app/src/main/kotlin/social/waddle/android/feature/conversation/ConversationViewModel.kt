@@ -162,6 +162,9 @@ open class ConversationViewModel(
     private val unreadAtOpen: Int =
         if (threadId == null) unreadStore.counts.value[conversationJid] ?: 0 else 0
 
+    /** The divider stays on the first unread message for this visit. */
+    private val unreadAnchor = UnreadAnchor(unreadAtOpen)
+
     val uiState: StateFlow<ConversationUiState> =
         combine(
             timeline,
@@ -179,6 +182,7 @@ open class ConversationViewModel(
                         selfBareJid = selfBareJid,
                         pinnedIds = pins,
                         unreadAtOpen = unreadAtOpen,
+                        unreadAnchor = unreadAnchor,
                     ),
                 ),
                 isLoadingOlder = load.inFlight,

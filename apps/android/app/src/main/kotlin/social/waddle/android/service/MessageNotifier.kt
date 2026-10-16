@@ -270,8 +270,11 @@ class MessageNotifier(
      * a summary notification; an update alerts again only when a mention
      * follows plain messages.
      */
-    override suspend fun postPushSummary(summary: PushSummary) = postMutex.withLock {
-        if (handledLive(summary.item)) return@withLock
+    override suspend fun postPushSummary(
+        summary: PushSummary,
+        stillWanted: suspend () -> Boolean,
+    ) = postMutex.withLock {
+        if (handledLive(summary.item) || !stillWanted()) return@withLock
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.POST_NOTIFICATIONS,

@@ -5,7 +5,11 @@ import kotlinx.coroutines.Job
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
@@ -33,6 +37,15 @@ internal class SessionCatchup(
     private val readState: ReadStateCoordinator,
     private val activeSession: ActiveSession,
 ) {
+    private val _completedRuns = MutableStateFlow(0L)
+
+    /**
+     * Ready pipelines run to the end (queued sends and read markers
+     * drained). Work queued before a ready stream is out once this passes
+     * the value seen when it was queued.
+     */
+    val completedRuns: StateFlow<Long> = _completedRuns.asStateFlow()
+
     /**
      * Discover the spaces/channels topology into [SessionStores.roomStore]
      * and hand it back so the rejoin step can derive the XEP-0402
@@ -96,6 +109,7 @@ internal class SessionCatchup(
             // the freshly loaded newest pages.
             readState.bootstrapMdsDisplayed(lease)
             readState.drainPendingDisplayed()
+            _completedRuns.update { it + 1 }
         }
     }
 

@@ -189,6 +189,12 @@ class XmppSessionManager(
     private val catchup =
         SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
 
+    /**
+     * Ready pipelines completed: queued sends and read markers drained.
+     * Capture it before queuing work, then wait for it to advance.
+     */
+    val readyPipelineRuns: StateFlow<Long> = catchup.completedRuns
+
     private val loop: ConnectionLoop = ConnectionLoop(
         clientFactory = clientFactory,
         networkSignal = networkSignal,

@@ -3,7 +3,6 @@ package social.waddle.android.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
@@ -44,6 +43,10 @@ class MarkReadReceiver : BroadcastReceiver() {
             try {
                 // Same never-throw posture as the other receivers: an
                 // uncaught throw on this root coroutine kills the process.
+                // Sent at once on a ready stream; otherwise queued for the
+                // next ready pipeline, which counts as done once it advances.
+                val sentLive = graph.sessionManager.connectionState.value == ConnectionState.Ready
+                val runsBefore = graph.sessionManager.readyPipelineRuns.value
                 runCatching {
                     graph.sessionManager.markConversationDisplayed(
                         conversationJid,
@@ -53,14 +56,12 @@ class MarkReadReceiver : BroadcastReceiver() {
                 }
                 runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
                 runCatching { graph.messageNotifier.clearConversationNotification(conversationJid) }
-                val drained = withTimeoutOrNull(MARKER_HOLD_MILLIS) {
-                    graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
-                    // The ready pipeline drains queued markers right after.
-                    delay(MARKER_DRAIN_MILLIS)
+                val drained = sentLive || withTimeoutOrNull(MARKER_HOLD_MILLIS) {
+                    graph.sessionManager.readyPipelineRuns.first { it > runsBefore }
                 } != null
-                // Not connected within the receiver's budget: a short
+                // Not drained within the receiver's budget: a short
                 // foreground service carries the marker the rest of the way.
-                if (!drained) PendingDeliveryService.start(context)
+                if (!drained) PendingDeliveryService.start(context, markerRunAfter = runsBefore)
             } finally {
                 hold.release()
                 pendingResult.finish()
@@ -73,7 +74,6 @@ class MarkReadReceiver : BroadcastReceiver() {
 
         /** Within the receiver's ~10 s goAsync budget. */
         private const val MARKER_HOLD_MILLIS = 9_000L
-        private const val MARKER_DRAIN_MILLIS = 1_000L
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
         const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.IS_GROUPCHAT"
         const val EXTRA_MARKER_ID = "social.waddle.android.extra.MARKER_ID"

@@ -32,8 +32,8 @@ class PushMessageHandlerTest {
 
         override fun handledLive(item: String): Boolean = item in live
 
-        override suspend fun postPushSummary(summary: PushSummary) {
-            posted += summary
+        override suspend fun postPushSummary(summary: PushSummary, stillWanted: suspend () -> Boolean) {
+            if (stillWanted()) posted += summary
         }
     }
 
@@ -140,6 +140,21 @@ class PushMessageHandlerTest {
 
         assertEquals(1, harness.sink.posted.size)
         harness.manager.logout()
+    }
+
+    @Test
+    fun `signing out during the live grace drops the summary`() = runTest {
+        val harness = signedIn()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val handling = launch { harness.handler.handle(INSTANCE, DM_PUSH, decrypted = true) }
+        runCurrent()
+        harness.manager.logout()
+        advanceTimeBy(PushMessageHandler.LIVE_GRACE_MILLIS + 1)
+        handling.join()
+
+        assertTrue("the signed-out account's banner never posts", harness.sink.posted.isEmpty())
     }
 
     private companion object {

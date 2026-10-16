@@ -200,6 +200,24 @@ class XmppSessionManagerCatchupTest {
     // ── XEP-0402 bookmark-driven rejoin ──────────────────────────────
 
     @Test
+    fun `each completed ready pipeline is counted`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        assertEquals(0L, harness.manager.readyPipelineRuns.value)
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        assertEquals(
+            "markers queued before the stream are out once this advances",
+            1L,
+            harness.manager.readyPipelineRuns.value,
+        )
+        harness.manager.logout()
+    }
+
+    @Test
     fun `queued dm sends replay before topology discovery answers`() = runTest {
         val harness = Harness(this)
         harness.factory.onCreate = { client -> client.topology.delayMillis = TOPOLOGY_STALL_MILLIS }
