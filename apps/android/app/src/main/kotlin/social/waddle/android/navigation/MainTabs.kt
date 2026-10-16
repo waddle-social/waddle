@@ -91,6 +91,11 @@ fun MainTabs(actions: MainTabsActions) {
     val tabInsets = WindowInsets.safeDrawing.only(WindowInsetsSides.Top + WindowInsetsSides.Horizontal)
 
     Scaffold(
+        // No content insets here: the padding below is consumed for the
+        // tabs, so a status-bar inset in it would be marked handled without
+        // being applied, and each tab's top bar would draw under the
+        // status bar.
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
             NavigationBar(containerColor = MaterialTheme.colorScheme.surfaceContainerLow) {
                 MainTab.entries.forEach { entry ->
