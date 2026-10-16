@@ -47,9 +47,14 @@ class ReplyReceiver : BroadcastReceiver() {
                             graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
                         }
                     }
-                // A reply not acknowledged in time stays queued and goes
-                // out with the next connection.
-                runCatching { awaitAcknowledged(graph, queuedId) }
+                // Not acknowledged within the receiver's budget: hand the
+                // wait to a short foreground service while this receiver
+                // still may start one.
+                val acknowledged = runCatching { awaitAcknowledged(graph, queuedId) }.getOrDefault(false)
+                val pending = queuedId
+                if (!acknowledged && pending != null) {
+                    PendingDeliveryService.start(context, listOf(pending), conversationJid, isGroupchat)
+                }
             } finally {
                 hold.release()
                 pendingResult.finish()
@@ -57,12 +62,12 @@ class ReplyReceiver : BroadcastReceiver() {
         }
     }
 
-    /** Until the durable row for [queuedId] is acknowledged and gone, bounded. */
-    private suspend fun awaitAcknowledged(graph: AppGraph, queuedId: String?) {
-        queuedId ?: return
-        withTimeoutOrNull(DELIVERY_HOLD_MILLIS) {
+    /** Whether the durable row for [queuedId] was acknowledged and removed in time. */
+    private suspend fun awaitAcknowledged(graph: AppGraph, queuedId: String?): Boolean {
+        queuedId ?: return true
+        return withTimeoutOrNull(DELIVERY_HOLD_MILLIS) {
             graph.sessionPrefs.outboundQueue.first { queue -> queue.none { it.clientStanzaId == queuedId } }
-        }
+        } != null
     }
 
     /** Sends the reply; returns the outbound queue id it is tracked under. */

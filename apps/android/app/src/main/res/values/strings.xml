@@ -220,6 +220,8 @@
     <string name="settings_delivery_distributor_none">None chosen</string>
     <string name="settings_stay_connected">Stay connected</string>
     <string name="settings_stay_connected_body">Keep a connection open in the background so calls ring. Uses more battery.</string>
+    <string name="notification_reply_waiting">Not sent yet: it goes out when Waddle reconnects</string>
+    <string name="pending_delivery_title">Sending…</string>
     <string name="notification_reply_failed">Reply not sent — open Waddle to retry</string>
     <string name="connection_retry">Retry</string>
     <string name="notification_self_fallback">You</string>

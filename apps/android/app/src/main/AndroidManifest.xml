@@ -76,6 +76,13 @@
             android:exported="false"
             android:foregroundServiceType="phoneCall|microphone|camera" />
 
+        <!-- Finishes a notification action's delivery (an inline reply,
+             a read marker) once its receiver's budget runs out. -->
+        <service
+            android:name=".service.PendingDeliveryService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
+
         <receiver
             android:name=".service.CallActionReceiver"
             android:exported="false" />

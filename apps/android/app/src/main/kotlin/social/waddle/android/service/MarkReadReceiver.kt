@@ -53,11 +53,14 @@ class MarkReadReceiver : BroadcastReceiver() {
                 }
                 runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
                 runCatching { graph.messageNotifier.clearConversationNotification(conversationJid) }
-                withTimeoutOrNull(MARKER_HOLD_MILLIS) {
+                val drained = withTimeoutOrNull(MARKER_HOLD_MILLIS) {
                     graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
                     // The ready pipeline drains queued markers right after.
                     delay(MARKER_DRAIN_MILLIS)
-                }
+                } != null
+                // Not connected within the receiver's budget: a short
+                // foreground service carries the marker the rest of the way.
+                if (!drained) PendingDeliveryService.start(context)
             } finally {
                 hold.release()
                 pendingResult.finish()

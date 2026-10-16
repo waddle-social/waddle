@@ -163,6 +163,22 @@ class MessageNotifier(
         postNotification(conversationJid, isGroupchat, messages, silent = false, replyFailed = true)
     }
 
+    /**
+     * A direct reply is queued but the server has not acknowledged it:
+     * say so (quietly) instead of leaving it looking sent. It goes out
+     * with the next connection.
+     */
+    suspend fun notifyReplyWaiting(conversationJid: String, isGroupchat: Boolean) = postMutex.withLock {
+        val messages = synchronized(historyLock) { history[conversationJid]?.toList() } ?: return@withLock
+        postNotification(
+            conversationJid,
+            isGroupchat,
+            messages,
+            silent = true,
+            subText = context.getString(R.string.notification_reply_waiting),
+        )
+    }
+
     /** Sign-out: drop every message notification and the cached history. */
     suspend fun clearAll() {
         // Under the post mutex: a message racing sign-out could otherwise
@@ -323,6 +339,7 @@ class MessageNotifier(
         silent: Boolean,
         replyFailed: Boolean = false,
         mention: Boolean = false,
+        subText: String? = null,
     ) {
         val displayedTarget = synchronized(historyLock) { displayedTargets[conversationJid] }
         val granted = ContextCompat.checkSelfPermission(
@@ -356,6 +373,8 @@ class MessageNotifier(
             .setDeleteIntent(dismissIntent(conversationJid))
         if (replyFailed) {
             builder.setSubText(context.getString(R.string.notification_reply_failed))
+        } else if (subText != null) {
+            builder.setSubText(subText)
         }
         // Tag = JID, fixed id: String.hashCode() collides across arbitrary
         // remote-chosen JIDs (and with the foreground-service id), which
