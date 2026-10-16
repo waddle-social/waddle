@@ -32,6 +32,8 @@ internal class ConversationVerbs(
     private val sessionPrefs: SessionPrefs,
     /** Single archive ingest path: timeline rows plus catch-up cursors. */
     private val ingestArchivedPage: (List<WaddleArchivedMessage>) -> Unit = stores.timelineStore::onArchivedPage,
+    /** Monotonic millis, for how long a sent join counts as pending. */
+    private val nowMillis: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
 ) {
     /** Serializes reaction send+rollback pairs (see [toggleReaction]). */
     private val reactionMutex = Mutex()
@@ -93,7 +95,11 @@ internal class ConversationVerbs(
      */
     suspend fun ensureJoined(roomJid: String, nick: String): VerbResult {
         val (pending, owner) = joinsLock.withLock {
-            if (roomJid in stores.roomStore.joinedRooms.value) return VerbResult.Ok
+            // Membership on THIS stream (or a join it just sent), not the
+            // persisted intent: a kicked or failed room stays joinable.
+            if (stores.occupantJidStore.isInOrJoining(roomJid, nowMillis(), JOIN_PENDING_MILLIS)) {
+                return VerbResult.Ok
+            }
             val existing = joinsInFlight[roomJid]
             if (existing != null) {
                 existing to false
@@ -105,6 +111,7 @@ internal class ConversationVerbs(
         var result: VerbResult = VerbResult.NotConnected
         try {
             result = joinRoom(roomJid, nick)
+            if (result == VerbResult.Ok) stores.occupantJidStore.markJoinSent(roomJid, nowMillis())
             return result
         } finally {
             joinsLock.withLock { joinsInFlight.remove(roomJid) }
@@ -567,3 +574,10 @@ internal class ConversationVerbs(
         return page
     }
 }
+
+/**
+ * How long a sent join counts as in progress before its self-presence
+ * arrives; past it, a room that never answered can be joined again.
+ */
+private const val JOIN_PENDING_MILLIS = 10_000L
+private const val NANOS_PER_MILLI = 1_000_000L

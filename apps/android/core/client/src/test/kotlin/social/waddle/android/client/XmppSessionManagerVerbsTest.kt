@@ -87,6 +87,20 @@ class XmppSessionManagerVerbsTest {
     }
 
     @Test
+    fun `a remembered but unconfirmed room is joined again`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        // Persisted intent from an earlier stream, never confirmed on this
+        // one (a kick, or a rejoin that failed): opening it must join.
+        harness.manager.roomStore.markJoined(room)
+        val before = harness.client.joinRoomCalls.size
+
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals(before + 1, harness.client.joinRoomCalls.size)
+        harness.manager.logout()
+    }
+
+    @Test
     fun `reaction applies optimistically and sends the complete set`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)

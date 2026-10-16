@@ -225,7 +225,12 @@ internal class SessionCatchup(
             ActiveSession.LeaseInvocation.NotConnected,
             -> false
             is ActiveSession.LeaseInvocation.Completed ->
-                activeSession.applyIfCurrent(lease) { stores.roomStore.markJoined(roomJid) }
+                activeSession.applyIfCurrent(lease) {
+                    stores.roomStore.markJoined(roomJid)
+                    // A screen opening this room before its self-presence
+                    // lands must not send a second join.
+                    stores.occupantJidStore.markJoinSent(roomJid, System.nanoTime() / NANOS_PER_MILLI)
+                }
         }
     } catch (cancellation: CancellationException) {
         throw cancellation
@@ -276,3 +281,5 @@ internal class SessionCatchup(
         const val CATCHUP_PARALLELISM = 4
     }
 }
+
+private const val NANOS_PER_MILLI = 1_000_000L

@@ -45,6 +45,28 @@ class OccupantJidStore {
      */
     fun ownNickIn(roomJid: String): String? = synchronized(ownNicks) { ownNicks[normalizedBareJid(roomJid)] }
 
+    /** Rooms this stream sent a join to, and when (monotonic millis). */
+    private val joinsSent = HashMap<String, Long>()
+
+    /** A join presence to [roomJid] left this stream at [atMillis]. */
+    fun markJoinSent(roomJid: String, atMillis: Long) {
+        synchronized(ownNicks) { joinsSent[normalizedBareJid(roomJid)] = atMillis }
+    }
+
+    /**
+     * True when this stream is in [roomJid] (its self-presence, status
+     * 110, arrived and no unavailable followed) or sent a join under
+     * [pendingMillis] ago that the room has not answered yet. Persisted
+     * join intent does not count: after a kick or a failed rejoin the
+     * room must be joinable again.
+     */
+    fun isInOrJoining(roomJid: String, nowMillis: Long, pendingMillis: Long): Boolean {
+        val room = normalizedBareJid(roomJid)
+        return synchronized(ownNicks) {
+            room in ownNicks || joinsSent[room]?.let { nowMillis - it < pendingMillis } == true
+        }
+    }
+
     /** Who is behind `roomJid/nick` right now, if known. */
     fun jidFor(roomJid: String, nick: String): String? = jids.value[normalizedBareJid(roomJid)]?.get(nick)
 
@@ -78,7 +100,10 @@ class OccupantJidStore {
 
     fun clear() {
         _jids.value = emptyMap()
-        synchronized(ownNicks) { ownNicks.clear() }
+        synchronized(ownNicks) {
+            ownNicks.clear()
+            joinsSent.clear()
+        }
     }
 
     private fun trackOwnNick(room: String, nick: String, presenceType: String) {
@@ -86,8 +111,10 @@ class OccupantJidStore {
             if (presenceType !in NOT_AVAILABLE) {
                 ownNicks[room] = nick
             } else if (ownNicks[room] == nick) {
-                // We left (or are changing nick; the new self-presence follows).
+                // We left or were removed (or are changing nick; the new
+                // self-presence follows): a later open must join again.
                 ownNicks -= room
+                joinsSent -= room
             }
         }
     }
