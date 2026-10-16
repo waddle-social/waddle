@@ -32,8 +32,8 @@ use waddle_xmpp_client::messaging::{
     build_pinned_message, build_reaction_message, build_retraction_message, build_unpinned_message,
     is_muc_join_presence, InCallReactionEmoji, InCallReactionRecipient, InCallSessionId,
     InCallSignal, InboundCallEvent, InboundMessage, InboundPresence, LinkPreviewToken,
-    MarkupSpanData, MarkupSpanType, MucAffiliation, MucRole, ReferenceData, SendMessageOptions,
-    SharedFileDisposition,
+    MarkupSpanData, MarkupSpanType, MentionDirectory, MentionTarget, MucAffiliation, MucRole,
+    ReferenceData, SendMessageOptions, SharedFileDisposition,
 };
 use waddle_xmpp_client::pep::{
     build_pep_items_iq, build_publish_activity_iq, build_publish_mood_iq, build_publish_tune_iq,

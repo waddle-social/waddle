@@ -27,6 +27,7 @@ import type {
   WasmArchivedMessage,
   WasmCallThreadAnchor,
   WasmInboxConversation,
+  WasmMentionDirectory,
   WasmExtensionEnvelope,
   WasmExtensionPayloadElement,
   WasmMessage,
@@ -914,6 +915,18 @@ export function buildWasmSendOptions(
     }));
   }
   return wasmOpts;
+}
+
+/**
+ * The room's mention directory for the Rust send builder, which resolves
+ * typed `@label` tokens to XEP-0372 mention references. Without it a
+ * mention is body text only and receivers never see it as one.
+ */
+export function roomMentionDirectory(mentionJidsByNick?: Readonly<Record<string, string>>): WasmMentionDirectory {
+  return {
+    targets: Object.entries(mentionJidsByNick ?? {}).map(([label, jid]) => ({ label, jid })),
+    broadcasts: true,
+  };
 }
 
 export function encodeBodyForSend(

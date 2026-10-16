@@ -5,6 +5,7 @@ use url::Url;
 use waddle_xmpp_core::xep0359::StanzaId as StableStanzaId;
 use waddle_xmpp_core::{CoreError, DirectVideoMediaType, PreviewImageMediaType};
 
+use super::mentions::MentionDirectory;
 use crate::error::ClientResult;
 use crate::request::StanzaId;
 use crate::xep::encrypted_file::EncryptedFile;
@@ -811,6 +812,11 @@ pub struct SendMessageOptions {
     pub markup_spans: Vec<MarkupSpanData>,
     /// XEP-0372 references such as mentions.
     pub references: Vec<ReferenceData>,
+    /// Resolve plain-text `@label` tokens in the body to XEP-0372 mention
+    /// references at build time. Ranges already covered by `references`,
+    /// the reply fallback and code markup are left alone. `None` resolves
+    /// nothing.
+    pub mention_directory: Option<MentionDirectory>,
     /// XEP-0446 / XEP-0447 shared files attached to the message.
     pub shared_files: Vec<SharedFile>,
     /// Waddle-private link-preview token request consumed server-side before

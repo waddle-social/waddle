@@ -1114,6 +1114,9 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
             .transpose()
             .map_err(|err| err.to_string())?,
         sticker: opts.sticker.map(sticker_marker_from_ffi).transpose()?,
+        // Native composers emit references for popover-picked mentions
+        // themselves; typed-label resolution is not exposed over UniFFI yet.
+        mention_directory: None,
     })
 }
 

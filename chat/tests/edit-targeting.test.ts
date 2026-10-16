@@ -69,6 +69,8 @@ describe("edit targeting", () => {
       undefined,
       // Link preview token payload — absent when an edit has no eligible preview.
       undefined,
+      // XEP-0372 mention directory — absent when the caller supplies none.
+      undefined,
     );
   });
 

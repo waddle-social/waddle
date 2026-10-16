@@ -1026,6 +1026,22 @@ pub struct WaddleSendOptions {
     pub shared_files: Vec<WaddleSharedFile>,
     pub markup_spans: Vec<WaddleMarkupSpanInput>,
     pub references: Vec<WaddleReference>,
+    /// Sender-side directory for resolving typed `@label` tokens to
+    /// XEP-0372 mention references (see `SendMessageOptions::mention_directory`).
+    pub mention_directory: Option<WaddleMentionDirectory>,
+}
+
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct WaddleMentionDirectory {
+    pub targets: Vec<WaddleMentionTarget>,
+    pub broadcasts: bool,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WaddleMentionTarget {
+    pub label: String,
+    pub jid: String,
 }
 
 /// XEP-style payload for one entry in a urn:waddle:threads:0 response,

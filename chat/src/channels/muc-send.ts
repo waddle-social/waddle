@@ -309,6 +309,7 @@ export function useMucSend(deps: UseMucSendDeps) {
           linkPreviewToken: freshLinkPreview.token,
           linkPreviewExpiresAt: freshLinkPreview.expiresAt,
         } : undefined,
+        mentionJidsByNick?.value,
       );
     } catch (e) {
       actionError.value = normalizeError(e);
