@@ -14252,7 +14252,12 @@ public enum WaddlePushDeviceCredentials: Equatable, Hashable {
     )
     case apns(deviceToken: String
     )
-    case fcm(registrationToken: String
+    /**
+     * `p256dh` / `auth` are the device's RFC 8291 envelope-encryption
+     * keys (base64url, no padding); the Push Service encrypts every FCM
+     * message to them.
+     */
+    case fcm(registrationToken: String, p256dh: String, auth: String
     )
 
 
@@ -14281,7 +14286,7 @@ public struct FfiConverterTypeWaddlePushDeviceCredentials: FfiConverterRustBuffe
         case 2: return .apns(deviceToken: try FfiConverterString.read(from: &buf)
         )
 
-        case 3: return .fcm(registrationToken: try FfiConverterString.read(from: &buf)
+        case 3: return .fcm(registrationToken: try FfiConverterString.read(from: &buf), p256dh: try FfiConverterString.read(from: &buf), auth: try FfiConverterString.read(from: &buf)
         )
 
         default: throw UniffiInternalError.unexpectedEnumCase
@@ -14304,9 +14309,11 @@ public struct FfiConverterTypeWaddlePushDeviceCredentials: FfiConverterRustBuffe
             FfiConverterString.write(deviceToken, into: &buf)
 
 
-        case let .fcm(registrationToken):
+        case let .fcm(registrationToken,p256dh,auth):
             writeInt(&buf, Int32(3))
             FfiConverterString.write(registrationToken, into: &buf)
+            FfiConverterString.write(p256dh, into: &buf)
+            FfiConverterString.write(auth, into: &buf)
 
         }
     }

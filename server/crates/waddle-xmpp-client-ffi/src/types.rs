@@ -1161,8 +1161,13 @@ pub enum WaddlePushDeviceCredentials {
     Apns {
         device_token: String,
     },
+    /// `p256dh` / `auth` are the device's RFC 8291 envelope-encryption
+    /// keys (base64url, no padding); the Push Service encrypts every FCM
+    /// message to them.
     Fcm {
         registration_token: String,
+        p256dh: String,
+        auth: String,
     },
 }
 
@@ -1179,9 +1184,15 @@ impl From<WaddlePushDeviceCredentials> for waddle_xmpp_client::push::PushDeviceC
                 auth,
             },
             WaddlePushDeviceCredentials::Apns { device_token } => Self::Apns { device_token },
-            WaddlePushDeviceCredentials::Fcm { registration_token } => {
-                Self::Fcm { registration_token }
-            }
+            WaddlePushDeviceCredentials::Fcm {
+                registration_token,
+                p256dh,
+                auth,
+            } => Self::Fcm {
+                registration_token,
+                p256dh,
+                auth,
+            },
         }
     }
 }
