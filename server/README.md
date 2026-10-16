@@ -11,7 +11,7 @@ Waddle Social is a community-focused messaging platform that combines:
 
 ## License
 
-This project is licensed under the **AGPL-3.0** license. See [LICENSE](LICENSE) for details.
+This project is licensed under the **AGPL-3.0-or-later** license. See [LICENSE](LICENSE) for details.
 
 ## Project Structure
 
