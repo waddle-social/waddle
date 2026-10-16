@@ -135,6 +135,9 @@ private fun TabContent(
     tabInsets: WindowInsets,
     select: (MainTab) -> Unit,
 ) {
+    // Who is talking in the call this device is in (empty outside one):
+    // lights speaking rings on Home, Rooms and People.
+    val speaking by LocalAppGraph.current.callSessionController.speakingJids.collectAsStateWithLifecycle()
     when (tab) {
         MainTab.HOME -> HomeScreen(
             onOpenChannel = actions.openChannel,
@@ -143,9 +146,18 @@ private fun TabContent(
             onOpenYou = { select(MainTab.YOU) },
             onOpenPeople = { select(MainTab.PEOPLE) },
             onOpenRooms = { select(MainTab.ROOMS) },
+            speaking = speaking,
         )
-        MainTab.ROOMS -> RoomsScreen(onOpenChannel = actions.openChannel, contentWindowInsets = tabInsets)
-        MainTab.PEOPLE -> PeopleScreen(onOpenDm = actions.openDm, contentWindowInsets = tabInsets)
+        MainTab.ROOMS -> RoomsScreen(
+            onOpenChannel = actions.openChannel,
+            contentWindowInsets = tabInsets,
+            speaking = speaking,
+        )
+        MainTab.PEOPLE -> PeopleScreen(
+            onOpenDm = actions.openDm,
+            contentWindowInsets = tabInsets,
+            speaking = speaking,
+        )
         MainTab.DMS -> DmListScreen(
             onOpenDm = actions.openDm,
             onOpenGroupDm = actions.openGroupDm,
