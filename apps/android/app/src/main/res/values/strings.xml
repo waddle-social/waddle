@@ -25,21 +25,12 @@
 
     <!-- Home -->
     <string name="home_settings">Settings</string>
-    <string name="home_section_channels">Channels</string>
     <string name="home_channel_label">#%1$s</string>
-    <string name="home_empty">No channels yet. They appear here once the server topology loads.</string>
-    <string name="home_empty_title">Nothing here yet</string>
-    <string name="home_filter_placeholder">Jump to a channel</string>
-    <string name="home_filter_no_match">No channels match “%1$s”.</string>
     <string name="tab_home">Home</string>
     <string name="no_conversation_title">No conversation open</string>
     <string name="no_conversation_body">Pick a channel or a direct message.</string>
     <string name="tab_dms">DMs</string>
-    <string name="tab_activity">Activity</string>
     <string name="tab_you">You</string>
-    <string name="activity_title">Activity</string>
-    <string name="activity_empty_title">You\'re all caught up</string>
-    <string name="activity_empty_body">Unread conversations show up here.</string>
     <string name="you_title">You</string>
     <string name="you_profile">Profile and status</string>
     <string name="you_profile_body">Name, avatar, mood and what you\'re listening to</string>
@@ -323,16 +314,16 @@
     <string name="room_destroy_action">Delete channel</string>
     <string name="room_destroy_confirm_title">Delete this channel?</string>
     <string name="room_destroy_confirm_body">The channel and its history will be destroyed for everyone. This cannot be undone.</string>
-    <string name="create_channel_title">New channel</string>
+    <string name="create_channel_title">New room</string>
     <string name="create_channel_name">Name</string>
     <string name="create_channel_name_hint">general</string>
     <string name="create_channel_description">Description</string>
-    <string name="create_channel_type">Channel type</string>
+    <string name="create_channel_type">Kind of room</string>
     <string name="create_channel_type_text">Text</string>
     <string name="create_channel_type_forum">Forum</string>
     <string name="create_channel_submit">Create</string>
-    <string name="create_channel_failed">Couldn\'t create the channel.</string>
-    <string name="create_channel_not_permitted">You don\'t have permission to create channels.</string>
+    <string name="create_channel_failed">Couldn\'t create the room.</string>
+    <string name="create_channel_not_permitted">You don\'t have permission to create rooms.</string>
     <string name="settings_community_admin">Community admin</string>
     <string name="community_users_title">Users</string>
     <string name="community_users_subtitle">Browse and search community members</string>
@@ -418,7 +409,6 @@
     <string name="call_roster_hand_raised">Hand raised</string>
     <string name="call_roster_muted">Muted</string>
     <string name="call_leave_retained">Leave call</string>
-    <string name="home_channel_call_badge">Active call</string>
     <!-- Huddle presence (avatar dots and rings, screen readers) -->
     <string name="presence_available">available</string>
     <string name="presence_away">away</string>
@@ -426,4 +416,148 @@
     <string name="presence_offline">offline</string>
     <string name="presence_in_huddle">in a huddle</string>
     <string name="presence_speaking">speaking</string>
+    <!-- Huddle: shell, home, rooms, people -->
+    <string name="tab_rooms">Rooms</string>
+    <string name="tab_people">People</string>
+    <plurals name="tab_unread_badge">
+        <item quantity="one">%1$d unread message</item>
+        <item quantity="other">%1$d unread messages</item>
+    </plurals>
+    <string name="tab_rooms_live">a huddle is live</string>
+    <string name="shell_wordmark">waddle</string>
+    <string name="shell_account_action">You: profile and settings</string>
+    <string name="shell_clear_search">Clear search</string>
+    <string name="home_strip_more">+%1$d</string>
+    <plurals name="home_strip_more_description">
+        <item quantity="one">%1$d more person around. Open People.</item>
+        <item quantity="other">%1$d more people around. Open People.</item>
+    </plurals>
+    <string name="home_greeting_morning">Good morning</string>
+    <string name="home_greeting_day">Good afternoon</string>
+    <string name="home_greeting_evening">Good evening</string>
+    <string name="home_greeting_night">Late one tonight</string>
+    <string name="home_greeting_named">%1$s, %2$s.</string>
+    <string name="home_greeting_plain">%1$s.</string>
+    <string name="home_quiet_morning">Everything\'s quiet. A good moment to start something.</string>
+    <string name="home_quiet_day">All caught up. The room is yours.</string>
+    <string name="home_quiet_evening">All caught up. Maybe say hi to someone.</string>
+    <string name="home_quiet_night">Quiet night. Sleep well — or send a long-form note.</string>
+    <string name="home_kicker_around">%1$d around</string>
+    <string name="home_kicker_in_huddle">%1$d in a huddle</string>
+    <plurals name="home_summary_mentions">
+        <item quantity="one">mention</item>
+        <item quantity="other">mentions</item>
+    </plurals>
+    <plurals name="home_summary_unread">
+        <item quantity="one">unread message</item>
+        <item quantity="other">unread messages</item>
+    </plurals>
+    <plurals name="home_summary_thread_replies">
+        <item quantity="one">thread reply</item>
+        <item quantity="other">thread replies</item>
+    </plurals>
+    <plurals name="home_summary_active_calls">
+        <item quantity="one">active call</item>
+        <item quantity="other">active calls</item>
+    </plurals>
+    <plurals name="home_summary_around">
+        <item quantity="one">person around</item>
+        <item quantity="other">people around</item>
+    </plurals>
+    <string name="home_cta_join">Join %1$s call</string>
+    <string name="home_cta_return">Return to %1$s call</string>
+    <string name="home_cta_jump">Jump into %1$s</string>
+    <string name="home_cta_browse">Browse rooms</string>
+    <string name="home_happening_title">Happening now</string>
+    <plurals name="home_happening_live">
+        <item quantity="one">%1$d live conversation</item>
+        <item quantity="other">%1$d live conversations</item>
+    </plurals>
+    <string name="home_call_live">Live now</string>
+    <string name="home_call_here">You\'re here</string>
+    <string name="home_call_open">Open</string>
+    <string name="home_call_voice">Group call</string>
+    <string name="home_call_video">Group video call</string>
+    <string name="home_call_in_this_call">%1$d in this call</string>
+    <string name="home_needs_title">Needs you</string>
+    <plurals name="home_needs_replies">
+        <item quantity="one">%1$d reply</item>
+        <item quantity="other">%1$d replies</item>
+    </plurals>
+    <plurals name="home_needs_mentions">
+        <item quantity="one">%1$d mention</item>
+        <item quantity="other">%1$d mentions</item>
+    </plurals>
+    <plurals name="home_needs_thread_replies">
+        <item quantity="one">%1$d thread reply</item>
+        <item quantity="other">%1$d thread replies</item>
+    </plurals>
+    <string name="home_needs_waiting">%1$s waiting</string>
+    <string name="home_needs_both">%1$s and %2$s</string>
+    <string name="home_needs_open">Open</string>
+    <string name="connection_banner_connecting">Connecting…</string>
+    <string name="connection_banner_offline_title">Disconnected</string>
+    <string name="connection_banner_offline_body">You\'re offline. Messages you send are queued.</string>
+    <string name="connection_banner_reconnecting_title">Reconnecting…</string>
+    <string name="connection_banner_reconnecting_body">Trying again now.</string>
+    <string name="connection_banner_attention_title">Connection needs attention</string>
+    <string name="connection_banner_attention_body">Your session expired. Sign in again to reconnect.</string>
+    <string name="connection_banner_back">Back online</string>
+    <string name="rooms_title">Rooms</string>
+    <string name="rooms_lead">Sorted by what is happening: huddles first, then mentions and unread.</string>
+    <plurals name="rooms_count">
+        <item quantity="one">%1$d room</item>
+        <item quantity="other">%1$d rooms</item>
+    </plurals>
+    <string name="rooms_live">%1$d live</string>
+    <string name="rooms_new">New room</string>
+    <string name="rooms_search">Find a room</string>
+    <string name="rooms_loading">Finding your rooms.</string>
+    <string name="rooms_empty">No rooms yet. Create the first one and invite people in.</string>
+    <string name="rooms_no_match">No rooms match “%1$s”.</string>
+    <string name="room_kicker_room">Room</string>
+    <string name="room_kicker_here">Room · %1$d here</string>
+    <plurals name="room_kicker_mentions">
+        <item quantity="one">Room · %1$d mention</item>
+        <item quantity="other">Room · %1$d mentions</item>
+    </plurals>
+    <string name="room_kicker_unread">Room · %1$d unread</string>
+    <string name="room_kicker_active">Room · active</string>
+    <string name="room_kicker_quiet">Room · quiet</string>
+    <string name="room_kicker_voice_huddle">Voice huddle · %1$d in</string>
+    <string name="room_kicker_video_huddle">Video huddle · %1$d in</string>
+    <string name="room_quiet_line">It is quiet in here. Be the one who breaks the silence.</string>
+    <string name="room_enter">Enter</string>
+    <string name="room_join">Join</string>
+    <string name="room_enter_description">Enter %1$s</string>
+    <string name="room_join_description">Join the huddle in %1$s</string>
+    <plurals name="room_mentions_description">
+        <item quantity="one">%1$d mention</item>
+        <item quantity="other">%1$d mentions</item>
+    </plurals>
+    <string name="room_unread_description">%1$d unread</string>
+    <string name="people_title">People</string>
+    <string name="people_lead">Everyone in your rooms. Tap someone to message them.</string>
+    <plurals name="people_count">
+        <item quantity="one">%1$d person</item>
+        <item quantity="other">%1$d people</item>
+    </plurals>
+    <string name="people_search">Find people</string>
+    <string name="people_group_huddle">In a huddle</string>
+    <string name="people_group_around">Around</string>
+    <string name="people_group_away">Away and offline</string>
+    <string name="people_group_kicker">%1$s · %2$d</string>
+    <string name="people_group_show">Show away and offline</string>
+    <string name="people_group_hide">Hide away and offline</string>
+    <string name="people_empty_huddle">Nobody is in a huddle right now. Start one.</string>
+    <string name="people_empty_around">Nobody around right now.</string>
+    <string name="people_empty">Nobody is around right now. Be the one who is here first.</string>
+    <string name="people_no_match">Nobody matches “%1$s”.</string>
+    <string name="people_status_speaking">Speaking</string>
+    <string name="people_status_huddle_in">In the huddle in %1$s</string>
+    <string name="people_status_available">Available</string>
+    <string name="people_status_away">Away</string>
+    <string name="people_status_dnd">Do not disturb</string>
+    <string name="people_status_offline">Offline</string>
+    <string name="people_message">Message %1$s</string>
 </resources>
