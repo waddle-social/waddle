@@ -218,6 +218,30 @@ class PushRegistrarTest {
     }
 
     @Test
+    fun `a key rotated under an active device is pending until re-bound`() = runTest {
+        val harness = signedIn()
+        harness.manager.recordPushEndpoint(INSTANCE, ENDPOINT)
+        connect(harness)
+        assertEquals(PushStatus.ACTIVE, harness.status())
+
+        harness.factory.onCreate = {
+            it.push.vapid = WaddlePushVapidLookup.Advertised(publicKey = "BNEW", kid = "kid-2")
+        }
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        harness.manager.requestReconnect()
+        runCurrent()
+        connect(harness)
+
+        assertEquals(
+            "pushes signed with the new key no longer reach the old endpoint",
+            PushStatus.PENDING,
+            harness.status(),
+        )
+        harness.manager.logout()
+    }
+
+    @Test
     fun `another account's endpoint callback is ignored`() = runTest {
         val harness = signedIn()
 

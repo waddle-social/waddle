@@ -8,6 +8,8 @@ import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.android.client.calls.CallState
+import social.waddle.client.ffi.WaddleCallMedia
 
 /** What holds the stream open, and that letting go waits out a grace period. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -83,6 +85,19 @@ class ConnectionDemandTest {
         advanceTimeBy(GRACE * 2)
         runCurrent()
         assertFalse(demand.wanted.value)
+    }
+
+    @Test
+    fun `only ringing or live calls need the stream`() {
+        val incoming = CallState.Incoming(
+            from = "alice@waddle.test/phone",
+            sid = "s",
+            media = WaddleCallMedia(audio = true, video = false),
+        )
+        assertTrue(incoming.needsStream())
+        val ended = CallState.Ended(sid = "s", reason = null)
+        assertFalse("an ended call waits for dismissal forever", ended.needsStream())
+        assertFalse(CallState.Idle.needsStream())
     }
 
     private companion object {

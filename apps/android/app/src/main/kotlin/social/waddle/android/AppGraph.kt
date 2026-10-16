@@ -35,7 +35,6 @@ import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
-import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
@@ -57,6 +56,7 @@ import social.waddle.android.jid.localpartOf
 import social.waddle.android.push.ConnectionDemand
 import social.waddle.android.push.PushDistributor
 import social.waddle.android.push.PushMessageHandler
+import social.waddle.android.push.needsStream
 import social.waddle.android.push.pushSummaryOf
 import social.waddle.android.service.CallNotifier
 import social.waddle.android.service.ConnectionServiceController
@@ -131,16 +131,20 @@ class AppGraph(
     )
 
     /** Push delivery for the signed-in account, known from disk on a cold start. */
-    val pushStatus: StateFlow<PushStatus> =
+    val pushStatus: StateFlow<PushStatus?> =
         combine(sessionManager.pushState, sessionPrefs.ownerBareJid, ::pushStatusOf)
-            .stateIn(applicationScope, SharingStarted.Eagerly, PushStatus.NONE)
+            .stateIn(applicationScope, SharingStarted.Eagerly, null)
 
     /**
      * Whether to hold the stream in the background: the user's choice, or
      * by default whenever push is not delivering. `null` until loaded.
      */
     val stayConnected: StateFlow<Boolean?> =
-        combine(userPrefs.stayConnected, pushStatus) { choice, status -> choice ?: (status != PushStatus.ACTIVE) }
+        // Unknown until BOTH stores have loaded: guessing from one would
+        // briefly hold the stream (or start the service) in push mode.
+        combine(userPrefs.stayConnected, pushStatus) { choice, status ->
+            status?.let { choice ?: (it != PushStatus.ACTIVE) }
+        }
             .stateIn(applicationScope, SharingStarted.Eagerly, null)
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
@@ -267,7 +271,9 @@ class AppGraph(
             stayConnected.filterNotNull().collect(connectionDemand::setStayConnected)
         }
         applicationScope.launch {
-            sessionManager.callStore.state.collect { connectionDemand.setCallActive(it != CallState.Idle) }
+            // An ended call waits in its slot until the UI dismisses it;
+            // only ringing or live calls need signalling.
+            sessionManager.callStore.state.collect { connectionDemand.setCallActive(it.needsStream()) }
         }
         // A newly learned or rotated server key needs a fresh endpoint.
         applicationScope.launch {

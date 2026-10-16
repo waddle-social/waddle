@@ -11,6 +11,7 @@ import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.transformLatest
 import kotlinx.coroutines.flow.update
+import social.waddle.android.client.calls.CallState
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
@@ -79,7 +80,19 @@ class ConnectionDemand(
     }
 
     companion object {
-        /** How long the stream outlives the last thing that needed it. */
-        const val GRACE_MILLIS = 30_000L
+        /**
+         * How long the stream outlives the last thing that needed it:
+         * covers a quick app switch, and stays well under the time after
+         * which Android freezes a cached process (a frozen process with an
+         * open socket would keep the server from pushing).
+         */
+        const val GRACE_MILLIS = 5_000L
     }
 }
+
+/**
+ * Whether a call in this state needs signalling over the stream. An
+ * ended call waits in its slot until the UI dismisses it, which may be
+ * never; it must not hold the stream.
+ */
+fun CallState.needsStream(): Boolean = this !is CallState.Idle && this !is CallState.Ended

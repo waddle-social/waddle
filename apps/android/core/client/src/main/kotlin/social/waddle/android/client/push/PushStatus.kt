@@ -31,6 +31,9 @@ fun pushStatusOf(state: PushState?, owner: String?): PushStatus {
     return when {
         mine.unsupported -> PushStatus.UNSUPPORTED
         endpoint == null -> PushStatus.NONE
+        // The server rotated its key: pushes it signs no longer reach the
+        // old endpoint until the distributor hands out a new one.
+        mine.advertised != null && endpoint.vapidKid != mine.advertised.kid -> PushStatus.PENDING
         device != null && device.enabled && device.endpoint == endpoint -> PushStatus.ACTIVE
         mine.failed -> PushStatus.FAILED
         else -> PushStatus.PENDING

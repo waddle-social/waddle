@@ -26,8 +26,11 @@ class ReplyReceiver : BroadcastReceiver() {
         val isGroupchat = intent.getBooleanExtra(EXTRA_IS_GROUPCHAT, false)
 
         val graph = (context.applicationContext as WaddleApplication).graph
-        // Without push-mode demand the stream may be closed: hold it open
-        // until the reply is acknowledged (or the hold times out).
+        // In push mode the stream may be closed: hold it open until the
+        // reply is acknowledged. The receiver stays unfinished for that
+        // long too, which keeps the process active: a finished receiver
+        // leaves a cached process that Android may freeze while its open
+        // socket keeps the server from pushing.
         val hold = graph.holdConnection()
         val pendingResult = goAsync()
         graph.applicationScope.launch {
@@ -44,11 +47,13 @@ class ReplyReceiver : BroadcastReceiver() {
                             graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
                         }
                     }
+                // A reply not acknowledged in time stays queued and goes
+                // out with the next connection.
+                runCatching { awaitAcknowledged(graph, queuedId) }
             } finally {
+                hold.release()
                 pendingResult.finish()
             }
-            awaitAcknowledged(graph, queuedId)
-            hold.release()
         }
     }
 
@@ -94,7 +99,7 @@ class ReplyReceiver : BroadcastReceiver() {
         const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.IS_GROUPCHAT"
         const val KEY_REPLY_TEXT = "waddle.reply.text"
 
-        /** Longest the stream is held open for one reply. */
-        private const val DELIVERY_HOLD_MILLIS = 30_000L
+        /** Within the receiver's ~10 s goAsync budget. */
+        private const val DELIVERY_HOLD_MILLIS = 9_000L
     }
 }

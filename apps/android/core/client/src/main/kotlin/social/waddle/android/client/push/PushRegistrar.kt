@@ -8,6 +8,7 @@ import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.client.prefs.PushDevice
 import social.waddle.android.client.prefs.PushDeviceRef
 import social.waddle.android.client.prefs.PushEndpoint
@@ -192,14 +193,20 @@ internal class PushRegistrar(
         return true
     }
 
-    /** One FFI call under [lease]; `null` when the session is gone or the call threw. */
+    /**
+     * One FFI call under [lease]; `null` when the session is gone, the call
+     * threw, or it outlived [CALL_TIMEOUT_MILLIS] (a hung IQ must neither
+     * stall the pass nor hold up the attempt it runs on).
+     */
     private suspend fun <T : Any> call(lease: ActiveSession.OwnerLease, op: suspend (WaddleClientInterface) -> T): T? =
         try {
-            when (val invocation = activeSession.invokeIfCurrent(lease, op)) {
-                ActiveSession.LeaseInvocation.Stale,
-                ActiveSession.LeaseInvocation.NotConnected,
-                -> null
-                is ActiveSession.LeaseInvocation.Completed -> invocation.value
+            withTimeoutOrNull(CALL_TIMEOUT_MILLIS) {
+                when (val invocation = activeSession.invokeIfCurrent(lease, op)) {
+                    ActiveSession.LeaseInvocation.Stale,
+                    ActiveSession.LeaseInvocation.NotConnected,
+                    -> null
+                    is ActiveSession.LeaseInvocation.Completed -> invocation.value
+                }
             }
         } catch (cancellation: CancellationException) {
             throw cancellation
@@ -223,6 +230,9 @@ internal class PushRegistrar(
 
         /** Bounded so a long-unreachable service cannot grow the state forever. */
         const val MAX_PENDING_DISABLES = 16
+
+        /** Per IQ; the XEP-0050 exchanges take a few round trips. */
+        const val CALL_TIMEOUT_MILLIS = 20_000L
     }
 }
 

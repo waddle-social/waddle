@@ -97,6 +97,9 @@ class MessageNotifier(
      */
     private val liveItems = LinkedHashSet<String>()
 
+    /** Conversations showing a push summary (not a live notification). */
+    private val summaryKinds = HashMap<String, SummaryKind>()
+
     fun start(scope: CoroutineScope) {
         scope.launch {
             events.collect { event ->
@@ -170,6 +173,7 @@ class MessageNotifier(
                 history.clear()
                 displayedTargets.clear()
                 liveItems.clear()
+                summaryKinds.clear()
             }
             replyDeliveries.clear()
             NotificationManagerCompat.from(context).cancelAll()
@@ -182,6 +186,7 @@ class MessageNotifier(
             synchronized(historyLock) {
                 history.remove(conversationJid)
                 displayedTargets.remove(conversationJid)
+                summaryKinds.remove(conversationJid)
             }
             NotificationManagerCompat.from(context)
                 .cancel(conversationJid, MESSAGE_NOTIFICATION_ID)
@@ -193,6 +198,7 @@ class MessageNotifier(
         synchronized(historyLock) {
             history.remove(conversationJid)
             displayedTargets.remove(conversationJid)
+            summaryKinds.remove(conversationJid)
         }
     }
 
@@ -210,6 +216,8 @@ class MessageNotifier(
             decision.displayedTarget?.let { target ->
                 synchronized(historyLock) { displayedTargets[decision.conversationJid] = target }
             }
+            // The live notification replaces any summary for the conversation.
+            synchronized(historyLock) { summaryKinds.remove(decision.conversationJid) }
             val messages = appendToHistory(decision.conversationJid, entry)
             val silent = !userPrefs.messageSoundsEnabled.first()
             postNotification(
@@ -236,44 +244,65 @@ class MessageNotifier(
 
     /**
      * A content-free push (the payload names the conversation, never the
-     * message): post a summary unless the live path already handled
-     * [item] or a richer notification for the conversation is showing.
-     * Under [postMutex] like every post, so it cannot race sign-out's
-     * clear or a live notification for the same conversation.
+     * message). Skipped when the live path already handled [item]; under
+     * [postMutex] like every post, so it cannot race sign-out's clear or a
+     * live notification for the same conversation.
+     *
+     * When a live MessagingStyle notification for the conversation is in
+     * this process, the summary joins its history (keeping its content
+     * and actions) instead of replacing it. Otherwise it posts or updates
+     * a summary notification; an update alerts again only when a mention
+     * follows plain messages.
      */
     override suspend fun postPushSummary(summary: PushSummary) = postMutex.withLock {
         if (handledLive(summary.item)) return@withLock
-        val showing = NotificationManagerCompat.from(context).activeNotifications
-            .any { it.tag == summary.conversationJid && it.id == MESSAGE_NOTIFICATION_ID }
-        if (showing) return@withLock
         val granted = ContextCompat.checkSelfPermission(
             context,
             Manifest.permission.POST_NOTIFICATIONS,
         ) == PackageManager.PERMISSION_GRANTED
         if (!granted) return@withLock
-        val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
-            .setSmallIcon(R.drawable.ic_stat_waddle)
-            .setContentTitle(summary.title)
-            .setContentText(summary.text)
-            .setGroup(summary.conversationJid)
-            .setAutoCancel(true)
-            .setOnlyAlertOnce(true)
-            .setSilent(!userPrefs.messageSoundsEnabled.first())
-            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-            .setPriority(
-                if (summary.isMention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT,
-            )
-            .setContentIntent(contentIntent(summary.conversationJid))
-            .addAction(replyAction(summary.conversationJid, summary.isGroupchat))
-            .addAction(markReadAction(summary.conversationJid, summary.isGroupchat, displayedTarget = null))
-            .setDeleteIntent(dismissIntent(summary.conversationJid))
-        NotificationManagerCompat.from(context)
-            .notify(summary.conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
+        val conversationJid = summary.conversationJid
+        val silent = !userPrefs.messageSoundsEnabled.first()
+        val liveHistory = synchronized(historyLock) { history[conversationJid]?.isNotEmpty() == true }
+        if (liveHistory) {
+            val sender = Person.Builder().setName(summary.title).setKey(summary.title).build()
+            val entry = NotificationCompat.MessagingStyle.Message(summary.text, System.currentTimeMillis(), sender)
+            val messages = appendToHistory(conversationJid, entry)
+            postNotification(conversationJid, summary.isGroupchat, messages, silent, mention = summary.isMention)
+        } else {
+            val previous = synchronized(historyLock) { summaryKinds[conversationJid] }
+            val alert = previous == null || (summary.isMention && previous == SummaryKind.MESSAGES)
+            val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
+                .setSmallIcon(R.drawable.ic_stat_waddle)
+                .setContentTitle(summary.title)
+                .setContentText(summary.text)
+                .setGroup(conversationJid)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(!alert)
+                .setSilent(silent)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setPriority(
+                    if (summary.isMention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT,
+                )
+                .setContentIntent(contentIntent(conversationJid))
+                // No mark-read action: a summary names no message, so there
+                // is no marker to send.
+                .addAction(replyAction(conversationJid, summary.isGroupchat))
+                .setDeleteIntent(dismissIntent(conversationJid))
+            NotificationManagerCompat.from(context).notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
+            synchronized(historyLock) {
+                val mentioned = summary.isMention || previous == SummaryKind.MENTION
+                summaryKinds[conversationJid] = if (mentioned) SummaryKind.MENTION else SummaryKind.MESSAGES
+            }
+        }
         synchronized(historyLock) {
             liveItems += summary.item
             while (liveItems.size > MAX_LIVE_ITEMS) liveItems.remove(liveItems.first())
         }
     }
+
+    /** What a showing summary notification already announced. */
+    private enum class SummaryKind { MESSAGES, MENTION }
 
     private fun appendToHistory(
         conversationJid: String,

@@ -12,8 +12,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.ui.platform.LocalView
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowInsetsControllerCompat
+import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.drop
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.launch
 import social.waddle.android.avatar.LocalPeerAvatars
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.theme.WaddleTheme
@@ -57,6 +65,7 @@ class MainActivity : ComponentActivity() {
             pendingCallAnswer.value = true
         }
         intent.removeExtra(EXTRA_ANSWER_CALL)
+        watchPushKey(graph)
         setContent {
             val themeMode by graph.userPrefs.theme
                 .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
@@ -96,6 +105,24 @@ class MainActivity : ComponentActivity() {
         // Foreground is the one place a distributor may be chosen (it can
         // show UI); UnifiedPush also asks for a register on every start.
         (application as WaddleApplication).graph.pushDistributor.onForeground(this)
+    }
+
+    /**
+     * The server key is only learned once a stream is ready, often after
+     * onStart (first sign-in, sign-in after sign-out): run the foreground
+     * registration again when it appears or changes while started.
+     */
+    private fun watchPushKey(graph: AppGraph) {
+        lifecycleScope.launch {
+            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                graph.sessionManager.pushState
+                    .map { it?.advertised?.kid }
+                    .distinctUntilChanged()
+                    .drop(1)
+                    .filterNotNull()
+                    .collect { graph.pushDistributor.onForeground(this@MainActivity) }
+            }
+        }
     }
 
     override fun onSaveInstanceState(outState: Bundle) {

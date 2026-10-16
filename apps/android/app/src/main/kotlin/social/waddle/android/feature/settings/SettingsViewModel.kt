@@ -47,7 +47,8 @@ data class DeliveryUiState(
 
 /** The push side of Settings, from the graph (absent in plain unit tests). */
 class DeliverySource(
-    val pushStatus: StateFlow<PushStatus>,
+    /** `null` until loaded. */
+    val pushStatus: StateFlow<PushStatus?>,
     val distributorLabel: StateFlow<String?>,
     val distributorInstalled: StateFlow<Boolean>,
     val stayConnected: StateFlow<Boolean?>,
@@ -68,7 +69,8 @@ class SettingsViewModel(
             delivery.distributorLabel,
             delivery.distributorInstalled,
             delivery.stayConnected,
-        ) { status, label, installed, stay ->
+        ) { loaded, label, installed, stay ->
+            val status = loaded ?: PushStatus.NONE
             DeliveryUiState(
                 status = status,
                 distributorLabel = label,
