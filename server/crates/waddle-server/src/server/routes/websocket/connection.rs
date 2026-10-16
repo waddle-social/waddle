@@ -730,23 +730,74 @@ async fn handle_xmpp_websocket(
         }
     }
 
+    finish_connection(
+        &state,
+        &mut conn,
+        ws_sender.uninterrupted(),
+        FrameAuthority {
+            permit: &admission_permit,
+            shutdown: &shutdown_token,
+        },
+        superseded,
+        ConnectionShutdownChannels {
+            outbound_rx: &mut outbound_rx,
+            handoff_rx: &mut handoff_rx,
+            force_detach_rx: &mut force_detach_rx,
+            pending_force_detach: &mut pending_force_detach,
+        },
+    )
+    .await;
+}
+
+/// Channel state carried from the live loop into its connection-owned shutdown.
+pub(super) struct ConnectionShutdownChannels<'a> {
+    pub(super) outbound_rx: &'a mut mpsc::Receiver<OutboundStanza>,
+    pub(super) handoff_rx: &'a mut mpsc::UnboundedReceiver<
+        crate::server::routes::interpret::OrderedRelayHandoffCompletion,
+    >,
+    pub(super) force_detach_rx:
+        &'a mut Option<mpsc::Receiver<waddle_xmpp::registry::ForceDetachRequest>>,
+    pub(super) pending_force_detach: &'a mut Vec<waddle_xmpp::registry::ForceDetachRequest>,
+}
+
+/// Complete the connection-owned shutdown after the live loop stops.
+/// The sender must bypass live-write interruption so a queued detach request
+/// can still receive its bounded best-effort conflict close.
+pub(super) async fn finish_connection<S, E>(
+    state: &Arc<WebSocketState>,
+    conn: &mut WsConnState,
+    ws_sender: &mut S,
+    authority: FrameAuthority<'_>,
+    mut superseded: bool,
+    channels: ConnectionShutdownChannels<'_>,
+) where
+    S: Sink<Message, Error = E> + Unpin,
+    E: super::send::WebSocketWriteError,
+{
+    let FrameAuthority {
+        permit: admission_permit,
+        shutdown: shutdown_token,
+    } = authority;
+    let ConnectionShutdownChannels {
+        outbound_rx,
+        handoff_rx,
+        force_detach_rx,
+        pending_force_detach,
+    } = channels;
+    let domain = &state.deps.auth_state.xmpp_domain;
+
     // A blocked ready/flush can end the loop before its queued control arm
     // runs. Collect that request before any deferred old-client input can
     // mutate state that is about to be resumed elsewhere.
     if let Some(bound_bare) = conn.phase.bound_jid().map(|jid| jid.to_bare()) {
         let was_detaching = !pending_force_detach.is_empty();
         pending_force_detach.extend(drain_ready_force_detach_requests(
-            &mut force_detach_rx,
+            force_detach_rx,
             &bound_bare,
         ));
         if !was_detaching && !pending_force_detach.is_empty() {
-            close_live_session_for_force_detach(
-                ws_sender.uninterrupted(),
-                &conn,
-                &admission_permit,
-                &shutdown_token,
-            )
-            .await;
+            close_live_session_for_force_detach(ws_sender, conn, admission_permit, shutdown_token)
+                .await;
         }
     }
 
@@ -780,15 +831,15 @@ async fn handle_xmpp_websocket(
         // release-retry janitor while admitted submissions are in flight.
     } else {
         settle_deferred_inbound_before_cleanup(
-            &domain,
-            &state,
-            &mut conn,
-            &admission_permit,
-            &shutdown_token,
-            &pending_force_detach,
+            domain,
+            state,
+            conn,
+            admission_permit,
+            shutdown_token,
+            pending_force_detach,
         )
         .await;
-        drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn).await;
+        drain_ordered_relay_handoffs_before_cleanup(handoff_rx, conn).await;
     }
 
     // Connection is ending. Decide between two paths:
@@ -810,7 +861,7 @@ async fn handle_xmpp_websocket(
     if !pending_force_detach.is_empty() {
         if let Some(bound_bare) = conn.phase.bound_jid().map(|jid| jid.to_bare()) {
             pending_force_detach.extend(drain_ready_force_detach_requests(
-                &mut force_detach_rx,
+                force_detach_rx,
                 &bound_bare,
             ));
         }
@@ -818,18 +869,18 @@ async fn handle_xmpp_websocket(
     let shutdown_outcome = if !pending_force_detach.is_empty() {
         cleanup_force_detach_shutdown_with_late_waiter_service(
             state.as_ref(),
-            &mut outbound_rx,
-            &mut conn,
+            outbound_rx,
+            conn,
             superseded,
-            &mut force_detach_rx,
-            &mut pending_force_detach,
+            force_detach_rx,
+            pending_force_detach,
         )
         .await
     } else {
-        cleanup_connection_shutdown(state.as_ref(), &mut outbound_rx, &mut conn, superseded).await
+        cleanup_connection_shutdown(state.as_ref(), outbound_rx, conn, superseded).await
     };
-    finalize_replay_recorded_completions(&state, &mut conn, shutdown_outcome);
-    cleanup::finish_socket_cleanup(&state, &conn, shutdown_outcome).await;
+    finalize_replay_recorded_completions(state, conn, shutdown_outcome);
+    cleanup::finish_socket_cleanup(state, conn, shutdown_outcome).await;
 
     // ADR-0017 Phase 3 Slice 6: only now — after this connection's own
     // detach-for-resume persistence has actually run above — tell the
@@ -840,7 +891,7 @@ async fn handle_xmpp_websocket(
     // `steal_for_resume` against a snapshot that was never persisted (a
     // storage-error fallback, an ownership-race promotion, or any other
     // non-detach cleanup path).
-    ack_force_detach_requests(pending_force_detach, shutdown_outcome);
+    ack_force_detach_requests(std::mem::take(pending_force_detach), shutdown_outcome);
 
     info!("XMPP WebSocket connection closed");
 }

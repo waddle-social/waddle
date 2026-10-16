@@ -51,15 +51,12 @@ pub struct ConnectionRegistry {
     last_activity: DashMap<BareJid, LastActivityState>,
     /// Server start time used for XEP-0012 uptime responses.
     started_at: Instant,
-    /// Best-effort reverse index from XEP-0198 SM stream id to the full JID
-    /// currently publishing it (ADR-0017 Phase 3 Slice 6). "Best-effort":
-    /// entries are never proactively swept on every connection teardown
-    /// path, so a caller MUST re-verify the returned JID's own
-    /// `ConnectionEntry::sm_stream_id()` still matches before acting on
-    /// it — see [`Self::sm_stream_owner`]'s doc comment. Used by the
-    /// cross-node resume bridge to find which live connection (if any) to
-    /// ask to force-detach.
-    sm_stream_owners: DashMap<crate::pending_delivery::SmSessionId, FullJid>,
+    /// Reverse index from XEP-0198 SM stream id to its publishing full JID
+    /// (ADR-0017 Phase 3 Slice 6). Replacement and teardown prune entries
+    /// while holding the connection slot's exclusive guard. Lookups remain
+    /// best-effort snapshots: the cross-node resume bridge must re-verify the
+    /// connection's own SM id before requesting force-detach.
+    sm_stream_owners: Arc<DashMap<crate::pending_delivery::SmSessionId, FullJid>>,
 }
 
 impl ConnectionRegistry {
@@ -73,7 +70,20 @@ impl ConnectionRegistry {
             presence_states: Arc::new(DashMap::new()),
             last_activity: DashMap::new(),
             started_at: Instant::now(),
-            sm_stream_owners: DashMap::new(),
+            sm_stream_owners: Arc::new(DashMap::new()),
+        }
+    }
+
+    /// Prune under the connection's exclusive map guard, before releasing its
+    /// slot. Otherwise a resumed same-JID successor could republish the same
+    /// stream id before an old teardown removes its reverse mapping.
+    fn remove_sm_stream_owner(
+        sm_stream_owners: &DashMap<crate::pending_delivery::SmSessionId, FullJid>,
+        jid: &FullJid,
+        entry: &ConnectionEntry,
+    ) {
+        if let Some(stream_id) = entry.sm_stream_id() {
+            sm_stream_owners.remove_if(&stream_id, |_, owner| owner == jid);
         }
     }
 
@@ -87,21 +97,16 @@ impl ConnectionRegistry {
         jid: &FullJid,
         stream_id: Option<crate::pending_delivery::SmSessionId>,
     ) {
-        let Some(entry) = self.connections.get(jid) else {
+        let Some(entry) = self.connections.get_mut(jid) else {
             return;
         };
-        if let Some(previous) = entry.sm_stream_id() {
-            self.sm_stream_owners.remove(&previous);
-        }
+        Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, &entry);
         entry.set_sm_stream_id(stream_id.clone());
         if let Some(stream_id) = stream_id {
             self.sm_stream_owners.insert(stream_id, jid.clone());
         }
     }
 
-    /// Publish an SM stream id only while `owner` still owns the full-JID
-    /// slot. The connection entry guard serializes the ownership check,
-    /// entry update, and reverse-index update against same-JID replacement.
     /// Publish `generation` onto `jid`'s entry, owner-gated like the SM
     /// stream id: a racing same-FullJID replacement keeps its own (#1703).
     pub fn set_occupancy_session_if_owner(
@@ -132,21 +137,22 @@ impl ConnectionRegistry {
             .and_then(|entry| entry.occupancy_session())
     }
 
+    /// Publish an SM stream id only while `owner` still owns the full-JID
+    /// slot. The exclusive connection guard serializes ownership checks and
+    /// both indexes' updates against setters, replacement, and teardown.
     pub fn set_sm_stream_id_if_owner(
         &self,
         jid: &FullJid,
         owner: &Arc<AtomicBool>,
         stream_id: Option<crate::pending_delivery::SmSessionId>,
     ) -> bool {
-        let Some(entry) = self.connections.get(jid) else {
+        let Some(entry) = self.connections.get_mut(jid) else {
             return false;
         };
         if !Arc::ptr_eq(&entry.carbons_enabled, owner) {
             return false;
         }
-        if let Some(previous) = entry.sm_stream_id() {
-            self.sm_stream_owners.remove(&previous);
-        }
+        Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, &entry);
         entry.set_sm_stream_id(stream_id.clone());
         if let Some(stream_id) = stream_id {
             self.sm_stream_owners.insert(stream_id, jid.clone());
@@ -155,11 +161,10 @@ impl ConnectionRegistry {
     }
 
     /// Look up which full JID currently publishes `stream_id`, if any
-    /// (ADR-0017 Phase 3 Slice 6). **Best-effort**: this index is not
-    /// proactively swept on every teardown path, so callers MUST re-verify
-    /// the returned entry's `ConnectionEntry::sm_stream_id()` still equals
-    /// `stream_id` before acting on it (a stale reverse-index hit is always
-    /// safely detectable this way, never silently acted upon).
+    /// (ADR-0017 Phase 3 Slice 6). **Best-effort**: a connection can change
+    /// after this snapshot, so callers MUST re-verify the returned entry's
+    /// `ConnectionEntry::sm_stream_id()` still equals `stream_id` before
+    /// acting on it.
     pub fn sm_stream_owner(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,

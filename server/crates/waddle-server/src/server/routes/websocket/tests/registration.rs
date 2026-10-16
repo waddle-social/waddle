@@ -66,6 +66,10 @@ use xmpp_parsers::minidom::Element;
 #[path = "registration_owner_local.rs"]
 mod owner_local;
 
+#[cfg(feature = "clustering")]
+#[path = "registration_remote_retirement.rs"]
+mod remote_retirement;
+
 #[tokio::test]
 async fn paused_local_mirror_releases_the_only_main_pool_connection() {
     use super::super::registration::LOCAL_PUBLICATION_GATE;

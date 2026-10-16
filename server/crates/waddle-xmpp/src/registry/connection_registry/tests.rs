@@ -821,6 +821,243 @@ fn test_try_send_to_load_reports_single_delivery_then_drops() {
     assert_eq!(dropped_full, 31);
 }
 
+#[test]
+fn unregister_prunes_sm_stream_owner() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+    let (tx, _rx) = mpsc::channel(4);
+    registry.register(jid.clone(), tx);
+    let stream_id = crate::pending_delivery::SmSessionId::new("ended-stream");
+    registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
+    assert_eq!(registry.sm_stream_owner(&stream_id), Some(jid.clone()));
+
+    assert!(registry.unregister(&jid).is_some());
+
+    assert_eq!(registry.sm_stream_owner(&stream_id), None);
+}
+
+#[test]
+fn guarded_unregister_prunes_sm_stream_owner() {
+    for expires in [false, true] {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("alice");
+        let (tx, _rx) = mpsc::channel(4);
+        let owner = registry.register(jid.clone(), tx);
+        let stream_id = crate::pending_delivery::SmSessionId::new("ended-stream");
+        assert!(registry.set_sm_stream_id_if_owner(&jid, &owner, Some(stream_id.clone())));
+
+        let removed = if expires {
+            registry.unregister_if_sm_stream_id(&jid, &stream_id)
+        } else {
+            // Terminal logout uses the connection's owner token.
+            registry.unregister_if_owner(&jid, &owner)
+        };
+
+        assert!(removed.is_some());
+        assert_eq!(registry.sm_stream_owner(&stream_id), None);
+    }
+}
+
+#[test]
+fn sm_stream_replacement_prunes_ended_owner() {
+    for registration in 0..3 {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("alice");
+        let (tx, _rx) = mpsc::channel(4);
+        let owner = registry.register(jid.clone(), tx);
+        let stream_id = crate::pending_delivery::SmSessionId::new("replaced-stream");
+        registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
+        let (replacement_tx, _replacement_rx) = mpsc::channel(4);
+
+        match registration {
+            0 => {
+                registry.register(jid.clone(), replacement_tx);
+            }
+            1 => {
+                registry.register_entry(jid.clone(), ConnectionEntry::new(replacement_tx));
+            }
+            _ => {
+                let mut replacement = ConnectionEntry::new(replacement_tx);
+                replacement.carbons_enabled = owner.clone();
+                assert!(registry.register_entry_if_owner_or_absent(
+                    jid.clone(),
+                    replacement,
+                    &owner
+                ));
+            }
+        }
+
+        assert!(registry.is_connected(&jid));
+        assert_eq!(registry.sm_stream_owner(&stream_id), None);
+    }
+}
+
+#[test]
+fn sm_stream_clear_preserves_reassigned_owner() {
+    for owner_gated in [false, true] {
+        let registry = ConnectionRegistry::new();
+        let previous_jid = test_jid("alice");
+        let successor_jid = test_jid("bob");
+        let (previous_tx, _previous_rx) = mpsc::channel(4);
+        let owner = registry.register(previous_jid.clone(), previous_tx);
+        let (successor_tx, _successor_rx) = mpsc::channel(4);
+        registry.register(successor_jid.clone(), successor_tx);
+        let stream_id = crate::pending_delivery::SmSessionId::new("reassigned-stream");
+        registry.set_sm_stream_id(&previous_jid, Some(stream_id.clone()));
+        registry.set_sm_stream_id(&successor_jid, Some(stream_id.clone()));
+
+        if owner_gated {
+            assert!(registry.set_sm_stream_id_if_owner(&previous_jid, &owner, None));
+        } else {
+            registry.set_sm_stream_id(&previous_jid, None);
+        }
+
+        assert_eq!(registry.sm_stream_owner(&stream_id), Some(successor_jid));
+        assert_eq!(
+            registry.get_entry(&previous_jid).unwrap().sm_stream_id(),
+            None
+        );
+    }
+}
+
+#[test]
+fn sm_stream_closed_send_eviction_prunes_owner() {
+    for send_path in 0..3 {
+        let registry = ConnectionRegistry::new();
+        let jid = test_jid("alice");
+        let (tx, rx) = mpsc::channel(4);
+        let owner = registry.register(jid.clone(), tx);
+        let stream_id = crate::pending_delivery::SmSessionId::new("closed-stream");
+        registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
+        drop(rx);
+        let stanza = Stanza::Message(make_test_message("alice@example.com"));
+
+        let outcome = match send_path {
+            0 => registry.try_send_to(&jid, stanza),
+            1 => registry.try_send_outbound_if_owner(&jid, &owner, OutboundStanza::new(stanza)),
+            _ => registry.capture_owned_enqueue_if_owner(
+                jid.clone(),
+                owner,
+                OutboundStanza::new(stanza),
+            )(),
+        };
+
+        assert_eq!(outcome, BroadcastOutcome::DroppedClosed);
+        assert!(!registry.is_connected(&jid));
+        assert_eq!(registry.sm_stream_owner(&stream_id), None);
+    }
+}
+
+#[test]
+fn sm_stream_resumed_successor_rejects_stale_owner_cleanup() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("alice");
+    let (old_tx, _old_rx) = mpsc::channel(4);
+    let old_owner = registry.register(jid.clone(), old_tx);
+    let stream_id = crate::pending_delivery::SmSessionId::new("resumed-stream");
+    registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
+    let old_enqueue = registry.capture_owned_enqueue_if_owner(
+        jid.clone(),
+        old_owner.clone(),
+        OutboundStanza::new(Stanza::Message(make_test_message("alice@example.com"))),
+    );
+    let (new_tx, _new_rx) = mpsc::channel(4);
+    let new_owner = registry.register(jid.clone(), new_tx);
+    assert!(registry.set_sm_stream_id_if_owner(&jid, &new_owner, Some(stream_id.clone())));
+
+    assert!(registry.unregister_if_owner(&jid, &old_owner).is_none());
+    assert!(!registry.set_sm_stream_id_if_owner(&jid, &old_owner, None));
+    assert_eq!(old_enqueue(), BroadcastOutcome::NotConnected);
+    assert!(registry.is_owned_by(&jid, &new_owner));
+    assert_eq!(registry.sm_stream_owner(&stream_id), Some(jid));
+}
+
+#[test]
+fn sm_stream_unregister_preserves_reassigned_owner() {
+    let registry = ConnectionRegistry::new();
+    let previous_jid = test_jid("alice");
+    let successor_jid = test_jid("bob");
+    let (previous_tx, _previous_rx) = mpsc::channel(4);
+    registry.register(previous_jid.clone(), previous_tx);
+    let (successor_tx, _successor_rx) = mpsc::channel(4);
+    registry.register(successor_jid.clone(), successor_tx);
+    let stream_id = crate::pending_delivery::SmSessionId::new("reassigned-stream");
+    registry.set_sm_stream_id(&previous_jid, Some(stream_id.clone()));
+    registry.set_sm_stream_id(&successor_jid, Some(stream_id.clone()));
+
+    assert!(registry.unregister(&previous_jid).is_some());
+
+    assert_eq!(registry.sm_stream_owner(&stream_id), Some(successor_jid));
+}
+
+#[test]
+fn sm_stream_cleanup_keeps_connection_locked_until_reverse_owner_is_pruned() {
+    use dashmap::try_result::TryResult;
+    use std::sync::mpsc as sync_mpsc;
+    use std::thread;
+
+    let registry = Arc::new(ConnectionRegistry::new());
+    let jid = test_jid("alice");
+    let (old_tx, _old_rx) = mpsc::channel(4);
+    let old_owner = registry.register(jid.clone(), old_tx);
+    let stream_id = crate::pending_delivery::SmSessionId::new("resumed-stream");
+    registry.set_sm_stream_id(&jid, Some(stream_id.clone()));
+
+    // Pause pruning at its reverse-index lock. A successor must not gain the
+    // connection slot until this old generation's pruning has finished.
+    let reverse_guard = registry.sm_stream_owners.get_mut(&stream_id).unwrap();
+    let cleanup_registry = registry.clone();
+    let cleanup_jid = jid.clone();
+    let cleanup =
+        thread::spawn(move || cleanup_registry.unregister_if_owner(&cleanup_jid, &old_owner));
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let connection_locked = loop {
+        match registry.connections.try_get(&jid) {
+            TryResult::Locked => break true,
+            TryResult::Absent => break false,
+            TryResult::Present(entry) => drop(entry),
+        }
+        if Instant::now() >= deadline {
+            break false;
+        }
+        thread::yield_now();
+    };
+    if !connection_locked {
+        drop(reverse_guard);
+        cleanup.join().unwrap();
+        panic!("cleanup released the connection slot before pruning its SM owner");
+    }
+
+    let successor_registry = registry.clone();
+    let successor_jid = jid.clone();
+    let successor_stream_id = stream_id.clone();
+    let (started_tx, started_rx) = sync_mpsc::channel();
+    let (new_tx, _new_rx) = mpsc::channel(4);
+    let successor = thread::spawn(move || {
+        started_tx.send(()).unwrap();
+        let owner = successor_registry.register(successor_jid.clone(), new_tx);
+        assert!(successor_registry.set_sm_stream_id_if_owner(
+            &successor_jid,
+            &owner,
+            Some(successor_stream_id)
+        ));
+        owner
+    });
+    let successor_started = started_rx.recv_timeout(Duration::from_secs(5));
+    drop(reverse_guard);
+    let removed = cleanup.join().unwrap();
+    let new_owner = successor.join().unwrap();
+
+    successor_started.unwrap();
+    assert!(removed.is_some());
+    assert!(registry.is_owned_by(&jid, &new_owner));
+    assert_eq!(
+        registry.get_entry(&jid).unwrap().sm_stream_id(),
+        Some(stream_id.clone())
+    );
+    assert_eq!(registry.sm_stream_owner(&stream_id), Some(jid));
+}
+
 /// ADR-0017 Phase 1 (Greptile P1 on PR #1177): the SM-expiry janitor must not
 /// evict a live REPLACEMENT session. `unregister_if_sm_stream_id` removes the
 /// entry only when its published SM stream id matches the expired session's, so
