@@ -179,7 +179,7 @@ pub(crate) async fn request_local_forced_detach(
     // answers `NotLiveLocally` immediately rather than waiting on
     // capacity that may never free up, keeping this call's own budget
     // meaningful (a blocking send has no bound of its own).
-    if let Err(error) = entry.force_detach_sender().try_send(request) {
+    if let Err(error) = entry.try_force_detach_and_interrupt(request) {
         match error {
             tokio::sync::mpsc::error::TrySendError::Full(_) => {
                 tracing::debug!(
@@ -195,9 +195,6 @@ pub(crate) async fn request_local_forced_detach(
         }
         return LocalForcedDetachOutcome::NotLiveLocally;
     }
-    // Interrupt only this captured generation, after both authoritative
-    // identity checks and successful enqueue. A replacement has its own token.
-    entry.write_interruption.cancel();
     match tokio::time::timeout(budget, ack_rx).await {
         Ok(Ok(ForceDetachOutcome::Detached)) => LocalForcedDetachOutcome::Detached,
         Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => LocalForcedDetachOutcome::IdentityMismatch,

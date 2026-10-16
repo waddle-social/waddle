@@ -41,18 +41,20 @@ impl OrderedRelayDeliveryBridge {
                 for pending in &actor_retirements {
                     if pending.state() == SocketCleanupState::Running {
                         let (ack, _ack_rx) = tokio::sync::oneshot::channel();
-                        let _ = pending
-                            .entry
-                            .force_detach_sender()
-                            .try_send(ForceDetachRequest {
-                                origin: if pending.generation == generation {
-                                    ForceDetachOrigin::CrossNodeResume
-                                } else {
-                                    ForceDetachOrigin::FreshBindReplacement
-                                },
-                                requester_bare_jid: jid.to_bare(),
-                                ack,
-                            });
+                        let request = ForceDetachRequest {
+                            origin: if pending.generation == generation {
+                                ForceDetachOrigin::CrossNodeResume
+                            } else {
+                                ForceDetachOrigin::FreshBindReplacement
+                            },
+                            requester_bare_jid: jid.to_bare(),
+                            ack,
+                        };
+                        let _ = if pending.generation == generation {
+                            pending.entry.force_detach_sender().try_send(request)
+                        } else {
+                            pending.entry.try_force_detach_and_interrupt(request)
+                        };
                         // Route removal and the detach ACK can both precede
                         // handler shutdown. Only the lifecycle is proof.
                         pending.wait_stopped().await;
