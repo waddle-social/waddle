@@ -1124,6 +1124,10 @@ pub struct ServerConfig {
     /// when unset: the Push Service then records `apns-not-configured`
     /// for Apple devices instead of sending.
     pub apns: Option<crate::push_service::ApnsConfig>,
+    /// FCM provider configuration from `WADDLE_FCM_*` (#530). `None`
+    /// when unset: the Push Service then records `fcm-not-configured`
+    /// for Android devices instead of sending.
+    pub fcm: Option<crate::push_service::FcmConfig>,
 }
 
 /// Dedicated ingress authority transaction limits.
@@ -1590,6 +1594,7 @@ impl Default for ServerConfig {
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
             apns: None,
+            fcm: None,
         }
     }
 }
@@ -1621,6 +1626,7 @@ impl ServerConfig {
         let clustering = ClusteringConfig::from_env()?;
         let apns =
             crate::push_service::ApnsConfig::from_env().map_err(|error| error.to_string())?;
+        let fcm = crate::push_service::FcmConfig::from_env().map_err(|error| error.to_string())?;
 
         Ok(Self {
             mode,
@@ -1635,6 +1641,7 @@ impl ServerConfig {
             ingress,
             clustering,
             apns,
+            fcm,
         })
     }
 
@@ -1671,6 +1678,7 @@ impl ServerConfig {
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
             apns: None,
+            fcm: None,
         }
     }
 
@@ -1689,6 +1697,7 @@ impl ServerConfig {
             ingress: IngressConfig::default(),
             clustering: ClusteringConfig::default(),
             apns: None,
+            fcm: None,
         }
     }
 }

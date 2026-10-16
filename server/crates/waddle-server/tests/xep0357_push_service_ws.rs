@@ -275,7 +275,23 @@ async fn register_web_push_device_via_xep0050_with_device_id(
     p256dh: &str,
     auth: &str,
 ) -> RegisterDeviceOutcome {
-    // Stage 1 → 2: execute, expect status='executing' + sessionid.
+    register_device_via_xep0050(
+        client,
+        id_prefix,
+        &[
+            ("platform", "web"),
+            ("environment", "prod"),
+            ("app-id", app_id),
+            ("web-push-endpoint", endpoint),
+            ("web-push-p256dh", p256dh),
+            ("web-push-auth", auth),
+        ],
+    )
+    .await
+}
+
+/// Execute `register-device` and return the stage-2 sessionid.
+async fn open_register_device_session(client: &mut WsXmppClient, id_prefix: &str) -> String {
     let execute_id = format!("{id_prefix}-execute");
     let execute = command_element(REGISTER_DEVICE_NODE, "execute", None, None);
     let executing_response = send_iq(
@@ -291,25 +307,26 @@ async fn register_web_push_device_via_xep0050_with_device_id(
         Some("executing"),
         "stage 2 must carry status='executing': {executing_response}"
     );
-    let session_id = executing_command
+    executing_command
         .attr("sessionid")
         .expect("XEP-0050 §3 sessionid")
-        .to_string();
+        .to_string()
+}
+
+/// Drive the 4-stage `register-device` dance with a platform-specific
+/// submit form (`fields` excludes FORM_TYPE).
+async fn register_device_via_xep0050(
+    client: &mut WsXmppClient,
+    id_prefix: &str,
+    fields: &[(&str, &str)],
+) -> RegisterDeviceOutcome {
+    // Stage 1 → 2: execute, expect status='executing' + sessionid.
+    let session_id = open_register_device_session(client, id_prefix).await;
 
     // Stage 3 → 4: complete with the platform-discriminated form,
     // expect status='completed' + result form carrying `node`.
     let complete_id = format!("{id_prefix}-complete");
-    let form = submit_form(
-        REGISTER_DEVICE_FORM_TYPE,
-        &[
-            ("platform", "web"),
-            ("environment", "prod"),
-            ("app-id", app_id),
-            ("web-push-endpoint", endpoint),
-            ("web-push-p256dh", p256dh),
-            ("web-push-auth", auth),
-        ],
-    );
+    let form = submit_form(REGISTER_DEVICE_FORM_TYPE, fields);
     let complete = command_element(
         REGISTER_DEVICE_NODE,
         "complete",
@@ -1307,6 +1324,180 @@ async fn xep0050_register_device_completes_and_persists_device_row() {
         post_disable, 0,
         "disable-device flipped the only device on the node to 'disabled'"
     );
+
+    let _ = client.close().await;
+}
+
+/// #530: an Android device registers its FCM token and RFC 8291 envelope
+/// keys with the Push Service over XEP-0050; the Push Service seals each
+/// one in its own column, while the user server's XEP-0357 registration
+/// that follows stores only the service JID and node.
+#[tokio::test]
+async fn xep0050_fcm_registration_seals_credentials_and_xep0357_stays_provider_free() {
+    use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+    use base64::Engine as _;
+    use p256::elliptic_curve::sec1::ToEncodedPoint;
+
+    let temp_dir = tempfile::tempdir().expect("temp dir");
+    let db_path = temp_dir.path().join("xep0050-register-fcm.sqlite3");
+    let database_url = format!("sqlite://{}?mode=rwc", db_path.display());
+    let server = TestServer::start_persistent_with_extra_accounts(&database_url, &[]);
+    let password = server.fixed_account_password().to_string();
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        &password,
+        &format!("xep0050-register-fcm-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("websocket connection");
+
+    let fcm_token = "fcm-ws-token:APA91bExampleRegistrationToken";
+    let p256dh = URL_SAFE_NO_PAD.encode(
+        p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng)
+            .public_key()
+            .to_encoded_point(false)
+            .as_bytes(),
+    );
+    let auth = URL_SAFE_NO_PAD.encode(rand::random::<[u8; 16]>());
+
+    // Malformed envelope keys are refused at the form boundary.
+    let session_id = open_register_device_session(&mut client, "xep0050-fcm-bad").await;
+    let bad_form = submit_form(
+        REGISTER_DEVICE_FORM_TYPE,
+        &[
+            ("platform", "fcm"),
+            ("environment", "prod"),
+            ("app-id", "social.waddle.android"),
+            ("fcm-token", fcm_token),
+            ("fcm-p256dh", "not-a-p256-point"),
+            ("fcm-auth", &auth),
+        ],
+    );
+    let bad_complete = command_element(
+        REGISTER_DEVICE_NODE,
+        "complete",
+        Some(&session_id),
+        Some(bad_form),
+    );
+    let bad_response = send_iq(
+        &mut client,
+        iq_frame(
+            "set",
+            "xep0050-fcm-bad-complete",
+            PUSH_SERVICE_JID,
+            bad_complete,
+        ),
+        "xep0050-fcm-bad-complete",
+    )
+    .await;
+    assert_iq_error_condition(&bad_response, "xep0050-fcm-bad-complete", "bad-request");
+
+    let outcome = register_device_via_xep0050(
+        &mut client,
+        "xep0050-fcm",
+        &[
+            ("platform", "fcm"),
+            ("environment", "prod"),
+            ("app-id", "social.waddle.android"),
+            ("fcm-token", fcm_token),
+            ("fcm-p256dh", &p256dh),
+            ("fcm-auth", &auth),
+        ],
+    )
+    .await;
+
+    let pool = sqlx::SqlitePool::connect(&database_url)
+        .await
+        .expect("open sqlite db");
+    let row = sqlx::query(
+        "SELECT d.platform, d.provider_endpoint, d.provider_token, \
+                d.provider_key_material, d.provider_auth, n.app_id \
+         FROM push_devices d \
+         JOIN push_nodes n ON n.node = d.node \
+         WHERE d.node = ? AND d.device_id = ? AND d.status = 'active'",
+    )
+    .bind(&outcome.node)
+    .bind(&outcome.device_id)
+    .fetch_one(&pool)
+    .await
+    .expect("active FCM device row");
+    assert_eq!(row.get::<String, _>("platform"), "fcm");
+    assert_eq!(row.get::<String, _>("app_id"), "social.waddle.android");
+    assert_eq!(
+        row.get::<Option<String>, _>("provider_endpoint"),
+        None,
+        "FCM devices have no endpoint"
+    );
+    const ENCRYPTED_ENVELOPE_PREFIX: &str = "waddle-push-secret-v1:";
+    let sealed = ["provider_token", "provider_key_material", "provider_auth"]
+        .map(|column| (column, row.get::<String, _>(column)));
+    for (column, value) in &sealed {
+        assert!(
+            value.starts_with(ENCRYPTED_ENVELOPE_PREFIX),
+            "{column} must be stored encrypted: got {value}"
+        );
+        for plaintext in [fcm_token, p256dh.as_str(), auth.as_str()] {
+            assert!(!value.contains(plaintext), "{column} stores plaintext");
+        }
+    }
+    assert_ne!(sealed[0].1, sealed[1].1);
+    assert_ne!(sealed[1].1, sealed[2].1);
+    assert_ne!(sealed[0].1, sealed[2].1);
+
+    // XEP-0357 §5: the client enables the node at its own server.
+    let enable = Element::builder("enable", NS_PUSH)
+        .attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        )
+        .attr(
+            minidom::rxml::xml_ncname!("node").to_owned(),
+            outcome.node.as_str(),
+        )
+        .build();
+    let enable_response = send_iq(
+        &mut client,
+        iq_frame("set", "xep0357-fcm-enable", DOMAIN, enable),
+        "xep0357-fcm-enable",
+    )
+    .await;
+    parse_iq_element(&enable_response, "xep0357-fcm-enable", "result");
+
+    let registration = sqlx::query(
+        "SELECT push_service_jid, node, publish_options_xml \
+         FROM push_registrations WHERE owner_bare_jid = ? AND status = 'enabled'",
+    )
+    .bind(format!("{USERNAME}@{DOMAIN}"))
+    .fetch_one(&pool)
+    .await
+    .expect("XEP-0357 registration row");
+    assert_eq!(
+        registration.get::<String, _>("push_service_jid"),
+        PUSH_SERVICE_JID
+    );
+    assert_eq!(registration.get::<String, _>("node"), outcome.node);
+    assert_eq!(
+        registration.get::<Option<String>, _>("publish_options_xml"),
+        None
+    );
+    let registration_columns: Vec<String> =
+        sqlx::query("SELECT name FROM pragma_table_info('push_registrations')")
+            .fetch_all(&pool)
+            .await
+            .expect("registration schema")
+            .iter()
+            .map(|row| row.get::<String, _>("name"))
+            .collect();
+    for forbidden in ["token", "p256dh", "auth", "endpoint", "key"] {
+        assert!(
+            registration_columns
+                .iter()
+                .all(|column| !column.contains(forbidden)),
+            "push_registrations must not have a provider-credential column: {registration_columns:?}"
+        );
+    }
 
     let _ = client.close().await;
 }

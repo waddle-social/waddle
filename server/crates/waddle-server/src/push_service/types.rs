@@ -114,6 +114,9 @@ pub struct PushDeviceRegistration {
     pub(super) provider_endpoint: Option<String>,
     pub(super) provider_token: Option<String>,
     pub(super) provider_key_material: Option<String>,
+    /// FCM only: the RFC 8291 `auth` secret of the client's
+    /// envelope-encryption keys.
+    pub(super) provider_auth: Option<String>,
 }
 
 impl PushDeviceRegistration {
@@ -131,6 +134,7 @@ impl PushDeviceRegistration {
             provider_endpoint: None,
             provider_token: None,
             provider_key_material: None,
+            provider_auth: None,
         }
     }
 
@@ -146,6 +150,11 @@ impl PushDeviceRegistration {
 
     pub fn with_provider_key_material(mut self, provider_key_material: Option<String>) -> Self {
         self.provider_key_material = provider_key_material;
+        self
+    }
+
+    pub fn with_provider_auth(mut self, provider_auth: Option<String>) -> Self {
+        self.provider_auth = provider_auth;
         self
     }
 }
@@ -169,6 +178,10 @@ impl fmt::Debug for PushDeviceRegistration {
                 "provider_key_material",
                 &self.provider_key_material.as_ref().map(|_| "<redacted>"),
             )
+            .field(
+                "provider_auth",
+                &self.provider_auth.as_ref().map(|_| "<redacted>"),
+            )
             .finish()
     }
 }
@@ -184,6 +197,8 @@ pub struct PushServiceDevice {
     pub(super) provider_token: Option<String>,
     #[cfg(test)]
     pub(super) provider_key_material: Option<String>,
+    #[cfg(test)]
+    pub(super) provider_auth: Option<String>,
 }
 
 impl PushServiceDevice {
@@ -215,6 +230,11 @@ impl PushServiceDevice {
     #[cfg(test)]
     pub(crate) fn provider_key_material(&self) -> Option<&str> {
         self.provider_key_material.as_deref()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn provider_auth(&self) -> Option<&str> {
+        self.provider_auth.as_deref()
     }
 }
 

@@ -28,6 +28,8 @@ const PROVIDER_CREDENTIAL_FIELD_VARS: &[&str] = &[
     "provider-key-material",
     "apns-token",
     "fcm-token",
+    "fcm-p256dh",
+    "fcm-auth",
     "web-push-endpoint",
     "web-push-p256dh",
     "web-push-auth",
@@ -715,6 +717,14 @@ mod tests {
         assert!(publish_options_contains_provider_credentials(
             &publish_options_with_field("WEB-PUSH-AUTH", "secret")
         ));
+        for fcm_field in ["fcm-token", "fcm-p256dh", "fcm-auth"] {
+            assert!(
+                publish_options_contains_provider_credentials(&publish_options_with_field(
+                    fcm_field, "secret"
+                )),
+                "{fcm_field} is an FCM provider credential"
+            );
+        }
         assert!(!publish_options_contains_provider_credentials(
             &publish_options("server-secret")
         ));

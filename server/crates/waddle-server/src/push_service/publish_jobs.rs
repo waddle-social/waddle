@@ -206,9 +206,8 @@ pub(super) async fn get_publish_job_payload_xml_tx(
 }
 
 /// Device ids that already recorded a terminal-success attempt for
-/// this exact scheduler acceptance — `web-delivered` for real Web Push sends,
-/// `apns-delivered` for real APNs sends, `fake-sent` for the stubbed
-/// FCM platform. A retried publish
+/// this exact scheduler acceptance — `web-delivered`, `apns-delivered` or
+/// `fcm-delivered`. A retried publish
 /// job filters its fan-out against this set so one transiently
 /// failing sibling does not turn into duplicate OS notifications on
 /// every device that already received the item (#1123).
@@ -227,7 +226,7 @@ pub(super) async fn delivered_device_ids_for_acceptance_tx(
                 publish_job_id,
                 super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
                 super::apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
-                super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+                super::fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED,
             ],
         )
         .await
@@ -537,7 +536,7 @@ pub(super) async fn prune_delivery_attempts_tx(
     // Terminal-success attempts of a still-retryable job are exempt
     // from the retention tail (#1123, Greptile review): the per-device
     // idempotency filter reads `web-delivered`/`apns-delivered`/
-    // `fake-sent` rows for the job's `(node, item_id)` on every retry,
+    // `fcm-delivered` rows for the job's `(node, item_id)` on every retry,
     // so evicting one mid-retry would re-push the item to a device that
     // already received it. Only that narrow slice is protected — failure/
     // transient attempts (pure audit) and attempts of terminal jobs
@@ -571,7 +570,7 @@ pub(super) async fn prune_delivery_attempts_tx(
             limit,
             super::dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
             super::apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
-            super::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+            super::fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED,
             node,
             PUBLISH_JOB_STATUS_QUEUED,
             PUBLISH_JOB_STATUS_IN_PROGRESS,
@@ -1665,7 +1664,7 @@ mod tests {
                         "web-1",
                         PushDevicePlatform::Web.to_string(),
                         format!("item-{idx}"),
-                        dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+                        dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
                         idx as i64,
                     ],
                 )

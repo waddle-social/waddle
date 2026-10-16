@@ -1086,6 +1086,34 @@ async fn create_websocket_state(
             push_service
         }
     };
+    // FCM (#530): the service-account key is read and exercised once
+    // here. A configured-but-unusable key fails boot rather than leaving
+    // Android devices silently undeliverable; no `WADDLE_FCM_*` at all
+    // leaves FCM disabled (`fcm-not-configured` attempts).
+    let push_service = match server_config.fcm.as_ref() {
+        Some(fcm_config) => {
+            let tokens = fcm_config.load_token_source().await.map_err(|error| {
+                anyhow::anyhow!("failed to load FCM service-account key: {error}")
+            })?;
+            let sender = waddle_xmpp::push::fcm::HttpFcmSender::new()
+                .map_err(|error| anyhow::anyhow!("failed to build FCM sender: {error}"))?;
+            info!(
+                fcm_project_id = fcm_config.project_id.as_str(),
+                fcm_app_id = fcm_config.app_id.as_str(),
+                "FCM delivery enabled for the XMPP Push Service"
+            );
+            push_service.with_fcm_provider(
+                Arc::new(tokens),
+                Arc::new(sender),
+                fcm_config.project_id.clone(),
+                fcm_config.app_id.clone(),
+            )
+        }
+        None => {
+            info!("FCM delivery disabled: WADDLE_FCM_* is not configured");
+            push_service
+        }
+    };
     let push_service = Arc::new(push_service);
     // XEP-0050 ad-hoc command handlers for `register-device` and
     // `disable-device` on `push.<domain>`. The command dispatcher

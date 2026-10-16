@@ -425,6 +425,7 @@ impl DatabasePushServiceStore {
                         provider_endpoint = NULL,
                         provider_token = NULL,
                         provider_key_material = NULL,
+                        provider_auth = NULL,
                         last_error = ?,
                         updated_at_ms = ?
                     WHERE node = ?

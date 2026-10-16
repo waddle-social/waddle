@@ -3,10 +3,16 @@
 //! only active devices, payload validation, delivery-attempt/job
 //! persistence across store reopen, and retry wake-up semantics.
 
+use std::future::Future;
 use std::path::Path;
+use std::pin::Pin;
+use std::sync::Arc;
 
+use base64::engine::general_purpose::URL_SAFE_NO_PAD;
+use base64::Engine as _;
 use jid::BareJid;
 use minidom::Element;
+use p256::elliptic_curve::sec1::ToEncodedPoint;
 use tempfile::tempdir;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams, Rows};
 use waddle_server::db_params;
@@ -14,12 +20,42 @@ use waddle_server::push_service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::pubsub::PubSubItem;
+use waddle_xmpp::push::fcm::{
+    FcmAccessToken, FcmAccessTokenSource, FcmAppId, FcmOutcome, FcmProjectId, FcmRequest,
+    FcmSender, FcmTokenError,
+};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
 
-/// Mirrors `crate::push_service::dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB`
-/// (recorded for the stubbed FCM platform until #530).
-const ATTEMPT_STATUS_FAKE_SENT_NON_WEB: &str = "fake-sent";
+/// Mirrors `fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED`.
+const ATTEMPT_STATUS_FCM_DELIVERED: &str = "fcm-delivered";
+/// Android application id the fake FCM provider serves.
+const FCM_APP_ID: &str = "social.waddle.android";
+
+/// FCM transport that accepts every message: these are queue-mechanics
+/// tests, so the provider only has to answer.
+struct AcceptingFcmSender;
+
+impl FcmSender for AcceptingFcmSender {
+    fn send(
+        &self,
+        _request: FcmRequest<'_>,
+    ) -> Pin<Box<dyn Future<Output = FcmOutcome> + Send + '_>> {
+        Box::pin(async { FcmOutcome::Sent })
+    }
+}
+
+struct StaticFcmTokens;
+
+impl FcmAccessTokenSource for StaticFcmTokens {
+    fn current(
+        &self,
+    ) -> Pin<Box<dyn Future<Output = Result<FcmAccessToken, FcmTokenError>> + Send + '_>> {
+        Box::pin(async { Ok(FcmAccessToken::new("ya29.test".to_string())) })
+    }
+
+    fn invalidate(&self, _rejected: &FcmAccessToken) {}
+}
 
 async fn store() -> DatabasePushServiceStore {
     store_on(
@@ -34,6 +70,25 @@ async fn store_on(db: Database) -> DatabasePushServiceStore {
     DatabasePushServiceStore::new_with_secret_key(db, b"waddle-push-service-test-secret-key")
         .await
         .expect("push service store")
+        .with_fcm_provider(
+            Arc::new(StaticFcmTokens),
+            Arc::new(AcceptingFcmSender),
+            FcmProjectId::parse("waddle-test").expect("project id"),
+            FcmAppId::parse(FCM_APP_ID).expect("app id"),
+        )
+}
+
+/// A deliverable FCM device: registration token plus the client's
+/// RFC 8291 envelope keys.
+fn fcm_device(device_id: &str, node: &str) -> PushDeviceRegistration {
+    let secret = p256::SecretKey::random(&mut p256::elliptic_curve::rand_core::OsRng);
+    let auth: [u8; 16] = rand::random();
+    PushDeviceRegistration::new(device_id, node, PushDevicePlatform::Fcm, "prod")
+        .with_provider_token(Some(format!("fcm-token-{device_id}")))
+        .with_provider_key_material(Some(
+            URL_SAFE_NO_PAD.encode(secret.public_key().to_encoded_point(false).as_bytes()),
+        ))
+        .with_provider_auth(Some(URL_SAFE_NO_PAD.encode(auth)))
 }
 
 /// Open a SQLite database at a local file path. Mirrors the crate's
@@ -53,10 +108,23 @@ fn owner() -> BareJid {
     "alice@example.com".parse().expect("owner jid")
 }
 
+/// XEP-0357 notification with the Waddle routing context the chat
+/// publisher attaches, so the provider-backed worker can parse it.
 fn notification_item(item_id: &str) -> PubSubItem {
+    let context = Element::builder("context", "urn:waddle:push:context:0")
+        .attr(
+            minidom::rxml::xml_ncname!("conversation").to_owned(),
+            "bob@example.com",
+        )
+        .attr(minidom::rxml::xml_ncname!("class").to_owned(), "dm")
+        .build();
     PubSubItem::new(
         Some(item_id.to_string()),
-        Some(Element::builder("notification", NS_PUSH).build()),
+        Some(
+            Element::builder("notification", NS_PUSH)
+                .append(context)
+                .build(),
+        ),
     )
 }
 
@@ -74,26 +142,19 @@ async fn query(store: &DatabasePushServiceStore, sql: &str, params: impl IntoPar
 
 #[tokio::test]
 async fn publish_notification_fans_out_to_active_devices_only() {
-    // Queue-mechanics test: uses the FCM platform so no real provider
-    // needs wiring. FCM records the `fake-sent` stub until #530 lands
-    // its sender (APNs is dispatched for real since #529).
+    // Queue-mechanics test: FCM devices behind a fake FCM transport.
     let store = store().await;
     let owner = owner();
-    let node = store.ensure_node(&owner, "web").await.expect("push node");
+    let node = store
+        .ensure_node(&owner, FCM_APP_ID)
+        .await
+        .expect("push node");
     store
-        .upsert_device(
-            &owner,
-            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test")
-                .with_provider_endpoint(Some("https://push.example.com/one".to_string())),
-        )
+        .upsert_device(&owner, fcm_device("dev-1", node.node()))
         .await
         .expect("device one");
     store
-        .upsert_device(
-            &owner,
-            PushDeviceRegistration::new("dev-2", node.node(), PushDevicePlatform::Fcm, "test")
-                .with_provider_endpoint(Some("https://push.example.com/two".to_string())),
-        )
+        .upsert_device(&owner, fcm_device("dev-2", node.node()))
         .await
         .expect("device two");
     store
@@ -114,7 +175,7 @@ async fn publish_notification_fans_out_to_active_devices_only() {
         .expect("attempts");
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].device_id(), "dev-1");
-    assert_eq!(attempts[0].status(), ATTEMPT_STATUS_FAKE_SENT_NON_WEB);
+    assert_eq!(attempts[0].status(), ATTEMPT_STATUS_FCM_DELIVERED);
 }
 
 #[tokio::test]
@@ -152,13 +213,10 @@ async fn push_delivery_attempts_survive_store_reopen() {
     {
         let db = open_local("push-service-attempts", &path).await;
         let store = store_on(db).await;
-        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let node = store.ensure_node(&owner, FCM_APP_ID).await.expect("node");
         node_id = node.node().to_string();
         store
-            .upsert_device(
-                &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
-            )
+            .upsert_device(&owner, fcm_device("dev-1", node.node()))
             .await
             .expect("device");
         store
@@ -181,13 +239,12 @@ async fn push_delivery_attempts_survive_store_reopen() {
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].device_id(), "dev-1");
     assert_eq!(attempts[0].item_id(), "durable-attempt");
-    assert_eq!(attempts[0].status(), ATTEMPT_STATUS_FAKE_SENT_NON_WEB);
+    assert_eq!(attempts[0].status(), ATTEMPT_STATUS_FCM_DELIVERED);
 }
 
 #[tokio::test]
 async fn uncertain_publish_job_survives_reopen_and_retries_after_lease_recovery() {
-    // Queue-mechanics: uses FCM so the fake-sent stub applies; Web
-    // and APNs require a wired provider.
+    // Queue-mechanics: FCM devices behind a fake FCM transport.
     let dir = tempdir().expect("tempdir");
     let path = dir.path().join("push-service-publish-jobs.sqlite3");
     let owner = owner();
@@ -197,13 +254,10 @@ async fn uncertain_publish_job_survives_reopen_and_retries_after_lease_recovery(
     {
         let db = open_local("push-service-jobs", &path).await;
         let store = store_on(db).await;
-        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let node = store.ensure_node(&owner, FCM_APP_ID).await.expect("node");
         node_id = node.node().to_string();
         store
-            .upsert_device(
-                &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
-            )
+            .upsert_device(&owner, fcm_device("dev-1", node.node()))
             .await
             .expect("device");
         execute(
@@ -317,6 +371,7 @@ async fn uncertain_publish_job_survives_reopen_and_retries_after_lease_recovery(
     assert_eq!(results[0].attempted_devices(), 1);
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].item_id(), "retry-after-failure");
+    assert_eq!(attempts[0].status(), ATTEMPT_STATUS_FCM_DELIVERED);
     assert!(queued.is_empty());
 }
 
@@ -402,12 +457,9 @@ async fn device_registration_wakes_only_no_device_retry_jobs() {
 async fn zero_device_publish_job_remains_retryable_until_device_returns() {
     let store = store().await;
     let owner = owner();
-    let node = store.ensure_node(&owner, "web").await.expect("node");
+    let node = store.ensure_node(&owner, FCM_APP_ID).await.expect("node");
     store
-        .upsert_device(
-            &owner,
-            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
-        )
+        .upsert_device(&owner, fcm_device("dev-1", node.node()))
         .await
         .expect("device");
     store
@@ -430,10 +482,7 @@ async fn zero_device_publish_job_remains_retryable_until_device_returns() {
     assert_eq!(queued[0].item_id(), "retry-when-device-returns");
 
     store
-        .upsert_device(
-            &owner,
-            PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
-        )
+        .upsert_device(&owner, fcm_device("dev-1", node.node()))
         .await
         .expect("reenable device");
     let retried = store
@@ -450,5 +499,6 @@ async fn zero_device_publish_job_remains_retryable_until_device_returns() {
     assert_eq!(retried[0].attempted_devices(), 1);
     assert_eq!(attempts.len(), 1);
     assert_eq!(attempts[0].item_id(), "retry-when-device-returns");
+    assert_eq!(attempts[0].status(), ATTEMPT_STATUS_FCM_DELIVERED);
     assert!(queued_after.is_empty());
 }

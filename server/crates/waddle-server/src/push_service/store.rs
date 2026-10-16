@@ -8,6 +8,7 @@ use jid::BareJid;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::pubsub::PubSubStorage;
 use waddle_xmpp::push::apns::{ApnsProviderTokenSource, ApnsSender, ApnsTopic};
+use waddle_xmpp::push::fcm::{FcmAccessTokenSource, FcmAppId, FcmProjectId, FcmSender};
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
@@ -16,6 +17,7 @@ use waddle_xmpp::XmppError;
 use crate::db::{Database, IntoParams};
 
 use super::apns_dispatch::ApnsProvider;
+use super::fcm_dispatch::FcmProvider;
 use super::secrets::PushSecretCipher;
 
 #[derive(Clone)]
@@ -42,6 +44,9 @@ pub struct DatabasePushServiceStore {
     /// APNs provider (#529). `None` when `WADDLE_APNS_*` is unset:
     /// Apple devices then record `apns-not-configured`.
     pub(super) apns: Option<ApnsProvider>,
+    /// FCM provider (#530). `None` when `WADDLE_FCM_*` is unset:
+    /// Android devices then record `fcm-not-configured`.
+    pub(super) fcm: Option<FcmProvider>,
 }
 
 #[derive(Clone)]
@@ -102,6 +107,7 @@ impl DatabasePushServiceStore {
             web_push_sender: None,
             vapid_sub: None,
             apns: None,
+            fcm: None,
         };
         store.initialize().await?;
         Ok(store)
@@ -125,6 +131,7 @@ impl DatabasePushServiceStore {
             web_push_sender: None,
             vapid_sub: None,
             apns: None,
+            fcm: None,
         };
         store.initialize().await?;
         Ok(store)
@@ -167,6 +174,26 @@ impl DatabasePushServiceStore {
             tokens,
             sender,
             topic,
+        });
+        self
+    }
+
+    /// Install the FCM OAuth access-token source, HTTP v1 transport, the
+    /// Firebase project id and the Android application id this server
+    /// delivers for. Called once at boot from `server::http` when
+    /// `WADDLE_FCM_*` is configured.
+    pub fn with_fcm_provider(
+        mut self,
+        tokens: Arc<dyn FcmAccessTokenSource>,
+        sender: Arc<dyn FcmSender>,
+        project_id: FcmProjectId,
+        app_id: FcmAppId,
+    ) -> Self {
+        self.fcm = Some(FcmProvider {
+            tokens,
+            sender,
+            project_id,
+            app_id,
         });
         self
     }
@@ -268,6 +295,12 @@ impl DatabasePushServiceStore {
             (),
         )
         .await?;
+        // FCM (#530): the RFC 8291 `auth` secret of the Android client's
+        // envelope-encryption keys, sealed like every provider secret.
+        // The registration token lives in `provider_token` and the
+        // `p256dh` key in `provider_key_material`.
+        self.add_column_if_missing("push_devices", "provider_auth TEXT")
+            .await?;
         self.execute(
             &format!(
                 r#"
@@ -480,11 +513,11 @@ impl DatabasePushServiceStore {
         self.vapid_signer.is_some() && self.web_push_sender.is_some() && self.vapid_sub.is_some()
     }
 
-    /// `true` when any real provider (Web Push or APNs) is wired, i.e.
-    /// when the worker needs the parsed XEP-0357 payload to build a
+    /// `true` when any real provider (Web Push, APNs or FCM) is wired,
+    /// i.e. when the worker needs the parsed XEP-0357 payload to build a
     /// provider request.
     pub(super) fn any_provider_ready(&self) -> bool {
-        self.web_push_provider_ready() || self.apns.is_some()
+        self.web_push_provider_ready() || self.apns.is_some() || self.fcm.is_some()
     }
 
     /// Public snapshot of the Web Push capability — `Ready` when the
