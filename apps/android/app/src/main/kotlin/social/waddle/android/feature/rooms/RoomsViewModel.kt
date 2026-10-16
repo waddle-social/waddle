@@ -36,7 +36,7 @@ class RoomsViewModel(
 
     /** Join (nick = account localpart) as the room opens; MAM backfills either way. */
     fun openRoom(roomJid: String) {
-        viewModelScope.launch { sessionManager.joinRoom(roomJid, nick) }
+        viewModelScope.launch { sessionManager.ensureRoomJoined(roomJid, nick) }
     }
 
     companion object {

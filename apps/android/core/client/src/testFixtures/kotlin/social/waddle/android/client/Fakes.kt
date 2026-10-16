@@ -1174,8 +1174,12 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun joinRoom(roomJid: String, nick: String) {
         joinRoomCalls += roomJid to nick
+        joinRoomStall?.await()
         joinRoomFailure?.let { throw it }
     }
+
+    /** When set, [joinRoom] suspends until it completes (single-flight tests). */
+    var joinRoomStall: CompletableDeferred<Unit>? = null
 
     override suspend fun leaveRoom(roomJid: String, nick: String) = unused()
 

@@ -64,6 +64,9 @@ private fun joinHuddle(graph: AppGraph, roomJid: String, video: Boolean) {
     val selfFullJid = graph.sessionManager.ownFullJid()
     val store = graph.sessionManager.callStore
     graph.applicationScope.launch {
+        // In the room first, through the one shared join: Muji presence
+        // must come after the MUC join, never be followed by another.
+        graph.sessionManager.ensureRoomJoined(roomJid, nick)
         if (store.muc.resume(roomJid, nick, selfFullJid)) return@launch
         store.muc.begin(
             roomJid = roomJid,

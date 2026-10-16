@@ -1,6 +1,8 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.runCurrent
@@ -60,6 +62,29 @@ class XmppSessionManagerVerbsTest {
         messageType = "groupchat",
         isMuc = true,
     )
+
+    @Test
+    fun `concurrent room opens share one join and a joined room sends none`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val stall = CompletableDeferred<Unit>()
+        harness.client.joinRoomStall = stall
+
+        val first = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        val second = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        runCurrent()
+        assertEquals("one join on the wire while it is in flight", 1, harness.client.joinRoomCalls.size)
+
+        stall.complete(Unit)
+        assertEquals(VerbResult.Ok, first.await())
+        assertEquals(VerbResult.Ok, second.await())
+
+        // Already joined (perhaps in a huddle): opening it again sends no
+        // presence that could strip the XEP-0272 call contents.
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals(1, harness.client.joinRoomCalls.size)
+        harness.manager.logout()
+    }
 
     @Test
     fun `reaction applies optimistically and sends the complete set`() = runTest {

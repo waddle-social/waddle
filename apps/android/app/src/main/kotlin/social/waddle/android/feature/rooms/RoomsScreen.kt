@@ -78,7 +78,8 @@ fun RoomsScreen(
         viewModel.openRoom(room.roomJid)
         onOpenChannel(room.roomJid, room.name)
     }
-    val join = rememberHuddleJoiner(onJoined = ::enter)
+    // The joiner already joined the room: opening it is navigation only.
+    val join = rememberHuddleJoiner(onJoined = { room -> onOpenChannel(room.roomJid, room.name) })
 
     Scaffold(
         contentWindowInsets = contentWindowInsets,

@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.prefs.SessionPrefs
@@ -75,6 +76,41 @@ internal class ConversationVerbs(
             return VerbResult.NotConnected
         }
         return VerbResult.Ok
+    }
+
+    /** One in-flight [ensureJoined] per room; see there. */
+    private val joinsInFlight = HashMap<String, CompletableDeferred<VerbResult>>()
+    private val joinsLock = Mutex()
+
+    /**
+     * Join [roomJid] unless it is already joined, sharing a single
+     * in-flight join between concurrent callers. A second join presence
+     * carries only the MUC `<x/>`: landing after this device's XEP-0272
+     * preparing/active presence it would withdraw the Muji contents,
+     * which the room reads as leaving the huddle (§Leaving). So screens
+     * that open a room, and a huddle Join that must be in the room
+     * before it advertises the call, all come through here.
+     */
+    suspend fun ensureJoined(roomJid: String, nick: String): VerbResult {
+        val (pending, owner) = joinsLock.withLock {
+            if (roomJid in stores.roomStore.joinedRooms.value) return VerbResult.Ok
+            val existing = joinsInFlight[roomJid]
+            if (existing != null) {
+                existing to false
+            } else {
+                CompletableDeferred<VerbResult>().also { joinsInFlight[roomJid] = it } to true
+            }
+        }
+        if (!owner) return pending.await()
+        var result: VerbResult = VerbResult.NotConnected
+        try {
+            result = joinRoom(roomJid, nick)
+            return result
+        } finally {
+            joinsLock.withLock { joinsInFlight.remove(roomJid) }
+            // A cancelled owner hands waiters NotConnected, not its cancellation.
+            pending.complete(result)
+        }
     }
 
     /**

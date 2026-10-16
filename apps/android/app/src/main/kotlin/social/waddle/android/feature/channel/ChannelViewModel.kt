@@ -96,9 +96,7 @@ internal class ChannelIo(
 ) : ConversationIo {
     /** Join only when not already joined (Home joins ahead of navigation). */
     override suspend fun ensureJoined() {
-        if (roomJid !in sessionManager.roomStore.joinedRooms.value) {
-            sessionManager.joinRoom(roomJid, nick)
-        }
+        sessionManager.ensureRoomJoined(roomJid, nick)
         sessionManager.refreshRoomPins(roomJid)
     }
 

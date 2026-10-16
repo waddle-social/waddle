@@ -231,7 +231,9 @@ private fun ReadyShell(
                     else -> null
                 }
                 if (mucRoomJid != null) {
-                    graph.sessionManager.joinRoom(
+                    // ensure, not join: a re-join would strip this
+                    // device's huddle presence in that room.
+                    graph.sessionManager.ensureRoomJoined(
                         roomJid = mucRoomJid,
                         nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                     )

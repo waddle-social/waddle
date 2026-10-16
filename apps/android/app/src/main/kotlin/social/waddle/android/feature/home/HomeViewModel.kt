@@ -82,7 +82,7 @@ class HomeViewModel(
      * immediately, the timeline backfills via MAM regardless.
      */
     fun openChannel(roomJid: String) {
-        viewModelScope.launch { sessionManager.joinRoom(roomJid, nick) }
+        viewModelScope.launch { sessionManager.ensureRoomJoined(roomJid, nick) }
     }
 
     private val _canCreateChannel = MutableStateFlow(false)

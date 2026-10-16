@@ -388,6 +388,13 @@ class XmppSessionManager(
     /** Join a MUC room; with no live session the intent still persists. */
     suspend fun joinRoom(roomJid: String, nick: String): VerbResult = verbs.joinRoom(roomJid, nick)
 
+    /**
+     * Join unless already joined, one in-flight join per room: the way
+     * screens open a room, so a re-join never strips this device's
+     * huddle presence (see [ConversationVerbs.ensureJoined]).
+     */
+    suspend fun ensureRoomJoined(roomJid: String, nick: String): VerbResult = verbs.ensureJoined(roomJid, nick)
+
     /** Fetch a MAM page for a room and fan it into [timelineStore]. */
     suspend fun fetchRoomHistory(roomJid: String, maxMessages: UInt, beforeId: String?): WaddleMamPage? =
         verbs.fetchRoomHistory(roomJid, maxMessages, beforeId)

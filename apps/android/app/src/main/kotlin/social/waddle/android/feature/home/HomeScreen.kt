@@ -106,7 +106,8 @@ fun HomeScreen(
         viewModel.openChannel(room.roomJid)
         onOpenChannel(room.roomJid, room.name)
     }
-    val join = rememberHuddleJoiner(onJoined = ::open)
+    // The joiner already joined the room: opening it is navigation only.
+    val join = rememberHuddleJoiner(onJoined = { room -> onOpenChannel(room.roomJid, room.name) })
     val accountJid = session?.jid?.let(::bareJidOf)
     val accountName = vcard?.fullName?.takeIf { it.isNotBlank() }
         ?: vcard?.nickname?.takeIf { it.isNotBlank() }
