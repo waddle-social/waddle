@@ -53,6 +53,11 @@ class OccupantJidStore {
         synchronized(ownNicks) { joinsSent[normalizedBareJid(roomJid)] = atMillis }
     }
 
+    /** Forget every pending join stamp (a new stream starts with none). */
+    fun clearJoinsSent() {
+        synchronized(ownNicks) { joinsSent.clear() }
+    }
+
     /**
      * True when this stream is in [roomJid] (its self-presence, status
      * 110, arrived and no unavailable followed) or sent a join under

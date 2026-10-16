@@ -96,6 +96,10 @@ internal class ConversationVerbs(
     fun onFreshStream() {
         val orphaned = synchronized(joinsLock) {
             joinEpoch += 1
+            // Under the same lock as a join's success stamp: an old join
+            // that finished after the stores were cleared, but before this
+            // bump, must not leave a stamp the new stream would trust.
+            stores.occupantJidStore.clearJoinsSent()
             joinsInFlight.values.toList().also { joinsInFlight.clear() }
         }
         orphaned.forEach { it.complete(false) }
