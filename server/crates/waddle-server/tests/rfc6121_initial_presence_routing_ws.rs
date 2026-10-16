@@ -45,18 +45,19 @@ async fn send_initial_presence(client: &mut WsXmppClient) {
 
 /// XEP-0199 round trip: the server handles a stream's stanzas in order, so
 /// the pong proves everything sent before it has been processed.
-async fn barrier(client: &mut WsXmppClient, id: &str) {
+/// Returns every frame received up to and including the pong.
+async fn barrier(client: &mut WsXmppClient, id: &str) -> Vec<String> {
     let mut ping = Iq::from_get(id, Ping);
     *ping.to_mut() = Some(DOMAIN.parse().expect("server JID"));
     send(client, ping.into()).await;
     client
-        .recv_matching(|frame| {
+        .recv_until(|frame| {
             frame
                 .parse::<Element>()
                 .is_ok_and(|element| element.name() == "iq" && element.attr("id") == Some(id))
         })
         .await
-        .expect("barrier pong");
+        .expect("barrier pong")
 }
 
 async fn send_bare_jid_dm(sender: &mut WsXmppClient, id: &str) {
@@ -76,17 +77,26 @@ fn is_message_with_id(frame: &str, id: &str) -> bool {
         .is_ok_and(|element| element.name() == "message" && element.attr("id") == Some(id))
 }
 
-async fn receive_dm(client: &mut WsXmppClient, id: &str) {
+/// Returns every frame received up to and including the DM.
+async fn receive_dm(client: &mut WsXmppClient, id: &str) -> Vec<String> {
     client
-        .recv_matching(|frame| is_message_with_id(frame, id))
+        .recv_until(|frame| is_message_with_id(frame, id))
         .await
-        .unwrap_or_else(|error| panic!("expected DM {id}: {error}"));
+        .unwrap_or_else(|error| panic!("expected DM {id}: {error}"))
 }
 
-/// Fails on any copy of message `id` until the stream stays quiet.
-async fn assert_no_dm(client: &mut WsXmppClient, id: &str, why: &str) {
+/// Every further frame until the stream stays quiet.
+async fn drain(client: &mut WsXmppClient) -> Vec<String> {
+    let mut frames = Vec::new();
     while let Ok(frame) = client.recv_timeout(QUIET).await {
-        assert!(!is_message_with_id(&frame, id), "{why}: {frame}");
+        frames.push(frame);
+    }
+    frames
+}
+
+fn assert_no_dm(frames: &[String], id: &str, why: &str) {
+    for frame in frames {
+        assert!(!is_message_with_id(frame, id), "{why}: {frame}");
     }
 }
 
@@ -127,26 +137,27 @@ async fn bound_resource_joins_bare_jid_delivery_only_after_initial_presence() {
     send_bare_jid_dm(&mut sender, "dm-before-presence").await;
     receive_dm(&mut web, "dm-before-presence").await;
     assert_no_dm(
-        &mut phone,
+        &drain(&mut phone).await,
         "dm-before-presence",
         "a resource without presence must not share bare-JID delivery with an available sibling",
-    )
-    .await;
+    );
 
+    // Every frame the phone receives from its initial presence on: the
+    // barrier, the next DM and whatever trails it.
     send_initial_presence(&mut phone).await;
-    barrier(&mut phone, "phone-available").await;
+    let mut after_presence = barrier(&mut phone, "phone-available").await;
 
     send_bare_jid_dm(&mut sender, "dm-after-presence").await;
     receive_dm(&mut web, "dm-after-presence").await;
-    receive_dm(&mut phone, "dm-after-presence").await;
+    after_presence.extend(receive_dm(&mut phone, "dm-after-presence").await);
+    after_presence.extend(drain(&mut phone).await);
     // Delivered live to the sibling, never stored offline: initial
     // presence has nothing to flush.
     assert_no_dm(
-        &mut phone,
+        &after_presence,
         "dm-before-presence",
         "initial presence must not replay a message another resource already received",
-    )
-    .await;
+    );
 
     let _ = sender.close().await;
     let _ = web.close().await;
