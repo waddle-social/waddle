@@ -5,10 +5,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberUpdatedState
-import androidx.compose.runtime.setValue
+import androidx.lifecycle.ViewModel
+import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
@@ -27,16 +26,18 @@ import social.waddle.client.ffi.WaddleCallMedia
 fun rememberHuddleJoiner(onJoined: (room: RoomActivity) -> Unit): (RoomActivity) -> Unit {
     val graph = LocalAppGraph.current
     val opened by rememberUpdatedState(onJoined)
-    // Not saveable on purpose: after process death the tap is stale.
-    var pending by remember { mutableStateOf<RoomActivity?>(null) }
+    // Held in a ViewModel: it survives the recreation a rotation causes
+    // while the permission dialog is up, but not process death, after
+    // which the tap is stale. Deliberately not in saved state.
+    val pending: PendingHuddleJoin = viewModel()
     val launcher = rememberLauncherForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        val room = pending ?: return@rememberLauncherForActivityResult
-        pending = null
+        val room = pending.room ?: return@rememberLauncherForActivityResult
+        pending.room = null
         joinHuddle(graph, room.roomJid, video = room.video)
         opened(room)
     }
     return { room ->
-        pending = room
+        pending.room = room
         launcher.launch(
             if (room.video) {
                 arrayOf(Manifest.permission.RECORD_AUDIO, Manifest.permission.CAMERA)
@@ -45,6 +46,11 @@ fun rememberHuddleJoiner(onJoined: (room: RoomActivity) -> Unit): (RoomActivity)
             },
         )
     }
+}
+
+/** The room a Join tap is waiting on a permission result for. */
+internal class PendingHuddleJoin : ViewModel() {
+    var room: RoomActivity? = null
 }
 
 /**

@@ -76,7 +76,13 @@ class UnreadStore(
         synchronized(lock) {
             val conversation = bareJid(conversationJid)
             if (isMine || conversation == activeConversation) return
+            // The accounted entry may already be read down to zero (a read
+            // clear or a sibling device's read landed first): a mention
+            // can never outnumber the unread it sits in.
+            val unread = _counts.value[conversation] ?: 0
+            if (unread <= 0) return
             mentions.increment(conversation)
+            mentions.capAt(conversation, unread)
         }
     }
 

@@ -3,6 +3,7 @@ package social.waddle.android.feature.conversation
 import android.content.Context
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.remember
@@ -12,11 +13,14 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.LifecycleResumeEffect
+import kotlinx.coroutines.delay
 import social.waddle.android.R
 import java.time.DayOfWeek
+import java.time.Duration
 import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneId
+import java.time.ZonedDateTime
 import java.time.format.DateTimeFormatter
 import java.time.format.TextStyle
 import java.util.Locale
@@ -124,7 +128,21 @@ fun rememberConversationClock(): ConversationClock {
         resumes += 1
         onPauseOrDispose { }
     }
-    return remember(locale, resumes) { deviceClock(context, locale) }
+    // A screen left open across midnight must roll Today over too, not
+    // only on the next resume.
+    var midnights by remember { mutableIntStateOf(0) }
+    LaunchedEffect(resumes, midnights) {
+        delay(millisUntilNextLocalMidnight())
+        midnights += 1
+    }
+    return remember(locale, resumes, midnights) { deviceClock(context, locale) }
+}
+
+private fun millisUntilNextLocalMidnight(): Long {
+    val zone = ZoneId.systemDefault()
+    val now = ZonedDateTime.now(zone)
+    val next = now.toLocalDate().plusDays(1).atStartOfDay(zone)
+    return Duration.between(now, next).toMillis() + MIDNIGHT_SLACK_MILLIS
 }
 
 private fun deviceClock(context: Context, locale: Locale): ConversationClock {
@@ -145,3 +163,6 @@ private const val SKELETON_12H = "hm"
 private const val SKELETON_DATE = "EEEMMMd"
 private const val SKELETON_DATE_YEAR = "EEEMMMdy"
 private const val DAYS_IN_WEEK = 7L
+
+/** Lands just past midnight, so LocalDate.now() is already the new day. */
+private const val MIDNIGHT_SLACK_MILLIS = 50L

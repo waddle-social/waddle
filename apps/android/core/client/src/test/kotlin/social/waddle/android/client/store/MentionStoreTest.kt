@@ -35,6 +35,21 @@ class MentionStoreTest {
     }
 
     @Test
+    fun `an accounted mention after the unread was read adds no badge`() {
+        unread.setUnlessActive(ROOM, 1)
+        unread.setUnlessActive(ROOM, 0)
+        unread.onLiveMentionAccounted(ROOM, isMine = false)
+        assertTrue(mentions.isEmpty())
+    }
+
+    @Test
+    fun `accounted mentions never outnumber the unread`() {
+        unread.setUnlessActive(ROOM, 1)
+        repeat(3) { unread.onLiveMentionAccounted(ROOM, isMine = false) }
+        assertEquals(1, mentions[ROOM])
+    }
+
+    @Test
     fun `mentions clear exactly when the unread clears`() {
         unread.onLiveMessage(ROOM, isMine = false, mentionsSelf = true)
         unread.onLiveMessage(DM, isMine = false, mentionsSelf = true)
