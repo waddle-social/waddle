@@ -27,6 +27,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -42,7 +43,6 @@ import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.format.FormatStyle
-import java.util.Locale
 
 /**
  * The app's top bar: the screen ground (no tonal tint), Space Grotesk
@@ -96,7 +96,7 @@ fun UnreadCountBadge(count: Int, modifier: Modifier = Modifier, emphasized: Bool
 @Composable
 fun SectionKicker(text: String, modifier: Modifier = Modifier) {
     Text(
-        text = text.uppercase(Locale.getDefault()),
+        text = text.uppercase(LocalConfiguration.current.locales[0]),
         style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 0.08.em),
         fontWeight = FontWeight.SemiBold,
         color = MaterialTheme.colorScheme.onSurfaceVariant,
