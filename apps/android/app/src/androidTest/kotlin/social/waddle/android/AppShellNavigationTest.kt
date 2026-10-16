@@ -2,6 +2,7 @@ package social.waddle.android
 
 import android.Manifest
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -9,10 +10,14 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.core.graphics.Insets
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -106,6 +111,35 @@ class AppShellNavigationTest {
     }
 
     @Test
+    fun tabTopBarsClearTheStatusBar() {
+        // The app draws edge to edge; the bare test activity does not by default.
+        composeRule.runOnUiThread { composeRule.activity.enableEdgeToEdge() }
+        harness.signInAndConnect()
+        composeAppShell()
+        waitForHome()
+        openTab(MainTab.ACTIVITY)
+        waitForText("Activity")
+        // The CI emulator image has no system UI, so it reports no status
+        // bar: hand the window one, as a phone would.
+        composeRule.runOnUiThread {
+            val insets = WindowInsetsCompat.Builder()
+                .setInsets(WindowInsetsCompat.Type.statusBars(), Insets.of(0, FAKE_STATUS_BAR_PX, 0, 0))
+                .build()
+            ViewCompat.dispatchApplyWindowInsets(composeRule.activity.window.decorView, insets)
+        }
+        composeRule.waitForIdle()
+
+        // The tab label says "Activity" too; the title is the higher one.
+        val titleTop = composeRule.onAllNodesWithText("Activity")
+            .fetchSemanticsNodes()
+            .minOf { it.boundsInWindow.top }
+        assertTrue(
+            "title at $titleTop px sits under the $FAKE_STATUS_BAR_PX px status bar",
+            titleTop >= FAKE_STATUS_BAR_PX,
+        )
+    }
+
+    @Test
     fun navigatesHomeToDmListAndBack() {
         harness.signInAndConnect()
         composeAppShell()
@@ -114,5 +148,9 @@ class AppShellNavigationTest {
         waitForText("No direct messages yet.")
         openTab(MainTab.HOME)
         waitForHome()
+    }
+
+    private companion object {
+        const val FAKE_STATUS_BAR_PX = 100
     }
 }
