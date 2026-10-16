@@ -151,6 +151,16 @@ async fn xmpp_websocket_handler(
 /// Size of the outbound message channel buffer
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
+/// Dropping an aborted connection task must release resume callers too. The
+/// normal path finishes this control after cleanup; repeated finish is safe.
+struct LiveResumeOwnerGuard(Arc<waddle_xmpp::registry::LiveResumeControl>);
+
+impl Drop for LiveResumeOwnerGuard {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
 /// Deadline for a loop-level XEP-0198 send-window pause (issue #1219).
 /// While `sm_state.needs_send_pause()` latches, the connection loop stops
 /// draining the outbound mpsc so its producers backpressure; client acks
@@ -265,7 +275,10 @@ async fn handle_xmpp_websocket(
 
     // Track connection state
     let mut conn = WsConnState::new();
-    let mut ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone());
+    let live_resume_control = conn.live_resume_control.clone();
+    let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
+    let mut ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
+        .with_resume_control(live_resume_control.clone());
     let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<
         crate::server::routes::interpret::OrderedRelayHandoffCompletion,
     >();
@@ -452,6 +465,11 @@ async fn handle_xmpp_websocket(
                     }
                 }
             }
+
+            // Accepted detach requests stay ahead of new preflight work, so
+            // a stream of rejected attempts cannot starve its own retirement.
+            // Validation still precedes ordinary inbound/deferred work.
+            _ = std::future::poll_fn(|cx| live_resume_control.poll(cx)) => {}
 
             // Process a bounded drain-deferred inbound chunk.
             _ = std::future::ready(()), if deferred_pending => {
@@ -2195,6 +2213,31 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::sync::oneshot;
     use waddle_xmpp::stream_management::SmSessionRegistry;
+
+    #[tokio::test]
+    async fn unfinished_live_resume_returns_when_socket_owner_drops() {
+        let conn = WsConnState::new();
+        let (outbound, _outbound_rx) = mpsc::channel(1);
+        let entry = waddle_xmpp::registry::ConnectionEntry::new(outbound);
+        let owner: FullJid = "alice@example.test/old".parse().expect("full JID");
+        assert!(entry.wire_resume_control(owner.clone(), conn.live_resume_control.clone()));
+        let guard = LiveResumeOwnerGuard(conn.live_resume_control.clone());
+        let request = conn.live_resume_control.request(
+            waddle_xmpp::pending_delivery::SmSessionId::try_from_wire("old-stream")
+                .expect("valid stream ID"),
+            owner.to_bare(),
+            0,
+        );
+        tokio::pin!(request);
+        assert!(futures::poll!(request.as_mut()).is_pending());
+
+        drop(guard);
+        assert_eq!(
+            request.await,
+            waddle_xmpp::registry::LocalResumeReply::NotPersisted
+        );
+        assert!(!conn.write_interruption.is_cancelled());
+    }
 
     #[derive(Default)]
     struct UpgradeCloseSink {

@@ -597,6 +597,7 @@ where
         return outcome;
     }
     conn.sm_state.note_ack_request_sent();
+    let live_resume = std::sync::Arc::clone(&conn.live_resume_control);
     loop {
         if conn.write_interruption.is_cancelled() {
             return SendWindowOutcome::TransportClosed;
@@ -617,6 +618,7 @@ where
         }
         let next = match tokio::select! {
             biased;
+            _ = std::future::poll_fn(|cx| live_resume.poll(cx)) => continue,
             _ = conn.write_interruption.cancelled() => {
                 return SendWindowOutcome::TransportClosed;
             }
@@ -975,6 +977,13 @@ where
     RE: std::fmt::Display,
 {
     loop {
+        // Inline drains run on the owner task too. Service preflight before
+        // consuming another ACK, so a ready Pong/ACK flood cannot starve it.
+        std::future::poll_fn(|cx| {
+            let _ = conn.live_resume_control.poll(cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
         if conn.write_interruption.is_cancelled() {
             return DrainSignal::TransportClosed;
         }

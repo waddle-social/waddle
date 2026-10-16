@@ -259,6 +259,95 @@ async fn another_principal_cannot_detach_the_attached_owner() {
 }
 
 #[tokio::test]
+async fn ahead_resume_counter_does_not_detach_the_attached_owner() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let (mut owner, stream) = original(&server).await;
+    ping(&mut owner, "before-invalid-resume").await;
+    assert_handled(&mut owner, 1).await;
+
+    let mut invalid = authenticate(&server, 0).await;
+    let error = resume(&mut invalid, &stream, 2).await;
+    assert!(error.is("error", STREAM), "resume response: {error:?}");
+    assert!(error.get_child("undefined-condition", STREAMS).is_some());
+    assert!(error.get_child("handled-count-too-high", SM_NS).is_some());
+
+    // Rejecting an impossible count must leave the live owner and its
+    // counters intact, so it can continue before a later valid takeover.
+    ping(&mut owner, "owner-survives-ahead-counter").await;
+    assert_handled(&mut owner, 2).await;
+    let mut legitimate = authenticate(&server, 0).await;
+    let response = resume(&mut legitimate, &stream, 2).await;
+    assert!(
+        response.is("resumed", SM_NS),
+        "resume response: {response:?}"
+    );
+    assert_eq!(response.attr("h"), Some("2"));
+    ping(&mut legitimate, "successor-after-ahead-counter").await;
+    assert_handled(&mut legitimate, 3).await;
+    legitimate
+        .close()
+        .await
+        .expect("legitimate successor closes");
+}
+
+#[tokio::test]
+async fn regressed_resume_counter_preserves_the_attached_owner_and_routing() {
+    let server = TestServer::start_with_extra_accounts(ACCOUNTS);
+    let (mut owner, stream) = original(&server).await;
+    let owner_jid: FullJid = owner
+        .full_jid
+        .as_deref()
+        .expect("bound JID")
+        .parse()
+        .expect("full JID");
+    for id in ["acknowledged-first", "acknowledged-second"] {
+        ping(&mut owner, id).await;
+    }
+    send(
+        &mut owner,
+        Element::builder("a", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("h").to_owned(), "2")
+            .build(),
+    )
+    .await;
+    // The response to the following request is a same-socket barrier:
+    // last_acked is already two before the replacement supplies one.
+    assert_handled(&mut owner, 2).await;
+
+    let mut invalid = authenticate(&server, 0).await;
+    let failed = resume(&mut invalid, &stream, 1).await;
+    assert!(failed.is("failed", SM_NS), "resume response: {failed:?}");
+    assert!(failed
+        .get_child("resource-constraint", xmpp_parsers::ns::XMPP_STANZAS)
+        .is_some());
+    ping(&mut owner, "owner-survives-regressed-counter").await;
+    assert_handled(&mut owner, 3).await;
+
+    let mut peer = authenticate(&server, 1).await;
+    peer.bind("observer").await.expect("peer binds");
+    send_message(&mut peer, owner_jid.clone(), "original-owner-routing").await;
+    receive_message(&mut owner, "original-owner-routing").await;
+
+    let mut legitimate = authenticate(&server, 0).await;
+    let response = resume(&mut legitimate, &stream, 4).await;
+    assert!(
+        response.is("resumed", SM_NS),
+        "resume response: {response:?}"
+    );
+    assert_eq!(response.attr("h"), Some("3"));
+    ping(&mut legitimate, "successor-after-regressed-counter").await;
+    assert_handled(&mut legitimate, 4).await;
+    send_message(&mut peer, owner_jid, "successor-routing").await;
+    receive_message(&mut legitimate, "successor-routing").await;
+    legitimate
+        .close()
+        .await
+        .expect("legitimate successor closes");
+    invalid.close().await.expect("rejected replacement closes");
+    peer.close().await.expect("peer closes");
+}
+
+#[tokio::test]
 async fn intentional_logout_cannot_be_force_resumed() {
     let server = TestServer::start_with_extra_accounts(ACCOUNTS);
     let (owner, stream) = original(&server).await;

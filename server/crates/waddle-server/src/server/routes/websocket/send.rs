@@ -6,6 +6,7 @@ pub(super) struct InterruptibleSink<S> {
     inner: S,
     interrupt: tokio_util::sync::CancellationToken,
     cancelled: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>,
+    resume_control: Option<Arc<waddle_xmpp::registry::LiveResumeControl>>,
 }
 
 impl<S> InterruptibleSink<S> {
@@ -15,6 +16,21 @@ impl<S> InterruptibleSink<S> {
             inner,
             interrupt,
             cancelled,
+            resume_control: None,
+        }
+    }
+
+    pub(super) fn with_resume_control(
+        mut self,
+        control: Arc<waddle_xmpp::registry::LiveResumeControl>,
+    ) -> Self {
+        self.resume_control = Some(control);
+        self
+    }
+
+    fn poll_resume_control(&self, cx: &mut std::task::Context<'_>) {
+        if let Some(control) = &self.resume_control {
+            let _ = control.poll(cx);
         }
     }
 
@@ -72,6 +88,7 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
+        this.poll_resume_control(cx);
         if std::future::Future::poll(this.cancelled.as_mut(), cx).is_ready() {
             return std::task::Poll::Ready(Err(InterruptedWrite::Detached));
         }
@@ -95,6 +112,7 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
+        this.poll_resume_control(cx);
         if std::future::Future::poll(this.cancelled.as_mut(), cx).is_ready() {
             return std::task::Poll::Ready(Err(InterruptedWrite::Detached));
         }
@@ -108,6 +126,7 @@ impl<S: Sink<Message> + Unpin> Sink<Message> for InterruptibleSink<S> {
         cx: &mut std::task::Context<'_>,
     ) -> std::task::Poll<Result<(), Self::Error>> {
         let this = self.get_mut();
+        this.poll_resume_control(cx);
         if std::future::Future::poll(this.cancelled.as_mut(), cx).is_ready() {
             return std::task::Poll::Ready(Err(InterruptedWrite::Detached));
         }

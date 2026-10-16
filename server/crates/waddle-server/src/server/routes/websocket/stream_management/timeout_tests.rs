@@ -19,7 +19,7 @@ use waddle_xmpp::{
 };
 use xmpp_parsers::minidom::Element;
 
-async fn local_resume_after_slow_cleanup(clustering: ClusteringHandles, expect_waiting: bool) {
+async fn local_resume_after_slow_cleanup(clustering: ClusteringHandles) {
     let state = create_test_websocket_state_with_clustering(
         clustering,
         Arc::new(InMemorySmSessionRegistry::new().with_persistence(Arc::new(
@@ -62,10 +62,10 @@ async fn local_resume_after_slow_cleanup(clustering: ClusteringHandles, expect_w
             .build(),
     );
 
-    // Keep database/actor setup on real time; only the held handshake needs
-    // a virtual delay. Its request proves the timeout future has been polled.
+    // Keep database/actor setup on real time; only accepted cleanup needs a
+    // virtual delay. Service preflight on the old connection's owner task.
     tokio::time::pause();
-    let mut resuming = tokio::spawn({
+    let resuming = tokio::spawn({
         let state = Arc::clone(&state);
         async move {
             let mut conn = WsConnState::new();
@@ -74,22 +74,15 @@ async fn local_resume_after_slow_cleanup(clustering: ClusteringHandles, expect_w
             handle_xmpp_frame(&resume, "example.com", &state, &mut conn).await
         }
     });
+    std::future::poll_fn(|cx| old.live_resume_control.poll(cx)).await;
     let request = requests.recv().await.expect("local detach request");
     tokio::time::advance(Duration::from_secs(6)).await;
     tokio::task::yield_now().await;
-    assert_eq!(
+    assert!(
         !request.ack.is_closed(),
-        expect_waiting,
-        "local resume must honor its handshake budget while cleanup is delayed"
+        "accepted local resume must wait through captured cleanup, even past its handshake budget"
     );
     tokio::time::resume();
-    // An expired attempt must observe the missing snapshot before cleanup
-    // publishes it; a later snapshot must not turn this into a successful resume.
-    let expired_responses = if expect_waiting {
-        None
-    } else {
-        Some((&mut resuming).await.expect("expired resume task"))
-    };
 
     let outcome = cleanup_force_detach_connection_shutdown(
         &state,
@@ -101,52 +94,41 @@ async fn local_resume_after_slow_cleanup(clustering: ClusteringHandles, expect_w
     .await;
     assert_eq!(outcome, ConnectionShutdownOutcome::Detached);
     finish_socket_cleanup(&state, &old, outcome).await;
-    assert_eq!(
-        request.ack.send(ForceDetachOutcome::Detached).is_ok(),
-        expect_waiting,
-        "only an unexpired resume can receive cleanup acknowledgement"
-    );
-    let responses = match expired_responses {
-        Some(responses) => responses,
-        None => resuming.await.expect("resume task"),
-    };
-    let expected_response = if expect_waiting { "resumed" } else { "failed" };
+    request
+        .ack
+        .send(ForceDetachOutcome::Detached)
+        .expect("accepted local resume still waits for cleanup");
+    let responses = resuming.await.expect("resume task");
     assert!(
         responses.iter().any(|frame| {
             let element = Element::from_str(frame).expect("response XML");
-            element.name() == expected_response && element.ns() == SM_NS
+            element.name() == "resumed" && element.ns() == SM_NS
         }),
-        "expected {expected_response} after delayed cleanup: {responses:?}"
+        "expected resumed after delayed cleanup: {responses:?}"
     );
 }
 
 #[tokio::test]
 async fn local_resume_default_budget_allows_cleanup_past_five_seconds() {
-    local_resume_after_slow_cleanup(ClusteringHandles::default(), true).await;
+    local_resume_after_slow_cleanup(ClusteringHandles::default()).await;
 }
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn local_resume_uses_configured_handshake_budget_for_slow_cleanup() {
-    local_resume_after_slow_cleanup(
-        ClusteringHandles {
-            resume_handshake_timeout: Some(Duration::from_secs(10)),
-            ..Default::default()
-        },
-        true,
-    )
+async fn local_resume_with_cluster_configuration_waits_for_slow_cleanup() {
+    local_resume_after_slow_cleanup(ClusteringHandles {
+        resume_handshake_timeout: Some(Duration::from_secs(10)),
+        ..Default::default()
+    })
     .await;
 }
 
 #[cfg(feature = "clustering")]
 #[tokio::test]
-async fn local_resume_expires_at_configured_short_handshake_budget() {
-    local_resume_after_slow_cleanup(
-        ClusteringHandles {
-            resume_handshake_timeout: Some(Duration::from_secs(2)),
-            ..Default::default()
-        },
-        false,
-    )
+async fn local_resume_waits_for_captured_cleanup_past_handshake_budget() {
+    local_resume_after_slow_cleanup(ClusteringHandles {
+        resume_handshake_timeout: Some(Duration::from_secs(2)),
+        ..Default::default()
+    })
     .await;
 }

@@ -26,11 +26,56 @@
 
 #[cfg(any(test, feature = "clustering"))]
 use std::sync::{Arc, OnceLock};
+#[cfg(any(test, feature = "clustering"))]
 use std::time::Duration;
 
-use jid::BareJid;
+use jid::{BareJid, FullJid};
 use waddle_xmpp::pending_delivery::SmSessionId;
-use waddle_xmpp::registry::{ConnectionRegistry, ForceDetachOutcome, ForceDetachRequest};
+use waddle_xmpp::registry::ConnectionRegistry;
+#[cfg(any(test, feature = "clustering"))]
+use waddle_xmpp::registry::{ForceDetachOutcome, ForceDetachRequest};
+
+#[derive(Debug)]
+pub(crate) struct LocalResumeRejected {
+    pub jid: FullJid,
+    pub reason: waddle_xmpp::stream_management::SmResumeRejection,
+}
+
+/// Capture one local owner and let that owner's task validate `h` before
+/// interrupting I/O. After enqueue, wait through its cleanup acknowledgment:
+/// a handshake timer cannot turn an accepted detach into a premature miss.
+pub(crate) async fn request_validated_local_resume(
+    registry: &ConnectionRegistry,
+    stream_id: &SmSessionId,
+    requester_bare_jid: &BareJid,
+    h: u32,
+) -> Result<LocalForcedDetachOutcome, LocalResumeRejected> {
+    use waddle_xmpp::registry::LocalResumeReply;
+    let Some(jid) = registry.sm_stream_owner(stream_id) else {
+        return Ok(LocalForcedDetachOutcome::NotLiveLocally);
+    };
+    let Some(entry) = registry.get_entry(&jid) else {
+        return Ok(LocalForcedDetachOutcome::NotLiveLocally);
+    };
+    if !entry.is_locally_hosted() || entry.sm_stream_id().as_ref() != Some(stream_id) {
+        return Ok(LocalForcedDetachOutcome::NotLiveLocally);
+    }
+    if jid.to_bare() != *requester_bare_jid {
+        return Ok(LocalForcedDetachOutcome::IdentityMismatch);
+    }
+    let Some(control) = entry.resume_control() else {
+        return Ok(LocalForcedDetachOutcome::NotLiveLocally);
+    };
+    match control
+        .request(stream_id.clone(), requester_bare_jid.clone(), h)
+        .await
+    {
+        LocalResumeReply::Detached => Ok(LocalForcedDetachOutcome::Detached),
+        LocalResumeReply::IdentityMismatch => Ok(LocalForcedDetachOutcome::IdentityMismatch),
+        LocalResumeReply::NotPersisted => Ok(LocalForcedDetachOutcome::NotLiveLocally),
+        LocalResumeReply::Rejected(reason) => Err(LocalResumeRejected { jid, reason }),
+    }
+}
 
 /// This node's local outcome of a force-detach request, before being mapped
 /// onto the relay's wire reply type (`RelayResumeStealReply`). Also used
@@ -100,6 +145,7 @@ impl ResumeStealBridge {
 /// Target one captured connection generation, never a successor publishing the
 /// same SM ID. A timeout is inconclusive: callers must still claim the detached
 /// snapshot and pass the socket-cleanup barrier before serving the replacement.
+#[cfg(any(test, feature = "clustering"))]
 pub(crate) async fn request_local_forced_detach(
     registry: &ConnectionRegistry,
     stream_id: &SmSessionId,

@@ -917,6 +917,79 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
         "a later sweep must not promote the same payload twice"
     );
     assert_eq!(after_retry[0].id, queued[0].id);
+    if resume_first {
+        assert_fresh_bind_resume_control_tracks_new_stream(&state, &mut conn, &jid).await;
+    }
+}
+
+/// The same socket and controller survive a recoverable resume rejection.
+/// Fresh bind and SM enable must publish a new frontier through that original
+/// controller, even if the rejected attempt already wired a routing entry.
+async fn assert_fresh_bind_resume_control_tracks_new_stream(
+    state: &super::super::WebSocketState,
+    conn: &mut WsConnState,
+    jid: &FullJid,
+) {
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::registry::{ForceDetachOutcome, LocalResumeReply};
+    use waddle_xmpp::stream_management::SmResumeRejection;
+
+    let enable = element_to_xml(
+        Element::builder("enable", SM_NS)
+            .attr(minidom::rxml::xml_ncname!("resume").to_owned(), "true")
+            .build(),
+    );
+    let responses = handle_xmpp_frame(&enable, "example.com", state, conn).await;
+    let enabled: Element = responses[0].parse().expect("enabled XML");
+    assert!(enabled.is("enabled", SM_NS));
+    let stream_id = SmSessionId::try_from_wire(enabled.attr("id").expect("new stream ID"))
+        .expect("valid stream ID");
+    conn.publish_pending_sm_enable(state);
+    for id in ["new-first", "new-second"] {
+        let _ = conn.sm_state.record_outbound(
+            element_to_xml(
+                Element::builder("message", waddle_xmpp::ns::JABBER_CLIENT)
+                    .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                    .build(),
+            ),
+            waddle_xmpp::telemetry::attributes::SmEvictionPath::ReplayTail,
+        );
+    }
+    let entry = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(jid)
+        .expect("fresh bound entry");
+    let control = entry.resume_control().expect("fresh entry control");
+    assert!(Arc::ptr_eq(&control, &conn.live_resume_control));
+    let mut detach = entry.take_force_detach_rx().expect("fresh owner receiver");
+
+    let invalid = control.request(stream_id.clone(), jid.to_bare(), 3);
+    tokio::pin!(invalid);
+    assert!(futures::poll!(invalid.as_mut()).is_pending());
+    assert!(futures::poll!(std::future::poll_fn(|cx| control.poll(cx))).is_ready());
+    assert_eq!(
+        invalid.await,
+        LocalResumeReply::Rejected(SmResumeRejection::HandledTooHigh { outbound_count: 2 })
+    );
+    assert!(!conn.write_interruption.is_cancelled());
+    assert!(matches!(
+        detach.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+
+    let valid = control.request(stream_id, jid.to_bare(), 2);
+    tokio::pin!(valid);
+    assert!(futures::poll!(valid.as_mut()).is_pending());
+    assert!(futures::poll!(std::future::poll_fn(|cx| control.poll(cx))).is_ready());
+    let request = detach.try_recv().expect("fresh stream's validated detach");
+    assert!(conn.write_interruption.is_cancelled());
+    request
+        .ack
+        .send(ForceDetachOutcome::Detached)
+        .expect("resume caller still waiting");
+    assert_eq!(valid.await, LocalResumeReply::Detached);
 }
 
 #[tokio::test]
@@ -1187,7 +1260,7 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
 }
 
 #[tokio::test]
-async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fresh_bind() {
+async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_resume_control() {
     use waddle_xmpp::stream_management::{DetachedSession, DEFAULT_MAX_UNACKED_QUEUE_SIZE};
 
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
@@ -1337,6 +1410,7 @@ async fn replay_gap_during_resume_finalization_clears_blocklist_interest_for_fre
         .connection_registry
         .is_owned_by(&jid, conn.registry_owner.as_ref().unwrap()));
     assert!(!conn.blocklist_interested);
+    assert_fresh_bind_resume_control_tracks_new_stream(&state, &mut conn, &jid).await;
 }
 
 #[tokio::test]

@@ -414,6 +414,81 @@ async fn forced_detach_interrupts_ordinary_write_waiting_for_flush() {
     );
 }
 
+async fn invalid_live_resume_preserves_blocked_write<S>(inner: S)
+where
+    S: Sink<Message, Error = &'static str> + Unpin,
+{
+    use waddle_xmpp::pending_delivery::SmSessionId;
+    use waddle_xmpp::registry::{ConnectionEntry, ForceDetachOutcome, LocalResumeReply};
+    use waddle_xmpp::stream_management::SmResumeRejection;
+
+    let mut conn = super::super::state::WsConnState::new();
+    conn.sm_state
+        .enable("owner-serviced-resume".to_owned(), true, Some(300));
+    let stream_id = SmSessionId::try_from_wire("owner-serviced-resume").expect("valid stream ID");
+    let owner: jid::FullJid = "alice@example.test/old".parse().expect("full JID");
+    let (outbound, _outbound_rx) = tokio::sync::mpsc::channel(1);
+    let entry = ConnectionEntry::new(outbound);
+    entry.set_sm_stream_id(Some(stream_id.clone()));
+    assert!(entry.wire_resume_control(owner.clone(), conn.live_resume_control.clone()));
+    let mut force_detach_rx = entry.take_force_detach_rx().expect("owner receiver");
+    let mut sink = InterruptibleSink::new(inner, conn.write_interruption.clone())
+        .with_resume_control(conn.live_resume_control.clone());
+    let send = send_ws_message(&mut sink, Message::Text("<message/>".into()), "detach");
+    tokio::pin!(send);
+    assert!(futures::poll!(send.as_mut()).is_pending());
+
+    // Only the sink's owner-side polling can inspect the current SM frontier;
+    // the request itself must neither cancel I/O nor enqueue a destructive close.
+    let invalid = conn
+        .live_resume_control
+        .request(stream_id.clone(), owner.to_bare(), 1);
+    tokio::pin!(invalid);
+    assert!(futures::poll!(invalid.as_mut()).is_pending());
+    assert!(!conn.write_interruption.is_cancelled());
+    assert!(futures::poll!(send.as_mut()).is_pending());
+    assert_eq!(
+        invalid.await,
+        LocalResumeReply::Rejected(SmResumeRejection::HandledTooHigh { outbound_count: 0 })
+    );
+    assert!(!conn.write_interruption.is_cancelled());
+    assert!(matches!(
+        force_detach_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+
+    // Rejecting a bad h must leave a later correct takeover usable, including
+    // waking an owner whose socket never becomes ready or finishes flushing.
+    let valid = conn
+        .live_resume_control
+        .request(stream_id, owner.to_bare(), 0);
+    tokio::pin!(valid);
+    assert!(futures::poll!(valid.as_mut()).is_pending());
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_millis(100), send)
+            .await
+            .expect("validated resume interrupts blocked write")
+    );
+    let request = force_detach_rx.try_recv().expect("validated force detach");
+    assert!(conn.write_interruption.is_cancelled());
+    assert_eq!(request.requester_bare_jid, owner.to_bare());
+    request
+        .ack
+        .send(ForceDetachOutcome::Detached)
+        .expect("resume caller still waiting");
+    assert_eq!(valid.await, LocalResumeReply::Detached);
+}
+
+#[tokio::test]
+async fn invalid_live_resume_does_not_interrupt_blocked_ready_before_valid_takeover() {
+    invalid_live_resume_preserves_blocked_write(PendingReadySink { sent: Vec::new() }).await;
+}
+
+#[tokio::test]
+async fn invalid_live_resume_does_not_interrupt_blocked_flush_before_valid_takeover() {
+    invalid_live_resume_preserves_blocked_write(PendingFlushSink { sent: Vec::new() }).await;
+}
+
 async fn interrupted_batch_retains_replay<S>(sink: S)
 where
     S: Sink<Message, Error = &'static str> + Unpin,

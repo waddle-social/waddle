@@ -927,16 +927,11 @@ async fn handle_sm_resume_terminal(
     // another resume can publish the same SM ID on a replacement meanwhile.
     if let ConnectionPhase::Authenticated { bare_jid } = &*phase {
         use crate::clustering::resume_bridge::{
-            request_local_forced_detach, LocalForcedDetachOutcome,
+            request_validated_local_resume, LocalForcedDetachOutcome, LocalResumeRejected,
         };
+        use waddle_xmpp::stream_management::SmResumeRejection;
         let shutdown = state.deps.shutdown.stop_token();
         let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(&resume.previd);
-        let handshake_budget = state
-            .deps
-            .app_state
-            .clustering_claims
-            .resume_handshake_timeout()
-            .unwrap_or_else(|| crate::config::ClusteringResumeHandshakeConfig::default().timeout);
         let outcome = tokio::select! {
             biased;
             _ = shutdown.cancelled() => {
@@ -945,18 +940,47 @@ async fn handle_sm_resume_terminal(
                     SmResumeOutcome::ShutdownAbandoned,
                 );
             }
-            outcome = request_local_forced_detach(
+            outcome = request_validated_local_resume(
                 &state.deps.protocol.connection_registry,
                 &stream_id,
                 bare_jid,
-                handshake_budget,
+                resume.h,
             ) => outcome,
         };
-        if outcome == LocalForcedDetachOutcome::IdentityMismatch {
-            return SmResumeTerminal::failed(
-                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-                SmResumeOutcome::IdentityMismatch,
-            );
+        match outcome {
+            Ok(LocalForcedDetachOutcome::IdentityMismatch) => {
+                return SmResumeTerminal::failed(stream_id, SmResumeOutcome::IdentityMismatch);
+            }
+            Err(LocalResumeRejected {
+                reason: SmResumeRejection::NotResumable,
+                ..
+            }) => {
+                return SmResumeTerminal::failed(stream_id, SmResumeOutcome::NotFound);
+            }
+            Err(LocalResumeRejected {
+                jid,
+                reason:
+                    SmResumeRejection::ReplayGap {
+                        inbound_count,
+                        replay_gap_through,
+                    },
+            }) => {
+                return SmResumeTerminal::replay_gap(
+                    stream_id,
+                    inbound_count,
+                    jid,
+                    resume.h,
+                    replay_gap_through,
+                );
+            }
+            Err(LocalResumeRejected {
+                reason: SmResumeRejection::HandledTooHigh { outbound_count },
+                ..
+            }) => {
+                *phase = ConnectionPhase::closing(None);
+                return SmResumeTerminal::handled_too_high(stream_id, resume.h, outbound_count);
+            }
+            Ok(LocalForcedDetachOutcome::Detached | LocalForcedDetachOutcome::NotLiveLocally) => {}
         }
         // NotLiveLocally is not proof of cleanup. A snapshot must still be
         // claimable below; prepare_socket_bind separately waits for the exact

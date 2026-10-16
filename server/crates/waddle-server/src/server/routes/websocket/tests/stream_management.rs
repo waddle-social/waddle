@@ -12524,6 +12524,7 @@ async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup(
             (responses, conn)
         }
     });
+    std::future::poll_fn(|cx| old.live_resume_control.poll(cx)).await;
     let first = tokio::time::timeout(Duration::from_secs(2), detach_requests.recv())
         .await
         .expect("first request arrives")
@@ -12546,6 +12547,7 @@ async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup(
             (responses, conn)
         }
     });
+    std::future::poll_fn(|cx| old.live_resume_control.poll(cx)).await;
     let second = tokio::time::timeout(Duration::from_secs(2), detach_requests.recv())
         .await
         .expect("second request arrives")
@@ -12696,6 +12698,7 @@ async fn intentional_close_wins_inflight_force_resume_without_persisting_a_snaps
         .connection_registry
         .get_entry(&jid)
         .expect("owner entry");
+    assert!(entry.wire_resume_control(jid.clone(), Arc::clone(&owner.live_resume_control)));
     let mut detach_requests = entry
         .take_force_detach_rx()
         .expect("owner control receiver");
@@ -12745,6 +12748,7 @@ async fn intentional_close_wins_inflight_force_resume_without_persisting_a_snaps
             (responses, conn)
         }
     });
+    std::future::poll_fn(|cx| owner.live_resume_control.poll(cx)).await;
     let request = tokio::time::timeout(Duration::from_secs(2), detach_requests.recv())
         .await
         .expect("resume reaches the closing owner")

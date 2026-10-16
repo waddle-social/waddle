@@ -1701,6 +1701,7 @@ pub(super) async fn finish_socket_cleanup(
 ) {
     use waddle_xmpp::registry::SocketCleanupState;
     let (Some(lifecycle), Some(jid)) = (&conn.socket_lifecycle, conn.phase.cleanup_jid()) else {
+        conn.live_resume_control.finish();
         return;
     };
     let completion = if outcome == ConnectionShutdownOutcome::Detached {
@@ -1723,6 +1724,7 @@ pub(super) async fn finish_socket_cleanup(
         .protocol
         .connection_registry
         .prune_completed_bind(jid);
+    conn.live_resume_control.finish();
 }
 
 async fn promote_terminal_recovery(
@@ -2629,7 +2631,7 @@ async fn refuse_detach_without_principal(
         }
     }
     conn.sm_ingress_fence = None;
-    conn.sm_state = waddle_xmpp::stream_management::StreamManagementState::new();
+    conn.sm_state.reset();
     if let Some((was_presence_available, owner)) = terminal_removed {
         // The promotion await above can overlap a same-FullJID replacement
         // binding and rejoining rooms. At this point the old route is already
