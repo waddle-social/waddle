@@ -161,6 +161,112 @@ async fn finish_test_socket_cleanup(
 }
 
 #[tokio::test]
+async fn fresh_bind_interrupts_incumbent_write_waiting_for_readiness() {
+    fresh_bind_interrupts_incumbent_write(super::send::PendingReadySink { sent: Vec::new() }).await;
+}
+
+#[tokio::test]
+async fn fresh_bind_interrupts_incumbent_write_waiting_for_flush() {
+    fresh_bind_interrupts_incumbent_write(super::send::PendingFlushSink { sent: Vec::new() }).await;
+}
+
+async fn fresh_bind_interrupts_incumbent_write<S>(inner: S)
+where
+    S: futures::Sink<axum::extract::ws::Message, Error = &'static str> + Unpin,
+{
+    use super::super::{
+        cleanup::{
+            cleanup_force_detach_connection_shutdown, finish_socket_cleanup,
+            ConnectionShutdownOutcome,
+        },
+        send::{send_ws_message, InterruptibleSink},
+    };
+    use waddle_xmpp::registry::{ForceDetachOrigin, SocketCleanupState};
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/blocked-write".parse().expect("JID");
+    let (outcome, mut incumbent, mut rx, _) =
+        bind_fresh_test_connection(state.clone(), jid.clone()).await;
+    assert!(matches!(outcome, RegistrationAfterFrame::Registered(_)));
+    incumbent
+        .sm_state
+        .enable("fresh-bind-incumbent".into(), true, Some(300));
+    let lifecycle = incumbent
+        .socket_lifecycle
+        .clone()
+        .expect("incumbent lifecycle");
+    let owner = incumbent.registry_owner.clone().expect("incumbent owner");
+    let mut detach = lifecycle
+        .entry
+        .take_force_detach_rx()
+        .expect("control receiver");
+    let mut sink = InterruptibleSink::new(inner, incumbent.write_interruption.clone());
+    let write = send_ws_message(
+        &mut sink,
+        axum::extract::ws::Message::Text("<message/>".into()),
+        "blocked incumbent write",
+    );
+    tokio::pin!(write);
+    assert!(futures::poll!(write.as_mut()).is_pending());
+
+    let replacement = tokio::spawn(bind_fresh_test_connection(state.clone(), jid.clone()));
+    assert!(
+        !tokio::time::timeout(std::time::Duration::from_secs(1), write)
+            .await
+            .expect("fresh bind interrupts the ordinary write before its 60-second stall budget")
+    );
+    let request = detach
+        .try_recv()
+        .expect("retirement queued before interruption");
+    assert_eq!(request.origin, ForceDetachOrigin::FreshBindReplacement);
+    assert_eq!(request.requester_bare_jid, jid.to_bare());
+    assert!(
+        !replacement.is_finished(),
+        "interruption alone cannot publish a successor"
+    );
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .is_owned_by(&jid, &owner));
+
+    let shutdown = cleanup_force_detach_connection_shutdown(
+        &state,
+        &mut rx,
+        &mut incumbent,
+        false,
+        request.origin,
+    )
+    .await;
+    assert_eq!(shutdown, ConnectionShutdownOutcome::NotPersisted);
+    finish_socket_cleanup(&state, &incumbent, shutdown).await;
+    assert_eq!(lifecycle.state(), SocketCleanupState::Retired);
+
+    let (outcome, mut successor, mut successor_rx, pending) =
+        tokio::time::timeout(std::time::Duration::from_secs(1), replacement)
+            .await
+            .expect("fresh bind completes after terminal cleanup")
+            .expect("replacement task");
+    assert!(matches!(outcome, RegistrationAfterFrame::Registered(_)));
+    assert!(!pending);
+    assert_ne!(successor.occupancy_session, incumbent.occupancy_session);
+    assert!(
+        !successor.sm_state.enabled,
+        "fresh binding does not resume the old stream"
+    );
+    assert!(!successor.write_interruption.is_cancelled());
+
+    // A delayed cleanup carrying the old identity must leave the successor live.
+    finish_test_socket_cleanup(&state, &mut incumbent, &mut rx).await;
+    assert!(state.deps.protocol.connection_registry.is_owned_by(
+        &jid,
+        successor.registry_owner.as_ref().expect("successor owner"),
+    ));
+    assert!(!successor.write_interruption.is_cancelled());
+    finish_test_socket_cleanup(&state, &mut successor, &mut successor_rx).await;
+}
+
+#[tokio::test]
 async fn fresh_bind_waits_for_incumbent_cleanup_before_publication() {
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/replacement".parse().expect("jid");
