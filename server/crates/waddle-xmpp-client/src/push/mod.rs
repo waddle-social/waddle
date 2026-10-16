@@ -191,7 +191,7 @@ pub enum PushDeviceCredentials {
     Apns {
         device_token: String,
     },
-    /// Firebase Cloud Messaging. `p256dh` / `auth` are the device's
+    /// FCM (Android push). `p256dh` / `auth` are the device's
     /// RFC 8291 envelope-encryption keys (base64url, no padding): the
     /// Push Service encrypts every notification to them, so FCM only
     /// carries ciphertext.
