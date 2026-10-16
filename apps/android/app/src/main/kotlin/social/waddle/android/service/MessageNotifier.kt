@@ -61,12 +61,15 @@ class MessageNotifier(
     /** XEP-0492 effective-mode snapshot (see [NotificationPolicy]). */
     private val notifyModeFor: (conversationJid: String, isGroupchat: Boolean) -> WaddleNotifyMode =
         { _, _ -> WaddleNotifyMode.ALWAYS },
+    /** Whether the server pushes to this device (see [NotificationPolicy]). */
+    pushDelivering: () -> Boolean = { false },
 ) : PushSummarySink {
     private val policy = NotificationPolicy(
         userPrefs = userPrefs,
         currentSession = currentSession,
         isAppVisible = isAppVisible,
         notifyModeFor = notifyModeFor,
+        pushDelivering = pushDelivering,
     )
 
     private val historyLock = Any()
@@ -219,10 +222,10 @@ class MessageNotifier(
     }
 
     private suspend fun onMessage(message: WaddleMessage) {
-        // A replay (the XEP-0160 offline flush) is left to the push that
-        // announced it. Not remembering it as handled live matters when the
-        // flush wins the race with that push: the push must still post.
-        if (policy.isReplay(message)) return
+        // A pushed replay (the XEP-0160 offline flush) is left to the push
+        // that announced it. Not remembering it as handled live matters when
+        // the flush wins the race with that push: the push must still post.
+        if (policy.isPushedReplay(message)) return
         rememberLiveItem(message)
         val decision = policy.decide(message) ?: return
 

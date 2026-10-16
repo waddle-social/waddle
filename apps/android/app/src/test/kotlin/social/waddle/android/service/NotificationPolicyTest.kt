@@ -21,6 +21,7 @@ class NotificationPolicyTest {
     private val userPrefs = UserPrefs(InMemoryPreferencesDataStore())
     private val session = MutableStateFlow<WaddleSessionInfo?>(testSessionInfo())
     private var appVisible = false
+    private var pushActive = true
 
     /** XEP-0492 mode snapshot; unlisted JIDs resolve to `always`. */
     private val notifyModes = mutableMapOf<String, WaddleNotifyMode>()
@@ -30,6 +31,7 @@ class NotificationPolicyTest {
         currentSession = session,
         isAppVisible = { appVisible },
         notifyModeFor = { jid, _ -> notifyModes[jid] ?: WaddleNotifyMode.ALWAYS },
+        pushDelivering = { pushActive },
     )
 
     @Test
@@ -80,44 +82,55 @@ class NotificationPolicyTest {
         )
     }
 
+    private fun flushedDm() = testMessage(
+        from = "alice@waddle.test/phone",
+        stanzaId = "s-offline",
+        timestamp = "2026-10-16T09:00:00Z",
+    )
+
     @Test
-    fun `an offline flush replay does not notify again`() = runTest {
+    fun `with push active an offline flush replay does not notify again`() = runTest {
         // XEP-0160 §3: the flush replays the stored message with the
         // server's XEP-0203 <delay/>; push already announced it.
-        val flushed = testMessage(
-            from = "alice@waddle.test/phone",
-            stanzaId = "s-offline",
-            timestamp = "2026-10-16T09:00:00Z",
-        )
+        pushActive = true
 
-        assertTrue(policy.isReplay(flushed))
-        assertNull(policy.decide(flushed))
-        assertNull(
-            policy.decide(
-                mucMessage().copy(timestamp = "2026-10-16T09:00:00Z"),
-            ),
-        )
+        assertTrue(policy.isPushedReplay(flushedDm()))
+        assertNull(policy.decide(flushedDm()))
+        assertNull(policy.decide(mucMessage().copy(timestamp = "2026-10-16T09:00:00Z")))
     }
 
     @Test
-    fun `live messages without a delay still notify`() = runTest {
-        val live = testMessage(from = "alice@waddle.test/phone", timestamp = null)
+    fun `without push an offline flush replay still notifies`() = runTest {
+        // No distributor, or the stay-connected fallback: nothing announced
+        // the stored message, so the flush is its only notification.
+        pushActive = false
 
-        assertFalse(policy.isReplay(live))
-        assertNotNull(policy.decide(live))
-        assertNotNull(policy.decide(mucMessage()))
+        assertFalse(policy.isPushedReplay(flushedDm()))
+        assertEquals("alice@waddle.test", policy.decide(flushedDm())?.conversationJid)
+    }
+
+    @Test
+    fun `live messages without a delay notify in either push mode`() = runTest {
+        val live = testMessage(from = "alice@waddle.test/phone", timestamp = null)
+        for (active in listOf(true, false)) {
+            pushActive = active
+            assertFalse(policy.isPushedReplay(live))
+            assertNotNull(policy.decide(live))
+            assertNotNull(policy.decide(mucMessage()))
+        }
     }
 
     @Test
     fun `a received carbon is live although its forwarded wrapper is stamped`() = runTest {
         // XEP-0280/0297: the server stamps the <forwarded/> wrapper, and the
         // FFI falls back to that stamp for the carbon's timestamp.
+        pushActive = true
         val carbon = testMessage(
             from = "alice@waddle.test/phone",
             timestamp = "2026-10-16T09:00:00Z",
         ).copy(carbon = WaddleCarbonDirection.RECEIVED)
 
-        assertFalse(policy.isReplay(carbon))
+        assertFalse(policy.isPushedReplay(carbon))
         assertNotNull(policy.decide(carbon))
     }
 

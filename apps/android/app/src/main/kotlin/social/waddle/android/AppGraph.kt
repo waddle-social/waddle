@@ -231,6 +231,7 @@ class AppGraph(
                 if (isGroupchat) ConversationKind.PRIVATE_GROUP else ConversationKind.DIRECT_CHAT,
             )
         },
+        pushDelivering = { pushStatus.value == PushStatus.ACTIVE },
     )
 
     val pushDistributor: PushDistributor = PushDistributor(
