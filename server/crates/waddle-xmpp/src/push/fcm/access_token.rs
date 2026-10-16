@@ -278,6 +278,10 @@ pub enum FcmTokenSourceBuildError {
 pub struct OAuthFcmTokenSource {
     key: FcmServiceAccountKey,
     client: reqwest::Client,
+    /// Test-only override of the token endpoint (a local mock server).
+    /// Release builds have no such field: every exchange addresses
+    /// [`GOOGLE_OAUTH_TOKEN_URL`] directly.
+    #[cfg(test)]
     token_url: Url,
     clock: Arc<dyn FcmClock>,
     cache: Mutex<Option<CachedAccessToken>>,
@@ -303,9 +307,19 @@ impl OAuthFcmTokenSource {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(FcmTokenSourceBuildError::Client)?;
-        let token_url =
-            Url::parse(GOOGLE_OAUTH_TOKEN_URL).map_err(|_| FcmTokenSourceBuildError::TokenUrl)?;
-        Ok(Self::from_parts(key, client, token_url, clock))
+        // The endpoint is a constant; parsing it here proves at boot that
+        // every exchange can address it.
+        Url::parse(GOOGLE_OAUTH_TOKEN_URL).map_err(|_| FcmTokenSourceBuildError::TokenUrl)?;
+        Ok(Self {
+            key,
+            client,
+            #[cfg(test)]
+            token_url: Url::parse(GOOGLE_OAUTH_TOKEN_URL)
+                .map_err(|_| FcmTokenSourceBuildError::TokenUrl)?,
+            clock,
+            cache: Mutex::new(None),
+            refresh: tokio::sync::Mutex::new(()),
+        })
     }
 
     /// Test-only source pointed at a local mock server (cleartext).
@@ -317,15 +331,6 @@ impl OAuthFcmTokenSource {
             .redirect(reqwest::redirect::Policy::none())
             .build()
             .unwrap_or_default();
-        Self::from_parts(key, client, token_url, clock)
-    }
-
-    fn from_parts(
-        key: FcmServiceAccountKey,
-        client: reqwest::Client,
-        token_url: Url,
-        clock: Arc<dyn FcmClock>,
-    ) -> Self {
         Self {
             key,
             client,
@@ -334,6 +339,18 @@ impl OAuthFcmTokenSource {
             cache: Mutex::new(None),
             refresh: tokio::sync::Mutex::new(()),
         }
+    }
+
+    /// The token endpoint: always the pinned Google URL in release
+    /// builds, never a value read from configuration or the key file.
+    #[cfg(not(test))]
+    fn token_endpoint(&self) -> &'static str {
+        GOOGLE_OAUTH_TOKEN_URL
+    }
+
+    #[cfg(test)]
+    fn token_endpoint(&self) -> &str {
+        self.token_url.as_str()
     }
 
     /// A cached entry is independent of any panicking writer, so a
@@ -387,7 +404,7 @@ impl OAuthFcmTokenSource {
             .finish();
         let response = self
             .client
-            .post(self.token_url.clone())
+            .post(self.token_endpoint())
             .header(
                 CONTENT_TYPE,
                 HeaderValue::from_static("application/x-www-form-urlencoded"),
@@ -430,7 +447,7 @@ impl std::fmt::Debug for OAuthFcmTokenSource {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("OAuthFcmTokenSource")
             .field("key", &self.key)
-            .field("token_url", &self.token_url.as_str())
+            .field("token_url", &self.token_endpoint())
             .finish_non_exhaustive()
     }
 }

@@ -64,6 +64,10 @@ pub enum FcmSenderBuildError {
 #[derive(Debug, Clone)]
 pub struct HttpFcmSender {
     client: reqwest::Client,
+    /// Test-only override of the API base (a local mock server).
+    /// Release builds have no such field: every send addresses
+    /// [`FCM_API_BASE_URL`] directly.
+    #[cfg(test)]
     base: Url,
 }
 
@@ -74,8 +78,14 @@ impl HttpFcmSender {
             .https_only(true)
             .build()
             .map_err(FcmSenderBuildError::Client)?;
-        let base = Url::parse(FCM_API_BASE_URL).map_err(|_| FcmSenderBuildError::BaseUrl)?;
-        Ok(Self { client, base })
+        // The base is a constant; parsing it here proves at boot that
+        // every send can address it.
+        Url::parse(FCM_API_BASE_URL).map_err(|_| FcmSenderBuildError::BaseUrl)?;
+        Ok(Self {
+            client,
+            #[cfg(test)]
+            base: Url::parse(FCM_API_BASE_URL).map_err(|_| FcmSenderBuildError::BaseUrl)?,
+        })
     }
 
     /// Test-only sender pointed at a local mock server (cleartext).
@@ -89,7 +99,7 @@ impl HttpFcmSender {
     }
 
     fn send_url(&self, project_id: &FcmProjectId) -> Option<Url> {
-        let mut url = self.base.clone();
+        let mut url = self.api_base()?;
         url.path_segments_mut().ok()?.clear().extend([
             "v1",
             "projects",
@@ -97,6 +107,19 @@ impl HttpFcmSender {
             "messages:send",
         ]);
         Some(url)
+    }
+}
+
+impl HttpFcmSender {
+    /// The API base: always Google's FCM endpoint in release builds.
+    #[cfg(not(test))]
+    fn api_base(&self) -> Option<Url> {
+        Url::parse(FCM_API_BASE_URL).ok()
+    }
+
+    #[cfg(test)]
+    fn api_base(&self) -> Option<Url> {
+        Some(self.base.clone())
     }
 }
 
