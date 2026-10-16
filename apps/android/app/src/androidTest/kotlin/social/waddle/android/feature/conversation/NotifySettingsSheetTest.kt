@@ -65,9 +65,16 @@ class NotifySettingsSheetTest {
         }
     }
 
+    /** The bell lives in the top bar's overflow menu. */
+    private fun openNotifySheet() {
+        composeRule.onNodeWithContentDescription("More options").performClick()
+        waitForText("Notifications")
+        composeRule.onNodeWithText("Notifications").performClick()
+    }
+
     @Test
     fun mutingThroughTheBellSheetPublishesAndUpdatesTheStore() {
-        composeRule.onNodeWithContentDescription("Notifications").performClick()
+        openNotifySheet()
         waitForText("Muted")
         // Current mode pre-selects: the §3 direct-chat default is
         // "All messages" before any override exists.
@@ -88,7 +95,7 @@ class NotifySettingsSheetTest {
         }
 
         // Reopening pre-selects the stored override.
-        composeRule.onNodeWithContentDescription("Notifications").performClick()
+        openNotifySheet()
         waitForText("Mentions only")
         composeRule.onNode(isSelectable() and hasText("Muted")).assertIsSelected()
     }

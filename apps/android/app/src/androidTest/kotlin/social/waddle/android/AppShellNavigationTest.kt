@@ -99,6 +99,9 @@ class AppShellNavigationTest {
         composeRule.onNodeWithText("Settings").performClick()
         waitForText("Appearance")
         composeRule.onNodeWithContentDescription("Back").performClick()
+        // Back lands on the tab Settings was opened from.
+        waitForText("Settings")
+        openTab(MainTab.HOME)
         waitForHome()
     }
 
