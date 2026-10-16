@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -34,11 +35,13 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -172,6 +175,8 @@ fun TimelineList(
         }
     }
 
+    FollowNewest(listState, newestFirst.firstOrNull())
+
     // Web isPinnedAtEdge parity: in reverse layout, item 0 visible ==
     // scrolled to the newest message. Read markers gate on this.
     LaunchedEffect(listState) {
@@ -189,6 +194,42 @@ fun TimelineList(
                 if (nearTop) onTopReached()
             }
     }
+}
+
+/**
+ * Keeps the newest message in view as messages arrive. A keyed lazy list
+ * holds its first visible item in place when rows are inserted before
+ * it, so in reverse layout a new message can land below the viewport.
+ * When the reader was at the newest message, or has just sent one, the
+ * list follows it down; a reader scrolled back through history stays put.
+ *
+ * "Was at the newest" is read during composition, before the new row is
+ * measured, so it reflects the layout the reader was looking at. Only a
+ * send that appears while the list is on screen forces the jump: a
+ * pending row already there when the list is (re)created, say after a
+ * rotation restored a history position, does not. The scroll runs in the
+ * composition's scope, so the echo replacing the pending row (a new key)
+ * does not cancel a jump still in flight.
+ */
+@Composable
+private fun FollowNewest(listState: LazyListState, newest: FeedEntry?) {
+    val scope = rememberCoroutineScope()
+    val seen = remember { NewestSeen() }
+    val newestKey = newest?.key
+    val follow = remember(newestKey) {
+        val wasAtNewest = Snapshot.withoutReadObservation { listState.firstVisibleItemIndex == 0 }
+        val freshSend = seen.key != null && newest?.row is ConversationRow.Unconfirmed
+        wasAtNewest || freshSend
+    }
+    SideEffect { seen.key = newestKey }
+    LaunchedEffect(newestKey) {
+        if (newestKey != null && follow) scope.launch { listState.animateScrollToItem(0) }
+    }
+}
+
+/** The newest row key the list last composed with; null until the first. */
+private class NewestSeen {
+    var key: String? = null
 }
 
 /** Hairline · "Today" · hairline. */
