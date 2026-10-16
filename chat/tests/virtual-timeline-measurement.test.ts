@@ -248,4 +248,28 @@ describe("virtual timeline scroll compensation", () => {
 
     expect(scrolls).toEqual([[1000, 288]]);
   });
+
+  test("compensates every row above the viewport within one resize batch", () => {
+    const scrolls: Array<[number, number | undefined]> = [];
+    const virtualizer = new Virtualizer<HTMLDivElement, Element>({
+      count: 20,
+      estimateSize: () => 112,
+      getScrollElement: () => null,
+      scrollToFn: (offset, { adjustments }) => scrolls.push([offset, adjustments]),
+      observeElementRect: () => {},
+      observeElementOffset: () => {},
+    });
+    virtualizer.shouldAdjustScrollPositionOnItemSizeChange = adjustScrollForRowsAboveViewport;
+    virtualizer.getMeasurements();
+    virtualizer.scrollOffset = 1000;
+    virtualizer.scrollDirection = "backward";
+    virtualizer.isScrolling = true;
+
+    virtualizer.resizeItem(5, 400);
+    // Started at 896, above the viewport; the first correction moved it to
+    // 1184, past the stale raw offset but still above the compensated one.
+    virtualizer.resizeItem(8, 400);
+
+    expect(scrolls).toEqual([[1000, 288], [1000, 576]]);
+  });
 });
