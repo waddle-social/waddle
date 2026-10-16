@@ -38,7 +38,6 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.feature.home.CreateRoomHost
-import social.waddle.android.feature.home.CreateRoomState
 import social.waddle.android.feature.home.DashedNote
 import social.waddle.android.feature.home.HomeViewModel
 import social.waddle.android.feature.home.PageHeader
@@ -72,7 +71,7 @@ fun RoomsScreen(
     val now by rememberNow(clock)
     var query by rememberSaveable { mutableStateOf("") }
     val snackbar = remember { SnackbarHostState() }
-    val create = remember { CreateRoomState() }
+    val create = homeViewModel.createRoom
 
     fun enter(room: RoomActivity) {
         viewModel.openRoom(room.roomJid)

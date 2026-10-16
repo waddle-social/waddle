@@ -3,13 +3,14 @@ package social.waddle.android.feature.home
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
@@ -96,10 +97,19 @@ class HomeViewModel(
      */
     val canCreateChannel: StateFlow<Boolean> = _canCreateChannel.asStateFlow()
 
-    private val _createEvents = MutableSharedFlow<CreateRoomResult>(extraBufferCapacity = 4)
+    /**
+     * The create dialog's open/in-flight state. Held here, not in the
+     * composition, so a rotation mid-create keeps it and the outcome is
+     * still handled.
+     */
+    val createRoom = CreateRoomState()
 
-    /** Outcome of the last create-channel submit. */
-    val createEvents: SharedFlow<CreateRoomResult> = _createEvents
+    // A channel, not a SharedFlow: an outcome that lands while the
+    // screen is being recreated waits for the next collector.
+    private val _createEvents = Channel<CreateRoomResult>(Channel.BUFFERED)
+
+    /** Outcome of each create-channel submit, delivered once. */
+    val createEvents: Flow<CreateRoomResult> = _createEvents.receiveAsFlow()
 
     init {
         viewModelScope.launch {
@@ -128,7 +138,7 @@ class HomeViewModel(
                 description = description.trim().takeIf { it.isNotEmpty() },
                 forum = forum,
             )
-            _createEvents.tryEmit(result)
+            _createEvents.trySend(result)
         }
     }
 

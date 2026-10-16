@@ -100,7 +100,7 @@ fun HomeScreen(
     val vcard by graph.sessionManager.profileStore.selfVcard.collectAsStateWithLifecycle()
     val now by rememberNow(clock)
     val snackbar = remember { SnackbarHostState() }
-    val create = remember { CreateRoomState() }
+    val create = viewModel.createRoom
 
     fun open(room: RoomActivity) {
         viewModel.openChannel(room.roomJid)
