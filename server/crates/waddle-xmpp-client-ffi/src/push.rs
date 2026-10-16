@@ -1,11 +1,71 @@
-use waddle_xmpp_client::discovery::DiscoveryExt;
-
-use crate::{
-    WaddleClient, WaddlePushDeviceCredentials, WaddlePushEnvironment, WaddleRegisterDeviceResult,
+use jid::BareJid;
+use waddle_xmpp_client::discovery::{
+    build_disco_info_iq, parse_push_vapid_reply, DiscoveryExt, PushVapidDiscoParseError,
+    PushVapidReplyError,
 };
+
+use crate::messaging_verbs::send_iq_with_timeout;
+use crate::{
+    WaddleClient, WaddlePushDeviceCredentials, WaddlePushEnvironment, WaddlePushVapidLookup,
+    WaddleRegisterDeviceResult,
+};
+
+/// Classify the disco#info reply to a VAPID lookup, with the diagnostic
+/// for the listener when it failed. Pure, so the mapping is testable
+/// without a live stream.
+pub(crate) fn vapid_lookup_of(
+    reply: Result<minidom::Element, waddle_xmpp_client::ClientError>,
+    service: &BareJid,
+) -> (WaddlePushVapidLookup, Option<String>) {
+    let reply = match reply {
+        Ok(reply) => reply,
+        Err(e) => return (WaddlePushVapidLookup::Failed, Some(e.to_string())),
+    };
+    match parse_push_vapid_reply(&reply, service) {
+        Ok(advertisement) => (
+            WaddlePushVapidLookup::Advertised {
+                public_key: advertisement.public_key_base64url,
+                kid: advertisement.kid.to_string(),
+            },
+            None,
+        ),
+        Err(PushVapidReplyError::Advertisement(PushVapidDiscoParseError::NotAdvertised)) => {
+            (WaddlePushVapidLookup::NotAdvertised, None)
+        }
+        Err(e) => (WaddlePushVapidLookup::Failed, Some(e.to_string())),
+    }
+}
 
 #[uniffi::export(async_runtime = "tokio")]
 impl WaddleClient {
+    /// The Push Service's current RFC 8292 VAPID public key and kid, from
+    /// its XEP-0128 disco#info extension (`urn:waddle:push:vapid:0`).
+    /// Native Web Push clients (UnifiedPush on Android) bind their push
+    /// endpoint to this key. A reply not stamped by `push_service_jid`
+    /// itself is refused.
+    pub async fn fetch_push_vapid_public_key(
+        &self,
+        push_service_jid: String,
+    ) -> WaddlePushVapidLookup {
+        let Some(handle) = self.clone_handle().await else {
+            return WaddlePushVapidLookup::Failed;
+        };
+        let service = match BareJid::new(&push_service_jid) {
+            Ok(service) => service,
+            Err(e) => {
+                self.emit_error(format!("fetch_push_vapid_public_key failed: {e}"));
+                return WaddlePushVapidLookup::Failed;
+            }
+        };
+        let reply =
+            send_iq_with_timeout(&handle, build_disco_info_iq(service.as_str(), None)).await;
+        let (lookup, diagnostic) = vapid_lookup_of(reply, &service);
+        if let Some(diagnostic) = diagnostic {
+            self.emit_error(format!("fetch_push_vapid_public_key failed: {diagnostic}"));
+        }
+        lookup
+    }
+
     /// XEP-0357 §5 `<enable/>` IQ against the user's XMPP server.
     /// Never carries provider credentials — those flow through
     /// `register_push_device` (XEP-0050) at `push.<domain>`.

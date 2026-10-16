@@ -13,8 +13,9 @@ mod types;
 mod ext;
 
 pub use push_vapid::{
-    parse_push_vapid_from_disco_info, PushVapidAdvertisement, PushVapidDiscoParseError,
-    PUSH_VAPID_FIELD_KID, PUSH_VAPID_FIELD_PUBLIC_KEY, PUSH_VAPID_FORM_TYPE,
+    parse_push_vapid_from_disco_info, parse_push_vapid_reply, PushVapidAdvertisement,
+    PushVapidDiscoParseError, PushVapidReplyError, PUSH_VAPID_FIELD_KID,
+    PUSH_VAPID_FIELD_PUBLIC_KEY, PUSH_VAPID_FORM_TYPE,
 };
 
 pub use iq::{

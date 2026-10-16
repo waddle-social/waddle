@@ -59,6 +59,7 @@ import social.waddle.client.ffi.WaddlePepProfile
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
+import social.waddle.client.ffi.WaddlePushVapidLookup
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
 import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomConfig
@@ -884,6 +885,9 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
     /** Topology fake state: canned result, call count, failure knob. */
     val topology = FakeTopologyState()
 
+    /** XEP-0357 Push Service the fake answers for. */
+    val push = FakePushServiceState()
+
     override suspend fun discoverTopology(): WaddleTopology = topology.discoverTopology()
 
     /** Group-DM fake state: verb recorders and failure knobs. */
@@ -1433,15 +1437,25 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
-    override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()
+    override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean =
+        push.disable(RecordedPushDisable(pushServiceJid, node, deviceId))
+
     override suspend fun disablePushNotifications(pushServiceJid: String, node: String?): Boolean = unused()
-    override suspend fun enablePushNotifications(pushServiceJid: String, node: String): Boolean = unused()
+
+    override suspend fun enablePushNotifications(pushServiceJid: String, node: String): Boolean =
+        push.enable(pushServiceJid, node)
+
     override suspend fun registerPushDevice(
         pushServiceJid: String,
         appId: String,
         environment: WaddlePushEnvironment,
         credentials: WaddlePushDeviceCredentials,
-    ): WaddleRegisterDeviceResult? = unused()
+    ): WaddleRegisterDeviceResult? = push.register(
+        RecordedPushRegister(pushServiceJid, appId, environment, credentials),
+    )
+
+    override suspend fun fetchPushVapidPublicKey(pushServiceJid: String): WaddlePushVapidLookup =
+        push.lookup(pushServiceJid)
 }
 
 /**

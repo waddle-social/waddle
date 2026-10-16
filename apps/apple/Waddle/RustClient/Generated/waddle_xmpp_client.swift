@@ -1272,6 +1272,15 @@ public protocol WaddleClientProtocol: AnyObject, Sendable {
     func enablePushNotifications(pushServiceJid: String, node: String) async  -> Bool
 
     /**
+     * The Push Service's current RFC 8292 VAPID public key and kid, from
+     * its XEP-0128 disco#info extension (`urn:waddle:push:vapid:0`).
+     * Native Web Push clients (UnifiedPush on Android) bind their push
+     * endpoint to this key. A reply not stamped by `push_service_jid`
+     * itself is refused.
+     */
+    func fetchPushVapidPublicKey(pushServiceJid: String) async  -> WaddlePushVapidLookup
+
+    /**
      * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
      * Drives the multi-step dance and returns the assigned
      * [`WaddleRegisterDeviceResult`] (node id + device id) on
@@ -3551,6 +3560,31 @@ open func enablePushNotifications(pushServiceJid: String, node: String)async  ->
             completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_i8,
             freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_i8,
             liftFunc: FfiConverterBool.lift,
+            errorHandler: nil
+
+        )
+}
+
+    /**
+     * The Push Service's current RFC 8292 VAPID public key and kid, from
+     * its XEP-0128 disco#info extension (`urn:waddle:push:vapid:0`).
+     * Native Web Push clients (UnifiedPush on Android) bind their push
+     * endpoint to this key. A reply not stamped by `push_service_jid`
+     * itself is refused.
+     */
+open func fetchPushVapidPublicKey(pushServiceJid: String)async  -> WaddlePushVapidLookup  {
+    return
+        try!  await uniffiRustCallAsync(
+            rustFutureFunc: {
+                uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_push_vapid_public_key(
+                    self.uniffiCloneHandle(),
+                    FfiConverterString.lower(pushServiceJid)
+                )
+            },
+            pollFunc: ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer,
+            completeFunc: ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer,
+            freeFunc: ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer,
+            liftFunc: FfiConverterTypeWaddlePushVapidLookup_lift,
             errorHandler: nil
 
         )
@@ -6630,14 +6664,30 @@ public struct WaddleConfig: Equatable, Hashable {
     public var jid: String
     public var accessToken: String
     public var resource: String
+    /**
+     * Ask the server to hold the session for XEP-0198 resumption after
+     * an unclean drop. A client that never resumes MUST pass `false`:
+     * the server suppresses XEP-0357 pushes while it holds a session,
+     * so a session parked for nobody silences notifications until it
+     * expires.
+     */
+    public var resumable: Bool
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
-    public init(serverUrl: String, jid: String, accessToken: String, resource: String) {
+    public init(serverUrl: String, jid: String, accessToken: String, resource: String,
+        /**
+         * Ask the server to hold the session for XEP-0198 resumption after
+         * an unclean drop. A client that never resumes MUST pass `false`:
+         * the server suppresses XEP-0357 pushes while it holds a session,
+         * so a session parked for nobody silences notifications until it
+         * expires.
+         */resumable: Bool = true) {
         self.serverUrl = serverUrl
         self.jid = jid
         self.accessToken = accessToken
         self.resource = resource
+        self.resumable = resumable
     }
 
 
@@ -6659,7 +6709,8 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
                 serverUrl: FfiConverterString.read(from: &buf),
                 jid: FfiConverterString.read(from: &buf),
                 accessToken: FfiConverterString.read(from: &buf),
-                resource: FfiConverterString.read(from: &buf)
+                resource: FfiConverterString.read(from: &buf),
+                resumable: FfiConverterBool.read(from: &buf)
         )
     }
 
@@ -6668,6 +6719,7 @@ public struct FfiConverterTypeWaddleConfig: FfiConverterRustBuffer {
         FfiConverterString.write(value.jid, into: &buf)
         FfiConverterString.write(value.accessToken, into: &buf)
         FfiConverterString.write(value.resource, into: &buf)
+        FfiConverterBool.write(value.resumable, into: &buf)
     }
 }
 
@@ -14218,6 +14270,101 @@ public func FfiConverterTypeWaddlePushEnvironment_lower(_ value: WaddlePushEnvir
 // Note that we don't yet support `indirect` for enums.
 // See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
 /**
+ * Result of looking up the Push Service's VAPID key.
+ */
+
+public enum WaddlePushVapidLookup: Equatable, Hashable {
+
+    /**
+     * The active key: `public_key` is the base64url (no padding)
+     * uncompressed P-256 point a Web Push subscription binds to; `kid`
+     * changes when the service rotates the key, which obliges clients
+     * to re-subscribe.
+     */
+    case advertised(publicKey: String, kid: String
+    )
+    /**
+     * The service runs no Web Push provider.
+     */
+    case notAdvertised
+    /**
+     * The lookup failed (timeout, error reply, wrong origin, malformed
+     * advertisement); the diagnostic went to the listener. Callers keep
+     * any existing registration rather than tearing it down.
+     */
+    case failed
+
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddlePushVapidLookup: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddlePushVapidLookup: FfiConverterRustBuffer {
+    typealias SwiftType = WaddlePushVapidLookup
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddlePushVapidLookup {
+        let variant: Int32 = try readInt(&buf)
+        switch variant {
+
+        case 1: return .advertised(publicKey: try FfiConverterString.read(from: &buf), kid: try FfiConverterString.read(from: &buf)
+        )
+
+        case 2: return .notAdvertised
+
+        case 3: return .failed
+
+        default: throw UniffiInternalError.unexpectedEnumCase
+        }
+    }
+
+    public static func write(_ value: WaddlePushVapidLookup, into buf: inout [UInt8]) {
+        switch value {
+
+
+        case let .advertised(publicKey,kid):
+            writeInt(&buf, Int32(1))
+            FfiConverterString.write(publicKey, into: &buf)
+            FfiConverterString.write(kid, into: &buf)
+
+
+        case .notAdvertised:
+            writeInt(&buf, Int32(2))
+
+
+        case .failed:
+            writeInt(&buf, Int32(3))
+
+        }
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePushVapidLookup_lift(_ buf: RustBuffer) throws -> WaddlePushVapidLookup {
+    return try FfiConverterTypeWaddlePushVapidLookup.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddlePushVapidLookup_lower(_ value: WaddlePushVapidLookup) -> RustBuffer {
+    return FfiConverterTypeWaddlePushVapidLookup.lower(value)
+}
+
+
+// Note that we don't yet support `indirect` for enums.
+// See https://github.com/mozilla/uniffi-rs/issues/396 for further discussion.
+/**
  * XEP-0372 §4 reference `type`. `Other` preserves unrecognised wire
  * values explicitly so extension references survive the boundary
  * instead of being silently dropped or smuggled through a bare String.
@@ -17720,6 +17867,9 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 61395) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_push_vapid_public_key() != 43289) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 54628) {

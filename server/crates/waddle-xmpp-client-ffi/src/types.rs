@@ -22,6 +22,13 @@ pub struct WaddleConfig {
     pub jid: String,
     pub access_token: String,
     pub resource: String,
+    /// Ask the server to hold the session for XEP-0198 resumption after
+    /// an unclean drop. A client that never resumes MUST pass `false`:
+    /// the server suppresses XEP-0357 pushes while it holds a session,
+    /// so a session parked for nobody silences notifications until it
+    /// expires.
+    #[uniffi(default = true)]
+    pub resumable: bool,
 }
 
 #[derive(uniffi::Record, Clone)]
@@ -1093,6 +1100,22 @@ pub struct WaddleExternalService {
 }
 
 // ── Push notifications (XEP-0357 + XEP-0050) ─────────────────────────────────
+
+/// Result of looking up the Push Service's VAPID key.
+#[derive(uniffi::Enum, Clone, Debug, PartialEq, Eq)]
+pub enum WaddlePushVapidLookup {
+    /// The active key: `public_key` is the base64url (no padding)
+    /// uncompressed P-256 point a Web Push subscription binds to; `kid`
+    /// changes when the service rotates the key, which obliges clients
+    /// to re-subscribe.
+    Advertised { public_key: String, kid: String },
+    /// The service runs no Web Push provider.
+    NotAdvertised,
+    /// The lookup failed (timeout, error reply, wrong origin, malformed
+    /// advertisement); the diagnostic went to the listener. Callers keep
+    /// any existing registration rather than tearing it down.
+    Failed,
+}
 
 /// Outcome of a successful `register_push_device` UniFFI call.
 /// Carries the assigned XEP-0357 node id AND the Push Service-assigned
