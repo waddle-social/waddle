@@ -1,3 +1,5 @@
+import type { Virtualizer, VirtualItem } from "@tanstack/vue-virtual";
+
 type ListenerTarget = {
   addEventListener: (
     type: string,
@@ -182,4 +184,24 @@ export function installVirtualTimelineMeasurementRecovery(options: {
     elementScheduler?.disconnect();
     scheduler.disconnect();
   };
+}
+
+// TanStack Virtual skips the scroll correction for rows above the viewport
+// while scrolling backward. In a chat timeline that is the common case:
+// scrolling up mounts rows at the 112px estimate, and they measure much
+// taller once an image is involved, pushing the visible messages down by the
+// difference. Always keep the viewport stable instead. The library still
+// defers corrections during smooth scrolls and iOS momentum.
+//
+// Corrections already applied in this ResizeObserver batch move the viewport
+// before the next scroll event updates `scrollOffset`, so the boundary must
+// include them, as the library's own default does. `scrollAdjustments` is
+// private in the typings.
+export function adjustScrollForRowsAboveViewport(
+  item: VirtualItem,
+  _delta: number,
+  instance: Virtualizer<HTMLDivElement, Element>,
+): boolean {
+  const { scrollAdjustments } = instance as unknown as { scrollAdjustments: number };
+  return item.start < (instance.scrollOffset ?? 0) + scrollAdjustments;
 }

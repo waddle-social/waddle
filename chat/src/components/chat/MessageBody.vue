@@ -312,7 +312,10 @@ watch(
         :height="mediaState.image.height"
         loading="lazy"
         decoding="async"
-        class="max-h-48 w-full rounded border border-border object-cover"
+        :class="[
+          'w-full rounded border border-border object-cover',
+          mediaState.image.width && mediaState.image.height ? 'max-h-48' : 'h-48',
+        ]"
       />
       <span
         v-else-if="mediaState.kind === 'remote-unavailable'"
@@ -547,6 +550,7 @@ watch(
               'object-cover',
               compact ? 'h-20 w-20' : 'chat-attachment-image',
             ]"
+            :style="img.width && img.height ? { '--image-width': img.width, '--image-height': img.height } : undefined"
             loading="lazy"
           />
         </button>
