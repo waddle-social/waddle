@@ -82,43 +82,62 @@ internal class ConversationVerbs(
         return VerbResult.Ok
     }
 
-    /** One in-flight [ensureJoined] per room; see there. */
-    private val joinsInFlight = HashMap<String, CompletableDeferred<VerbResult>>()
+    /** One in-flight join per room, shared by every caller; see [singleFlightJoin]. */
+    private val joinsInFlight = HashMap<String, CompletableDeferred<Boolean>>()
     private val joinsLock = Mutex()
 
     /**
-     * Join [roomJid] unless it is already joined, sharing a single
-     * in-flight join between concurrent callers. A second join presence
-     * carries only the MUC `<x/>`: landing after this device's XEP-0272
-     * preparing/active presence it would withdraw the Muji contents,
-     * which the room reads as leaving the huddle (§Leaving). So screens
-     * that open a room, and a huddle Join that must be in the room
-     * before it advertises the call, all come through here.
+     * Join [roomJid] unless this stream is already in it or joining it
+     * (screens opening a room, a huddle Join). See [singleFlightJoin].
      */
     suspend fun ensureJoined(roomJid: String, nick: String): VerbResult {
+        var sent: VerbResult? = null
+        val joined = singleFlightJoin(roomJid) {
+            joinRoom(roomJid, nick).also { sent = it } == VerbResult.Ok
+        }
+        return sent ?: if (joined) VerbResult.Ok else VerbResult.NotConnected
+    }
+
+    /**
+     * The fresh-stream rejoin's entry to the same coordinator: [send]
+     * joins on the bootstrap's lease and reports success.
+     */
+    internal suspend fun ensureJoinedOnStream(roomJid: String, send: suspend () -> Boolean): Boolean =
+        singleFlightJoin(roomJid, send)
+
+    /**
+     * Every join this client sends goes through here, so there is at
+     * most one per room in flight and none while the stream is already
+     * in the room. A second join presence carries only the MUC `<x/>`:
+     * landing after this device's XEP-0272 preparing/active presence it
+     * would withdraw the Muji contents, which the room reads as leaving
+     * the huddle (§Leaving).
+     *
+     * "In the room" is this stream's membership (self-presence 110, or a
+     * join sent moments ago), never the persisted intent, so a kicked or
+     * failed room stays joinable. Returns whether the room is joined or
+     * joining once this call is done.
+     */
+    private suspend fun singleFlightJoin(roomJid: String, send: suspend () -> Boolean): Boolean {
         val (pending, owner) = joinsLock.withLock {
-            // Membership on THIS stream (or a join it just sent), not the
-            // persisted intent: a kicked or failed room stays joinable.
-            if (stores.occupantJidStore.isInOrJoining(roomJid, nowMillis(), JOIN_PENDING_MILLIS)) {
-                return VerbResult.Ok
-            }
+            if (stores.occupantJidStore.isInOrJoining(roomJid, nowMillis(), JOIN_PENDING_MILLIS)) return true
             val existing = joinsInFlight[roomJid]
             if (existing != null) {
                 existing to false
             } else {
-                CompletableDeferred<VerbResult>().also { joinsInFlight[roomJid] = it } to true
+                CompletableDeferred<Boolean>().also { joinsInFlight[roomJid] = it } to true
             }
         }
         if (!owner) return pending.await()
-        var result: VerbResult = VerbResult.NotConnected
+        var ok = false
         try {
-            result = joinRoom(roomJid, nick)
-            if (result == VerbResult.Ok) stores.occupantJidStore.markJoinSent(roomJid, nowMillis())
-            return result
+            ok = send()
+            if (ok) stores.occupantJidStore.markJoinSent(roomJid, nowMillis())
+            return ok
         } finally {
             // Waiters first (complete never suspends): a cancelled owner
-            // hands them NotConnected, not its cancellation.
-            pending.complete(result)
+            // hands them "not joined", not its cancellation.
+            pending.complete(ok)
             // Then retire the entry even while cancelled, or every later
             // open of this room would await a finished join forever.
             withContext(NonCancellable) {

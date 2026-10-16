@@ -220,17 +220,16 @@ internal class SessionCatchup(
         session: WaddleSessionInfo,
         roomJid: String,
     ): Boolean = try {
-        when (activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, session.xmppLocalpart) }) {
-            ActiveSession.LeaseInvocation.Stale,
-            ActiveSession.LeaseInvocation.NotConnected,
-            -> false
-            is ActiveSession.LeaseInvocation.Completed ->
-                activeSession.applyIfCurrent(lease) {
-                    stores.roomStore.markJoined(roomJid)
-                    // A screen opening this room before its self-presence
-                    // lands must not send a second join.
-                    stores.occupantJidStore.markJoinSent(roomJid, System.nanoTime() / NANOS_PER_MILLI)
-                }
+        // Through the shared coordinator: a room a screen (or a huddle
+        // Join) already joined on this stream is not joined again.
+        verbs.ensureJoinedOnStream(roomJid) {
+            when (activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, session.xmppLocalpart) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> false
+                is ActiveSession.LeaseInvocation.Completed ->
+                    activeSession.applyIfCurrent(lease) { stores.roomStore.markJoined(roomJid) }
+            }
         }
     } catch (cancellation: CancellationException) {
         throw cancellation
@@ -281,5 +280,3 @@ internal class SessionCatchup(
         const val CATCHUP_PARALLELISM = 4
     }
 }
-
-private const val NANOS_PER_MILLI = 1_000_000L
