@@ -2,8 +2,10 @@ package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.NonCancellable
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import kotlinx.coroutines.withContext
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.store.MessageMutation
@@ -114,9 +116,14 @@ internal class ConversationVerbs(
             if (result == VerbResult.Ok) stores.occupantJidStore.markJoinSent(roomJid, nowMillis())
             return result
         } finally {
-            joinsLock.withLock { joinsInFlight.remove(roomJid) }
-            // A cancelled owner hands waiters NotConnected, not its cancellation.
+            // Waiters first (complete never suspends): a cancelled owner
+            // hands them NotConnected, not its cancellation.
             pending.complete(result)
+            // Then retire the entry even while cancelled, or every later
+            // open of this room would await a finished join forever.
+            withContext(NonCancellable) {
+                joinsLock.withLock { joinsInFlight.remove(roomJid, pending) }
+            }
         }
     }
 

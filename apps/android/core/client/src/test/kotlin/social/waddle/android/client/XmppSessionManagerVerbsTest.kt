@@ -87,6 +87,25 @@ class XmppSessionManagerVerbsTest {
     }
 
     @Test
+    fun `a cancelled join releases its waiters and the room`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.joinRoomStall = CompletableDeferred()
+
+        val owner = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        val waiter = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        runCurrent()
+        owner.cancel()
+        runCurrent()
+
+        assertEquals("the waiter is released, not cancelled", VerbResult.NotConnected, waiter.await())
+        harness.client.joinRoomStall = null
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals("a fresh join goes out after the cancelled one", 2, harness.client.joinRoomCalls.size)
+        harness.manager.logout()
+    }
+
+    @Test
     fun `a remembered but unconfirmed room is joined again`() = runTest {
         val harness = Harness(this)
         harness.loginReady(this)
