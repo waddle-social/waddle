@@ -102,7 +102,7 @@ schema.#Project & {
 				"id-token": "write"
 				packages:   "none"
 			}
-			"tasks": [tasks.nativeTelemetryContract, tasks.test, tasks.lint, tasks.build, tasks.tokensCheck]
+			"tasks": [tasks.nativeTelemetryContract, tasks.test, tasks.lint, tasks.build, tasks.tokensCheck, tasks.tokensTest]
 		}
 	}
 
@@ -183,16 +183,29 @@ schema.#Project & {
 			]
 		}
 
-		// Fails when generated brand-palette outputs drift from tokens.css.
+		// Fails when generated native and website token outputs drift from
+		// tokens.css or the Huddle Panda tokens.
 		tokensCheck: schema.#Task & {
 			command: "bun"
 			args: ["../scripts/generate-design-tokens.mjs", "--check"]
 			inputs: [
 				"../scripts/generate-design-tokens.mjs",
+				"../scripts/design-tokens/**",
 				"src/styles/global/tokens.css",
+				"src/styles/huddle-tokens.ts",
+				"panda.config.ts",
 				"../website/src/styles/global/brand-palette.css",
 				"../apps/apple/Waddle/Assets.xcassets/AccentColor.colorset/Contents.json",
 				"../apps/android/app/src/main/kotlin/social/waddle/android/theme/WaddleTokens.kt",
+			]
+		}
+
+		// Unit tests for the generator's Panda token resolver.
+		tokensTest: schema.#Task & {
+			command: "bun"
+			args: ["test", "../scripts/design-tokens"]
+			inputs: [
+				"../scripts/design-tokens/**",
 			]
 		}
 
