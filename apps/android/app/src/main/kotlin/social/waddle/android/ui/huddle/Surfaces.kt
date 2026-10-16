@@ -24,6 +24,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.Dp
@@ -174,10 +175,17 @@ fun SkeletonBlock(modifier: Modifier = Modifier, height: Dp = SKELETON_LINE, rad
             .padding(vertical = SKELETON_GAP)
             // Read in the layer: the pulse redraws, never recomposes.
             .graphicsLayer { alpha = pulse?.value ?: 1f }
-            .background(Waddle.colors.surface2, RoundedCornerShape(radius))
+            .background(skeletonFill(), RoundedCornerShape(radius))
             .defaultMinSize(minHeight = height),
     )
 }
+
+/**
+ * Daylight's surface2 equals the daylight ground, so a skeleton on the bare
+ * page would vanish; the border tone reads on both the ground and a card.
+ */
+@Composable
+private fun skeletonFill(): Color = with(Waddle.colors) { if (isDark) surface2 else border }
 
 private val CARD_GLOW = 28.dp
 private val CARD_GLOW_SPREAD = (-10).dp
