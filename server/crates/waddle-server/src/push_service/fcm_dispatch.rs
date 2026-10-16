@@ -12,6 +12,7 @@
 //! `p256dh`/`auth` keys the Android client registered, so Google never
 //! sees the conversation, class or item.
 
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -33,8 +34,9 @@ pub(crate) const ATTEMPT_STATUS_FCM_DELIVERED: &str = "fcm-delivered";
 /// FCM answered `UNREGISTERED`: the app was uninstalled or the token
 /// expired. Disables the device (XEP-0357 §6).
 pub(crate) const ATTEMPT_STATUS_FCM_GONE: &str = "fcm-gone";
-/// FCM rejected the token itself (`INVALID_ARGUMENT` on `message.token`),
-/// or the stored token is not a registration token. Disables the device.
+/// FCM rejected the token itself (`INVALID_ARGUMENT` on `message.token`,
+/// or naming no field once this process has had a message accepted), or
+/// the stored token is not a registration token. Disables the device.
 pub(crate) const ATTEMPT_STATUS_FCM_INVALID_TOKEN: &str = "fcm-invalid-token";
 /// The stored `p256dh`/`auth` keys do not decode: the ciphertext can never
 /// be built for this device. Disables the device, like `web-invalid-keys`.
@@ -78,9 +80,51 @@ pub(crate) struct FcmProvider {
     pub(crate) project_id: FcmProjectId,
     /// The configured Android application id (`WADDLE_FCM_APP_ID`).
     pub(crate) app_id: FcmAppId,
+    /// FCM has accepted a message from this process. Every message this
+    /// server builds differs only in its token, ciphertext, priority and
+    /// TTL, so once one is accepted the request shape is known good.
+    pub(crate) accepted_a_message: Arc<AtomicBool>,
 }
 
 impl FcmProvider {
+    pub(crate) fn new(
+        tokens: Arc<dyn FcmAccessTokenSource>,
+        sender: Arc<dyn FcmSender>,
+        project_id: FcmProjectId,
+        app_id: FcmAppId,
+    ) -> Self {
+        Self {
+            tokens,
+            sender,
+            project_id,
+            app_id,
+            accepted_a_message: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    /// Settle an `INVALID_ARGUMENT` that names no field. FCM answers a
+    /// malformed registration token that way, and so it would a request
+    /// this server built wrongly. Until FCM has accepted a message from
+    /// this process the request is the suspect, and the device is kept:
+    /// a bug must not disable every Android device. Afterwards the
+    /// request shape is proven, so the token is what FCM refused.
+    fn settle(&self, outcome: FcmOutcome) -> FcmOutcome {
+        match outcome {
+            FcmOutcome::Sent => {
+                self.accepted_a_message.store(true, Ordering::Release);
+                FcmOutcome::Sent
+            }
+            FcmOutcome::UnattributedInvalidArgument { status, detail } => {
+                if self.accepted_a_message.load(Ordering::Acquire) {
+                    FcmOutcome::InvalidToken { status, detail }
+                } else {
+                    FcmOutcome::Rejected { status, detail }
+                }
+            }
+            other => other,
+        }
+    }
+
     /// Whether a node registered for `app_id` may be sent to under this
     /// server's credentials.
     pub(super) fn serves_app_id(&self, app_id: &str) -> bool {
@@ -321,7 +365,7 @@ pub(super) async fn dispatch_fcm_device(
                 .await
         }
     };
-    let mut outcome = send(token.clone()).await;
+    let mut outcome = provider.settle(send(token.clone()).await);
     record_outcome(&outcome, parsed);
     // FCM refused the access token: drop exactly the token it refused and
     // retry this device once with a fresh one. A second refusal means the
@@ -336,7 +380,7 @@ pub(super) async fn dispatch_fcm_device(
                 return attempt;
             }
         };
-        outcome = send(fresh).await;
+        outcome = provider.settle(send(fresh).await);
         record_outcome(&outcome, parsed);
     }
     attempt_for_outcome(&outcome)
@@ -382,7 +426,10 @@ pub(super) fn outcome_to_attempt_status(outcome: &FcmOutcome) -> &'static str {
             cause: FcmTransient::Failure(_),
             ..
         } => ATTEMPT_STATUS_FCM_TRANSIENT,
-        FcmOutcome::Rejected { .. } => ATTEMPT_STATUS_FCM_REJECTED,
+        // Settled before it gets here; unsettled, it disables nothing.
+        FcmOutcome::Rejected { .. } | FcmOutcome::UnattributedInvalidArgument { .. } => {
+            ATTEMPT_STATUS_FCM_REJECTED
+        }
     }
 }
 
@@ -428,7 +475,8 @@ fn outcome_diagnostic(outcome: &FcmOutcome) -> Option<String> {
         FcmOutcome::Rejected { status: 0, .. } => {
             "rejected (preflight: request could not be built)".to_string()
         }
-        FcmOutcome::Rejected { status, detail } => {
+        FcmOutcome::Rejected { status, detail }
+        | FcmOutcome::UnattributedInvalidArgument { status, detail } => {
             format!("rejected HTTP {status} {detail}")
         }
     };
@@ -457,8 +505,56 @@ mod tests {
         FcmErrorDetail {
             status: Some(status),
             error_code: code,
-            token_field_violation: false,
+            ..FcmErrorDetail::default()
         }
+    }
+
+    fn provider() -> FcmProvider {
+        FcmProvider::new(
+            Arc::new(crate::push_service::test_support::StaticFcmTokens),
+            Arc::new(crate::push_service::test_support::FakeFcmSender::default()),
+            FcmProjectId::parse("waddle-test").expect("project id"),
+            FcmAppId::parse("social.waddle.android").expect("app id"),
+        )
+    }
+
+    fn unattributed() -> FcmOutcome {
+        FcmOutcome::UnattributedInvalidArgument {
+            status: 400,
+            detail: detail(
+                GoogleRpcStatus::InvalidArgument,
+                Some(FcmErrorCode::InvalidArgument),
+            ),
+        }
+    }
+
+    #[test]
+    fn unattributed_invalid_argument_keeps_the_device_until_fcm_has_accepted_a_message() {
+        let provider = provider();
+        assert!(
+            matches!(
+                provider.settle(unattributed()),
+                FcmOutcome::Rejected { status: 400, .. }
+            ),
+            "before any accepted message the request itself is the suspect"
+        );
+        assert_eq!(provider.settle(FcmOutcome::Sent), FcmOutcome::Sent);
+        assert!(
+            matches!(
+                provider.settle(unattributed()),
+                FcmOutcome::InvalidToken { status: 400, .. }
+            ),
+            "once a message was accepted the request shape is proven, so the token is bad"
+        );
+        // Clones of the store (and so of the provider) share the proof.
+        assert!(matches!(
+            provider.clone().settle(unattributed()),
+            FcmOutcome::InvalidToken { .. }
+        ));
+        assert_eq!(
+            outcome_to_attempt_status(&provider.settle(unattributed())),
+            ATTEMPT_STATUS_FCM_INVALID_TOKEN
+        );
     }
 
     #[test]

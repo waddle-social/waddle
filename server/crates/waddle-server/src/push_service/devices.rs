@@ -298,7 +298,10 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
 /// unusable (relay returned 404/410, stored keys are structurally
 /// invalid, etc.). Idempotent — already-disabled rows stay disabled.
 /// `reason` is stored on the row as `last_error` so an operator can
-/// see which permanent-failure outcome triggered the disable.
+/// see which permanent-failure outcome triggered the disable. The
+/// sealed provider secrets are scrubbed exactly as an owner disable
+/// does: a disabled row is never sent to again, and re-registering
+/// writes fresh ones.
 pub(super) async fn mark_device_disabled_tx(
     tx: &mut crate::db::Transaction<'_>,
     node: &str,
@@ -310,6 +313,10 @@ pub(super) async fn mark_device_disabled_tx(
         r#"
         UPDATE push_devices
         SET status = ?,
+            provider_endpoint = NULL,
+            provider_token = NULL,
+            provider_key_material = NULL,
+            provider_auth = NULL,
             failure_count = failure_count + 1,
             last_error = ?,
             updated_at_ms = ?

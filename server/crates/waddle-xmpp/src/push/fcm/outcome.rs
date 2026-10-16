@@ -12,9 +12,15 @@
 //! The HTTP status alone is ambiguous (a `404` is both "token
 //! unregistered" and "project id does not exist"), so classification
 //! reads the body's `error.status`, the `FcmError.errorCode` detail and
-//! any `google.rpc.BadRequest.fieldViolations`. Only a response that
-//! names the token itself as dead ever disables a device; Google's
-//! free-text `message` is never parsed or stored.
+//! any `google.rpc.BadRequest.fieldViolations`. Google's free-text
+//! `message` is never parsed or stored.
+//!
+//! `INVALID_ARGUMENT` is the awkward one. FCM's documented answer to a
+//! malformed registration token names no field at all, which is also
+//! what a bug in the request this server builds would get. That shape
+//! is [`FcmOutcome::UnattributedInvalidArgument`], and the dispatcher
+//! decides with what it knows about the request (see
+//! `waddle-server`'s `fcm_dispatch`).
 
 use std::fmt;
 use std::time::Duration;
@@ -101,6 +107,8 @@ pub struct FcmErrorDetail {
     pub error_code: Option<FcmErrorCode>,
     /// A `google.rpc.BadRequest` field violation names `message.token`.
     pub token_field_violation: bool,
+    /// A `google.rpc.BadRequest` field violation names any other field.
+    pub other_field_violation: bool,
 }
 
 #[derive(Deserialize)]
@@ -149,13 +157,14 @@ impl FcmErrorDetail {
                 if let Some(code) = entry.error_code {
                     detail.error_code.get_or_insert(code);
                 }
-            } else if entry.type_url.ends_with(BAD_REQUEST_DETAIL_TYPE_SUFFIX)
-                && entry
-                    .field_violations
-                    .iter()
-                    .any(|violation| violation.field == TOKEN_FIELD_PATH)
-            {
-                detail.token_field_violation = true;
+            } else if entry.type_url.ends_with(BAD_REQUEST_DETAIL_TYPE_SUFFIX) {
+                for violation in &entry.field_violations {
+                    if violation.field == TOKEN_FIELD_PATH {
+                        detail.token_field_violation = true;
+                    } else {
+                        detail.other_field_violation = true;
+                    }
+                }
             }
         }
         detail
@@ -176,6 +185,9 @@ impl fmt::Display for FcmErrorDetail {
         write!(f, "{status}/{code}")?;
         if self.token_field_violation {
             f.write_str(" field=message.token")?;
+        }
+        if self.other_field_violation {
+            f.write_str(" field=other")?;
         }
         Ok(())
     }
@@ -201,9 +213,14 @@ pub enum FcmOutcome {
     /// `UNREGISTERED`: the app was uninstalled or the token expired.
     /// Disables the device.
     Unregistered { status: u16, detail: FcmErrorDetail },
-    /// `INVALID_ARGUMENT` blaming `message.token`: the token is not a
-    /// valid registration token. Disables the device.
+    /// `INVALID_ARGUMENT` blaming `message.token` only: the token is not
+    /// a valid registration token. Disables the device.
     InvalidToken { status: u16, detail: FcmErrorDetail },
+    /// `INVALID_ARGUMENT` naming no field: either a malformed
+    /// registration token (FCM's documented shape for one) or a request
+    /// this server built wrongly. The dispatcher resolves it into
+    /// [`Self::InvalidToken`] or [`Self::Rejected`].
+    UnattributedInvalidArgument { status: u16, detail: FcmErrorDetail },
     /// `401 UNAUTHENTICATED`: the OAuth access token was rejected. The
     /// caller invalidates it and retries once with a fresh one.
     Unauthenticated { detail: FcmErrorDetail },
@@ -263,10 +280,14 @@ pub fn classify_response(
         | None => {}
     }
     if detail.is_invalid_argument() {
-        return if detail.token_field_violation {
+        // Any violation outside the token blames the request, not the
+        // device.
+        return if detail.other_field_violation {
+            FcmOutcome::Rejected { status, detail }
+        } else if detail.token_field_violation {
             FcmOutcome::InvalidToken { status, detail }
         } else {
-            FcmOutcome::Rejected { status, detail }
+            FcmOutcome::UnattributedInvalidArgument { status, detail }
         };
     }
     match (status, detail.status) {
@@ -378,6 +399,13 @@ mod tests {
             { "@type": FCM_ERROR, "errorCode": "INVALID_ARGUMENT" },
             { "@type": BAD_REQUEST, "fieldViolations": [{ "field": "message.android.ttl" }] },
         ]);
+        let both_violations = serde_json::json!([
+            { "@type": FCM_ERROR, "errorCode": "INVALID_ARGUMENT" },
+            { "@type": BAD_REQUEST, "fieldViolations": [
+                { "field": "message.token" },
+                { "field": "message.android.ttl" },
+            ]},
+        ]);
         let cases: Vec<(u16, Vec<u8>, &str)> = vec![
             (200, Vec::new(), "sent"),
             (
@@ -398,6 +426,16 @@ mod tests {
             (
                 400,
                 body(400, "INVALID_ARGUMENT", fcm_error("INVALID_ARGUMENT")),
+                "unattributed-invalid-argument",
+            ),
+            (
+                400,
+                body(400, "INVALID_ARGUMENT", serde_json::json!([])),
+                "unattributed-invalid-argument",
+            ),
+            (
+                400,
+                body(400, "INVALID_ARGUMENT", both_violations),
                 "rejected",
             ),
             (
@@ -459,6 +497,7 @@ mod tests {
                 FcmOutcome::Sent => "sent",
                 FcmOutcome::Unregistered { .. } => "unregistered",
                 FcmOutcome::InvalidToken { .. } => "invalid-token",
+                FcmOutcome::UnattributedInvalidArgument { .. } => "unattributed-invalid-argument",
                 FcmOutcome::Unauthenticated { .. } => "unauthenticated",
                 FcmOutcome::ProviderAuth { .. } => "provider-auth",
                 FcmOutcome::SenderIdMismatch { .. } => "sender-id-mismatch",

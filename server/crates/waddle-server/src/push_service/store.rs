@@ -189,12 +189,7 @@ impl DatabasePushServiceStore {
         project_id: FcmProjectId,
         app_id: FcmAppId,
     ) -> Self {
-        self.fcm = Some(FcmProvider {
-            tokens,
-            sender,
-            project_id,
-            app_id,
-        });
+        self.fcm = Some(FcmProvider::new(tokens, sender, project_id, app_id));
         self
     }
 
@@ -740,6 +735,48 @@ mod tests {
             .disable_device_for_owner(&owner, node.node(), "android-1", Some("revoked"))
             .await
             .expect("disable device");
+        let disabled = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("disabled device");
+        assert_eq!(disabled.provider_token(), None);
+        assert_eq!(disabled.provider_key_material(), None);
+        assert_eq!(disabled.provider_auth(), None);
+    }
+
+    #[tokio::test]
+    async fn provider_disable_scrubs_every_secret_like_an_owner_disable() {
+        let store = DatabasePushServiceStore::new(
+            Database::in_memory("push-service-fcm-provider-disable")
+                .await
+                .expect("database"),
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
+        store
+            .upsert_device(&owner, fcm_registration("android-1", node.node()))
+            .await
+            .expect("device");
+
+        // The worker's path when FCM reports the token gone.
+        let mut tx = store.db.begin().await.expect("tx");
+        crate::push_service::devices::mark_device_disabled_tx(
+            &mut tx,
+            node.node(),
+            "android-1",
+            "fcm-gone",
+            1,
+        )
+        .await
+        .expect("provider disable");
+        tx.commit().await.expect("commit");
+
         let disabled = store
             .get_device_for_owner_on_node(&owner, node.node(), "android-1")
             .await

@@ -189,7 +189,10 @@ pub fn record_fcm_outcome(outcome: &FcmOutcome) -> Option<PushStage> {
             increment_provider_token_expired(PushProvider::Fcm);
             PushStage::ProviderTokenExpired
         }
-        FcmOutcome::Unauthenticated { .. }
+        // The dispatcher records outcomes after resolving this variant;
+        // seen unresolved, it is a provider rejection that disabled nothing.
+        FcmOutcome::UnattributedInvalidArgument { .. }
+        | FcmOutcome::Unauthenticated { .. }
         | FcmOutcome::ProviderAuth { .. }
         | FcmOutcome::SenderIdMismatch { .. }
         | FcmOutcome::Rejected { status: 1.., .. }

@@ -199,11 +199,47 @@ pub enum RegisterDeviceRequest {
         /// Validated at the form boundary so the Push Service never
         /// stores a token FCM would reject as malformed.
         registration_token: FcmRegistrationToken,
-        /// Base64url `p256dh` / `auth` envelope-encryption keys, checked
-        /// to decode as a P-256 point and a 16-byte secret.
-        p256dh: String,
-        auth: String,
+        /// The envelope-encryption keys, validated at the form boundary.
+        keys: FcmRegisteredKeys,
     },
+}
+
+/// The base64url `p256dh` / `auth` pair an FCM device registers for
+/// envelope encryption (RFC 8291), checked to decode as a P-256 point
+/// and a 16-byte secret. Kept in its submitted base64url form because
+/// that is what the store seals; `Debug` never prints the auth secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FcmRegisteredKeys {
+    p256dh: String,
+    auth: String,
+}
+
+impl FcmRegisteredKeys {
+    /// Validate a submitted pair.
+    pub fn parse(p256dh: &str, auth: &str) -> Result<Self, String> {
+        SubscriptionKeys::from_base64url(p256dh, auth).map_err(|error| error.to_string())?;
+        Ok(Self {
+            p256dh: p256dh.to_owned(),
+            auth: auth.to_owned(),
+        })
+    }
+
+    pub fn p256dh(&self) -> &str {
+        &self.p256dh
+    }
+
+    pub fn auth(&self) -> &str {
+        &self.auth
+    }
+}
+
+impl std::fmt::Debug for FcmRegisteredKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FcmRegisteredKeys")
+            .field("p256dh", &self.p256dh)
+            .field("auth", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Typed parse of the [`DISABLE_DEVICE_NODE`] submit form. Per-device
@@ -546,17 +582,16 @@ pub fn parse_register_request(form: &DataForm) -> Result<RegisterDeviceRequest, 
             let registration_token =
                 FcmRegistrationToken::parse(require_value(form, FIELD_FCM_TOKEN)?)
                     .map_err(|error| format!("{FIELD_FCM_TOKEN}: {error}"))?;
-            let p256dh = require_value(form, FIELD_FCM_P256DH)?.to_string();
-            let auth = require_value(form, FIELD_FCM_AUTH)?.to_string();
-            SubscriptionKeys::from_base64url(&p256dh, &auth).map_err(|error| {
-                format!("{FIELD_FCM_P256DH}/{FIELD_FCM_AUTH}: {error}")
-            })?;
+            let keys = FcmRegisteredKeys::parse(
+                require_value(form, FIELD_FCM_P256DH)?,
+                require_value(form, FIELD_FCM_AUTH)?,
+            )
+            .map_err(|error| format!("{FIELD_FCM_P256DH}/{FIELD_FCM_AUTH}: {error}"))?;
             Ok(RegisterDeviceRequest::Fcm {
                 app_id,
                 environment,
                 registration_token,
-                p256dh,
-                auth,
+                keys,
             })
         }
         other => Err(format!(
@@ -629,8 +664,7 @@ fn build_registration(
         RegisterDeviceRequest::Fcm {
             environment,
             registration_token,
-            p256dh,
-            auth,
+            keys,
             ..
         } => PushDeviceRegistration::new(
             device_id,
@@ -639,8 +673,8 @@ fn build_registration(
             environment.as_wire_str(),
         )
         .with_provider_token(Some(registration_token.as_str().to_owned()))
-        .with_provider_key_material(Some(p256dh.clone()))
-        .with_provider_auth(Some(auth.clone())),
+        .with_provider_key_material(Some(keys.p256dh().to_owned()))
+        .with_provider_auth(Some(keys.auth().to_owned())),
     }
 }
 
@@ -788,14 +822,15 @@ mod tests {
                 app_id,
                 environment,
                 registration_token,
-                p256dh,
-                auth,
+                keys: registered,
             } => {
                 assert_eq!(app_id, "social.waddle.android");
                 assert_eq!(environment, PushDeviceEnvironment::Production);
                 assert_eq!(registration_token.as_str(), "fcm-reg-token");
-                assert_eq!(p256dh, keys.p256dh);
-                assert_eq!(auth, keys.auth);
+                assert_eq!(registered.p256dh(), keys.p256dh);
+                assert_eq!(registered.auth(), keys.auth);
+                let debug = format!("{registered:?}");
+                assert!(!debug.contains(&keys.auth), "{debug}");
             }
             other => panic!("expected Fcm, got {other:?}"),
         }

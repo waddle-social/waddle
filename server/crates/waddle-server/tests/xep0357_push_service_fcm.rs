@@ -60,6 +60,7 @@ const DEVICE_STATUS_DISABLED: &str = "disabled";
 const FCM_DELIVERED: &str = "fcm-delivered";
 const FCM_GONE: &str = "fcm-gone";
 const FCM_INVALID_TOKEN: &str = "fcm-invalid-token";
+const FCM_REJECTED: &str = "fcm-rejected";
 const FCM_NOT_CONFIGURED: &str = "fcm-not-configured";
 const FCM_PROVIDER_AUTH: &str = "fcm-provider-auth";
 const FCM_APP_ID_MISMATCH: &str = "fcm-app-id-mismatch";
@@ -665,7 +666,7 @@ async fn xep0357_fcm_unregistered_disables_only_that_device_not_the_registration
             detail: FcmErrorDetail {
                 status: Some(GoogleRpcStatus::NotFound),
                 error_code: Some(FcmErrorCode::Unregistered),
-                token_field_violation: false,
+                ..FcmErrorDetail::default()
             },
         }],
     )]);
@@ -741,6 +742,7 @@ async fn xep0357_invalid_token_on_the_last_android_device_disables_the_registrat
                 status: Some(GoogleRpcStatus::InvalidArgument),
                 error_code: Some(FcmErrorCode::InvalidArgument),
                 token_field_violation: true,
+                ..FcmErrorDetail::default()
             },
         }],
     )]);
@@ -753,6 +755,102 @@ async fn xep0357_invalid_token_on_the_last_android_device_disables_the_registrat
     assert_eq!(
         device_status(&store, &node, "only-phone").await,
         DEVICE_STATUS_DISABLED
+    );
+    assert_eq!(
+        attempt_statuses(&store, &node).await,
+        vec![("only-phone".to_string(), FCM_INVALID_TOKEN.to_string())]
+    );
+    assert_eq!(
+        enabled_registrations(&store, &owner).await,
+        0,
+        "XEP-0357 §6: no deliverable device remains, so the registration is disabled"
+    );
+}
+
+/// FCM's documented reply to a malformed registration token: HTTP 400,
+/// `INVALID_ARGUMENT`, and no field named.
+fn unattributed_invalid_argument() -> FcmOutcome {
+    FcmOutcome::UnattributedInvalidArgument {
+        status: 400,
+        detail: FcmErrorDetail {
+            status: Some(GoogleRpcStatus::InvalidArgument),
+            error_code: Some(FcmErrorCode::InvalidArgument),
+            ..FcmErrorDetail::default()
+        },
+    }
+}
+
+#[tokio::test]
+async fn unattributed_invalid_argument_keeps_the_device_before_fcm_accepted_anything() {
+    // Nothing has proven the request shape yet: a bug in it must not
+    // disable every Android device, so the device is kept.
+    let only = AndroidDevice::new("fcm-token-garbled");
+    let sender = FakeFcmSender::with_outcomes(vec![(
+        "fcm-token-garbled",
+        vec![unattributed_invalid_argument()],
+    )]);
+    let store = store_with_fcm(sender, CountingTokens::new()).await;
+    let owner = owner();
+    let node = android_node(&store, &owner, APP_ID, &[("only-phone", &only)]).await;
+
+    publish(
+        &store,
+        &owner,
+        &node,
+        notification_item("unproven-1", "dm", 1),
+    )
+    .await;
+
+    assert_eq!(
+        device_status(&store, &node, "only-phone").await,
+        DEVICE_STATUS_ACTIVE
+    );
+    assert_eq!(
+        attempt_statuses(&store, &node).await,
+        vec![("only-phone".to_string(), FCM_REJECTED.to_string())]
+    );
+    assert_eq!(enabled_registrations(&store, &owner).await, 1);
+}
+
+#[tokio::test]
+async fn unattributed_invalid_argument_disables_the_device_once_fcm_accepted_a_message() {
+    let good = AndroidDevice::new("fcm-token-good");
+    let garbled = AndroidDevice::new("fcm-token-garbled");
+    let sender = FakeFcmSender::with_outcomes(vec![(
+        "fcm-token-garbled",
+        vec![unattributed_invalid_argument()],
+    )]);
+    let store = store_with_fcm(sender, CountingTokens::new()).await;
+
+    // Another account's delivery proves this server's request shape.
+    let carol: BareJid = "carol@example.com".parse().expect("carol jid");
+    let carol_node = android_node(&store, &carol, APP_ID, &[("carol-phone", &good)]).await;
+    publish(
+        &store,
+        &carol,
+        &carol_node,
+        notification_item("proof-1", "dm", 1),
+    )
+    .await;
+    assert_eq!(
+        attempt_statuses(&store, &carol_node).await,
+        vec![("carol-phone".to_string(), FCM_DELIVERED.to_string())]
+    );
+
+    let owner = owner();
+    let node = android_node(&store, &owner, APP_ID, &[("only-phone", &garbled)]).await;
+    publish(
+        &store,
+        &owner,
+        &node,
+        notification_item("garbled-1", "dm", 1),
+    )
+    .await;
+
+    assert_eq!(
+        device_status(&store, &node, "only-phone").await,
+        DEVICE_STATUS_DISABLED,
+        "with the request shape proven, FCM refused the token itself"
     );
     assert_eq!(
         attempt_statuses(&store, &node).await,
