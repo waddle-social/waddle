@@ -21,7 +21,7 @@ import java.util.concurrent.ConcurrentHashMap
 /**
  * Finishes what a notification action started when its receiver's few
  * seconds were not enough: holds the stream until the queued replies are
- * acknowledged and a ready pipeline has drained queued read markers.
+ * acknowledged and the parked read markers have gone out.
  *
  * A short foreground service (Android allows one from a notification
  * action) keeps the process active meanwhile; a cached process could be
@@ -38,9 +38,8 @@ class PendingDeliveryService : Service() {
 
     private data class PendingReply(val conversationJid: String, val isGroupchat: Boolean)
 
-    /** Queued read markers are out once a ready pipeline completes after this; -1 when none. */
-    @Volatile
-    private var markerRunAfter = NO_MARKER
+    /** Conversations whose read marker is parked for the next ready session. */
+    private val pendingMarkers: MutableSet<String> = ConcurrentHashMap.newKeySet()
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -58,8 +57,7 @@ class PendingDeliveryService : Service() {
                 pendingReplies[id] = PendingReply(conversationJid, isGroupchat)
             }
         }
-        val runAfter = intent?.getLongExtra(EXTRA_MARKER_RUN_AFTER, NO_MARKER) ?: NO_MARKER
-        markerRunAfter = maxOf(markerRunAfter, runAfter)
+        intent?.getStringExtra(EXTRA_MARKER_CONVERSATION_JID)?.let(pendingMarkers::add)
         // One waiter over everything still pending; a new start restarts
         // its window rather than dropping what earlier starts were owed.
         work?.cancel()
@@ -97,8 +95,10 @@ class PendingDeliveryService : Service() {
                 pendingReplies.keys.removeAll { it !in queued }
                 pendingReplies.isEmpty()
             }
-            val runAfter = markerRunAfter
-            if (runAfter != NO_MARKER) graph.sessionManager.readyPipelineRuns.first { it > runAfter }
+            pendingMarkers.toList().forEach { conversationJid ->
+                graph.sessionManager.awaitMarkerNotParked(conversationJid)
+                pendingMarkers.remove(conversationJid)
+            }
         } != null
     }
 
@@ -139,8 +139,7 @@ class PendingDeliveryService : Service() {
 
         /** Inside the system's three-minute short-service limit. */
         private const val WINDOW_MILLIS = 150_000L
-        private const val EXTRA_MARKER_RUN_AFTER = "social.waddle.android.extra.MARKER_RUN_AFTER"
-        private const val NO_MARKER = -1L
+        private const val EXTRA_MARKER_CONVERSATION_JID = "social.waddle.android.extra.MARKER_CONVERSATION_JID"
 
         /**
          * Start from a notification-action receiver that is still running
@@ -152,12 +151,12 @@ class PendingDeliveryService : Service() {
             queuedIds: Collection<String> = emptyList(),
             conversationJid: String? = null,
             isGroupchat: Boolean = false,
-            /** A queued read marker is out once a ready pipeline completes after this. */
-            markerRunAfter: Long = NO_MARKER,
+            /** A conversation whose read marker is parked for the next ready session. */
+            markerConversationJid: String? = null,
         ) {
             val intent = Intent(context, PendingDeliveryService::class.java)
                 .putExtra(EXTRA_QUEUED_IDS, queuedIds.toTypedArray())
-                .putExtra(EXTRA_MARKER_RUN_AFTER, markerRunAfter)
+                .putExtra(EXTRA_MARKER_CONVERSATION_JID, markerConversationJid)
                 .putExtra(EXTRA_CONVERSATION_JID, conversationJid)
                 .putExtra(EXTRA_IS_GROUPCHAT, isGroupchat)
             val started = runCatching { context.startForegroundService(intent) }.isSuccess

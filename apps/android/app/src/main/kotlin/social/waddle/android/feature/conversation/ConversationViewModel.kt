@@ -37,6 +37,7 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePresence
+import java.time.Instant
 
 /**
  * Shared timeline/composer wiring for channels and DMs: store-backed
@@ -163,7 +164,7 @@ open class ConversationViewModel(
         if (threadId == null) unreadStore.counts.value[conversationJid] ?: 0 else 0
 
     /** The divider stays on the first unread message for this visit. */
-    private val unreadAnchor = UnreadAnchor(unreadAtOpen)
+    private val unreadAnchor = UnreadAnchor(unreadAtOpen, openedAt = Instant.ofEpochMilli(clock()))
 
     val uiState: StateFlow<ConversationUiState> =
         combine(

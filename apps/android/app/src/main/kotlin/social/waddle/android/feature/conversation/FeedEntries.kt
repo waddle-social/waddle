@@ -70,19 +70,24 @@ data class FeedContext(
 
 /**
  * The unread divider's position for one screen visit: the first unread
- * message (the oldest of the last [unreadAtOpen] incoming rows). It
+ * message, i.e. the oldest of the last [unreadAtOpen] incoming rows sent
+ * before [openedAt] (later arrivals were not part of the count). It
  * follows the count while the newest history is still loading (a stale
  * cache can lack unread rows), then is held by identity from the first
  * derivation after that page lands. Derivations run one at a time on
  * the feed dispatcher.
+ *
+ * Archived rows carry the server's timestamp, so a server clock running
+ * ahead of the device can push a message sent just before opening past
+ * [openedAt]; the divider then lands one message late.
  */
-class UnreadAnchor(private val unreadAtOpen: Int) {
+class UnreadAnchor(private val unreadAtOpen: Int, private val openedAt: Instant) {
     @Volatile
     private var anchorKey: String? = null
 
     internal fun dividerIndex(rows: List<ConversationRow>, newestHistoryLoaded: Boolean): Int {
         anchorKey?.let { key -> return rows.indexOfFirst { rowKeyOf(it) == key } }
-        val index = unreadDividerIndex(rows, unreadAtOpen)
+        val index = unreadDividerIndex(rows, unreadAtOpen, sentBefore = openedAt)
         if (newestHistoryLoaded && index >= 0) anchorKey = rowKeyOf(rows[index])
         return index
     }
@@ -189,13 +194,13 @@ private fun replyCountOf(item: TimelineItem, counts: Map<String, Int>): Int =
 
 /**
  * Index of the oldest of the last [unread] incoming stored rows, or -1.
- * Own rows never count as unread.
+ * Own rows never count as unread, nor rows sent at or after [sentBefore].
  */
-private fun unreadDividerIndex(rows: List<ConversationRow>, unread: Int): Int {
+private fun unreadDividerIndex(rows: List<ConversationRow>, unread: Int, sentBefore: Instant? = null): Int {
     if (unread <= 0) return -1
     val incoming = rows.indices.filter { index ->
         val item = (rows[index] as? ConversationRow.Stored)?.item
-        item != null && !item.isMine
+        item != null && !item.isMine && (sentBefore == null || sentAtOf(item) < sentBefore)
     }
     return incoming.getOrNull(incoming.size - unread) ?: -1
 }

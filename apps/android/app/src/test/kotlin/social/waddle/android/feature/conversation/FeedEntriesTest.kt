@@ -8,6 +8,7 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testArchivedMessage
 import social.waddle.android.client.testMessage
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
 
@@ -259,7 +260,7 @@ class FeedEntriesTest {
         val a1 = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
         val a2 = row("2", "alice", "2026-07-15T10:01:00Z", authorJid = "alice@waddle.test")
         val a3 = row("3", "alice", "2026-07-15T10:02:00Z", authorJid = "alice@waddle.test")
-        val anchor = UnreadAnchor(unreadAtOpen = 2)
+        val anchor = UnreadAnchor(unreadAtOpen = 2, openedAt = Instant.parse("2026-07-15T10:02:30Z"))
         val context = FeedContext(
             threadId = null,
             selfBareJid = self,
@@ -286,7 +287,7 @@ class FeedEntriesTest {
         val a1 = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
         val a2 = row("2", "alice", "2026-07-15T10:01:00Z", authorJid = "alice@waddle.test")
         val a3 = row("3", "alice", "2026-07-15T10:02:00Z", authorJid = "alice@waddle.test")
-        val anchor = UnreadAnchor(unreadAtOpen = 1)
+        val anchor = UnreadAnchor(unreadAtOpen = 1, openedAt = Instant.parse("2026-07-15T10:02:30Z"))
         val loading = FeedContext(
             threadId = null,
             selfBareJid = self,
@@ -310,6 +311,38 @@ class FeedEntriesTest {
         val a4 = row("4", "alice", "2026-07-15T10:03:00Z", authorJid = "alice@waddle.test")
         val later = feedEntriesOf(listOf(a1, a2, a3, a4).map { it.item }, emptyList(), loaded)
         assertEquals(listOf(false, false, true, false), later.map { it.unreadDivider })
+    }
+
+    @Test
+    fun `a message arriving before history loads does not shift the unread divider`() {
+        val a1 = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
+        val a2 = row("2", "alice", "2026-07-15T10:01:00Z", authorJid = "alice@waddle.test")
+        val a3 = row("3", "alice", "2026-07-15T10:02:00Z", authorJid = "alice@waddle.test")
+        val anchor = UnreadAnchor(unreadAtOpen = 2, openedAt = Instant.parse("2026-07-15T10:02:30Z"))
+        val loading = FeedContext(
+            threadId = null,
+            selfBareJid = self,
+            pinnedIds = emptySet(),
+            unreadAtOpen = 2,
+            zone = ZoneOffset.UTC,
+            unreadAnchor = anchor,
+            newestHistoryLoaded = false,
+        )
+        // Sent after the screen opened, delivered while history is still loading.
+        val a4 = row("4", "alice", "2026-07-15T10:03:00Z", authorJid = "alice@waddle.test")
+        feedEntriesOf(listOf(a1, a2, a3, a4).map { it.item }, emptyList(), loading)
+
+        val loaded = feedEntriesOf(
+            listOf(a1, a2, a3, a4).map { it.item },
+            emptyList(),
+            loading.copy(newestHistoryLoaded = true),
+        )
+
+        assertEquals(
+            "the divider stays above the first message unread at open",
+            listOf(false, true, false, false),
+            loaded.map { it.unreadDivider },
+        )
     }
 
     @Test

@@ -1,7 +1,9 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.XmppSessionManager.DisplayedTarget
@@ -12,7 +14,6 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.client.ffi.WaddleClientInterface
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
-import java.util.concurrent.ConcurrentHashMap
 
 /**
  * XEP-0333 / XEP-0490 read state for the account: dispatches displayed
@@ -30,10 +31,20 @@ internal class ReadStateCoordinator(
     private val displayedMutex = Mutex()
 
     /** Reads parked while offline, replayed on the next ready session. */
-    private val pendingDisplayed = ConcurrentHashMap<String, PendingDisplayed>()
+    private val pendingDisplayed = MutableStateFlow<Map<String, PendingDisplayed>>(emptyMap())
 
     fun clearPending() {
-        pendingDisplayed.clear()
+        pendingDisplayed.value = emptyMap()
+    }
+
+    /**
+     * Returns once no read is parked for [conversationJid]: the drain sent
+     * it (or settled it as stale), or sign-out dropped it. A newer read
+     * parked for the same conversation keeps this waiting.
+     */
+    suspend fun awaitNotParked(conversationJid: String) {
+        val conversation = bareJid(conversationJid)
+        pendingDisplayed.first { conversation !in it }
     }
 
     /**
@@ -121,7 +132,7 @@ internal class ReadStateCoordinator(
                 // No live session: park the RESOLVED target and replay it on
                 // the next ready (a notification tap during a reconnect gap
                 // must not permanently drop the read receipt).
-                pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
+                pendingDisplayed.update { it + (conversation to PendingDisplayed(isGroupchat, ids)) }
                 return MarkerDispatch.QUEUED
             }
             is ActiveSession.LeaseInvocation.Completed -> result.value
@@ -257,19 +268,24 @@ internal class ReadStateCoordinator(
     }
 
     /**
-     * Replay reads parked while no session was live (see above).
-     * Atomic per-key removal — a snapshot-then-clear would drop a
-     * dispatch parked concurrently (notification receiver) between the
-     * snapshot and the clear.
+     * Replay reads parked while no session was live (see above). An entry
+     * stays parked until its dispatch settles, so [awaitNotParked] never
+     * sees a read as done while it is in flight, and it is retired only
+     * if unchanged: a newer read parked concurrently (notification
+     * receiver) survives for the next pass.
      */
     suspend fun drainPendingDisplayed() {
-        while (pendingDisplayed.isNotEmpty()) {
-            // A dispatch below re-parks when the session dropped mid-
-            // drain; bail instead of spinning on it.
+        while (true) {
             if (!activeSession.hasActiveClient()) return
-            for (conversation in pendingDisplayed.keys) {
-                val pending = pendingDisplayed.remove(conversation) ?: continue
-                markConversationDisplayed(conversation, pending.isGroupchat, pending.target)
+            val snapshot = pendingDisplayed.value
+            if (snapshot.isEmpty()) return
+            for ((conversation, pending) in snapshot) {
+                val dispatch = markConversationDisplayed(conversation, pending.isGroupchat, pending.target)
+                // The session dropped mid-drain: it stays parked for the next one.
+                if (dispatch == MarkerDispatch.QUEUED) return
+                pendingDisplayed.update { current ->
+                    if (current[conversation] == pending) current - conversation else current
+                }
             }
         }
     }

@@ -3,7 +3,6 @@ package social.waddle.android.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.WaddleApplication
@@ -45,9 +44,8 @@ class MarkReadReceiver : BroadcastReceiver() {
                 // uncaught throw on this root coroutine kills the process.
                 // The dispatch itself says whether it went out or was parked
                 // (a connection snapshot taken first can go stale while it
-                // waits its turn). A parked marker drains on the next ready
-                // pipeline, which counts as done once it advances.
-                val runsBefore = graph.sessionManager.readyPipelineRuns.value
+                // waits its turn). A parked marker is out once it is no
+                // longer parked.
                 val dispatch = runCatching {
                     graph.sessionManager.markConversationDisplayed(
                         conversationJid,
@@ -58,11 +56,11 @@ class MarkReadReceiver : BroadcastReceiver() {
                 runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
                 runCatching { graph.messageNotifier.clearConversationNotification(conversationJid) }
                 val drained = dispatch == MarkerDispatch.SETTLED || withTimeoutOrNull(MARKER_HOLD_MILLIS) {
-                    graph.sessionManager.readyPipelineRuns.first { it > runsBefore }
+                    graph.sessionManager.awaitMarkerNotParked(conversationJid)
                 } != null
                 // Not drained within the receiver's budget: a short
                 // foreground service carries the marker the rest of the way.
-                if (!drained) PendingDeliveryService.start(context, markerRunAfter = runsBefore)
+                if (!drained) PendingDeliveryService.start(context, markerConversationJid = conversationJid)
             } finally {
                 hold.release()
                 pendingResult.finish()

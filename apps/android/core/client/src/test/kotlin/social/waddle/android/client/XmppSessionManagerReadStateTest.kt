@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
@@ -180,6 +181,29 @@ class XmppSessionManagerReadStateTest {
             listOf(Triple("room@muc.waddle.test", "s1", true)),
             harness.client.displayedCalls,
         )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a parked read is awaited until a ready session sends it`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        harness.manager.timelineStore.onLiveMessage(mucMessage("s1"))
+        assertEquals(
+            MarkerDispatch.QUEUED,
+            harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true),
+        )
+
+        val waiter = launch { harness.manager.awaitMarkerNotParked("room@muc.waddle.test") }
+        runCurrent()
+        assertTrue("still parked without a session", waiter.isActive)
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        assertTrue("released once the drain sent it", waiter.isCompleted)
+        assertEquals(listOf(Triple("room@muc.waddle.test", "s1", true)), harness.client.displayedCalls)
         harness.manager.logout()
     }
 
