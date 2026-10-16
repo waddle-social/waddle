@@ -25,6 +25,8 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.store.MemberListStatus
+import social.waddle.android.client.store.PresenceShow
+import social.waddle.android.client.store.RoomMembersState
 import social.waddle.android.client.testPresence
 import social.waddle.android.client.testSessionInfo
 import social.waddle.client.ffi.WaddleClientEvent
@@ -77,6 +79,38 @@ class MembersViewModelTest {
         affiliation: WaddleMucAffiliation,
         nick: String? = null,
     ) = WaddleRoomMemberEntry(jid = jid, affiliation = affiliation, nick = nick, reason = null)
+
+    @Test
+    fun `members sort by presence, then tier, then name, with huddle and known presence`() {
+        val rows = memberRowsOf(
+            members = RoomMembersState(
+                status = MemberListStatus.LOADED,
+                members = listOf(
+                    entry("owen@waddle.test", WaddleMucAffiliation.OWNER),
+                    entry("amy@waddle.test", WaddleMucAffiliation.ADMIN),
+                    entry("bea@waddle.test", WaddleMucAffiliation.MEMBER),
+                    entry("cal@waddle.test", WaddleMucAffiliation.MEMBER),
+                    entry("dee@waddle.test", WaddleMucAffiliation.MEMBER),
+                ),
+            ),
+            occupants = mapOf(
+                "amy" to testPresence(from = "$ROOM/amy", mucJid = "amy@waddle.test/web", show = "away"),
+                "bea" to testPresence(from = "$ROOM/bea", mucJid = "bea@waddle.test/web"),
+                "cal" to testPresence(from = "$ROOM/cal", mucJid = "cal@waddle.test/web"),
+                "dee" to testPresence(from = "$ROOM/dee", mucJid = "dee@waddle.test/web", show = "dnd"),
+            ),
+            huddleNicks = setOf("cal"),
+            knownShows = mapOf("owen@waddle.test" to PresenceShow.AVAILABLE),
+        )
+        // cal is in the huddle; bea here; amy away; dee dnd; owen not in the room.
+        assertEquals(listOf("cal", "bea", "amy", "dee", "owen"), rows.map { it.displayName })
+        assertTrue(rows.first().inHuddle)
+        assertEquals(PresenceShow.AWAY, rows.single { it.displayName == "amy" }.presence)
+        // Not in the room, but seen elsewhere: presence without "here".
+        val owen = rows.last()
+        assertFalse(owen.presentNow)
+        assertEquals(PresenceShow.AVAILABLE, owen.presence)
+    }
 
     private fun seedSelfAsOwner(harness: Harness) {
         harness.factory.emit(

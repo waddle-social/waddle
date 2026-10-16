@@ -9,8 +9,14 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.stateIn
 import social.waddle.android.AppGraph
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.calls.CallKind
+import social.waddle.android.client.calls.CallState
+import social.waddle.android.client.normalizedBareJid
+import social.waddle.android.client.store.ContactPresence
 import social.waddle.android.client.store.InboxEntrySnapshot
 import social.waddle.android.client.store.NotifySettingsEntry
+import social.waddle.android.client.store.PeopleDirectorySnapshot
+import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleChannel
@@ -79,6 +85,26 @@ class DmListViewModel(sessionManager: XmppSessionManager) : ViewModel() {
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
 
+    /** [rows] with who is here and what is live: presence, calls, mentions. */
+    val items: StateFlow<List<DmListItem>> = combine(
+        rows,
+        combine(sessionManager.peopleDirectory, sessionManager.presenceStore.contacts, ::Pair),
+        sessionManager.callStore.state,
+        sessionManager.callStore.mucCallPresence.participants,
+        sessionManager.mentionStore.counts,
+    ) { rows, (directory, contacts), call, huddles, mentions ->
+        decoratedDmRows(
+            rows,
+            DmLiveInputs(
+                directory = directory,
+                contacts = contacts,
+                call = call,
+                huddleNicks = huddles,
+                mentions = mentions,
+            ),
+        )
+    }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), emptyList())
+
     companion object {
         fun factory(graph: AppGraph): ViewModelProvider.Factory =
             viewModelFactoryOf { DmListViewModel(graph.sessionManager) }
@@ -127,4 +153,83 @@ internal fun mergedDmRows(inputs: DmSurfaceInputs): List<DmListRow> {
     val (timed, untimed) = (peerRows + groupRows).partition { (_, lastUpdated) -> lastUpdated != null }
     return timed.sortedByDescending { (_, lastUpdated) -> lastUpdated }.map { (row, _) -> row } +
         untimed.map { (row, _) -> row }
+}
+
+/** Whether a DM row has a call happening right now (ember when it does). */
+enum class DmLiveState {
+    NONE,
+
+    /** A 1:1 call with this peer is ringing (theirs or ours). */
+    RINGING,
+
+    /** We are in a call with this peer, or the group DM has a huddle going. */
+    LIVE,
+}
+
+/** One DM-list row as rendered: the merged row plus presence and liveness. */
+data class DmListItem(
+    val row: DmListRow,
+    /** The peer's most-available Show; `null` when unknown (groups, or never seen). */
+    val presence: PresenceShow? = null,
+    /** The peer is in a huddle somewhere (teal ring). */
+    val inHuddle: Boolean = false,
+    val live: DmLiveState = DmLiveState.NONE,
+    /** Group-DM mentions of the account; live-only, like the web. */
+    val mentionCount: Int = 0,
+    /** People in the group DM's huddle right now. */
+    val huddleCount: Int = 0,
+)
+
+/** Everything liveness reads, bundled for the pure decoration. */
+internal data class DmLiveInputs(
+    val directory: PeopleDirectorySnapshot = PeopleDirectorySnapshot.EMPTY,
+    val contacts: Map<String, ContactPresence> = emptyMap(),
+    val call: CallState = CallState.Idle,
+    /** Normalised room JID → nicks with an active Muji call. */
+    val huddleNicks: Map<String, Set<String>> = emptyMap(),
+    val mentions: Map<String, Int> = emptyMap(),
+)
+
+/**
+ * Presence comes from the People projection (rooms and contacts,
+ * most-available) and falls back to contact presence; a peer seen
+ * nowhere this stream has no dot rather than a guessed "offline".
+ */
+internal fun decoratedDmRows(rows: List<DmListRow>, inputs: DmLiveInputs): List<DmListItem> {
+    val people = inputs.directory.people.associateBy { it.bareJid }
+    return rows.map { row ->
+        when (row) {
+            is DmListRow.Peer -> {
+                val bare = normalizedBareJid(row.peerJid)
+                val person = people[bare]
+                DmListItem(
+                    row = row,
+                    presence = person?.show ?: inputs.contacts[bare]?.show,
+                    inHuddle = person?.inHuddle == true,
+                    live = peerLiveState(bare, inputs.call),
+                    mentionCount = inputs.mentions[row.peerJid] ?: 0,
+                )
+            }
+            is DmListRow.Group -> {
+                val inCall = inputs.huddleNicks[normalizedBareJid(row.roomJid)].orEmpty().size
+                DmListItem(
+                    row = row,
+                    live = if (inCall > 0) DmLiveState.LIVE else DmLiveState.NONE,
+                    mentionCount = inputs.mentions[row.roomJid] ?: 0,
+                    huddleCount = inCall,
+                )
+            }
+        }
+    }
+}
+
+private fun peerLiveState(bare: String, call: CallState): DmLiveState = when (call) {
+    is CallState.Incoming -> if (normalizedBareJid(call.from) == bare) DmLiveState.RINGING else DmLiveState.NONE
+    is CallState.Outgoing -> if (normalizedBareJid(call.to) == bare) DmLiveState.RINGING else DmLiveState.NONE
+    is CallState.Active -> if (call.kind == CallKind.DM && normalizedBareJid(call.peer) == bare) {
+        DmLiveState.LIVE
+    } else {
+        DmLiveState.NONE
+    }
+    else -> DmLiveState.NONE
 }
