@@ -3,9 +3,9 @@ package social.waddle.android.feature.call
 import android.Manifest
 import android.app.NotificationManager
 import androidx.activity.ComponentActivity
-import androidx.compose.foundation.layout.Box
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.assertIsDisplayed
+import androidx.compose.ui.test.hasStateDescription
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
@@ -214,16 +214,15 @@ class CallFlowTest {
     private fun composeChannelWithOverlay() {
         composeRule.setContent {
             CompositionLocalProvider(LocalAppGraph provides harness.graph) {
-                Box {
+                CallOverlayHost(
+                    pendingCallAnswer = MutableStateFlow(false),
+                    onCallAnswerConsumed = {},
+                ) {
                     ChannelScreen(
                         roomJid = roomJid,
                         name = "room",
                         onBack = {},
                         onOpenThread = {},
-                    )
-                    CallOverlayHost(
-                        pendingCallAnswer = MutableStateFlow(false),
-                        onCallAnswerConsumed = {},
                     )
                 }
             }
@@ -337,6 +336,16 @@ class CallFlowTest {
             composeRule.onAllNodesWithText("bob").fetchSemanticsNodes().isNotEmpty()
         }
         composeRule.onNodeWithText("bob").assertIsDisplayed()
+
+        // LiveKit's active speakers light bob's tile (bare-JID mapped).
+        harness.callMedia.speakers.value = setOf("bob@waddle.test/phone")
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodes(hasStateDescription("Speaking")).fetchSemanticsNodes().isNotEmpty()
+        }
+
+        // Mute is a switch over the media plane.
+        composeRule.onNodeWithTag(CallTestTags.MUTE_BUTTON).performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) { !harness.callMedia.micEnabled.value }
 
         composeRule.onNodeWithTag(CallTestTags.HANG_UP_BUTTON).performClick()
 

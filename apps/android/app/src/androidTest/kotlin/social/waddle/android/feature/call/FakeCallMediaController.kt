@@ -45,6 +45,10 @@ class FakeCallMediaController : CallMediaController {
     val remoteIdentities = MutableStateFlow<List<String>>(emptyList())
     override val remoteParticipantIdentities: StateFlow<List<String>> = remoteIdentities
 
+    /** Tests script who the SFU hears (LiveKit identities) by writing this directly. */
+    val speakers = MutableStateFlow<Set<String>>(emptySet())
+    override val activeSpeakers: StateFlow<Set<String>> = speakers
+
     override suspend fun connect(
         join: WaddleLiveKitJoin,
         media: WaddleCallMedia,
@@ -60,6 +64,7 @@ class FakeCallMediaController : CallMediaController {
     override suspend fun disconnect() {
         disconnectCalls += 1
         remoteIdentities.value = emptyList()
+        speakers.value = emptySet()
         _connection.value = CallMediaConnection.Idle
         _micEnabled.value = false
         _cameraEnabled.value = false

@@ -4,8 +4,12 @@ import android.app.ForegroundServiceStartNotAllowedException
 import android.content.Context
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.SharingStarted
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.calls.CallKind
@@ -28,6 +32,20 @@ class CallSessionController(
     private val scope: CoroutineScope,
     private val liveParticipants: MucCallLiveParticipantsStore = MucCallLiveParticipantsStore(),
 ) {
+    /**
+     * Who is speaking in the call this device is in, as normalised bare
+     * JIDs (ourselves included), from LiveKit's active speakers. A
+     * speaker lights at once and is released [SPEAKING_RELEASE_MILLIS]
+     * after the SFU drops them, so rings and bars never flicker between
+     * words. Empty outside a connected call: speaking is only known for
+     * our own call. Any screen may read it (People, Home, Members) via
+     * `LocalAppGraph.current.callSessionController.speakingJids`.
+     */
+    val speakingJids: StateFlow<Set<String>> = media.activeSpeakers
+        .map(::speakingBareJidsOf)
+        .releasingAfter(SPEAKING_RELEASE_MILLIS)
+        .stateIn(scope, SharingStarted.WhileSubscribed(), emptySet())
+
     // Written by the state collector, read by the media-connection
     // collector — separate coroutines on a multithreaded dispatcher,
     // so publication needs @Volatile (same pattern as

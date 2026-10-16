@@ -35,6 +35,7 @@ class CallViewModel(
      */
     private val actionScope: CoroutineScope,
     liveParticipants: MucCallLiveParticipantsStore = MucCallLiveParticipantsStore(),
+    speakingJids: StateFlow<Set<String>> = MutableStateFlow(emptySet()),
 ) : ViewModel() {
     val callState: StateFlow<CallState> = sessionManager.callStore.state
     val lastError: StateFlow<String?> = sessionManager.callStore.lastError
@@ -52,9 +53,16 @@ class CallViewModel(
     private val presence = sessionManager.callStore.mucCallPresence
 
     /**
+     * Bare JIDs speaking in this call (ourselves included), debounced.
+     * Only known for the call this device is in.
+     */
+    val speaking: StateFlow<Set<String>> = speakingJids
+
+    /**
      * Roster of the live MUC call (empty for DM calls): nicks resolved
      * from the LiveKit projection with Muji-presence fallback, plus the
-     * `urn:waddle:in-call:0` raised-hand/mute badges.
+     * `urn:waddle:in-call:0` raised-hand/mute badges, who is speaking,
+     * and our own row first.
      */
     val mucRoster: StateFlow<List<MucRosterEntry>> = combine(
         callState,
@@ -63,9 +71,11 @@ class CallViewModel(
             ::MucPresenceRosterView,
         ),
         combine(liveParticipants.participants, liveParticipants.leavingRooms, ::LiveRosterView),
-    ) { state, presenceView, liveView ->
+        speakingJids,
+    ) { state, presenceView, liveView, speakers ->
         val room = activeMucRoomOf(state) ?: return@combine emptyList()
-        mucRosterOf(room, presenceView, liveView)
+        val selfJid = (state as? CallState.Active)?.join?.identity
+        rosterWithVoices(mucRosterOf(room, presenceView, liveView), speakers, selfJid)
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(), emptyList())
 
     /**
@@ -165,6 +175,7 @@ class CallViewModel(
                 media = graph.callSessionController.media,
                 actionScope = graph.applicationScope,
                 liveParticipants = graph.mucCallLiveParticipants,
+                speakingJids = graph.callSessionController.speakingJids,
             )
         }
     }

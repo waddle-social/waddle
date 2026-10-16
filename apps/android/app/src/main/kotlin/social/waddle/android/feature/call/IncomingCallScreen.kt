@@ -4,22 +4,28 @@ import android.Manifest
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawing
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Call
-import androidx.compose.material.icons.filled.CallEnd
+import androidx.compose.material.icons.outlined.Call
+import androidx.compose.material.icons.outlined.CallEnd
+import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledIconButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButtonDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -27,11 +33,19 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
+import social.waddle.android.theme.Waddle
+import social.waddle.android.theme.WaddleTokens
+import social.waddle.android.ui.huddle.Kicker
 
 /**
  * Full-screen incoming ring: caller identity, call kind, and the
@@ -68,83 +82,150 @@ fun IncomingCallScreen(
     // user answers or declines explicitly.
     BackHandler {}
 
-    Surface(
-        modifier = Modifier
-            .fillMaxSize()
-            .testTag(CallTestTags.INCOMING_SCREEN),
-        color = MaterialTheme.colorScheme.surface,
-    ) {
+    IncomingCallContent(
+        callerJid = bareJidOf(state.from),
+        video = state.media.video,
+        accepting = state.accepting,
+        onAnswer = { permissionLauncher.launch(permissions) },
+        onDecline = onDecline,
+    )
+}
+
+/**
+ * The ring itself, stateless: the caller big at the centre in an ember
+ * ring that sends slow waves out (ringing is live), their address in
+ * mono, and two large labelled targets at thumb height — Decline in
+ * danger, Answer in teal.
+ */
+@Composable
+fun IncomingCallContent(
+    callerJid: String,
+    video: Boolean,
+    accepting: Boolean,
+    onAnswer: () -> Unit,
+    onDecline: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    NightStage {
+        val colors = Waddle.colors
+        val name = localpartOf(callerJid)
         Column(
-            modifier = Modifier
+            modifier = modifier
                 .fillMaxSize()
-                .padding(32.dp),
+                .background(colors.nightGround)
+                .windowInsetsPadding(WindowInsets.safeDrawing)
+                .testTag(CallTestTags.INCOMING_SCREEN),
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.SpaceBetween,
         ) {
-            Column(
-                horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(8.dp),
-                modifier = Modifier.padding(top = 64.dp),
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(CALL_CONTROL),
+                contentAlignment = Alignment.Center,
             ) {
-                CallPeerAvatar(
-                    jid = bareJidOf(state.from),
-                    name = localpartOf(bareJidOf(state.from)),
-                    size = 96.dp,
+                Kicker(
+                    text = stringResource(if (video) R.string.call_incoming_video else R.string.call_incoming_audio),
+                    live = true,
                 )
-                Text(
-                    text = localpartOf(bareJidOf(state.from)),
-                    style = MaterialTheme.typography.headlineMedium,
-                )
-                Text(
-                    text = stringResource(
-                        if (state.media.video) R.string.call_incoming_video else R.string.call_incoming_audio,
-                    ),
-                    style = MaterialTheme.typography.bodyLarge,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                if (state.accepting) {
-                    CircularProgressIndicator(modifier = Modifier.padding(top = 16.dp))
-                    Text(
-                        text = stringResource(R.string.call_status_connecting),
-                        style = MaterialTheme.typography.bodyMedium,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+            }
+            BoxWithConstraints(
+                modifier = Modifier
+                    .weight(1f)
+                    .fillMaxWidth(),
+            ) {
+                val avatar = if (maxHeight < COMPACT_RING_HEIGHT) RING_AVATAR_COMPACT else RING_AVATAR
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = Waddle.space.lg),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    verticalArrangement = Arrangement.Center,
+                ) {
+                    StageAvatar(
+                        jid = callerJid,
+                        name = name,
+                        size = avatar,
+                        ring = StageRing.RINGING,
+                        modifier = Modifier.clearAndSetSemantics { },
                     )
+                    Spacer(Modifier.height(Waddle.space.xl))
+                    Text(
+                        text = name,
+                        style = Waddle.type.display,
+                        color = colors.fg,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.semantics { heading() },
+                    )
+                    Spacer(Modifier.height(Waddle.space.xs))
+                    Text(
+                        text = callerJid,
+                        style = Waddle.type.time,
+                        color = colors.fgMuted,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                    ConnectingLine(visible = accepting)
                 }
             }
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(bottom = 48.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
+                    .padding(horizontal = Waddle.space.xxl)
+                    .padding(top = Waddle.space.md, bottom = Waddle.space.xl),
+                horizontalArrangement = Arrangement.SpaceBetween,
             ) {
-                FilledIconButton(
+                CallControl(
+                    icon = Icons.Outlined.CallEnd,
+                    label = stringResource(R.string.call_action_decline),
                     onClick = onDecline,
-                    modifier = Modifier
-                        .size(72.dp)
-                        .testTag(CallTestTags.DECLINE_BUTTON),
-                    colors = IconButtonDefaults.filledIconButtonColors(
-                        containerColor = MaterialTheme.colorScheme.error,
-                        contentColor = MaterialTheme.colorScheme.onError,
-                    ),
-                ) {
-                    Icon(
-                        Icons.Filled.CallEnd,
-                        contentDescription = stringResource(R.string.call_action_decline),
-                    )
-                }
-                FilledIconButton(
-                    onClick = { permissionLauncher.launch(permissions) },
-                    enabled = !state.accepting,
-                    modifier = Modifier
-                        .size(72.dp)
-                        .testTag(CallTestTags.ACCEPT_BUTTON),
-                ) {
-                    Icon(
-                        Icons.Filled.Call,
-                        contentDescription = stringResource(R.string.call_action_accept),
-                    )
-                }
+                    tone = ControlTone.DANGER,
+                    size = CALL_CONTROL_LARGE,
+                    modifier = Modifier.testTag(CallTestTags.DECLINE_BUTTON),
+                )
+                CallControl(
+                    icon = if (video) Icons.Outlined.Videocam else Icons.Outlined.Call,
+                    label = stringResource(R.string.call_action_accept),
+                    onClick = onAnswer,
+                    tone = ControlTone.ACTION,
+                    size = CALL_CONTROL_LARGE,
+                    enabled = !accepting,
+                    modifier = Modifier.testTag(CallTestTags.ACCEPT_BUTTON),
+                )
             }
         }
     }
 }
+
+/** "Connecting…" under the caller once Answer is tapped; space reserved so nothing jumps. */
+@Composable
+private fun ConnectingLine(visible: Boolean) {
+    Row(
+        modifier = Modifier
+            .padding(top = Waddle.space.lg)
+            .height(Waddle.space.lg),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+    ) {
+        if (visible) {
+            CircularProgressIndicator(
+                modifier = Modifier.size(Waddle.space.md),
+                color = Waddle.colors.action,
+                strokeWidth = PROGRESS_STROKE,
+            )
+            Text(
+                text = stringResource(R.string.call_status_connecting),
+                style = Waddle.type.control,
+                color = Waddle.colors.fgMuted,
+            )
+        }
+    }
+}
+
+private val RING_AVATAR = WaddleTokens.Space.xxxl * 2
+private val RING_AVATAR_COMPACT = 88.dp
+private val COMPACT_RING_HEIGHT = 420.dp
+private val PROGRESS_STROKE = 2.dp

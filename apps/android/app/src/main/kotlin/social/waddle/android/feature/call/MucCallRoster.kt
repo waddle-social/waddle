@@ -111,7 +111,34 @@ data class MucRosterEntry(
     val muted: Boolean,
     /** The participant's real bare JID (avatar); `null` = unknown. */
     val jid: String? = null,
+    /** LiveKit hears them right now (debounced; see [CallSessionController.speakingJids]). */
+    val speaking: Boolean = false,
+    /** This row is our own account. */
+    val self: Boolean = false,
 )
+
+/**
+ * Light up who is speaking and mark our own row, keyed by bare JID (a
+ * row without a resolved JID can be neither). Our row moves to the
+ * front so it is always in the same place; everyone else keeps the
+ * roster's order, so nobody jumps around while they talk.
+ */
+fun rosterWithVoices(
+    roster: List<MucRosterEntry>,
+    speakingJids: Set<String>,
+    selfBareJid: String?,
+): List<MucRosterEntry> {
+    val self = selfBareJid?.let(::normalizedBareJid)?.takeIf { it.isNotEmpty() }
+    val marked = roster.map { entry ->
+        val jid = entry.jid?.let(::normalizedBareJid)
+        entry.copy(
+            speaking = jid != null && jid in speakingJids,
+            self = jid != null && jid == self,
+        )
+    }
+    val (mine, others) = marked.partition { it.self }
+    return mine + others
+}
 
 /** One consistent read of the Muji-presence flows, keyed by room. */
 data class MucPresenceRosterView(
