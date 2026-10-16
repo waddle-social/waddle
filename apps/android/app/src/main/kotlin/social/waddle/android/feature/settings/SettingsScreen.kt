@@ -1,6 +1,8 @@
 package social.waddle.android.feature.settings
 
+import android.app.Activity
 import android.content.Context
+import android.content.ContextWrapper
 import android.content.Intent
 import android.graphics.BitmapFactory
 import android.os.PowerManager
@@ -60,6 +62,7 @@ import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.prefs.ThemeMode
+import social.waddle.android.client.push.PushStatus
 import social.waddle.android.theme.MonoMeta
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.GroupDivider
@@ -83,10 +86,18 @@ fun SettingsScreen(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val isCommunityOwner by viewModel.isCommunityOwner.collectAsStateWithLifecycle()
     val selfAvatar by viewModel.selfAvatar.collectAsStateWithLifecycle()
+    val delivery by viewModel.deliveryState.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    LifecycleResumeEffect(Unit) {
+        // A distributor may have been installed or chosen meanwhile.
+        graph.pushDistributor.refresh()
+        onPauseOrDispose {}
+    }
     SettingsContent(
         state = state,
         selfAvatar = selfAvatar,
         isCommunityOwner = isCommunityOwner,
+        delivery = delivery,
         actions = SettingsActions(
             onBack = onBack,
             onOpenProfile = onOpenProfile,
@@ -96,8 +107,16 @@ fun SettingsScreen(
             onSetMessageSoundsEnabled = viewModel::setMessageSoundsEnabled,
             onSetReadReceiptsEnabled = viewModel::setReadReceiptsEnabled,
             onLogout = viewModel::logout,
+            onSetStayConnected = viewModel::setStayConnected,
+            onPickDistributor = { context.findActivity()?.let(graph.pushDistributor::pick) },
         ),
     )
+}
+
+private tailrec fun Context.findActivity(): Activity? = when (this) {
+    is Activity -> this
+    is ContextWrapper -> baseContext.findActivity()
+    else -> null
 }
 
 /** What the settings surface can ask for. */
@@ -110,6 +129,8 @@ internal data class SettingsActions(
     val onSetMessageSoundsEnabled: (Boolean) -> Unit,
     val onSetReadReceiptsEnabled: (Boolean) -> Unit,
     val onLogout: () -> Unit,
+    val onSetStayConnected: (Boolean) -> Unit = {},
+    val onPickDistributor: () -> Unit = {},
 )
 
 /** Stateless settings surface: grouped cards on the screen ground. */
@@ -119,6 +140,7 @@ internal fun SettingsContent(
     selfAvatar: WaddleAvatar?,
     isCommunityOwner: Boolean,
     actions: SettingsActions,
+    delivery: DeliveryUiState = DeliveryUiState(),
 ) {
     Scaffold(
         topBar = {
@@ -189,8 +211,8 @@ internal fun SettingsContent(
                     )
                 }
             }
-            GroupedSection(title = stringResource(R.string.settings_battery)) {
-                BatteryOptimizationRow()
+            GroupedSection(title = stringResource(R.string.settings_delivery)) {
+                DeliverySection(delivery = delivery, actions = actions)
             }
             OutlinedButton(
                 onClick = actions.onLogout,
@@ -211,6 +233,65 @@ internal fun SettingsContent(
                 )
                 Text(text = stringResource(R.string.action_logout))
             }
+        }
+    }
+}
+
+/** Push status, the distributor, the stay-connected switch and battery. */
+@Composable
+private fun DeliverySection(delivery: DeliveryUiState, actions: SettingsActions) {
+    Text(
+        text = deliveryStatusText(delivery),
+        style = MaterialTheme.typography.bodyMedium,
+        color = MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier
+            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.sm)
+            .testTag(SettingsScreenTestTags.DELIVERY_STATUS),
+    )
+    if (delivery.distributorInstalled) {
+        GroupDivider()
+        ListItem(
+            headlineContent = { Text(text = stringResource(R.string.settings_delivery_distributor)) },
+            supportingContent = {
+                Text(text = delivery.distributorLabel ?: stringResource(R.string.settings_delivery_distributor_none))
+            },
+            trailingContent = { Chevron() },
+            colors = groupedRowColors(),
+            modifier = Modifier.clickable(onClick = actions.onPickDistributor),
+        )
+    }
+    GroupDivider()
+    ListItem(
+        headlineContent = { Text(text = stringResource(R.string.settings_stay_connected)) },
+        supportingContent = { Text(text = stringResource(R.string.settings_stay_connected_body)) },
+        trailingContent = {
+            Switch(
+                checked = delivery.stayConnected,
+                onCheckedChange = actions.onSetStayConnected,
+                modifier = Modifier.testTag(SettingsScreenTestTags.STAY_CONNECTED_TOGGLE),
+            )
+        },
+        colors = groupedRowColors(),
+    )
+    // Battery exemption only matters while a connection is held.
+    if (delivery.stayConnected) {
+        GroupDivider()
+        BatteryOptimizationRow()
+    }
+}
+
+@Composable
+private fun deliveryStatusText(delivery: DeliveryUiState): String {
+    val distributor = delivery.distributorLabel
+    return when (delivery.status) {
+        PushStatus.ACTIVE -> stringResource(R.string.settings_delivery_push_active, distributor.orEmpty())
+        PushStatus.PENDING -> stringResource(R.string.settings_delivery_push_pending, distributor.orEmpty())
+        PushStatus.UNSUPPORTED -> stringResource(R.string.settings_delivery_unsupported)
+        PushStatus.FAILED -> stringResource(R.string.settings_delivery_failed)
+        PushStatus.NONE -> if (delivery.distributorInstalled) {
+            stringResource(R.string.settings_delivery_choose_distributor)
+        } else {
+            stringResource(R.string.settings_delivery_no_distributor)
         }
     }
 }
@@ -329,6 +410,8 @@ object SettingsScreenTestTags {
     const val MESSAGE_SOUNDS_TOGGLE = "settings-message-sounds-toggle"
     const val READ_RECEIPTS_TOGGLE = "settings-read-receipts-toggle"
     const val COMMUNITY_USERS_ROW = "settings-community-users-row"
+    const val DELIVERY_STATUS = "settings-delivery-status"
+    const val STAY_CONNECTED_TOGGLE = "settings-stay-connected-toggle"
 }
 
 @Composable

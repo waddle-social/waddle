@@ -7,27 +7,41 @@ import androidx.lifecycle.LifecycleOwner
 import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.launch
 import social.waddle.android.client.WaddleAppState
 
 /**
- * Starts/stops [WaddleConnectionService] on app-state transitions:
- * `Ready` raises the foreground service, `SignedOut` tears it down.
+ * Runs [WaddleConnectionService] exactly while a signed-in account stays
+ * connected in the background ([stayConnected]); with push delivery the
+ * service is not needed and stays down.
  */
 class ConnectionServiceController(
     private val context: Context,
     private val appState: StateFlow<WaddleAppState>,
+    /** Effective stay-connected mode; `null` until it is known. */
+    private val stayConnected: StateFlow<Boolean?>,
     private val scope: CoroutineScope,
     /** Foreground entry: the session should prove its stream is still alive. */
     private val onForeground: () -> Unit = {},
 ) {
+    private val wanted: Boolean
+        get() = appState.value == WaddleAppState.Ready && stayConnected.value == true
+
     fun start() {
         scope.launch {
-            appState.collect { state ->
-                when (state) {
-                    WaddleAppState.Ready -> startService()
-                    WaddleAppState.SignedOut -> stopService()
-                    else -> Unit
+            combine(appState, stayConnected) { state, stay ->
+                when {
+                    state == WaddleAppState.Ready && stay == true -> true
+                    state == WaddleAppState.SignedOut || stay == false -> false
+                    else -> null
+                }
+            }.distinctUntilChanged().collect { run ->
+                when (run) {
+                    true -> startService()
+                    false -> stopService()
+                    null -> Unit
                 }
             }
         }
@@ -38,10 +52,8 @@ class ConnectionServiceController(
         // FGS-start-eligible moment.
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) {
-                if (appState.value == WaddleAppState.Ready) {
-                    startService()
-                    onForeground()
-                }
+                if (wanted) startService()
+                if (appState.value == WaddleAppState.Ready) onForeground()
             }
         })
     }

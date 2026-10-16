@@ -7,6 +7,7 @@ import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import social.waddle.android.client.prefs.ThemeMode
+import social.waddle.android.client.push.PushStatus
 import social.waddle.android.client.store.MemberListStatus
 import social.waddle.android.feature.conversation.MessageActionList
 import social.waddle.android.feature.conversation.MessageSheetActions
@@ -14,6 +15,7 @@ import social.waddle.android.feature.members.BotRow
 import social.waddle.android.feature.members.MemberList
 import social.waddle.android.feature.members.MemberRow
 import social.waddle.android.feature.members.MembersUiState
+import social.waddle.android.feature.settings.DeliveryUiState
 import social.waddle.android.feature.settings.SettingsActions
 import social.waddle.android.feature.settings.SettingsContent
 import social.waddle.android.feature.settings.SettingsUiState
@@ -27,6 +29,12 @@ class SurfacesScreenshotTest {
     @Test
     fun settings() = captureThemed("settings") {
         SettingsContent(
+            delivery = DeliveryUiState(
+                status = PushStatus.ACTIVE,
+                distributorLabel = "ntfy",
+                distributorInstalled = true,
+                stayConnected = false,
+            ),
             state = SettingsUiState(
                 username = "david",
                 jid = "david@waddle.test",

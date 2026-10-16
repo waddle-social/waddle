@@ -17,6 +17,7 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.push.PushStatus
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleAvatar
 
@@ -30,13 +31,62 @@ data class SettingsUiState(
     val readReceiptsEnabled: Boolean = true,
 )
 
-/** Account row, theme mode, notification prefs, logout. */
+/** How background delivery works for the account right now. */
+data class DeliveryUiState(
+    val status: PushStatus = PushStatus.NONE,
+    /** The chosen UnifiedPush distributor's name, if any. */
+    val distributorLabel: String? = null,
+    /** Whether any distributor app is installed. */
+    val distributorInstalled: Boolean = false,
+    /** Effective stay-connected mode (choice, else automatic). */
+    val stayConnected: Boolean = true,
+) {
+    /** The mode the app would pick without a choice. */
+    val automaticStayConnected: Boolean get() = status != PushStatus.ACTIVE
+}
+
+/** The push side of Settings, from the graph (absent in plain unit tests). */
+class DeliverySource(
+    val pushStatus: StateFlow<PushStatus>,
+    val distributorLabel: StateFlow<String?>,
+    val distributorInstalled: StateFlow<Boolean>,
+    val stayConnected: StateFlow<Boolean?>,
+)
+
+/** Account row, theme mode, notification prefs, background delivery, logout. */
 class SettingsViewModel(
     private val userPrefs: UserPrefs,
     private val currentSession: StateFlow<WaddleSessionInfo?>,
     private val performSignOut: suspend () -> Unit,
     sessionManager: XmppSessionManager? = null,
+    delivery: DeliverySource? = null,
 ) : ViewModel() {
+    val deliveryState: StateFlow<DeliveryUiState> = when (delivery) {
+        null -> MutableStateFlow(DeliveryUiState())
+        else -> combine(
+            delivery.pushStatus,
+            delivery.distributorLabel,
+            delivery.distributorInstalled,
+            delivery.stayConnected,
+        ) { status, label, installed, stay ->
+            DeliveryUiState(
+                status = status,
+                distributorLabel = label,
+                distributorInstalled = installed,
+                stayConnected = stay ?: (status != PushStatus.ACTIVE),
+            )
+        }.stateIn(viewModelScope, SharingStarted.Eagerly, DeliveryUiState())
+    }
+
+    /**
+     * An explicit stay-connected choice; choosing what the automatic mode
+     * would pick anyway stores no choice, so it keeps following push.
+     */
+    fun setStayConnected(stay: Boolean) {
+        val automatic = deliveryState.value.automaticStayConnected
+        viewModelScope.launch { userPrefs.setStayConnected(if (stay == automatic) null else stay) }
+    }
+
     /** The CURRENT account's XMPP-published avatar (derived from the
      *  live session flow, never frozen at construction); wins over the
      *  REST URL. */
@@ -131,6 +181,12 @@ class SettingsViewModel(
                 currentSession = graph.currentSession,
                 performSignOut = graph::signOut,
                 sessionManager = graph.sessionManager,
+                delivery = DeliverySource(
+                    pushStatus = graph.pushStatus,
+                    distributorLabel = graph.pushDistributor.distributorLabel,
+                    distributorInstalled = graph.pushDistributor.installed,
+                    stayConnected = graph.stayConnected,
+                ),
             )
         }
     }

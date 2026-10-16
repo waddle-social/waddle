@@ -47,7 +47,8 @@
             </intent-filter>
         </activity>
 
-        <!-- Persistent XMPP connection (no Google Play push services). -->
+        <!-- Persistent XMPP connection when the account stays connected
+             in the background (no push distributor, or the user's choice). -->
         <service
             android:name=".service.WaddleConnectionService"
             android:exported="false"
@@ -55,6 +56,16 @@
             <property
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Maintains the user's persistent XMPP connection for realtime chat delivery without Google Play push services" />
+        </service>
+
+        <!-- UnifiedPush: Web Push payloads from the user's distributor
+             (no Google Play services). Bound only by the connector. -->
+        <service
+            android:name=".push.WaddlePushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
         </service>
 
         <!-- In-call foreground service: raised for outgoing/active calls;

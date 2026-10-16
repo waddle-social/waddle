@@ -91,6 +91,13 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onStart() {
+        super.onStart()
+        // Foreground is the one place a distributor may be chosen (it can
+        // show UI); UnifiedPush also asks for a register on every start.
+        (application as WaddleApplication).graph.pushDistributor.onForeground(this)
+    }
+
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
         outState.putString(STATE_PENDING_JID, pendingConversationJid.value)

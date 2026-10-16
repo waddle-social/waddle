@@ -34,6 +34,32 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
     /** XEP-0333 outbound gate, web `waddle:read-receipts` (default send). */
     val readReceiptsEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_READ_RECEIPTS] ?: true }
 
+    /**
+     * Background delivery override: `true` keeps the stream up in a
+     * foreground service, `false` relies on push alone, `null` (default)
+     * decides by whether push delivery is active.
+     */
+    val stayConnected: Flow<Boolean?> = dataStore.data.map { it[KEY_STAY_CONNECTED] }
+
+    /**
+     * The UnifiedPush instance last registered with a distributor. Kept
+     * across sign-out (unlike the session store) so a sign-out that wiped
+     * the session can still unregister it.
+     */
+    val lastPushInstance: Flow<String?> = dataStore.data.map { it[KEY_LAST_PUSH_INSTANCE] }
+
+    suspend fun setStayConnected(stayConnected: Boolean?) {
+        dataStore.edit { prefs ->
+            if (stayConnected == null) prefs.remove(KEY_STAY_CONNECTED) else prefs[KEY_STAY_CONNECTED] = stayConnected
+        }
+    }
+
+    suspend fun setLastPushInstance(instance: String?) {
+        dataStore.edit { prefs ->
+            if (instance == null) prefs.remove(KEY_LAST_PUSH_INSTANCE) else prefs[KEY_LAST_PUSH_INSTANCE] = instance
+        }
+    }
+
     suspend fun setTheme(mode: ThemeMode) {
         dataStore.edit { it[KEY_THEME] = mode.storageValue }
     }
@@ -59,5 +85,7 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         val KEY_NOTIFICATIONS = booleanPreferencesKey("notifications_enabled")
         val KEY_MESSAGE_SOUNDS = booleanPreferencesKey("message_sounds_enabled")
         val KEY_READ_RECEIPTS = booleanPreferencesKey("read_receipts_enabled")
+        val KEY_STAY_CONNECTED = booleanPreferencesKey("stay_connected")
+        val KEY_LAST_PUSH_INSTANCE = stringPreferencesKey("last_push_instance")
     }
 }

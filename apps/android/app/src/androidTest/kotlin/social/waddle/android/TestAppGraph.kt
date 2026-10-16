@@ -4,6 +4,7 @@ import androidx.test.core.app.ApplicationProvider
 import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.withTimeout
 import social.waddle.android.client.ConnectionState
@@ -87,6 +88,8 @@ class TestAppGraph {
         networkSignal = networkSignal,
         loginGatewayFactory = { loginGateway },
         callMediaControllerFactory = { callMedia },
+        // No process lifecycle drives these sessions: always connect.
+        connectionWanted = MutableStateFlow(true),
     )
 
     /** Flip the shell to SignedOut without touching the network. */

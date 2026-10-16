@@ -638,6 +638,14 @@ class XmppSessionManager(
         loop.requestReconnect()
     }
 
+    /**
+     * Something suggests the ready stream may have missed traffic (a push
+     * arrived for a message the stream should have carried): probe it.
+     */
+    fun requestLivenessCheck() {
+        loop.requestLivenessCheck()
+    }
+
     /** UI hook: the DM conversation is on screen — persist recency. */
     fun recordDmSeen(peerJid: String) {
         persistDmSeen(bareJid(peerJid), nowRfc3339())
