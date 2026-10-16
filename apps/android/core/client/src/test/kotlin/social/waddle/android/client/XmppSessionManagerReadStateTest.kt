@@ -161,7 +161,10 @@ class XmppSessionManagerReadStateTest {
         runCurrent()
         harness.manager.timelineStore.onLiveMessage(mucMessage("s1"))
 
-        harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
+        assertEquals(
+            MarkerDispatch.QUEUED,
+            harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true),
+        )
         assertNull(
             "the cursor dedupe must not swallow an offline read",
             harness.manager.readCursorStore.cursor("room@muc.waddle.test"),
@@ -169,11 +172,32 @@ class XmppSessionManagerReadStateTest {
 
         harness.factory.emit(WaddleClientEvent.Connected)
         runCurrent()
-        harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
+        assertEquals(
+            MarkerDispatch.SETTLED,
+            harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true),
+        )
         assertEquals(
             listOf(Triple("room@muc.waddle.test", "s1", true)),
             harness.client.displayedCalls,
         )
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a stream that drops before dispatch reports the read as queued`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.factory.emit(WaddleClientEvent.Message(mucMessage("s1")))
+        runCurrent()
+        val readyClient = harness.client
+        // A caller that saw Ready reaches the dispatch only after the drop.
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+
+        val dispatch = harness.manager.markConversationDisplayed("room@muc.waddle.test", isGroupchat = true)
+
+        assertEquals("parked, so the caller must keep the stream wanted", MarkerDispatch.QUEUED, dispatch)
+        assertTrue(readyClient.displayedCalls.isEmpty())
         harness.manager.logout()
     }
 

@@ -7,7 +7,7 @@ import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.WaddleApplication
-import social.waddle.android.client.ConnectionState
+import social.waddle.android.client.MarkerDispatch
 import social.waddle.android.client.XmppSessionManager
 
 /**
@@ -43,20 +43,21 @@ class MarkReadReceiver : BroadcastReceiver() {
             try {
                 // Same never-throw posture as the other receivers: an
                 // uncaught throw on this root coroutine kills the process.
-                // Sent at once on a ready stream; otherwise queued for the
-                // next ready pipeline, which counts as done once it advances.
-                val sentLive = graph.sessionManager.connectionState.value == ConnectionState.Ready
+                // The dispatch itself says whether it went out or was parked
+                // (a connection snapshot taken first can go stale while it
+                // waits its turn). A parked marker drains on the next ready
+                // pipeline, which counts as done once it advances.
                 val runsBefore = graph.sessionManager.readyPipelineRuns.value
-                runCatching {
+                val dispatch = runCatching {
                     graph.sessionManager.markConversationDisplayed(
                         conversationJid,
                         isGroupchat,
                         explicitTarget,
                     )
-                }
+                }.getOrDefault(MarkerDispatch.SETTLED)
                 runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
                 runCatching { graph.messageNotifier.clearConversationNotification(conversationJid) }
-                val drained = sentLive || withTimeoutOrNull(MARKER_HOLD_MILLIS) {
+                val drained = dispatch == MarkerDispatch.SETTLED || withTimeoutOrNull(MARKER_HOLD_MILLIS) {
                     graph.sessionManager.readyPipelineRuns.first { it > runsBefore }
                 } != null
                 // Not drained within the receiver's budget: a short

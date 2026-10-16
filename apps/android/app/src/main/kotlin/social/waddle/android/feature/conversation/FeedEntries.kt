@@ -61,22 +61,29 @@ data class FeedContext(
      * messages arriving while the screen is open do not move it.
      */
     val unreadAnchor: UnreadAnchor? = null,
+    /**
+     * The screen's newest history page has loaded. Until then the cached
+     * rows can be missing unread messages, so [unreadAnchor] does not pin.
+     */
+    val newestHistoryLoaded: Boolean = true,
 )
 
 /**
- * The unread divider's position for one screen visit: resolved once to
- * the first unread message (the oldest of the last [unreadAtOpen]
- * incoming rows, as soon as that many are loaded), then held there by
- * identity. Derivations run one at a time on the feed dispatcher.
+ * The unread divider's position for one screen visit: the first unread
+ * message (the oldest of the last [unreadAtOpen] incoming rows). It
+ * follows the count while the newest history is still loading (a stale
+ * cache can lack unread rows), then is held by identity from the first
+ * derivation after that page lands. Derivations run one at a time on
+ * the feed dispatcher.
  */
 class UnreadAnchor(private val unreadAtOpen: Int) {
     @Volatile
     private var anchorKey: String? = null
 
-    internal fun dividerIndex(rows: List<ConversationRow>): Int {
+    internal fun dividerIndex(rows: List<ConversationRow>, newestHistoryLoaded: Boolean): Int {
         anchorKey?.let { key -> return rows.indexOfFirst { rowKeyOf(it) == key } }
         val index = unreadDividerIndex(rows, unreadAtOpen)
-        if (index >= 0) anchorKey = rowKeyOf(rows[index])
+        if (newestHistoryLoaded && index >= 0) anchorKey = rowKeyOf(rows[index])
         return index
     }
 }
@@ -96,7 +103,8 @@ fun feedEntriesOf(
     val derived = Derived(
         replyCounts = if (context.threadId == null) replyCountsOf(items) else emptyMap(),
         byIdentity = quotedMessagesByIdentity(rows),
-        dividerIndex = context.unreadAnchor?.dividerIndex(rows) ?: unreadDividerIndex(rows, context.unreadAtOpen),
+        dividerIndex = context.unreadAnchor?.dividerIndex(rows, context.newestHistoryLoaded)
+            ?: unreadDividerIndex(rows, context.unreadAtOpen),
     )
     val out = ArrayList<FeedEntry>(rows.size)
     var previous: Placed? = null

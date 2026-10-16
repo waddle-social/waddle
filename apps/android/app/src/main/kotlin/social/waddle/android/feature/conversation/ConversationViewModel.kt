@@ -183,6 +183,7 @@ open class ConversationViewModel(
                         pinnedIds = pins,
                         unreadAtOpen = unreadAtOpen,
                         unreadAnchor = unreadAnchor,
+                        newestHistoryLoaded = load.newestLoaded,
                     ),
                 ),
                 isLoadingOlder = load.inFlight,
@@ -289,6 +290,7 @@ open class ConversationViewModel(
                         reachedStart = page.isComplete || page.messages.isEmpty(),
                         oldestMamId = page.firstId ?: current.oldestMamId,
                         pagesFetched = current.pagesFetched + 1,
+                        newestLoaded = true,
                     )
                 }
             }
@@ -596,6 +598,8 @@ open class ConversationViewModel(
         /** RSM `before` cursor: the mam id of the oldest fetched row. */
         val oldestMamId: String? = null,
         val pagesFetched: Int = 0,
+        /** A page fetched from the newest end has landed (paging starts there). */
+        val newestLoaded: Boolean = false,
     )
 
     private companion object {

@@ -282,6 +282,37 @@ class FeedEntriesTest {
     }
 
     @Test
+    fun `the unread divider waits for the newest history before pinning`() {
+        val a1 = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
+        val a2 = row("2", "alice", "2026-07-15T10:01:00Z", authorJid = "alice@waddle.test")
+        val a3 = row("3", "alice", "2026-07-15T10:02:00Z", authorJid = "alice@waddle.test")
+        val anchor = UnreadAnchor(unreadAtOpen = 1)
+        val loading = FeedContext(
+            threadId = null,
+            selfBareJid = self,
+            pinnedIds = emptySet(),
+            unreadAtOpen = 1,
+            zone = ZoneOffset.UTC,
+            unreadAnchor = anchor,
+            newestHistoryLoaded = false,
+        )
+        // Stale cache: the one unread message (3) has not been fetched yet.
+        feedEntriesOf(listOf(a1, a2).map { it.item }, emptyList(), loading)
+
+        val loaded = loading.copy(newestHistoryLoaded = true)
+        val hydrated = feedEntriesOf(listOf(a1, a2, a3).map { it.item }, emptyList(), loaded)
+        assertEquals(
+            "the divider lands on the unread message the history brought in",
+            listOf(false, false, true),
+            hydrated.map { it.unreadDivider },
+        )
+
+        val a4 = row("4", "alice", "2026-07-15T10:03:00Z", authorJid = "alice@waddle.test")
+        val later = feedEntriesOf(listOf(a1, a2, a3, a4).map { it.item }, emptyList(), loaded)
+        assertEquals(listOf(false, false, true, false), later.map { it.unreadDivider })
+    }
+
+    @Test
     fun `undelayed live rows group by local receipt time`() {
         val first = row("1", "alice", timestamp = null, authorJid = "alice@waddle.test")
         val second = row("2", "alice", timestamp = null, authorJid = "alice@waddle.test")

@@ -32,7 +32,7 @@ class PushMessageHandler(
         // for this install's keys is trusted.
         if (!decrypted) return
         // Another account's leftover registration: never show its traffic.
-        if (sessionManager.pushInstance() != instance) return
+        if (!sessionManager.ownsPushInstance(instance)) return
         val envelope = PushEnvelope.parse(content) ?: return
         if (!userPrefs.notificationsEnabled.first()) return
         // The open app shows the conversation live.
@@ -45,7 +45,7 @@ class PushMessageHandler(
         // Re-checked under the notifier's lock: the account may have signed
         // out (or switched) since, and sign-out clears under the same lock.
         notifier.postPushSummary(summarize(envelope)) {
-            sessionManager.pushInstance() == instance && !isAppVisible()
+            sessionManager.ownsPushInstance(instance) && !isAppVisible()
         }
     }
 

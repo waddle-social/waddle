@@ -53,13 +53,17 @@ internal class ReadStateCoordinator(
      * [explicitTarget] lets callers without a loaded timeline (the
      * notification mark-as-read action after process death) name the
      * message directly.
+     *
+     * Returns [MarkerDispatch.QUEUED] only when the read was parked for
+     * the next ready session, decided at dispatch time rather than from
+     * any earlier connection snapshot.
      */
     suspend fun markConversationDisplayed(
         conversationJid: String,
         isGroupchat: Boolean,
         explicitTarget: DisplayedTarget? = null,
-    ): Unit = displayedMutex.withLock {
-        val lease = activeSession.captureOwnerLease() ?: return@withLock
+    ): MarkerDispatch = displayedMutex.withLock {
+        val lease = activeSession.captureOwnerLease() ?: return@withLock MarkerDispatch.SETTLED
         // Serialized: unguarded concurrent dispatches (timeline
         // collector, visibility hooks, the notification receiver) could
         // interleave across the suspend points and let a STALE call's
@@ -69,7 +73,7 @@ internal class ReadStateCoordinator(
         val items = stores.timelineStore.timeline(conversation).value
         val ids = explicitTarget
             ?: newestDisplayedTarget(items, isGroupchat, conversation)
-            ?: return
+            ?: return MarkerDispatch.SETTLED
         // The on-screen path clears the badge unconditionally (looking
         // IS reading, even offline). Explicit targets (parked replays,
         // notification actions) must pass the staleness guard first —
@@ -85,11 +89,11 @@ internal class ReadStateCoordinator(
                     stores.inboxStore.markReadLocally(conversation)
                 }
             ) {
-                return@withLock
+                return@withLock MarkerDispatch.SETTLED
             }
         }
         val explicitExpectation = explicitTarget?.let {
-            expectedCursorFor(items, conversation, it.markerId) ?: return
+            expectedCursorFor(items, conversation, it.markerId) ?: return MarkerDispatch.SETTLED
         }
         // Snapshot the cursor to CAS against below: applyMdsEntry runs
         // OUTSIDE displayedMutex and can advance the cursor to a newer
@@ -97,7 +101,7 @@ internal class ReadStateCoordinator(
         // advance would then regress it to our (older) marker and wedge
         // the sibling entry's CAS forever.
         val cursorBefore = stores.readCursorStore.cursor(conversation)
-        if (cursorBefore == ids.markerId) return
+        if (cursorBefore == ids.markerId) return MarkerDispatch.SETTLED
         // The cursor (which dedupes future dispatches) is taken only
         // when every attempted send went through — a thrown/refused
         // dispatch stays retryable on the next timeline change.
@@ -118,7 +122,7 @@ internal class ReadStateCoordinator(
                 // the next ready (a notification tap during a reconnect gap
                 // must not permanently drop the read receipt).
                 pendingDisplayed[conversation] = PendingDisplayed(isGroupchat, ids)
-                return
+                return MarkerDispatch.QUEUED
             }
             is ActiveSession.LeaseInvocation.Completed -> result.value
         }
@@ -132,6 +136,7 @@ internal class ReadStateCoordinator(
                 stores.readCursorStore.compareAndAdvance(conversation, expected, ids.markerId)
             }
         }
+        MarkerDispatch.SETTLED
     }
 
     /**
