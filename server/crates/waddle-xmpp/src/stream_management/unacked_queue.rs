@@ -18,7 +18,11 @@ pub struct UnackedStanza {
     pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// The sequence number of this stanza (outbound count when sent)
     pub sequence: u32,
-    /// The XML content of the stanza
+    /// Immutable wire XML captured by the production serializer. This queue
+    /// is the transport's retransmission log: keeping `String` preserves exact
+    /// replay bytes rather than rebuilding them from a typed stanza. The same
+    /// decision applies after detach; see [`super::DetachedUnackedStanza`] and
+    /// the replay byte contract documented by [`super::ReplayStanza`].
     pub stanza_xml: String,
     /// When the stanza was sent (monotonic — used for age telemetry).
     pub sent_at: Instant,

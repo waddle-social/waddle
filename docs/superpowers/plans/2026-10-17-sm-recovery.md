@@ -18,3 +18,17 @@ Review the durability design independently before implementation, then review th
 ## Integration
 
 Keep #1198 and #1807 bounded. Inventory lifecycle and quota handling must agree on successful durable settlement; retries must not duplicate pending rows or restore resume eligibility. No new dependencies.
+
+## Implemented design
+
+- Reuse `sm_sessions` and `sm_unacked` as canonical promotion inventory. Set both resume limits to zero, retain the exact claim fence, and let startup hydration and the existing expiry janitor recover unfinished work. Registration reconciles against the durable watermark; captured newer suffixes survive failed writes without recreating retired prefix entries.
+- Capture the terminal backlog synchronously before the first backend await. Cancellation guards retain the complete prefix and accepted suffix; append commits the stanza and outbound watermark together. The normal promotion/confirmation chain owns retirement.
+- Portable pending storage can use a database separate from SM storage. Record an origin/sequence handoff receipt in the same transaction as pending insertion; quota rejection rolls back both. Keep receipts after delivery until the canonical SM source is confirmed deleted.
+- Bulk metadata scans skip and count corrupt rows. Exact-JID probes remain fail closed, and retraction sweeps use strict ID enumeration so corrupt metadata cannot hide readable message payloads.
+- Public detached append APIs accept typed stanzas; existing immutable replay bytes retain their established contract. Senderless server frames can use alternate live delivery but do not enter offline promotion or bounce retry loops. Existing MAM filtering and pending-retention expiry remain in place with added coverage.
+
+## Remaining limits
+
+A crash after canonical source deletion but before portable receipt cleanup can retain content-free origin/sequence receipts. This affects storage housekeeping, not payload durability. Historical production row contents and post-deploy quota telemetry cannot be established by local tests.
+
+Review also identified a pre-existing, separate expired-during-resume completion path that deletes its source without promotion. This change covers promotion custody transitions; expired-resume completion remains a follow-up rather than expanding the current four issues.

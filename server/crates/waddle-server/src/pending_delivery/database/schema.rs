@@ -42,6 +42,21 @@ pub(super) async fn initialize(
             (),
         )
         .await?;
+    // A portable deployment may keep pending delivery and SM persistence
+    // in separate databases. Retain exact promotion receipts until the SM
+    // source is confirmed retired, even if pending delivery finishes first.
+    // This store owns the table alongside pending_delivery, outside the
+    // canonical ingress migration ledger.
+    storage
+        .execute(
+            "CREATE TABLE IF NOT EXISTS pending_delivery_sm_promotions (\
+                origin_stream_id TEXT NOT NULL, \
+                sequence BIGINT NOT NULL, \
+                PRIMARY KEY (origin_stream_id, sequence)\
+            )",
+            (),
+        )
+        .await?;
     // Online migration for existing Postgres tables that were created
     // with the pre-fix `INTEGER` (i32) shape. Widening to BIGINT is
     // lossless — every value that actually made it in fits in i32

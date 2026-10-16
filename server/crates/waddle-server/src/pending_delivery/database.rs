@@ -56,8 +56,8 @@ pub struct DatabasePendingDeliveryStorage {
     /// `PostgresFencedSmPersistence`, one table over). `insert_fenced`
     /// uses this to run the Q6 promotion insert under the origin SM
     /// session's claim fence; `None` means this storage falls back to the
-    /// portable, unfenced `insert` path — correct for every
-    /// non-clustered/non-co-located deployment.
+    /// portable path, whose sequence-aware promotion receipts also support
+    /// independently configured SM and pending-delivery databases.
     fencing: Option<PendingDeliveryFencing>,
     ack_windows: std::sync::Arc<ack_windows::SessionAckWindows>,
 }
@@ -270,9 +270,15 @@ impl DatabasePendingDeliveryStorage {
         origin_stream_id: &str,
         prune_sequence: Option<u32>,
     ) -> Result<InsertOutcome, PendingStorageError> {
-        // Without clustered fencing there is no co-located durable SM row
-        // whose lifetime this storage can manage.
+        // Without clustered fencing the SM source may be in another
+        // database. Commit a transfer receipt with the pending row so a
+        // crash before the caller prunes that source cannot duplicate it.
         let Some(fencing) = &self.fencing else {
+            if let Some(sequence) = prune_sequence {
+                return self
+                    .insert_portable_promotion(row, origin_stream_id, sequence)
+                    .await;
+            }
             return self.insert(row).await;
         };
 
@@ -355,6 +361,43 @@ impl DatabasePendingDeliveryStorage {
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         drop(identity_guard);
 
+        Ok(outcome)
+    }
+
+    async fn insert_portable_promotion(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+        sequence: u32,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        // Inserting the identity first also serializes concurrent retries:
+        // PostgreSQL waits for the conflicting transaction, while SQLite
+        // takes its writer lock when beginning this transaction.
+        let receipt_inserted = tx
+            .execute(
+                "INSERT INTO pending_delivery_sm_promotions (origin_stream_id, sequence) \
+                 VALUES (?, ?) ON CONFLICT (origin_stream_id, sequence) DO NOTHING",
+                crate::db_params![origin_stream_id.to_string(), i64::from(sequence)],
+            )
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        if receipt_inserted == 0 {
+            return Ok(InsertOutcome::Inserted);
+        }
+        let outcome = insert_in_transaction(&mut tx, &row, self.quota, None).await?;
+        if outcome == InsertOutcome::QuotaExceeded {
+            // Roll back the receipt too: rejected custody is still owed by
+            // the SM source and must remain eligible for a later retry.
+            return Ok(outcome);
+        }
+        tx.commit()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
         Ok(outcome)
     }
 
@@ -597,6 +640,18 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
     ) -> Result<InsertOutcome, PendingStorageError> {
         self.insert_under_origin_fence(row, origin_stream_id, Some(sequence))
             .await
+    }
+
+    async fn confirm_promotion(
+        &self,
+        origin_stream_id: &SmSessionId,
+    ) -> Result<(), PendingStorageError> {
+        self.execute(
+            "DELETE FROM pending_delivery_sm_promotions WHERE origin_stream_id = ?",
+            crate::db_params![origin_stream_id.as_str().to_string()],
+        )
+        .await?;
+        Ok(())
     }
 
     async fn insert_ingress_custody(

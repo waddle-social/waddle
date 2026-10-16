@@ -22,10 +22,12 @@ pub struct DetachedUnackedStanza {
     pub ingress_receipts: Vec<crate::stream_management::SmIngressFrameReceipt>,
     /// XEP-0198 outbound sequence number assigned to this stanza.
     pub sequence: u32,
-    /// Serialized stanza XML (re-parsed on demand by the promotion
-    /// path; kept as `String` here so the queue doesn't pin the
-    /// `xmpp_parsers::Element` representation in memory across
-    /// detach windows).
+    /// Immutable wire XML captured by the production serializer. This is a
+    /// retransmission log, so retaining `String` deliberately preserves the
+    /// exact replay bytes across detach; reparsing and reserializing a typed
+    /// value here could change XML spelling. New registry appends accept typed
+    /// stanzas and serialize once; existing entries are never normalized.
+    /// See the replay byte contract documented by [`super::super::ReplayStanza`].
     pub stanza_xml: String,
     /// Server-side receipt time of the original stanza. Used by the
     /// Q6 SM-expiry promotion path for the XEP-0203 `<delay/>` stamp.

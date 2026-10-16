@@ -662,9 +662,10 @@ impl InMemorySmSessionRegistry {
     pub async fn record_outbound_for_detached_stream(
         &self,
         stream_id: &str,
-        stanza_xml: String,
+        stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
+        let stanza_xml = Self::stanza_to_replay_xml(stanza);
         self.update_detached_session_snapshot(
             stream_id,
             |session| !session.is_expired(),
@@ -680,9 +681,10 @@ impl InMemorySmSessionRegistry {
         &self,
         stream_id: &str,
         sequence: u32,
-        stanza_xml: String,
+        stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
+        let stanza_xml = Self::stanza_to_replay_xml(stanza);
         self.update_detached_session_snapshot(
             stream_id,
             |session| !session.is_expired(),

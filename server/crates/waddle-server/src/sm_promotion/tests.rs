@@ -298,6 +298,21 @@ fn dm_xml(from: &str, to: &str, body: &str) -> String {
     String::from_utf8(buf).unwrap()
 }
 
+fn senderless_server_message_xml(recipient: &str) -> String {
+    let mut message =
+        xmpp_parsers::message::Message::new(Some(recipient.parse().expect("recipient")));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "server-generated notification".to_string(),
+    );
+    let mut xml = Vec::new();
+    Stanza::Message(message)
+        .to_element()
+        .write_to(&mut xml)
+        .expect("serialize message");
+    String::from_utf8(xml).expect("UTF-8 stanza")
+}
+
 fn mam_replay_xml(child_name: &str) -> String {
     let mut m = xmpp_parsers::message::Message::new(Some(
         "alice@example.com/web".parse::<jid::Jid>().unwrap(),
@@ -476,6 +491,83 @@ async fn mam_fin_frame_is_not_promoted_to_pending_delivery() {
 }
 
 #[tokio::test]
+async fn senderless_server_messages_do_not_accumulate_or_bounce_at_quota() {
+    let _guard = sm_promotion_metric_test_lock().lock().await;
+    for allow_unfenced_effects in [true, false] {
+        for quota in [
+            QuotaPolicy::Unlimited,
+            QuotaPolicy::CountCap { max_rows: 0 },
+        ] {
+            let storage: Arc<dyn PendingDeliveryStorage> =
+                Arc::new(InMemoryPendingDeliveryStorage::new(quota));
+            let registry = ConnectionRegistry::new();
+            let user_registry = test_user_registry();
+            let session = detached_session_with_unacked(
+                "senderless-server-message",
+                full("alice@example.com/web"),
+                vec![senderless_server_message_xml("alice@example.com/web")],
+            );
+
+            let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new();
+            let summary = promote_session_with_custody(
+                &session,
+                TerminalOverflowPromotionDeps {
+                    sm_registry: &sm_registry,
+                    registry: &registry,
+                    user_registry: &user_registry,
+                    pending_storage: &storage,
+                    blocklist: &Blocklist::empty(),
+                    server_domain: "example.com",
+                    recent_tombstones: &[],
+                    allow_unfenced_effects,
+                },
+            )
+            .await;
+
+            assert_eq!(summary.not_promotable, 1);
+            assert_eq!(summary.queued, 0);
+            assert_eq!(summary.bounced, 0);
+            assert_eq!(summary.storage_failed, 0, "no retry or warning storm");
+            assert_eq!(summary.promoted_sequences, vec![1]);
+            assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn senderless_server_messages_can_still_reach_an_alternate_resource() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let alternate = full("alice@example.com/web");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    dual_register(&registry, &user_registry, alternate.clone(), sender).await;
+    registry.update_presence(&alternate, true, 1);
+    let session = detached_session_with_unacked(
+        "senderless-live-notification",
+        full("alice@example.com/phone"),
+        vec![senderless_server_message_xml("alice@example.com")],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.redelivered, 1);
+    assert_eq!(summary.not_promotable, 0);
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn promotes_to_alt_resource_when_one_is_online() {
     // Locked Q6 = B step 1: another resource of the same user
     // is online with non-negative priority — re-route there
@@ -516,8 +608,7 @@ async fn promotes_to_alt_resource_when_one_is_online() {
     assert!(rx.try_recv().is_ok(), "stanza pushed to alt resource");
 }
 
-#[tokio::test]
-async fn bounces_service_unavailable_when_quota_exceeded() {
+async fn assert_quota_bounce_reaches_sender(sender_address: &str) {
     // Locked Q6 = B step 3: pending_delivery quota refused →
     // <service-unavailable/> bounced to sender per XEP-0160 §3
     // step 3 + RFC 6120 §8.3.
@@ -536,11 +627,7 @@ async fn bounces_service_unavailable_when_quota_exceeded() {
     let session = detached_session_with_unacked(
         "stream-1",
         full("alice@example.com/laptop"),
-        vec![dm_xml(
-            "bob@example.com/x",
-            "alice@example.com",
-            "queue full",
-        )],
+        vec![dm_xml(sender_address, "alice@example.com", "queue full")],
     );
 
     let summary = promote_session_unacked(
@@ -560,9 +647,34 @@ async fn bounces_service_unavailable_when_quota_exceeded() {
     match &bounce.stanza {
         Stanza::Message(m) => {
             assert_eq!(m.type_, xmpp_parsers::message::MessageType::Error);
+            assert_eq!(
+                m.to.as_ref(),
+                Some(&sender_address.parse().expect("sender"))
+            );
+            let error = m
+                .payloads
+                .iter()
+                .find(|payload| payload.name() == "error")
+                .expect("error payload");
+            let error = xmpp_parsers::stanza_error::StanzaError::try_from(error.clone())
+                .expect("typed stanza error");
+            assert_eq!(
+                error.defined_condition,
+                xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+            );
         }
         _ => panic!("expected Message bounce"),
     }
+}
+
+#[tokio::test]
+async fn bounces_service_unavailable_when_quota_exceeded() {
+    assert_quota_bounce_reaches_sender("bob@example.com/x").await;
+}
+
+#[tokio::test]
+async fn bounces_service_unavailable_to_bare_sender_resource_when_quota_exceeded() {
+    assert_quota_bounce_reaches_sender("bob@example.com").await;
 }
 
 #[tokio::test]

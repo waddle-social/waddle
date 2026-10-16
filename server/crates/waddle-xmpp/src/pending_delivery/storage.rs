@@ -279,6 +279,18 @@ pub trait PendingDeliveryStorage: Send + Sync {
         self.insert_fenced(row, origin_stream_id).await
     }
 
+    /// Release transfer receipts after the canonical SM source has been
+    /// durably retired. The caller must exclude further promotion attempts
+    /// for this stream before confirming; pending delivery completion alone
+    /// does not make a receipt safe to remove.
+    async fn confirm_promotion(
+        &self,
+        origin_stream_id: &SmSessionId,
+    ) -> Result<(), PendingStorageError> {
+        let _ = origin_stream_id;
+        Ok(())
+    }
+
     /// Atomically insert the pending row and mark its exact ingress allocation
     /// promoted, only while the durable allocation remains pending. Backends
     /// must share a transaction with custody storage and hold the SM claim

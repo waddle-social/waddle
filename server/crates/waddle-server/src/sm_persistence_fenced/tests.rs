@@ -378,9 +378,80 @@ async fn cold_start_listing_skips_malformed_occupancy_session_and_keeps_healthy_
     assert_eq!(sessions[0].0.stream_id, healthy_stream_id);
 
     f.fenced
+        .list_sessions_for_full_jid(&full("alice@example.com/web"))
+        .await
+        .expect_err("exact-JID durable probes must still fail closed on a poison session row");
+}
+
+#[tokio::test]
+async fn list_all_sessions_skips_poison_rows_and_keeps_healthy_sessions() {
+    let Some(f) = fixture().await else { return };
+    for stream_id in ["healthy-before", "poison", "healthy-after"] {
+        f.fenced
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .expect("seed session");
+    }
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+        crate::db_params!["not-a-uuid", "poison"],
+    )
+    .await
+    .expect("corrupt session");
+    drop(conn);
+
+    let sessions = f
+        .fenced
         .list_all_sessions()
         .await
-        .expect_err("general durable probes must still fail closed on a poison session row");
+        .expect("a poison row must not abort the complete session listing");
+    let mut stream_ids: Vec<_> = sessions.iter().map(|s| s.stream_id.as_str()).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy-after", "healthy-before"]);
+
+    let ids = f
+        .fenced
+        .list_all_session_ids()
+        .await
+        .expect("queue safety checks must still inspect a session with corrupt metadata");
+    let mut stream_ids: Vec<_> = ids.iter().map(SmSessionId::as_str).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy-after", "healthy-before", "poison"]);
+}
+
+#[tokio::test]
+async fn list_expired_sessions_skips_poison_rows_and_keeps_healthy_sessions() {
+    let Some(f) = fixture().await else { return };
+    for stream_id in ["healthy-before", "poison", "healthy-after"] {
+        let mut session = fixture_session(stream_id);
+        session.max_resume_duration = StdDuration::ZERO;
+        f.fenced
+            .upsert_session(session)
+            .await
+            .expect("seed expired session");
+    }
+    f.fenced
+        .upsert_session(fixture_session("active"))
+        .await
+        .expect("seed active session");
+    let conn = f.claims_db.guard().await.expect("guard");
+    conn.execute(
+        "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+        crate::db_params!["not-a-uuid", "poison"],
+    )
+    .await
+    .expect("corrupt expired session");
+    drop(conn);
+
+    let sessions = f
+        .fenced
+        .list_expired_sessions(stale_caller_supplied_time())
+        .await
+        .expect("a poison row must not abort expiry listing");
+    let mut stream_ids: Vec<_> = sessions.iter().map(|s| s.stream_id.as_str()).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy-after", "healthy-before"]);
 }
 
 /// #1206: the fenced backend must persist the resource's presence extension
@@ -704,6 +775,80 @@ async fn append_ack_through_and_delete_unacked_lifecycle() {
         .await
         .expect("list_unacked")
         .is_empty());
+}
+
+#[tokio::test]
+async fn promotion_inventory_append_and_metadata_updates_reject_a_stolen_exact_claim() {
+    let Some(f) = fixture().await else { return };
+    let stream_id = SmSessionId::new("promotion-inventory-fence");
+    let mut inventory = fixture_session(stream_id.as_str());
+    inventory.max_resume_time = Some(0);
+    inventory.max_resume_duration = StdDuration::ZERO;
+    f.fenced
+        .upsert_session(inventory.clone())
+        .await
+        .expect("register non-resumable inventory under the original claim");
+    f.fenced
+        .append_promotion_stanza(fixture_unacked(stream_id.as_str(), 13))
+        .await
+        .expect("append inventory suffix under its exact claim");
+    let before = f
+        .fenced
+        .get_session(&stream_id)
+        .await
+        .expect("read accepted inventory")
+        .expect("inventory exists");
+    assert_eq!(before.outbound_count, 13);
+    assert_eq!(before.max_resume_time, Some(0));
+    assert_eq!(before.max_resume_duration, StdDuration::ZERO);
+    let rows = f
+        .fenced
+        .list_unacked(&stream_id)
+        .await
+        .expect("accepted suffix");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sequence, 13);
+
+    seed_node(&f.claims_db, &f.identity, true).await;
+    let entity = Entity::new(EntityType::SmSession, stream_id.as_str().to_owned());
+    let owner_epoch = current_claim_epoch(&f, &entity).await;
+    let stealer = live_stealer(&f.claims_db).await;
+    f.claims
+        .steal_stale(&entity, owner_epoch, StalePredicate::OwnerStale, &stealer)
+        .await
+        .expect("move custody to a successor");
+
+    let result = f
+        .fenced
+        .append_promotion_stanza(fixture_unacked(stream_id.as_str(), 14))
+        .await;
+    assert!(
+        matches!(result, Err(SmPersistenceError::NotOwner { .. })),
+        "stale inventory append must be rejected, got {result:?}"
+    );
+    inventory.outbound_count = 99;
+    let result = f.fenced.upsert_session(inventory).await;
+    assert!(
+        matches!(result, Err(SmPersistenceError::NotOwner { .. })),
+        "stale inventory registration must be rejected, got {result:?}"
+    );
+    let after = f
+        .fenced
+        .get_session(&stream_id)
+        .await
+        .expect("inspect successor inventory")
+        .expect("inventory survives stale writes");
+    assert_eq!(after.outbound_count, before.outbound_count);
+    assert_eq!(after.max_resume_time, before.max_resume_time);
+    assert_eq!(after.max_resume_duration, before.max_resume_duration);
+    assert_eq!(after.detached_at, before.detached_at);
+    let rows = f
+        .fenced
+        .list_unacked(&stream_id)
+        .await
+        .expect("unchanged suffix");
+    assert_eq!(rows.len(), 1, "stale append must not leave payload behind");
+    assert_eq!(rows[0].sequence, 13);
 }
 
 #[tokio::test]

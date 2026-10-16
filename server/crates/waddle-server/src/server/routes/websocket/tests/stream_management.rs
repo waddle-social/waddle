@@ -313,12 +313,20 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirs
 
 struct FailDeleteSmPersistence {
     inner: waddle_xmpp::stream_management::persistence::InMemorySmPersistence,
+    gate_inventory_store: std::sync::atomic::AtomicBool,
+    reject_next_principal_store: std::sync::atomic::AtomicBool,
+    append_started: Notify,
+    append_release: Semaphore,
 }
 
 impl FailDeleteSmPersistence {
     fn new() -> Self {
         Self {
             inner: waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+            gate_inventory_store: std::sync::atomic::AtomicBool::new(false),
+            reject_next_principal_store: std::sync::atomic::AtomicBool::new(false),
+            append_started: Notify::new(),
+            append_release: Semaphore::new(0),
         }
     }
 }
@@ -358,6 +366,13 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
         stanza: waddle_xmpp::stream_management::persistence::PersistedUnackedStanza,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
         self.inner.append_unacked(stanza).await
+    }
+
+    async fn append_promotion_stanza(
+        &self,
+        stanza: waddle_xmpp::stream_management::persistence::PersistedUnackedStanza,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner.append_promotion_stanza(stanza).await
     }
 
     async fn ack_through(
@@ -410,6 +425,17 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
         session: waddle_xmpp::stream_management::persistence::PersistedSession,
         unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        if self
+            .gate_inventory_store
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.append_started.notify_one();
+            self.append_release
+                .acquire()
+                .await
+                .expect("inventory gate")
+                .forget();
+        }
         self.inner.store_session_atomic(session, unacked).await
     }
 
@@ -419,6 +445,16 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
         session: waddle_xmpp::stream_management::persistence::PersistedSession,
         unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        if self
+            .reject_next_principal_store
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                waddle_xmpp::stream_management::persistence::SmPersistenceError::Other(
+                    "simulated initial detach snapshot failure".to_owned(),
+                ),
+            );
+        }
         self.inner
             .store_session_atomic_with_principal(principal, session, unacked)
             .await
@@ -2480,6 +2516,276 @@ async fn refused_detach_keeps_claim_fence_until_promotion_retry_settles() {
     );
 }
 
+async fn assert_promotion_failure_survives_restart(terminal_recovery: bool) {
+    let persistence =
+        Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let failures = Arc::new(FailCountedInsertsForMessageIdPendingStorage {
+        inner: waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::unlimited(),
+        fail_id: "survives-restart",
+        remaining_failures: std::sync::atomic::AtomicU32::new(if terminal_recovery {
+            2
+        } else {
+            1
+        }),
+    });
+    let pending: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        failures.clone();
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        pending.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/durable-terminal".parse().expect("jid");
+    let stream_id = "durable-terminal-promotion";
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(3);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx.clone()),
+    );
+    conn.sm_state.enable(stream_id.to_owned(), true, Some(300));
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id("survives-restart".to_owned()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "keep this queue".to_owned(),
+    );
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(message).expect("serialize"),
+        SmEvictionPath::DirectOutbound,
+    );
+    if terminal_recovery {
+        conn.begin_terminal_sm_recovery();
+        for id in ["accepted-suffix-1", "accepted-suffix-2"] {
+            let mut suffix = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+            suffix.from = Some("bob@example.com/phone".parse().expect("sender"));
+            suffix.type_ = xmpp_parsers::message::MessageType::Chat;
+            suffix.id = Some(xmpp_parsers::message::Id(id.to_owned()));
+            suffix.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                "accepted tail".to_owned(),
+            );
+            tx.send(OutboundStanza::new(Stanza::Message(suffix)))
+                .await
+                .expect("accepted suffix");
+        }
+    }
+    let expected = if terminal_recovery { 3 } else { 1 };
+    let _ = cleanup_connection_shutdown(&state, &mut rx, &mut conn, false).await;
+    assert!(
+        pending
+            .list(&jid.to_bare())
+            .await
+            .expect("failed prefix")
+            .is_empty(),
+        "later accepted work must remain behind the failed prefix"
+    );
+    failures
+        .remaining_failures
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+
+    // Rebuild without consulting the old registry's in-memory retry map.
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+    assert_eq!(
+        restarted.restore_from_persistence().await.expect("restore"),
+        1,
+        "failed terminal promotion must have a durable non-resumable inventory"
+    );
+    assert!(restarted
+        .peek_session(stream_id)
+        .await
+        .expect("peek")
+        .is_none());
+    let retry = restarted.drain_expired().await.expect("janitor retry");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].unacked_stanzas.len(), expected);
+    let sequences: Vec<_> = retry[0]
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    assert_eq!(
+        sequences,
+        (1..=u32::try_from(expected).unwrap()).collect::<Vec<_>>(),
+        "accepted suffixes keep distinct FIFO sequence numbers across restart"
+    );
+    assert!(retry[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("survives-restart"));
+    let settled = crate::sm_promotion::promote_displaced_sessions(
+        retry,
+        crate::sm_promotion::DisplacedPromotionDeps {
+            sm_registry: &restarted,
+            connection_registry: &state.deps.protocol.connection_registry,
+            user_registry: &state.deps.protocol.user_registry,
+            pending_storage: &pending,
+            blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+    assert!(!settled.is_retrying(stream_id));
+    assert_eq!(
+        pending.list(&jid.to_bare()).await.expect("pending").len(),
+        expected
+    );
+    let final_restart = InMemorySmSessionRegistry::new().with_persistence(persistence);
+    assert_eq!(
+        final_restart
+            .restore_from_persistence()
+            .await
+            .expect("settled inventory"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn terminal_promotion_failure_survives_registry_restart_without_becoming_resumable() {
+    assert_promotion_failure_survives_restart(false).await;
+}
+
+#[tokio::test]
+async fn terminal_prefix_and_accepted_overflow_survive_restart_in_fifo_order() {
+    assert_promotion_failure_survives_restart(true).await;
+}
+
+#[tokio::test]
+async fn cancelled_terminal_prefix_remains_available_to_the_live_janitor() {
+    let persistence =
+        Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let gate = Arc::new(GatedFirstInsertPendingStorage::new());
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        gate.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/cancelled-inventory".parse().unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
+    conn.sm_state
+        .enable("cancelled-inventory".to_owned(), true, Some(300));
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().unwrap());
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "cancel safely".to_owned(),
+    );
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(message).unwrap(),
+        SmEvictionPath::DirectOutbound,
+    );
+    conn.begin_terminal_sm_recovery();
+    let cleanup_state = state.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_connection_shutdown(&cleanup_state, &mut rx, &mut conn, false).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        gate.wait_until_insert_blocks(),
+    )
+    .await
+    .expect("promotion reached gated sink");
+    cleanup.abort();
+    assert!(cleanup.await.unwrap_err().is_cancelled());
+    let retry = registry.drain_expired().await.expect("janitor custody");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].unacked_stanzas.len(), 1);
+    let outcome = crate::sm_promotion::promote_displaced_sessions(
+        retry,
+        crate::sm_promotion::DisplacedPromotionDeps {
+            sm_registry: &registry,
+            connection_registry: &state.deps.protocol.connection_registry,
+            user_registry: &state.deps.protocol.user_registry,
+            pending_storage: &state.deps.protocol.pending_delivery_storage,
+            blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+    assert!(!outcome.is_retrying("cancelled-inventory"));
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&jid.to_bare())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancelled_initial_inventory_write_retains_the_entire_terminal_backlog() {
+    let persistence = Arc::new(FailDeleteSmPersistence::new());
+    persistence
+        .gate_inventory_store
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+    let jid: FullJid = "alice@example.com/cancelled-backlog".parse().unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(state.deps.protocol.connection_registry.register(jid, tx));
+    conn.sm_state
+        .enable("cancelled-backlog".to_owned(), true, Some(300));
+    let _ = conn.sm_state.record_outbound(
+        message_frame_xml_with_id("live-prefix".to_owned()),
+        SmEvictionPath::DirectOutbound,
+    );
+    conn.begin_terminal_sm_recovery();
+    for id in ["captured-first", "captured-second"] {
+        conn.record_terminal_recovery_outbound(message_frame_xml_with_id(id.to_owned()));
+    }
+    let cleanup_state = state.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_connection_shutdown(&cleanup_state, &mut rx, &mut conn, false).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        persistence.append_started.notified(),
+    )
+    .await
+    .expect("initial inventory write blocked");
+    cleanup.abort();
+    assert!(cleanup.await.unwrap_err().is_cancelled());
+    let retry = registry
+        .drain_expired()
+        .await
+        .expect("janitor can retry the captured backlog");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(
+        retry[0].unacked_stanzas.len(),
+        3,
+        "cancellation before the initial write must retain every captured backlog entry"
+    );
+    let sequences: Vec<_> = retry[0]
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    assert_eq!(sequences, vec![1, 2, 3]);
+}
+
 #[tokio::test]
 async fn terminal_incremental_overflow_rechecks_tombstones_per_item() {
     let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
@@ -3860,6 +4166,94 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     }
 }
 
+#[tokio::test]
+async fn failed_pending_ownership_preflight_never_releases_a_durable_replay_copy() {
+    let persistence =
+        Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let pending = Arc::new(FailOnceListAndReleasePendingStorage::new());
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        pending.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/preflight-inventory".parse().unwrap();
+    let stream_id = "preflight-inventory";
+    seed_claimed_pending_row(&state, &jid.to_bare(), stream_id, 1).await;
+    handoff_expired_claimed_session(
+        &state,
+        stream_id,
+        &jid,
+        vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 1,
+            stanza_xml: message_frame_xml_with_id("terminal-release-replay-copy".to_owned()),
+            original_receipt_at: chrono::Utc::now(),
+        }],
+    )
+    .await;
+    let mut inventory = registry.drain_expired().await.unwrap().pop().unwrap();
+    pending
+        .fail_next_list
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let outcome = crate::sm_promotion::release_row_backed_replay_copies(
+        &registry,
+        &state.deps.protocol.pending_delivery_storage,
+        &mut inventory,
+    )
+    .await;
+    assert!(outcome.ownership_unknown);
+    assert!(!outcome.released_rows);
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .flushed_in_session
+            .as_ref()
+            .map(|session| session.as_str()),
+        Some(stream_id)
+    );
+    inventory = registry
+        .register_promotion_session(&inventory)
+        .await
+        .unwrap();
+    assert_eq!(inventory.unacked_stanzas.len(), 1);
+
+    let released = crate::sm_promotion::release_row_backed_replay_copies(
+        &registry,
+        &state.deps.protocol.pending_delivery_storage,
+        &mut inventory,
+    )
+    .await;
+    assert!(released.released_rows);
+    assert!(
+        registry
+            .register_promotion_session(&inventory)
+            .await
+            .unwrap()
+            .unacked_stanzas
+            .is_empty(),
+        "canonical hydration must not recreate the released pending replay copy"
+    );
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&jid.to_bare())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// PR #1669 round 8: when BOTH the ownership preflight (`list`) and the
 /// sequence release fail during terminal cleanup, row-backed replay copies
 /// cannot be told apart from fresh work. The whole queue must stay out of
@@ -3914,9 +4308,9 @@ async fn terminal_ownership_discovery_failure_defers_promotion_until_janitor_ret
         "the original row must stay claimed until the retry discovers ownership"
     );
 
-    // Storage has recovered (the failures were one-shot). The janitor's next
-    // sweep re-runs ownership discovery, releases the row, strips the replay
-    // copy, and settles the synthetic session without duplicating anything.
+    // Ownership discovery failed closed before attempting release. The next
+    // sweep consumes its one-shot release failure, and a final sweep settles.
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
     crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
 
     let rows = state
@@ -12794,4 +13188,133 @@ async fn intentional_close_wins_inflight_force_resume_without_persisting_a_snaps
         .expect("snapshot lookup")
         .is_none());
     assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+}
+
+#[tokio::test]
+async fn failed_detach_snapshot_keeps_its_claim_while_promotion_needs_retry() {
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let persistence = Arc::new(FailDeleteSmPersistence::new());
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_persistence(persistence.clone())
+            .with_claim_store(
+                claim_store.clone(),
+                SharedNodeIdentity::new(NodeIdentity::new("failed-detach-node", "incarnation")),
+            ),
+    );
+    let pending = Arc::new(FailFirstPendingStorage::new());
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        pending.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/failed-snapshot".parse().expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
+    let enabled = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let stream_id = Element::from_str(&enabled[0])
+        .expect("enabled XML")
+        .attr("id")
+        .expect("resumable stream id")
+        .to_owned();
+    conn.publish_pending_sm_enable(state.as_ref());
+    let original_fence = registry
+        .current_sm_claim_fence(&stream_id)
+        .expect("enabled stream owns its claim");
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id(
+        "failed-snapshot-retry".to_owned(),
+    ));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "preserve this failed detach".to_owned(),
+    );
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(message).expect("queued message XML"),
+        SmEvictionPath::DirectOutbound,
+    );
+    persistence
+        .reject_next_principal_store
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(
+        !persistence
+            .reject_next_principal_store
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the authenticated stream attempted its normal resumable snapshot"
+    );
+    assert_eq!(
+        registry.current_sm_claim_fence(&stream_id),
+        Some(original_fence.clone())
+    );
+    assert!(registry
+        .locally_owned_claim_ids()
+        .expect("locally owned claims")
+        .iter()
+        .any(|owned| owned == &stream_id));
+    let entity = waddle_xmpp::ownership::Entity::new(
+        waddle_xmpp::ownership::EntityType::SmSession,
+        stream_id.clone(),
+    );
+    let claim = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup")
+        .expect("promotion retry still owns the claim");
+    assert_eq!(claim.claim_epoch, original_fence.epoch());
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("pending rows")
+        .is_empty());
+    let stream = waddle_xmpp::pending_delivery::SmSessionId::new(&stream_id);
+    let source = persistence
+        .get_session(&stream)
+        .await
+        .expect("durable retry inventory")
+        .expect("failed promotion preserves its durable source");
+    assert_eq!(source.max_resume_time, Some(0));
+    assert_eq!(source.max_resume_duration, std::time::Duration::ZERO);
+    assert_eq!(
+        persistence
+            .list_unacked(&stream)
+            .await
+            .expect("retained queue")
+            .len(),
+        1
+    );
+    let retry = registry.drain_expired().await.expect("janitor retry");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].stream_id, stream_id);
+    assert_eq!(retry[0].unacked_stanzas.len(), 1);
+    assert!(retry[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("failed-snapshot-retry"));
 }

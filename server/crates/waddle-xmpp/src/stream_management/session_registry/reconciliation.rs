@@ -165,6 +165,7 @@ impl InMemorySmSessionRegistry {
         &self,
         session: &mut DetachedSession,
     ) -> Result<(), SmRegistryError> {
+        *session = self.persist_promotion_inventory_locked(session).await?;
         let stream_id = SmSessionId::new(session.stream_id.clone());
         if self.persistence.is_some() {
             if let Some(mut durable) = self.durable_snapshot_locked(&stream_id).await? {

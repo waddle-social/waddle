@@ -3216,7 +3216,11 @@ async fn complete_claim_releases_when_handoff_creates_replay_gap() {
             .record_outbound_for_detached_stream_at(
                 "stream-handoff-gap",
                 sequence,
-                message_stanza_xml_with_id(format!("m{sequence}")),
+                &{
+                    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+                    message.id = Some(xmpp_parsers::message::Id(format!("m{sequence}")));
+                    Stanza::Message(message)
+                },
                 Utc::now(),
             )
             .await

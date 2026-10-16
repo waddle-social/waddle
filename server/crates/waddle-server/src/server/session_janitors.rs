@@ -1847,6 +1847,11 @@ async fn confirm_expired_ingress_stream(
     {
         return false;
     }
+    crate::sm_promotion::confirm_pending_promotion(
+        &state.deps.protocol.pending_delivery_storage,
+        stream_id,
+    )
+    .await;
     // The SM claim must be released before the ingress retirement's absence fence.
     if let Err(error) = state.deps.protocol.ingress.forget_stream(stream_id).await {
         warn!(%stream_id, %error, "SM janitor: ingress stream retirement failed");
@@ -8492,6 +8497,11 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 remaining_outcomes.account(&metric_stream_id);
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+                crate::sm_promotion::confirm_pending_promotion(
+                    &websocket_state.deps.protocol.pending_delivery_storage,
+                    &session_id,
+                )
+                .await;
                 if let Err(error) = websocket_state
                     .deps
                     .protocol

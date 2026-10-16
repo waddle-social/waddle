@@ -85,28 +85,28 @@ impl Drop for PendingAcquisitionGuard<'_> {
     }
 }
 
-struct PendingPromotionRetryLease<'a> {
+pub(super) struct PendingPromotionRetryLease<'a> {
     registry: &'a InMemorySmSessionRegistry,
     session: Option<DetachedSession>,
 }
 
 impl<'a> PendingPromotionRetryLease<'a> {
-    fn new(registry: &'a InMemorySmSessionRegistry, session: DetachedSession) -> Self {
+    pub(super) fn new(registry: &'a InMemorySmSessionRegistry, session: DetachedSession) -> Self {
         Self {
             registry,
             session: Some(session),
         }
     }
 
-    fn session_mut(&mut self) -> &mut DetachedSession {
+    pub(super) fn session_mut(&mut self) -> &mut DetachedSession {
         self.session.as_mut().expect("retry lease is armed")
     }
 
-    fn finish(mut self) -> DetachedSession {
+    pub(super) fn finish(mut self) -> DetachedSession {
         self.session.take().expect("retry lease is armed")
     }
 
-    fn discard(mut self) {
+    pub(super) fn discard(mut self) {
         self.session.take();
     }
 }
@@ -418,6 +418,9 @@ impl InMemorySmSessionRegistry {
             let _stream_guard = stream_lock.lock().await;
             self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
                 .await?;
+            if let Some(session) = self.promotion_source_locked(stream_id, |_| true)? {
+                self.persist_promotion_inventory_locked(&session).await?;
+            }
             let removed = {
                 let mut sessions = self
                     .sessions
@@ -1446,6 +1449,23 @@ impl InMemorySmSessionRegistry {
                 .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
                 .contains_key(&stream_id);
             if still_pending {
+                // Registration may have been cancelled while its original
+                // detached source was still present. Leasing retry custody
+                // retires that resumable view before handing the queue out.
+                let identity = (
+                    retry.session_mut().jid.clone(),
+                    retry.session_mut().occupancy_session,
+                );
+                for inventory in [&self.sessions, &self.claimed_sessions] {
+                    let mut inventory = inventory
+                        .write()
+                        .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+                    if inventory.get(&stream_id).is_some_and(|session| {
+                        session.jid == identity.0 && session.occupancy_session == identity.1
+                    }) {
+                        inventory.remove(&stream_id);
+                    }
+                }
                 drained.push(retry.finish());
             } else {
                 retry.discard();
@@ -1456,7 +1476,7 @@ impl InMemorySmSessionRegistry {
 
     /// Caller holds the stream shard. Never acquire or steal a claim here:
     /// retirement is authorized only by this snapshot's recorded exact fence.
-    async fn retirement_identity_locked(
+    pub(super) async fn retirement_identity_locked(
         &self,
         stream_id: &SmSessionId,
     ) -> Result<Option<crate::ownership::CurrentNodeIdentityGuard>, SmRegistryError> {
@@ -1515,6 +1535,14 @@ impl InMemorySmSessionRegistry {
         let Some(_identity) = self.retirement_identity_locked(stream_id).await? else {
             return Ok(None);
         };
+        // Release identity publication authority before storage acquires its
+        // own guard; the stream shard continues to serialize this retirement.
+        drop(_identity);
+        if let Some(session) = self.promotion_source_locked(stream_id.as_str(), |session| {
+            session.jid == *jid && session.occupancy_session == generation
+        })? {
+            self.persist_promotion_inventory_locked(&session).await?;
+        }
         let removed = {
             let mut sessions = self
                 .sessions
@@ -1567,6 +1595,11 @@ impl InMemorySmSessionRegistry {
             let _stream_guard = stream_lock.lock().await;
             self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
                 .await?;
+            if let Some(session) =
+                self.promotion_source_locked(stream_id, |session| session.is_expired())?
+            {
+                self.persist_promotion_inventory_locked(&session).await?;
+            }
             let removed = {
                 let mut sessions = self
                     .sessions
@@ -1661,9 +1694,13 @@ impl InMemorySmSessionRegistry {
                                     .iter()
                                     .map(|entry| entry.sequence)
                                     .collect::<std::collections::HashSet<_>>();
-                                session
-                                    .unacked_stanzas
-                                    .retain(|entry| durable.contains(&entry.sequence));
+                                session.unacked_stanzas.retain(|entry| {
+                                    durable.contains(&entry.sequence)
+                                        || super::super::sequence::sequence_gt(
+                                            entry.sequence,
+                                            persisted.outbound_count,
+                                        )
+                                });
                                 let present = session
                                     .unacked_stanzas
                                     .iter()
@@ -1757,13 +1794,39 @@ impl InMemorySmSessionRegistry {
             .pending_promotions
             .read()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
-        if !promotions.contains_key(&stream_id) {
+        if promotions.get(&stream_id) != Some(&(session.jid.clone(), session.occupancy_session)) {
             return Ok(PendingPromotionRetryRetention::NotTracked);
         }
-        self.pending_promotion_retries
+        let mut retries = self
+            .pending_promotion_retries
             .write()
-            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
-            .insert(stream_id, session);
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?;
+        if let Some(existing) = retries.get_mut(&stream_id) {
+            // Nested cancellation guards can retain a newer tail before an
+            // earlier failed append. Union missing sequences regardless of
+            // the captured watermark; durable reconciliation later removes
+            // entries already settled or scrubbed from the canonical prefix.
+            let watermark = existing.outbound_count;
+            let retained = existing
+                .unacked_stanzas
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<std::collections::HashSet<_>>();
+            existing.unacked_stanzas.extend(
+                session
+                    .unacked_stanzas
+                    .into_iter()
+                    .filter(|entry| !retained.contains(&entry.sequence)),
+            );
+            if super::super::sequence::sequence_gt(session.outbound_count, watermark) {
+                existing.outbound_count = session.outbound_count;
+            }
+            existing
+                .unacked_stanzas
+                .sort_by_key(|entry| entry.sequence.wrapping_sub(existing.last_acked));
+        } else {
+            retries.insert(stream_id, session);
+        }
         Ok(PendingPromotionRetryRetention::Retained)
     }
 
@@ -2571,6 +2634,9 @@ impl InMemorySmSessionRegistry {
         if claimed {
             return Ok(None);
         }
+        if let Some(session) = self.promotion_source_locked(stream_id, |_| true)? {
+            self.persist_promotion_inventory_locked(&session).await?;
+        }
         let removed = {
             let mut sessions = self
                 .sessions
@@ -2671,6 +2737,16 @@ impl InMemorySmSessionRegistry {
             else {
                 continue;
             };
+            drop(_identity);
+            if let Some(session) =
+                self.detached_snapshot_matching(&SmSessionId::new(stream_id), |session| {
+                    session.jid == *jid
+                        && generation
+                            .is_none_or(|generation| session.occupancy_session == generation)
+                })?
+            {
+                self.persist_promotion_inventory_locked(&session).await?;
+            }
             let (removed_detached, removed_claimed) = {
                 let mut sessions = self
                     .sessions

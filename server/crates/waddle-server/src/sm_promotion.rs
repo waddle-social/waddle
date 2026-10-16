@@ -274,8 +274,23 @@ pub(crate) async fn promote_terminal_overflow_entry(
     entry: DetachedUnackedStanza,
     deps: TerminalOverflowPromotionDeps<'_>,
 ) -> PromotionSummary {
+    let sequence = entry.sequence;
     let session = detached_session_for_terminal_entry(source, entry);
-    promote_session_with_custody(&session, deps).await
+    let mut summary = promote_session_with_custody(&session, deps).await;
+    if !summary.has_storage_failure() {
+        if let Err(error) = deps
+            .sm_registry
+            .delete_unacked_sequences(&source.stream_id, &summary.promoted_sequences)
+            .await
+        {
+            tracing::warn!(stream_id = %source.stream_id, sequence, %error,
+                "terminal promotion could not retire inventory entry; retaining for retry");
+            summary.storage_failed += 1;
+            summary.first_failure = Some((sequence, PromotionFailureReason::PendingStorage));
+            summary.promoted_sequences.clear();
+        }
+    }
+    summary
 }
 
 fn detached_session_for_terminal_entry(
@@ -394,6 +409,14 @@ pub(crate) async fn release_row_backed_replay_copies(
             None
         }
     };
+    // Without the ownership preflight there is no safe prune-before-release
+    // order: canonical inventory hydration could revive a released replay copy.
+    if preflight.is_none() {
+        return RowBackedReleaseOutcome {
+            ownership_unknown: true,
+            ..RowBackedReleaseOutcome::default()
+        };
+    }
     if let Some(sequence_bound_rows) = preflight.as_ref() {
         if !sequence_bound_rows.is_empty() {
             // Crash-consistency ordering: durably prune the replay copies of
@@ -878,6 +901,18 @@ pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
     }
 }
 
+/// The canonical SM source has been deleted under its claim fence. Portable
+/// handoff receipts can now be retired without making a retry look like new work.
+pub(crate) async fn confirm_pending_promotion(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+) {
+    if let Err(error) = storage.confirm_promotion(stream_id).await {
+        tracing::warn!(%stream_id, %error,
+            "confirmed SM promotion retained its content-free handoff receipts");
+    }
+}
+
 pub(crate) async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
@@ -886,7 +921,23 @@ pub(crate) async fn promote_displaced_sessions(
     let mut batch_guard = PromotionBatchGuard::new(deps.sm_registry, sessions);
     while let Some(pending_session) = batch_guard.pop() {
         let mut promotion_guard = PromotionSessionGuard::new(deps.sm_registry, pending_session);
-        let session = promotion_guard.session().clone();
+        let session = match deps
+            .sm_registry
+            .register_promotion_session(promotion_guard.session())
+            .await
+        {
+            Ok(session) => session,
+            Err(error) => {
+                tracing::warn!(stream_id = %promotion_guard.session().stream_id, %error,
+                    "displaced promotion could not register durable custody; retaining for retry");
+                let session = promotion_guard.session().clone();
+                if reinsert_or_retain_for_retry(&mut promotion_guard, session.clone()).await {
+                    outcome.retrying_stream_ids.insert(session.stream_id);
+                }
+                continue;
+            }
+        };
+        *promotion_guard.session_mut() = session.clone();
         let blocklist = match deps
             .blocking_storage
             .list_blocked_jid_entries(&session.jid.to_bare())
@@ -1018,6 +1069,7 @@ pub(crate) async fn promote_displaced_sessions(
             .completed_stream_ids
             .insert(session.stream_id.clone());
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        confirm_pending_promotion(deps.pending_storage, &session_id).await;
         if let Err(error) = deps.pending_storage.release_claim(&session_id).await {
             tracing::warn!(
                 jid = %session.jid,
@@ -1150,6 +1202,16 @@ async fn promote_one(
         // Classifier said deliver but no live target took the stanza
         // (full-JID target had gone offline by send time, or the
         // socket buffer rejected). Fall through to offline storage.
+    }
+
+    // Authenticated peer intake stamps a sender. Senderless server frames
+    // have no return target when offline admission fails. Keep the live
+    // alternative above, but do not create new offline work from these
+    // stream-local frames: doing so fills queues with unbounceable entries
+    // that would otherwise retry and warn on every promotion pass.
+    if message.from.is_none() {
+        waddle_xmpp::telemetry::reliability::increment_sm_promotion_not_promotable();
+        return PromotedOutcome::NotPromotable;
     }
 
     // Step 2: offline storage — if the classifier marked the stanza

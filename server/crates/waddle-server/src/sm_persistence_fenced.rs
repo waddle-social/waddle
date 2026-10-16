@@ -908,6 +908,30 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         Ok(())
     }
 
+    async fn append_promotion_stanza(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<(), SmPersistenceError> {
+        let fence = self.claim_fence_for(&stanza.stream_id).await?;
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity = self
+            .assert_fenced(&mut tx, &stanza.stream_id, &fence)
+            .await?;
+        crate::sm_persistence::promotion_inventory::append(
+            &mut tx,
+            stanza,
+            DatabaseDriver::Postgres,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
     async fn ack_through(
         &self,
         stream_id: &SmSessionId,
@@ -1039,12 +1063,32 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             )
             .await?;
         let mut out = Vec::new();
+        let mut poison_sessions = 0usize;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
         {
-            out.push(decode_session(&row)?);
+            match decode_session(&row) {
+                Ok(session) => out.push(session),
+                Err(error) => {
+                    let stream_id = row
+                        .get::<String>(0)
+                        .unwrap_or_else(|_| "<unreadable>".to_string());
+                    tracing::debug!(
+                        %stream_id,
+                        %error,
+                        "list_expired_sessions: skipping session whose row failed to decode (poison pill)"
+                    );
+                    poison_sessions += 1;
+                }
+            }
+        }
+        if poison_sessions > 0 {
+            tracing::warn!(
+                count = poison_sessions,
+                "list_expired_sessions: skipped poison-pill session(s); listing proceeds with remaining sessions"
+            );
         }
         Ok(out)
     }
@@ -1062,12 +1106,50 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             )
             .await?;
         let mut out = Vec::new();
+        let mut poison_sessions = 0usize;
         while let Some(row) = rows
             .next()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?
         {
-            out.push(decode_session(&row)?);
+            match decode_session(&row) {
+                Ok(session) => out.push(session),
+                Err(error) => {
+                    let stream_id = row
+                        .get::<String>(0)
+                        .unwrap_or_else(|_| "<unreadable>".to_string());
+                    tracing::debug!(
+                        %stream_id,
+                        %error,
+                        "list_all_sessions: skipping session whose row failed to decode (poison pill)"
+                    );
+                    poison_sessions += 1;
+                }
+            }
+        }
+        if poison_sessions > 0 {
+            tracing::warn!(
+                count = poison_sessions,
+                "list_all_sessions: skipped poison-pill session(s); listing proceeds with remaining sessions"
+            );
+        }
+        Ok(out)
+    }
+
+    async fn list_all_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let mut rows = self
+            .guard_query("SELECT stream_id FROM sm_sessions", ())
+            .await?;
+        let mut out = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        {
+            let stream_id: String = row
+                .get(0)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            out.push(SmSessionId::new(stream_id));
         }
         Ok(out)
     }
@@ -1080,7 +1162,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     ///
     /// Read-only and unfenced for the same reason `list_all_sessions` is: it
     /// spans every node's sessions, not just this node's claims. Decode
-    /// failures propagate exactly as they do there, so the probe backing an
+    /// failures propagate instead of being skipped, so the probe backing an
     /// eviction reports `Failed` rather than `Absent` for a row it cannot read.
     async fn list_sessions_for_full_jid(
         &self,

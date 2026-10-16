@@ -319,6 +319,19 @@ pub trait SmPersistenceStorage: Send + Sync {
         stanza: PersistedUnackedStanza,
     ) -> Result<(), SmPersistenceError>;
 
+    /// Append a sequence to non-resumable promotion custody and advance its
+    /// outbound watermark atomically. Already recorded or retired sequences
+    /// are idempotent no-ops; a missing or resumable inventory is an error.
+    /// Implementations must fence this transaction like the source SM stream.
+    async fn append_promotion_stanza(
+        &self,
+        _stanza: PersistedUnackedStanza,
+    ) -> Result<(), SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "Atomic promotion-inventory append is unsupported".to_owned(),
+        ))
+    }
+
     /// Remove unacked entries up to and including `up_to_sequence`.
     ///
     /// This contract uses raw numeric `<=` comparison in both the in-memory
@@ -363,6 +376,8 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// Enumerate every persisted session whose `detached_at +
     /// max_resume_duration` is in the past. Used by the janitor that
     /// expires timed-out sessions and by the graceful-shutdown drain.
+    /// Undecodable session rows are skipped with a warning and skipped-row
+    /// count so corruption of one row cannot prevent other sessions expiring.
     async fn list_expired_sessions(
         &self,
         now: chrono::DateTime<chrono::Utc>,
@@ -373,7 +388,26 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// rebuild the in-memory view from durable storage so an
     /// XEP-0198 `<resume previd='…'/>` finds sessions that detached
     /// before the most recent restart.
+    /// Undecodable session rows are skipped with a warning and skipped-row
+    /// count. Safety-sensitive queue scans use [`Self::list_all_session_ids`]
+    /// instead so a corrupt session header cannot hide durable replay entries.
     async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError>;
+
+    /// Enumerate every persisted session ID without decoding its metadata.
+    ///
+    /// Tombstone snapshots and scrubs must inspect a session's durable queue
+    /// even when its header cannot be decoded. Implementations whose bulk
+    /// session listing skips corrupt rows MUST override this method to read
+    /// IDs independently. Unreadable IDs and database failures must propagate
+    /// as errors, never omissions.
+    async fn list_all_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        Ok(self
+            .list_all_sessions()
+            .await?
+            .into_iter()
+            .map(|session| session.stream_id)
+            .collect())
+    }
 
     /// Enumerate the persisted sessions for one EXACT full JID.
     ///
@@ -384,11 +418,10 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// decoding the whole `sm_sessions` table costs
     /// `occupants x peers x stored sessions` decodes per maintenance pass.
     ///
-    /// Decode semantics match [`Self::list_all_sessions`]: a row that matches
-    /// the JID but cannot be decoded is an error, never an omission. A caller
-    /// deciding whether to drop a durable obligation must read an undecodable
-    /// row as "cannot tell", so implementations MUST NOT skip poison rows here
-    /// even where a best-effort listing does.
+    /// A row that matches the JID but cannot be decoded is an error, never an
+    /// omission. A caller deciding whether to drop a durable obligation must
+    /// read an undecodable row as "cannot tell", so implementations MUST NOT
+    /// skip poison rows here even where a best-effort listing does.
     ///
     /// Default impl filters [`Self::list_all_sessions`] so in-memory backends
     /// and test fakes keep working unchanged; SQL backends override it with an
@@ -682,6 +715,38 @@ impl InMemorySmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for InMemorySmPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<(), SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let session = guard.sessions.get(&stanza.stream_id).ok_or_else(|| {
+            SmPersistenceError::Other("Promotion inventory is missing".to_owned())
+        })?;
+        if session.max_resume_time != Some(0) || session.max_resume_duration != Duration::ZERO {
+            return Err(SmPersistenceError::Other(
+                "Promotion inventory is resumable".to_owned(),
+            ));
+        }
+        if !super::sequence::sequence_gt(stanza.sequence, session.outbound_count) {
+            return Ok(());
+        }
+        let stream = stanza.stream_id.clone();
+        let sequence = stanza.sequence;
+        let queue = guard.unacked.entry(stream.clone()).or_default();
+        if queue.iter().any(|entry| entry.sequence == sequence) {
+            return Ok(());
+        }
+        queue.push(stanza);
+        if let Some(session) = guard.sessions.get_mut(&stream) {
+            session.outbound_count = sequence;
+        }
+        Ok(())
+    }
+
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         let mut guard = self
             .inner

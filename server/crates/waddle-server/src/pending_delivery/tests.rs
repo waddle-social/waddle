@@ -1,4 +1,5 @@
 mod fenced_cleanup;
+mod promotion_handoff;
 mod recovery_storage;
 
 use super::*;

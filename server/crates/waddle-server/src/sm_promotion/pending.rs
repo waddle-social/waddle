@@ -179,10 +179,6 @@ async fn send_quota_bounce(
     let bounce =
         waddle_xmpp::protocol::handlers::errors::message_error_reply(original_message, error);
     let Some(sender_jid) = bounce.to.clone() else {
-        warn!(
-            recipient = %recipient,
-            "Q6 promotion: bounce target JID missing; dropping bounce"
-        );
         return false;
     };
     let stanza = Stanza::Message(bounce);

@@ -320,6 +320,106 @@ async fn list_expired_filters_by_detached_plus_duration() {
 }
 
 #[tokio::test]
+async fn list_expired_sessions_skips_poison_rows_and_keeps_healthy_sessions() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for stream_id in ["healthy-before", "poison", "healthy-after"] {
+        storage
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .unwrap();
+    }
+    let mut active = fixture_session("active");
+    active.detached_at = fixed_time() + chrono::Duration::hours(1);
+    storage.upsert_session(active).await.unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid", "poison"],
+        )
+        .await
+        .unwrap();
+
+    let sessions = storage
+        .list_expired_sessions(fixed_time() + chrono::Duration::minutes(2))
+        .await
+        .expect("a poison row must not abort expiry listing");
+    let mut stream_ids: Vec<_> = sessions.iter().map(|s| s.stream_id.as_str()).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy-after", "healthy-before"]);
+}
+
+#[tokio::test]
+async fn list_all_sessions_skips_poison_rows_and_keeps_healthy_sessions() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for stream_id in ["healthy-before", "poison", "healthy-after"] {
+        storage
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .unwrap();
+    }
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid", "poison"],
+        )
+        .await
+        .unwrap();
+
+    let sessions = storage
+        .list_all_sessions()
+        .await
+        .expect("a poison row must not abort the complete session listing");
+    let mut stream_ids: Vec<_> = sessions.iter().map(|s| s.stream_id.as_str()).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy-after", "healthy-before"]);
+}
+
+#[tokio::test]
+async fn list_all_session_ids_keeps_poison_metadata_for_queue_safety_checks() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for stream_id in ["healthy", "poison"] {
+        storage
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .unwrap();
+    }
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid", "poison"],
+        )
+        .await
+        .unwrap();
+
+    let ids = storage
+        .list_all_session_ids()
+        .await
+        .expect("queue safety checks must still inspect a session with corrupt metadata");
+    let mut stream_ids: Vec<_> = ids.iter().map(SmSessionId::as_str).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy", "poison"]);
+}
+
+#[tokio::test]
+async fn list_all_session_ids_fails_closed_on_an_unreadable_id() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("unreadable-id"))
+        .await
+        .unwrap();
+    // SQLite permits NULL in a TEXT PRIMARY KEY; it cannot become a typed ID.
+    storage
+        .execute("UPDATE sm_sessions SET stream_id = NULL", ())
+        .await
+        .unwrap();
+
+    storage
+        .list_all_session_ids()
+        .await
+        .expect_err("an unreadable ID must fail the scan rather than hide a durable queue");
+}
+
+#[tokio::test]
 async fn round_trip_unacked_preserves_typed_stanza() {
     let storage = DatabaseSmPersistence::open(None).await.unwrap();
     storage
@@ -598,7 +698,9 @@ async fn detached_snapshot_refresh_preserves_principal_through_registry() {
     let recorded = registry
         .record_outbound_for_detached_stream(
             "refresh-keeps-principal",
-            "<message xmlns='jabber:client' to='alice@example.com/phone'/>".to_string(),
+            &Stanza::Message(xmpp_parsers::message::Message::new(Some(
+                "alice@example.com/phone".parse().expect("recipient JID"),
+            ))),
             chrono::Utc::now(),
         )
         .await
@@ -660,7 +762,9 @@ async fn null_occupancy_session_decodes_to_minted_generation_and_rewrites_non_nu
         registry
             .record_outbound_for_detached_stream(
                 stream_id.as_str(),
-                "<message xmlns='jabber:client' to='alice@example.com/web'/>".to_string(),
+                &Stanza::Message(xmpp_parsers::message::Message::new(Some(
+                    "alice@example.com/web".parse().expect("recipient JID"),
+                ))),
                 fixed_time(),
             )
             .await
@@ -1408,9 +1512,8 @@ async fn postgres_lists_sessions_for_one_full_jid() {
 }
 
 /// The scoped read backs an eviction guard, so an undecodable row that MATCHES
-/// the JID must read as "cannot tell", never as absence. `list_all_sessions`
-/// already propagates a decode failure rather than skipping the row; this pins
-/// the same policy for the scoped query.
+/// the JID must read as "cannot tell", never as absence, even though the
+/// best-effort unscoped listing skips undecodable rows.
 #[tokio::test]
 async fn sqlite_scoped_listing_fails_closed_on_an_undecodable_matching_row() {
     let storage = DatabaseSmPersistence::open(None)
