@@ -247,12 +247,7 @@ class MessageNotifier(
     }
 
     private fun rememberLiveItem(message: WaddleMessage) {
-        val ids = message.stanzaIds.map { it.id } + listOfNotNull(message.stanzaId)
-        if (ids.isEmpty()) return
-        synchronized(historyLock) {
-            liveItems += ids
-            while (liveItems.size > MAX_LIVE_ITEMS) liveItems.remove(liveItems.first())
-        }
+        rememberItems(message.stanzaIds.map { it.id } + listOfNotNull(message.stanzaId))
     }
 
     /** Whether the live path already handled the message with stanza-id [item]. */
@@ -274,48 +269,62 @@ class MessageNotifier(
         summary: PushSummary,
         stillWanted: suspend () -> Boolean,
     ) = postMutex.withLock {
-        if (handledLive(summary.item) || !stillWanted()) return@withLock
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.POST_NOTIFICATIONS,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!granted) return@withLock
-        val conversationJid = summary.conversationJid
+        if (handledLive(summary.item) || !stillWanted() || !canPostNotifications()) return@withLock
         val silent = !userPrefs.messageSoundsEnabled.first()
-        val liveHistory = synchronized(historyLock) { history[conversationJid]?.isNotEmpty() == true }
+        val liveHistory = synchronized(historyLock) { history[summary.conversationJid]?.isNotEmpty() == true }
         if (liveHistory) {
-            val sender = Person.Builder().setName(summary.title).setKey(summary.title).build()
-            val entry = NotificationCompat.MessagingStyle.Message(summary.text, System.currentTimeMillis(), sender)
-            val messages = appendToHistory(conversationJid, entry)
-            postNotification(conversationJid, summary.isGroupchat, messages, silent, mention = summary.isMention)
+            appendSummaryToLive(summary, silent)
         } else {
-            val previous = synchronized(historyLock) { summaryKinds[conversationJid] }
-            val alert = previous == null || (summary.isMention && previous == SummaryKind.MESSAGES)
-            val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
-                .setSmallIcon(R.drawable.ic_stat_waddle)
-                .setContentTitle(summary.title)
-                .setContentText(summary.text)
-                .setGroup(conversationJid)
-                .setAutoCancel(true)
-                .setOnlyAlertOnce(!alert)
-                .setSilent(silent)
-                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
-                .setPriority(
-                    if (summary.isMention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT,
-                )
-                .setContentIntent(contentIntent(conversationJid))
-                // No mark-read action: a summary names no message, so there
-                // is no marker to send.
-                .addAction(replyAction(conversationJid, summary.isGroupchat))
-                .setDeleteIntent(dismissIntent(conversationJid))
-            NotificationManagerCompat.from(context).notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
-            synchronized(historyLock) {
-                val mentioned = summary.isMention || previous == SummaryKind.MENTION
-                summaryKinds[conversationJid] = if (mentioned) SummaryKind.MENTION else SummaryKind.MESSAGES
-            }
+            postStandaloneSummary(summary, silent)
         }
+        rememberItems(listOf(summary.item))
+    }
+
+    /** Adds [summary] to the conversation's live MessagingStyle history. */
+    private fun appendSummaryToLive(summary: PushSummary, silent: Boolean) {
+        val sender = Person.Builder().setName(summary.title).setKey(summary.title).build()
+        val entry = NotificationCompat.MessagingStyle.Message(summary.text, System.currentTimeMillis(), sender)
+        val messages = appendToHistory(summary.conversationJid, entry)
+        postNotification(summary.conversationJid, summary.isGroupchat, messages, silent, mention = summary.isMention)
+    }
+
+    /** Posts or updates the summary-only notification for the conversation. */
+    private fun postStandaloneSummary(summary: PushSummary, silent: Boolean) {
+        val conversationJid = summary.conversationJid
+        val previous = synchronized(historyLock) { summaryKinds[conversationJid] }
+        val alert = previous == null || (summary.isMention && previous == SummaryKind.MESSAGES)
+        val priority = if (summary.isMention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT
+        val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
+            .setSmallIcon(R.drawable.ic_stat_waddle)
+            .setContentTitle(summary.title)
+            .setContentText(summary.text)
+            .setGroup(conversationJid)
+            .setAutoCancel(true)
+            .setOnlyAlertOnce(!alert)
+            .setSilent(silent)
+            .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+            .setPriority(priority)
+            .setContentIntent(contentIntent(conversationJid))
+            // No mark-read action: a summary names no message, so there
+            // is no marker to send.
+            .addAction(replyAction(conversationJid, summary.isGroupchat))
+            .setDeleteIntent(dismissIntent(conversationJid))
+        NotificationManagerCompat.from(context).notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
+        val mentioned = summary.isMention || previous == SummaryKind.MENTION
         synchronized(historyLock) {
-            liveItems += summary.item
+            summaryKinds[conversationJid] = if (mentioned) SummaryKind.MENTION else SummaryKind.MESSAGES
+        }
+    }
+
+    private fun canPostNotifications(): Boolean = ContextCompat.checkSelfPermission(
+        context,
+        Manifest.permission.POST_NOTIFICATIONS,
+    ) == PackageManager.PERMISSION_GRANTED
+
+    private fun rememberItems(ids: List<String>) {
+        if (ids.isEmpty()) return
+        synchronized(historyLock) {
+            liveItems += ids
             while (liveItems.size > MAX_LIVE_ITEMS) liveItems.remove(liveItems.first())
         }
     }
@@ -345,11 +354,7 @@ class MessageNotifier(
         subText: String? = null,
     ) {
         val displayedTarget = synchronized(historyLock) { displayedTargets[conversationJid] }
-        val granted = ContextCompat.checkSelfPermission(
-            context,
-            Manifest.permission.POST_NOTIFICATIONS,
-        ) == PackageManager.PERMISSION_GRANTED
-        if (!granted) return
+        if (!canPostNotifications()) return
 
         val style = NotificationCompat.MessagingStyle(selfPerson())
             .setGroupConversation(isGroupchat)
