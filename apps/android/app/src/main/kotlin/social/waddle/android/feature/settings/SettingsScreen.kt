@@ -62,6 +62,7 @@ import coil3.compose.AsyncImage
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.avatar.PeerAvatar
+import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.push.PushStatus
 import social.waddle.android.theme.Waddle
@@ -117,7 +118,8 @@ fun SettingsScreen(
             onSetReadReceiptsEnabled = viewModel::setReadReceiptsEnabled,
             onLogout = viewModel::logout,
             onSetStayConnected = viewModel::setStayConnected,
-            onPickDistributor = { context.findActivity()?.let(graph.pushDistributor::pick) },
+            onPickDistributor = { context.findActivity()?.let(graph.push::useUnifiedPush) },
+            onUseFcm = graph.push::useFcm,
         ),
     )
 }
@@ -140,6 +142,7 @@ internal data class SettingsActions(
     val onLogout: () -> Unit,
     val onSetStayConnected: (Boolean) -> Unit = {},
     val onPickDistributor: () -> Unit = {},
+    val onUseFcm: () -> Unit = {},
     val onSetWallpaperColors: (Boolean) -> Unit = {},
 )
 
@@ -254,15 +257,34 @@ internal fun SettingsContent(
 @Composable
 private fun DeliverySection(delivery: DeliveryUiState, actions: SettingsActions) {
     DeliveryStatusRow(delivery)
+    if (delivery.fcmAvailable) {
+        GroupDivider()
+        val usingFcm = delivery.endpointKind == PushEndpointKind.FCM
+        GroupedRow(
+            title = stringResource(R.string.settings_delivery_fcm),
+            supporting = stringResource(
+                if (usingFcm) R.string.settings_delivery_fcm_in_use else R.string.settings_delivery_fcm_use,
+            ),
+            trailing = { RowChevron() },
+            // Always available: it also brings back FCM after a distributor
+            // choice that never produced an endpoint.
+            onClick = actions.onUseFcm,
+        )
+    }
     if (delivery.distributorInstalled) {
         GroupDivider()
         GroupedRow(
             title = stringResource(R.string.settings_delivery_distributor),
-            supporting = delivery.distributorLabel ?: stringResource(R.string.settings_delivery_distributor_none),
+            supporting = delivery.distributorLabel
+                ?.takeIf { delivery.endpointKind != PushEndpointKind.FCM }
+                ?: stringResource(R.string.settings_delivery_distributor_none),
             trailing = { RowChevron() },
             onClick = actions.onPickDistributor,
         )
     }
+    // The Play build holds no background connection: push is the only
+    // background delivery there.
+    if (!delivery.stayConnectedSupported) return
     GroupDivider()
     ToggleRow(
         title = stringResource(R.string.settings_stay_connected),
@@ -291,9 +313,14 @@ private enum class DeliveryTone { GOOD, WAITING, NEUTRAL, PROBLEM }
 
 @Composable
 private fun deliveryLookOf(delivery: DeliveryUiState): DeliveryLook {
-    val distributor = delivery.distributorLabel.orEmpty()
-    val connectedTitle = stringResource(R.string.huddle_delivery_connected_title)
+    val distributor = if (delivery.endpointKind == PushEndpointKind.FCM) {
+        stringResource(R.string.settings_delivery_fcm_name)
+    } else {
+        delivery.distributorLabel.orEmpty()
+    }
     val off = stringResource(R.string.huddle_delivery_tag_off)
+    if (!delivery.stayConnectedSupported) noBackgroundLookOf(delivery, off)?.let { return it }
+    val connectedTitle = stringResource(R.string.huddle_delivery_connected_title)
     return when (delivery.status) {
         PushStatus.ACTIVE -> DeliveryLook(
             icon = Icons.Outlined.NotificationsActive,
@@ -339,6 +366,30 @@ private fun deliveryLookOf(delivery: DeliveryUiState): DeliveryLook {
             tone = DeliveryTone.NEUTRAL,
         )
     }
+}
+
+/**
+ * Without a background connection to fall back on (the Play build), any
+ * status but working push means messages arrive only while Waddle is
+ * open; say so plainly. `null` for the statuses that read the same.
+ */
+@Composable
+private fun noBackgroundLookOf(delivery: DeliveryUiState, off: String): DeliveryLook? = when (delivery.status) {
+    PushStatus.ACTIVE, PushStatus.PENDING -> null
+    PushStatus.FAILED -> DeliveryLook(
+        icon = Icons.Outlined.ErrorOutline,
+        title = stringResource(R.string.huddle_delivery_failed_title),
+        detail = stringResource(R.string.huddle_delivery_failed_no_background_detail),
+        tag = stringResource(R.string.huddle_delivery_tag_failed),
+        tone = DeliveryTone.PROBLEM,
+    )
+    PushStatus.UNSUPPORTED, PushStatus.NONE -> DeliveryLook(
+        icon = Icons.Outlined.ErrorOutline,
+        title = stringResource(R.string.huddle_delivery_no_background_title),
+        detail = stringResource(R.string.huddle_delivery_no_background_detail),
+        tag = off,
+        tone = DeliveryTone.PROBLEM,
+    )
 }
 
 @Composable

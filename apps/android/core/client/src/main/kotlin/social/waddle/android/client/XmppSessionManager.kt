@@ -28,6 +28,7 @@ import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.calls.CallStore
 import social.waddle.android.client.calls.ClientCallSignaling
 import social.waddle.android.client.prefs.PushEndpoint
+import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.PushState
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
@@ -339,11 +340,12 @@ class XmppSessionManager(
     }
 
     /**
-     * The UnifiedPush distributor handed out [endpoint] for [instance].
-     * Recorded only when [instance] is the signed-in account's (see
-     * [pushInstanceFor]); a stale callback for another account is
-     * ignored. Registration with the Push Service follows on the next
-     * ready stream, or at once if one is ready.
+     * The selected push transport handed out [endpoint] for [instance],
+     * replacing whatever endpoint the account held. Recorded only when
+     * [instance] is the signed-in account's (see [pushInstanceFor]); a
+     * stale callback for another account is ignored. Registration with
+     * the Push Service follows on the next ready stream, or at once if
+     * one is ready.
      */
     suspend fun recordPushEndpoint(instance: String, endpoint: PushEndpoint): Boolean {
         val owner = pushOwnerFor(instance) ?: return false
@@ -352,10 +354,17 @@ class XmppSessionManager(
         return true
     }
 
-    /** The distributor dropped [instance]'s endpoint; the device is retired next. */
-    suspend fun recordPushEndpointRevoked(instance: String) {
+    /**
+     * A [kind] transport dropped [instance]'s endpoint; the device is
+     * retired next. Only an endpoint of that kind is dropped: a late
+     * revocation from a transport the app already switched away from
+     * must not take the current endpoint with it.
+     */
+    suspend fun recordPushEndpointRevoked(instance: String, kind: PushEndpointKind) {
         val owner = pushOwnerFor(instance) ?: return
-        sessionPrefs.push.update(owner) { it.copy(endpoint = null) }
+        sessionPrefs.push.update(owner) { state ->
+            if (state.endpoint?.kind == kind) state.copy(endpoint = null) else state
+        }
         pushRegistrar.requestReconcile()
     }
 

@@ -27,7 +27,8 @@ churn test for session changes, and an on-device check before release.
 | Bounded parallel rejoin and MAM catch-up | ✅ | `XmppSessionManagerCatchupTest` | — | — |
 | History ingested once (MAM pages only) | ✅ | `TimelinePublishTest` | — | — |
 | Push over UnifiedPush (XEP-0357, Web Push provider) | ✅ | `PushRegistrarTest`, `PushMessageHandlerTest` | `settings` | — |
-| Stay-connected foreground service (no distributor, or by choice) | n/a | — | `settings` | — |
+| Push over FCM in the Play build (XEP-0357, FCM provider; RFC 8291 ciphertext only), one transport and one device at a time | n/a | `PushCoordinatorTest`, `FcmEnvelopeKeysTest`, `PushRegistrarTest`, `PushStateStoreTest` | — | — |
+| Stay-connected foreground service (FOSS build; no distributor, or by choice) | n/a | — | `settings` | — |
 | Inline reply and mark-read hold the stream until delivered | n/a | — | — | — |
 | Own presence (ADR-010): available in the foreground or a live call; held in the background, away after 10 min and xa after 30 min with XEP-0319 idle, on a wake alarm that survives deep sleep; a manual status from another device overrides it; nothing for notification actions | 🟡 | `XmppSessionManagerPresenceTest`, `XmppSessionManagerStatusPreferenceTest`, `ConnectionDemandTest` (app) | — | — |
 | A drop mid-pipeline ends the attempt at once; the next stream restarts the pipeline | n/a | `ConnectionLoopReadyWorkTest` | — | — |

@@ -18,7 +18,8 @@ import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.VapidKey
 
 /**
- * The app's side of UnifiedPush: which distributor delivers, asking it
+ * The UnifiedPush transport ([PushCoordinator] decides when it is used):
+ * which distributor delivers, asking it
  * for an endpoint bound to the Push Service's VAPID key, and handing the
  * endpoint it returns to the session (which registers it at the server).
  *
@@ -71,11 +72,16 @@ class PushDistributor(
         }
     }
 
-    /** Let the user pick among installed distributors (Settings). */
-    fun pick(activity: Activity) {
+    /** Let the user pick among installed distributors (Settings); [onChosen] runs before registering. */
+    fun pick(activity: Activity, onChosen: suspend () -> Unit = {}) {
         UnifiedPush.tryPickDistributor(activity) { chosen ->
             refresh()
-            if (chosen) scope.launch { currentKey()?.let { register(it) } }
+            if (chosen) {
+                scope.launch {
+                    onChosen()
+                    currentKey()?.let { register(it) }
+                }
+            }
         }
     }
 
@@ -94,7 +100,7 @@ class PushDistributor(
         val state = sessionManager.pushState.first()
         // The endpoint is bound to the key the request named.
         val kid = state?.requestedKid ?: state?.advertised?.kid ?: return
-        val endpoint = PushEndpoint(url = url, p256dh = p256dh, auth = auth, vapidKid = kid)
+        val endpoint = PushEndpoint.WebPush(url = url, p256dh = p256dh, auth = auth, vapidKid = kid)
         sessionManager.recordPushEndpoint(instance, endpoint)
         refresh()
     }

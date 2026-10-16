@@ -59,6 +59,31 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
      */
     val lastPushInstance: Flow<String?> = dataStore.data.map { it[KEY_LAST_PUSH_INSTANCE] }
 
+    /**
+     * Which push transport the user chose where more than one exists (the
+     * Play build: FCM or a UnifiedPush distributor). Kept across sign-out,
+     * like the distributor choice it stands for; `null` until chosen.
+     */
+    val pushTransport: Flow<PushTransportChoice?> =
+        dataStore.data.map { prefs -> prefs[KEY_PUSH_TRANSPORT]?.let(PushTransportChoice::fromStorage) }
+
+    /**
+     * An FCM token from a signed-out account is still to be deleted (the
+     * deletion needs the network). Kept across sign-out on purpose: until
+     * it is deleted, the old account's device keeps getting pushes.
+     */
+    val fcmTokenDeletionPending: Flow<Boolean> = dataStore.data.map { it[KEY_FCM_TOKEN_DELETION_PENDING] ?: false }
+
+    suspend fun setPushTransport(choice: PushTransportChoice) {
+        dataStore.edit { it[KEY_PUSH_TRANSPORT] = choice.storageValue }
+    }
+
+    suspend fun setFcmTokenDeletionPending(pending: Boolean) {
+        dataStore.edit { prefs ->
+            if (pending) prefs[KEY_FCM_TOKEN_DELETION_PENDING] = true else prefs.remove(KEY_FCM_TOKEN_DELETION_PENDING)
+        }
+    }
+
     suspend fun setStayConnected(stayConnected: Boolean?) {
         dataStore.edit { prefs ->
             if (stayConnected == null) prefs.remove(KEY_STAY_CONNECTED) else prefs[KEY_STAY_CONNECTED] = stayConnected
@@ -103,5 +128,18 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         val KEY_STAY_CONNECTED = booleanPreferencesKey("stay_connected")
         val KEY_WALLPAPER_COLORS = booleanPreferencesKey("wallpaper_colors")
         val KEY_LAST_PUSH_INSTANCE = stringPreferencesKey("last_push_instance")
+        val KEY_PUSH_TRANSPORT = stringPreferencesKey("push_transport")
+        val KEY_FCM_TOKEN_DELETION_PENDING = booleanPreferencesKey("fcm_token_deletion_pending")
+    }
+}
+
+/** A push transport the user can choose (see [UserPrefs.pushTransport]). */
+enum class PushTransportChoice(val storageValue: String) {
+    FCM("fcm"),
+    UNIFIED_PUSH("unified_push"),
+    ;
+
+    companion object {
+        fun fromStorage(value: String): PushTransportChoice? = entries.firstOrNull { it.storageValue == value }
     }
 }

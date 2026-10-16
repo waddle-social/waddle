@@ -177,20 +177,29 @@ schema.#Project & {
 			]])
 		}
 
+		// Both distributions: `foss` (Obtainium, no Google code) and
+		// `play` (FCM push, no background connection service). R8 also
+		// runs over the Play release code (FCM library, reflective
+		// serializers) with placeholder FCM values: the real ones are
+		// secrets, and R8 only needs the build to configure.
 		build: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon :app:assembleDebug"]
+			args: ["-c", "./gradlew --no-daemon :app:assembleFossDebug :app:assemblePlayDebug :app:minifyPlayReleaseWithR8 -PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder -PWADDLE_FIREBASE_APP_ID=1:0:android:0 -PWADDLE_FIREBASE_API_KEY=ci-placeholder -PWADDLE_FIREBASE_SENDER_ID=0"]
 			dependsOn: [setupSdk, buildRustJni]
 			inputs: _gradleInputs
-			outputs: ["app/build/outputs/apk/debug/app-debug.apk"]
+			outputs: [
+				"app/build/outputs/apk/foss/debug/app-foss-debug.apk",
+				"app/build/outputs/apk/play/debug/app-play-debug.apk",
+			]
 		}
 
 		// JVM unit tests plus the Roborazzi golden screenshots
-		// (app/src/test/screenshots): a visual change that was not
-		// re-recorded fails here.
+		// (app/src/test/screenshots), for both distributions: a visual
+		// change that was not re-recorded fails here. Screenshot tests set
+		// their state explicitly, so both flavours share one set of goldens.
 		test: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon testDebugUnitTest -Proborazzi.test.verify=true"]
+			args: ["-c", "./gradlew --no-daemon :core:client:testDebugUnitTest :app:testFossDebugUnitTest :app:testPlayDebugUnitTest -Proborazzi.test.verify=true"]
 			dependsOn: [setupSdk]
 			inputs: _gradleInputs
 		}
@@ -198,10 +207,12 @@ schema.#Project & {
 		// Static analysis: detekt (default rules + formatting, no
 		// baselines — see detekt.yml for the justified deviations) and
 		// Android lint with warnings-as-errors, mirroring the server's
-		// clippy -D warnings posture.
+		// clippy -D warnings posture. The runtime-classpath checks resolve
+		// every transitive dependency: no Google code in `foss`, and no
+		// analytics, crash or performance reporting in `play`.
 		lint: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon detekt :app:lintDebug"]
+			args: ["-c", "./gradlew --no-daemon detekt :app:lintFossDebug :app:lintPlayDebug :app:verifyFossRuntimeClasspath :app:verifyPlayRuntimeClasspath"]
 			dependsOn: [setupSdk]
 			inputs: _gradleInputs
 		}
@@ -213,14 +224,14 @@ schema.#Project & {
 		// cached configuration.
 		gmdCheck: schema.#Task & {
 			command: "bash"
-			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache --no-parallel --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx4g -XX:+UseParallelGC' :app:atdApi34DebugAndroidTest"]
+			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache --no-parallel --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx4g -XX:+UseParallelGC' :app:atdApi34FossDebugAndroidTest"]
 			dependsOn: [setupSdk, buildRustJni]
 			// Include this definition so GMD-only changes are selected by affectedness.
 			inputs: list.Concat([_gradleInputs, ["env.cue"]])
 		}
 
-		// Install-in-place artifact: every merge to main builds the
-		// `preview` APK — release-optimised (R8, shrinking, non-debuggable,
+		// Install-in-place artifact: every merge to main builds the FOSS
+		// `preview` APK (the Obtainium channel) — release-optimised (R8, shrinking, non-debuggable,
 		// mobile-profile Rust core) but signed with the shared checked-in
 		// key, so `adb install -r` upgrades over earlier rolling and debug
 		// builds without an uninstall — with a monotonic timestamp-derived
@@ -250,16 +261,16 @@ schema.#Project & {
 				# Commit-timestamp minutes: monotonic across builds and immune
 				# to shallow CI clones (rev-list --count would report 1).
 				version_code="$(( $(git show -s --format=%ct HEAD) / 60 ))"
-				./gradlew --no-daemon :app:assemblePreview \
+				./gradlew --no-daemon :app:assembleFossPreview \
 				  -PversionCode="${version_code}" \
 				  -PversionName="$(git rev-parse --short HEAD)"
 				sha="$(git rev-parse --short HEAD)"
 				# The asset's FILENAME (not the `file#label` display text)
 				# is the path segment in releases/latest/download/<name>,
 				# so upload the file under the advertised name rather than
-				# gradle's app-preview.apk.
+				# gradle's app-foss-preview.apk.
 				apk="waddle-android.apk"
-				cp app/build/outputs/apk/preview/app-preview.apk "${apk}"
+				cp app/build/outputs/apk/foss/preview/app-foss-preview.apk "${apk}"
 				# Unique per build (never reused -> never hits the immutable
 				# tag-name lock); versionCode prefix keeps tags sortable.
 				tag="android-b${version_code}-${sha}"
@@ -288,7 +299,7 @@ schema.#Project & {
 			// a script-only fix and the rolling release is never
 			// rebuilt.
 			inputs: list.Concat([_gradleInputs, ["env.cue"]])
-			outputs: ["app/build/outputs/apk/preview/app-preview.apk"]
+			outputs: ["app/build/outputs/apk/foss/preview/app-foss-preview.apk"]
 		}
 	}
 }

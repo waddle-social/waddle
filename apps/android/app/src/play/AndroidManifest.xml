@@ -1,0 +1,60 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Play build overlay: push over FCM, no background connection service. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- FCM wakes the app; nothing holds a connection in the background. -->
+    <uses-permission
+        android:name="android.permission.REQUEST_IGNORE_BATTERY_OPTIMIZATIONS"
+        tools:node="remove" />
+    <uses-permission
+        android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE"
+        tools:node="remove" />
+    <!-- Boot only ever raised the connection service. -->
+    <uses-permission
+        android:name="android.permission.RECEIVE_BOOT_COMPLETED"
+        tools:node="remove" />
+
+    <!-- Restates the main manifest (and the platform default since API 28)
+         so this overlay reads safely on its own. -->
+    <application
+        android:allowBackup="false"
+        android:usesCleartextTraffic="false">
+        <service
+            android:name=".service.WaddleConnectionService"
+            tools:node="remove" />
+
+        <receiver
+            android:name=".service.BootCompletedReceiver"
+            tools:node="remove" />
+
+        <!-- FCM data messages: the Push Service's RFC 8291 ciphertext only. -->
+        <service
+            android:name=".push.WaddleFirebaseMessagingService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="com.google.firebase.MESSAGING_EVENT" />
+            </intent-filter>
+        </service>
+
+        <!-- Firebase is initialized by the app from build values, never by
+             the provider from google-services.json. -->
+        <provider
+            android:name="com.google.firebase.provider.FirebaseInitProvider"
+            android:authorities="${applicationId}.firebaseinitprovider"
+            tools:node="remove" />
+
+        <!-- No token until an account registers; no Analytics; no delivery
+             metrics export. -->
+        <meta-data
+            android:name="firebase_messaging_auto_init_enabled"
+            android:value="false" />
+        <meta-data
+            android:name="firebase_analytics_collection_deactivated"
+            android:value="true" />
+        <meta-data
+            android:name="delivery_metrics_exported_to_big_query_enabled"
+            android:value="false" />
+    </application>
+
+</manifest>

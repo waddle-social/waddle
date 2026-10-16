@@ -62,6 +62,16 @@ check_absent() {
   local label="$1"
   local pattern="$2"
   shift 2
+  check_absent_allowing "$label" "$pattern" "" "$@"
+}
+
+# Like check_absent, but drops matches whose `path:line:text` output line
+# matches the extended regex `allow` (empty allows nothing).
+check_absent_allowing() {
+  local label="$1"
+  local pattern="$2"
+  local allow="$3"
+  shift 3
   local -a existing=()
   local path
   for path in "$@"; do
@@ -75,17 +85,20 @@ check_absent() {
   local output_file
   output_file="$(mktemp)"
   if command -v rg >/dev/null 2>&1; then
-    if rg --hidden --no-ignore --glob '!.git' --glob '!target' --no-messages -n -i -e "$pattern" "${existing[@]}" >"$output_file"; then
-      echo "[fail] $label matched pattern: $pattern" >&2
-      cat "$output_file" >&2
-      failed=1
-    fi
+    rg --hidden --no-ignore --glob '!.git' --glob '!target' --no-messages -n -i -e "$pattern" "${existing[@]}" >"$output_file" || true
   else
-    if grep -ERniI --exclude-dir=target --exclude-dir=.git -- "$pattern" "${existing[@]}" >"$output_file" 2>/dev/null; then
-      echo "[fail] $label matched pattern: $pattern" >&2
-      cat "$output_file" >&2
-      failed=1
-    fi
+    grep -ERniI --exclude-dir=target --exclude-dir=.git -- "$pattern" "${existing[@]}" >"$output_file" 2>/dev/null || true
+  fi
+  if [[ -n "$allow" ]]; then
+    local filtered_file
+    filtered_file="$(mktemp)"
+    grep -Ev -- "$allow" "$output_file" >"$filtered_file" || true
+    mv "$filtered_file" "$output_file"
+  fi
+  if [[ -s "$output_file" ]]; then
+    echo "[fail] $label matched pattern: $pattern" >&2
+    cat "$output_file" >&2
+    failed=1
   fi
   rm -f "$output_file"
 }
@@ -153,7 +166,18 @@ check_apple() {
     "${apple_exporter_paths[@]}"
 }
 
+# The Play flavour (apps/android/app/src/play) carries Firebase Cloud
+# Messaging, a push transport, and nothing else from Firebase. Its source
+# set is scanned with these narrower patterns: every other SDK, exporter
+# and Firebase product stays banned there too.
+play_dependency_pattern='(^|[^[:alnum:]_])(sentry|crashlytics|firebase[_-](analytics|crashlytics|perf|sessions|config|inappmessaging)|datadog|newrelic|mixpanel|amplitude|posthog|bugsnag|telemetrydeck|faro|otlp|opentelemetry([_-]otlp)?|tracing[_-](opentelemetry|subscriber))([^[:alnum:]_]|$)'
+play_exporter_pattern="${native_exporter_pattern//FirebaseApp\\.initializeApp|/}"
+# Outside the Play source set, exactly two lines may name Firebase: the
+# FCM library's catalog entry and its play-only dependency declaration.
+android_firebase_allow=':[0-9]+:(firebase-messaging = \{ group = "com\.google\.firebase", name = "firebase-messaging", version\.ref = "firebaseMessaging" \}|    "playImplementation"\(libs\.firebase\.messaging\))$'
+
 check_android() {
+  local -a play_paths=()
   local -a android_dependency_paths=(
     "$repo_root/apps/android/build.gradle.kts"
     "$repo_root/apps/android/settings.gradle.kts"
@@ -173,6 +197,10 @@ check_android() {
     android_exporter_paths+=("$path")
     module_dir="$(dirname "$path")"
     while IFS= read -r source_set_dir; do
+      if [[ "$source_set_dir" == "$repo_root/apps/android/app/src/play" ]]; then
+        play_paths+=("$source_set_dir")
+        continue
+      fi
       android_dependency_paths+=("$source_set_dir")
       android_exporter_paths+=("$source_set_dir")
     done < <(android_module_source_sets "$module_dir")
@@ -196,12 +224,21 @@ check_android() {
     android_dependency_paths+=("$path")
     android_exporter_paths+=("$path")
   done <<<"$cargo_closure"
-  check_absent "android dependency" \
+  check_absent_allowing "android dependency" \
     "$native_dependency_pattern" \
+    "$android_firebase_allow" \
     "${android_dependency_paths[@]}"
   check_absent "android exporter init" \
     "$native_exporter_pattern" \
     "${android_exporter_paths[@]}"
+  if [[ ${#play_paths[@]} -gt 0 ]]; then
+    check_absent "android play dependency" \
+      "$play_dependency_pattern" \
+      "${play_paths[@]}"
+    check_absent "android play exporter init" \
+      "$play_exporter_pattern" \
+      "${play_paths[@]}"
+  fi
 }
 
 check_wasm() {

@@ -26,8 +26,10 @@ import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Keeps the account's XEP-0357 Push Service registration in step with
- * the UnifiedPush endpoint the app holds (iOS `PushRegistrationStore`
- * parity, over the Web Push provider).
+ * the one endpoint the app holds: a UnifiedPush (Web Push provider) or an
+ * FCM endpoint (iOS `PushRegistrationStore` parity). Switching transport
+ * replaces the endpoint, so the old device is retired before the new one
+ * registers and a push never notifies twice.
  *
  * One reconcile pass runs per ready stream and whenever the endpoint
  * changes; passes never overlap and extra triggers collapse into one
@@ -96,7 +98,27 @@ internal class PushRegistrar(
         val owner = lease.ownerBareJid
         val service = pushServiceJidFor(owner) ?: return
         if (!retryPendingDisables(lease, owner)) return
-        val key = when (val lookup = call(lease) { it.fetchPushVapidPublicKey(service) } ?: return) {
+        val lookup = call(lease) { it.fetchPushVapidPublicKey(service) } ?: return
+        // FCM endpoints are not bound to the server's VAPID key, and the
+        // server needs no Web Push provider to deliver to them. The key is
+        // still recorded, so a switch to a distributor can request an
+        // endpoint for it.
+        val held = store.read(owner).endpoint
+        if (held is PushEndpoint.Fcm) {
+            if (recordLookup(lease, owner, lookup)) reconcileDevice(lease, owner, service, held)
+            return
+        }
+        reconcileWebPush(lease, owner, service, lookup)
+    }
+
+    /** The Web Push path: endpoints are bound to the server's VAPID key. */
+    private suspend fun reconcileWebPush(
+        lease: ActiveSession.OwnerLease,
+        owner: String,
+        service: String,
+        lookup: WaddlePushVapidLookup,
+    ) {
+        val key = when (lookup) {
             // Transient: keep what is registered, just re-assert it.
             WaddlePushVapidLookup.Failed -> {
                 refreshEnable(lease, owner)
@@ -110,19 +132,44 @@ internal class PushRegistrar(
             is WaddlePushVapidLookup.Advertised -> VapidKey(publicKey = lookup.publicKey, kid = lookup.kid)
         }
         if (!write(lease, owner) { it.copy(unsupported = false, advertised = key) }) return
-        val state = store.read(owner)
-        val endpoint = state.endpoint
-        when {
-            endpoint == null -> retireDevice(lease, owner)
+        when (val endpoint = store.read(owner).endpoint) {
+            null -> retireDevice(lease, owner)
             // The distributor still holds an endpoint for an older key;
             // the app re-registers it, and the new endpoint triggers a pass.
-            endpoint.vapidKid != key.kid -> Unit
-            state.device?.matches(service, endpoint) == true -> refreshEnable(lease, owner)
-            else -> {
-                if (!retireDevice(lease, owner)) return
-                register(lease, owner, service, endpoint)
+            is PushEndpoint.WebPush -> if (endpoint.vapidKid == key.kid) {
+                reconcileDevice(lease, owner, service, endpoint)
             }
+            // Switched to FCM while the key was being looked up.
+            is PushEndpoint.Fcm -> reconcileDevice(lease, owner, service, endpoint)
         }
+    }
+
+    /** Persist what [lookup] says about the server's key; `false` once the lease is stale. */
+    private suspend fun recordLookup(
+        lease: ActiveSession.OwnerLease,
+        owner: String,
+        lookup: WaddlePushVapidLookup,
+    ): Boolean = when (lookup) {
+        WaddlePushVapidLookup.Failed -> true
+        WaddlePushVapidLookup.NotAdvertised -> write(lease, owner) { it.copy(unsupported = true, advertised = null) }
+        is WaddlePushVapidLookup.Advertised -> write(lease, owner) {
+            it.copy(unsupported = false, advertised = VapidKey(publicKey = lookup.publicKey, kid = lookup.kid))
+        }
+    }
+
+    /** Keep the device registered for [endpoint], replacing any other. */
+    private suspend fun reconcileDevice(
+        lease: ActiveSession.OwnerLease,
+        owner: String,
+        service: String,
+        endpoint: PushEndpoint,
+    ) {
+        if (store.read(owner).device?.matches(service, endpoint) == true) {
+            refreshEnable(lease, owner)
+            return
+        }
+        if (!retireDevice(lease, owner)) return
+        register(lease, owner, service, endpoint)
     }
 
     private suspend fun register(
@@ -131,11 +178,18 @@ internal class PushRegistrar(
         service: String,
         endpoint: PushEndpoint,
     ) {
-        val credentials = WaddlePushDeviceCredentials.WebPush(
-            endpoint = endpoint.url,
-            p256dh = endpoint.p256dh,
-            auth = endpoint.auth,
-        )
+        val credentials = when (endpoint) {
+            is PushEndpoint.WebPush -> WaddlePushDeviceCredentials.WebPush(
+                endpoint = endpoint.url,
+                p256dh = endpoint.p256dh,
+                auth = endpoint.auth,
+            )
+            is PushEndpoint.Fcm -> WaddlePushDeviceCredentials.Fcm(
+                registrationToken = endpoint.token,
+                p256dh = endpoint.p256dh,
+                auth = endpoint.auth,
+            )
+        }
         val outcome = call(lease) {
             Optional(it.registerPushDevice(service, APP_ID, WaddlePushEnvironment.PRODUCTION, credentials))
         } ?: return

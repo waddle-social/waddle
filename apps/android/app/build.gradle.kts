@@ -1,3 +1,7 @@
+import org.gradle.api.artifacts.component.ModuleComponentIdentifier
+import org.gradle.api.artifacts.result.ResolvedComponentResult
+import org.gradle.api.artifacts.result.ResolvedDependencyResult
+
 plugins {
     alias(libs.plugins.android.application)
     alias(libs.plugins.kotlin.compose)
@@ -6,6 +10,17 @@ plugins {
     alias(libs.plugins.kotlin.serialization)
     alias(libs.plugins.roborazzi)
 }
+
+/** The FCM project values the Play build is configured with. */
+val FIREBASE_CONFIG = listOf(
+    "WADDLE_FIREBASE_PROJECT_ID",
+    "WADDLE_FIREBASE_APP_ID",
+    "WADDLE_FIREBASE_API_KEY",
+    "WADDLE_FIREBASE_SENDER_ID",
+)
+
+fun firebaseValue(name: String): String =
+    (project.findProperty(name) as String?) ?: System.getenv(name).orEmpty()
 
 android {
     namespace = "social.waddle.android"
@@ -31,6 +46,28 @@ android {
         buildConfig = true
     }
 
+    // Two distributions of one app (same applicationId; the two are
+    // signed differently, so switching channels means reinstalling):
+    flavorDimensions += "distribution"
+    productFlavors {
+        // Obtainium (and F-Droid): UnifiedPush or a background connection,
+        // and no Google code at all (verifyFossRuntimeClasspath).
+        create("foss") {
+            dimension = "distribution"
+            isDefault = true
+        }
+        // Google Play: FCM push and no background connection service.
+        // FCM is configured from these values (Gradle property or
+        // environment variable), never google-services.json; without them
+        // the build has no FCM, and playRelease refuses to build.
+        create("play") {
+            dimension = "distribution"
+            for (name in FIREBASE_CONFIG) {
+                buildConfigField("String", name, "\"${firebaseValue(name)}\"")
+            }
+        }
+    }
+
     signingConfigs {
         // Shared, checked-in debug keystore (deliberately NOT a secret —
         // it may never sign release builds): every machine and CI run
@@ -54,8 +91,9 @@ android {
         disable += setOf("AndroidGradlePluginVersion", "GradleDependency", "NewerVersionAvailable")
         // targetSdk upgrades are deliberate, tested changes, not nags.
         disable += "OldTargetApi"
-        // Persistent-XMPP FGS app distributed by sideload, not Play; the
-        // battery-optimization exemption is the documented use case.
+        // The FOSS build holds a persistent XMPP connection in a foreground
+        // service, the documented use of the battery-optimization
+        // exemption; the Play manifest removes both.
         disable += "BatteryLife"
         // Release APKs are arm64-only by design (sideload target); x86_64
         // stays debug/emulator-only.
@@ -75,7 +113,7 @@ android {
         managedDevices {
             localDevices {
                 // Headless automated-test device for CI (no GPU, low
-                // memory): `./gradlew :app:atdApi34DebugAndroidTest`.
+                // memory): `./gradlew :app:atdApi34FossDebugAndroidTest`.
                 // API 34 = minSdk; the aosp-atd image line trails the
                 // newest platforms.
                 create("atdApi34") {
@@ -127,8 +165,18 @@ android {
     }
 }
 
+androidComponents {
+    // The Play build ships only as playRelease; the public preview key
+    // must never sign an APK with Play's FCM configuration.
+    beforeVariants(selector().withFlavor("distribution" to "play").withBuildType("preview")) {
+        it.enable = false
+    }
+}
+
 dependencies {
     implementation(project(":core:client"))
+    // FCM for push, and nothing else from Google (see the verify tasks below).
+    "playImplementation"(libs.firebase.messaging)
 
     val composeBom = platform(libs.compose.bom)
     implementation(composeBom)
@@ -186,8 +234,70 @@ dependencies {
 }
 
 // Golden screenshots live in the source tree so CI can verify them:
-// `./gradlew :app:verifyRoborazziDebug`; re-record with
-// `./gradlew :app:recordRoborazziDebug` after an intended visual change.
+// `./gradlew :app:verifyRoborazziFossDebug`; re-record with
+// `./gradlew :app:recordRoborazziFossDebug` after an intended visual change.
 roborazzi {
     outputDir.set(file("src/test/screenshots"))
+}
+
+// A Play release without FCM would ship with no background delivery.
+val checkPlayReleaseFirebaseConfig by tasks.registering {
+    val missing = FIREBASE_CONFIG.filter { firebaseValue(it).isBlank() }
+    doLast {
+        if (missing.isNotEmpty()) {
+            throw GradleException("playRelease needs FCM configuration: ${missing.joinToString()}")
+        }
+    }
+}
+tasks.matching { it.name == "prePlayReleaseBuild" }.configureEach { dependsOn(checkPlayReleaseFirebaseConfig) }
+
+/**
+ * Fails when a resolved runtime classpath contains a banned module: the
+ * FOSS build has no Google code at all, and the Play build carries
+ * FCM but no analytics, crash or performance reporting (the banned
+ * module prefixes live in gradle/runtime-bans-*.txt).
+ * Resolved, so transitive dependencies count too.
+ */
+abstract class VerifyRuntimeClasspath : DefaultTask() {
+    @get:Input
+    abstract val rootComponent: Property<ResolvedComponentResult>
+
+    @get:Input
+    abstract val bannedPrefixes: ListProperty<String>
+
+    @TaskAction
+    fun verify() {
+        val modules = mutableSetOf<String>()
+        val visited = mutableSetOf<ResolvedComponentResult>()
+        val queue = ArrayDeque(listOf(rootComponent.get()))
+        while (queue.isNotEmpty()) {
+            val component = queue.removeFirst()
+            if (!visited.add(component)) continue
+            (component.id as? ModuleComponentIdentifier)?.let { modules += "${it.group}:${it.module}" }
+            component.dependencies.filterIsInstance<ResolvedDependencyResult>().forEach { queue += it.selected }
+        }
+        val banned = modules.filter { module -> bannedPrefixes.get().any(module::startsWith) }.sorted()
+        if (banned.isNotEmpty()) {
+            throw GradleException("$name: banned modules on the runtime classpath: ${banned.joinToString()}")
+        }
+    }
+}
+
+fun bannedModules(flavor: String): List<String> =
+    rootProject.file("gradle/runtime-bans-$flavor.txt").readLines()
+        .map(String::trim)
+        .filter { it.isNotEmpty() && !it.startsWith("#") }
+
+val verifyFossRuntimeClasspath by tasks.registering(VerifyRuntimeClasspath::class) {
+    rootComponent.set(
+        configurations.named("fossReleaseRuntimeClasspath").flatMap { it.incoming.resolutionResult.rootComponent },
+    )
+    bannedPrefixes.set(bannedModules("foss"))
+}
+
+val verifyPlayRuntimeClasspath by tasks.registering(VerifyRuntimeClasspath::class) {
+    rootComponent.set(
+        configurations.named("playReleaseRuntimeClasspath").flatMap { it.incoming.resolutionResult.rootComponent },
+    )
+    bannedPrefixes.set(bannedModules("play"))
 }

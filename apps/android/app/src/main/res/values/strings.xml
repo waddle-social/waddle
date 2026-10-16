@@ -201,6 +201,10 @@
     <string name="settings_delivery">Background delivery</string>
     <string name="settings_delivery_distributor">Push distributor</string>
     <string name="settings_delivery_distributor_none">None chosen</string>
+    <string name="settings_delivery_fcm">Google Play push</string>
+    <string name="settings_delivery_fcm_in_use">In use</string>
+    <string name="settings_delivery_fcm_use">Use Google Play services to deliver pushes</string>
+    <string name="settings_delivery_fcm_name">Google Play</string>
     <string name="settings_stay_connected">Stay connected</string>
     <string name="settings_stay_connected_body">Keep a connection open in the background so calls ring. Uses more battery.</string>
     <string name="notification_reply_waiting">Not sent yet: it goes out when Waddle reconnects</string>
@@ -595,6 +599,9 @@
     <string name="huddle_delivery_unsupported_detail">This server does not offer push.</string>
     <string name="huddle_delivery_failed_title">Push was refused</string>
     <string name="huddle_delivery_failed_detail">The server refused push registration, so Waddle stays connected instead.</string>
+    <string name="huddle_delivery_failed_no_background_detail">The server refused push registration. Messages arrive only while Waddle is open.</string>
+    <string name="huddle_delivery_no_background_title">No background delivery</string>
+    <string name="huddle_delivery_no_background_detail">Push is not working, so messages arrive only while Waddle is open.</string>
     <string name="huddle_delivery_tag_on">On</string>
     <string name="huddle_delivery_tag_pending">Pending</string>
     <string name="huddle_delivery_tag_off">Off</string>
