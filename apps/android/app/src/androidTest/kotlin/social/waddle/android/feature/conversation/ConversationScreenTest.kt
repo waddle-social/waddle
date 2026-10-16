@@ -137,10 +137,10 @@ class ConversationScreenTest {
         composeRule.onNodeWithText("reply to me").performTouchInput { longClick() }
         waitForText("Reply")
         composeRule.onNodeWithText("Reply").performClick()
-        waitForText("Replying to alice")
+        waitForText("Replying to @alice")
         composeRule.onNodeWithContentDescription("Cancel reply").performClick()
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            composeRule.onAllNodesWithText("Replying to alice").fetchSemanticsNodes().isEmpty()
+            composeRule.onAllNodesWithText("Replying to @alice").fetchSemanticsNodes().isEmpty()
         }
         composeRule.onNodeWithText("reply to me").assertIsDisplayed()
     }

@@ -82,10 +82,10 @@ class MessageComposerTest {
                 onCancelReply = { replying.value = null },
             )
         }
-        composeRule.onNodeWithText("Replying to alice").assertIsDisplayed()
+        composeRule.onNodeWithText("Replying to @alice").assertIsDisplayed()
         composeRule.onNodeWithContentDescription("Cancel reply").performClick()
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            composeRule.onAllNodesWithText("Replying to alice").fetchSemanticsNodes().isEmpty()
+            composeRule.onAllNodesWithText("Replying to @alice").fetchSemanticsNodes().isEmpty()
         }
     }
 }

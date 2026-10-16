@@ -1,37 +1,47 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.CallEnd
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.feature.call.formatCallDuration
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.huddle.AvatarSize
 import java.time.Duration
+import java.time.Instant
 import java.time.format.DateTimeParseException
 
 /**
- * Compact feed row for `urn:waddle:call-thread:0` anchors: a
- * "started a call" line for the anchor and a "call ended · duration"
- * line for the XEP-0422 ended marker, replacing the empty bubble the
- * server-enriched stanzas would otherwise render as.
+ * Compact feed row for `urn:waddle:call-thread:0` anchors: a "started a
+ * call" line for the anchor and a "call ended · duration" line for the
+ * XEP-0422 ended marker, replacing the empty bubble the server-enriched
+ * stanzas would otherwise render as. It sits on the message grid: the
+ * glyph in the avatar column, the line and its time in the text column.
+ * History, not a live thing, so it stays quiet (no ember).
  */
 @Composable
-internal fun CallTimelineRow(item: TimelineItem) {
+internal fun CallTimelineRow(item: TimelineItem, sentAt: Instant) {
     val anchor = item.callAnchor
     val ended = item.callEndedMarker
     val (icon, text) = when {
@@ -50,24 +60,33 @@ internal fun CallTimelineRow(item: TimelineItem) {
         )
         else -> return
     }
+    val colors = Waddle.colors
+    val clock = rememberConversationClock()
     Row(
         verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 6.dp),
+            .semantics(mergeDescendants = true) {}
+            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xs),
     ) {
-        Icon(
-            icon,
-            contentDescription = null,
-            tint = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.size(18.dp),
-        )
+        Box(modifier = Modifier.width(AvatarSize.MESSAGE.dp), contentAlignment = Alignment.Center) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier
+                    .size(AvatarSize.SM.dp)
+                    .background(colors.surface2, CircleShape),
+            ) {
+                Icon(icon, contentDescription = null, tint = colors.fgMuted, modifier = Modifier.size(CALL_ICON))
+            }
+        }
         Text(
             text = text,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            modifier = Modifier.padding(start = 8.dp),
+            style = MetaStyle,
+            color = colors.fgMuted,
+            modifier = Modifier.weight(1f, fill = false),
         )
+        Text(text = clock.time(sentAt), style = Waddle.type.time, color = colors.fgMuted, maxLines = 1)
     }
 }
 
@@ -77,3 +96,5 @@ private fun formatIsoDuration(iso: String): String = try {
 } catch (_: DateTimeParseException) {
     iso
 }
+
+private val CALL_ICON = 16.dp

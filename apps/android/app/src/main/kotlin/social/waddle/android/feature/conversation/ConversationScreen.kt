@@ -2,18 +2,14 @@ package social.waddle.android.feature.conversation
 
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Call
 import androidx.compose.material.icons.outlined.MoreVert
@@ -27,16 +23,13 @@ import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
-import androidx.compose.material3.ListItemDefaults
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,14 +37,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.testTag
-import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.AnnotatedString
-import androidx.compose.ui.text.style.TextOverflow
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.LocalLifecycleOwner
@@ -61,14 +50,12 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import kotlinx.coroutines.flow.filterNotNull
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
-import social.waddle.android.avatar.LIST_AVATAR_SIZE
-import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.store.TimelineItem
-import social.waddle.android.client.store.authorBareJidOf
 import social.waddle.android.feature.search.MessageSearchSheet
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.feature.search.MessageSearchViewModel
+import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.WaddleTopBar
 import social.waddle.client.ffi.WaddleNotifyMode
 
@@ -106,6 +93,66 @@ fun ConversationScreen(
     aboveTimeline: @Composable () -> Unit = {},
     /** Slash-command wiring; `null` (scaffold tests) hides the feature. */
     slashCommandHost: SlashCommandHost? = null,
+    /** Room, DM or thread: the empty state and placeholder. `null` infers it from [viewModel]. */
+    kind: ConversationKind? = null,
+    /** A face before the title (DM peer with presence). */
+    titleLeading: (@Composable () -> Unit)? = null,
+    /** Replaces [subtitle] under the title (room headcount and live huddle). */
+    titleSubline: (@Composable () -> Unit)? = null,
+) {
+    val clock = rememberConversationClock()
+    CompositionLocalProvider(LocalConversationClock provides clock) {
+        ConversationScaffold(
+            title = title,
+            viewModel = viewModel,
+            onBack = onBack,
+            onOpenThread = onOpenThread,
+            searchTarget = searchTarget,
+            selfBareJid = selfBareJid,
+            trustedMediaOrigin = trustedMediaOrigin,
+            chrome = ConversationChromeSlots(
+                titleLeading = titleLeading,
+                titleSubline = titleSubline ?: subtitle?.let { text -> { DmHeaderSubline(text) } },
+                extraTopBarActions = extraTopBarActions,
+                overflowItems = overflowItems,
+                overflowTestTag = overflowTestTag,
+                onStartCall = onStartCall,
+                aboveTimeline = aboveTimeline,
+            ),
+            slashCommandHost = slashCommandHost,
+            kind = kind ?: when {
+                viewModel.isThread -> ConversationKind.Thread
+                viewModel.isGroupchat -> ConversationKind.Room(title)
+                else -> ConversationKind.Dm(title)
+            },
+        )
+    }
+}
+
+/** The top-bar and above-timeline slots a host fills. */
+internal class ConversationChromeSlots(
+    val titleLeading: (@Composable () -> Unit)?,
+    val titleSubline: (@Composable () -> Unit)?,
+    val extraTopBarActions: @Composable () -> Unit,
+    val overflowItems: @Composable (dismiss: () -> Unit) -> Unit,
+    val overflowTestTag: String,
+    val onStartCall: ((video: Boolean) -> Unit)?,
+    val aboveTimeline: @Composable () -> Unit,
+)
+
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun ConversationScaffold(
+    title: String,
+    viewModel: ConversationViewModel,
+    onBack: () -> Unit,
+    onOpenThread: ((threadId: String) -> Unit)?,
+    searchTarget: MessageSearchTarget?,
+    selfBareJid: String?,
+    trustedMediaOrigin: String?,
+    chrome: ConversationChromeSlots,
+    slashCommandHost: SlashCommandHost?,
+    kind: ConversationKind,
 ) {
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
@@ -163,35 +210,19 @@ fun ConversationScreen(
         topBar = {
             WaddleTopBar(
                 title = {
-                    Column {
-                        Text(
-                            text = title,
-                            style = MaterialTheme.typography.titleMedium,
-                            maxLines = 1,
-                            overflow = TextOverflow.Ellipsis,
-                        )
-                        subtitle?.let {
-                            Text(
-                                text = it,
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                maxLines = 1,
-                                overflow = TextOverflow.Ellipsis,
-                            )
-                        }
-                    }
+                    ConversationTitle(title = title, leading = chrome.titleLeading, subline = chrome.titleSubline)
                 },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
                         Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
+                            Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = stringResource(R.string.action_back),
                         )
                     }
                 },
                 actions = {
-                    extraTopBarActions()
-                    if (onStartCall != null) CallMenuAction(onStartCall)
+                    chrome.extraTopBarActions()
+                    chrome.onStartCall?.let { CallMenuAction(it) }
                     if (searchTarget != null) {
                         IconButton(onClick = { searchOpen = true }) {
                             Icon(Icons.Outlined.Search, contentDescription = stringResource(R.string.search_messages))
@@ -200,7 +231,10 @@ fun ConversationScreen(
                     var overflowOpen by remember { mutableStateOf(false) }
                     val dismiss = { overflowOpen = false }
                     Box {
-                        IconButton(onClick = { overflowOpen = true }, modifier = Modifier.testTag(overflowTestTag)) {
+                        IconButton(
+                            onClick = { overflowOpen = true },
+                            modifier = Modifier.testTag(chrome.overflowTestTag),
+                        ) {
                             Icon(
                                 Icons.Outlined.MoreVert,
                                 contentDescription = stringResource(R.string.conversation_more),
@@ -238,7 +272,7 @@ fun ConversationScreen(
                                     },
                                 )
                             }
-                            overflowItems(dismiss)
+                            chrome.overflowItems(dismiss)
                         }
                     }
                 },
@@ -252,7 +286,7 @@ fun ConversationScreen(
                 .fillMaxSize()
                 .imePadding(),
         ) {
-            aboveTimeline()
+            chrome.aboveTimeline()
             val rowActions = remember(viewModel, onOpenThread) {
                 MessageRowActions(
                     onLongPress = { item -> sheetTarget = item },
@@ -278,6 +312,8 @@ fun ConversationScreen(
                 context = rowContext,
                 modifier = Modifier.weight(1f),
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
+                loadingFirstPage = state.awaitingFirstPage,
+                emptyState = { TimelineEmpty(kind) },
             )
             TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)
             val slashCommands = slashCommandHost
@@ -302,6 +338,7 @@ fun ConversationScreen(
                 slashDispatch = slashCommandHost?.let { host ->
                     slashDispatchOf(host) { body -> viewModel.send(body) }
                 },
+                placeholder = composerPlaceholderOf(kind),
             )
         }
     }
@@ -349,7 +386,7 @@ fun ConversationScreen(
                 }) {
                     Text(
                         text = stringResource(R.string.action_moderate_message),
-                        color = MaterialTheme.colorScheme.error,
+                        color = Waddle.colors.dangerText,
                     )
                 }
             },
@@ -480,56 +517,15 @@ fun ConversationScreen(
     }
 
     if (threadsOverviewOpen && onOpenThread != null) {
-        ModalBottomSheet(onDismissRequest = { threadsOverviewOpen = false }) {
-            Column(modifier = Modifier.navigationBarsPadding()) {
-                Text(
-                    text = stringResource(R.string.threads_overview_title),
-                    style = MaterialTheme.typography.titleMedium,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                )
-                // Scrollable: long histories can hold more threads than
-                // the sheet's height.
-                LazyColumn {
-                    items(state.threads, key = { it.threadId }) { thread ->
-                        ListItem(
-                            leadingContent = {
-                                PeerAvatar(
-                                    jid = thread.rootItem?.let { authorBareJidOf(it, selfBareJid) },
-                                    displayName = thread.rootAuthor.orEmpty(),
-                                    size = LIST_AVATAR_SIZE,
-                                )
-                            },
-                            headlineContent = {
-                                Text(
-                                    text = if (thread.rootTombstoned) {
-                                        stringResource(R.string.message_deleted)
-                                    } else {
-                                        thread.rootPreview
-                                    },
-                                    maxLines = 1,
-                                    overflow = TextOverflow.Ellipsis,
-                                )
-                            },
-                            supportingContent = {
-                                Text(
-                                    text = pluralStringResource(
-                                        R.plurals.thread_replies_count,
-                                        thread.replyCount,
-                                        thread.replyCount,
-                                        thread.rootAuthor ?: "",
-                                    ),
-                                )
-                            },
-                            colors = ListItemDefaults.colors(containerColor = Color.Transparent),
-                            modifier = Modifier.clickable {
-                                threadsOverviewOpen = false
-                                onOpenThread(thread.threadId)
-                            },
-                        )
-                    }
-                }
-            }
-        }
+        ThreadsOverviewSheet(
+            threads = state.threads,
+            selfBareJid = selfBareJid,
+            onOpen = { threadId ->
+                threadsOverviewOpen = false
+                onOpenThread(threadId)
+            },
+            onDismiss = { threadsOverviewOpen = false },
+        )
     }
 }
 

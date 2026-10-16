@@ -34,6 +34,8 @@ data class ConversationUiState(
     val entries: List<FeedEntry> = emptyList(),
     val isLoadingOlder: Boolean = false,
     val reachedHistoryStart: Boolean = false,
+    /** No history fetch has answered yet: show the skeleton, not the empty state. */
+    val awaitingFirstPage: Boolean = true,
     /** `urn:waddle:pin:0`: pinned stanza ids (rooms only). */
     val pinnedIds: Set<String> = emptySet(),
     val canPin: Boolean = false,

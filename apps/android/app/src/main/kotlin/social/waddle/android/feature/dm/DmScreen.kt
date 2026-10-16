@@ -28,8 +28,13 @@ import social.waddle.android.R
 import social.waddle.android.client.IdleAge
 import social.waddle.android.client.idleAgeOf
 import social.waddle.android.client.presenceShowsIdle
+import social.waddle.android.client.store.PresenceShow
+import social.waddle.android.feature.conversation.ConversationKind
 import social.waddle.android.feature.conversation.ConversationScreen
+import social.waddle.android.feature.conversation.DmHeaderAvatar
+import social.waddle.android.feature.conversation.DmHeaderSubline
 import social.waddle.android.feature.conversation.SlashCommandHost
+import social.waddle.android.feature.conversation.presenceWordOf
 import social.waddle.android.feature.conversation.rememberExtensionCommandController
 import social.waddle.android.feature.conversation.trustedPreviewOriginOf
 import social.waddle.android.feature.search.MessageSearchTarget
@@ -53,6 +58,9 @@ fun DmScreen(
     )
     val session by graph.currentSession.collectAsStateWithLifecycle()
     val contacts by graph.sessionManager.presenceStore.contacts.collectAsStateWithLifecycle()
+    // Contacts hold online people only: absent means offline.
+    val peer = contacts[peerJid]
+    val peerShow = peer?.show ?: PresenceShow.OFFLINE
     val scope = rememberCoroutineScope()
     var newGroupOpen by remember { mutableStateOf(false) }
 
@@ -79,7 +87,9 @@ fun DmScreen(
         onOpenThread = onOpenThread,
         searchTarget = MessageSearchTarget(peerJid, isGroupchat = false),
         selfBareJid = session?.jid?.let(::bareJidOf),
-        subtitle = dmPresenceSubtitle(contacts[peerJid]?.presence),
+        kind = ConversationKind.Dm(name),
+        titleLeading = { DmHeaderAvatar(jid = bareJidOf(peerJid), name = name, presence = peerShow) },
+        titleSubline = { DmHeaderSubline(presenceWordOf(peerShow, idleAge(peer?.presence))) },
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
         slashCommandHost = SlashCommandHost(
             controller = rememberExtensionCommandController(graph),
@@ -128,17 +138,15 @@ object DmScreenTestTags {
 }
 
 /**
- * Web `ChatHeader.dmPeerPresenceText` parity: "away · idle 20m" while
- * the peer's presence show is `away`/`xa` and XEP-0319 `idleSince` is
- * present; bare "away" without it; nothing otherwise. The idle age
- * re-derives on a minute ticker so it stays current without presence
+ * Web `ChatHeader.dmPeerPresenceText` parity: the XEP-0319 idle age while
+ * the peer is away (`away`/`xa`) with an `idleSince` stamp, else `null`.
+ * It re-derives on a minute ticker so it stays current without presence
  * traffic.
  */
 @Composable
-private fun dmPresenceSubtitle(presence: WaddlePresence?): String? {
+private fun idleAge(presence: WaddlePresence?): String? {
     if (presence == null || !presenceShowsIdle(presence.show)) return null
-    val idleSince = presence.idleSince
-        ?: return stringResource(R.string.dm_presence_away)
+    val idleSince = presence.idleSince ?: return null
     var nowMs by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(idleSince) {
         while (true) {
@@ -146,9 +154,7 @@ private fun dmPresenceSubtitle(presence: WaddlePresence?): String? {
             nowMs = System.currentTimeMillis()
         }
     }
-    val age = idleAgeOf(idleSince, nowMs)
-        ?: return stringResource(R.string.dm_presence_away)
-    return stringResource(R.string.dm_presence_away_idle, idleAgeText(age))
+    return idleAgeOf(idleSince, nowMs)?.let { idleAgeText(it) }
 }
 
 @Composable

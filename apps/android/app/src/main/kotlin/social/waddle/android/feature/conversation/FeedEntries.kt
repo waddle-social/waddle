@@ -39,6 +39,8 @@ data class FeedEntry(
     /** XEP-0461 parent, when it is loaded. */
     val replyParent: TimelineItem?,
     val replyParentAuthorJid: String?,
+    /** Feed roots: who replied in this message's thread, and when. */
+    val threadActivity: ThreadActivity? = null,
 ) {
     val isCallRow: Boolean get() = isCallRow(row)
 }
@@ -107,6 +109,7 @@ fun feedEntriesOf(
     val rows = visibleRows(items, pending, context.threadId)
     val derived = Derived(
         replyCounts = if (context.threadId == null) replyCountsOf(items) else emptyMap(),
+        threadActivity = if (context.threadId == null) threadActivityOf(items, context.selfBareJid) else emptyMap(),
         byIdentity = quotedMessagesByIdentity(rows),
         dividerIndex = context.unreadAnchor?.dividerIndex(rows, context.newestHistoryLoaded)
             ?: unreadDividerIndex(rows, context.unreadAtOpen),
@@ -124,6 +127,7 @@ fun feedEntriesOf(
 /** Per-conversation lookups computed once per derivation. */
 private class Derived(
     val replyCounts: Map<String, Int>,
+    val threadActivity: Map<String, ThreadActivity>,
     val byIdentity: Map<String, TimelineItem>,
     val dividerIndex: Int,
 )
@@ -163,6 +167,9 @@ private fun place(
         replyCount = item?.let { replyCountOf(it, derived.replyCounts) } ?: 0,
         replyParent = parent,
         replyParentAuthorJid = item?.let { quotedAuthorJidOf(it, parent, context.selfBareJid) },
+        threadActivity = item?.let { root ->
+            (listOfNotNull(root.threadId) + root.identityIds).firstNotNullOfOrNull { derived.threadActivity[it] }
+        },
     )
     return Placed(entry, authorKey)
 }

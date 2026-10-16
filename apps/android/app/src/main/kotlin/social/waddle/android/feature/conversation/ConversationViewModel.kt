@@ -189,6 +189,7 @@ open class ConversationViewModel(
                 ),
                 isLoadingOlder = load.inFlight,
                 reachedHistoryStart = load.reachedStart,
+                awaitingFirstPage = !load.settled,
                 pinnedIds = pins,
                 canPin = io.canPin,
                 canModerate = moderate,
@@ -284,7 +285,7 @@ open class ConversationViewModel(
             val page = io.fetchHistory(pageSize, history.value.oldestMamId)
             history.update { current ->
                 if (page == null) {
-                    current.copy(inFlight = false)
+                    current.copy(inFlight = false, settled = true)
                 } else {
                     HistoryState(
                         inFlight = false,
@@ -292,6 +293,7 @@ open class ConversationViewModel(
                         oldestMamId = page.firstId ?: current.oldestMamId,
                         pagesFetched = current.pagesFetched + 1,
                         newestLoaded = true,
+                        settled = true,
                     )
                 }
             }
@@ -601,6 +603,8 @@ open class ConversationViewModel(
         val pagesFetched: Int = 0,
         /** A page fetched from the newest end has landed (paging starts there). */
         val newestLoaded: Boolean = false,
+        /** The first fetch answered (a page or a failure): the empty state may show. */
+        val settled: Boolean = false,
     )
 
     private companion object {
