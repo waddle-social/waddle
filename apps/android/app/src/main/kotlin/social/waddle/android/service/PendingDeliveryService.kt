@@ -6,6 +6,7 @@ import android.content.Intent
 import android.content.pm.ServiceInfo
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -66,21 +67,36 @@ class PendingDeliveryService : Service() {
         val graph = (application as WaddleApplication).graph
         val hold = graph.holdConnection()
         try {
-            val delivered = withTimeoutOrNull(WINDOW_MILLIS) {
-                graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
-                graph.sessionPrefs.outboundQueue.first { queue ->
-                    val queued = queue.mapTo(HashSet()) { it.clientStanzaId }
-                    pendingReplies.keys.removeAll { it !in queued }
-                    pendingReplies.isEmpty()
-                }
-                // Queued markers drain right after the ready pipeline's sends.
-                delay(MARKER_DRAIN_MILLIS)
-            } != null
+            // A failed store read counts as not delivered: flag and stop
+            // rather than crash with the replies still looking sent. A
+            // cancellation (a newer start took over) must propagate.
+            val delivered = try {
+                awaitDelivered()
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Exception) {
+                false
+            }
             if (!delivered) flagWaitingReplies()
             stopSelf(startId)
         } finally {
             hold.release()
         }
+    }
+
+    /** Ready, every pending reply acknowledged, markers drained: within the window? */
+    private suspend fun awaitDelivered(): Boolean {
+        val graph = (application as WaddleApplication).graph
+        return withTimeoutOrNull(WINDOW_MILLIS) {
+            graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
+            graph.sessionPrefs.outboundQueue.first { queue ->
+                val queued = queue.mapTo(HashSet()) { it.clientStanzaId }
+                pendingReplies.keys.removeAll { it !in queued }
+                pendingReplies.isEmpty()
+            }
+            // Queued markers drain right after the ready pipeline's sends.
+            delay(MARKER_DRAIN_MILLIS)
+        } != null
     }
 
     /** Replies still unacknowledged must not keep looking sent. */
