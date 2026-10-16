@@ -2,6 +2,7 @@ package social.waddle.android.feature.conversation
 
 import android.app.Application
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.ui.Modifier
@@ -9,12 +10,15 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsNotDisplayed
 import androidx.compose.ui.test.hasScrollAction
+import androidx.compose.ui.test.junit4.StateRestorationTester
 import androidx.compose.ui.test.junit4.createComposeRule
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performTouchInput
 import androidx.compose.ui.test.swipe
 import androidx.test.ext.junit.runners.AndroidJUnit4
+import org.junit.After
+import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -25,8 +29,11 @@ import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testMessage
 import social.waddle.android.theme.LocalConsistentHue
 import social.waddle.android.theme.WaddleTheme
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZoneOffset
+import java.util.Locale
+import java.util.TimeZone
 
 /** The timeline follows new messages for a reader at the newest edge. */
 @RunWith(AndroidJUnit4::class)
@@ -66,23 +73,56 @@ class TimelineFollowTest {
     private val history = (1..40).map(::item)
     private val shown = mutableStateOf(entries(history))
 
-    private fun showTimeline() {
-        compose.setContent {
-            CompositionLocalProvider(LocalConsistentHue provides { 0.0 }) {
-                WaddleTheme(themeMode = ThemeMode.LIGHT) {
-                    TimelineList(
-                        entries = shown.value,
-                        isLoadingOlder = false,
-                        reachedHistoryStart = true,
-                        onTopReached = {},
-                        actions = MessageRowActions(),
-                        context = MessageRowContext(selfBareJid = self),
-                        today = LocalDate.of(2026, 7, 15),
-                        modifier = Modifier.fillMaxSize(),
-                    )
-                }
+    private val sent = PendingMessage(
+        localId = 1,
+        stanzaId = null,
+        body = "my reply",
+        timestampMillis = Instant.parse("2026-07-15T11:00:00Z").toEpochMilli(),
+        failed = false,
+    )
+
+    /** The server's echo of [sent]: a stored row with a new key. */
+    private val echo = item(41).copy(id = "echo", body = "my reply", from = "$room/me", isMine = true)
+
+    private lateinit var savedLocale: Locale
+    private lateinit var savedZone: TimeZone
+
+    // Timestamps format with the JVM defaults; pin them like the
+    // screenshot tests so test order cannot change either's output.
+    @Before
+    fun pinLocale() {
+        savedLocale = Locale.getDefault()
+        savedZone = TimeZone.getDefault()
+        Locale.setDefault(Locale.UK)
+        TimeZone.setDefault(TimeZone.getTimeZone("UTC"))
+    }
+
+    @After
+    fun restoreLocale() {
+        Locale.setDefault(savedLocale)
+        TimeZone.setDefault(savedZone)
+    }
+
+    @Composable
+    private fun Timeline() {
+        CompositionLocalProvider(LocalConsistentHue provides { 0.0 }) {
+            WaddleTheme(themeMode = ThemeMode.LIGHT) {
+                TimelineList(
+                    entries = shown.value,
+                    isLoadingOlder = false,
+                    reachedHistoryStart = true,
+                    onTopReached = {},
+                    actions = MessageRowActions(),
+                    context = MessageRowContext(selfBareJid = self),
+                    today = LocalDate.of(2026, 7, 15),
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
+    }
+
+    private fun showTimeline() {
+        compose.setContent { Timeline() }
         compose.onNodeWithText("message 40").assertIsDisplayed()
     }
 
@@ -127,19 +167,43 @@ class TimelineFollowTest {
         showTimeline()
         compose.onNode(hasScrollAction()).performScrollToIndex(35)
 
-        val sent = PendingMessage(
-            localId = 1,
-            stanzaId = null,
-            body = "my reply",
-            timestampMillis = java.time.Instant.parse("2026-07-15T11:00:00Z").toEpochMilli(),
-            failed = false,
-        )
         shown.value = entries(history, pending = listOf(sent))
 
         compose.onNodeWithText("my reply").assertIsDisplayed()
     }
 
+    @Test
+    fun `the echo replacing a send does not stop the jump to it`() {
+        showTimeline()
+        compose.onNode(hasScrollAction()).performScrollToIndex(35)
+
+        compose.mainClock.autoAdvance = false
+        shown.value = entries(history, pending = listOf(sent))
+        repeat(JUMP_FRAMES_BEFORE_ECHO) { compose.mainClock.advanceTimeByFrame() }
+        shown.value = entries(history + echo)
+        compose.mainClock.autoAdvance = true
+
+        compose.onNodeWithText("my reply").assertIsDisplayed()
+    }
+
+    @Test
+    fun `a pending send already there on restore keeps the reader's place`() {
+        val restoration = StateRestorationTester(compose)
+        shown.value = entries(history, pending = listOf(sent))
+        restoration.setContent { Timeline() }
+        compose.onNode(hasScrollAction()).performScrollToIndex(36)
+        compose.onNodeWithText("message 5").assertIsDisplayed()
+
+        restoration.emulateSavedInstanceStateRestore()
+
+        compose.onNodeWithText("message 5").assertIsDisplayed()
+        compose.onNodeWithText("my reply").assertIsNotDisplayed()
+    }
+
     private companion object {
         const val NUDGE_PX = 60f
+
+        /** Long enough to be mid-jump from deep history, well short of its end. */
+        const val JUMP_FRAMES_BEFORE_ECHO = 3
     }
 }
