@@ -98,7 +98,15 @@ push_publish_jobs  (durable row, Push Service queue; provider
 | `waddle_push_outbox_retry_scheduled_total` | `drain_due_outbox_jobs` → RetryScheduled outcome (transient failure backoff) | `prometheus.rs` HELP text |
 | `waddle_push_outbox_dead_lettered_total` | `drain_due_outbox_jobs` → Failed outcome (permanent failure → terminal `failed` status) | `prometheus.rs` HELP text |
 
-Provider-side counters (`provider_sent`, `provider_rejected`, `expired_token`) land alongside #528/#529/#530 in a follow-up. Until those land, the alert *"provider keeps returning errors"* is NOT writable from the counters in this document — the closest signal is a sustained non-zero `waddle_push_outbox_dead_lettered_total` rate, which is alert-worthy but also fires during normal provider-side device revocation.
+Provider-side outcomes are the OTel family `waddle.push.provider{stage, provider}` (`telemetry/push_pipeline.rs`), emitted by `record_web_push_outcome`, `record_apns_outcome` and `record_fcm_outcome` once a provider has answered:
+
+| `stage` | Meaning |
+|---|---|
+| `provider_sent` | The provider accepted the notification. |
+| `provider_token_expired` | The provider reported the device gone (Web Push 404/410, APNs `Unregistered`, FCM `UNREGISTERED` / invalid token); the device is disabled. |
+| `provider_rejected` | The provider answered with an error (auth, sender mismatch, clock skew, payload too large, rate limit, 5xx, other rejection). |
+
+`provider` is one of `web_push`, `apns`, `fcm`. Network failures, timeouts and local preflight rejections carry no provider answer and are not counted here; they surface as `retry_scheduled` / `dead_lettered` on `waddle.push.pipeline`. The family is not zero-registered: a pod with no push registrations has nothing to report. The alert *"provider keeps returning errors"* is `rate(waddle.push.provider{stage="provider_rejected"})` per `provider`.
 
 ### Counter values reset on server restart
 
@@ -106,15 +114,9 @@ The counters live in process-local `AtomicU64` statics, so values reset to zero 
 
 ## Deferred to follow-up
 
-### Provider integration (per-blocker mapping)
+### Provider integration
 
-| Provider | Issue | AC items this PR cannot close until it lands |
-|---|---|---|
-| Web Push | #528 | `Web fake provider fanout` AC; `waddle_push_provider_sent_total{provider="web"}` counter; `waddle_push_provider_rejected_total{provider="web",reason}` counter |
-| APNs | #529 | `APNS fake provider fanout` AC; `waddle_push_provider_sent_total{provider="apns"}`; `waddle_push_provider_rejected_total{provider="apns",reason}`; `waddle_push_provider_expired_token_total{provider="apns"}` (APNs `Unregistered` device flow) |
-| FCM | #530 | `FCM fake provider fanout` AC; `waddle_push_provider_sent_total{provider="fcm"}`; `waddle_push_provider_rejected_total{provider="fcm",reason}`; `waddle_push_provider_expired_token_total{provider="fcm"}` (FCM `UNREGISTERED` device flow) |
-
-When a provider PR lands, the counter rename / label expansion in this document MUST land in the same PR — the labels and counter shape are part of the wire contract with operators. See the "Counter values reset on server restart" section above for the PromQL implications.
+All three providers deliver: Web Push (#528), APNs (#529) and FCM HTTP v1 (#530). Their fake-provider fanout suites are `tests/xep0357_push_service_web_push.rs`, `tests/xep0357_push_service_apns.rs` and `tests/xep0357_push_service_fcm.rs`. Any change to the `waddle.push.provider` stages, providers or attributes MUST update the table above in the same PR — the labels are part of the contract with operators.
 
 ### Note on `SuppressedReason::ProviderRejected` / `ProviderTokenExpired`
 
