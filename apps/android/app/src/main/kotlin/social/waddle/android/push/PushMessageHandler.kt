@@ -32,7 +32,7 @@ class PushMessageHandler(
         // for this install's keys is trusted.
         if (!decrypted) return
         // Another account's leftover registration: never show its traffic.
-        if (sessionManager.pushInstance() != instance) return
+        if (!sessionManager.ownsPushInstance(instance)) return
         val envelope = PushEnvelope.parse(content) ?: return
         if (!userPrefs.notificationsEnabled.first()) return
         // The open app shows the conversation live.
@@ -42,7 +42,11 @@ class PushMessageHandler(
             delay(liveGraceMillis)
             if (notifier.handledLive(envelope.item)) return
         }
-        notifier.postPushSummary(summarize(envelope))
+        // Re-checked under the notifier's lock: the account may have signed
+        // out (or switched) since, and sign-out clears under the same lock.
+        notifier.postPushSummary(summarize(envelope)) {
+            sessionManager.ownsPushInstance(instance) && !isAppVisible()
+        }
     }
 
     companion object {
@@ -55,7 +59,8 @@ class PushMessageHandler(
 interface PushSummarySink {
     fun handledLive(item: String): Boolean
 
-    suspend fun postPushSummary(summary: PushSummary)
+    /** Post [summary] unless [stillWanted], checked under the post lock, says no. */
+    suspend fun postPushSummary(summary: PushSummary, stillWanted: suspend () -> Boolean)
 }
 
 /**

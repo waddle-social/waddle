@@ -1,9 +1,11 @@
 package social.waddle.android.push
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.UnconfinedTestDispatcher
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -15,6 +17,7 @@ import social.waddle.android.client.FakeNetworkSignal
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
+import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
@@ -22,6 +25,7 @@ import social.waddle.android.client.push.pushInstanceFor
 import social.waddle.android.client.testSessionInfo
 import social.waddle.android.service.PushSummary
 import social.waddle.client.ffi.WaddleClientEvent
+import social.waddle.client.ffi.WaddleSaslCondition
 
 /** When a delivered push becomes a banner, and when the live path owns it. */
 @OptIn(ExperimentalCoroutinesApi::class)
@@ -30,10 +34,18 @@ class PushMessageHandlerTest {
         val live = mutableSetOf<String>()
         val posted = mutableListOf<PushSummary>()
 
+        /** When set, the post lock is "held": the recheck is kept for the test to run later. */
+        var holdPosts = false
+        var heldRecheck: (suspend () -> Boolean)? = null
+
         override fun handledLive(item: String): Boolean = item in live
 
-        override suspend fun postPushSummary(summary: PushSummary) {
-            posted += summary
+        override suspend fun postPushSummary(summary: PushSummary, stillWanted: suspend () -> Boolean) {
+            if (holdPosts) {
+                heldRecheck = stillWanted
+                return
+            }
+            if (stillWanted()) posted += summary
         }
     }
 
@@ -140,6 +152,42 @@ class PushMessageHandlerTest {
 
         assertEquals(1, harness.sink.posted.size)
         harness.manager.logout()
+    }
+
+    @Test
+    fun `signing out during the live grace drops the summary`() = runTest {
+        val harness = signedIn()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val handling = launch { harness.handler.handle(INSTANCE, DM_PUSH, decrypted = true) }
+        runCurrent()
+        harness.manager.logout()
+        advanceTimeBy(PushMessageHandler.LIVE_GRACE_MILLIS + 1)
+        handling.join()
+
+        assertTrue("the signed-out account's banner never posts", harness.sink.posted.isEmpty())
+    }
+
+    @Test
+    fun `a push rechecked as terminal auth signs out is dropped`() = runTest {
+        val harness = signedIn()
+        harness.sink.holdPosts = true
+        harness.handler.handle(INSTANCE, DM_PUSH, decrypted = true)
+        val recheck = checkNotNull(harness.sink.heldRecheck)
+
+        // Runs at the instant SignedOut is published, which is when the
+        // shell's cleanup clears the shade: the persisted owner is still
+        // there at that point, so the owner alone would let it post.
+        var wantedAtSignOut: Boolean? = null
+        launch(UnconfinedTestDispatcher(testScheduler)) {
+            harness.manager.appState.first { it == WaddleAppState.SignedOut }
+            wantedAtSignOut = recheck()
+        }
+        harness.factory.emit(WaddleClientEvent.AuthenticationFailed(WaddleSaslCondition.NOT_AUTHORIZED))
+        runCurrent()
+
+        assertEquals(false, wantedAtSignOut)
     }
 
     private companion object {

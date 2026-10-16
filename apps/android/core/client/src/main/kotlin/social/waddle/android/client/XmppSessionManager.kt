@@ -327,6 +327,14 @@ class XmppSessionManager(
     /** The persisted account's UnifiedPush instance, readable before restore. */
     suspend fun pushInstance(): String? = sessionPrefs.ownerBareJid.first()?.let(::pushInstanceFor)
 
+    /**
+     * Whether [instance] still belongs to a signed-in account. A terminal
+     * auth failure publishes [WaddleAppState.SignedOut] before it clears
+     * the persisted owner, so the owner alone can outlive the account.
+     */
+    suspend fun ownsPushInstance(instance: String): Boolean =
+        _appState.value != WaddleAppState.SignedOut && pushInstance() == instance
+
     private suspend fun pushOwnerFor(instance: String): String? =
         sessionPrefs.ownerBareJid.first()?.takeIf { pushInstanceFor(it) == instance }
 
@@ -430,7 +438,13 @@ class XmppSessionManager(
         conversationJid: String,
         isGroupchat: Boolean,
         explicitTarget: DisplayedTarget? = null,
-    ) = readState.markConversationDisplayed(conversationJid, isGroupchat, explicitTarget)
+    ): MarkerDispatch = readState.markConversationDisplayed(conversationJid, isGroupchat, explicitTarget)
+
+    /**
+     * Returns once no read is parked for [conversationJid] (a
+     * [MarkerDispatch.QUEUED] read has gone out on a ready session).
+     */
+    suspend fun awaitMarkerNotParked(conversationJid: String) = readState.awaitNotParked(conversationJid)
 
     /**
      * XEP-0430 server-side mark-read for one conversation (optionally

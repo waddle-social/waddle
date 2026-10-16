@@ -56,7 +56,42 @@ data class FeedContext(
     /** Incoming rows unread when the screen opened (divider placement). */
     val unreadAtOpen: Int,
     val zone: ZoneId = ZoneId.systemDefault(),
+    /**
+     * Pins the divider to the first unread message once it is known, so
+     * messages arriving while the screen is open do not move it.
+     */
+    val unreadAnchor: UnreadAnchor? = null,
+    /**
+     * The screen's newest history page has loaded. Until then the cached
+     * rows can be missing unread messages, so [unreadAnchor] does not pin.
+     */
+    val newestHistoryLoaded: Boolean = true,
 )
+
+/**
+ * The unread divider's position for one screen visit: the first unread
+ * message, i.e. the oldest of the last [unreadAtOpen] incoming rows sent
+ * before [openedAt] (later arrivals were not part of the count). It
+ * follows the count while the newest history is still loading (a stale
+ * cache can lack unread rows), then is held by identity from the first
+ * derivation after that page lands. Derivations run one at a time on
+ * the feed dispatcher.
+ *
+ * Archived rows carry the server's timestamp, so a server clock running
+ * ahead of the device can push a message sent just before opening past
+ * [openedAt]; the divider then lands one message late.
+ */
+class UnreadAnchor(private val unreadAtOpen: Int, private val openedAt: Instant) {
+    @Volatile
+    private var anchorKey: String? = null
+
+    internal fun dividerIndex(rows: List<ConversationRow>, newestHistoryLoaded: Boolean): Int {
+        anchorKey?.let { key -> return rows.indexOfFirst { rowKeyOf(it) == key } }
+        val index = unreadDividerIndex(rows, unreadAtOpen, sentBefore = openedAt)
+        if (newestHistoryLoaded && index >= 0) anchorKey = rowKeyOf(rows[index])
+        return index
+    }
+}
 
 /**
  * The visible rows ([visibleRows]) turned into feed entries, oldest first.
@@ -73,7 +108,8 @@ fun feedEntriesOf(
     val derived = Derived(
         replyCounts = if (context.threadId == null) replyCountsOf(items) else emptyMap(),
         byIdentity = quotedMessagesByIdentity(rows),
-        dividerIndex = unreadDividerIndex(rows, context.unreadAtOpen),
+        dividerIndex = context.unreadAnchor?.dividerIndex(rows, context.newestHistoryLoaded)
+            ?: unreadDividerIndex(rows, context.unreadAtOpen),
     )
     val out = ArrayList<FeedEntry>(rows.size)
     var previous: Placed? = null
@@ -158,13 +194,13 @@ private fun replyCountOf(item: TimelineItem, counts: Map<String, Int>): Int =
 
 /**
  * Index of the oldest of the last [unread] incoming stored rows, or -1.
- * Own rows never count as unread.
+ * Own rows never count as unread, nor rows sent at or after [sentBefore].
  */
-private fun unreadDividerIndex(rows: List<ConversationRow>, unread: Int): Int {
+private fun unreadDividerIndex(rows: List<ConversationRow>, unread: Int, sentBefore: Instant? = null): Int {
     if (unread <= 0) return -1
     val incoming = rows.indices.filter { index ->
         val item = (rows[index] as? ConversationRow.Stored)?.item
-        item != null && !item.isMine
+        item != null && !item.isMine && (sentBefore == null || sentAtOf(item) < sentBefore)
     }
     return incoming.getOrNull(incoming.size - unread) ?: -1
 }

@@ -37,6 +37,7 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePresence
+import java.time.Instant
 
 /**
  * Shared timeline/composer wiring for channels and DMs: store-backed
@@ -162,6 +163,9 @@ open class ConversationViewModel(
     private val unreadAtOpen: Int =
         if (threadId == null) unreadStore.counts.value[conversationJid] ?: 0 else 0
 
+    /** The divider stays on the first unread message for this visit. */
+    private val unreadAnchor = UnreadAnchor(unreadAtOpen, openedAt = Instant.ofEpochMilli(clock()))
+
     val uiState: StateFlow<ConversationUiState> =
         combine(
             timeline,
@@ -179,6 +183,8 @@ open class ConversationViewModel(
                         selfBareJid = selfBareJid,
                         pinnedIds = pins,
                         unreadAtOpen = unreadAtOpen,
+                        unreadAnchor = unreadAnchor,
+                        newestHistoryLoaded = load.newestLoaded,
                     ),
                 ),
                 isLoadingOlder = load.inFlight,
@@ -285,6 +291,7 @@ open class ConversationViewModel(
                         reachedStart = page.isComplete || page.messages.isEmpty(),
                         oldestMamId = page.firstId ?: current.oldestMamId,
                         pagesFetched = current.pagesFetched + 1,
+                        newestLoaded = true,
                     )
                 }
             }
@@ -592,6 +599,8 @@ open class ConversationViewModel(
         /** RSM `before` cursor: the mam id of the oldest fetched row. */
         val oldestMamId: String? = null,
         val pagesFetched: Int = 0,
+        /** A page fetched from the newest end has landed (paging starts there). */
+        val newestLoaded: Boolean = false,
     )
 
     private companion object {
