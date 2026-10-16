@@ -79,7 +79,7 @@ class WaddleConnectionService : Service() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Builder(this, NotificationChannels.CONNECTION)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_waddle)
             .setContentTitle(getString(R.string.app_name))
             .setContentText(statusText(state))
             .setOngoing(true)
@@ -97,8 +97,7 @@ class WaddleConnectionService : Service() {
             getString(R.string.connection_reconnecting, state.attempt)
         ConnectionState.Offline -> getString(R.string.connection_offline)
         ConnectionState.AuthFailed -> getString(R.string.connection_auth_failed)
-        ConnectionState.Failed -> getString(R.string.connection_failed)
-        ConnectionState.Idle -> getString(R.string.connection_status_idle)
+        ConnectionState.Idle, ConnectionState.Paused -> getString(R.string.connection_status_idle)
     }
 
     companion object {

@@ -33,6 +33,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import social.waddle.android.client.PeerAvatarSource
 import social.waddle.android.client.normalizedBareJid
+import social.waddle.android.theme.LocalConsistentHue
 import social.waddle.android.theme.consistentColor
 
 /**
@@ -63,7 +64,9 @@ fun PeerAvatar(
         modifier = modifier
             .size(size)
             .clip(CircleShape)
-            .background(if (image == null) consistentColor(displayName) else Color.Transparent),
+            // Initials are white on the identity colour: keep its daylight
+            // lightness in both themes so they stay legible.
+            .background(if (image == null) initialsFill(displayName) else Color.Transparent),
         contentAlignment = Alignment.Center,
     ) {
         if (image != null) {
@@ -85,6 +88,10 @@ fun PeerAvatar(
         }
     }
 }
+
+@Composable
+private fun initialsFill(displayName: String): Color =
+    consistentColor(displayName, onDark = false, hueOf = LocalConsistentHue.current)
 
 @Composable
 private fun rememberAvatarImage(source: PeerAvatarSource, key: String): ImageBitmap? {

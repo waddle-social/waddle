@@ -5,13 +5,23 @@ import android.net.ConnectivityManager
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.datastore.core.DataStore
 import androidx.datastore.preferences.core.Preferences
+import androidx.lifecycle.DefaultLifecycleObserver
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleOwner
+import androidx.lifecycle.ProcessLifecycleOwner
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import okhttp3.OkHttpClient
 import social.waddle.android.client.ClientFactory
@@ -29,6 +39,9 @@ import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
+import social.waddle.android.client.push.PushStatus
+import social.waddle.android.client.push.pushStatusOf
+import social.waddle.android.client.session.fixedRateTicks
 import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.call.CallMediaController
 import social.waddle.android.feature.call.CallSessionController
@@ -39,6 +52,12 @@ import social.waddle.android.feature.conversation.EncryptedAttachmentOpener
 import social.waddle.android.feature.conversation.StickerPackCreator
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
+import social.waddle.android.jid.localpartOf
+import social.waddle.android.push.ConnectionDemand
+import social.waddle.android.push.PushDistributor
+import social.waddle.android.push.PushMessageHandler
+import social.waddle.android.push.needsStream
+import social.waddle.android.push.pushSummaryOf
 import social.waddle.android.service.CallNotifier
 import social.waddle.android.service.ConnectionServiceController
 import social.waddle.android.service.MessageNotifier
@@ -68,6 +87,11 @@ class AppGraph(
      * hermetic suites never open a real mic/camera or WebRTC stack.
      */
     callMediaControllerFactory: ((CoroutineScope) -> CallMediaController)? = null,
+    /**
+     * Overrides the connection demand. Hermetic tests pass an always-on
+     * flow: they drive sessions without a process lifecycle.
+     */
+    connectionWanted: StateFlow<Boolean>? = null,
 ) {
     private val appContext: Context = context.applicationContext
 
@@ -94,12 +118,34 @@ class AppGraph(
     private val networkSignal: NetworkSignal = networkSignal
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))
 
+    /** What needs the XMPP stream right now (see [ConnectionDemand]). */
+    val connectionDemand: ConnectionDemand = ConnectionDemand(applicationScope)
+
     val sessionManager: XmppSessionManager = XmppSessionManager(
         sessionPrefs = sessionPrefs,
         clientFactory = clientFactory,
         networkSignal = this.networkSignal,
         userPrefs = userPrefs,
+        livenessTicks = fixedRateTicks(),
+        connectionWanted = connectionWanted ?: connectionDemand.wanted,
     )
+
+    /** Push delivery for the signed-in account, known from disk on a cold start. */
+    val pushStatus: StateFlow<PushStatus?> =
+        combine(sessionManager.pushState, sessionPrefs.ownerBareJid, ::pushStatusOf)
+            .stateIn(applicationScope, SharingStarted.Eagerly, null)
+
+    /**
+     * Whether to hold the stream in the background: the user's choice, or
+     * by default whenever push is not delivering. `null` until loaded.
+     */
+    val stayConnected: StateFlow<Boolean?> =
+        // Unknown until BOTH stores have loaded: guessing from one would
+        // briefly hold the stream (or start the service) in push mode.
+        combine(userPrefs.stayConnected, pushStatus) { choice, status ->
+            status?.let { choice ?: (it != PushStatus.ACTIVE) }
+        }
+            .stateIn(applicationScope, SharingStarted.Eagerly, null)
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
 
@@ -122,7 +168,9 @@ class AppGraph(
     val serviceController: ConnectionServiceController = ConnectionServiceController(
         context = appContext,
         appState = appState,
+        stayConnected = stayConnected,
         scope = applicationScope,
+        onForeground = sessionManager::onAppForeground,
     )
 
     val attachmentUploader: AttachmentUploader = AttachmentUploader(
@@ -183,8 +231,64 @@ class AppGraph(
         },
     )
 
+    val pushDistributor: PushDistributor = PushDistributor(
+        context = appContext,
+        scope = applicationScope,
+        sessionManager = sessionManager,
+        sessionPrefs = sessionPrefs,
+        userPrefs = userPrefs,
+    )
+
+    val pushMessageHandler: PushMessageHandler = PushMessageHandler(
+        sessionManager = sessionManager,
+        userPrefs = userPrefs,
+        notifier = messageNotifier,
+        isAppVisible = {
+            ProcessLifecycleOwner.get().lifecycle.currentState.isAtLeast(Lifecycle.State.STARTED)
+        },
+        summarize = { envelope -> pushSummaryOf(envelope, appContext.resources, ::conversationTitleOf) },
+    )
+
+    /** Keep the stream up until [ConnectionDemand.Lease.release] (notification actions). */
+    fun holdConnection(): ConnectionDemand.Lease = connectionDemand.acquire()
+
+    private fun conversationTitleOf(conversationJid: String, isGroupchat: Boolean): String {
+        if (!isGroupchat) return localpartOf(conversationJid)
+        val name = sessionManager.roomStore.topology.value.channels
+            .firstOrNull { it.roomJid == conversationJid }
+            ?.name
+        return "#" + (name ?: localpartOf(conversationJid))
+    }
+
+    /** Feed the connection demand from the process, the delivery mode and calls. */
+    private fun startConnectionDemand() {
+        ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
+            override fun onStart(owner: LifecycleOwner) = connectionDemand.setProcessStarted(true)
+
+            override fun onStop(owner: LifecycleOwner) = connectionDemand.setProcessStarted(false)
+        })
+        applicationScope.launch {
+            stayConnected.filterNotNull().collect(connectionDemand::setStayConnected)
+        }
+        applicationScope.launch {
+            // An ended call waits in its slot until the UI dismisses it;
+            // only ringing or live calls need signalling.
+            sessionManager.callStore.state.collect { connectionDemand.setCallActive(it.needsStream()) }
+        }
+        // A newly learned or rotated server key needs a fresh endpoint.
+        applicationScope.launch {
+            sessionManager.pushState
+                .map { it?.advertised?.kid }
+                .distinctUntilChanged()
+                .filterNotNull()
+                .collect { runCatching { pushDistributor.onKeyChanged() } }
+        }
+        pushDistributor.refresh()
+    }
+
     /** Wire the long-lived collectors and kick off session restore. */
     fun start() {
+        startConnectionDemand()
         serviceController.start()
         messageNotifier.start(applicationScope)
         callSessionController.start()
@@ -215,6 +319,9 @@ class AppGraph(
                 if (state == WaddleAppState.SignedOut) {
                     messageNotifier.clearAll()
                     encryptedAttachmentOpener.clearCache()
+                    // Also covers a server-side sign-out that already
+                    // wiped the session: the endpoint must die with it.
+                    runCatching { pushDistributor.unregister() }
                 }
             }
         }
@@ -226,6 +333,7 @@ class AppGraph(
         messageNotifier.clearAll()
         _currentSession.value = null
         sessionManager.logout()
+        runCatching { pushDistributor.unregister() }
         // After local state is gone: revoking the server session may block
         // for the full HTTP timeout and must never delay the visible
         // sign-out.

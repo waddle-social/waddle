@@ -26,8 +26,9 @@ class XmppEventBridgeTest {
         bridge.onEvent(WaddleClientEvent.Presence(presence))
         assertEquals(XmppEvent.Presence(presence), received())
 
+        // Archive results are ingested from the fetch's page, never as
+        // events: the echo is dropped so the next event is the ack.
         bridge.onEvent(WaddleClientEvent.MamResult(archived))
-        assertEquals(XmppEvent.MamResult(archived), received())
 
         bridge.onEvent(WaddleClientEvent.DeliveryAcked("stanza-1"))
         assertEquals(XmppEvent.DeliveryAcked("stanza-1"), received())

@@ -8,9 +8,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.Group
-import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
@@ -78,7 +76,6 @@ fun GroupDmScreen(
     // bookmarks), so the live store name wins over the nav argument.
     val title = groupDms.firstOrNull { it.roomJid == roomJid }?.name ?: name
 
-    var menuOpen by remember { mutableStateOf(false) }
     var renameOpen by remember { mutableStateOf(false) }
     var addMemberOpen by remember { mutableStateOf(false) }
     var leaveOpen by remember { mutableStateOf(false) }
@@ -101,41 +98,33 @@ fun GroupDmScreen(
                     contentDescription = stringResource(R.string.members_action),
                 )
             }
-            IconButton(
-                onClick = { menuOpen = true },
-                modifier = Modifier.testTag(GroupDmTestTags.MENU_ACTION),
-            ) {
-                Icon(
-                    Icons.Outlined.MoreVert,
-                    contentDescription = stringResource(R.string.group_dm_more_actions),
-                )
-            }
-            DropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                DropdownMenuItem(
-                    text = { Text(text = stringResource(R.string.group_dm_rename_action)) },
-                    onClick = {
-                        menuOpen = false
-                        renameOpen = true
-                    },
-                    modifier = Modifier.testTag(GroupDmTestTags.RENAME_MENU_ITEM),
-                )
-                DropdownMenuItem(
-                    text = { Text(text = stringResource(R.string.group_dm_add_member_action)) },
-                    onClick = {
-                        menuOpen = false
-                        addMemberOpen = true
-                    },
-                    modifier = Modifier.testTag(GroupDmTestTags.ADD_MEMBER_MENU_ITEM),
-                )
-                DropdownMenuItem(
-                    text = { Text(text = stringResource(R.string.group_dm_leave_action)) },
-                    onClick = {
-                        menuOpen = false
-                        leaveOpen = true
-                    },
-                    modifier = Modifier.testTag(GroupDmTestTags.LEAVE_MENU_ITEM),
-                )
-            }
+        },
+        overflowTestTag = GroupDmTestTags.MENU_ACTION,
+        overflowItems = { dismiss ->
+            DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.group_dm_rename_action)) },
+                onClick = {
+                    dismiss()
+                    renameOpen = true
+                },
+                modifier = Modifier.testTag(GroupDmTestTags.RENAME_MENU_ITEM),
+            )
+            DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.group_dm_add_member_action)) },
+                onClick = {
+                    dismiss()
+                    addMemberOpen = true
+                },
+                modifier = Modifier.testTag(GroupDmTestTags.ADD_MEMBER_MENU_ITEM),
+            )
+            DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.group_dm_leave_action)) },
+                onClick = {
+                    dismiss()
+                    leaveOpen = true
+                },
+                modifier = Modifier.testTag(GroupDmTestTags.LEAVE_MENU_ITEM),
+            )
         },
     )
 

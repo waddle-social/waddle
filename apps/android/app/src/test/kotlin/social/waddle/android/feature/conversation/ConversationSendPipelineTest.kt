@@ -68,6 +68,8 @@ class ConversationSendPipelineTest {
     }
 
     private fun createViewModel() = ConversationViewModel(
+        // Virtual time: derive the feed on the test Main dispatcher.
+        feedDispatcher = Dispatchers.Main,
         conversationJid = "room@muc.waddle.test",
         isGroupchat = true,
         timeline = store.timeline("room@muc.waddle.test"),

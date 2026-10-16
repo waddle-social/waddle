@@ -111,6 +111,8 @@ class ConversationViewModelTest {
     }
 
     private fun createViewModel(): ConversationViewModel = ConversationViewModel(
+        // Virtual time: derive the feed on the test Main dispatcher.
+        feedDispatcher = Dispatchers.Main,
         conversationJid = ROOM_JID,
         isGroupchat = true,
         timeline = store.timeline(ROOM_JID),
@@ -467,6 +469,8 @@ class ConversationViewModelTest {
     fun `dm action targets prefer the author-assigned id over the local stanza id`() = runTest {
         val dmStore = TimelineStore().apply { setOwnBareJid(OWN_JID) }
         val dmViewModel = ConversationViewModel(
+            // Virtual time: derive the feed on the test Main dispatcher.
+            feedDispatcher = Dispatchers.Main,
             conversationJid = "alice@waddle.test",
             isGroupchat = false,
             timeline = dmStore.timeline("alice@waddle.test"),
@@ -490,6 +494,8 @@ class ConversationViewModelTest {
     @Test
     fun `thread screens never mark the parent conversation displayed`() = runTest {
         val threadViewModel = ConversationViewModel(
+            // Virtual time: derive the feed on the test Main dispatcher.
+            feedDispatcher = Dispatchers.Main,
             conversationJid = ROOM_JID,
             isGroupchat = true,
             timeline = store.timeline(ROOM_JID),
@@ -577,6 +583,8 @@ class ConversationViewModelTest {
             MentionCandidate(display = "bob", uri = "xmpp:bob@waddle.test", isBroadcast = false),
         )
         val viewModel = ConversationViewModel(
+            // Virtual time: derive the feed on the test Main dispatcher.
+            feedDispatcher = Dispatchers.Main,
             conversationJid = ROOM_JID,
             isGroupchat = true,
             timeline = store.timeline(ROOM_JID),

@@ -5,6 +5,10 @@
 # Usage:
 #   ./scripts/build-android-rust.sh [--debug] [--skip-bindings]
 #
+# Default profile is `mobile` (server/Cargo.toml): speed-optimised (opt-level
+# 3) with full LTO. `--debug` builds the unoptimised dev profile, which is
+# only fit for proving the cross-compile; never distribute it.
+#
 # Outputs:
 #   apps/android/core/client/src/main/jniLibs/{arm64-v8a,x86_64}/libwaddle_xmpp_client_ffi.so
 #   apps/android/core/client/src/main/kotlin/social/waddle/client/ffi/waddle_xmpp_client.kt (committed)
@@ -27,12 +31,12 @@ NDK_VERSION="28.2.13676358"
 # = minSdk of the Android app.
 ANDROID_API="34"
 
-PROFILE="release"
-CARGO_FLAG="--release"
+PROFILE="mobile"
+CARGO_FLAG="--profile mobile"
 SKIP_BINDINGS=0
 for arg in "$@"; do
   case "$arg" in
-    --debug) PROFILE="debug"; CARGO_FLAG="" ;;
+    --debug) PROFILE="dev"; CARGO_FLAG="" ;;
     --skip-bindings) SKIP_BINDINGS=1 ;;
     *) echo "unknown argument: $arg" >&2; exit 1 ;;
   esac

@@ -3,6 +3,7 @@ package social.waddle.android.feature.conversation
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
@@ -15,11 +16,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Chat
 import androidx.compose.material.icons.outlined.Call
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material.icons.outlined.Notifications
 import androidx.compose.material.icons.outlined.NotificationsOff
 import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material.icons.outlined.Videocam
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -32,7 +36,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -66,6 +69,7 @@ import social.waddle.android.client.store.authorBareJidOf
 import social.waddle.android.feature.search.MessageSearchSheet
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.feature.search.MessageSearchViewModel
+import social.waddle.android.ui.WaddleTopBar
 import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
@@ -90,8 +94,12 @@ fun ConversationScreen(
     subtitle: String? = null,
     /** Origin whose cached XEP-0363 preview images may load. */
     trustedMediaOrigin: String? = null,
-    /** Extra host-specific top-bar actions (room members/settings). */
+    /** Host icons before search (call controls, members). Keep it to one or two. */
     extraTopBarActions: @Composable () -> Unit = {},
+    /** Host entries for the overflow menu; call `dismiss` before acting. */
+    overflowItems: @Composable (dismiss: () -> Unit) -> Unit = {},
+    /** Test tag for the overflow button. */
+    overflowTestTag: String = ConversationTopBarTestTags.OVERFLOW,
     /** DM-only call entry points; `null` (channels, threads) hides them. */
     onStartCall: ((video: Boolean) -> Unit)? = null,
     /** Host slot rendered above the timeline (channel call banner). */
@@ -153,14 +161,19 @@ fun ConversationScreen(
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
+            WaddleTopBar(
                 title = {
                     Column {
-                        Text(text = title, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        Text(
+                            text = title,
+                            style = MaterialTheme.typography.titleMedium,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                        )
                         subtitle?.let {
                             Text(
                                 text = it,
-                                style = MaterialTheme.typography.labelSmall,
+                                style = MaterialTheme.typography.labelMedium,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1,
                                 overflow = TextOverflow.Ellipsis,
@@ -178,54 +191,54 @@ fun ConversationScreen(
                 },
                 actions = {
                     extraTopBarActions()
-                    if (onStartCall != null) {
-                        IconButton(
-                            onClick = { onStartCall(false) },
-                            modifier = Modifier.testTag(ConversationCallTestTags.AUDIO_CALL_BUTTON),
-                        ) {
-                            Icon(
-                                Icons.Outlined.Call,
-                                contentDescription = stringResource(R.string.call_start_audio),
-                            )
-                        }
-                        IconButton(
-                            onClick = { onStartCall(true) },
-                            modifier = Modifier.testTag(ConversationCallTestTags.VIDEO_CALL_BUTTON),
-                        ) {
-                            Icon(
-                                Icons.Outlined.Videocam,
-                                contentDescription = stringResource(R.string.call_start_video),
-                            )
-                        }
-                    }
-                    if (onOpenThread != null && state.threads.isNotEmpty()) {
-                        IconButton(onClick = { threadsOverviewOpen = true }) {
-                            Icon(
-                                Icons.AutoMirrored.Outlined.Chat,
-                                contentDescription = stringResource(R.string.threads_overview_title),
-                            )
-                        }
-                    }
+                    if (onStartCall != null) CallMenuAction(onStartCall)
                     if (searchTarget != null) {
                         IconButton(onClick = { searchOpen = true }) {
-                            Icon(
-                                Icons.Outlined.Search,
-                                contentDescription = stringResource(R.string.search_messages),
-                            )
+                            Icon(Icons.Outlined.Search, contentDescription = stringResource(R.string.search_messages))
                         }
                     }
-                    // XEP-0492 bell: parent conversations only — a
-                    // thread screen shares its parent's setting.
-                    if (!viewModel.isThread) {
-                        IconButton(onClick = { notifySheetOpen = true }) {
+                    var overflowOpen by remember { mutableStateOf(false) }
+                    val dismiss = { overflowOpen = false }
+                    Box {
+                        IconButton(onClick = { overflowOpen = true }, modifier = Modifier.testTag(overflowTestTag)) {
                             Icon(
-                                if (notifyMode == WaddleNotifyMode.NEVER) {
-                                    Icons.Outlined.NotificationsOff
-                                } else {
-                                    Icons.Outlined.Notifications
-                                },
-                                contentDescription = stringResource(R.string.notify_settings_title),
+                                Icons.Outlined.MoreVert,
+                                contentDescription = stringResource(R.string.conversation_more),
                             )
+                        }
+                        DropdownMenu(expanded = overflowOpen, onDismissRequest = dismiss) {
+                            if (onOpenThread != null && state.threads.isNotEmpty()) {
+                                DropdownMenuItem(
+                                    text = { Text(text = stringResource(R.string.threads_overview_title)) },
+                                    leadingIcon = { Icon(Icons.AutoMirrored.Outlined.Chat, contentDescription = null) },
+                                    onClick = {
+                                        dismiss()
+                                        threadsOverviewOpen = true
+                                    },
+                                )
+                            }
+                            // XEP-0492: parent conversations only — a
+                            // thread shares its parent's setting.
+                            if (!viewModel.isThread) {
+                                DropdownMenuItem(
+                                    text = { Text(text = stringResource(R.string.notify_settings_title)) },
+                                    leadingIcon = {
+                                        Icon(
+                                            if (notifyMode == WaddleNotifyMode.NEVER) {
+                                                Icons.Outlined.NotificationsOff
+                                            } else {
+                                                Icons.Outlined.Notifications
+                                            },
+                                            contentDescription = null,
+                                        )
+                                    },
+                                    onClick = {
+                                        dismiss()
+                                        notifySheetOpen = true
+                                    },
+                                )
+                            }
+                            overflowItems(dismiss)
                         }
                     }
                 },
@@ -240,27 +253,31 @@ fun ConversationScreen(
                 .imePadding(),
         ) {
             aboveTimeline()
+            val rowActions = remember(viewModel, onOpenThread) {
+                MessageRowActions(
+                    onLongPress = { item -> sheetTarget = item },
+                    onToggleReaction = viewModel::toggleReaction,
+                    onOpenThread = onOpenThread?.let { open -> { item -> open(viewModel.threadIdFor(item)) } },
+                    onRetry = viewModel::retry,
+                )
+            }
+            val rowContext = remember(selfBareJid, authorPresence, declaredBotJids, trustedMediaOrigin) {
+                MessageRowContext(
+                    selfBareJid = selfBareJid,
+                    authorPresence = authorPresence,
+                    declaredBotJids = declaredBotJids,
+                    trustedMediaOrigin = trustedMediaOrigin,
+                )
+            }
             TimelineList(
-                rows = state.rows,
+                entries = state.entries,
                 isLoadingOlder = state.isLoadingOlder,
+                reachedHistoryStart = state.reachedHistoryStart,
                 onTopReached = viewModel::loadOlder,
-                onRetry = viewModel::retry,
+                actions = rowActions,
+                context = rowContext,
                 modifier = Modifier.weight(1f),
-                pinnedIds = state.pinnedIds,
-                threadReplyCounts = state.threadReplyCounts,
-                onLongPress = { item -> sheetTarget = item },
-                onToggleReaction = viewModel::toggleReaction,
-                onOpenThread = onOpenThread?.let { open ->
-                    {
-                        item ->
-                            open(viewModel.threadIdFor(item))
-                        }
-                },
                 onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
-                selfBareJid = selfBareJid,
-                authorPresence = authorPresence,
-                declaredBotJids = declaredBotJids,
-                trustedMediaOrigin = trustedMediaOrigin,
             )
             TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)
             val slashCommands = slashCommandHost
@@ -518,6 +535,42 @@ fun ConversationScreen(
 
 /** Shared VM key: the picker and create sheets address ONE instance. */
 private const val STICKER_PACKS_VIEW_MODEL_KEY = "sticker-packs"
+
+/** One call icon; voice or video from its menu. */
+@Composable
+private fun CallMenuAction(onStartCall: (video: Boolean) -> Unit) {
+    var open by remember { mutableStateOf(false) }
+    Box {
+        IconButton(onClick = { open = true }) {
+            Icon(Icons.Outlined.Call, contentDescription = stringResource(R.string.call_start))
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.call_start_audio)) },
+                leadingIcon = { Icon(Icons.Outlined.Call, contentDescription = null) },
+                onClick = {
+                    open = false
+                    onStartCall(false)
+                },
+                modifier = Modifier.testTag(ConversationCallTestTags.AUDIO_CALL_BUTTON),
+            )
+            DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.call_start_video)) },
+                leadingIcon = { Icon(Icons.Outlined.Videocam, contentDescription = null) },
+                onClick = {
+                    open = false
+                    onStartCall(true)
+                },
+                modifier = Modifier.testTag(ConversationCallTestTags.VIDEO_CALL_BUTTON),
+            )
+        }
+    }
+}
+
+/** Semantics tags for the conversation top bar. */
+object ConversationTopBarTestTags {
+    const val OVERFLOW = "conversation-overflow"
+}
 
 /** Semantics tags for the DM call entry points, shared with tests. */
 object ConversationCallTestTags {

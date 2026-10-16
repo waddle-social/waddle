@@ -2,6 +2,7 @@ package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEventBridge
@@ -17,17 +18,31 @@ import social.waddle.client.ffi.WaddleSendMessageOutcome
  */
 internal class ActiveSession {
     /**
-     * The single linearization point for ordinary transport use and logout
-     * revocation.  `sendIfCurrent` holds it through the FFI invocation, so a
-     * send that observed a live lease owns that client until it returns;
-     * logout waits, then retires the client before its call-only teardown.
+     * The linearization point between ordinary transport use and account
+     * revocation (logout, relogin, terminal auth failure).
+     *
+     * It is a readers/writer fence, not a mutex. Ordinary operations hold a
+     * shared permit for the whole FFI invocation, so an operation that
+     * observed a live lease owns that client until it returns; revocation
+     * takes every permit, so it waits for in-flight work and no new work
+     * starts until it is done. Ordinary operations do NOT serialise against
+     * each other: the Rust client handles concurrent IQs, and a 30-second
+     * history query must never hold up a send, a typing state or a read
+     * marker.
+     *
+     * Attempt bookkeeping (publish/end of one physical connection) does not
+     * change account authority and only takes [stateLock], so a dead
+     * stream's teardown never waits behind calls that are timing out on it.
      *
      * Callers may hold `OutboundMessenger.sendMutex` before this fence.  No
-     * code under this fence acquires that mutex or `lifecycleMutex`, and FFI
-     * sends must not synchronously re-enter the manager, avoiding a lock
-     * cycle across suspension.
+     * code under this fence acquires that mutex or `lifecycleMutex`, FFI
+     * calls must not synchronously re-enter the manager, and fenced
+     * operations must not nest.
      */
-    private val transportFence = Mutex()
+    private val transportFence = RevocationFence()
+
+    /** Guards the per-attempt slots below; never held across a suspension in FFI. */
+    private val stateLock = Mutex()
 
     /** Result of a generation-fenced message send attempt. */
     sealed interface LeaseSendResult {
@@ -134,14 +149,22 @@ internal class ActiveSession {
     @Volatile
     private var outboundOwner: OwnerLease? = null
 
-    /** Called under [transportFence] by lifecycle transitions. */
+    /**
+     * Account-authority transitions: wait out every in-flight operation,
+     * then mutate under [stateLock] so a concurrent attempt publish/end
+     * observes either the old or the new authority, never half of each.
+     */
+    private suspend inline fun <T> revoking(crossinline block: () -> T): T =
+        transportFence.exclusive { stateLock.withLock { block() } }
+
+    /** Called under [revoking] by lifecycle transitions. */
     private fun advanceGenerationLocked() {
         generation += 1
         outboundOwner = null
     }
 
     /** Fence a fresh login or terminal session failure against active sends. */
-    suspend fun advanceGeneration() = transportFence.withLock {
+    suspend fun advanceGeneration() = revoking {
         advanceGenerationLocked()
     }
 
@@ -152,14 +175,14 @@ internal class ActiveSession {
      * a same-account relogin must not let a delayed old failure retire the
      * successor between those two operations.
      */
-    suspend fun advanceGenerationIfCurrent(lease: OwnerLease): Boolean = transportFence.withLock {
-        if (outboundOwner != lease) return@withLock false
+    suspend fun advanceGenerationIfCurrent(lease: OwnerLease): Boolean = revoking {
+        if (outboundOwner != lease) return@revoking false
         advanceGenerationLocked()
         true
     }
 
     /** Publish a new account's authority after login has finished clearing old state. */
-    suspend fun activateOwner(ownerBareJid: String) = transportFence.withLock {
+    suspend fun activateOwner(ownerBareJid: String) = revoking {
         ownBareJid = ownerBareJid
         outboundOwner = OwnerLease(ownerBareJid = ownerBareJid, generation = generation)
     }
@@ -169,13 +192,13 @@ internal class ActiveSession {
      * returned connection is call-teardown-only; it is never reinstalled
      * as the active transport.
      */
-    suspend fun revokeOutboundAuthority(): RetiredCallConnection? = transportFence.withLock {
+    suspend fun revokeOutboundAuthority(): RetiredCallConnection? = revoking {
         val retired = client?.let { RetiredCallConnection(it, ownFullJid) }
         advanceGenerationLocked()
         ownBareJid = null
         ownFullJid = null
         client = null
-        return retired
+        retired
     }
 
     /** Capture the current account authority for a durable operation. */
@@ -212,7 +235,7 @@ internal class ActiveSession {
      * bridge remains attempt-private until [publishReady] linearizes it with
      * the client and full JID under [transportFence].
      */
-    suspend fun beginAttempt(): Attempt? = transportFence.withLock {
+    suspend fun beginAttempt(): Attempt? = stateLock.withLock {
         val lease = outboundOwner ?: return@withLock null
         Attempt(lease, XmppEventBridge())
     }
@@ -228,7 +251,7 @@ internal class ActiveSession {
         readyClient: WaddleClientInterface,
         readyOwnFullJid: String,
         onPublished: () -> Unit,
-    ): Boolean = transportFence.withLock {
+    ): Boolean = stateLock.withLock {
         if (!isCurrent(attempt.lease)) return@withLock false
         bridge = attempt.bridge
         client = readyClient
@@ -244,7 +267,7 @@ internal class ActiveSession {
      * delayed old attempt must never erase a successor that has reached
      * ready state.
      */
-    suspend fun endAttempt(attempt: Attempt, endingClient: WaddleClientInterface) = transportFence.withLock {
+    suspend fun endAttempt(attempt: Attempt, endingClient: WaddleClientInterface) = stateLock.withLock {
         // Both the lease and client identity must match.  An old attempt can
         // finish after a same-account relogin, so comparing the client alone
         // is insufficient to protect the successor's slot.
@@ -260,8 +283,8 @@ internal class ActiveSession {
      */
     suspend fun <T> invoke(
         op: suspend (WaddleClientInterface) -> T,
-    ): Invocation<T> = transportFence.withLock {
-        val liveClient = client ?: return@withLock Invocation.NotConnected
+    ): Invocation<T> = transportFence.shared {
+        val liveClient = client ?: return@shared Invocation.NotConnected
         Invocation.Completed(op(liveClient))
     }
 
@@ -274,9 +297,9 @@ internal class ActiveSession {
     suspend fun <T> invokeIfCurrent(
         lease: OwnerLease,
         op: suspend (WaddleClientInterface) -> T,
-    ): LeaseInvocation<T> = transportFence.withLock {
-        if (!isCurrent(lease)) return@withLock LeaseInvocation.Stale
-        val liveClient = client ?: return@withLock LeaseInvocation.NotConnected
+    ): LeaseInvocation<T> = transportFence.shared {
+        if (!isCurrent(lease)) return@shared LeaseInvocation.Stale
+        val liveClient = client ?: return@shared LeaseInvocation.NotConnected
         LeaseInvocation.Completed(op(liveClient))
     }
 
@@ -285,8 +308,8 @@ internal class ActiveSession {
      * current. Logout waits on this fence before it clears stores, preventing
      * a completed old read from repopulating a successor's state.
      */
-    suspend fun applyIfCurrent(lease: OwnerLease, action: () -> Unit): Boolean = transportFence.withLock {
-        if (!isCurrent(lease)) return@withLock false
+    suspend fun applyIfCurrent(lease: OwnerLease, action: () -> Unit): Boolean = transportFence.shared {
+        if (!isCurrent(lease)) return@shared false
         action()
         true
     }
@@ -296,8 +319,8 @@ internal class ActiveSession {
      * names [lease]. This is for durable session projections: completing an
      * old write after logout could otherwise restore state into a successor.
      */
-    suspend fun runIfCurrent(lease: OwnerLease, action: suspend () -> Unit): Boolean = transportFence.withLock {
-        if (!isCurrent(lease)) return@withLock false
+    suspend fun runIfCurrent(lease: OwnerLease, action: suspend () -> Unit): Boolean = transportFence.shared {
+        if (!isCurrent(lease)) return@shared false
         action()
         true
     }
@@ -311,8 +334,8 @@ internal class ActiveSession {
     suspend fun <T> runIfCurrentResult(
         lease: OwnerLease,
         action: suspend () -> T,
-    ): LeaseInvocation<T> = transportFence.withLock {
-        if (!isCurrent(lease)) return@withLock LeaseInvocation.Stale
+    ): LeaseInvocation<T> = transportFence.shared {
+        if (!isCurrent(lease)) return@shared LeaseInvocation.Stale
         LeaseInvocation.Completed(action())
     }
 
@@ -381,12 +404,12 @@ internal class ActiveSession {
     suspend fun sendIfCurrent(
         lease: OwnerLease,
         op: suspend (WaddleClientInterface) -> WaddleSendMessageOutcome,
-    ): LeaseSendResult = transportFence.withLock {
-        if (!isCurrent(lease)) return@withLock LeaseSendResult.Stale
-        // The fence stays held across `op`: either logout revoked first and
-        // this returns Stale without calling a retired client, or this
-        // invocation owns the selected client and logout waits for completion.
-        val liveClient = client ?: return@withLock LeaseSendResult.Attempted(WaddleSendMessageOutcome.NotConnected)
+    ): LeaseSendResult = transportFence.shared {
+        if (!isCurrent(lease)) return@shared LeaseSendResult.Stale
+        // The shared permit stays held across `op`: either logout revoked
+        // first and this returns Stale without calling a retired client, or
+        // this invocation owns the selected client and logout waits for it.
+        val liveClient = client ?: return@shared LeaseSendResult.Attempted(WaddleSendMessageOutcome.NotConnected)
         try {
             LeaseSendResult.Attempted(op(liveClient))
         } catch (cancellation: CancellationException) {
@@ -427,5 +450,46 @@ internal class ActiveSession {
         } catch (_: Throwable) {
             null
         }
+    }
+}
+
+/**
+ * Readers/writer fence over a fair [Semaphore]. Shared holders take one
+ * permit; an exclusive holder takes all of them, one by one, under
+ * [writers] so two exclusive acquirers cannot deadlock each other with
+ * partial sets. The semaphore is FIFO, so once an exclusive acquirer is
+ * waiting, later shared acquirers queue behind it: revocation cannot be
+ * starved by a stream of sends.
+ */
+internal class RevocationFence(@PublishedApi internal val permits: Int = DEFAULT_PERMITS) {
+    @PublishedApi internal val semaphore = Semaphore(permits)
+
+    @PublishedApi internal val writers = Mutex()
+
+    suspend inline fun <T> shared(block: () -> T): T {
+        semaphore.acquire()
+        try {
+            return block()
+        } finally {
+            semaphore.release()
+        }
+    }
+
+    suspend inline fun <T> exclusive(block: () -> T): T = writers.withLock {
+        var held = 0
+        try {
+            repeat(permits) {
+                semaphore.acquire()
+                held += 1
+            }
+            block()
+        } finally {
+            repeat(held) { semaphore.release() }
+        }
+    }
+
+    private companion object {
+        /** Upper bound on concurrent FFI operations; far above real fan-out. */
+        const val DEFAULT_PERMITS = 64
     }
 }

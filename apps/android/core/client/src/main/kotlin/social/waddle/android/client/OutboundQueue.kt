@@ -52,11 +52,17 @@ class OutboundQueue(
      * A snapshot means each retained row is attempted at most once per
      * fresh ready session. Before each send the durable row is rechecked,
      * so an acknowledgement racing the drain prevents a stale replay.
+     *
+     * [include] selects the rows this pass replays. A ready session may
+     * drain in complementary passes (rows whose destination is reachable
+     * now, then the rest); the passes MUST partition the queue, or a row
+     * that was `Sent` but not yet acknowledged would be replayed twice.
      */
     suspend fun drain(
         ownerBareJid: String,
         send: suspend (QueuedOutboundMessage) -> WaddleSendMessageOutcome,
         onDropped: suspend (QueuedOutboundMessage, WaddleSendMessageOutcome) -> Unit,
+        include: (QueuedOutboundMessage) -> Boolean = { true },
     ) {
         // Cross-account guard: drop anything another account enqueued
         // (e.g. a send committed in the logout teardown window) BEFORE
@@ -64,7 +70,7 @@ class OutboundQueue(
         // current account.
         pruneForeign(ownerBareJid)
         val snapshot = sessionPrefs.outboundQueue.first()
-            .filter { it.ownerBareJid == ownerBareJid }
+            .filter { it.ownerBareJid == ownerBareJid && include(it) }
         for (message in snapshot) {
             if (!contains(ownerBareJid, message.clientStanzaId)) continue
             when (val outcome = send(message)) {
@@ -79,6 +85,11 @@ class OutboundQueue(
             }
         }
     }
+
+    /** Rooms that queued groupchat sends from [ownerBareJid] are waiting on. */
+    suspend fun pendingRooms(ownerBareJid: String): Set<String> = sessionPrefs.outboundQueue.first()
+        .filter { it.ownerBareJid == ownerBareJid && it.isGroupchat }
+        .mapTo(mutableSetOf()) { it.conversationJid }
 
     /** Delete the exact row owned by [ownerBareJid] after its SM ack. */
     suspend fun acknowledge(ownerBareJid: String, clientStanzaId: String) {

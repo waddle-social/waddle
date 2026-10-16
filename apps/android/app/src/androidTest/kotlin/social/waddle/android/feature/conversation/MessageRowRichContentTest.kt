@@ -21,9 +21,9 @@ import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddlePresence
 import social.waddle.client.ffi.WaddleSharedFile
 
-/** Rich-content rendering in MessageCard: markup, previews, stickers, badges. */
+/** Rich-content rendering in MessageRow: markup, previews, stickers, badges. */
 @RunWith(AndroidJUnit4::class)
-class MessageCardRichContentTest {
+class MessageRowRichContentTest {
 
     @get:Rule
     val composeRule = createAndroidComposeRule<ComponentActivity>()
@@ -43,11 +43,13 @@ class MessageCardRichContentTest {
         authorPresence: Map<String, WaddlePresence> = emptyMap(),
     ) {
         composeRule.setContent {
-            MessageCard(
-                row = ConversationRow.Stored(itemOf(message)),
-                onRetry = {},
-                authorPresence = authorPresence,
-                trustedMediaOrigin = "https://xmpp.waddle.test",
+            MessageRow(
+                entry = feedEntryOf(itemOf(message)),
+                actions = MessageRowActions(),
+                context = MessageRowContext(
+                    authorPresence = authorPresence,
+                    trustedMediaOrigin = "https://xmpp.waddle.test",
+                ),
             )
         }
     }

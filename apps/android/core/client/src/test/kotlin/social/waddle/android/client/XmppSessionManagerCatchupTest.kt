@@ -66,16 +66,17 @@ class XmppSessionManagerCatchupTest {
         )
 
         // An older MAM backfill row must never move the cursor backwards.
-        harness.factory.emit(
-            WaddleClientEvent.MamResult(
-                testArchivedMessage(
-                    mamId = "mam-old",
-                    stanzaId = "s-old",
-                    from = "alice@waddle.test",
-                    to = "icepuma@waddle.test",
-                    messageType = "chat",
-                    timestamp = "2026-07-15T09:00:00Z",
-                ),
+        harness.manager.deliverArchivedPage(
+            harness.factory.clients.last(),
+            "alice@waddle.test",
+            isGroupchat = false,
+            testArchivedMessage(
+                mamId = "mam-old",
+                stanzaId = "s-old",
+                from = "alice@waddle.test",
+                to = "icepuma@waddle.test",
+                messageType = "chat",
+                timestamp = "2026-07-15T09:00:00Z",
             ),
         )
         runCurrent()
@@ -197,6 +198,88 @@ class XmppSessionManagerCatchupTest {
     }
 
     // ── XEP-0402 bookmark-driven rejoin ──────────────────────────────
+
+    @Test
+    fun `queued dm sends replay before topology discovery answers`() = runTest {
+        val harness = Harness(this)
+        harness.factory.onCreate = { client -> client.topology.delayMillis = TOPOLOGY_STALL_MILLIS }
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        assertTrue(harness.manager.sendChatMessage("alice@waddle.test", "typed offline").queued)
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.single()
+        assertEquals("discovery still parked", 0, client.topology.calls)
+        assertEquals(listOf("alice@waddle.test" to "typed offline"), client.sendCalls)
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `queued room sends join their room first and replay before the remaining joins`() = runTest {
+        val harness = Harness(this)
+        harness.prefs.setJoinedRooms(setOf("quiet@muc.waddle.test", "busy@muc.waddle.test"))
+        harness.factory.onCreate = { client ->
+            client.topology.delayMillis = TOPOLOGY_STALL_MILLIS
+            client.topology.result = WaddleTopology(
+                spaces = emptyList(),
+                channels = listOf(testChannel("general@muc.waddle.test", autojoin = true)),
+            )
+        }
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        assertTrue(harness.manager.sendGroupchatMessage("busy@muc.waddle.test", "typed offline").queued)
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.single()
+        assertEquals(listOf("busy@muc.waddle.test"), client.joinRoomCalls.map { it.first })
+        assertEquals(listOf("busy@muc.waddle.test" to "typed offline"), client.sendCalls)
+
+        advanceTimeBy(TOPOLOGY_STALL_MILLIS + 1)
+        runCurrent()
+
+        assertEquals(
+            setOf("busy@muc.waddle.test", "quiet@muc.waddle.test", "general@muc.waddle.test"),
+            client.joinRoomCalls.map { it.first }.toSet(),
+        )
+        assertEquals("the priority room joins once", 3, client.joinRoomCalls.size)
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `the two replay passes partition the queue`() = runTest {
+        val harness = Harness(this)
+        harness.factory.onCreate = { client ->
+            client.topology.result = WaddleTopology(
+                spaces = emptyList(),
+                channels = listOf(testChannel("general@muc.waddle.test", autojoin = true)),
+            )
+        }
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        // An autojoin-only room is not known before discovery, so its
+        // send waits for the second pass; the DM goes in the first.
+        assertTrue(harness.manager.sendGroupchatMessage("general@muc.waddle.test", "room").queued)
+        assertTrue(harness.manager.sendChatMessage("alice@waddle.test", "dm").queued)
+
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+
+        val client = harness.factory.clients.single()
+        assertEquals(
+            "each row replays exactly once, the room after its join",
+            listOf("alice@waddle.test" to "dm", "general@muc.waddle.test" to "room"),
+            client.sendCalls,
+        )
+        assertEquals(listOf("general@muc.waddle.test"), client.joinRoomCalls.map { it.first })
+
+        harness.manager.logout()
+    }
 
     @Test
     fun `join set unions autojoin channels with persisted-intent rooms`() = runTest {
@@ -350,5 +433,9 @@ class XmppSessionManagerCatchupTest {
         harness.manager.logout()
 
         assertTrue(harness.manager.notifySettingsStore.entries.value.isEmpty())
+    }
+
+    private companion object {
+        const val TOPOLOGY_STALL_MILLIS = 10_000L
     }
 }

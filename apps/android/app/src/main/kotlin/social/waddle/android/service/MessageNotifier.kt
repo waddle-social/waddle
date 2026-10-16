@@ -26,10 +26,22 @@ import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.jid.localpartOf
+import social.waddle.android.push.PushSummarySink
 import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleNotifyMode
 import java.time.Instant
 import java.time.OffsetDateTime
+
+/** What a content-free push notification shows for one conversation. */
+data class PushSummary(
+    val conversationJid: String,
+    val isGroupchat: Boolean,
+    val isMention: Boolean,
+    /** The archived message's XEP-0359 stanza-id (dedup key). */
+    val item: String,
+    val title: String,
+    val text: String,
+)
 
 /**
  * MessagingStyle notifications for messages arriving while the app is
@@ -49,7 +61,7 @@ class MessageNotifier(
     /** XEP-0492 effective-mode snapshot (see [NotificationPolicy]). */
     private val notifyModeFor: (conversationJid: String, isGroupchat: Boolean) -> WaddleNotifyMode =
         { _, _ -> WaddleNotifyMode.ALWAYS },
-) {
+) : PushSummarySink {
     private val policy = NotificationPolicy(
         userPrefs = userPrefs,
         currentSession = currentSession,
@@ -77,6 +89,16 @@ class MessageNotifier(
      * process-death read dispatch intact instead of wiping the extras.
      */
     private val displayedTargets = HashMap<String, XmppSessionManager.DisplayedTarget>()
+
+    /**
+     * XEP-0359 ids of messages that already arrived live, newest last. A
+     * push for one of them (room pushes fire even while connected) must
+     * not raise a second, content-free banner over the live handling.
+     */
+    private val liveItems = LinkedHashSet<String>()
+
+    /** Conversations showing a push summary (not a live notification). */
+    private val summaryKinds = HashMap<String, SummaryKind>()
 
     fun start(scope: CoroutineScope) {
         scope.launch {
@@ -141,6 +163,22 @@ class MessageNotifier(
         postNotification(conversationJid, isGroupchat, messages, silent = false, replyFailed = true)
     }
 
+    /**
+     * A direct reply is queued but the server has not acknowledged it:
+     * say so (quietly) instead of leaving it looking sent. It goes out
+     * with the next connection.
+     */
+    suspend fun notifyReplyWaiting(conversationJid: String, isGroupchat: Boolean) = postMutex.withLock {
+        val messages = synchronized(historyLock) { history[conversationJid]?.toList() } ?: return@withLock
+        postNotification(
+            conversationJid,
+            isGroupchat,
+            messages,
+            silent = true,
+            subText = context.getString(R.string.notification_reply_waiting),
+        )
+    }
+
     /** Sign-out: drop every message notification and the cached history. */
     suspend fun clearAll() {
         // Under the post mutex: a message racing sign-out could otherwise
@@ -150,6 +188,8 @@ class MessageNotifier(
             synchronized(historyLock) {
                 history.clear()
                 displayedTargets.clear()
+                liveItems.clear()
+                summaryKinds.clear()
             }
             replyDeliveries.clear()
             NotificationManagerCompat.from(context).cancelAll()
@@ -162,6 +202,7 @@ class MessageNotifier(
             synchronized(historyLock) {
                 history.remove(conversationJid)
                 displayedTargets.remove(conversationJid)
+                summaryKinds.remove(conversationJid)
             }
             NotificationManagerCompat.from(context)
                 .cancel(conversationJid, MESSAGE_NOTIFICATION_ID)
@@ -173,10 +214,12 @@ class MessageNotifier(
         synchronized(historyLock) {
             history.remove(conversationJid)
             displayedTargets.remove(conversationJid)
+            summaryKinds.remove(conversationJid)
         }
     }
 
     private suspend fun onMessage(message: WaddleMessage) {
+        rememberLiveItem(message)
         val decision = policy.decide(message) ?: return
 
         val person = Person.Builder().setName(decision.sender).setKey(decision.sender).build()
@@ -189,6 +232,8 @@ class MessageNotifier(
             decision.displayedTarget?.let { target ->
                 synchronized(historyLock) { displayedTargets[decision.conversationJid] = target }
             }
+            // The live notification replaces any summary for the conversation.
+            synchronized(historyLock) { summaryKinds.remove(decision.conversationJid) }
             val messages = appendToHistory(decision.conversationJid, entry)
             val silent = !userPrefs.messageSoundsEnabled.first()
             postNotification(
@@ -200,6 +245,80 @@ class MessageNotifier(
             )
         }
     }
+
+    private fun rememberLiveItem(message: WaddleMessage) {
+        val ids = message.stanzaIds.map { it.id } + listOfNotNull(message.stanzaId)
+        if (ids.isEmpty()) return
+        synchronized(historyLock) {
+            liveItems += ids
+            while (liveItems.size > MAX_LIVE_ITEMS) liveItems.remove(liveItems.first())
+        }
+    }
+
+    /** Whether the live path already handled the message with stanza-id [item]. */
+    override fun handledLive(item: String): Boolean = synchronized(historyLock) { item in liveItems }
+
+    /**
+     * A content-free push (the payload names the conversation, never the
+     * message). Skipped when the live path already handled [item]; under
+     * [postMutex] like every post, so it cannot race sign-out's clear or a
+     * live notification for the same conversation.
+     *
+     * When a live MessagingStyle notification for the conversation is in
+     * this process, the summary joins its history (keeping its content
+     * and actions) instead of replacing it. Otherwise it posts or updates
+     * a summary notification; an update alerts again only when a mention
+     * follows plain messages.
+     */
+    override suspend fun postPushSummary(summary: PushSummary) = postMutex.withLock {
+        if (handledLive(summary.item)) return@withLock
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return@withLock
+        val conversationJid = summary.conversationJid
+        val silent = !userPrefs.messageSoundsEnabled.first()
+        val liveHistory = synchronized(historyLock) { history[conversationJid]?.isNotEmpty() == true }
+        if (liveHistory) {
+            val sender = Person.Builder().setName(summary.title).setKey(summary.title).build()
+            val entry = NotificationCompat.MessagingStyle.Message(summary.text, System.currentTimeMillis(), sender)
+            val messages = appendToHistory(conversationJid, entry)
+            postNotification(conversationJid, summary.isGroupchat, messages, silent, mention = summary.isMention)
+        } else {
+            val previous = synchronized(historyLock) { summaryKinds[conversationJid] }
+            val alert = previous == null || (summary.isMention && previous == SummaryKind.MESSAGES)
+            val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
+                .setSmallIcon(R.drawable.ic_stat_waddle)
+                .setContentTitle(summary.title)
+                .setContentText(summary.text)
+                .setGroup(conversationJid)
+                .setAutoCancel(true)
+                .setOnlyAlertOnce(!alert)
+                .setSilent(silent)
+                .setCategory(NotificationCompat.CATEGORY_MESSAGE)
+                .setPriority(
+                    if (summary.isMention) NotificationCompat.PRIORITY_HIGH else NotificationCompat.PRIORITY_DEFAULT,
+                )
+                .setContentIntent(contentIntent(conversationJid))
+                // No mark-read action: a summary names no message, so there
+                // is no marker to send.
+                .addAction(replyAction(conversationJid, summary.isGroupchat))
+                .setDeleteIntent(dismissIntent(conversationJid))
+            NotificationManagerCompat.from(context).notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
+            synchronized(historyLock) {
+                val mentioned = summary.isMention || previous == SummaryKind.MENTION
+                summaryKinds[conversationJid] = if (mentioned) SummaryKind.MENTION else SummaryKind.MESSAGES
+            }
+        }
+        synchronized(historyLock) {
+            liveItems += summary.item
+            while (liveItems.size > MAX_LIVE_ITEMS) liveItems.remove(liveItems.first())
+        }
+    }
+
+    /** What a showing summary notification already announced. */
+    private enum class SummaryKind { MESSAGES, MENTION }
 
     private fun appendToHistory(
         conversationJid: String,
@@ -220,6 +339,7 @@ class MessageNotifier(
         silent: Boolean,
         replyFailed: Boolean = false,
         mention: Boolean = false,
+        subText: String? = null,
     ) {
         val displayedTarget = synchronized(historyLock) { displayedTargets[conversationJid] }
         val granted = ContextCompat.checkSelfPermission(
@@ -236,7 +356,7 @@ class MessageNotifier(
         messages.forEach(style::addMessage)
 
         val builder = NotificationCompat.Builder(context, NotificationChannels.MESSAGES)
-            .setSmallIcon(R.drawable.ic_launcher_foreground)
+            .setSmallIcon(R.drawable.ic_stat_waddle)
             .setStyle(style)
             .setGroup(conversationJid)
             .setAutoCancel(true)
@@ -253,6 +373,8 @@ class MessageNotifier(
             .setDeleteIntent(dismissIntent(conversationJid))
         if (replyFailed) {
             builder.setSubText(context.getString(R.string.notification_reply_failed))
+        } else if (subText != null) {
+            builder.setSubText(subText)
         }
         // Tag = JID, fixed id: String.hashCode() collides across arbitrary
         // remote-chosen JIDs (and with the foreground-service id), which
@@ -309,7 +431,7 @@ class MessageNotifier(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_MUTABLE,
         )
         return NotificationCompat.Action.Builder(
-            R.drawable.ic_launcher_foreground,
+            R.drawable.ic_stat_waddle,
             context.getString(R.string.notification_reply_label),
             pendingIntent,
         )
@@ -342,7 +464,7 @@ class MessageNotifier(
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE,
         )
         return NotificationCompat.Action.Builder(
-            R.drawable.ic_launcher_foreground,
+            R.drawable.ic_stat_waddle,
             context.getString(R.string.notification_mark_read_label),
             pendingIntent,
         ).build()
@@ -374,6 +496,7 @@ class MessageNotifier(
          */
         const val MESSAGE_NOTIFICATION_ID = 2
         const val MAX_HISTORY = 25
+        const val MAX_LIVE_ITEMS = 256
         const val SELF_PERSON_KEY = "me"
     }
 }

@@ -13,6 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -22,8 +24,12 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.calls.CallStore
 import social.waddle.android.client.calls.ClientCallSignaling
+import social.waddle.android.client.prefs.PushEndpoint
+import social.waddle.android.client.prefs.PushState
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.push.PushRegistrar
+import social.waddle.android.client.push.pushInstanceFor
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ConnectionLoop
 import social.waddle.android.client.session.ConnectionLoopCallbacks
@@ -65,8 +71,16 @@ class XmppSessionManager(
     reconnectPolicy: ReconnectPolicy = ReconnectPolicy(),
     private val dispatcher: CoroutineDispatcher = Dispatchers.Default,
     connectTimeoutMillis: Long = CONNECT_TIMEOUT_MILLIS,
+    /** Periodic liveness probe cadence while ready; production passes `fixedRateTicks()`. */
+    livenessTicks: Flow<Unit> = emptyFlow(),
     /** Test seam for the stale terminal-auth completion race. */
     private val beforeTerminalAuthCommit: suspend () -> Unit = {},
+    /**
+     * Whether anything needs the stream now (foreground, stay-connected
+     * mode, a call, an inline reply). Always-on unless the app supplies
+     * its demand; while false the session stays signed in but closed.
+     */
+    connectionWanted: StateFlow<Boolean> = MutableStateFlow(true),
     /** Wall clock for the peer-avatar TTLs. */
     clock: () -> Long = System::currentTimeMillis,
 ) {
@@ -135,9 +149,19 @@ class XmppSessionManager(
             persistDmSeen(peer, timestamp)
         }
 
-    private val messenger = OutboundMessenger(activeSession, stores, sessionPrefs, router::dispatch)
+    private val messenger: OutboundMessenger = OutboundMessenger(
+        activeSession,
+        stores,
+        sessionPrefs,
+        router::dispatch,
+        // A send the transport refused while "ready" is the strongest
+        // hint the stream is half-open: prove it or replace it now
+        // instead of leaving the queued row waiting for a reconnect that
+        // nothing else would trigger.
+        onTransportError = { loop.requestLivenessCheck() },
+    )
 
-    private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs)
+    private val verbs = ConversationVerbs(activeSession, stores, sessionPrefs, router::ingestArchivedPage)
 
     private val roomAdmin = RoomAdminVerbs(activeSession, stores)
 
@@ -165,7 +189,7 @@ class XmppSessionManager(
     private val catchup =
         SessionCatchup(sessionPrefs, stores, resume, verbs, messenger, readState, activeSession)
 
-    private val loop = ConnectionLoop(
+    private val loop: ConnectionLoop = ConnectionLoop(
         clientFactory = clientFactory,
         networkSignal = networkSignal,
         sessionPrefs = sessionPrefs,
@@ -179,11 +203,18 @@ class XmppSessionManager(
         ),
         reconnectPolicy = reconnectPolicy,
         connectTimeoutMillis = connectTimeoutMillis,
+        livenessTicks = livenessTicks,
+        wanted = connectionWanted,
     )
 
     val connectionState: StateFlow<ConnectionState> = loop.state
 
-    /** Every domain event, after store fan-out; drops oldest under burst. */
+    private val pushRegistrar = PushRegistrar(sessionPrefs.push, activeSession)
+
+    /** Persisted push delivery state (any account; check [PushState.owner]). */
+    val pushState: Flow<PushState?> = sessionPrefs.push.state
+
+    /** Every domain event, after store fan-out. */
     val events: SharedFlow<XmppEvent> = router.events
 
     /**
@@ -219,6 +250,18 @@ class XmppSessionManager(
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
+        // While the stream is still ours: disable this device at the Push
+        // Service so it stops pushing for an account that is leaving.
+        // Bounded like the call teardown below.
+        activeSession.captureOwnerLease()?.let { lease ->
+            try {
+                withTimeoutOrNull(LOGOUT_PUSH_TEARDOWN_MILLIS) { pushRegistrar.retireForLogout(lease) }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Best-effort: the distributor unregister kills the endpoint anyway.
+            }
+        }
         // Fence ALL ordinary outbound work before the call teardown can
         // suspend. The one captured connection is call-teardown-only;
         // concurrent sends cannot capture a lease, persist a row, or use
@@ -253,6 +296,39 @@ class XmppSessionManager(
         loop.resetToIdle()
         _appState.value = WaddleAppState.SignedOut
     }
+
+    /**
+     * The UnifiedPush distributor handed out [endpoint] for [instance].
+     * Recorded only when [instance] is the signed-in account's (see
+     * [pushInstanceFor]); a stale callback for another account is
+     * ignored. Registration with the Push Service follows on the next
+     * ready stream, or at once if one is ready.
+     */
+    suspend fun recordPushEndpoint(instance: String, endpoint: PushEndpoint): Boolean {
+        val owner = pushOwnerFor(instance) ?: return false
+        sessionPrefs.push.update(owner) { it.copy(endpoint = endpoint, failed = false) }
+        pushRegistrar.requestReconcile()
+        return true
+    }
+
+    /** The distributor dropped [instance]'s endpoint; the device is retired next. */
+    suspend fun recordPushEndpointRevoked(instance: String) {
+        val owner = pushOwnerFor(instance) ?: return
+        sessionPrefs.push.update(owner) { it.copy(endpoint = null) }
+        pushRegistrar.requestReconcile()
+    }
+
+    /** The app asked the distributor to register under VAPID key [kid]. */
+    suspend fun recordPushDistributorRequest(instance: String, kid: String) {
+        val owner = pushOwnerFor(instance) ?: return
+        sessionPrefs.push.update(owner) { it.copy(requestedKid = kid) }
+    }
+
+    /** The persisted account's UnifiedPush instance, readable before restore. */
+    suspend fun pushInstance(): String? = sessionPrefs.ownerBareJid.first()?.let(::pushInstanceFor)
+
+    private suspend fun pushOwnerFor(instance: String): String? =
+        sessionPrefs.ownerBareJid.first()?.takeIf { pushInstanceFor(it) == instance }
 
     // UI passthroughs (M1): the app module never touches the FFI client
     // directly — [ConversationVerbs], [OutboundMessenger], and
@@ -547,9 +623,27 @@ class XmppSessionManager(
         submission: ExtensionCommandSubmission,
     ): ExtensionCommandCall = extensions.submitExtensionCommandForm(submission)
 
-    /** Manual retry from the Failed banner: fresh budget immediately. */
+    /** Manual retry from the connection banner: skip the remaining backoff. */
     fun requestReconnect() {
         loop.requestReconnect()
+    }
+
+    /**
+     * The app came to the foreground. A ready stream may have died while
+     * the process was frozen (Doze, cached-app freezer): probe it. A
+     * stream that is not ready stops waiting out its backoff.
+     */
+    fun onAppForeground() {
+        loop.requestLivenessCheck()
+        loop.requestReconnect()
+    }
+
+    /**
+     * Something suggests the ready stream may have missed traffic (a push
+     * arrived for a message the stream should have carried): probe it.
+     */
+    fun requestLivenessCheck() {
+        loop.requestLivenessCheck()
     }
 
     /** UI hook: the DM conversation is on screen — persist recency. */
@@ -575,11 +669,13 @@ class XmppSessionManager(
             // stream's first post-ready event is dispatched.
             if (freshStream) stores.occupantJidStore.clear()
         }
-        // Topology discovery now heads the sequential ready pipeline:
-        // the bookmark-driven rejoin derives its join set from it.
+        // The ready pipeline: queued sends, topology, joins, catch-up.
         attemptScope.launch {
             if (activeSession.isCurrent(lease)) catchup.onSessionReady(session, freshStream)
         }
+        // Push registration runs beside the ready pipeline, never in it:
+        // a slow Push Service must not hold up queued sends or catch-up.
+        if (activeSession.isCurrent(lease)) pushRegistrar.onReady(attemptScope, lease)
         // Once per connect: retry the XEP-0166 mixer terminates a
         // previous group-call leave still owes (terminate-pending
         // session-cache entries survive process death and reconnects).
@@ -667,6 +763,9 @@ class XmppSessionManager(
     )
 
     companion object {
+        /** Sign-out waits at most this long to disable the push device. */
+        const val LOGOUT_PUSH_TEARDOWN_MILLIS = 3_000L
+
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = ConnectionLoop.CONNECT_TIMEOUT_MILLIS
 

@@ -59,6 +59,8 @@ class ConversationModerationTest {
     }
 
     private fun createViewModel() = ConversationViewModel(
+        // Virtual time: derive the feed on the test Main dispatcher.
+        feedDispatcher = Dispatchers.Main,
         conversationJid = ROOM_JID,
         isGroupchat = true,
         timeline = store.timeline(ROOM_JID),

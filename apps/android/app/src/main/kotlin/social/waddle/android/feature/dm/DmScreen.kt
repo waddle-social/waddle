@@ -5,8 +5,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.GroupAdd
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -84,18 +85,18 @@ fun DmScreen(
             controller = rememberExtensionCommandController(graph),
             roomJid = null,
         ),
-        extraTopBarActions = {
-            // "Start a group from this DM": the create sheet opens
-            // with the peer prefilled (web group-DM spawn parity).
-            IconButton(
-                onClick = { newGroupOpen = true },
+        overflowItems = { dismiss ->
+            // "Start a group from this DM": the create sheet opens with
+            // the peer prefilled (web group-DM spawn parity).
+            DropdownMenuItem(
+                text = { Text(text = stringResource(R.string.dm_start_group_action)) },
+                leadingIcon = { Icon(Icons.Outlined.GroupAdd, contentDescription = null) },
+                onClick = {
+                    dismiss()
+                    newGroupOpen = true
+                },
                 modifier = Modifier.testTag(DmScreenTestTags.START_GROUP_ACTION),
-            ) {
-                Icon(
-                    Icons.Outlined.GroupAdd,
-                    contentDescription = stringResource(R.string.dm_start_group_action),
-                )
-            }
+            )
         },
         onStartCall = { video ->
             pendingCallVideo = video

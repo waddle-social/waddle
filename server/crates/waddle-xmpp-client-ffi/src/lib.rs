@@ -56,6 +56,8 @@ mod ping_tests;
 #[cfg(test)]
 mod profile_verbs_tests;
 #[cfg(test)]
+mod push_tests;
+#[cfg(test)]
 mod room_admin_tests;
 #[cfg(test)]
 mod safety_scores_tests;
@@ -172,14 +174,15 @@ impl WaddleClient {
             }
         };
 
-        let client_config = match ClientConfig::new(ConnectionConfig::new(domain), transport, auth)
-        {
-            Ok(c) => c,
-            Err(e) => {
-                self.emit_error(format!("Invalid client config: {e}"));
-                return;
-            }
-        };
+        let mut client_config =
+            match ClientConfig::new(ConnectionConfig::new(domain), transport, auth) {
+                Ok(c) => c,
+                Err(e) => {
+                    self.emit_error(format!("Invalid client config: {e}"));
+                    return;
+                }
+            };
+        apply_resumability(&mut client_config, self.config.resumable);
 
         let xmpp_client = match XmppClient::new(client_config) {
             Ok(c) => c,
@@ -234,6 +237,18 @@ impl WaddleClient {
             // its normal reconnect loop can proceed.
             self.listener.on_event(WaddleClientEvent::Disconnected);
         }
+    }
+}
+
+/// Map [`WaddleConfig::resumable`] onto the XEP-0198 `<enable/>` the
+/// client sends: a non-resumable session asks for no resumption at all
+/// (no `resume`, no `max`), so the server ends it on the first drop.
+pub(crate) fn apply_resumability(config: &mut ClientConfig, resumable: bool) {
+    let stream_management = &mut config.session.stream_management;
+    stream_management.allow_resume = resumable;
+    if !resumable {
+        stream_management.resume_max = None;
+        stream_management.resume_state = None;
     }
 }
 

@@ -42,6 +42,7 @@ fn test_client(listener: RecordingListener) -> Arc<WaddleClient> {
             jid: "alice@waddle.test".to_owned(),
             access_token: "token".to_owned(),
             resource: "test".to_owned(),
+            resumable: true,
         },
         Box::new(listener),
     )

@@ -6,6 +6,7 @@ import androidx.datastore.preferences.core.emptyPreferences
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -58,6 +59,7 @@ import social.waddle.client.ffi.WaddlePepProfile
 import social.waddle.client.ffi.WaddlePinEntry
 import social.waddle.client.ffi.WaddlePushDeviceCredentials
 import social.waddle.client.ffi.WaddlePushEnvironment
+import social.waddle.client.ffi.WaddlePushVapidLookup
 import social.waddle.client.ffi.WaddleRegisterDeviceResult
 import social.waddle.client.ffi.WaddleRoomBot
 import social.waddle.client.ffi.WaddleRoomConfig
@@ -108,6 +110,14 @@ class InMemoryPreferencesDataStore : DataStore<Preferences> {
 class FakeNetworkSignal(initiallyOnline: Boolean = true) : NetworkSignal {
     val state = MutableStateFlow(initiallyOnline)
     override val online: Flow<Boolean> = state
+
+    private val changes = MutableSharedFlow<Unit>(extraBufferCapacity = 8)
+    override val networkChanges: Flow<Unit> = changes
+
+    /** Simulate the default network being replaced (Wi-Fi ↔ cellular). */
+    fun handoff() {
+        changes.tryEmit(Unit)
+    }
 }
 
 /**
@@ -859,10 +869,24 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         disconnectCalls += 1
     }
 
-    override suspend fun pingServer() = Unit
+    /** XEP-0199 probes issued; [ping] decides each probe's fate. */
+    @Volatile
+    var pingCalls = 0
+
+    /** Default: the server answers. Throw to fail, suspend to time out. */
+    @Volatile
+    var ping: suspend () -> Unit = {}
+
+    override suspend fun pingServer() {
+        pingCalls += 1
+        ping()
+    }
 
     /** Topology fake state: canned result, call count, failure knob. */
     val topology = FakeTopologyState()
+
+    /** XEP-0357 Push Service the fake answers for. */
+    val push = FakePushServiceState()
 
     override suspend fun discoverTopology(): WaddleTopology = topology.discoverTopology()
 
@@ -1413,13 +1437,42 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
 
     override suspend fun pinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
     override suspend fun unpinDirectMessage(peerJid: String, targetStanzaId: String): Boolean = unused()
-    override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean = unused()
+    override suspend fun disablePushDevice(pushServiceJid: String, node: String, deviceId: String): Boolean =
+        push.disable(RecordedPushDisable(pushServiceJid, node, deviceId))
+
     override suspend fun disablePushNotifications(pushServiceJid: String, node: String?): Boolean = unused()
-    override suspend fun enablePushNotifications(pushServiceJid: String, node: String): Boolean = unused()
+
+    override suspend fun enablePushNotifications(pushServiceJid: String, node: String): Boolean =
+        push.enable(pushServiceJid, node)
+
     override suspend fun registerPushDevice(
         pushServiceJid: String,
         appId: String,
         environment: WaddlePushEnvironment,
         credentials: WaddlePushDeviceCredentials,
-    ): WaddleRegisterDeviceResult? = unused()
+    ): WaddleRegisterDeviceResult? = push.register(
+        RecordedPushRegister(pushServiceJid, appId, environment, credentials),
+    )
+
+    override suspend fun fetchPushVapidPublicKey(pushServiceJid: String): WaddlePushVapidLookup =
+        push.lookup(pushServiceJid)
+}
+
+/**
+ * Deliver [messages] the way production does: as the page a history
+ * fetch returns. (The FFI's per-result `MamResult` echo is deliberately
+ * ignored by the bridge.)
+ */
+suspend fun XmppSessionManager.deliverArchivedPage(
+    client: FakeWaddleClient,
+    conversationJid: String,
+    isGroupchat: Boolean,
+    vararg messages: social.waddle.client.ffi.WaddleArchivedMessage,
+) {
+    client.mamPage = WaddleMamPage(messages = messages.toList(), firstId = null, lastId = null, isComplete = true)
+    if (isGroupchat) {
+        fetchRoomHistory(conversationJid, 50u, null)
+    } else {
+        fetchDmHistory(conversationJid, 50u, null)
+    }
 }

@@ -134,6 +134,13 @@ codegen-units = 1
 strip = true
 opt-level = "z"
 
+# Shipped mobile client cores (Android .so). `release` is size-optimised
+# (`opt-level = "z"`) for server images; on a phone the XMPP parse, TLS and
+# tokio scheduling hot paths matter more than a few hundred KB of APK.
+[profile.mobile]
+inherits = "release"
+opt-level = 3
+
 [profile.ci]
 inherits = "release"
 lto = "thin"

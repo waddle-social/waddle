@@ -3,8 +3,12 @@ package social.waddle.android.service
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.WaddleApplication
+import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.XmppSessionManager
 
 /**
@@ -31,6 +35,10 @@ class MarkReadReceiver : BroadcastReceiver() {
         }
 
         val graph = (context.applicationContext as WaddleApplication).graph
+        // The marker goes out over the stream: hold it open while push
+        // mode has it closed (a queued marker drains once ready), keeping
+        // the receiver unfinished meanwhile so the process stays active.
+        val hold = graph.holdConnection()
         val pendingResult = goAsync()
         graph.applicationScope.launch {
             try {
@@ -45,7 +53,16 @@ class MarkReadReceiver : BroadcastReceiver() {
                 }
                 runCatching { graph.sessionManager.unreadStore.clear(conversationJid) }
                 runCatching { graph.messageNotifier.clearConversationNotification(conversationJid) }
+                val drained = withTimeoutOrNull(MARKER_HOLD_MILLIS) {
+                    graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
+                    // The ready pipeline drains queued markers right after.
+                    delay(MARKER_DRAIN_MILLIS)
+                } != null
+                // Not connected within the receiver's budget: a short
+                // foreground service carries the marker the rest of the way.
+                if (!drained) PendingDeliveryService.start(context)
             } finally {
+                hold.release()
                 pendingResult.finish()
             }
         }
@@ -53,6 +70,10 @@ class MarkReadReceiver : BroadcastReceiver() {
 
     companion object {
         const val ACTION_MARK_READ = "social.waddle.android.action.MARK_READ"
+
+        /** Within the receiver's ~10 s goAsync budget. */
+        private const val MARKER_HOLD_MILLIS = 9_000L
+        private const val MARKER_DRAIN_MILLIS = 1_000L
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
         const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.IS_GROUPCHAT"
         const val EXTRA_MARKER_ID = "social.waddle.android.extra.MARKER_ID"

@@ -4,6 +4,7 @@ plugins {
     // Nav keys are @Serializable so the Navigation 3 back stack survives
     // process death via rememberNavBackStack.
     alias(libs.plugins.kotlin.serialization)
+    alias(libs.plugins.roborazzi)
 }
 
 android {
@@ -62,6 +63,15 @@ android {
     }
 
     testOptions {
+        // Robolectric screenshot tests render real resources (fonts, the
+        // icon) with native graphics.
+        unitTests {
+            isIncludeAndroidResources = true
+            all { test ->
+                test.systemProperty("robolectric.graphicsMode", "NATIVE")
+                test.systemProperty("robolectric.pixelCopyRenderMode", "hardware")
+            }
+        }
         managedDevices {
             localDevices {
                 // Headless automated-test device for CI (no GPU, low
@@ -91,6 +101,28 @@ android {
             ndk {
                 abiFilters += "arm64-v8a"
             }
+            // Store releases sign with the upload key from the environment
+            // (never committed). Absent credentials leave the APK unsigned.
+            val uploadKeystore = System.getenv("WADDLE_ANDROID_UPLOAD_KEYSTORE")
+            if (uploadKeystore != null) {
+                signingConfig = signingConfigs.create("upload") {
+                    storeFile = file(uploadKeystore)
+                    storePassword = System.getenv("WADDLE_ANDROID_UPLOAD_STORE_PASSWORD")
+                    keyAlias = System.getenv("WADDLE_ANDROID_UPLOAD_KEY_ALIAS")
+                    keyPassword = System.getenv("WADDLE_ANDROID_UPLOAD_KEY_PASSWORD")
+                }
+            }
+        }
+        // The sideloaded rolling build: release-optimised (R8, shrinking,
+        // non-debuggable, mobile-profile Rust core) but signed with the
+        // shared checked-in key so it installs in place over earlier
+        // rolling and debug builds without wiping app data. The key is
+        // public, so this APK proves nothing about its origin; store
+        // distribution uses `release` and the upload key instead.
+        create("preview") {
+            initWith(getByName("release"))
+            signingConfig = signingConfigs.getByName("debug")
+            matchingFallbacks += "release"
         }
     }
 }
@@ -111,8 +143,17 @@ dependencies {
     implementation(libs.androidx.lifecycle.runtime.compose)
     implementation(libs.androidx.lifecycle.viewmodel.compose)
     implementation(libs.androidx.lifecycle.process)
+    // Installs the bundled Compose/AndroidX baseline profiles (and the
+    // app's own, when generated) so release builds skip JIT warm-up.
+    implementation(libs.androidx.profileinstaller)
+    implementation(libs.unifiedpush.connector) {
+        exclude(group = "com.google.crypto.tink", module = "tink")
+    }
+    implementation(libs.tink.android)
     implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.navigation3.ui)
+    implementation(libs.androidx.lifecycle.viewmodel.navigation3)
+    implementation(libs.androidx.adaptive.navigation3)
     implementation(libs.coil.compose)
     implementation(libs.coil.network.okhttp)
     implementation(libs.kotlinx.coroutines.android)
@@ -125,6 +166,13 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.turbine)
     testImplementation(testFixtures(project(":core:client")))
+    testImplementation(composeBom)
+    testImplementation(libs.robolectric)
+    testImplementation(libs.roborazzi)
+    testImplementation(libs.roborazzi.compose)
+    testImplementation(libs.roborazzi.junit.rule)
+    testImplementation(libs.compose.ui.test.junit4)
+    testImplementation(libs.androidx.test.ext.junit)
 
     // Hosts ComponentActivity for createAndroidComposeRule in androidTest.
     debugImplementation(libs.compose.ui.test.manifest)
@@ -135,4 +183,11 @@ dependencies {
     androidTestImplementation(libs.compose.ui.test.junit4)
     androidTestImplementation(libs.kotlinx.coroutines.test)
     androidTestImplementation(testFixtures(project(":core:client")))
+}
+
+// Golden screenshots live in the source tree so CI can verify them:
+// `./gradlew :app:verifyRoborazziDebug`; re-record with
+// `./gradlew :app:recordRoborazziDebug` after an intended visual change.
+roborazzi {
+    outputDir.set(file("src/test/screenshots"))
 }

@@ -15,6 +15,7 @@ import social.waddle.android.client.store.InboxKind
 import social.waddle.android.client.store.SessionStores
 import social.waddle.android.client.store.isDirectChat
 import social.waddle.android.client.store.isTimelineMutation
+import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleMessage
 
@@ -40,7 +41,12 @@ internal class XmppEventRouter(
         onBufferOverflow = BufferOverflow.DROP_OLDEST,
     )
 
-    /** Every domain event, after store fan-out; drops oldest under burst. */
+    /**
+     * Every domain event, after store fan-out. The buffer covers a
+     * reconnect burst (presence floods from rejoining every room) now
+     * that archive rows no longer travel as events; consumers that must
+     * not lose state read stores, not this stream.
+     */
     val events: SharedFlow<XmppEvent> = _events.asSharedFlow()
 
     /** Emit a locally-computed event without any store fan-out. */
@@ -70,7 +76,6 @@ internal class XmppEventRouter(
                 // presence stream (web `set_on_presence` wrapper parity).
                 callStore.onPresence(event.presence)
             }
-            is XmppEvent.MamResult -> routeMamResult(event)
             // The reducer + side-effect scheduling run HERE, on the
             // single-consumer dispatch path, so accept/reject can never
             // interleave with tie-break sends (web single-thread parity).
@@ -206,24 +211,32 @@ internal class XmppEventRouter(
         if (applied.kind == InboxKind.DIRECT) stores.dmStore.touch(applied.partner)
     }
 
-    private fun routeMamResult(event: XmppEvent.MamResult) {
-        val message = event.message
-        // Same "not shown" rule as live `muc#user` traffic (see routeMessage).
-        if (message.mucUser) return
-        stores.timelineStore.onArchivedMessage(message)
-        if (message.body == null) return
-        conversationKeyOf(
-            ownBareJid = activeSession.ownBareJid,
-            ownNick = activeSession.ownBareJid?.substringBefore('@'),
-            from = message.from,
-            to = message.to,
-            isGroupchat = message.messageType == "groupchat",
-        )?.let { key ->
-            resume.recordCursor(
-                conversationJid = key.jid,
-                stanzaId = message.stanzaId ?: message.originId ?: message.id ?: message.mamId,
-                timestamp = message.timestamp,
-            )
+    /**
+     * Ingest one fetched MAM page. Pages are the ONLY archive path: the
+     * FFI also echoes each result as a `MamResult` event, and ingesting
+     * both stored every history row twice and flooded the shared event
+     * buffer during catch-up (the Apple client drops the events too).
+     * Search pages never come here — they are a disjoint slice of the
+     * archive, not conversation history.
+     */
+    fun ingestArchivedPage(messages: List<WaddleArchivedMessage>) {
+        stores.timelineStore.onArchivedPage(messages)
+        for (message in messages) {
+            // Same "not shown" rule as live `muc#user` traffic (see routeMessage).
+            if (message.mucUser || message.body == null) continue
+            conversationKeyOf(
+                ownBareJid = activeSession.ownBareJid,
+                ownNick = activeSession.ownBareJid?.substringBefore('@'),
+                from = message.from,
+                to = message.to,
+                isGroupchat = message.messageType == "groupchat",
+            )?.let { key ->
+                resume.recordCursor(
+                    conversationJid = key.jid,
+                    stanzaId = message.stanzaId ?: message.originId ?: message.id ?: message.mamId,
+                    timestamp = message.timestamp,
+                )
+            }
         }
     }
 
@@ -293,6 +306,6 @@ internal class XmppEventRouter(
         /** Incoming-typing expiry tick (XEP-0085 indicator sweep). */
         const val CHAT_STATE_SWEEP_MILLIS = 1_000L
 
-        private const val EVENT_BUFFER_CAPACITY = 256
+        private const val EVENT_BUFFER_CAPACITY = 2_048
     }
 }

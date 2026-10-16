@@ -15,6 +15,7 @@ import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.android.jid.bareJidOf as selfBareJidOf
 
 /** 1:1 DM conversation: DM MAM paging and chat sends (no join step). */
 class DmViewModel(
@@ -22,6 +23,7 @@ class DmViewModel(
     peerJid: String,
     uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
+    selfBareJid: String? = null,
 ) : ConversationViewModel(
     conversationJid = peerJid,
     isGroupchat = false,
@@ -33,6 +35,7 @@ class DmViewModel(
     notifyMode = sessionManager.notifySettingsStore.modeFlow(peerJid, ConversationKind.DIRECT_CHAT),
     uploader = uploader,
     onConversationRead = onConversationRead,
+    selfBareJid = selfBareJid,
 ) {
     companion object {
         fun factory(graph: AppGraph, peerJid: String): ViewModelProvider.Factory =
@@ -42,6 +45,7 @@ class DmViewModel(
                     peerJid = peerJid,
                     uploader = graph.attachmentUploader,
                     onConversationRead = graph.messageNotifier::clearConversationNotification,
+                    selfBareJid = graph.currentSession.value?.jid?.let(::selfBareJidOf),
                 )
             }
     }

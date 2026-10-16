@@ -2,7 +2,6 @@ package social.waddle.android.client
 
 import social.waddle.client.ffi.Jid
 import social.waddle.client.ffi.StanzaId
-import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleCallEvent
 import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleMdsDisplayedEntry
@@ -27,8 +26,6 @@ sealed interface XmppEvent {
     data class Message(val message: WaddleMessage) : XmppEvent
 
     data class Presence(val presence: WaddlePresence) : XmppEvent
-
-    data class MamResult(val message: WaddleArchivedMessage) : XmppEvent
 
     /** XEP-0198: the server acked the outbound message with this id. */
     data class DeliveryAcked(val stanzaId: String) : XmppEvent

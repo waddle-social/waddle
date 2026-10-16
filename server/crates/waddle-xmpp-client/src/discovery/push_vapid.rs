@@ -33,10 +33,12 @@
 
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
+use jid::{BareJid, Jid};
+use minidom::Element;
 use thiserror::Error;
 use uuid::Uuid;
 
-use super::DiscoInfoResult;
+use super::{parse_disco_info_result, DiscoInfoResult};
 
 /// FORM_TYPE for the Push Service's VAPID disco extension. Mirrors
 /// `waddle_xmpp::push::disco::PUSH_VAPID_FORM_TYPE`.
@@ -134,6 +136,133 @@ pub fn parse_push_vapid_from_disco_info(
         public_key_base64url: public_key_b64.clone(),
         kid,
     })
+}
+
+/// Outcomes for [`parse_push_vapid_reply`]: the reply-level checks in
+/// front of [`parse_push_vapid_from_disco_info`].
+#[derive(Debug, Error, PartialEq, Eq)]
+pub enum PushVapidReplyError {
+    /// The reply is not stamped by the queried service (RFC 6120
+    /// §8.1.2.1 requires components to stamp `from`). A key from anyone
+    /// else must never be trusted to authenticate pushes.
+    #[error("Push Service disco#info reply is not from the queried service")]
+    WrongOrigin,
+    #[error("Push Service disco#info reply carries no disco#info <query/>")]
+    MissingQuery,
+    #[error(transparent)]
+    Advertisement(#[from] PushVapidDiscoParseError),
+}
+
+/// Parse the Push Service's VAPID advertisement out of its disco#info
+/// reply [`reply`], refusing any reply whose `from` is not exactly
+/// [`service`] (a bare component JID, never a resource).
+pub fn parse_push_vapid_reply(
+    reply: &Element,
+    service: &BareJid,
+) -> Result<PushVapidAdvertisement, PushVapidReplyError> {
+    let from = reply
+        .attr("from")
+        .and_then(|from| from.parse::<Jid>().ok())
+        .ok_or(PushVapidReplyError::WrongOrigin)?;
+    if from.resource().is_some() || from.to_bare() != *service {
+        return Err(PushVapidReplyError::WrongOrigin);
+    }
+    let disco = parse_disco_info_result(reply, service.as_str())
+        .ok_or(PushVapidReplyError::MissingQuery)?;
+    Ok(parse_push_vapid_from_disco_info(&disco)?)
+}
+
+#[cfg(test)]
+mod reply_tests {
+    use super::*;
+    use crate::discovery::{CLIENT_NS, DATA_FORMS_NS, DISCO_INFO_NS};
+    use minidom::rxml::xml_ncname;
+
+    const KID: &str = "0b3c1d7e-8f4a-4d2b-9c6e-1a2b3c4d5e6f";
+
+    fn field(var: &str, value: &str) -> Element {
+        Element::builder("field", DATA_FORMS_NS)
+            .attr(xml_ncname!("var").to_owned(), var)
+            .append(
+                Element::builder("value", DATA_FORMS_NS)
+                    .append(value)
+                    .build(),
+            )
+            .build()
+    }
+
+    /// XEP-0068: a FORM_TYPE is only a context indicator when hidden.
+    fn form_type_field() -> Element {
+        Element::builder("field", DATA_FORMS_NS)
+            .attr(xml_ncname!("var").to_owned(), "FORM_TYPE")
+            .attr(xml_ncname!("type").to_owned(), "hidden")
+            .append(
+                Element::builder("value", DATA_FORMS_NS)
+                    .append(PUSH_VAPID_FORM_TYPE)
+                    .build(),
+            )
+            .build()
+    }
+
+    fn public_key() -> String {
+        let mut bytes = [0u8; 65];
+        bytes[0] = 0x04;
+        URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    fn reply(from: Option<&str>) -> Element {
+        let form = Element::builder("x", DATA_FORMS_NS)
+            .attr(xml_ncname!("type").to_owned(), "result")
+            .append(form_type_field())
+            .append(field(PUSH_VAPID_FIELD_PUBLIC_KEY, &public_key()))
+            .append(field(PUSH_VAPID_FIELD_KID, KID))
+            .build();
+        let query = Element::builder("query", DISCO_INFO_NS)
+            .append(form)
+            .build();
+        let mut iq = Element::builder("iq", CLIENT_NS)
+            .attr(xml_ncname!("type").to_owned(), "result")
+            .attr(xml_ncname!("id").to_owned(), "disco-1");
+        if let Some(from) = from {
+            iq = iq.attr(xml_ncname!("from").to_owned(), from);
+        }
+        iq.append(query).build()
+    }
+
+    fn service() -> BareJid {
+        BareJid::new("push.example.com").expect("valid service jid")
+    }
+
+    #[test]
+    fn accepts_a_reply_from_the_queried_service() {
+        let parsed = parse_push_vapid_reply(&reply(Some("push.example.com")), &service())
+            .expect("reply from the service parses");
+        assert_eq!(parsed.public_key_base64url, public_key());
+        assert_eq!(parsed.kid.to_string(), KID);
+    }
+
+    #[test]
+    fn refuses_a_reply_without_from() {
+        assert_eq!(
+            parse_push_vapid_reply(&reply(None), &service()),
+            Err(PushVapidReplyError::WrongOrigin),
+        );
+    }
+
+    #[test]
+    fn refuses_a_reply_from_another_jid() {
+        for from in [
+            "evil.example.com",
+            "push.example.com/res",
+            "user@push.example.com",
+        ] {
+            assert_eq!(
+                parse_push_vapid_reply(&reply(Some(from)), &service()),
+                Err(PushVapidReplyError::WrongOrigin),
+                "{from}",
+            );
+        }
+    }
 }
 
 #[cfg(test)]

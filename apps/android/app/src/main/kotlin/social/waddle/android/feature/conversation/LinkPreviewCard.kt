@@ -1,14 +1,20 @@
 package social.waddle.android.feature.conversation
 
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -25,7 +31,6 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -33,6 +38,7 @@ import social.waddle.android.R
 import social.waddle.android.client.httpsHrefOrNull
 import social.waddle.android.client.isTrustedCachedPreviewImageUrl
 import social.waddle.android.client.linkPreviewHost
+import social.waddle.android.theme.Waddle
 import social.waddle.client.ffi.WaddleLinkPreview
 
 /**
@@ -55,45 +61,62 @@ fun LinkPreviewCard(
     val href = httpsHrefOrNull(preview.originalUrl)
     val open: (() -> Unit)? = href?.let { url -> { runCatching { uriHandler.openUri(url) } } }
     Surface(
-        shape = RoundedCornerShape(8.dp),
-        color = MaterialTheme.colorScheme.surfaceContainerHighest,
+        shape = RoundedCornerShape(Waddle.radius.md),
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
         border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         onClick = open ?: {},
         enabled = open != null,
-        modifier = modifier.fillMaxWidth().padding(top = 2.dp),
+        modifier = modifier
+            .padding(top = 2.dp)
+            .widthIn(max = PREVIEW_MAX_WIDTH)
+            .fillMaxWidth(),
     ) {
-        Column(
-            modifier = Modifier.padding(8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
-        ) {
-            linkPreviewHost(preview.originalUrl)?.let { host ->
-                Text(
-                    text = host,
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            PreviewMedia(preview, trustedMediaOrigin)
-            preview.title?.let { title ->
-                Text(
-                    text = title,
-                    style = MaterialTheme.typography.bodyMedium,
-                    fontWeight = FontWeight.Medium,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-            preview.description?.let { description ->
-                Text(
-                    text = description,
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                    maxLines = 2,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
+        Row(modifier = Modifier.height(IntrinsicSize.Min)) {
+            // Accent rule: the card belongs to the message, like a quote.
+            Box(
+                modifier = Modifier
+                    .width(3.dp)
+                    .fillMaxHeight()
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
+            )
+            PreviewBody(preview, trustedMediaOrigin)
+        }
+    }
+}
+
+@Composable
+private fun PreviewBody(preview: WaddleLinkPreview, trustedMediaOrigin: String?) {
+    Column(
+        modifier = Modifier.padding(horizontal = Waddle.space.sm, vertical = 10.dp),
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
+    ) {
+        linkPreviewHost(preview.originalUrl)?.let { host ->
+            Text(
+                text = host,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        PreviewMedia(preview, trustedMediaOrigin)
+        preview.title?.let { title ->
+            Text(
+                text = title,
+                style = MaterialTheme.typography.titleSmall,
+                color = MaterialTheme.colorScheme.primary,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        preview.description?.let { description ->
+            Text(
+                text = description,
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+            )
         }
     }
 }
@@ -115,7 +138,7 @@ private fun PreviewMedia(preview: WaddleLinkPreview, trustedMediaOrigin: String?
                 modifier = Modifier
                     .fillMaxWidth()
                     .heightIn(max = 192.dp)
-                    .clip(RoundedCornerShape(6.dp)),
+                    .clip(RoundedCornerShape(Waddle.radius.sm)),
             )
             if (playable) PlayGlyph()
         }
@@ -151,3 +174,5 @@ private fun PlayGlyph() {
         )
     }
 }
+
+private val PREVIEW_MAX_WIDTH = 320.dp

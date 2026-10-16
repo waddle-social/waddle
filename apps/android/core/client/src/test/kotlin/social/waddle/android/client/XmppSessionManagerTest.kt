@@ -106,12 +106,12 @@ class XmppSessionManagerTest {
     }
 
     @Test
-    fun `attempt budget exhaustion is terminal`() = runTest {
+    fun `reconnect never parks in a terminal failure`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
 
-        repeat(ReconnectPolicy.MAX_ATTEMPTS) { attempt ->
+        repeat(25) { attempt ->
             harness.factory.emit(WaddleClientEvent.Disconnected)
             runCurrent()
             val state = harness.manager.connectionState.value
@@ -123,50 +123,52 @@ class XmppSessionManagerTest {
             advanceTimeBy(state.nextDelayMs)
             runCurrent()
         }
-
-        harness.factory.emit(WaddleClientEvent.Disconnected)
-        runCurrent()
-        assertEquals(ConnectionState.Failed, harness.manager.connectionState.value)
+        assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
         assertEquals("app stays signed in on transport failure", WaddleAppState.Ready, harness.manager.appState.value)
-
-        // Failed is parked, not terminal: a manual retry restarts the
-        // loop with a fresh budget (web connectWithFreshBudget parity).
-        val clientsBefore = harness.factory.clients.size
-        harness.manager.requestReconnect()
-        runCurrent()
-        assertTrue(
-            "retry restarts the connection loop",
-            harness.factory.clients.size > clientsBefore,
-        )
 
         harness.manager.logout()
     }
 
     @Test
-    fun `budget exhaustion recovers on an offline-online edge`() = runTest {
+    fun `manual retry skips the remaining backoff`() = runTest {
         val harness = Harness(this)
         harness.manager.login(testSessionInfo())
         runCurrent()
-
-        repeat(ReconnectPolicy.MAX_ATTEMPTS + 1) {
+        repeat(6) {
             harness.factory.emit(WaddleClientEvent.Disconnected)
             runCurrent()
-            (harness.manager.connectionState.value as? ConnectionState.Reconnecting)?.let {
+            (harness.manager.connectionState.value as ConnectionState.Reconnecting).let {
                 advanceTimeBy(it.nextDelayMs)
                 runCurrent()
             }
         }
-        assertEquals(ConnectionState.Failed, harness.manager.connectionState.value)
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        val waiting = harness.manager.connectionState.value as ConnectionState.Reconnecting
+        assertEquals("backoff is at the cap", 30_000L, waiting.nextDelayMs)
 
         val clientsBefore = harness.factory.clients.size
-        harness.network.state.value = false
+        harness.manager.requestReconnect()
         runCurrent()
-        harness.network.state.value = true
+        assertEquals(ConnectionState.Connecting, harness.manager.connectionState.value)
+        assertEquals(clientsBefore + 1, harness.factory.clients.size)
+
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `foreground skips the remaining backoff`() = runTest {
+        val harness = Harness(this)
+        harness.manager.login(testSessionInfo())
         runCurrent()
-        assertTrue(
-            "connectivity return restarts the loop",
-            harness.factory.clients.size > clientsBefore,
-        )
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        assertTrue(harness.manager.connectionState.value is ConnectionState.Reconnecting)
+
+        val clientsBefore = harness.factory.clients.size
+        harness.manager.onAppForeground()
+        runCurrent()
+        assertEquals(clientsBefore + 1, harness.factory.clients.size)
 
         harness.manager.logout()
     }

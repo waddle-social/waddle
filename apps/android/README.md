@@ -40,22 +40,27 @@ cuenv equivalents (same tasks CI runs): `cuenv task build --path apps/android`,
 
 ## Install-in-place artifacts
 
-Debug builds are signed with the **checked-in** `debug.keystore`
-(deliberately not a secret; never used for release), so every APK —
-local or CI — carries the same signature and `adb install -r` upgrades
-in place without uninstalling (app data survives). Every merge to main
-builds `waddle-android-debug.apk` (versionCode = commit-timestamp
-minutes, so upgrades are always monotonic) and publishes it as the
-repo's **latest** release under a unique `android-b<versionCode>-<sha>`
-tag. The stable, tag-agnostic download URL always resolves to the
-newest build:
+Every APK — local or CI — is signed with the **checked-in**
+`debug.keystore` (deliberately not a secret; never used for a store
+release), so `adb install -r` upgrades in place without uninstalling (app
+data survives). Every merge to main builds the **preview** variant —
+release code with R8, the baseline profile, and the Rust core at
+`opt-level = 3` (`--profile mobile`) — as `waddle-android.apk`
+(versionCode = commit-timestamp minutes, so upgrades are always
+monotonic) and publishes it as the repo's **latest** release under a
+unique `android-b<versionCode>-<sha>` tag:
 
 ```sh
-gh release download --pattern waddle-android-debug.apk   # latest release
-adb install -r waddle-android-debug.apk
+gh release download --pattern waddle-android.apk   # latest release
+adb install -r waddle-android.apk
 # or straight from the browser/curl on the phone:
-#   https://github.com/waddle-social/waddle/releases/latest/download/waddle-android-debug.apk
+#   https://github.com/waddle-social/waddle/releases/latest/download/waddle-android.apk
 ```
+
+Build it locally with `bash ../../scripts/build-android-rust.sh` (mobile
+profile) then `./gradlew :app:assemblePreview`. A Play upload key, when
+one exists, is read from `WADDLE_ANDROID_UPLOAD_*` environment variables
+for the `release` build type.
 
 (A single reused tag like `android-latest` is deliberately avoided:
 GitHub's immutable releases permanently reserve a tag name once it has
@@ -76,11 +81,30 @@ Three layers, cheapest first:
 3. **On device**: `./gradlew :app:installDebug` against the S24 Ultra
    for anything interactive (calls, notifications, battery behavior).
 
+Screenshot goldens (Roborazzi, JVM, light and dark) live in
+`app/src/test/screenshots`. CI verifies them; after an intended visual
+change, re-record with
+`./gradlew :app:testDebugUnitTest -Proborazzi.test.record=true` and
+review the PNG diff. `QUALITY.md` tracks what each feature is guarded by.
+
+## Background delivery
+
+With a UnifiedPush distributor installed (ntfy, NextPush, Sunup…),
+Waddle registers its endpoint with the server's XEP-0357 Push Service
+(the Web Push provider; no Google Play services) and connects only
+while something needs the stream: the app in the foreground, a call, or
+a notification action. Without a distributor, or with **Settings →
+Stay connected** on, a foreground service keeps the connection open.
+In push mode, calls ring only while the app is open, and DM pushes wait
+while another session of the account is online.
+
 ## Layout
 
-- `:app` — Compose UI. Currently the M0 toolchain spike (`MainActivity`
-  exercises `parseJid`, a tokio-backed `connect`, and `on_event` callbacks).
-- `:core:client` — committed UniFFI bindings
+- `:app` — Compose UI (Material 3 driven by the generated
+  `WaddleTokens.kt`), navigation, notifications, calls, and the
+  UnifiedPush bridge (`push/`).
+- `:core:client` — the session core (`XmppSessionManager`,
+  `ConnectionLoop`, stores, push registration), committed UniFFI bindings
   (`social.waddle.client.ffi`, drift-guarded by
   `scripts/check-android-ffi-bindings.sh`), JNA, R8 consumer rules, and the
   gitignored `src/main/jniLibs` built by `scripts/build-android-rust.sh`.

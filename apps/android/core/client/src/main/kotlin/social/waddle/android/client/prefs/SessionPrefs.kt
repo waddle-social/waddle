@@ -28,6 +28,9 @@ class SessionPrefs(
      */
     val mucCallSessions: MucCallSessionCache = MucCallSessionCache(dataStore, json)
 
+    /** Push delivery state, in this file so [clear] wipes it on logout. */
+    val push: PushStateStore = PushStateStore(dataStore, json)
+
     val serverUrl: Flow<String?> = dataStore.data.map { it[KEY_SERVER_URL] }
     val sessionId: Flow<String?> = dataStore.data.map { it[KEY_SESSION_ID] }
     val joinedRooms: Flow<Set<String>> = dataStore.data.map { it[KEY_JOINED_ROOMS] ?: emptySet() }

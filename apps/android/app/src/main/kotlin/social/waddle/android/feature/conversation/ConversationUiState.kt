@@ -30,8 +30,8 @@ sealed interface ConversationRow {
 }
 
 data class ConversationUiState(
-    /** Oldest-first rows (pending messages appended after stored history). */
-    val rows: List<ConversationRow> = emptyList(),
+    /** Oldest-first feed (pending messages after stored history), ready to draw. */
+    val entries: List<FeedEntry> = emptyList(),
     val isLoadingOlder: Boolean = false,
     val reachedHistoryStart: Boolean = false,
     /** `urn:waddle:pin:0`: pinned stanza ids (rooms only). */
@@ -39,11 +39,12 @@ data class ConversationUiState(
     val canPin: Boolean = false,
     /** XEP-0425: own occupant may moderate others' messages (rooms only). */
     val canModerate: Boolean = false,
-    /** Feed mode: thread id → reply count for the roots' chips. */
-    val threadReplyCounts: Map<String, Int> = emptyMap(),
     /** Feed mode: loaded-history threads overview, newest first. */
     val threads: List<ThreadSummary> = emptyList(),
-)
+) {
+    /** The rows behind [entries], oldest first. */
+    val rows: List<ConversationRow> get() = entries.map { it.row }
+}
 
 /** One thread of the loaded history (overview sheet row). */
 data class ThreadSummary(

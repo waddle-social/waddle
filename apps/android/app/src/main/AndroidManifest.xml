@@ -47,7 +47,8 @@
             </intent-filter>
         </activity>
 
-        <!-- Persistent XMPP connection (no Google Play push services). -->
+        <!-- Persistent XMPP connection when the account stays connected
+             in the background (no push distributor, or the user's choice). -->
         <service
             android:name=".service.WaddleConnectionService"
             android:exported="false"
@@ -57,6 +58,16 @@
                 android:value="Maintains the user's persistent XMPP connection for realtime chat delivery without Google Play push services" />
         </service>
 
+        <!-- UnifiedPush: Web Push payloads from the user's distributor
+             (no Google Play services). Bound only by the connector. -->
+        <service
+            android:name=".push.WaddlePushService"
+            android:exported="false">
+            <intent-filter>
+                <action android:name="org.unifiedpush.android.connector.PUSH_EVENT" />
+            </intent-filter>
+        </service>
+
         <!-- In-call foreground service: raised for outgoing/active calls;
              the camera type is exercised only after the CAMERA runtime
              grant on a video call. -->
@@ -64,6 +75,13 @@
             android:name=".service.CallForegroundService"
             android:exported="false"
             android:foregroundServiceType="phoneCall|microphone|camera" />
+
+        <!-- Finishes a notification action's delivery (an inline reply,
+             a read marker) once its receiver's budget runs out. -->
+        <service
+            android:name=".service.PendingDeliveryService"
+            android:exported="false"
+            android:foregroundServiceType="shortService" />
 
         <receiver
             android:name=".service.CallActionReceiver"

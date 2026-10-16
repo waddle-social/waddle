@@ -859,6 +859,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_disable_
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_push_vapid_public_key(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_create_room(
@@ -1103,6 +1105,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_d
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_disable_push_notifications(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_enable_push_notifications(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_push_vapid_public_key(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_register_push_device(`ptr`: Long,`pushServiceJid`: RustBuffer.ByValue,`appId`: RustBuffer.ByValue,`environment`: RustBuffer.ByValue,`credentials`: RustBuffer.ByValue,
 ): Long
@@ -1543,6 +1547,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_enable_push_notifications() != 61395) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_push_vapid_public_key() != 43289) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_register_push_device() != 54628) {
@@ -2830,6 +2837,15 @@ public interface WaddleClientInterface {
      * `register_push_device` (XEP-0050) at `push.<domain>`.
      */
     suspend fun `enablePushNotifications`(`pushServiceJid`: kotlin.String, `node`: kotlin.String): kotlin.Boolean
+
+    /**
+     * The Push Service's current RFC 8292 VAPID public key and kid, from
+     * its XEP-0128 disco#info extension (`urn:waddle:push:vapid:0`).
+     * Native Web Push clients (UnifiedPush on Android) bind their push
+     * endpoint to this key. A reply not stamped by `push_service_jid`
+     * itself is refused.
+     */
+    suspend fun `fetchPushVapidPublicKey`(`pushServiceJid`: kotlin.String): WaddlePushVapidLookup
 
     /**
      * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
@@ -5471,6 +5487,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
 
 
     /**
+     * The Push Service's current RFC 8292 VAPID public key and kid, from
+     * its XEP-0128 disco#info extension (`urn:waddle:push:vapid:0`).
+     * Native Web Push clients (UnifiedPush on Android) bind their push
+     * endpoint to this key. A reply not stamped by `push_service_jid`
+     * itself is refused.
+     */
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchPushVapidPublicKey`(`pushServiceJid`: kotlin.String) : WaddlePushVapidLookup {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_push_vapid_public_key(
+                uniffiHandle,
+                FfiConverterString.lower(`pushServiceJid`),
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddlePushVapidLookup.lift(it) },
+        // Error FFI converter
+        UniffiNullRustCallStatusErrorHandler,
+    )
+    }
+
+
+    /**
      * XEP-0050 `register-device` ad-hoc command on `push.<domain>`.
      * Drives the multi-step dance and returns the assigned
      * [`WaddleRegisterDeviceResult`] (node id + device id) on
@@ -7989,6 +8032,15 @@ data class WaddleConfig (
     var `accessToken`: kotlin.String
     ,
     var `resource`: kotlin.String
+    ,
+    /**
+     * Ask the server to hold the session for XEP-0198 resumption after
+     * an unclean drop. A client that never resumes MUST pass `false`:
+     * the server suppresses XEP-0357 pushes while it holds a session,
+     * so a session parked for nobody silences notifications until it
+     * expires.
+     */
+    var `resumable`: kotlin.Boolean = true
 
 ){
 
@@ -8009,6 +8061,7 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
             FfiConverterString.read(buf),
+            FfiConverterBoolean.read(buf),
         )
     }
 
@@ -8016,7 +8069,8 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.allocationSize(value.`serverUrl`) +
             FfiConverterString.allocationSize(value.`jid`) +
             FfiConverterString.allocationSize(value.`accessToken`) +
-            FfiConverterString.allocationSize(value.`resource`)
+            FfiConverterString.allocationSize(value.`resource`) +
+            FfiConverterBoolean.allocationSize(value.`resumable`)
     )
 
     override fun write(value: WaddleConfig, buf: ByteBuffer) {
@@ -8024,6 +8078,7 @@ public object FfiConverterTypeWaddleConfig: FfiConverterRustBuffer<WaddleConfig>
             FfiConverterString.write(value.`jid`, buf)
             FfiConverterString.write(value.`accessToken`, buf)
             FfiConverterString.write(value.`resource`, buf)
+            FfiConverterBoolean.write(value.`resumable`, buf)
     }
 }
 
@@ -13772,6 +13827,114 @@ public object FfiConverterTypeWaddlePushEnvironment: FfiConverterRustBuffer<Wadd
 
     override fun write(value: WaddlePushEnvironment, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * Result of looking up the Push Service's VAPID key.
+ */
+sealed class WaddlePushVapidLookup {
+
+    /**
+     * The active key: `public_key` is the base64url (no padding)
+     * uncompressed P-256 point a Web Push subscription binds to; `kid`
+     * changes when the service rotates the key, which obliges clients
+     * to re-subscribe.
+     */
+    data class Advertised(
+        val `publicKey`: kotlin.String,
+        val `kid`: kotlin.String) : WaddlePushVapidLookup()
+
+    {
+
+
+        companion object
+    }
+
+    /**
+     * The service runs no Web Push provider.
+     */
+    object NotAdvertised : WaddlePushVapidLookup()
+
+
+    /**
+     * The lookup failed (timeout, error reply, wrong origin, malformed
+     * advertisement); the diagnostic went to the listener. Callers keep
+     * any existing registration rather than tearing it down.
+     */
+    object Failed : WaddlePushVapidLookup()
+
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddlePushVapidLookup : FfiConverterRustBuffer<WaddlePushVapidLookup>{
+    override fun read(buf: ByteBuffer): WaddlePushVapidLookup {
+        return when(buf.getInt()) {
+            1 -> WaddlePushVapidLookup.Advertised(
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                )
+            2 -> WaddlePushVapidLookup.NotAdvertised
+            3 -> WaddlePushVapidLookup.Failed
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddlePushVapidLookup) = when(value) {
+        is WaddlePushVapidLookup.Advertised -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterString.allocationSize(value.`publicKey`)
+                + FfiConverterString.allocationSize(value.`kid`)
+            )
+        }
+        is WaddlePushVapidLookup.NotAdvertised -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddlePushVapidLookup.Failed -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+    }
+
+    override fun write(value: WaddlePushVapidLookup, buf: ByteBuffer) {
+        when(value) {
+            is WaddlePushVapidLookup.Advertised -> {
+                buf.putInt(1)
+                FfiConverterString.write(value.`publicKey`, buf)
+                FfiConverterString.write(value.`kid`, buf)
+                Unit
+            }
+            is WaddlePushVapidLookup.NotAdvertised -> {
+                buf.putInt(2)
+                Unit
+            }
+            is WaddlePushVapidLookup.Failed -> {
+                buf.putInt(3)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 

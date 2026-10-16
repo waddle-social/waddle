@@ -17,9 +17,13 @@ sealed interface ConnectionState {
     /** Network is gone; waiting for connectivity instead of burning attempts. */
     data object Offline : ConnectionState
 
+    /**
+     * Signed in but deliberately not connected: nothing needs the stream
+     * right now (app in the background with push delivery). The server
+     * sees no session, so XEP-0357 pushes flow.
+     */
+    data object Paused : ConnectionState
+
     /** Terminal: the server rejected the credentials — re-login required. */
     data object AuthFailed : ConnectionState
-
-    /** Terminal: the reconnect attempt budget is exhausted. */
-    data object Failed : ConnectionState
 }

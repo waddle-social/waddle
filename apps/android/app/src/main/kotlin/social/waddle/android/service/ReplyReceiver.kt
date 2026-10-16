@@ -4,7 +4,9 @@ import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import androidx.core.app.RemoteInput
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.AppGraph
 import social.waddle.android.WaddleApplication
 import social.waddle.client.ffi.WaddleSendMessageOutcome
@@ -24,32 +26,57 @@ class ReplyReceiver : BroadcastReceiver() {
         val isGroupchat = intent.getBooleanExtra(EXTRA_IS_GROUPCHAT, false)
 
         val graph = (context.applicationContext as WaddleApplication).graph
+        // In push mode the stream may be closed: hold it open until the
+        // reply is acknowledged. The receiver stays unfinished for that
+        // long too, which keeps the process active: a finished receiver
+        // leaves a cached process that Android may freeze while its open
+        // socket keeps the server from pushing.
+        val hold = graph.holdConnection()
         val pendingResult = goAsync()
         graph.applicationScope.launch {
+            var queuedId: String? = null
             try {
                 // Same defensive posture as the bootstrap/login/notifier
                 // paths: the offline enqueue is a DataStore write and the
                 // shade re-post is a notify() — both can throw, and an
                 // uncaught throw on this root coroutine kills the process
                 // while leaving the RemoteInput spinner stuck.
-                runCatching { deliver(graph, conversationJid, isGroupchat, text) }
+                runCatching { queuedId = deliver(graph, conversationJid, isGroupchat, text) }
                     .onFailure {
                         runCatching {
                             graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
                         }
                     }
+                // Not acknowledged within the receiver's budget: hand the
+                // wait to a short foreground service while this receiver
+                // still may start one.
+                val acknowledged = runCatching { awaitAcknowledged(graph, queuedId) }.getOrDefault(false)
+                val pending = queuedId
+                if (!acknowledged && pending != null) {
+                    PendingDeliveryService.start(context, listOf(pending), conversationJid, isGroupchat)
+                }
             } finally {
+                hold.release()
                 pendingResult.finish()
             }
         }
     }
 
+    /** Whether the durable row for [queuedId] was acknowledged and removed in time. */
+    private suspend fun awaitAcknowledged(graph: AppGraph, queuedId: String?): Boolean {
+        queuedId ?: return true
+        return withTimeoutOrNull(DELIVERY_HOLD_MILLIS) {
+            graph.sessionPrefs.outboundQueue.first { queue -> queue.none { it.clientStanzaId == queuedId } }
+        } != null
+    }
+
+    /** Sends the reply; returns the outbound queue id it is tracked under. */
     private suspend fun deliver(
         graph: AppGraph,
         conversationJid: String,
         isGroupchat: Boolean,
         text: String,
-    ) {
+    ): String? {
         val result = if (isGroupchat) {
             graph.sessionManager.sendGroupchatMessage(conversationJid, text)
         } else {
@@ -68,6 +95,7 @@ class ReplyReceiver : BroadcastReceiver() {
         } else {
             graph.messageNotifier.notifyReplyFailed(conversationJid, isGroupchat)
         }
+        return result.queuedId
     }
 
     companion object {
@@ -75,5 +103,8 @@ class ReplyReceiver : BroadcastReceiver() {
         const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.CONVERSATION_JID"
         const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.IS_GROUPCHAT"
         const val KEY_REPLY_TEXT = "waddle.reply.text"
+
+        /** Within the receiver's ~10 s goAsync budget. */
+        private const val DELIVERY_HOLD_MILLIS = 9_000L
     }
 }

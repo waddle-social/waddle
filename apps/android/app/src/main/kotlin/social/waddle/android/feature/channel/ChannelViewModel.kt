@@ -25,6 +25,7 @@ import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleChatState
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleNotifyMode
+import social.waddle.android.jid.bareJidOf as selfBareJidOf
 
 /** MUC channel conversation: joins on open, room MAM, groupchat sends. */
 class ChannelViewModel(
@@ -33,6 +34,7 @@ class ChannelViewModel(
     nick: String,
     uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
+    selfBareJid: String? = null,
 ) : ConversationViewModel(
     conversationJid = roomJid,
     isGroupchat = true,
@@ -55,6 +57,7 @@ class ChannelViewModel(
         .map { rooms -> canModerateOf(rooms[roomJid].orEmpty()) },
     uploader = uploader,
     onConversationRead = onConversationRead,
+    selfBareJid = selfBareJid,
 ) {
     /**
      * Web `canManageMembers` parity: own affiliation ∈ {owner, admin},
@@ -80,6 +83,7 @@ class ChannelViewModel(
                     nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                     uploader = graph.attachmentUploader,
                     onConversationRead = graph.messageNotifier::clearConversationNotification,
+                    selfBareJid = graph.currentSession.value?.jid?.let(::selfBareJidOf),
                 )
             }
     }
