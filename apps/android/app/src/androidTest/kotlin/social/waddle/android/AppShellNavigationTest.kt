@@ -2,6 +2,7 @@ package social.waddle.android
 
 import android.Manifest
 import androidx.activity.ComponentActivity
+import androidx.activity.enableEdgeToEdge
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.junit4.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
@@ -9,10 +10,13 @@ import androidx.compose.ui.test.onNodeWithContentDescription
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
 import androidx.compose.ui.test.performClick
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 import androidx.test.ext.junit.runners.AndroidJUnit4
 import androidx.test.platform.app.InstrumentationRegistry
 import kotlinx.coroutines.flow.MutableStateFlow
 import org.junit.After
+import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Rule
 import org.junit.Test
@@ -103,6 +107,28 @@ class AppShellNavigationTest {
         waitForText("Settings")
         openTab(MainTab.HOME)
         waitForHome()
+    }
+
+    @Test
+    fun tabTopBarsClearTheStatusBar() {
+        // The app draws edge to edge; the bare test activity does not by default.
+        composeRule.runOnUiThread { composeRule.activity.enableEdgeToEdge() }
+        harness.signInAndConnect()
+        composeAppShell()
+        waitForHome()
+        openTab(MainTab.ACTIVITY)
+        waitForText("Activity")
+        composeRule.waitForIdle()
+
+        val statusBar = ViewCompat.getRootWindowInsets(composeRule.activity.window.decorView)
+            ?.getInsets(WindowInsetsCompat.Type.statusBars())
+            ?.top ?: 0
+        assertTrue("the device reports a status bar", statusBar > 0)
+        // The tab label says "Activity" too; the title is the higher one.
+        val titleTop = composeRule.onAllNodesWithText("Activity")
+            .fetchSemanticsNodes()
+            .minOf { it.boundsInWindow.top }
+        assertTrue("title at $titleTop px sits under the $statusBar px status bar", titleTop >= statusBar)
     }
 
     @Test
