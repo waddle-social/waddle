@@ -218,15 +218,16 @@ fun ActiveCallContent(
 ) {
     NightStage {
         val colors = Waddle.colors
-        val fullBleedVideo = ui.video && remoteVideo != null
+        val fullBleed = remoteVideo?.takeIf { ui.video }
+        val fullBleedVideo = fullBleed != null
         Box(
             modifier = modifier
                 .fillMaxSize()
                 .background(colors.nightGround)
                 .testTag(CallTestTags.ACTIVE_SCREEN),
         ) {
-            if (fullBleedVideo && remoteVideo != null) {
-                CallVideoView(handle = remoteVideo, modifier = Modifier.fillMaxSize())
+            if (fullBleed != null) {
+                CallVideoView(handle = fullBleed, modifier = Modifier.fillMaxSize())
                 VideoScrims()
             }
             Column(

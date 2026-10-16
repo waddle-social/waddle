@@ -33,36 +33,58 @@ fun speakingBareJidsOf(identities: Collection<String>): Set<String> =
  * kept if it comes back inside that window. Emits only on change.
  */
 fun Flow<Set<String>>.releasingAfter(holdMillis: Long): Flow<Set<String>> = channelFlow {
-    val lock = Mutex()
-    var latest = emptySet<String>()
-    var shown: Set<String>? = null
-    val releases = HashMap<String, Job>()
-
-    suspend fun publish(next: Set<String>) {
-        if (next != shown) {
-            shown = next
-            send(next)
-        }
-    }
-
+    val state = SpeakerRelease(emit = { send(it) })
     // Release timers are children of the producer: the flow completes
     // only after the last pending release has landed.
     collect { speakers ->
-        lock.withLock {
-            latest = speakers
-            speakers.forEach { releases.remove(it)?.cancel() }
-            val current = shown.orEmpty()
-            for (gone in current - speakers) {
-                if (gone in releases) continue
-                releases[gone] = launch {
-                    delay(holdMillis)
-                    lock.withLock {
-                        releases.remove(gone)
-                        if (gone !in latest) publish(shown.orEmpty() - gone)
-                    }
-                }
+        state.lock.withLock {
+            for (gone in state.take(speakers)) {
+                state.track(
+                    gone,
+                    launch {
+                        delay(holdMillis)
+                        state.lock.withLock { state.release(gone) }
+                    },
+                )
             }
-            publish(current + speakers)
+        }
+    }
+}
+
+/** [releasingAfter]'s state; every call but [lock] runs under [lock]. */
+private class SpeakerRelease(private val emit: suspend (Set<String>) -> Unit) {
+    val lock = Mutex()
+    private var latest: Set<String> = emptySet()
+    private var shown: Set<String>? = null
+    private val releases = HashMap<String, Job>()
+
+    /**
+     * Take the newest active set: speakers show at once, any pending
+     * release for them is cancelled. Returns the members that just went
+     * quiet and still need a release timer.
+     */
+    suspend fun take(speakers: Set<String>): Set<String> {
+        latest = speakers
+        speakers.forEach { releases.remove(it)?.cancel() }
+        val current = shown.orEmpty()
+        publish(current + speakers)
+        return current - speakers - releases.keys
+    }
+
+    fun track(member: String, timer: Job) {
+        releases[member] = timer
+    }
+
+    /** The hold ran out: drop [member] unless they spoke again. */
+    suspend fun release(member: String) {
+        releases.remove(member)
+        if (member !in latest) publish(shown.orEmpty() - member)
+    }
+
+    private suspend fun publish(next: Set<String>) {
+        if (next != shown) {
+            shown = next
+            emit(next)
         }
     }
 }
