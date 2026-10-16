@@ -7,9 +7,9 @@ import android.content.pm.ServiceInfo
 import android.os.IBinder
 import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
-import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
@@ -17,6 +17,7 @@ import kotlinx.coroutines.withTimeoutOrNull
 import social.waddle.android.R
 import social.waddle.android.WaddleApplication
 import social.waddle.android.client.ConnectionState
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Finishes what a notification action started when its receiver's few
@@ -30,8 +31,13 @@ import social.waddle.android.client.ConnectionState
  * notification as waiting rather than left looking sent.
  */
 class PendingDeliveryService : Service() {
-    private val scope = CoroutineScope(SupervisorJob())
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
     private var work: Job? = null
+
+    /** Queued reply id → its conversation; merged across overlapping starts. */
+    private val pendingReplies = ConcurrentHashMap<String, PendingReply>()
+
+    private data class PendingReply(val conversationJid: String, val isGroupchat: Boolean)
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -42,44 +48,72 @@ class PendingDeliveryService : Service() {
             .setSilent(true)
             .build()
         startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_SHORT_SERVICE)
-        val queuedIds = intent?.getStringArrayExtra(EXTRA_QUEUED_IDS)?.toSet().orEmpty()
         val conversationJid = intent?.getStringExtra(EXTRA_CONVERSATION_JID)
         val isGroupchat = intent?.getBooleanExtra(EXTRA_IS_GROUPCHAT, false) ?: false
-        work?.cancel()
-        work = scope.launch {
-            val graph = (application as WaddleApplication).graph
-            val hold = graph.holdConnection()
-            try {
-                val delivered = withTimeoutOrNull(WINDOW_MILLIS) {
-                    graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
-                    graph.sessionPrefs.outboundQueue.first { queue -> queue.none { it.clientStanzaId in queuedIds } }
-                    // Queued markers drain right after the ready pipeline's sends.
-                    delay(MARKER_DRAIN_MILLIS)
-                } != null
-                if (!delivered && queuedIds.isNotEmpty() && conversationJid != null) {
-                    runCatching { graph.messageNotifier.notifyReplyWaiting(conversationJid, isGroupchat) }
-                }
-            } finally {
-                hold.release()
-                stopSelf(startId)
+        if (conversationJid != null) {
+            intent.getStringArrayExtra(EXTRA_QUEUED_IDS).orEmpty().forEach { id ->
+                pendingReplies[id] = PendingReply(conversationJid, isGroupchat)
             }
         }
+        // One waiter over everything still pending; a new start restarts
+        // its window rather than dropping what earlier starts were owed.
+        work?.cancel()
+        work = scope.launch { awaitDeliveries(startId) }
         return START_NOT_STICKY
     }
 
-    /** The system's short-service limit was reached: let go now. */
-    override fun onTimeout(startId: Int, fgsType: Int) {
+    private suspend fun awaitDeliveries(startId: Int) {
+        val graph = (application as WaddleApplication).graph
+        val hold = graph.holdConnection()
+        try {
+            val delivered = withTimeoutOrNull(WINDOW_MILLIS) {
+                graph.sessionManager.connectionState.first { it == ConnectionState.Ready }
+                graph.sessionPrefs.outboundQueue.first { queue ->
+                    val queued = queue.mapTo(HashSet()) { it.clientStanzaId }
+                    pendingReplies.keys.removeAll { it !in queued }
+                    pendingReplies.isEmpty()
+                }
+                // Queued markers drain right after the ready pipeline's sends.
+                delay(MARKER_DRAIN_MILLIS)
+            } != null
+            if (!delivered) flagWaitingReplies()
+            stopSelf(startId)
+        } finally {
+            hold.release()
+        }
+    }
+
+    /** Replies still unacknowledged must not keep looking sent. */
+    private suspend fun flagWaitingReplies() {
+        val notifier = (application as WaddleApplication).graph.messageNotifier
+        pendingReplies.values.distinct().forEach { reply ->
+            runCatching { notifier.notifyReplyWaiting(reply.conversationJid, reply.isGroupchat) }
+        }
+        pendingReplies.clear()
+    }
+
+    /** API 34: the system's short-service limit was reached. */
+    @Deprecated("Superseded by onTimeout(Int, Int) on API 35+", ReplaceWith("onTimeout(startId, fgsType)"))
+    override fun onTimeout(startId: Int) = timedOut(startId)
+
+    /** API 35+: the system's short-service limit was reached. */
+    override fun onTimeout(startId: Int, fgsType: Int) = timedOut(startId)
+
+    private fun timedOut(startId: Int) {
         work?.cancel()
+        // Stop at once (the system allows only seconds), then flag.
         stopSelf(startId)
+        scope.launch { flagWaitingReplies() }
     }
 
     override fun onDestroy() {
-        scope.cancel()
+        work?.cancel()
         super.onDestroy()
     }
 
     companion object {
-        private const val NOTIFICATION_ID = 3
+        /** Unique among the app's ids: 1 connection, 2 messages, 3 call, 4 incoming call. */
+        private const val NOTIFICATION_ID = 5
         private const val EXTRA_QUEUED_IDS = "social.waddle.android.extra.QUEUED_IDS"
         private const val EXTRA_CONVERSATION_JID = "social.waddle.android.extra.PENDING_CONVERSATION_JID"
         private const val EXTRA_IS_GROUPCHAT = "social.waddle.android.extra.PENDING_IS_GROUPCHAT"
@@ -103,7 +137,15 @@ class PendingDeliveryService : Service() {
                 .putExtra(EXTRA_QUEUED_IDS, queuedIds.toTypedArray())
                 .putExtra(EXTRA_CONVERSATION_JID, conversationJid)
                 .putExtra(EXTRA_IS_GROUPCHAT, isGroupchat)
-            runCatching { context.startForegroundService(intent) }
+            val started = runCatching { context.startForegroundService(intent) }.isSuccess
+            // Refused: the reply stays queued for the next connection, so it
+            // must not keep looking sent.
+            if (!started && conversationJid != null && queuedIds.isNotEmpty()) {
+                val graph = (context.applicationContext as WaddleApplication).graph
+                graph.applicationScope.launch {
+                    runCatching { graph.messageNotifier.notifyReplyWaiting(conversationJid, isGroupchat) }
+                }
+            }
         }
     }
 }
