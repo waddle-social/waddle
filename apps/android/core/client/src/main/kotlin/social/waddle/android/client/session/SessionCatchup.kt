@@ -2,7 +2,13 @@ package social.waddle.android.client.session
 
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import social.waddle.android.client.ConversationVerbs
 import social.waddle.android.client.OutboundMessenger
 import social.waddle.android.client.ReadStateCoordinator
@@ -15,8 +21,8 @@ import social.waddle.client.ffi.WaddleTopology
 
 /**
  * What happens after `SessionReady`: room topology discovery and the
- * sequential ready pipeline (rejoin → queue drain → MAM catch-up →
- * MDS bootstrap → pending-displayed drain).
+ * ready pipeline (queued sends → topology → remaining joins → inbox →
+ * MAM catch-up → MDS bootstrap → pending-displayed drain).
  */
 internal class SessionCatchup(
     private val sessionPrefs: SessionPrefs,
@@ -49,11 +55,13 @@ internal class SessionCatchup(
     }
 
     /**
-     * One sequential pipeline, deliberately not parallel: the rejoin's
-     * join set is derived from the freshly discovered topology's
-     * bookmark autojoin flags, queued groupchat sends need the rejoin's
-     * join presence first, and the bounded catch-up must not race the
-     * replay or hammer the server.
+     * One ordered pipeline. Queued sends go first: DMs immediately, room
+     * sends once their room has rejoined (a groupchat send needs the
+     * join presence). Topology discovery then supplies the autojoin set
+     * for the remaining joins. Joins and catch-up pages run a few at a
+     * time: parallel enough that thirty rooms do not take thirty round
+     * trips, bounded so a reconnect does not hammer the server. Stages
+     * stay ordered so catch-up never races the replay.
      */
     suspend fun onSessionReady(
         session: WaddleSessionInfo,
@@ -64,9 +72,18 @@ internal class SessionCatchup(
         // coroutine would kill the process ("never throw" contract).
         persistQuietly {
             val lease = activeSession.captureOwnerLease() ?: return@persistQuietly
+            // Queued sends first: what the user already typed must not
+            // wait behind topology discovery and every other room's join.
+            // DMs need no join; rooms with queued sends join before the
+            // rest, and only those the user still intends to be in.
+            val persistedRooms = sessionPrefs.joinedRooms.first()
+            val sendRooms = messenger.pendingRooms() intersect persistedRooms
+            val joinedForSends = joinRooms(lease, session, sendRooms)
+            messenger.drainOutboundQueue { !it.isGroupchat || it.conversationJid in joinedForSends }
             val topology = refreshTopology(lease)
-            rejoinRooms(lease, session, topology)
-            messenger.drainOutboundQueue()
+            joinRooms(lease, session, joinSetOf(topology, persistedRooms) - sendRooms)
+            // The complementary pass: rooms that only just joined.
+            messenger.drainOutboundQueue { it.isGroupchat && it.conversationJid !in joinedForSends }
             // Every ready session, resumed streams included (web
             // parity): the inbox is the server-authoritative unread
             // baseline the live pushes then patch.
@@ -173,30 +190,47 @@ internal class SessionCatchup(
      * MAM catch-up and screens see them; the prefs stay user-intent
      * only and are NOT widened with autojoin rooms.
      */
-    private suspend fun rejoinRooms(
+    /** XEP-0402 autojoin channels plus the rooms the user joined. */
+    private fun joinSetOf(topology: WaddleTopology?, persistedRooms: Set<String>): Set<String> =
+        topology?.channels.orEmpty()
+            .filter { it.autojoin }
+            .mapTo(mutableSetOf()) { it.roomJid } + persistedRooms
+
+    /**
+     * Join [rooms], a few at a time, and return the ones that joined.
+     * One unjoinable room must not block the rest; a stale or dropped
+     * session ends every join without marking anything.
+     */
+    private suspend fun joinRooms(
         lease: ActiveSession.OwnerLease,
         session: WaddleSessionInfo,
-        topology: WaddleTopology?,
-    ) {
-        val autojoinRooms = topology?.channels.orEmpty()
-            .filter { it.autojoin }
-            .map { it.roomJid }
-        val joinSet = autojoinRooms.toSet() + sessionPrefs.joinedRooms.first()
-        for (roomJid in joinSet) {
-            try {
-                when (activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, session.xmppLocalpart) }) {
-                    ActiveSession.LeaseInvocation.Stale,
-                    ActiveSession.LeaseInvocation.NotConnected,
-                    -> return
-                    is ActiveSession.LeaseInvocation.Completed -> Unit
-                }
-                if (!activeSession.applyIfCurrent(lease) { stores.roomStore.markJoined(roomJid) }) return
-            } catch (cancellation: CancellationException) {
-                throw cancellation
-            } catch (_: Throwable) {
-                // Keep going: one unjoinable room must not block the rest.
-            }
+        rooms: Set<String>,
+    ): Set<String> {
+        if (rooms.isEmpty()) return emptySet()
+        val permits = Semaphore(JOIN_PARALLELISM)
+        return coroutineScope {
+            rooms.map { roomJid ->
+                async { permits.withPermit { roomJid.takeIf { joinRoom(lease, session, it) } } }
+            }.awaitAll().filterNotNullTo(mutableSetOf())
         }
+    }
+
+    private suspend fun joinRoom(
+        lease: ActiveSession.OwnerLease,
+        session: WaddleSessionInfo,
+        roomJid: String,
+    ): Boolean = try {
+        when (activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, session.xmppLocalpart) }) {
+            ActiveSession.LeaseInvocation.Stale,
+            ActiveSession.LeaseInvocation.NotConnected,
+            -> false
+            is ActiveSession.LeaseInvocation.Completed ->
+                activeSession.applyIfCurrent(lease) { stores.roomStore.markJoined(roomJid) }
+        }
+    } catch (cancellation: CancellationException) {
+        throw cancellation
+    } catch (_: Throwable) {
+        false
     }
 
     /**
@@ -212,11 +246,19 @@ internal class SessionCatchup(
      */
     private suspend fun catchUpConversations(lease: ActiveSession.OwnerLease) {
         val rooms = stores.roomStore.joinedRooms.value
-        for (roomJid in rooms) {
-            verbs.fetchRoomHistory(lease, roomJid, CATCHUP_PAGE_SIZE, beforeId = null)
-        }
-        for (peerJid in resume.cursorTracker.newestFirst(excluding = rooms, limit = CATCHUP_DM_LIMIT)) {
-            verbs.fetchDmHistory(lease, peerJid, CATCHUP_PAGE_SIZE, beforeId = null)
+        val dms = resume.cursorTracker.newestFirst(excluding = rooms, limit = CATCHUP_DM_LIMIT)
+        val permits = Semaphore(CATCHUP_PARALLELISM)
+        coroutineScope {
+            rooms.forEach { roomJid ->
+                launch {
+                    permits.withPermit { verbs.fetchRoomHistory(lease, roomJid, CATCHUP_PAGE_SIZE, beforeId = null) }
+                }
+            }
+            dms.forEach { peerJid ->
+                launch {
+                    permits.withPermit { verbs.fetchDmHistory(lease, peerJid, CATCHUP_PAGE_SIZE, beforeId = null) }
+                }
+            }
         }
     }
 
@@ -226,5 +268,11 @@ internal class SessionCatchup(
 
         /** Only the most recently active DMs catch up (rooms: all joined). */
         const val CATCHUP_DM_LIMIT = 3
+
+        /** Room joins in flight at once after a reconnect. */
+        const val JOIN_PARALLELISM = 4
+
+        /** Catch-up history pages in flight at once. */
+        const val CATCHUP_PARALLELISM = 4
     }
 }

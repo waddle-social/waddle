@@ -599,8 +599,7 @@ class XmppSessionManager(
             // stream's first post-ready event is dispatched.
             if (freshStream) stores.occupantJidStore.clear()
         }
-        // Topology discovery now heads the sequential ready pipeline:
-        // the bookmark-driven rejoin derives its join set from it.
+        // The ready pipeline: queued sends, topology, joins, catch-up.
         attemptScope.launch {
             if (activeSession.isCurrent(lease)) catchup.onSessionReady(session, freshStream)
         }

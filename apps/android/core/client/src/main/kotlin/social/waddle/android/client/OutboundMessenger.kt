@@ -134,8 +134,9 @@ internal class OutboundMessenger(
      * Transport acceptance is deliberately at-least-once until the
      * matching XEP-0198 acknowledgement removes the durable intent;
      * server-side effect deduplication is the following P1 concern.
+     * [include] limits this pass to some rows (see [OutboundQueue.drain]).
      */
-    suspend fun drainOutboundQueue() {
+    suspend fun drainOutboundQueue(include: (QueuedOutboundMessage) -> Boolean = { true }) {
         sendMutex.withLock {
             val lease = activeSession.captureOwnerLease() ?: return@withLock
             val owner = lease.ownerBareJid
@@ -173,8 +174,15 @@ internal class OutboundMessenger(
                 onDropped = { queued, outcome ->
                     reportDroppedQueuedMessage(queued, outcome::class.simpleName ?: DROP_REASON_UNKNOWN)
                 },
+                include = include,
             )
         }
+    }
+
+    /** Rooms the current account's queued groupchat sends wait on. */
+    suspend fun pendingRooms(): Set<String> {
+        val lease = activeSession.captureOwnerLease() ?: return emptySet()
+        return outboundQueue.pendingRooms(lease.ownerBareJid)
     }
 
     /** Persisted delivery ownership moves to the server before UI dispatch. */
