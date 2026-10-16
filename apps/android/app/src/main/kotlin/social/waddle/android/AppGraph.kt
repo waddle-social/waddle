@@ -63,6 +63,7 @@ import social.waddle.android.push.pushSummaryOf
 import social.waddle.android.service.CallNotifier
 import social.waddle.android.service.ConnectionServiceController
 import social.waddle.android.service.MessageNotifier
+import social.waddle.android.service.SessionPrefsPushedItems
 
 /**
  * Single manual-DI composition root, created once by [WaddleApplication].
@@ -233,6 +234,7 @@ class AppGraph(
                 if (isGroupchat) ConversationKind.PRIVATE_GROUP else ConversationKind.DIRECT_CHAT,
             )
         },
+        pushedItems = SessionPrefsPushedItems(sessionPrefs),
     )
 
     val pushDistributor: PushDistributor = PushDistributor(

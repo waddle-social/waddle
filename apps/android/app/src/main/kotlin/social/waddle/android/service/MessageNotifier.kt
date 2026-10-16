@@ -61,6 +61,8 @@ class MessageNotifier(
     /** XEP-0492 effective-mode snapshot (see [NotificationPolicy]). */
     private val notifyModeFor: (conversationJid: String, isGroupchat: Boolean) -> WaddleNotifyMode =
         { _, _ -> WaddleNotifyMode.ALWAYS },
+    /** Persists the ids push posted, so another process still dedupes them. */
+    pushedItems: PushedItemsStore,
 ) : PushSummarySink {
     private val policy = NotificationPolicy(
         userPrefs = userPrefs,
@@ -95,7 +97,7 @@ class MessageNotifier(
      * push for a live message (room pushes fire even while connected) and
      * the offline flush of a pushed message must not raise a second banner.
      */
-    private val announced = AnnouncedItems(MAX_LIVE_ITEMS)
+    private val announced = AnnouncedItems(pushedItems, MAX_LIVE_ITEMS)
 
     /** Conversations showing a push summary (not a live notification). */
     private val summaryKinds = HashMap<String, SummaryKind>()
@@ -221,7 +223,7 @@ class MessageNotifier(
     private suspend fun onMessage(message: WaddleMessage) {
         // Push already announced it (the XEP-0160 offline flush of a pushed
         // message); otherwise it is claimed so a later push stays silent.
-        if (!announced.claimLive(message)) return
+        if (!announced.claimLive(message, currentSession.value?.jid)) return
         val decision = policy.decide(message) ?: return
 
         val person = Person.Builder().setName(decision.sender).setKey(decision.sender).build()

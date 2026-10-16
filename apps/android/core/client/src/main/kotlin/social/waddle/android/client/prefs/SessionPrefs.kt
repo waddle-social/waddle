@@ -102,6 +102,25 @@ class SessionPrefs(
         }
     }
 
+    /**
+     * XEP-0359 stanza-ids of messages a push notification already
+     * announced, oldest first, so a later process recognises them when the
+     * XEP-0160 offline flush delivers them live. Cleared with the session.
+     */
+    val pushAnnouncedItems: Flow<List<String>> = dataStore.data.map { prefs ->
+        prefs[KEY_PUSH_ANNOUNCED_ITEMS]?.let(::decodeStringList).orEmpty()
+    }
+
+    suspend fun setPushAnnouncedItems(items: List<String>) {
+        dataStore.edit { prefs ->
+            if (items.isEmpty()) {
+                prefs.remove(KEY_PUSH_ANNOUNCED_ITEMS)
+            } else {
+                prefs[KEY_PUSH_ANNOUNCED_ITEMS] = json.encodeToString(items)
+            }
+        }
+    }
+
     suspend fun setResumeCursors(cursors: Map<String, ResumeCursor>) {
         dataStore.edit { prefs ->
             if (cursors.isEmpty()) {
@@ -111,6 +130,9 @@ class SessionPrefs(
             }
         }
     }
+
+    private fun decodeStringList(stored: String): List<String>? =
+        runCatching { json.decodeFromString<List<String>>(stored) }.getOrNull()
 
     private fun decodeOutboundQueue(stored: String): List<QueuedOutboundMessage>? =
         runCatching { json.decodeFromString<List<QueuedOutboundMessage>>(stored) }.getOrNull()
@@ -153,6 +175,7 @@ class SessionPrefs(
         val KEY_OUTBOUND_QUEUE = stringPreferencesKey("outbound_queue")
         val KEY_RESUME_CURSORS = stringPreferencesKey("resume_cursors")
         val KEY_RESOURCE_SUFFIX = stringPreferencesKey("resource_suffix")
+        val KEY_PUSH_ANNOUNCED_ITEMS = stringPreferencesKey("push_announced_items")
 
         const val RESOURCE_SUFFIX_LENGTH = 8
         const val HEX_ALPHABET = "0123456789abcdef"
