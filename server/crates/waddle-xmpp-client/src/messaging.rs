@@ -7,6 +7,7 @@
 mod builders;
 mod call;
 mod link_preview_lookup;
+mod mentions;
 pub(crate) mod namespaces;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 mod native;
@@ -36,6 +37,9 @@ pub use call::{
 pub use link_preview_lookup::{
     build_link_preview_lookup_iq, eligible_preview_url, parse_link_preview_lookup_response,
     LinkPreviewLookup, LinkPreviewLookupReady, MAX_LINK_PREVIEW_TOKEN_BYTES,
+};
+pub use mentions::{
+    MentionDirectory, MentionTarget, MENTION_URI_EVERYONE, MENTION_URI_HERE, REFERENCE_TYPE_MENTION,
 };
 pub use namespaces::{
     build_in_call_presence_state_element, build_muji_element, NS_CHAT_MARKERS, NS_CHAT_STATES,

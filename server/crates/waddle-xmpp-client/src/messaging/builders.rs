@@ -7,6 +7,7 @@ use crate::xep::encrypted_file as xep_encrypted_file;
 use crate::xep::{reply as xep_reply, thread as xep_thread};
 use waddle_xmpp_core::CoreError;
 
+use super::mentions::resolve_typed_mentions;
 use super::namespaces::*;
 use super::parsing::payloads::validate_chat_state;
 use super::types::*;
@@ -493,7 +494,12 @@ pub fn build_outbound_message(
         }
         builder = builder.append(markups);
     }
-    for reference in &options.references {
+    let typed_mentions = options
+        .mention_directory
+        .as_ref()
+        .map(|directory| resolve_typed_mentions(body, directory, options))
+        .unwrap_or_default();
+    for reference in options.references.iter().chain(&typed_mentions) {
         // XEP-0372 §2.1: `begin` and `end` are OPTIONAL. They MUST be present
         // when the reference points at a substring of the body, and MUST be
         // absent when no body position applies (e.g. anchor-only references

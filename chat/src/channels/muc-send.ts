@@ -6,6 +6,7 @@ import type { BrowserXmppClient } from "@/lib/xmpp-client";
 import { MAX_FILE_UPLOAD_BYTES } from "@/lib/xmpp/file-upload";
 import { barePeerJid } from "@/lib/xmpp/jid";
 import type { OutboundFileAttachment } from "@/lib/xmpp";
+import type { SendGroupMessageOptions } from "@/lib/xmpp/send-types";
 import { composerLinkPreviewPayloadIsFresh, type ComposerLinkPreviewSendPayload } from "@/lib/link-preview-composer";
 import {
   inferredFileDisposition,
@@ -305,10 +306,7 @@ export function useMucSend(deps: UseMucSendDeps) {
         markup,
         references,
         thread,
-        freshLinkPreview ? {
-          linkPreviewToken: freshLinkPreview.token,
-          linkPreviewExpiresAt: freshLinkPreview.expiresAt,
-        } : undefined,
+        correctionExtras(freshLinkPreview, mentionJidsByNick?.value),
       );
     } catch (e) {
       actionError.value = normalizeError(e);
@@ -341,5 +339,20 @@ export function useMucSend(deps: UseMucSendDeps) {
     onMessageAck,
     onMessageQueueStatus,
     onMessageDeliveryFailure,
+  };
+}
+
+/**
+ * Link preview and mention directory for a room correction, or `undefined`
+ * when there is neither.
+ */
+function correctionExtras(
+  linkPreview: ComposerLinkPreviewSendPayload | undefined,
+  mentionJidsByNick: Readonly<Record<string, string>> | undefined,
+): Pick<SendGroupMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt" | "mentionJidsByNick"> | undefined {
+  if (!linkPreview && !mentionJidsByNick) return undefined;
+  return {
+    ...(linkPreview && { linkPreviewToken: linkPreview.token, linkPreviewExpiresAt: linkPreview.expiresAt }),
+    ...(mentionJidsByNick && { mentionJidsByNick }),
   };
 }

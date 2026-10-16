@@ -16,6 +16,26 @@ pub(crate) fn thread_ref_from_args(
     })
 }
 
+/// Typed mention directory from the JS options. A target whose JID does
+/// not parse as a bare JID is dropped: it can never be a conformant
+/// `xmpp:<barejid>` mention, and one bad roster entry must not fail the send.
+fn mention_directory_from_js(directory: WaddleMentionDirectory) -> MentionDirectory {
+    MentionDirectory {
+        targets: directory
+            .targets
+            .into_iter()
+            .filter_map(|target| {
+                let jid = target.jid.parse::<BareJid>().ok()?;
+                Some(MentionTarget {
+                    label: target.label,
+                    jid,
+                })
+            })
+            .collect(),
+        broadcasts: directory.broadcasts,
+    }
+}
+
 pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOptions, JsValue> {
     let options = if options.is_null() || options.is_undefined() {
         WaddleSendOptions::default()
@@ -84,6 +104,7 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
                 anchor: reference.anchor,
             })
             .collect(),
+        mention_directory: options.mention_directory.map(mention_directory_from_js),
         shared_files: options
             .shared_files
             .into_iter()
@@ -120,4 +141,35 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
             })
             .collect::<Result<Vec<_>, JsValue>>()?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mention_directory_drops_targets_without_a_bare_jid() {
+        let directory = mention_directory_from_js(WaddleMentionDirectory {
+            targets: vec![
+                WaddleMentionTarget {
+                    label: "alice".to_string(),
+                    jid: "alice@example.com".to_string(),
+                },
+                WaddleMentionTarget {
+                    label: "ghost".to_string(),
+                    jid: "not a jid@".to_string(),
+                },
+            ],
+            broadcasts: true,
+        });
+
+        assert!(directory.broadcasts);
+        assert_eq!(
+            directory.targets,
+            vec![MentionTarget {
+                label: "alice".to_string(),
+                jid: "alice@example.com".parse().expect("bare JID"),
+            }]
+        );
+    }
 }

@@ -414,6 +414,34 @@ describe("client send readiness", () => {
     );
   });
 
+  test("XEP-0372: room sends hand the room mention directory to the Rust builder", async () => {
+    // Typed `@nick` tokens only become mentions as <reference type='mention'/>;
+    // the Rust builder resolves them from this directory (wire shape asserted
+    // in waddle-xmpp-client's XEP-0372 tests).
+    const xmpp = { send_groupchat_message: mock(async (_room: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id) };
+    const client = new BrowserXmppClient(session());
+    const roomJid = roomBareJidFor(session(), "c1");
+    (client as unknown as { xmpp: typeof xmpp }).xmpp = xmpp;
+    (client as unknown as { connected: boolean }).connected = true;
+    (client as unknown as { currentRoom: string | null }).currentRoom = roomJid;
+    (client as unknown as { joinedMucReady: Set<string> }).joinedMucReady.add(roomJid);
+
+    await client.sendGroupMessage("w1", "c1", "@rawkode hi", {
+      mentionJidsByNick: { rawkode: "rawkode@example.com" },
+    });
+
+    expect(xmpp.send_groupchat_message).toHaveBeenCalledWith(
+      roomJid,
+      "@rawkode hi",
+      expect.objectContaining({
+        mention_directory: {
+          targets: [{ label: "rawkode", jid: "rawkode@example.com" }],
+          broadcasts: true,
+        },
+      }),
+    );
+  });
+
   test("room send queues when the room is unavailable", async () => {
     const xmpp = { sendMessage: mock(() => undefined) };
     const client = new BrowserXmppClient(session());

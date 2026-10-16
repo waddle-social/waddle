@@ -174,6 +174,7 @@ import {
   encodeBodyForSend,
   inboxEntryFromWasm,
   roomMessageFromArchived,
+  roomMentionDirectory,
 } from "./wasm-message-codecs";
 import type {
   WasmAdminChannelRef,
@@ -1860,6 +1861,7 @@ export class BrowserXmppClient {
   private async compatSendGroupMessage(xmpp: XmppClientInstance, roomJid: string, body: string, opts: SendGroupMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts.replyTo, opts.markup, opts.references);
     const wasmOpts = buildWasmSendOptions({ ...opts, markup: rebasedMarkup, references: rebasedReferences, requestDisplayedMarker: opts.requestDisplayedMarker ?? true }, replyFallbackLength);
+    wasmOpts.mention_directory = roomMentionDirectory(opts.mentionJidsByNick);
     if (xmpp.send_groupchat_message) {
       return compatWasmSendResult(await xmpp.send_groupchat_message(roomJid, effectiveBody, wasmOpts) as string | WasmSendMessageOutcome);
     }
@@ -1912,6 +1914,7 @@ export class BrowserXmppClient {
   private async compatSendCorrection(xmpp: XmppClientInstance, to: string, type: "chat" | "groupchat", body: string, replacesId: string, opts?: SendGroupMessageOptions | SendDirectMessageOptions): Promise<string | null> {
     const { effectiveBody, replyFallbackLength, rebasedMarkup, rebasedReferences } = encodeBodyForSend(body, opts?.replyTo, opts?.markup, opts?.references);
     const wasmOpts = buildWasmSendOptions({ ...(opts ?? {}), markup: rebasedMarkup, references: rebasedReferences }, replyFallbackLength);
+    if (type === "groupchat") wasmOpts.mention_directory = roomMentionDirectory((opts as SendGroupMessageOptions | undefined)?.mentionJidsByNick);
     if (xmpp.send_correction) return await xmpp.send_correction(to, type, effectiveBody, replacesId, wasmOpts) as string;
     throw new Error("XMPP session is not ready");
   }
@@ -2120,9 +2123,9 @@ export class BrowserXmppClient {
   // which already serializes thread/parent into the wasm send options used by
   // build_outbound_message — so passing { threadId, parentThreadId } here is
   // all the wire-level conformance needs.
-  async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"], thread?: { id: string; parent?: string }, preview?: Pick<SendGroupMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">): Promise<string | null> {
+  async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"], thread?: { id: string; parent?: string }, extras?: Pick<SendGroupMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt" | "mentionJidsByNick">): Promise<string | null> {
     const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
-    const opts: SendGroupMessageOptions = { markup, references, ...preview };
+    const opts: SendGroupMessageOptions = { markup, references, ...extras, mentionJidsByNick: { ...extras?.mentionJidsByNick, ...this.memberJidsFor(roomJid) } };
     if (thread?.id) opts.threadId = thread.id;
     if (thread?.parent) opts.parentThreadId = thread.parent;
     return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, opts);

@@ -558,6 +558,14 @@ export interface WasmSendOptions {
   }>;
   markup_spans?: WasmMarkupSpan[];
   references?: WasmReference[];
+  /** Room sends: resolve typed `@label` tokens to XEP-0372 mention references. */
+  mention_directory?: WasmMentionDirectory;
+}
+
+export interface WasmMentionDirectory {
+  targets: Array<{ label: string; jid: string }>;
+  /** Resolve `@everyone` / `@here` to broadcast mention URIs. */
+  broadcasts: boolean;
 }
 
 export type WasmSendMessageOutcome =

@@ -1257,6 +1257,112 @@ fn build_outbound_message_omits_begin_end_when_no_position() {
 }
 
 #[test]
+fn build_outbound_message_resolves_typed_mentions_to_references() {
+    // XEP-0372: a typed `@nick` only addresses someone when it travels as
+    // `<reference type='mention'/>`; receivers ignore bare body text.
+    let options = SendMessageOptions {
+        mention_directory: Some(MentionDirectory {
+            targets: vec![MentionTarget {
+                label: "rawkode".to_string(),
+                jid: "rawkode@waddle.social".parse().unwrap(),
+            }],
+            broadcasts: true,
+        }),
+        ..Default::default()
+    };
+
+    let (_, stanza) = build_outbound_message(
+        "room@muc.example",
+        "groupchat",
+        "@rawkode and @everyone, not @randax",
+        &options,
+    )
+    .unwrap();
+
+    let wire: Vec<[Option<&str>; 4]> = stanza
+        .children()
+        .filter(|child| child.is("reference", NS_REFERENCES))
+        .map(|child| ["type", "uri", "begin", "end"].map(|attr| child.attr(attr)))
+        .collect();
+    assert_eq!(
+        wire,
+        vec![
+            [
+                Some("mention"),
+                Some("xmpp:rawkode@waddle.social"),
+                Some("0"),
+                Some("8")
+            ],
+            [
+                Some("mention"),
+                Some("xmpp:@everyone"),
+                Some("13"),
+                Some("22")
+            ],
+        ]
+    );
+
+    // Receivers classify the same stanza as mentioning the target and
+    // carrying a broadcast.
+    let MessagingEvent::Message(msg) = parse(&stanza).unwrap() else {
+        panic!("expected message");
+    };
+    assert_eq!(
+        msg.mention_uris,
+        vec![
+            "xmpp:rawkode@waddle.social".to_string(),
+            "xmpp:@everyone".to_string()
+        ]
+    );
+    assert_eq!(msg.broadcast_mention.as_deref(), Some("xmpp:@everyone"));
+}
+
+#[test]
+fn build_outbound_message_keeps_explicit_mentions_and_skips_their_range() {
+    let options = SendMessageOptions {
+        references: vec![ReferenceData {
+            ref_type: "mention".to_string(),
+            uri: "xmpp:bob@example.com".to_string(),
+            begin: 0,
+            end: 4,
+            anchor: None,
+        }],
+        mention_directory: Some(MentionDirectory {
+            targets: vec![MentionTarget {
+                label: "bob".to_string(),
+                jid: "bob@example.com".parse().unwrap(),
+            }],
+            broadcasts: false,
+        }),
+        ..Default::default()
+    };
+
+    let (_, stanza) =
+        build_outbound_message("room@muc.example", "groupchat", "@bob hi", &options).unwrap();
+
+    assert_eq!(
+        stanza
+            .children()
+            .filter(|child| child.is("reference", NS_REFERENCES))
+            .count(),
+        1
+    );
+}
+
+#[test]
+fn build_outbound_message_without_directory_adds_no_mentions() {
+    let (_, stanza) = build_outbound_message(
+        "room@muc.example",
+        "groupchat",
+        "@bob @everyone",
+        &SendMessageOptions::default(),
+    )
+    .unwrap();
+
+    assert!(stanza.get_child("reference", NS_REFERENCES).is_none());
+}
+
+#[test]
 fn build_outbound_message_emits_anchor_attribute_when_present() {
     let options = SendMessageOptions {
         references: vec![ReferenceData {
