@@ -21,6 +21,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
@@ -39,6 +40,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.snapshotFlow
+import androidx.compose.runtime.snapshots.Snapshot
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -172,6 +174,8 @@ fun TimelineList(
         }
     }
 
+    // disabled
+
     // Web isPinnedAtEdge parity: in reverse layout, item 0 visible ==
     // scrolled to the newest message. Read markers gate on this.
     LaunchedEffect(listState) {
@@ -188,6 +192,28 @@ fun TimelineList(
                     lastVisible >= newestFirst.lastIndex - LOAD_MORE_THRESHOLD
                 if (nearTop) onTopReached()
             }
+    }
+}
+
+/**
+ * Keeps the newest message in view as messages arrive. A keyed lazy list
+ * holds its first visible item in place when rows are inserted before
+ * it, so in reverse layout a new message lands below the viewport. When
+ * the reader was at the newest message (or sent this one) the list
+ * follows it down; a reader scrolled back through history stays put.
+ *
+ * "Was at the newest" is read during composition, before the new row is
+ * measured, so it reflects the layout the reader was looking at.
+ */
+@Composable
+private fun FollowNewest(listState: LazyListState, newest: FeedEntry?) {
+    val newestKey = newest?.key
+    val follow = remember(newestKey) {
+        val wasAtNewest = Snapshot.withoutReadObservation { listState.firstVisibleItemIndex == 0 }
+        wasAtNewest || newest?.row is ConversationRow.Unconfirmed
+    }
+    LaunchedEffect(newestKey) {
+        if (newestKey != null && follow) listState.animateScrollToItem(0)
     }
 }
 
