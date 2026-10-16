@@ -61,15 +61,12 @@ class MessageNotifier(
     /** XEP-0492 effective-mode snapshot (see [NotificationPolicy]). */
     private val notifyModeFor: (conversationJid: String, isGroupchat: Boolean) -> WaddleNotifyMode =
         { _, _ -> WaddleNotifyMode.ALWAYS },
-    /** Whether the server pushes to this device (see [NotificationPolicy]). */
-    pushDelivering: () -> Boolean = { false },
 ) : PushSummarySink {
     private val policy = NotificationPolicy(
         userPrefs = userPrefs,
         currentSession = currentSession,
         isAppVisible = isAppVisible,
         notifyModeFor = notifyModeFor,
-        pushDelivering = pushDelivering,
     )
 
     private val historyLock = Any()
@@ -94,11 +91,11 @@ class MessageNotifier(
     private val displayedTargets = HashMap<String, XmppSessionManager.DisplayedTarget>()
 
     /**
-     * XEP-0359 ids of messages that already arrived live, newest last. A
-     * push for one of them (room pushes fire even while connected) must
-     * not raise a second, content-free banner over the live handling.
+     * What the live and push paths already announced, by XEP-0359 id: a
+     * push for a live message (room pushes fire even while connected) and
+     * the offline flush of a pushed message must not raise a second banner.
      */
-    private val liveItems = LinkedHashSet<String>()
+    private val announced = AnnouncedItems(MAX_LIVE_ITEMS)
 
     /** Conversations showing a push summary (not a live notification). */
     private val summaryKinds = HashMap<String, SummaryKind>()
@@ -191,9 +188,9 @@ class MessageNotifier(
             synchronized(historyLock) {
                 history.clear()
                 displayedTargets.clear()
-                liveItems.clear()
                 summaryKinds.clear()
             }
+            announced.clear()
             replyDeliveries.clear()
             NotificationManagerCompat.from(context).cancelAll()
         }
@@ -222,11 +219,9 @@ class MessageNotifier(
     }
 
     private suspend fun onMessage(message: WaddleMessage) {
-        // A pushed replay (the XEP-0160 offline flush) is left to the push
-        // that announced it. Not remembering it as handled live matters when
-        // the flush wins the race with that push: the push must still post.
-        if (policy.isPushedReplay(message)) return
-        rememberLiveItem(message)
+        // Push already announced it (the XEP-0160 offline flush of a pushed
+        // message); otherwise it is claimed so a later push stays silent.
+        if (!announced.claimLive(message)) return
         val decision = policy.decide(message) ?: return
 
         val person = Person.Builder().setName(decision.sender).setKey(decision.sender).build()
@@ -253,12 +248,8 @@ class MessageNotifier(
         }
     }
 
-    private fun rememberLiveItem(message: WaddleMessage) {
-        rememberItems(message.stanzaIds.map { it.id } + listOfNotNull(message.stanzaId))
-    }
-
     /** Whether the live path already handled the message with stanza-id [item]. */
-    override fun handledLive(item: String): Boolean = synchronized(historyLock) { item in liveItems }
+    override fun handledLive(item: String): Boolean = announced.handledLive(item)
 
     /**
      * A content-free push (the payload names the conversation, never the
@@ -276,7 +267,8 @@ class MessageNotifier(
         summary: PushSummary,
         stillWanted: suspend () -> Boolean,
     ) = postMutex.withLock {
-        if (handledLive(summary.item) || !stillWanted() || !canPostNotifications()) return@withLock
+        if (!stillWanted() || !canPostNotifications()) return@withLock
+        if (!announced.claimPush(summary.item)) return@withLock
         val silent = !userPrefs.messageSoundsEnabled.first()
         val liveHistory = synchronized(historyLock) { history[summary.conversationJid]?.isNotEmpty() == true }
         if (liveHistory) {
@@ -284,7 +276,6 @@ class MessageNotifier(
         } else {
             postStandaloneSummary(summary, silent)
         }
-        rememberItems(listOf(summary.item))
     }
 
     /** Adds [summary] to the conversation's live MessagingStyle history. */
@@ -333,14 +324,6 @@ class MessageNotifier(
         context,
         Manifest.permission.POST_NOTIFICATIONS,
     ) == PackageManager.PERMISSION_GRANTED
-
-    private fun rememberItems(ids: List<String>) {
-        if (ids.isEmpty()) return
-        synchronized(historyLock) {
-            liveItems += ids
-            while (liveItems.size > MAX_LIVE_ITEMS) liveItems.remove(liveItems.first())
-        }
-    }
 
     /** What a showing summary notification already announced. */
     private enum class SummaryKind { MESSAGES, MENTION }

@@ -16,10 +16,9 @@ import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
  * The should-this-message-notify decision for [MessageNotifier], free of
- * notification plumbing: own-JID filtering, pushed-replay (offline flush)
- * filtering, prefs gating, app visibility, message-type classification,
- * XEP-0492 per-conversation mode gating, and the XEP-0333/0490
- * displayed-target resolution.
+ * notification plumbing: own-JID filtering, prefs gating, app
+ * visibility, message-type classification, XEP-0492 per-conversation
+ * mode gating, and the XEP-0333/0490 displayed-target resolution.
  *
  * [notifyModeFor] is the XEP-0492 store's effective-mode snapshot
  * (conversation bare JID + kind → mode), injected as a function so the
@@ -31,8 +30,6 @@ class NotificationPolicy(
     private val isAppVisible: () -> Boolean,
     private val notifyModeFor: (conversationJid: String, isGroupchat: Boolean) -> WaddleNotifyMode =
         { _, _ -> WaddleNotifyMode.ALWAYS },
-    /** Whether the server pushes to this device (push status ACTIVE). */
-    private val pushDelivering: () -> Boolean = { false },
 ) {
     /** A message that must notify, with everything the poster needs. */
     data class Notify(
@@ -45,36 +42,12 @@ class NotificationPolicy(
         val isMention: Boolean = false,
     )
 
-    /**
-     * A replay of stored traffic that push already announced: the stanza
-     * itself carries a XEP-0203 `<delay/>` (the FFI surfaces it as
-     * [WaddleMessage.timestamp]), and the server pushes to this device.
-     * The XEP-0160 offline flush stamps every message it replays this way
-     * (§3), and while push is active everything stored offline was pushed
-     * when it was stored, so the flush must not announce it again. Without
-     * push (no distributor, or the stay-connected fallback) nothing else
-     * announced it, so the flush still notifies.
-     *
-     * Live deliveries carry no delay of their own. A received carbon is
-     * still live: the server stamps its XEP-0297 `<forwarded/>` wrapper with
-     * a delay that the FFI falls back to, so carbons are told apart by
-     * [WaddleMessage.carbon].
-     */
-    fun isPushedReplay(message: WaddleMessage): Boolean =
-        message.timestamp != null && message.carbon == null && pushDelivering()
-
-    /**
-     * New content to announce: not a pushed replay, and not a correction
-     * (which carries a body but only rewrites an existing row, so notifying
-     * would re-announce old content as a new message).
-     */
-    private fun isNewContent(message: WaddleMessage): Boolean =
-        !isPushedReplay(message) && !message.isTimelineMutation()
-
     /** `null` means the message must not raise a notification. */
     suspend fun decide(message: WaddleMessage): Notify? {
         val body = message.body ?: return null
-        if (!isNewContent(message)) return null
+        // A correction carries a body but only rewrites an existing row —
+        // notifying would re-announce old content as a new message.
+        if (message.isTimelineMutation()) return null
         if (isAppVisible()) return null
         if (!userPrefs.notificationsEnabled.first()) return null
         val session = currentSession.value ?: return null
