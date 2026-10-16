@@ -309,6 +309,12 @@ class MessageNotifier(
             // is no marker to send.
             .addAction(replyAction(conversationJid, summary.isGroupchat))
             .setDeleteIntent(dismissIntent(conversationJid))
+        // Checked beside notify(): lint only accepts a check in the posting method.
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
         NotificationManagerCompat.from(context).notify(conversationJid, MESSAGE_NOTIFICATION_ID, builder.build())
         val mentioned = summary.isMention || previous == SummaryKind.MENTION
         synchronized(historyLock) {
@@ -354,7 +360,12 @@ class MessageNotifier(
         subText: String? = null,
     ) {
         val displayedTarget = synchronized(historyLock) { displayedTargets[conversationJid] }
-        if (!canPostNotifications()) return
+        // Checked beside notify(): lint only accepts a check in the posting method.
+        val granted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) return
 
         val style = NotificationCompat.MessagingStyle(selfPerson())
             .setGroupConversation(isGroupchat)
