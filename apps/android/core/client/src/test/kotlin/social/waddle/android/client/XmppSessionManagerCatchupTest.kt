@@ -1,6 +1,8 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
@@ -167,6 +169,31 @@ class XmppSessionManagerCatchupTest {
                 .isEmpty(),
         )
 
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a screen opening a room mid-rejoin shares the bootstrap join`() = runTest {
+        val harness = Harness(this)
+        harness.prefs.setJoinedRooms(setOf("general@muc.waddle.test"))
+        harness.manager.login(testSessionInfo())
+        runCurrent()
+        val client = harness.factory.clients.last()
+        val stall = CompletableDeferred<Unit>()
+        client.joinRoomStall = stall
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertEquals("the rejoin is on the wire", 1, client.joinRoomCalls.size)
+
+        // A huddle Join (or any room open) while the rejoin is in flight
+        // must not send a second, Muji-less join after it.
+        val open = async { harness.manager.ensureRoomJoined("general@muc.waddle.test", "icepuma") }
+        runCurrent()
+        stall.complete(Unit)
+        runCurrent()
+
+        assertEquals(VerbResult.Ok, open.await())
+        assertEquals("one join for the room on this stream", 1, client.joinRoomCalls.size)
         harness.manager.logout()
     }
 

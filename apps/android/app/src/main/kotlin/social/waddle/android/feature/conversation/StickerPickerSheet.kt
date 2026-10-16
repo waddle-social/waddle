@@ -1,5 +1,6 @@
 package social.waddle.android.feature.conversation
 
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
@@ -8,7 +9,6 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
@@ -16,17 +16,13 @@ import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.MoreVert
+import androidx.compose.material.icons.outlined.MoreVert
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.Button
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -40,12 +36,14 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
 import social.waddle.android.R
 import social.waddle.android.client.StickerItem
 import social.waddle.android.client.StickerPack
 import social.waddle.android.client.StickerPacksResult
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.huddle.Kicker
+import social.waddle.android.ui.huddle.PillButton
 
 /**
  * XEP-0449 sticker picker bottom sheet (the GIF picker's sibling): the
@@ -54,7 +52,6 @@ import social.waddle.android.client.StickerPacksResult
  * and a per-pack remove action behind a confirm dialog. Selecting a
  * sticker emits the item + its pack; the caller sends it.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun StickerPickerSheet(
     packs: StickerPacksResult?,
@@ -66,25 +63,16 @@ fun StickerPickerSheet(
     var selectedPackId by remember { mutableStateOf<String?>(null) }
     var removeTarget by remember { mutableStateOf<StickerPack?>(null) }
 
-    ModalBottomSheet(
+    ConversationSheet(
         onDismissRequest = onDismiss,
+        title = stringResource(R.string.sticker_picker_title),
         modifier = Modifier.testTag(StickerPickerTestTags.SHEET),
     ) {
-        Column(
-            modifier = Modifier
-                .navigationBarsPadding()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.sticker_picker_title),
-                style = MaterialTheme.typography.titleMedium,
-            )
+        Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
             when (packs) {
-                null -> StickerStatusText(stringResource(R.string.sticker_picker_loading))
+                null -> PickerGridSkeleton(stringResource(R.string.sticker_picker_loading), STICKER_GRID_COLUMNS)
                 StickerPacksResult.Unavailable ->
-                    StickerStatusText(stringResource(R.string.sticker_picker_unavailable))
+                    PickerStatusText(stringResource(R.string.sticker_picker_unavailable))
                 StickerPacksResult.Empty -> StickerEmptyState(onCreatePack)
                 is StickerPacksResult.Ready -> StickerPackContent(
                     packs = packs.packs,
@@ -117,7 +105,7 @@ fun StickerPickerSheet(
                 ) {
                     Text(
                         text = stringResource(R.string.sticker_remove_pack),
-                        color = MaterialTheme.colorScheme.error,
+                        color = Waddle.colors.dangerText,
                     )
                 }
             },
@@ -134,22 +122,21 @@ fun StickerPickerSheet(
 private fun StickerEmptyState(onCreatePack: () -> Unit) {
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 24.dp),
+            .padding(vertical = Waddle.space.lg),
     ) {
         Text(
             text = stringResource(R.string.sticker_picker_empty),
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = Waddle.type.control,
+            color = Waddle.colors.fgMuted,
         )
-        Button(
+        PillButton(
+            text = stringResource(R.string.sticker_create_pack),
             onClick = onCreatePack,
             modifier = Modifier.testTag(StickerPickerTestTags.CREATE_CTA),
-        ) {
-            Text(text = stringResource(R.string.sticker_create_pack))
-        }
+        )
     }
 }
 
@@ -166,7 +153,7 @@ private fun StickerPackContent(
     val pack = viewState.selectedPack ?: return
     if (viewState.showPackChips) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
             modifier = Modifier
                 .fillMaxWidth()
                 .horizontalScroll(rememberScrollState()),
@@ -175,7 +162,8 @@ private fun StickerPackContent(
                 FilterChip(
                     selected = candidate.id == pack.id,
                     onClick = { onSelectPack(candidate.id) },
-                    label = { Text(text = stickerPackLabel(candidate)) },
+                    label = { Text(text = stickerPackLabel(candidate), style = Waddle.type.control) },
+                    shape = RoundedCornerShape(Waddle.radius.control),
                     modifier = Modifier.testTag(StickerPickerTestTags.packChip(candidate.id)),
                 )
             }
@@ -185,10 +173,9 @@ private fun StickerPackContent(
         verticalAlignment = Alignment.CenterVertically,
         modifier = Modifier.fillMaxWidth(),
     ) {
-        Text(
+        Kicker(
             text = stickerPackLabel(pack),
-            style = MaterialTheme.typography.labelLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            heading = true,
             modifier = Modifier.weight(1f),
         )
         TextButton(
@@ -210,7 +197,7 @@ private fun StickerPackOverflow(pack: StickerPack, onRemovePack: (StickerPack) -
         modifier = Modifier.testTag(StickerPickerTestTags.PACK_MENU),
     ) {
         Icon(
-            Icons.Filled.MoreVert,
+            Icons.Outlined.MoreVert,
             contentDescription = stringResource(R.string.sticker_pack_actions),
         )
     }
@@ -230,35 +217,28 @@ private fun StickerPackOverflow(pack: StickerPack, onRemovePack: (StickerPack) -
 private fun StickerGrid(pack: StickerPack, onSelect: (StickerItem, StickerPack) -> Unit) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(STICKER_GRID_COLUMNS),
-        horizontalArrangement = Arrangement.spacedBy(4.dp),
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
         modifier = Modifier
-            .heightIn(max = 360.dp)
+            .heightIn(max = GRID_MAX_HEIGHT)
             .testTag(StickerPickerTestTags.GRID),
     ) {
         itemsIndexed(pack.stickers) { index, sticker ->
+            // Every cell is labelled: the sticker's own description, else its pack.
+            val label = sticker.desc?.takeIf { it.isNotBlank() } ?: stickerPackLabel(pack)
             AsyncImage(
                 model = sticker.sources.firstOrNull(),
-                contentDescription = sticker.desc,
+                contentDescription = label,
                 contentScale = ContentScale.Fit,
                 modifier = Modifier
                     .aspectRatio(1f)
-                    .clip(RoundedCornerShape(6.dp))
+                    .clip(RoundedCornerShape(Waddle.radius.control))
+                    .background(Waddle.colors.surface2)
                     .testTag(StickerPickerTestTags.sticker(index))
-                    .clickable { onSelect(sticker, pack) },
+                    .clickable(onClickLabel = label) { onSelect(sticker, pack) },
             )
         }
     }
-}
-
-@Composable
-private fun StickerStatusText(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier.padding(vertical = 24.dp),
-    )
 }
 
 private const val STICKER_GRID_COLUMNS = 4

@@ -3,13 +3,14 @@ package social.waddle.android.feature.home
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
-import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import social.waddle.android.AppGraph
@@ -17,40 +18,39 @@ import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.ConnectionState
 import social.waddle.android.client.CreateRoomResult
 import social.waddle.android.client.XmppSessionManager
-import social.waddle.android.client.store.NotifySettingsEntry
-import social.waddle.android.jid.bareJidOf
+import social.waddle.android.client.store.DirectoryPerson
+import social.waddle.android.feature.call.MucCallLiveParticipantsStore
+import social.waddle.android.feature.rooms.RoomActivity
+import social.waddle.android.feature.rooms.roomActivityFlow
+import social.waddle.android.feature.rooms.topologySettledFlow
 import social.waddle.android.viewModelFactoryOf
 import social.waddle.client.ffi.WaddleChannel
-import social.waddle.client.ffi.WaddleNotifyMode
-import social.waddle.client.ffi.WaddleSpace
-
-data class ChannelListItem(
-    val roomJid: String,
-    val name: String,
-    val unreadCount: Int,
-    /** XEP-0492: an explicit `never` override mutes this channel. */
-    val isMuted: Boolean = false,
-    /** XEP-0272: occupants advertising the room's live group call. */
-    val inCallCount: Int = 0,
-)
-
-/** One drawer/list section; `name == null` is the unspaced-channels bucket. */
-data class SpaceSection(
-    val id: String,
-    val name: String?,
-    val channels: List<ChannelListItem>,
-)
 
 data class HomeUiState(
-    val sections: List<SpaceSection> = emptyList(),
+    /** Every listable room, topology order (callers sort). */
+    val rooms: List<RoomActivity> = emptyList(),
+    /** The People directory: no self, no bots, by name. */
+    val people: List<DirectoryPerson> = emptyList(),
+    /** Unread direct and group-DM messages: the DMs tab badge. */
     val dmUnreadCount: Int = 0,
     val connectionState: ConnectionState = ConnectionState.Idle,
-)
+    /** False until the topology had its chance to load: show skeletons, not "nothing". */
+    val settled: Boolean = false,
+) {
+    /** Something is live in a room: the ember dot on the Rooms tab. */
+    val anyHuddleLive: Boolean get() = rooms.any { it.live }
+}
 
-/** Spaces→channels topology with unread badges and the connection banner. */
+/**
+ * The shell's community state: every room with what is happening in it,
+ * the people around, the DM badge and the connection. Home reads all of
+ * it; the tab bar reads the badges. Also owns room creation (Home's "+"
+ * and Rooms' "New room").
+ */
 class HomeViewModel(
     private val sessionManager: XmppSessionManager,
     private val nick: String,
+    liveParticipants: MucCallLiveParticipantsStore = MucCallLiveParticipantsStore(),
 ) : ViewModel() {
     /** Failed-banner action: restart the parked loop with a fresh budget. */
     fun retryConnection() {
@@ -58,34 +58,23 @@ class HomeViewModel(
     }
 
     val uiState: StateFlow<HomeUiState> = combine(
-        // Spaces come from the raw topology; the channel list uses the
-        // store's group-DM-free selector (group DMs surface on the DM
-        // list in stage 3, never here).
+        roomActivityFlow(sessionManager, liveParticipants),
+        sessionManager.peopleDirectory,
         combine(
-            sessionManager.roomStore.topology,
-            sessionManager.roomStore.channels,
-            ::Pair,
+            sessionManager.dmStore.peers,
+            sessionManager.roomStore.groupDms,
+            sessionManager.unreadStore.counts,
+            ::dmUnreadOf,
         ),
-        sessionManager.unreadStore.counts,
-        sessionManager.dmStore.peers,
         sessionManager.connectionState,
-        // XEP-0272 Muji view rides along with the bookmark entries so
-        // the five-arity combine stays available.
-        combine(
-            sessionManager.notifySettingsStore.entries,
-            sessionManager.callStore.mucCallPresence.participants,
-            ::Pair,
-        ),
-    ) { (topology, channels), counts, dmPeers, connection, (notifyEntries, callParticipants) ->
-        // Group DMs live on the DM surface, so their unreads count into
-        // the drawer's Direct-messages badge alongside peer DMs.
-        val groupDmUnread = topology.channels
-            .filter { it.isGroupDm }
-            .sumOf { counts[it.roomJid] ?: 0 }
+        topologySettledFlow(sessionManager),
+    ) { rooms, directory, dmUnread, connection, settled ->
         HomeUiState(
-            sections = sectionsOf(topology.spaces, channels, counts, notifyEntries, callParticipants),
-            dmUnreadCount = dmPeers.sumOf { counts[it] ?: 0 } + groupDmUnread,
+            rooms = rooms,
+            people = directory.people,
+            dmUnreadCount = dmUnread,
             connectionState = connection,
+            settled = settled,
         )
     }.stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), HomeUiState())
 
@@ -94,7 +83,7 @@ class HomeViewModel(
      * immediately, the timeline backfills via MAM regardless.
      */
     fun openChannel(roomJid: String) {
-        viewModelScope.launch { sessionManager.joinRoom(roomJid, nick) }
+        viewModelScope.launch { sessionManager.ensureRoomJoined(roomJid, nick) }
     }
 
     private val _canCreateChannel = MutableStateFlow(false)
@@ -108,10 +97,19 @@ class HomeViewModel(
      */
     val canCreateChannel: StateFlow<Boolean> = _canCreateChannel.asStateFlow()
 
-    private val _createEvents = MutableSharedFlow<CreateRoomResult>(extraBufferCapacity = 4)
+    /**
+     * The create dialog's open/in-flight state. Held here, not in the
+     * composition, so a rotation mid-create keeps it and the outcome is
+     * still handled.
+     */
+    val createRoom = CreateRoomState()
 
-    /** Outcome of the last create-channel submit. */
-    val createEvents: SharedFlow<CreateRoomResult> = _createEvents
+    // A channel, not a SharedFlow: an outcome that lands while the
+    // screen is being recreated waits for the next collector.
+    private val _createEvents = Channel<CreateRoomResult>(Channel.BUFFERED)
+
+    /** Outcome of each create-channel submit, delivered once. */
+    val createEvents: Flow<CreateRoomResult> = _createEvents.receiveAsFlow()
 
     init {
         viewModelScope.launch {
@@ -140,62 +138,21 @@ class HomeViewModel(
                 description = description.trim().takeIf { it.isNotEmpty() },
                 forum = forum,
             )
-            _createEvents.tryEmit(result)
-        }
-    }
-
-    private fun sectionsOf(
-        spaces: List<WaddleSpace>,
-        channels: List<WaddleChannel>,
-        counts: Map<String, Int>,
-        notifyEntries: Map<String, NotifySettingsEntry>,
-        callParticipants: Map<String, Set<String>>,
-    ): List<SpaceSection> {
-        fun itemOf(roomJid: String, name: String): ChannelListItem {
-            val bare = bareJidOf(roomJid)
-            return ChannelListItem(
-                roomJid = roomJid,
-                name = name,
-                unreadCount = counts[bare] ?: 0,
-                // A group's §3 default is never `never`, so only an
-                // explicit stored override can mute it.
-                isMuted = notifyEntries[bare]?.notifyMode == WaddleNotifyMode.NEVER,
-                // Muji presence keys rooms by normalized (lowercased)
-                // bare JID.
-                inCallCount = callParticipants[bare.lowercase()]?.size ?: 0,
-            )
-        }
-
-        val channelsBySpace = channels.groupBy { it.spaceId }
-        val sections = spaces.map { space ->
-            SpaceSection(
-                id = space.id,
-                name = space.name,
-                channels = channelsBySpace[space.id].orEmpty()
-                    .sortedBy { it.position }
-                    .map { channel -> itemOf(channel.roomJid, channel.name) },
-            )
-        }
-        val knownSpaces = spaces.mapTo(HashSet()) { it.id }
-        val orphans = channels
-            .filter { it.spaceId !in knownSpaces }
-            .sortedBy { it.position }
-            .map { channel -> itemOf(channel.roomJid, channel.name) }
-        return if (orphans.isEmpty()) {
-            sections
-        } else {
-            sections + SpaceSection(id = ORPHAN_SECTION_ID, name = null, channels = orphans)
+            _createEvents.trySend(result)
         }
     }
 
     companion object {
-        private const val ORPHAN_SECTION_ID = "waddle.section.unspaced"
-
         fun factory(graph: AppGraph): ViewModelProvider.Factory = viewModelFactoryOf {
             HomeViewModel(
                 sessionManager = graph.sessionManager,
                 nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+                liveParticipants = graph.mucCallLiveParticipants,
             )
         }
     }
 }
+
+/** Peer DMs plus group DMs (which live on the DM surface): the DMs tab badge. */
+internal fun dmUnreadOf(peers: List<String>, groupDms: List<WaddleChannel>, counts: Map<String, Int>): Int =
+    peers.sumOf { counts[it] ?: 0 } + groupDms.sumOf { counts[it.roomJid] ?: 0 }

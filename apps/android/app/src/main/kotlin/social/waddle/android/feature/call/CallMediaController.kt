@@ -41,6 +41,15 @@ interface CallMediaController {
     val remoteParticipantIdentities: StateFlow<List<String>>
 
     /**
+     * LiveKit identities (full JIDs) the SFU currently reports as
+     * speaking, our own local participant included; empty while no room
+     * is connected. Raw and undebounced: map and smooth it with
+     * [speakingBareJidsOf] and [releasingAfter] (see
+     * [CallSessionController.speakingJids]).
+     */
+    val activeSpeakers: StateFlow<Set<String>>
+
+    /**
      * Validate the join grant and connect. [media] names the tracks to
      * publish (audio and/or video); [iceServers] is the XEP-0215
      * advertisement mapped by [iceServerConfigsFrom] — empty means "no

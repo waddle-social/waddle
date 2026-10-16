@@ -1,8 +1,11 @@
 package social.waddle.android.client
 
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.StandardTestDispatcher
 import kotlinx.coroutines.test.TestScope
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
@@ -60,6 +63,92 @@ class XmppSessionManagerVerbsTest {
         messageType = "groupchat",
         isMuc = true,
     )
+
+    @Test
+    fun `concurrent room opens share one join and a joined room sends none`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val stall = CompletableDeferred<Unit>()
+        harness.client.joinRoomStall = stall
+
+        val first = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        // The same room spelt differently (topology keeps original case).
+        val second = async { harness.manager.ensureRoomJoined(room.uppercase(), "icepuma") }
+        runCurrent()
+        assertEquals("one join on the wire while it is in flight", 1, harness.client.joinRoomCalls.size)
+
+        stall.complete(Unit)
+        assertEquals(VerbResult.Ok, first.await())
+        assertEquals(VerbResult.Ok, second.await())
+
+        // Already joined (perhaps in a huddle): opening it again sends no
+        // presence that could strip the XEP-0272 call contents.
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals(1, harness.client.joinRoomCalls.size)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a cancelled join releases its waiters and the room`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        harness.client.joinRoomStall = CompletableDeferred()
+
+        val owner = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        val waiter = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        runCurrent()
+        owner.cancel()
+        runCurrent()
+
+        assertEquals("the waiter is released, not cancelled", VerbResult.NotConnected, waiter.await())
+        harness.client.joinRoomStall = null
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals("a fresh join goes out after the cancelled one", 2, harness.client.joinRoomCalls.size)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a join in flight across a reconnect does not count for the new stream`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        val first = harness.client
+        val stall = CompletableDeferred<Unit>()
+        first.joinRoomStall = stall
+        val stale = async { harness.manager.ensureRoomJoined(room, "icepuma") }
+        runCurrent()
+
+        harness.factory.emit(WaddleClientEvent.Disconnected)
+        runCurrent()
+        advanceTimeBy(1_000L)
+        runCurrent()
+        harness.factory.emit(WaddleClientEvent.Connected)
+        runCurrent()
+        assertEquals("a new stream is up", 2, harness.factory.clients.size)
+        stall.complete(Unit)
+        runCurrent()
+        stale.await()
+
+        // The old stream's join must not pass for membership on this one.
+        val second = harness.client
+        val before = second.joinRoomCalls.size
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals("the new stream sends its own join", before + 1, second.joinRoomCalls.size)
+        harness.manager.logout()
+    }
+
+    @Test
+    fun `a remembered but unconfirmed room is joined again`() = runTest {
+        val harness = Harness(this)
+        harness.loginReady(this)
+        // Persisted intent from an earlier stream, never confirmed on this
+        // one (a kick, or a rejoin that failed): opening it must join.
+        harness.manager.roomStore.markJoined(room)
+        val before = harness.client.joinRoomCalls.size
+
+        assertEquals(VerbResult.Ok, harness.manager.ensureRoomJoined(room, "icepuma"))
+        assertEquals(before + 1, harness.client.joinRoomCalls.size)
+        harness.manager.logout()
+    }
 
     @Test
     fun `reaction applies optimistically and sends the complete set`() = runTest {

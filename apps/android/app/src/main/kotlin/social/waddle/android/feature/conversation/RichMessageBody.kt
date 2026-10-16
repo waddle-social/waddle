@@ -15,7 +15,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -50,7 +49,7 @@ import social.waddle.android.theme.Waddle
 fun RichMessageBody(blocks: List<RichBlock>, modifier: Modifier = Modifier) {
     Column(
         modifier = modifier,
-        verticalArrangement = Arrangement.spacedBy(4.dp),
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
     ) {
         blocks.forEach { block ->
             when (block) {
@@ -67,7 +66,8 @@ private fun ParagraphText(paragraph: RichBlock.Paragraph) {
     if (paragraph.runs.isEmpty()) return
     Text(
         text = annotatedParagraph(paragraph.runs),
-        style = MaterialTheme.typography.bodyLarge,
+        style = Waddle.type.body,
+        color = Waddle.colors.fg,
     )
 }
 
@@ -75,7 +75,7 @@ private fun ParagraphText(paragraph: RichBlock.Paragraph) {
 @Composable
 private fun CodeBlockSurface(block: RichBlock.CodeBlock) {
     Surface(
-        shape = RoundedCornerShape(Waddle.radius.sm),
+        shape = RoundedCornerShape(Waddle.radius.control),
         color = Waddle.colors.codeBackground,
         contentColor = Waddle.colors.codeForeground,
         border = BorderStroke(1.dp, Waddle.colors.codeBorder),
@@ -83,11 +83,10 @@ private fun CodeBlockSurface(block: RichBlock.CodeBlock) {
     ) {
         Text(
             text = block.text,
-            style = MaterialTheme.typography.bodySmall,
-            fontFamily = JetBrainsMonoFamily,
+            style = Waddle.type.time,
             modifier = Modifier
                 .horizontalScroll(rememberScrollState())
-                .padding(8.dp),
+                .padding(Waddle.space.xs),
         )
     }
 }
@@ -98,16 +97,16 @@ private fun BlockquoteColumn(quote: RichBlock.Blockquote) {
     Row(modifier = Modifier.height(IntrinsicSize.Min)) {
         Box(
             modifier = Modifier
-                .width(3.dp)
+                .width(QUOTE_BAR)
                 .fillMaxHeight()
                 .background(
                     color = Waddle.colors.quoteBorder,
-                    shape = RoundedCornerShape(1.dp),
+                    shape = RoundedCornerShape(QUOTE_BAR),
                 ),
         )
         Column(
-            modifier = Modifier.padding(start = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(4.dp),
+            modifier = Modifier.padding(start = Waddle.space.xs),
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
         ) {
             quote.paragraphs.forEach { ParagraphText(it) }
         }
@@ -117,7 +116,8 @@ private fun BlockquoteColumn(quote: RichBlock.Blockquote) {
 @Composable
 private fun annotatedParagraph(runs: List<RichInlineRun>): AnnotatedString {
     val uriHandler = LocalUriHandler.current
-    val mentionColor = MaterialTheme.colorScheme.primary
+    // Inline @mentions act (teal); the row tint says "you", not the name.
+    val mentionColor = Waddle.colors.actionText
     val linkColor = Waddle.colors.link
     val codeBackground = Waddle.colors.codeBackground
     return buildAnnotatedString {
@@ -158,3 +158,5 @@ private fun RichInlineRun.spanStyle(mentionColor: Color, codeBackground: Color):
 
 private fun mergedDecoration(base: TextDecoration?, extra: TextDecoration): TextDecoration =
     if (base == null) extra else TextDecoration.combine(listOf(base, extra))
+
+private val QUOTE_BAR = 3.dp

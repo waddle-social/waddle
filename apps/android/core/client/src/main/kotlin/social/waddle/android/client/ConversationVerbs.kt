@@ -1,6 +1,7 @@
 package social.waddle.android.client
 
 import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import social.waddle.android.client.prefs.SessionPrefs
@@ -31,6 +32,8 @@ internal class ConversationVerbs(
     private val sessionPrefs: SessionPrefs,
     /** Single archive ingest path: timeline rows plus catch-up cursors. */
     private val ingestArchivedPage: (List<WaddleArchivedMessage>) -> Unit = stores.timelineStore::onArchivedPage,
+    /** Monotonic millis, for how long a sent join counts as pending. */
+    private val nowMillis: () -> Long = { System.nanoTime() / NANOS_PER_MILLI },
 ) {
     /** Serializes reaction send+rollback pairs (see [toggleReaction]). */
     private val reactionMutex = Mutex()
@@ -76,6 +79,92 @@ internal class ConversationVerbs(
         }
         return VerbResult.Ok
     }
+
+    /** One in-flight join per room, shared by every caller; see [singleFlightJoin]. */
+    private val joinsInFlight = HashMap<String, CompletableDeferred<Boolean>>()
+    private val joinsLock = Any()
+
+    /** Bumped per fresh stream: a join begun before it says nothing about the new one. */
+    private var joinEpoch = 0L
+
+    /**
+     * A new transport stream (not an SM resume) is ready: joins still in
+     * flight belong to the old one. Their waiters hear "not joined", and
+     * their late success is not recorded as this stream's membership, so
+     * the rejoin and any screen open send a fresh join here.
+     */
+    fun onFreshStream() {
+        val orphaned = synchronized(joinsLock) {
+            joinEpoch += 1
+            // Under the same lock as a join's success stamp: an old join
+            // that finished after the stores were cleared, but before this
+            // bump, must not leave a stamp the new stream would trust.
+            stores.occupantJidStore.clearJoinsSent()
+            joinsInFlight.values.toList().also { joinsInFlight.clear() }
+        }
+        orphaned.forEach { it.complete(false) }
+    }
+
+    /**
+     * Join [roomJid] unless this stream is already in it or joining it
+     * (screens opening a room, a huddle Join). See [singleFlightJoin].
+     */
+    suspend fun ensureJoined(roomJid: String, nick: String): VerbResult {
+        var sent: VerbResult? = null
+        val joined = singleFlightJoin(roomJid) {
+            joinRoom(roomJid, nick).also { sent = it } == VerbResult.Ok
+        }
+        return if (joined) VerbResult.Ok else sent?.takeIf { it != VerbResult.Ok } ?: VerbResult.NotConnected
+    }
+
+    /**
+     * The fresh-stream rejoin's entry to the same coordinator: [send]
+     * joins on the bootstrap's lease and reports success.
+     */
+    internal suspend fun ensureJoinedOnStream(roomJid: String, send: suspend () -> Boolean): Boolean =
+        singleFlightJoin(roomJid, send)
+
+    /**
+     * Every join this client sends goes through here, so there is at
+     * most one per room in flight and none while the stream is already
+     * in the room. A second join presence carries only the MUC `<x/>`:
+     * landing after this device's XEP-0272 preparing/active presence it
+     * would withdraw the Muji contents, which the room reads as leaving
+     * the huddle (§Leaving).
+     *
+     * "In the room" is this stream's membership (self-presence 110, or a
+     * join sent moments ago on this stream), never the persisted intent,
+     * so a kicked or failed room stays joinable. Returns whether the room
+     * is joined or joining on the current stream once this call is done.
+     */
+    private suspend fun singleFlightJoin(roomJid: String, send: suspend () -> Boolean): Boolean {
+        // One key per room however it is spelt (topology and persisted ids
+        // keep their original case), as the membership check already does.
+        val key = normalizedBareJid(roomJid)
+        val flight = synchronized(joinsLock) {
+            if (stores.occupantJidStore.isInOrJoining(key, nowMillis(), JOIN_PENDING_MILLIS)) return true
+            joinsInFlight[key]?.let { JoinFlight(it, owner = false, epoch = joinEpoch) }
+                ?: JoinFlight(CompletableDeferred<Boolean>().also { joinsInFlight[key] = it }, true, joinEpoch)
+        }
+        if (!flight.owner) return flight.pending.await()
+        var ok = false
+        try {
+            val sent = send()
+            synchronized(joinsLock) {
+                // Only a join sent on the stream that is still current counts.
+                ok = sent && flight.epoch == joinEpoch
+                if (ok) stores.occupantJidStore.markJoinSent(key, nowMillis())
+            }
+            return ok
+        } finally {
+            // Nothing here suspends, so a cancelled owner still releases its
+            // waiters ("not joined") and the room.
+            flight.pending.complete(ok)
+            synchronized(joinsLock) { joinsInFlight.remove(key, flight.pending) }
+        }
+    }
+
+    private class JoinFlight(val pending: CompletableDeferred<Boolean>, val owner: Boolean, val epoch: Long)
 
     /**
      * Fetch a MAM page for a room and fan it into the timeline store
@@ -531,3 +620,10 @@ internal class ConversationVerbs(
         return page
     }
 }
+
+/**
+ * How long a sent join counts as in progress before its self-presence
+ * arrives; past it, a room that never answered can be joined again.
+ */
+private const val JOIN_PENDING_MILLIS = 10_000L
+private const val NANOS_PER_MILLI = 1_000_000L

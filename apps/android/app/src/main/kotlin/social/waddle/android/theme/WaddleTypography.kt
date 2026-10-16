@@ -8,10 +8,11 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
 import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
+import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
 import social.waddle.android.R
 
-/** Outfit: every UI and message string (web `--font-ui`). */
+/** Outfit: body, controls and messages (Huddle `body`). */
 val OutfitFamily = FontFamily(
     Font(R.font.outfit_regular, FontWeight.Normal),
     Font(R.font.outfit_medium, FontWeight.Medium),
@@ -19,13 +20,14 @@ val OutfitFamily = FontFamily(
     Font(R.font.outfit_bold, FontWeight.Bold),
 )
 
-/** Space Grotesk: display and screen titles (web `--font-display`). */
+/** Space Grotesk: headlines, room, community and people names, big numbers (Huddle `display`). */
 val SpaceGroteskFamily = FontFamily(
     Font(R.font.space_grotesk_medium, FontWeight.Medium),
+    Font(R.font.space_grotesk_semibold, FontWeight.SemiBold),
     Font(R.font.space_grotesk_bold, FontWeight.Bold),
 )
 
-/** JetBrains Mono: code, timestamps, counts and kickers (web `--font-code`). */
+/** JetBrains Mono: kickers, timestamps, counts and code (Huddle `mono`). */
 val JetBrainsMonoFamily = FontFamily(
     Font(R.font.jetbrains_mono_regular, FontWeight.Normal),
     Font(R.font.jetbrains_mono_medium, FontWeight.Medium),
@@ -37,47 +39,98 @@ private val Centered = LineHeightStyle(
     trim = LineHeightStyle.Trim.None,
 )
 
-private fun style(
-    family: FontFamily,
-    size: TextUnit,
-    leading: Float,
-    weight: FontWeight = FontWeight.Normal,
-) = TextStyle(
-    fontFamily = family,
-    fontWeight = weight,
-    fontSize = size,
-    lineHeight = (size.value * leading).sp,
-    // Web sets `letter-spacing: 0`; Material's 0.5sp body tracking reads
-    // as a template on Outfit.
-    letterSpacing = 0.em,
-    lineHeightStyle = Centered,
-)
-
-private val T = WaddleTokens.Text
-private val L = WaddleTokens.Leading
+private fun familyOf(font: HuddleFont): FontFamily = when (font) {
+    HuddleFont.Display -> SpaceGroteskFamily
+    HuddleFont.Body -> OutfitFamily
+    HuddleFont.Mono -> JetBrainsMonoFamily
+}
 
 /**
- * The web type scale mapped onto Material roles:
- * message 15 · body 14 · control 13 · meta 12 · caption 11 · title 16 ·
- * display 20 (Space Grotesk). Larger display roles keep Space Grotesk.
+ * A Huddle text style as a Compose style. Line height is relative to the
+ * size (`em`), as on the web; a style that inherits it on the web gets
+ * [fallbackLeading]. Case is not a style in Compose: uppercase styles are
+ * rendered through [social.waddle.android.ui.huddle.Kicker].
+ */
+private fun HuddleTextStyle.toStyle(
+    size: TextUnit = this.size,
+    weight: FontWeight = this.weight,
+    fallbackLeading: Float = SNUG,
+): TextStyle {
+    val leading = if (lineHeight.isSpecified) lineHeight.value else fallbackLeading
+    return TextStyle(
+        fontFamily = familyOf(font),
+        fontWeight = weight,
+        fontSize = size,
+        lineHeight = (size.value * leading).sp,
+        letterSpacing = letterSpacing,
+        lineHeightStyle = Centered,
+    )
+}
+
+private const val SNUG = 1.2f
+
+/** Display lines get a little air on Android, where 1.0 clips accents in two-line headings. */
+private const val DISPLAY_LEADING = 1.1f
+
+private val T = WaddleTokens.Huddle.Type
+
+/**
+ * Huddle's text styles (web `textStyles`), for the roles Material has no
+ * name for. Prefer these by name in new code: `Waddle.type.kicker`.
+ */
+object WaddleType {
+    val hero: TextStyle = T.hero.toStyle().copy(lineHeight = (T.hero.size.value * DISPLAY_LEADING).sp)
+    val display: TextStyle = T.display.toStyle().copy(lineHeight = (T.display.size.value * DISPLAY_LEADING).sp)
+    val headline: TextStyle = T.headline.toStyle().copy(lineHeight = (T.headline.size.value * DISPLAY_LEADING).sp)
+
+    /** Room, card, section and people titles: Space Grotesk 18/600. */
+    val title: TextStyle = T.title.toStyle()
+
+    /** Big numbers. */
+    val stat: TextStyle = T.stat.toStyle()
+    val lead: TextStyle = T.lead.toStyle()
+
+    /** Message body: Outfit 15/1.5. */
+    val body: TextStyle = T.body.toStyle()
+
+    /** Buttons, tabs, fields: Outfit 14/500. */
+    val control: TextStyle = T.control.toStyle()
+
+    /** Mono 11/500, tracked 0.08em; render uppercase through `Kicker`. */
+    val kicker: TextStyle = T.kicker.toStyle()
+
+    /** Timestamps and counts: mono 12. */
+    val time: TextStyle = T.time.toStyle()
+}
+
+private val F = WaddleTokens.Huddle.FontSize
+
+/**
+ * Huddle mapped onto Material roles, so stock components follow it:
+ * display roles are the hero/display/headline styles, title roles are
+ * Space Grotesk (top bars, sheet and dialog titles), body roles Outfit at
+ * message/body/caption sizes, labels the control style down to kicker
+ * size.
  */
 val WaddleTypography = Typography(
-    displayLarge = style(SpaceGroteskFamily, 44.sp, L.COMPACT, FontWeight.Bold),
-    displayMedium = style(SpaceGroteskFamily, 36.sp, L.COMPACT, FontWeight.Bold),
-    displaySmall = style(SpaceGroteskFamily, 30.sp, L.COMPACT, FontWeight.Bold),
-    headlineLarge = style(SpaceGroteskFamily, 28.sp, L.COMPACT, FontWeight.Bold),
-    headlineMedium = style(SpaceGroteskFamily, 24.sp, L.COMPACT, FontWeight.Bold),
-    headlineSmall = style(SpaceGroteskFamily, 22.sp, L.COMPACT, FontWeight.Medium),
-    titleLarge = style(SpaceGroteskFamily, T.display, L.COMPACT, FontWeight.Bold),
-    titleMedium = style(OutfitFamily, T.title, L.CONTROL, FontWeight.SemiBold),
-    titleSmall = style(OutfitFamily, T.body, L.CONTROL, FontWeight.SemiBold),
-    bodyLarge = style(OutfitFamily, T.message, L.MESSAGE),
-    bodyMedium = style(OutfitFamily, T.body, L.BODY),
-    bodySmall = style(OutfitFamily, T.meta, L.BODY),
-    labelLarge = style(OutfitFamily, T.body, L.CONTROL, FontWeight.Medium),
-    labelMedium = style(OutfitFamily, T.meta, L.CONTROL, FontWeight.Medium),
-    labelSmall = style(OutfitFamily, T.caption, L.CONTROL, FontWeight.Medium),
+    displayLarge = WaddleType.hero,
+    displayMedium = WaddleType.display,
+    displaySmall = WaddleType.headline,
+    headlineLarge = WaddleType.headline,
+    headlineMedium = T.title.toStyle(size = 24.sp, weight = FontWeight.Bold).copy(letterSpacing = (-0.02).em),
+    headlineSmall = T.title.toStyle(size = 20.sp, weight = FontWeight.Bold),
+    titleLarge = WaddleType.title,
+    titleMedium = T.title.toStyle(size = 16.sp),
+    titleSmall = T.title.toStyle(size = F.body),
+    bodyLarge = WaddleType.body,
+    bodyMedium = T.body.toStyle(size = F.body),
+    bodySmall = T.body.toStyle(size = F.caption).copy(lineHeight = (F.caption.value * CAPTION_LEADING).sp),
+    labelLarge = WaddleType.control,
+    labelMedium = T.control.toStyle(size = F.caption),
+    labelSmall = T.control.toStyle(size = F.kicker),
 )
 
-/** Timestamps, counters and kickers: mono at meta size, like the web rail. */
-val MonoMeta = style(JetBrainsMonoFamily, T.meta, L.COMPACT)
+private const val CAPTION_LEADING = 1.35f
+
+/** Timestamps, counters and kickers: Huddle `time` (mono 12). */
+val MonoMeta: TextStyle = WaddleType.time

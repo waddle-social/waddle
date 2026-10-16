@@ -33,10 +33,10 @@ class UserPrefsTest {
     }
 
     @Test
-    fun `defaults are system theme with notifications and sounds on`() = runBlocking {
+    fun `defaults are night theme with notifications and sounds on`() = runBlocking {
         val prefs = newPrefs()
 
-        assertEquals(ThemeMode.SYSTEM, prefs.theme.first())
+        assertEquals(ThemeMode.NIGHT, prefs.theme.first())
         assertTrue(prefs.notificationsEnabled.first())
         assertTrue(prefs.messageSoundsEnabled.first())
     }
@@ -45,16 +45,35 @@ class UserPrefsTest {
     fun `round trips settings and clear restores defaults`() = runBlocking {
         val prefs = newPrefs()
 
-        prefs.setTheme(ThemeMode.DARK)
+        prefs.setTheme(ThemeMode.DAYLIGHT)
         prefs.setNotificationsEnabled(false)
         prefs.setMessageSoundsEnabled(false)
 
-        assertEquals(ThemeMode.DARK, prefs.theme.first())
+        assertEquals(ThemeMode.DAYLIGHT, prefs.theme.first())
         assertFalse(prefs.notificationsEnabled.first())
         assertFalse(prefs.messageSoundsEnabled.first())
 
         prefs.clear()
-        assertEquals(ThemeMode.SYSTEM, prefs.theme.first())
+        assertEquals(ThemeMode.NIGHT, prefs.theme.first())
         assertTrue(prefs.notificationsEnabled.first())
+    }
+
+    @Test
+    fun `the old system and unknown values read as night`() {
+        assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage("system"))
+        assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage(null))
+        assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage("sepia"))
+        assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage("dark"))
+        assertEquals(ThemeMode.DAYLIGHT, ThemeMode.fromStorage("light"))
+    }
+
+    @Test
+    fun `wallpaper colours are off until chosen`() = runBlocking {
+        val prefs = newPrefs()
+        assertFalse(prefs.wallpaperColors.first())
+
+        prefs.setWallpaperColors(true)
+
+        assertTrue(prefs.wallpaperColors.first())
     }
 }

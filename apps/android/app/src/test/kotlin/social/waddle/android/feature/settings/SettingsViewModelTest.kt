@@ -83,7 +83,7 @@ class SettingsViewModelTest {
 
         assertEquals(
             SettingsUiState(
-                theme = ThemeMode.SYSTEM,
+                theme = ThemeMode.NIGHT,
                 notificationsEnabled = true,
                 messageSoundsEnabled = true,
                 readReceiptsEnabled = true,
@@ -95,11 +95,11 @@ class SettingsViewModelTest {
     @Test
     fun `theme round-trips through the prefs store`() = runTest {
         val viewModel = createViewModel()
-        viewModel.setTheme(ThemeMode.DARK)
+        viewModel.setTheme(ThemeMode.DAYLIGHT)
         runCurrent()
 
-        assertEquals(ThemeMode.DARK, viewModel.uiState.value.theme)
-        assertEquals(ThemeMode.DARK, userPrefs.theme.first())
+        assertEquals(ThemeMode.DAYLIGHT, viewModel.uiState.value.theme)
+        assertEquals(ThemeMode.DAYLIGHT, userPrefs.theme.first())
     }
 
     @Test
@@ -128,7 +128,7 @@ class SettingsViewModelTest {
     @Test
     fun `pref toggles keep the account row intact`() = runTest {
         val viewModel = createViewModel()
-        viewModel.setTheme(ThemeMode.LIGHT)
+        viewModel.setTheme(ThemeMode.NIGHT)
         runCurrent()
 
         assertEquals("icepuma", viewModel.uiState.value.username)

@@ -63,6 +63,17 @@ class InboxStore {
     /** Room-thread entries, keyed room bare JID + thread id. */
     val threads: StateFlow<Map<InboxThreadKey, InboxEntrySnapshot>> = _threads.asStateFlow()
 
+    private val _threadUnread = MutableStateFlow<Map<String, Int>>(emptyMap())
+
+    /**
+     * Unread thread replies per room: room bare JID → the sum of its
+     * thread entries' server-reported unread (absent = zero). Derived
+     * from [threads], so it follows the same freshness guard and
+     * read-clear barrier; a thread is cleared by `markInboxRead(room,
+     * threadId)`, never by reading the room's feed.
+     */
+    val threadUnread: StateFlow<Map<String, Int>> = _threadUnread.asStateFlow()
+
     /** Read-clear barriers: conversation(+thread) → snapshotted stanza id. */
     private val readClearBarriers = HashMap<BarrierKey, String>()
 
@@ -117,6 +128,7 @@ class InboxStore {
             _direct.value = emptyMap()
             _muc.value = emptyMap()
             _threads.value = emptyMap()
+            _threadUnread.value = emptyMap()
             readClearBarriers.clear()
             accountedMessageIds.clear()
         }
@@ -194,12 +206,20 @@ class InboxStore {
         if (threadId != null) {
             _threads.value =
                 _threads.value + (InboxThreadKey(snapshot.partner, threadId) to snapshot)
+            recomputeThreadUnread(snapshot.partner)
         } else {
             when (snapshot.kind) {
                 InboxKind.DIRECT -> _direct.value = _direct.value + (snapshot.partner to snapshot)
                 InboxKind.MUC -> _muc.value = _muc.value + (snapshot.partner to snapshot)
             }
         }
+    }
+
+    private fun recomputeThreadUnread(roomJid: String) {
+        val unread = _threads.value.entries.sumOf { (key, entry) -> if (key.roomJid == roomJid) entry.unread else 0 }
+        val current = _threadUnread.value
+        if ((current[roomJid] ?: 0) == unread) return
+        _threadUnread.value = if (unread > 0) current + (roomJid to unread) else current - roomJid
     }
 
     private fun rememberAccounted(snapshot: InboxEntrySnapshot) {

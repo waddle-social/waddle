@@ -41,6 +41,8 @@ on:
     - chat/src/**
     - chat/src/styles/global/tokens.css
     - chat/src/styles/global/tokens.css/**
+    - chat/src/styles/huddle-tokens.ts
+    - chat/src/styles/huddle-tokens.ts/**
     - chat/tests/**
     - chat/tests/native-telemetry-off.test.ts
     - chat/tests/native-telemetry-off.test.ts/**
@@ -59,6 +61,7 @@ on:
     - package.json/**
     - scripts/check-native-remote-telemetry.sh
     - scripts/check-native-remote-telemetry.sh/**
+    - scripts/design-tokens/**
     - scripts/generate-design-tokens.mjs
     - scripts/generate-design-tokens.mjs/**
     - scripts/native-telemetry-cargo-closure.py

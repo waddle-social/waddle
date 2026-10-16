@@ -4,14 +4,24 @@ import android.Manifest
 import android.content.pm.PackageManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.StartOffset
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CloudOff
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -19,10 +29,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -34,6 +48,13 @@ import social.waddle.android.feature.login.LoginScreen
 import social.waddle.android.navigation.WaddleNavDisplay
 import social.waddle.android.navigation.WaddleNavKey
 import social.waddle.android.navigation.conversationNavKeyFor
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.EmptyState
+import social.waddle.android.ui.EmptyStateTone
+import social.waddle.android.ui.Wordmark
+import social.waddle.android.ui.huddle.HuddleMotion
+import social.waddle.android.ui.huddle.PillButton
+import social.waddle.android.ui.huddle.reducedMotion
 
 /**
  * App-state switch (web `AppShell.vue` parity): Loading → progress,
@@ -50,7 +71,7 @@ fun AppShell(
     val appState by graph.appState.collectAsStateWithLifecycle()
     Surface(
         modifier = Modifier.fillMaxSize().testTag(AppShellTestTags.ROOT),
-        color = MaterialTheme.colorScheme.background,
+        color = Waddle.colors.bg,
     ) {
         when (val state = appState) {
             WaddleAppState.Loading -> LoadingScreen()
@@ -69,38 +90,109 @@ fun AppShell(
     }
 }
 
+/**
+ * App startup (web `AppShell` loading): the wordmark, "Checking
+ * session." and three teal typing dots. The dots hold still under
+ * reduced motion.
+ */
 @Composable
-private fun LoadingScreen() {
-    Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-        CircularProgressIndicator()
-    }
-}
-
-@Composable
-private fun RestoreErrorScreen(detail: String, onRetry: () -> Unit) {
+internal fun LoadingScreen() {
+    val description = stringResource(R.string.huddle_app_checking_session)
     Column(
         modifier = Modifier
             .fillMaxSize()
-            .padding(32.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.CenterVertically),
+            .background(Waddle.colors.bg)
+            .semantics(mergeDescendants = true) { contentDescription = description },
+        verticalArrangement = Arrangement.Center,
         horizontalAlignment = Alignment.CenterHorizontally,
     ) {
-        Text(
-            text = stringResource(R.string.restore_error_title),
-            style = MaterialTheme.typography.headlineSmall,
-            textAlign = TextAlign.Center,
-        )
-        Text(
-            text = detail,
-            style = MaterialTheme.typography.bodyMedium,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        Button(onClick = onRetry) {
-            Text(text = stringResource(R.string.action_retry))
+        Wordmark(style = Waddle.type.headline)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+            modifier = Modifier.padding(top = Waddle.space.md),
+        ) {
+            TypingDots()
+            Text(text = description, style = Waddle.type.control, color = Waddle.colors.fgMuted)
         }
     }
 }
+
+/** Three teal dots breathing in turn (web typing dots: .85 → 1.15 over 1.25s). */
+@Composable
+private fun TypingDots() {
+    val color = Waddle.colors.action
+    val scales = if (reducedMotion) {
+        List(DOT_COUNT) { 1f }
+    } else {
+        val transition = rememberInfiniteTransition(label = "checking")
+        List(DOT_COUNT) { dot ->
+            transition.animateFloat(
+                initialValue = DOT_MIN_SCALE,
+                targetValue = DOT_MAX_SCALE,
+                animationSpec = infiniteRepeatable(
+                    animation = tween(DOT_CYCLE_MILLIS / 2, easing = HuddleMotion.easing),
+                    repeatMode = RepeatMode.Reverse,
+                    initialStartOffset = StartOffset(dot * DOT_STAGGER_MILLIS),
+                ),
+                label = "dot$dot",
+            ).value
+        }
+    }
+    Row(horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs)) {
+        scales.forEach { scale ->
+            Box(
+                modifier = Modifier
+                    .size(TYPING_DOT)
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                    }
+                    .background(color, CircleShape),
+            )
+        }
+    }
+}
+
+/** The session could not be restored: say so kindly, offer the retry, keep the detail small. */
+@Composable
+internal fun RestoreErrorScreen(detail: String, onRetry: () -> Unit) {
+    EmptyState(
+        icon = Icons.Outlined.CloudOff,
+        title = stringResource(R.string.restore_error_title),
+        body = stringResource(R.string.huddle_app_restore_body),
+        tone = EmptyStateTone.PROBLEM,
+        modifier = Modifier
+            .background(Waddle.colors.bg)
+            .systemBarsPadding(),
+        action = {
+            Column(
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(Waddle.space.md),
+            ) {
+                PillButton(text = stringResource(R.string.action_retry), onClick = onRetry)
+                if (detail.isNotBlank()) {
+                    Text(
+                        text = detail,
+                        style = Waddle.type.time,
+                        color = Waddle.colors.fgSoft,
+                        textAlign = TextAlign.Center,
+                        maxLines = DETAIL_LINES,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
+            }
+        },
+    )
+}
+
+private const val DOT_COUNT = 3
+private const val DOT_MIN_SCALE = 0.85f
+private const val DOT_MAX_SCALE = 1.15f
+private const val DOT_CYCLE_MILLIS = 1250
+private const val DOT_STAGGER_MILLIS = 180
+private const val DETAIL_LINES = 3
+private val TYPING_DOT = 6.dp
 
 @Composable
 private fun ReadyShell(
@@ -112,7 +204,13 @@ private fun ReadyShell(
     val graph = LocalAppGraph.current
     RequestNotificationPermissionOnce()
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // Call surfaces wrap whatever screen is open: the ring and the
+    // in-call screen layer over it; the minimized and ended banners take
+    // a row above it so they never cover a top bar.
+    CallOverlayHost(
+        pendingCallAnswer = pendingCallAnswer,
+        onCallAnswerConsumed = onCallAnswerConsumed,
+    ) {
         WaddleNavDisplay { backStack ->
             val pendingJid by pendingConversationJid.collectAsStateWithLifecycle()
             LaunchedEffect(pendingJid) {
@@ -133,7 +231,9 @@ private fun ReadyShell(
                     else -> null
                 }
                 if (mucRoomJid != null) {
-                    graph.sessionManager.joinRoom(
+                    // ensure, not join: a re-join would strip this
+                    // device's huddle presence in that room.
+                    graph.sessionManager.ensureRoomJoined(
                         roomJid = mucRoomJid,
                         nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
                     )
@@ -141,12 +241,6 @@ private fun ReadyShell(
                 onConversationConsumed()
             }
         }
-        // Call surfaces layer over whatever screen is open: the ring,
-        // the in-call screen, or the minimized banner.
-        CallOverlayHost(
-            pendingCallAnswer = pendingCallAnswer,
-            onCallAnswerConsumed = onCallAnswerConsumed,
-        )
     }
 }
 

@@ -3,18 +3,16 @@ package social.waddle.android.feature.conversation
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
-import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.RadioButton
 import androidx.compose.material3.Switch
@@ -27,11 +25,13 @@ import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.client.ExtensionCommandAction
 import social.waddle.android.client.ExtensionCommandField
 import social.waddle.android.client.ExtensionFieldType
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.huddle.PillButton
+import social.waddle.android.ui.huddle.PillTone
 
 /**
  * The slash-command palette: one XEP-0004 form stage of an extension
@@ -45,7 +45,7 @@ import social.waddle.android.client.ExtensionFieldType
  * disabled while the form is blocked or any visible required field is
  * empty (`cancel`/`prev` always work).
  */
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun ExtensionCommandFormSheet(
     session: ExtensionFormSession,
@@ -54,31 +54,24 @@ fun ExtensionCommandFormSheet(
     onAction: (ExtensionCommandAction) -> Unit,
     onDismiss: () -> Unit,
 ) {
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ConversationSheet(onDismissRequest = onDismiss, title = session.title ?: session.command.name) {
         Column(
-            verticalArrangement = Arrangement.spacedBy(12.dp),
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
             modifier = Modifier
-                .navigationBarsPadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 16.dp)
                 .testTag(SlashCommandTestTags.FORM_SHEET),
         ) {
-            Text(
-                text = session.title ?: session.command.name,
-                style = MaterialTheme.typography.titleMedium,
-            )
             session.instructions?.let { instructions ->
-                Text(text = instructions, style = MaterialTheme.typography.bodyMedium)
+                Text(text = instructions, style = Waddle.type.control, color = Waddle.colors.fgMuted)
             }
             phase?.detail?.takeIf { phase.state != CommandPhaseState.LOADING }?.let { detail ->
                 Text(
                     text = detail,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = Waddle.type.control,
                     color = if (phase.state == CommandPhaseState.ERROR) {
-                        MaterialTheme.colorScheme.error
+                        Waddle.colors.dangerText
                     } else {
-                        MaterialTheme.colorScheme.tertiary
+                        Waddle.colors.warningText
                     },
                 )
             }
@@ -87,15 +80,15 @@ fun ExtensionCommandFormSheet(
             if (blockedReason != null) {
                 Text(
                     text = blockedReason,
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.error,
+                    style = Waddle.type.control,
+                    color = Waddle.colors.dangerText,
                     modifier = Modifier.testTag(SlashCommandTestTags.FORM_BLOCKED),
                 )
             } else if (missingRequired.isNotEmpty()) {
                 Text(
                     text = stringResource(R.string.extension_form_required_hint),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.tertiary,
+                    style = MetaStyle,
+                    color = Waddle.colors.fgMuted,
                 )
             }
             session.fields
@@ -128,11 +121,13 @@ private fun FormField(
         ExtensionFieldType.BOOLEAN -> {
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = Waddle.space.xxl),
             ) {
                 Text(
                     text = label,
-                    style = MaterialTheme.typography.bodyMedium,
+                    style = Waddle.type.control,
                     modifier = Modifier.weight(1f),
                 )
                 val checked = field.values.firstOrNull() == "1" || field.values.firstOrNull() == "true"
@@ -145,12 +140,13 @@ private fun FormField(
         }
         ExtensionFieldType.LIST_SINGLE -> {
             Column {
-                Text(text = label, style = MaterialTheme.typography.labelMedium)
+                Text(text = label, style = Waddle.type.kicker)
                 field.options.forEach { option ->
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .heightIn(min = Waddle.space.xxl)
                             .clickable(enabled = enabled) {
                                 onFieldChange(field.name, listOf(option.value))
                             },
@@ -162,7 +158,7 @@ private fun FormField(
                         )
                         Text(
                             text = option.label ?: option.value,
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = Waddle.type.control,
                         )
                     }
                 }
@@ -170,13 +166,14 @@ private fun FormField(
         }
         ExtensionFieldType.LIST_MULTI -> {
             Column {
-                Text(text = label, style = MaterialTheme.typography.labelMedium)
+                Text(text = label, style = Waddle.type.kicker)
                 field.options.forEach { option ->
                     val selected = option.value in field.values
                     Row(
                         verticalAlignment = Alignment.CenterVertically,
                         modifier = Modifier
                             .fillMaxWidth()
+                            .heightIn(min = Waddle.space.xxl)
                             .clickable(enabled = enabled) {
                                 onFieldChange(field.name, toggleValue(field.values, option.value))
                             },
@@ -190,7 +187,7 @@ private fun FormField(
                         )
                         Text(
                             text = option.label ?: option.value,
-                            style = MaterialTheme.typography.bodyMedium,
+                            style = Waddle.type.control,
                         )
                     }
                 }
@@ -202,6 +199,7 @@ private fun FormField(
             label = { Text(label) },
             enabled = enabled,
             minLines = 3,
+            shape = RoundedCornerShape(Waddle.radius.control),
             modifier = Modifier.fillMaxWidth(),
         )
         else -> OutlinedTextField(
@@ -216,11 +214,13 @@ private fun FormField(
                 VisualTransformation.None
             },
             enabled = enabled,
+            shape = RoundedCornerShape(Waddle.radius.control),
             modifier = Modifier.fillMaxWidth(),
         )
     }
 }
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 private fun ActionRow(
     actions: List<ExtensionCommandAction>,
@@ -228,36 +228,40 @@ private fun ActionRow(
     submitAllowed: Boolean,
     onAction: (ExtensionCommandAction) -> Unit,
 ) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        modifier = Modifier.fillMaxWidth(),
+    FlowRow(
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs, Alignment.End),
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(top = Waddle.space.xs),
     ) {
         if (ExtensionCommandAction.CANCEL in actions) {
             TextButton(onClick = { onAction(ExtensionCommandAction.CANCEL) }, enabled = !busy) {
-                Text(stringResource(R.string.extension_form_cancel))
+                Text(stringResource(R.string.extension_form_cancel), style = Waddle.type.control)
             }
         }
         if (ExtensionCommandAction.PREV in actions) {
-            OutlinedButton(onClick = { onAction(ExtensionCommandAction.PREV) }, enabled = !busy) {
-                Text(stringResource(R.string.extension_form_back))
-            }
+            PillButton(
+                text = stringResource(R.string.extension_form_back),
+                onClick = { onAction(ExtensionCommandAction.PREV) },
+                enabled = !busy,
+                tone = PillTone.QUIET,
+            )
         }
         if (ExtensionCommandAction.NEXT in actions) {
-            OutlinedButton(
+            PillButton(
+                text = stringResource(R.string.extension_form_next),
                 onClick = { onAction(ExtensionCommandAction.NEXT) },
                 enabled = !busy && submitAllowed,
-            ) {
-                Text(stringResource(R.string.extension_form_next))
-            }
+                tone = if (ExtensionCommandAction.COMPLETE in actions) PillTone.QUIET else PillTone.PRIMARY,
+            )
         }
         if (ExtensionCommandAction.COMPLETE in actions) {
-            Button(
+            PillButton(
+                text = stringResource(R.string.extension_form_submit),
                 onClick = { onAction(ExtensionCommandAction.COMPLETE) },
                 enabled = !busy && submitAllowed,
-            ) {
-                Text(stringResource(R.string.extension_form_submit))
-            }
+            )
         }
     }
 }

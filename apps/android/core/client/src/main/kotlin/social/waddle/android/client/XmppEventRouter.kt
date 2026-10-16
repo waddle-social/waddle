@@ -178,8 +178,20 @@ internal class XmppEventRouter(
         // ALSO increment locally — the absolute count in that push
         // covered it (web `wasUnreadAccountedByInbox` parity).
         val accountedByInbox = stores.inboxStore.wasUnreadAccounted(key.jid, rootIds)
-        if (newlyInserted && !isThreadReply && !accountedByInbox) {
-            stores.unreadStore.onLiveMessage(key.jid, key.isMine)
+        // XEP-0372: a reference to our bare JID or a broadcast mention.
+        // The inbox carries no mention counts, so an inbox-accounted
+        // message still counts its mention.
+        val mentionsSelf = messageMentionsBareJid(
+            broadcastMention = message.broadcastMention,
+            mentionUris = message.mentionUris,
+            selfBareJid = activeSession.ownBareJid,
+        )
+        if (newlyInserted && !isThreadReply) {
+            if (!accountedByInbox) {
+                stores.unreadStore.onLiveMessage(key.jid, key.isMine, mentionsSelf)
+            } else if (mentionsSelf) {
+                stores.unreadStore.onLiveMentionAccounted(key.jid, key.isMine)
+            }
         }
         resume.recordCursor(
             conversationJid = key.jid,

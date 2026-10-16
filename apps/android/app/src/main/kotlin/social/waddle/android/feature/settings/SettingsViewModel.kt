@@ -25,10 +25,12 @@ data class SettingsUiState(
     val username: String? = null,
     val jid: String? = null,
     val avatarUrl: String? = null,
-    val theme: ThemeMode = ThemeMode.SYSTEM,
+    val theme: ThemeMode = ThemeMode.NIGHT,
     val notificationsEnabled: Boolean = true,
     val messageSoundsEnabled: Boolean = true,
     val readReceiptsEnabled: Boolean = true,
+    /** Material You dynamic colour (off: Huddle's own colours). */
+    val wallpaperColors: Boolean = false,
 )
 
 /** How background delivery works for the account right now. */
@@ -130,11 +132,11 @@ class SettingsViewModel(
 
     val uiState: StateFlow<SettingsUiState> = combine(
         currentSession,
-        userPrefs.theme,
+        combine(userPrefs.theme, userPrefs.wallpaperColors, ::Pair),
         userPrefs.notificationsEnabled,
         userPrefs.messageSoundsEnabled,
         userPrefs.readReceiptsEnabled,
-    ) { session, theme, notificationsEnabled, messageSoundsEnabled, readReceiptsEnabled ->
+    ) { session, (theme, wallpaperColors), notificationsEnabled, messageSoundsEnabled, readReceiptsEnabled ->
         SettingsUiState(
             username = session?.username,
             jid = session?.jid,
@@ -143,6 +145,7 @@ class SettingsViewModel(
             notificationsEnabled = notificationsEnabled,
             messageSoundsEnabled = messageSoundsEnabled,
             readReceiptsEnabled = readReceiptsEnabled,
+            wallpaperColors = wallpaperColors,
         )
     }.stateIn(viewModelScope, SharingStarted.Eagerly, accountSeed())
 
@@ -157,6 +160,10 @@ class SettingsViewModel(
 
     fun setTheme(mode: ThemeMode) {
         viewModelScope.launch { userPrefs.setTheme(mode) }
+    }
+
+    fun setWallpaperColors(enabled: Boolean) {
+        viewModelScope.launch { userPrefs.setWallpaperColors(enabled) }
     }
 
     fun setNotificationsEnabled(enabled: Boolean) {

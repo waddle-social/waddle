@@ -3,22 +3,27 @@ package social.waddle.android.feature.login
 import androidx.browser.customtabs.CustomTabsIntent
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.defaultMinSize
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
+import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material3.Button
-import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
+import androidx.compose.material3.LoadingIndicator
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -29,6 +34,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.heading
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.em
@@ -40,6 +47,9 @@ import social.waddle.android.R
 import social.waddle.android.client.auth.AuthProvider
 import social.waddle.android.theme.JetBrainsMonoFamily
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.Wordmark
+import social.waddle.android.ui.huddle.PillButton
+import social.waddle.android.ui.huddle.PillTone
 
 /**
  * Device-authorization login: pick a provider, approve in a Custom Tab,
@@ -70,7 +80,10 @@ fun LoginScreen() {
     )
 }
 
-/** Stateless login surface: brand, one line of purpose, then the phase. */
+/**
+ * Stateless login surface: the mark on its tile, the `waddle.`
+ * wordmark, one line about what Waddle is for, then the phase.
+ */
 @Composable
 internal fun LoginContent(
     state: LoginUiState,
@@ -78,95 +91,149 @@ internal fun LoginContent(
     onCancel: () -> Unit,
     onDismissError: () -> Unit,
 ) {
-    Column(
+    val colors = Waddle.colors
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
-            .systemBarsPadding()
-            .padding(horizontal = Waddle.space.xl, vertical = Waddle.space.xxl),
-        verticalArrangement = Arrangement.spacedBy(Waddle.space.md, Alignment.CenterVertically),
-        horizontalAlignment = Alignment.CenterHorizontally,
+            .background(colors.bg)
+            .systemBarsPadding(),
+    ) {
+        // Centred when it fits, scrollable when the font scale makes it tall.
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .heightIn(min = maxHeight)
+                .padding(horizontal = Waddle.space.xl, vertical = Waddle.space.xl),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            LoginBody(
+                state = state,
+                onSelectProvider = onSelectProvider,
+                onCancel = onCancel,
+                onDismissError = onDismissError,
+            )
+        }
+    }
+}
+
+@Composable
+private fun LoginBody(
+    state: LoginUiState,
+    onSelectProvider: (String) -> Unit,
+    onCancel: () -> Unit,
+    onDismissError: () -> Unit,
+) {
+    val colors = Waddle.colors
+    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+        MarkTile()
+        Wordmark(
+            style = Waddle.type.display,
+            modifier = Modifier
+                .padding(top = Waddle.space.lg)
+                .semantics { heading() },
+        )
+        Text(
+            text = stringResource(R.string.huddle_login_lead),
+            style = Waddle.type.lead,
+            color = colors.fgMuted,
+            textAlign = TextAlign.Center,
+            modifier = Modifier
+                .widthIn(max = LEAD_WIDTH)
+                .padding(top = Waddle.space.xs),
+        )
+        Spacer(Modifier.height(Waddle.space.xl))
+        Column(
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+            modifier = Modifier.widthIn(max = ACTIONS_WIDTH),
+        ) {
+            when (state) {
+                LoginUiState.LoadingProviders -> Working()
+                is LoginUiState.ProviderPicker -> ProviderPicker(
+                    providers = state.providers,
+                    onSelect = onSelectProvider,
+                )
+                is LoginUiState.Verifying -> Verifying(userCode = state.userCode, onCancel = onCancel)
+                LoginUiState.Completing -> Working(label = stringResource(R.string.login_completing))
+                is LoginUiState.Failed -> Failed(phase = state, onDismiss = onDismissError)
+            }
+        }
+    }
+}
+
+/**
+ * The penguin mark on a teal-washed tile: the mark's own dark bubble
+ * would sink into the night ground without it.
+ */
+@Composable
+private fun MarkTile() {
+    val colors = Waddle.colors
+    val shape = RoundedCornerShape(MARK_TILE_RADIUS)
+    Box(
+        contentAlignment = Alignment.Center,
+        modifier = Modifier
+            .size(MARK_TILE)
+            .background(colors.actionSubtle, shape)
+            .border(BorderStroke(1.dp, colors.border), shape),
     ) {
         Image(
             painter = painterResource(R.drawable.waddle_mark),
             contentDescription = null,
-            modifier = Modifier.size(96.dp),
+            modifier = Modifier.size(MARK),
         )
-        Text(
-            text = stringResource(R.string.app_name),
-            style = MaterialTheme.typography.displaySmall,
-        )
-        Text(
-            text = stringResource(R.string.login_subtitle),
-            style = MaterialTheme.typography.bodyLarge,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
-            textAlign = TextAlign.Center,
-        )
-        Spacer(Modifier.height(Waddle.space.sm))
-        when (state) {
-            LoginUiState.LoadingProviders -> CircularProgressIndicator()
-            is LoginUiState.ProviderPicker -> ProviderPicker(providers = state.providers, onSelect = onSelectProvider)
-            is LoginUiState.Verifying -> Verifying(userCode = state.userCode, onCancel = onCancel)
-            LoginUiState.Completing -> Completing()
-            is LoginUiState.Failed -> Failed(phase = state, onDismiss = onDismissError)
-        }
     }
 }
 
 @Composable
 private fun ProviderPicker(providers: List<AuthProvider>, onSelect: (String) -> Unit) {
+    val colors = Waddle.colors
     if (providers.isEmpty()) {
         Text(
             text = stringResource(R.string.login_no_providers),
-            style = MaterialTheme.typography.bodyMedium,
+            style = Waddle.type.body,
+            color = colors.fgMuted,
             textAlign = TextAlign.Center,
         )
         return
     }
+    Text(
+        text = stringResource(R.string.login_subtitle),
+        style = Waddle.type.control,
+        color = colors.fgMuted,
+        textAlign = TextAlign.Center,
+        modifier = Modifier.padding(bottom = Waddle.space.xxs),
+    )
     providers.forEachIndexed { index, provider ->
-        // The first provider is the obvious path; the rest stay quieter.
-        val content: @Composable RowScope.() -> Unit = {
-            Text(
-                text = stringResource(
-                    R.string.login_continue_with,
-                    provider.displayName ?: provider.id,
-                ),
-                style = MaterialTheme.typography.titleSmall,
-            )
-        }
-        if (index == 0) {
-            Button(
-                onClick = { onSelect(provider.id) },
-                shape = RoundedCornerShape(Waddle.radius.lg),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .defaultMinSize(minHeight = BUTTON_HEIGHT),
-                content = content,
-            )
-        } else {
-            OutlinedButton(
-                onClick = { onSelect(provider.id) },
-                shape = RoundedCornerShape(Waddle.radius.lg),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .defaultMinSize(minHeight = BUTTON_HEIGHT),
-                content = content,
-            )
-        }
+        // The first provider is the obvious path; the rest are quiet but
+        // never read as disabled.
+        PillButton(
+            text = stringResource(R.string.login_continue_with, provider.displayName ?: provider.id),
+            onClick = { onSelect(provider.id) },
+            tone = if (index == 0) PillTone.PRIMARY else PillTone.QUIET,
+            modifier = Modifier
+                .fillMaxWidth()
+                .heightIn(min = Waddle.control.touch),
+        )
     }
 }
 
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
 private fun Verifying(userCode: String, onCancel: () -> Unit) {
+    val colors = Waddle.colors
     Text(
         text = stringResource(R.string.login_verification_instructions),
-        style = MaterialTheme.typography.bodyMedium,
+        style = Waddle.type.body,
+        color = colors.fgMuted,
         textAlign = TextAlign.Center,
     )
     // The code a person may type on another device: mono, spaced, boxed.
     Surface(
-        shape = RoundedCornerShape(Waddle.radius.lg),
-        color = MaterialTheme.colorScheme.surfaceContainer,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shape = RoundedCornerShape(Waddle.radius.card),
+        color = colors.surface,
+        border = BorderStroke(1.dp, colors.border),
     ) {
         Text(
             text = userCode,
@@ -174,50 +241,51 @@ private fun Verifying(userCode: String, onCancel: () -> Unit) {
                 fontFamily = JetBrainsMonoFamily,
                 letterSpacing = 0.12.em,
             ),
-            color = MaterialTheme.colorScheme.primary,
+            color = colors.actionText,
             modifier = Modifier.padding(horizontal = Waddle.space.lg, vertical = Waddle.space.sm),
         )
     }
-    CircularProgressIndicator(strokeWidth = 2.dp, modifier = Modifier.size(24.dp))
-    OutlinedButton(
+    LoadingIndicator(color = colors.action, modifier = Modifier.size(Waddle.space.xxl))
+    PillButton(
+        text = stringResource(R.string.action_cancel),
         onClick = onCancel,
-        modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-    ) {
-        Text(text = stringResource(R.string.action_cancel))
-    }
+        tone = PillTone.QUIET,
+    )
 }
 
+/** An expressive loading indicator, with what is happening when known. */
+@OptIn(ExperimentalMaterial3ExpressiveApi::class)
 @Composable
-private fun Completing() {
-    CircularProgressIndicator()
-    Text(
-        text = stringResource(R.string.login_completing),
-        style = MaterialTheme.typography.bodyMedium,
-    )
+private fun Working(label: String? = null) {
+    LoadingIndicator(color = Waddle.colors.action, modifier = Modifier.size(Waddle.space.xxl))
+    label?.let {
+        Text(text = it, style = Waddle.type.body, color = Waddle.colors.fgMuted)
+    }
 }
 
 @Composable
 private fun Failed(phase: LoginUiState.Failed, onDismiss: () -> Unit) {
+    val colors = Waddle.colors
     Text(
         text = stringResource(phase.reason.messageRes()),
-        style = MaterialTheme.typography.bodyMedium,
-        color = Waddle.colors.dangerText,
+        style = Waddle.type.body,
+        color = colors.dangerText,
         textAlign = TextAlign.Center,
     )
     phase.detail?.let { detail ->
         Text(
             text = detail,
-            style = MaterialTheme.typography.bodySmall,
-            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            style = Waddle.type.time,
+            color = colors.fgMuted,
             textAlign = TextAlign.Center,
+            maxLines = DETAIL_LINES,
         )
     }
-    Button(
+    PillButton(
+        text = stringResource(R.string.action_retry),
         onClick = onDismiss,
-        modifier = Modifier.defaultMinSize(minHeight = 48.dp),
-    ) {
-        Text(text = stringResource(R.string.action_retry))
-    }
+        modifier = Modifier.heightIn(min = Waddle.control.touch),
+    )
 }
 
 private fun LoginFailureReason.messageRes(): Int = when (this) {
@@ -228,4 +296,9 @@ private fun LoginFailureReason.messageRes(): Int = when (this) {
     LoginFailureReason.SESSION_INVALID -> R.string.login_error_session
 }
 
-private val BUTTON_HEIGHT = 52.dp
+private const val DETAIL_LINES = 3
+private val MARK_TILE = 104.dp
+private val MARK_TILE_RADIUS = 28.dp
+private val MARK = 76.dp
+private val LEAD_WIDTH = 300.dp
+private val ACTIONS_WIDTH = 360.dp

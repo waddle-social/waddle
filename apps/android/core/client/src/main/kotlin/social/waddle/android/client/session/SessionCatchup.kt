@@ -220,12 +220,16 @@ internal class SessionCatchup(
         session: WaddleSessionInfo,
         roomJid: String,
     ): Boolean = try {
-        when (activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, session.xmppLocalpart) }) {
-            ActiveSession.LeaseInvocation.Stale,
-            ActiveSession.LeaseInvocation.NotConnected,
-            -> false
-            is ActiveSession.LeaseInvocation.Completed ->
-                activeSession.applyIfCurrent(lease) { stores.roomStore.markJoined(roomJid) }
+        // Through the shared coordinator: a room a screen (or a huddle
+        // Join) already joined on this stream is not joined again.
+        verbs.ensureJoinedOnStream(roomJid) {
+            when (activeSession.invokeIfCurrent(lease) { it.joinRoom(roomJid, session.xmppLocalpart) }) {
+                ActiveSession.LeaseInvocation.Stale,
+                ActiveSession.LeaseInvocation.NotConnected,
+                -> false
+                is ActiveSession.LeaseInvocation.Completed ->
+                    activeSession.applyIfCurrent(lease) { stores.roomStore.markJoined(roomJid) }
+            }
         }
     } catch (cancellation: CancellationException) {
         throw cancellation

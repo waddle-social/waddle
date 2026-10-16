@@ -6,7 +6,7 @@ import androidx.compose.ui.test.assertIsDisplayed
 import androidx.compose.ui.test.assertIsOff
 import androidx.compose.ui.test.assertIsOn
 import androidx.compose.ui.test.assertIsSelected
-import androidx.compose.ui.test.junit4.createAndroidComposeRule
+import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -75,12 +75,12 @@ class SettingsScreenTest {
     @Test
     fun themeSelectionPersistsToUserPrefs() {
         waitForText("Appearance")
-        composeRule.onNodeWithText("Dark").performClick()
-        waitForPref(harness.graph.userPrefs.theme, ThemeMode.DARK)
-        composeRule.onNodeWithText("Dark").assertIsSelected()
-        composeRule.onNodeWithText("Light").performClick()
-        waitForPref(harness.graph.userPrefs.theme, ThemeMode.LIGHT)
-        composeRule.onNodeWithText("Light").assertIsSelected()
+        composeRule.onNodeWithText("Daylight").performClick()
+        waitForPref(harness.graph.userPrefs.theme, ThemeMode.DAYLIGHT)
+        composeRule.onNodeWithText("Daylight").assertIsSelected()
+        composeRule.onNodeWithText("Night").performClick()
+        waitForPref(harness.graph.userPrefs.theme, ThemeMode.NIGHT)
+        composeRule.onNodeWithText("Night").assertIsSelected()
     }
 
     @Test

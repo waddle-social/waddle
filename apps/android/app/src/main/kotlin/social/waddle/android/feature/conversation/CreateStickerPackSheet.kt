@@ -8,20 +8,14 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.Close
-import androidx.compose.material3.Button
-import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material.icons.outlined.Close
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -38,10 +32,11 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.unit.dp
 import androidx.core.net.toUri
 import coil3.compose.AsyncImage
 import social.waddle.android.R
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.huddle.PillButton
 
 /**
  * Waddle product cap (anti-DoS): at most 24 stickers per published
@@ -59,7 +54,6 @@ const val STICKER_PACK_MAX_ITEMS = 24
  * pipeline; the sheet owns only form state, saved across recreation.
  * [onCreated] fires once [CreatePackPhase.Succeeded] is observed.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun CreateStickerPackSheet(
     phase: CreatePackPhase,
@@ -88,29 +82,21 @@ fun CreateStickerPackSheet(
         if (phase == CreatePackPhase.Succeeded) onCreated()
     }
 
-    ModalBottomSheet(
+    ConversationSheet(
         // A mid-upload dismiss would silently drop the half-created
         // pack; the sheet stays until the attempt resolves.
         onDismissRequest = { if (!creating) onDismiss() },
+        title = stringResource(R.string.sticker_create_pack),
         modifier = Modifier.testTag(CreateStickerPackTestTags.SHEET),
     ) {
-        Column(
-            modifier = Modifier
-                .navigationBarsPadding()
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
-        ) {
-            Text(
-                text = stringResource(R.string.sticker_create_pack),
-                style = MaterialTheme.typography.titleMedium,
-            )
+        Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
             OutlinedTextField(
                 value = name,
                 onValueChange = { name = it },
                 label = { Text(text = stringResource(R.string.sticker_pack_name)) },
                 singleLine = true,
                 enabled = !creating,
+                shape = RoundedCornerShape(Waddle.radius.control),
                 modifier = Modifier
                     .fillMaxWidth()
                     .testTag(CreateStickerPackTestTags.NAME_FIELD),
@@ -121,6 +107,7 @@ fun CreateStickerPackSheet(
                 label = { Text(text = stringResource(R.string.sticker_pack_summary)) },
                 singleLine = true,
                 enabled = !creating,
+                shape = RoundedCornerShape(Waddle.radius.control),
                 modifier = Modifier.fillMaxWidth(),
             )
             TextButton(
@@ -155,8 +142,8 @@ fun CreateStickerPackSheet(
                         progress.done,
                         progress.total,
                     ),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.primary,
+                    style = Waddle.type.time,
+                    color = Waddle.colors.actionText,
                 )
             }
             (phase as? CreatePackPhase.Failed)?.let { failed ->
@@ -168,20 +155,21 @@ fun CreateStickerPackSheet(
                             R.string.sticker_create_failed
                         },
                     ),
-                    style = MaterialTheme.typography.labelMedium,
-                    color = MaterialTheme.colorScheme.error,
+                    style = Waddle.type.control,
+                    color = Waddle.colors.dangerText,
                     modifier = Modifier.testTag(CreateStickerPackTestTags.FAILURE),
                 )
             }
-            Button(
+            PillButton(
+                text = stringResource(R.string.sticker_publish_pack),
                 onClick = {
                     onCreate(name, summary.trim().takeIf { it.isNotEmpty() }, images)
                 },
                 enabled = !creating && name.isNotBlank() && images.isNotEmpty(),
-                modifier = Modifier.testTag(CreateStickerPackTestTags.PUBLISH),
-            ) {
-                Text(text = stringResource(R.string.sticker_publish_pack))
-            }
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .testTag(CreateStickerPackTestTags.PUBLISH),
+            )
         }
     }
 }
@@ -209,13 +197,13 @@ private fun PickedStickerImages(
     onRemove: (Int) -> Unit,
 ) {
     LazyColumn(
-        verticalArrangement = Arrangement.spacedBy(4.dp),
-        modifier = Modifier.heightIn(max = 240.dp),
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
+        modifier = Modifier.heightIn(max = POPOVER_MAX_HEIGHT),
     ) {
         itemsIndexed(images, key = { _, input -> input.uri }) { index, input ->
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 AsyncImage(
@@ -223,8 +211,8 @@ private fun PickedStickerImages(
                     contentDescription = null,
                     contentScale = ContentScale.Crop,
                     modifier = Modifier
-                        .size(48.dp)
-                        .clip(RoundedCornerShape(6.dp)),
+                        .size(Waddle.space.xxl)
+                        .clip(RoundedCornerShape(Waddle.radius.control)),
                 )
                 OutlinedTextField(
                     value = input.desc,
@@ -232,11 +220,12 @@ private fun PickedStickerImages(
                     placeholder = { Text(text = stringResource(R.string.sticker_desc_placeholder)) },
                     singleLine = true,
                     enabled = enabled,
+                    shape = RoundedCornerShape(Waddle.radius.control),
                     modifier = Modifier.weight(1f),
                 )
                 IconButton(onClick = { onRemove(index) }, enabled = enabled) {
                     Icon(
-                        Icons.Filled.Close,
+                        Icons.Outlined.Close,
                         contentDescription = stringResource(R.string.sticker_remove_image),
                     )
                 }

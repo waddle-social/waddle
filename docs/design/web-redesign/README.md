@@ -92,7 +92,7 @@ Everything on the boards is backed by an existing store in `chat/src` (MUC, MAM,
 - Integration: Panda runs as a PostCSS plugin registered in `chat/astro.config.mjs` (`vite.css.postcss`), next to `@tailwindcss/vite`, during migration. Panda's cascade layers are renamed `pd_*` so they never merge with Tailwind's `base` and `utilities`; because they are declared after Tailwind's, a recipe class beats a plain utility on the same element. Drop the rename when Tailwind goes.
 - Theme: night is the default (no attribute), daylight is `[data-theme=light]`. The three-way light/system/dark switch became a two-way Night/Daylight switch; a stored "system" preference reads as night.
 - Knip: `styled-system/` is generated and gitignored; it sits outside Knip's project globs, so no ignore entry is needed. CI runs `panda codegen` as its own task before typecheck, build and Knip.
-- `scripts/generate-design-tokens.mjs` still parses `--primary` from `tokens.css` (kept in oklch for that reason) and emits the Apple accent and website palette; both now derive from the Huddle teal. Android's hand-maintained accent is a follow-up.
+- `scripts/generate-design-tokens.mjs` still parses `--primary` from `tokens.css` (kept in oklch for that reason) and emits the Apple accent and website palette; both now derive from the Huddle teal. The Huddle token values live in `chat/src/styles/huddle-tokens.ts`, which `panda.config.ts` imports; the generator reads the same module and emits Android's `WaddleTokens.Huddle` (night and daylight colours, radii, control heights, type scale, text styles, motion) with exact hex values.
 
 ## 5. Migration
 

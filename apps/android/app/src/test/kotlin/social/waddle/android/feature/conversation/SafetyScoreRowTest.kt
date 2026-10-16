@@ -1,15 +1,14 @@
 package social.waddle.android.feature.conversation
 
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.Bolt
 import androidx.compose.material.icons.outlined.FavoriteBorder
 import androidx.compose.material.icons.outlined.GppBad
-import androidx.compose.material.icons.outlined.HelpOutline
 import androidx.compose.material.icons.outlined.Inbox
 import androidx.compose.material.icons.outlined.PersonOff
 import androidx.compose.material.icons.outlined.SmsFailed
 import androidx.compose.material.icons.outlined.VisibilityOff
-import androidx.compose.ui.graphics.Color
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -113,9 +112,9 @@ class SafetyScoreRowTest {
     }
 
     @Test
-    fun `every category has a distinct icon and its own light and dark colour`() {
+    fun `every category has a distinct icon and a theme tone, never ember`() {
         val icons = mapOf(
-            WaddleSafetyCategory.IS_QUESTION to Icons.Outlined.HelpOutline,
+            WaddleSafetyCategory.IS_QUESTION to Icons.AutoMirrored.Outlined.HelpOutline,
             WaddleSafetyCategory.HATE_SPEECH to Icons.Outlined.PersonOff,
             WaddleSafetyCategory.EXPLICIT to Icons.Outlined.VisibilityOff,
             WaddleSafetyCategory.HARASSMENT to Icons.Outlined.SmsFailed,
@@ -127,12 +126,10 @@ class SafetyScoreRowTest {
         val styles = WaddleSafetyCategory.entries.map(::safetyScoreStyle)
 
         assertEquals(WaddleSafetyCategory.entries.size, styles.map { it.icon }.toSet().size)
-        assertEquals(WaddleSafetyCategory.entries.size, styles.map { it.lightColor }.toSet().size)
-        assertEquals(WaddleSafetyCategory.entries.size, styles.map { it.darkColor }.toSet().size)
         icons.forEach { (category, icon) -> assertEquals(icon, safetyScoreStyle(category).icon) }
-        assertEquals(Color(0xFF2563EB), safetyScoreStyle(WaddleSafetyCategory.IS_QUESTION).lightColor)
-        assertEquals(Color(0xFF60A5FA), safetyScoreStyle(WaddleSafetyCategory.IS_QUESTION).darkColor)
-        assertEquals(Color(0xFFC2410C), safetyScoreStyle(WaddleSafetyCategory.HARASSMENT).lightColor)
-        assertEquals(Color(0xFFFB923C), safetyScoreStyle(WaddleSafetyCategory.HARASSMENT).darkColor)
+        assertEquals(SafetyTone.ACTION, safetyScoreStyle(WaddleSafetyCategory.IS_QUESTION).tone)
+        assertEquals(SafetyTone.DANGER, safetyScoreStyle(WaddleSafetyCategory.HATE_SPEECH).tone)
+        assertEquals(SafetyTone.WARNING, safetyScoreStyle(WaddleSafetyCategory.HARASSMENT).tone)
+        assertEquals(SafetyTone.MUTED, safetyScoreStyle(WaddleSafetyCategory.SPAM).tone)
     }
 }

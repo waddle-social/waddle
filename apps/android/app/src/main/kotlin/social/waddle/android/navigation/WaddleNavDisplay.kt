@@ -18,7 +18,6 @@ import androidx.navigation3.runtime.entryProvider
 import androidx.navigation3.runtime.rememberNavBackStack
 import androidx.navigation3.runtime.rememberSaveableStateHolderNavEntryDecorator
 import androidx.navigation3.ui.NavDisplay
-import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.feature.admin.CommunityUsersScreen
 import social.waddle.android.feature.channel.ChannelScreen
@@ -41,14 +40,6 @@ import social.waddle.android.ui.LocalOpenConversation
 @Composable
 fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
     val backStack = rememberNavBackStack(WaddleNavKey.Home)
-    val graph = LocalAppGraph.current
-
-    /** Activity rows name a JID; topology decides channel, group DM or DM. */
-    fun openConversationKey(jid: String): WaddleNavKey = conversationNavKeyFor(
-        topology = graph.sessionManager.roomStore.topology.value,
-        joinedRooms = graph.sessionManager.roomStore.joinedRooms.value,
-        conversationJid = jid,
-    )
     sideEffects(backStack)
     NavDisplay(
         backStack = backStack,
@@ -80,10 +71,12 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                             openGroupDm = { roomJid, name ->
                                 backStack.showConversation(WaddleNavKey.GroupDm(roomJid = roomJid, name = name))
                             },
-                            openConversation = { jid -> backStack.showConversation(openConversationKey(jid)) },
                             openProfile = { backStack.add(WaddleNavKey.Profile) },
                             openSettings = { backStack.add(WaddleNavKey.Settings) },
                         ),
+                        // Wide layouts show the tabs beside an open
+                        // conversation; back then closes that first.
+                        atRoot = backStack.size == 1,
                     )
                 }
             }
@@ -111,6 +104,10 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     roomJid = key.roomJid,
                     name = key.name,
                     onBack = { backStack.popSafely() },
+                    // Pushed on top, so back returns to the member list.
+                    onOpenDm = { peerJid, name ->
+                        backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name))
+                    },
                 )
             }
             entry<WaddleNavKey.CommunityUsers> {

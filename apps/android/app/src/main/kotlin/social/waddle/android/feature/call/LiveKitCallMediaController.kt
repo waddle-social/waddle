@@ -61,6 +61,9 @@ class LiveKitCallMediaController(
     override val remoteParticipantIdentities: StateFlow<List<String>> =
         _remoteParticipantIdentities.asStateFlow()
 
+    private val _activeSpeakers = MutableStateFlow<Set<String>>(emptySet())
+    override val activeSpeakers: StateFlow<Set<String>> = _activeSpeakers.asStateFlow()
+
     // Written on the app-scope dispatcher, read from main-thread UI
     // actions — @Volatile for cross-thread visibility.
     @Volatile
@@ -200,11 +203,20 @@ class LiveKitCallMediaController(
             // Re-project the full remote set from the SDK's map instead
             // of applying deltas — replay/duplicate events can't drift
             // the snapshot that way.
-            is RoomEvent.ParticipantConnected -> refreshRemoteParticipants(event.room)
-            is RoomEvent.ParticipantDisconnected -> refreshRemoteParticipants(event.room)
-            is RoomEvent.Reconnecting -> _connection.value = CallMediaConnection.Reconnecting
+            is RoomEvent.ParticipantConnected, is RoomEvent.ParticipantDisconnected ->
+                refreshRemoteParticipants(event.room)
+            // The SFU's audio-level verdict, local participant included;
+            // a full snapshot each time, so it replaces the set.
+            is RoomEvent.ActiveSpeakersChanged ->
+                _activeSpeakers.value = event.speakers.mapNotNullTo(LinkedHashSet()) { it.identity?.value }
+            is RoomEvent.Reconnecting -> {
+                // Nobody is heard while the transport is down.
+                _activeSpeakers.value = emptySet()
+                _connection.value = CallMediaConnection.Reconnecting
+            }
             is RoomEvent.Reconnected -> _connection.value = CallMediaConnection.Connected
             is RoomEvent.Disconnected -> {
+                _activeSpeakers.value = emptySet()
                 // Local disconnect() nulls `room` first; a remote/SDK
                 // disconnect surfaces as Failed so the session
                 // controller can end the call.
@@ -239,6 +251,7 @@ class LiveKitCallMediaController(
         eventsJob?.cancel()
         eventsJob = null
         _remoteParticipantIdentities.value = emptyList()
+        _activeSpeakers.value = emptySet()
         _remoteVideo.value = null
         _localVideo.value = null
         _micEnabled.value = false

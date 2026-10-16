@@ -1,27 +1,22 @@
 package social.waddle.android.feature.conversation
 
 import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.OpenInNew
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.PlayCircle
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -31,6 +26,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import coil3.compose.AsyncImage
@@ -58,53 +54,60 @@ fun LinkPreviewCard(
     modifier: Modifier = Modifier,
 ) {
     val uriHandler = LocalUriHandler.current
+    val colors = Waddle.colors
     val href = httpsHrefOrNull(preview.originalUrl)
     val open: (() -> Unit)? = href?.let { url -> { runCatching { uriHandler.openUri(url) } } }
+    // One teal thing per message: the link in the body. The card itself
+    // is neutral, so link, rule and title never stack up in teal.
     Surface(
-        shape = RoundedCornerShape(Waddle.radius.md),
-        color = MaterialTheme.colorScheme.surfaceContainerLow,
-        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        shape = RoundedCornerShape(Waddle.radius.control),
+        color = colors.surface,
+        contentColor = colors.fg,
+        border = BorderStroke(1.dp, colors.border),
         onClick = open ?: {},
         enabled = open != null,
         modifier = modifier
-            .padding(top = 2.dp)
+            .padding(top = Waddle.space.xxs)
             .widthIn(max = PREVIEW_MAX_WIDTH)
             .fillMaxWidth(),
     ) {
-        Row(modifier = Modifier.height(IntrinsicSize.Min)) {
-            // Accent rule: the card belongs to the message, like a quote.
-            Box(
-                modifier = Modifier
-                    .width(3.dp)
-                    .fillMaxHeight()
-                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.6f)),
-            )
-            PreviewBody(preview, trustedMediaOrigin)
-        }
+        PreviewBody(preview, trustedMediaOrigin)
     }
 }
 
 @Composable
 private fun PreviewBody(preview: WaddleLinkPreview, trustedMediaOrigin: String?) {
+    val colors = Waddle.colors
     Column(
-        modifier = Modifier.padding(horizontal = Waddle.space.sm, vertical = 10.dp),
+        modifier = Modifier.padding(Waddle.space.sm),
         verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
     ) {
         linkPreviewHost(preview.originalUrl)?.let { host ->
-            Text(
-                text = host,
-                style = MaterialTheme.typography.labelMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis,
-            )
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
+            ) {
+                Icon(
+                    Icons.AutoMirrored.Outlined.OpenInNew,
+                    contentDescription = null,
+                    tint = colors.fgMuted,
+                    modifier = Modifier.size(SITE_ICON),
+                )
+                Text(
+                    text = host,
+                    style = MetaStyle,
+                    color = colors.fgMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         PreviewMedia(preview, trustedMediaOrigin)
         preview.title?.let { title ->
             Text(
                 text = title,
-                style = MaterialTheme.typography.titleSmall,
-                color = MaterialTheme.colorScheme.primary,
+                style = Waddle.type.control.copy(fontWeight = FontWeight.SemiBold),
+                color = colors.fg,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -112,8 +115,8 @@ private fun PreviewBody(preview: WaddleLinkPreview, trustedMediaOrigin: String?)
         preview.description?.let { description ->
             Text(
                 text = description,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MetaStyle,
+                color = colors.fgMuted,
                 maxLines = 2,
                 overflow = TextOverflow.Ellipsis,
             )
@@ -136,43 +139,53 @@ private fun PreviewMedia(preview: WaddleLinkPreview, trustedMediaOrigin: String?
                     ?: stringResource(R.string.link_preview_image),
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
+                    .padding(vertical = Waddle.space.xxs)
                     .fillMaxWidth()
-                    .heightIn(max = 192.dp)
-                    .clip(RoundedCornerShape(Waddle.radius.sm)),
+                    .heightIn(max = PREVIEW_IMAGE_MAX_HEIGHT)
+                    .clip(RoundedCornerShape(Waddle.radius.tag)),
             )
             if (playable) PlayGlyph()
         }
-        preview.remoteMediaUnavailable -> Row(verticalAlignment = Alignment.CenterVertically) {
+        preview.remoteMediaUnavailable -> Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
+        ) {
             Icon(
                 Icons.Outlined.ErrorOutline,
                 contentDescription = null,
-                tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.size(14.dp),
+                tint = Waddle.colors.fgMuted,
+                modifier = Modifier.size(SITE_ICON),
             )
             Text(
                 text = stringResource(R.string.link_preview_remote_media_unavailable),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(start = 4.dp),
+                style = MetaStyle,
+                color = Waddle.colors.fgMuted,
             )
         }
         else -> Unit
     }
 }
 
-/** Explicit play affordance over video/player posters (web parity). */
+/** Explicit play affordance over video/player posters (web parity), on the night ground. */
 @Composable
 private fun PlayGlyph() {
+    val colors = Waddle.colors
     Surface(
         shape = CircleShape,
-        color = MaterialTheme.colorScheme.surface.copy(alpha = 0.7f),
+        color = colors.nightGround.copy(alpha = PLAY_SCRIM_ALPHA),
+        contentColor = colors.nightForeground,
     ) {
         Icon(
             Icons.Outlined.PlayCircle,
             contentDescription = stringResource(R.string.link_preview_play),
-            modifier = Modifier.padding(4.dp).size(32.dp),
+            modifier = Modifier
+                .padding(Waddle.space.xxs)
+                .size(Waddle.control.sm),
         )
     }
 }
 
 private val PREVIEW_MAX_WIDTH = 320.dp
+private val PREVIEW_IMAGE_MAX_HEIGHT = 192.dp
+private val SITE_ICON = 12.dp
+private const val PLAY_SCRIM_ALPHA = 0.7f
