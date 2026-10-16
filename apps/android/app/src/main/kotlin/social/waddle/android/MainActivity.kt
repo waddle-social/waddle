@@ -5,13 +5,19 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.core.splashscreen.SplashScreen.Companion.installSplashScreen
 import androidx.core.view.WindowInsetsControllerCompat
 import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.repeatOnLifecycle
@@ -24,6 +30,8 @@ import kotlinx.coroutines.launch
 import social.waddle.android.avatar.LocalPeerAvatars
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.theme.WaddleTheme
+import social.waddle.android.ui.huddle.LocalReducedMotion
+import social.waddle.android.ui.huddle.reducedMotionOf
 
 /**
  * The single activity: edge-to-edge, splash held until the app state
@@ -92,6 +100,7 @@ class MainActivity : ComponentActivity() {
                 CompositionLocalProvider(
                     LocalAppGraph provides graph,
                     LocalPeerAvatars provides graph.sessionManager.peerAvatars,
+                    LocalReducedMotion provides rememberSystemReducedMotion(),
                 ) {
                     AppShell(
                         pendingConversationJid = pendingConversationJid,
@@ -153,4 +162,19 @@ class MainActivity : ComponentActivity() {
         const val EXTRA_ANSWER_CALL = "waddle.call.answer"
         private const val STATE_PENDING_JID = "waddle.state.pending-jid"
     }
+}
+
+/**
+ * Android's "Remove animations" (animator duration scale 0), re-read on
+ * every resume: the user flips it in system settings, outside the app.
+ */
+@Composable
+private fun rememberSystemReducedMotion(): Boolean {
+    val context = LocalContext.current
+    var reduced by remember { mutableStateOf(reducedMotionOf(context)) }
+    LifecycleResumeEffect(context) {
+        reduced = reducedMotionOf(context)
+        onPauseOrDispose { }
+    }
+    return reduced
 }
