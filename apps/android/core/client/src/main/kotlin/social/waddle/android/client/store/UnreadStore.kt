@@ -9,10 +9,15 @@ import social.waddle.android.client.bareJid
  * Per-conversation unread counters from live traffic: messages that are
  * not the account's own and arrive while the conversation is not being
  * viewed increment; opening the conversation clears. One internal lock
- * covers counts AND the active-conversation marker so compound
- * decisions (recompute-unless-active) are atomic against increments.
+ * covers counts, [mentions] AND the active-conversation marker so
+ * compound decisions (recompute-unless-active) are atomic against
+ * increments, and a mention is counted and cleared in the same step as
+ * its unread.
  */
-class UnreadStore {
+class UnreadStore(
+    /** Written only from here, under the same lock as [counts]. */
+    val mentions: MentionStore = MentionStore(),
+) {
     private val lock = Any()
     private val _counts = MutableStateFlow<Map<String, Int>>(emptyMap())
 
@@ -48,17 +53,38 @@ class UnreadStore {
         }
     }
 
-    fun onLiveMessage(conversationJid: String, isMine: Boolean) {
+    /**
+     * A live, feed-visible message counted as unread unless it is ours
+     * or its conversation is on screen; [mentionsSelf] (it addresses
+     * the account, see `messageMentionsBareJid`) also counts a mention.
+     */
+    fun onLiveMessage(conversationJid: String, isMine: Boolean, mentionsSelf: Boolean = false) {
         synchronized(lock) {
             val conversation = bareJid(conversationJid)
             if (isMine || conversation == activeConversation) return
             _counts.value = _counts.value + (conversation to (_counts.value[conversation] ?: 0) + 1)
+            if (mentionsSelf) mentions.increment(conversation)
+        }
+    }
+
+    /**
+     * A live mention of the account whose unread the server inbox
+     * already accounted (its absolute count covered the message): only
+     * the mention counts, on the same not-ours/not-on-screen terms.
+     */
+    fun onLiveMentionAccounted(conversationJid: String, isMine: Boolean) {
+        synchronized(lock) {
+            val conversation = bareJid(conversationJid)
+            if (isMine || conversation == activeConversation) return
+            mentions.increment(conversation)
         }
     }
 
     fun clear(conversationJid: String) {
         synchronized(lock) {
-            _counts.value = _counts.value - bareJid(conversationJid)
+            val conversation = bareJid(conversationJid)
+            _counts.value = _counts.value - conversation
+            mentions.clear(conversation)
         }
     }
 
@@ -76,12 +102,21 @@ class UnreadStore {
             if (conversation == activeConversation) return
             _counts.value =
                 if (count <= 0) _counts.value - conversation else _counts.value + (conversation to count)
+            mentions.capAt(conversation, count)
+        }
+    }
+
+    /** A fresh stream: mention counts are live-only (see [MentionStore]). */
+    fun resetMentions() {
+        synchronized(lock) {
+            mentions.clearAll()
         }
     }
 
     fun clearAll() {
         synchronized(lock) {
             _counts.value = emptyMap()
+            mentions.clearAll()
         }
     }
 }

@@ -79,7 +79,7 @@ fun DmScreen(
         onOpenThread = onOpenThread,
         searchTarget = MessageSearchTarget(peerJid, isGroupchat = false),
         selfBareJid = session?.jid?.let(::bareJidOf),
-        subtitle = dmPresenceSubtitle(contacts[peerJid]),
+        subtitle = dmPresenceSubtitle(contacts[peerJid]?.presence),
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
         slashCommandHost = SlashCommandHost(
             controller = rememberExtensionCommandController(graph),
