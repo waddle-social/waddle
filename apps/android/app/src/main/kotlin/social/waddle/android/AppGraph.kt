@@ -54,6 +54,7 @@ import social.waddle.android.feature.conversation.StickerPackCreator
 import social.waddle.android.feature.login.LoginAuthGateway
 import social.waddle.android.feature.login.WaddleLoginAuthGateway
 import social.waddle.android.jid.localpartOf
+import social.waddle.android.push.AlarmWakeTimer
 import social.waddle.android.push.ConnectionDemand
 import social.waddle.android.push.PushDistributor
 import social.waddle.android.push.PushMessageHandler
@@ -120,7 +121,8 @@ class AppGraph(
         ?: ConnectivityNetworkSignal(appContext.getSystemService(ConnectivityManager::class.java))
 
     /** What needs the XMPP stream right now (see [ConnectionDemand]). */
-    val connectionDemand: ConnectionDemand = ConnectionDemand(applicationScope)
+    val connectionDemand: ConnectionDemand =
+        ConnectionDemand(applicationScope, wakeTimer = AlarmWakeTimer(appContext))
 
     val sessionManager: XmppSessionManager = XmppSessionManager(
         sessionPrefs = sessionPrefs,

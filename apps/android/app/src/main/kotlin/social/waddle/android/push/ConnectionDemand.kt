@@ -1,5 +1,6 @@
 package social.waddle.android.push
 
+import android.os.SystemClock
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.delay
@@ -41,11 +42,20 @@ import java.util.concurrent.atomic.AtomicBoolean
 class ConnectionDemand(
     scope: CoroutineScope,
     private val graceMillis: Long = GRACE_MILLIS,
-    /** Wall clock for the XEP-0319 idle stamp; tests tie it to virtual time. */
-    private val now: () -> Instant = Instant::now,
+    /**
+     * Wakes the process for the next auto-away step. The steps must fire
+     * while the phone sleeps, so production uses an `AlarmManager` alarm
+     * ([AlarmWakeTimer]); coroutine time stops in deep sleep.
+     */
+    private val wakeTimer: WakeTimer,
+    /** Wall clock for the XEP-0319 idle stamp. */
+    private val wallClock: () -> Instant = Instant::now,
+    /** Monotonic time that keeps counting in deep sleep, for the thresholds. */
+    private val elapsedRealtime: () -> Long = SystemClock::elapsedRealtime,
     private val autoAway: AutoAway = AutoAway(),
 ) {
     private val attention = MutableStateFlow(Attention(foreground = false, inCall = false, absentSince = null))
+    private val wakeups = MutableStateFlow(0L)
     private val stayConnected = MutableStateFlow(false)
     private val callActive = MutableStateFlow(false)
     private val leases = MutableStateFlow(0)
@@ -65,24 +75,31 @@ class ConnectionDemand(
 
     /**
      * What this device advertises on the stream while [wanted] holds it,
-     * stepping through [autoAway] while the user is away. Any change of
-     * input (the app returning to the foreground) cancels the pending step.
+     * stepping through [autoAway] while the user is away. Every evaluation
+     * measures against elapsed realtime, so a step that came due while the
+     * phone slept applies on the next one, and re-arms [wakeTimer] for the
+     * step after it (or cancels it, e.g. on returning to the foreground).
      */
     val presence: StateFlow<DesiredPresence> = combine(
         attention,
         stayConnected,
         callActive,
-    ) { seen, stay, call -> seen to (stay || call) }
-        .distinctUntilChanged()
-        .transformLatest { (seen, holdsStream) ->
-            while (true) {
-                val at = now()
-                emit(autoAway.presenceOf(seen, holdsStream, at))
-                val next = autoAway.nextStepAt(seen, holdsStream, at) ?: break
-                delay(millisUntil(at, next))
-            }
+        wakeups,
+    ) { seen, stay, call, _ ->
+        val holdsStream = stay || call
+        val now = elapsedRealtime()
+        when (val next = autoAway.nextStepAt(seen, holdsStream, now)) {
+            null -> wakeTimer.cancel()
+            else -> wakeTimer.schedule(next, ::reevaluate)
         }
+        autoAway.presenceOf(seen, holdsStream, now)
+    }
         .stateIn(scope, SharingStarted.Eagerly, initialValue = DesiredPresence.None)
+
+    /** Re-check auto-away now: the wake timer fired, or the process woke. */
+    fun reevaluate() {
+        wakeups.update { it + 1 }
+    }
 
     fun setProcessStarted(started: Boolean) {
         updateAttention { it.copy(foreground = started) }
@@ -111,7 +128,7 @@ class ConnectionDemand(
             val next = transform(old)
             when {
                 next.present -> next.copy(absentSince = null)
-                old.present -> next.copy(absentSince = now())
+                old.present -> next.copy(absentSince = Departure(wallClock(), elapsedRealtime()))
                 else -> next
             }
         }
@@ -143,6 +160,12 @@ class ConnectionDemand(
 }
 
 /**
+ * When the user stopped being present: [at] stamps XEP-0319 idle, and
+ * [elapsedRealtimeMillis] measures the auto-away thresholds across sleep.
+ */
+internal data class Departure(val at: Instant, val elapsedRealtimeMillis: Long)
+
+/**
  * Whether the user is present on this device, and since when they are
  * not. [absentSince] is `null` while present, and also after a cold start
  * in the background, where the last interaction is unknown.
@@ -150,7 +173,7 @@ class ConnectionDemand(
 internal data class Attention(
     val foreground: Boolean,
     val inCall: Boolean,
-    val absentSince: Instant?,
+    val absentSince: Departure?,
 ) {
     val present: Boolean get() = foreground || inCall
 }
@@ -174,23 +197,24 @@ class AutoAway(
     private val awayAfter: Duration = Duration.ofMinutes(AWAY_AFTER_MINUTES),
     private val extendedAwayAfter: Duration = Duration.ofMinutes(EXTENDED_AWAY_AFTER_MINUTES),
 ) {
-    internal fun presenceOf(attention: Attention, holdsStream: Boolean, now: Instant): DesiredPresence {
+    /** The presence at elapsed realtime [nowMillis]. */
+    internal fun presenceOf(attention: Attention, holdsStream: Boolean, nowMillis: Long): DesiredPresence {
         if (attention.present) return DesiredPresence.Available
         if (!holdsStream) return DesiredPresence.None
         val since = attention.absentSince ?: return DesiredPresence.Away(idleSince = null)
-        val idle = Duration.between(since, now)
+        val idleMillis = nowMillis - since.elapsedRealtimeMillis
         return when {
-            idle >= extendedAwayAfter -> DesiredPresence.ExtendedAway(since)
-            idle >= awayAfter -> DesiredPresence.Away(since)
+            idleMillis >= extendedAwayAfter.toMillis() -> DesiredPresence.ExtendedAway(since.at)
+            idleMillis >= awayAfter.toMillis() -> DesiredPresence.Away(since.at)
             else -> DesiredPresence.Available
         }
     }
 
-    /** When [presenceOf] next changes on its own, or `null` if it will not. */
-    internal fun nextStepAt(attention: Attention, holdsStream: Boolean, now: Instant): Instant? {
+    /** Elapsed realtime of the next step after [nowMillis], or `null` if none is due. */
+    internal fun nextStepAt(attention: Attention, holdsStream: Boolean, nowMillis: Long): Long? {
         if (attention.present || !holdsStream) return null
-        val since = attention.absentSince ?: return null
-        return listOf(since + awayAfter, since + extendedAwayAfter).firstOrNull { it.isAfter(now) }
+        val since = attention.absentSince?.elapsedRealtimeMillis ?: return null
+        return listOf(since + awayAfter.toMillis(), since + extendedAwayAfter.toMillis()).firstOrNull { it > nowMillis }
     }
 
     private companion object {
@@ -200,13 +224,13 @@ class AutoAway(
     }
 }
 
-/** Whole milliseconds from [from] until [to], rounded up so a step never fires early. */
-private fun millisUntil(from: Instant, to: Instant): Long {
-    val nanos = Duration.between(from, to).toNanos()
-    return (nanos + NANOS_PER_MILLI - 1) / NANOS_PER_MILLI
-}
+/** Wakes the process at an elapsed-realtime instant, even from deep sleep. */
+interface WakeTimer {
+    /** Call [onFire] at [atElapsedRealtimeMillis], replacing any pending wake. */
+    fun schedule(atElapsedRealtimeMillis: Long, onFire: () -> Unit)
 
-private const val NANOS_PER_MILLI = 1_000_000L
+    fun cancel()
+}
 
 /**
  * Whether a call in this state needs signalling over the stream. An

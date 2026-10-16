@@ -17,11 +17,53 @@ import java.time.Instant
 /** What holds the stream open, and that letting go waits out a grace period. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionDemandTest {
-    /** Wall clock tied to virtual time, so auto-away steps are deterministic. */
-    private fun TestScope.now(): Instant = STARTED_AT.plusMillis(testScheduler.currentTime)
+    /**
+     * The phone's clocks and its wake alarm. Elapsed realtime and the wall
+     * clock move together; the alarm fires only when the test says the
+     * phone was awake to run it.
+     */
+    private class FakePhone : WakeTimer {
+        var elapsedMillis = 0L
+        var wall: Instant = STARTED_AT
+        var dueAt: Long? = null
+            private set
+        private var onFire: (() -> Unit)? = null
 
-    private fun TestScope.demand() =
-        ConnectionDemand(backgroundScope, graceMillis = GRACE, now = { now() }).also { runCurrent() }
+        override fun schedule(atElapsedRealtimeMillis: Long, onFire: () -> Unit) {
+            dueAt = atElapsedRealtimeMillis
+            this.onFire = onFire
+        }
+
+        override fun cancel() {
+            dueAt = null
+            onFire = null
+        }
+
+        fun pass(minutes: Long) {
+            elapsedMillis += minutes * MINUTE_MILLIS
+            wall = wall.plusMillis(minutes * MINUTE_MILLIS)
+        }
+
+        fun fireIfDue() {
+            val due = dueAt ?: return
+            if (due > elapsedMillis) return
+            val fire = onFire
+            cancel()
+            fire?.invoke()
+        }
+    }
+
+    private val phone = FakePhone()
+
+    private fun now(): Instant = phone.wall
+
+    private fun TestScope.demand() = ConnectionDemand(
+        backgroundScope,
+        graceMillis = GRACE,
+        wakeTimer = phone,
+        wallClock = { phone.wall },
+        elapsedRealtime = { phone.elapsedMillis },
+    ).also { runCurrent() }
 
     /** Bring the app up and leave it again; returns when it left. */
     private fun TestScope.leaveApp(demand: ConnectionDemand): Instant {
@@ -33,9 +75,13 @@ class ConnectionDemandTest {
         return left
     }
 
+    /** Minutes pass with the phone awake: a due alarm fires on time. */
     private fun TestScope.advanceMinutes(minutes: Long) {
-        advanceTimeBy(minutes * MINUTE_MILLIS)
-        runCurrent()
+        repeat(minutes.toInt()) {
+            phone.pass(1)
+            phone.fireIfDue()
+            runCurrent()
+        }
     }
 
     @Test
@@ -150,6 +196,54 @@ class ConnectionDemandTest {
     }
 
     @Test
+    fun `the wake alarm is armed for each step in elapsed realtime`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        leaveApp(demand)
+        val leftAt = phone.elapsedMillis
+
+        assertEquals(leftAt + AWAY_MINUTES * MINUTE_MILLIS, phone.dueAt)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals(leftAt + EXTENDED_AWAY_MINUTES * MINUTE_MILLIS, phone.dueAt)
+        advanceMinutes(EXTENDED_AWAY_MINUTES - AWAY_MINUTES)
+        assertEquals("nothing after extended away", null, phone.dueAt)
+        assertTrue(demand.presence.value is DesiredPresence.ExtendedAway)
+    }
+
+    @Test
+    fun `a step missed in deep sleep applies on the next evaluation`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        val left = leaveApp(demand)
+
+        // Locked phone: coroutine time and the deferred alarm stand still
+        // while elapsed realtime runs on.
+        phone.pass(EXTENDED_AWAY_MINUTES + 5)
+        runCurrent()
+        assertEquals("nothing ran in sleep", DesiredPresence.Available, demand.presence.value)
+
+        // The first wake (the late alarm, or any re-evaluation) catches up
+        // straight to the step that is due now.
+        demand.reevaluate()
+        runCurrent()
+        assertEquals(DesiredPresence.ExtendedAway(left), demand.presence.value)
+        assertEquals(null, phone.dueAt)
+    }
+
+    @Test
+    fun `a late alarm skips straight past the step it was set for`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        val left = leaveApp(demand)
+
+        phone.pass(EXTENDED_AWAY_MINUTES)
+        phone.fireIfDue()
+        runCurrent()
+
+        assertEquals(DesiredPresence.ExtendedAway(left), demand.presence.value)
+    }
+
+    @Test
     fun `returning to the foreground cancels the pending auto-away step`() = runTest {
         val demand = demand()
         demand.setStayConnected(true)
@@ -159,6 +253,7 @@ class ConnectionDemandTest {
         demand.setProcessStarted(true)
         runCurrent()
         assertEquals(DesiredPresence.Available, demand.presence.value)
+        assertEquals("the wake alarm is cancelled", null, phone.dueAt)
         advanceMinutes(EXTENDED_AWAY_MINUTES * 2)
         assertEquals("the old timer never fires", DesiredPresence.Available, demand.presence.value)
 
