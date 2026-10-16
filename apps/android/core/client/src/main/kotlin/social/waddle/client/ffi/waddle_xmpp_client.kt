@@ -9627,6 +9627,91 @@ public object FfiConverterTypeWaddleMdsDisplayedEntry: FfiConverterRustBuffer<Wa
 
 
 
+/**
+ * Who a typed `@label` can address in this conversation.
+ */
+data class WaddleMentionDirectory (
+    var `targets`: List<WaddleMentionTarget>
+    ,
+    /**
+     * Resolve `@everyone` / `@here` to broadcast mention URIs.
+     */
+    var `broadcasts`: kotlin.Boolean
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMentionDirectory: FfiConverterRustBuffer<WaddleMentionDirectory> {
+    override fun read(buf: ByteBuffer): WaddleMentionDirectory {
+        return WaddleMentionDirectory(
+            FfiConverterSequenceTypeWaddleMentionTarget.read(buf),
+            FfiConverterBoolean.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleMentionDirectory) = (
+            FfiConverterSequenceTypeWaddleMentionTarget.allocationSize(value.`targets`) +
+            FfiConverterBoolean.allocationSize(value.`broadcasts`)
+    )
+
+    override fun write(value: WaddleMentionDirectory, buf: ByteBuffer) {
+            FfiConverterSequenceTypeWaddleMentionTarget.write(value.`targets`, buf)
+            FfiConverterBoolean.write(value.`broadcasts`, buf)
+    }
+}
+
+
+
+/**
+ * One mentionable entity: the label typed after `@` and its real bare JID.
+ */
+data class WaddleMentionTarget (
+    var `label`: kotlin.String
+    ,
+    var `jid`: kotlin.String
+
+){
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleMentionTarget: FfiConverterRustBuffer<WaddleMentionTarget> {
+    override fun read(buf: ByteBuffer): WaddleMentionTarget {
+        return WaddleMentionTarget(
+            FfiConverterString.read(buf),
+            FfiConverterString.read(buf),
+        )
+    }
+
+    override fun allocationSize(value: WaddleMentionTarget) = (
+            FfiConverterString.allocationSize(value.`label`) +
+            FfiConverterString.allocationSize(value.`jid`)
+    )
+
+    override fun write(value: WaddleMentionTarget, buf: ByteBuffer) {
+            FfiConverterString.write(value.`label`, buf)
+            FfiConverterString.write(value.`jid`, buf)
+    }
+}
+
+
+
 data class WaddleMessage (
     var `id`: kotlin.String?
     ,
@@ -11238,6 +11323,12 @@ data class WaddleSendOptions (
      * pack. The sticker image itself travels in `shared_files`.
      */
     var `sticker`: WaddleStickerRef?
+    ,
+    /**
+     * Resolve typed `@label` tokens in the body to XEP-0372 mention
+     * references (room sends). `None` resolves nothing.
+     */
+    var `mentionDirectory`: WaddleMentionDirectory?
 
 ){
 
@@ -11266,6 +11357,7 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterBoolean.read(buf),
             FfiConverterBoolean.read(buf),
             FfiConverterOptionalTypeWaddleStickerRef.read(buf),
+            FfiConverterOptionalTypeWaddleMentionDirectory.read(buf),
         )
     }
 
@@ -11281,7 +11373,8 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterOptionalString.allocationSize(value.`linkPreviewToken`) +
             FfiConverterBoolean.allocationSize(value.`requestDisplayedMarker`) +
             FfiConverterBoolean.allocationSize(value.`mucPm`) +
-            FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`sticker`)
+            FfiConverterOptionalTypeWaddleStickerRef.allocationSize(value.`sticker`) +
+            FfiConverterOptionalTypeWaddleMentionDirectory.allocationSize(value.`mentionDirectory`)
     )
 
     override fun write(value: WaddleSendOptions, buf: ByteBuffer) {
@@ -11297,6 +11390,7 @@ public object FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer<WaddleSe
             FfiConverterBoolean.write(value.`requestDisplayedMarker`, buf)
             FfiConverterBoolean.write(value.`mucPm`, buf)
             FfiConverterOptionalTypeWaddleStickerRef.write(value.`sticker`, buf)
+            FfiConverterOptionalTypeWaddleMentionDirectory.write(value.`mentionDirectory`, buf)
     }
 }
 
@@ -15521,6 +15615,38 @@ public object FfiConverterOptionalTypeWaddleLinkPreviewVideo: FfiConverterRustBu
 /**
  * @suppress
  */
+public object FfiConverterOptionalTypeWaddleMentionDirectory: FfiConverterRustBuffer<WaddleMentionDirectory?> {
+    override fun read(buf: ByteBuffer): WaddleMentionDirectory? {
+        if (buf.get().toInt() == 0) {
+            return null
+        }
+        return FfiConverterTypeWaddleMentionDirectory.read(buf)
+    }
+
+    override fun allocationSize(value: WaddleMentionDirectory?): ULong {
+        if (value == null) {
+            return 1UL
+        } else {
+            return 1UL + FfiConverterTypeWaddleMentionDirectory.allocationSize(value)
+        }
+    }
+
+    override fun write(value: WaddleMentionDirectory?, buf: ByteBuffer) {
+        if (value == null) {
+            buf.put(0)
+        } else {
+            buf.put(1)
+            FfiConverterTypeWaddleMentionDirectory.write(value, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
 public object FfiConverterOptionalTypeWaddleMood: FfiConverterRustBuffer<WaddleMood?> {
     override fun read(buf: ByteBuffer): WaddleMood? {
         if (buf.get().toInt() == 0) {
@@ -16987,6 +17113,34 @@ public object FfiConverterSequenceTypeWaddleMdsDisplayedEntry: FfiConverterRustB
         buf.putInt(value.size)
         value.iterator().forEach {
             FfiConverterTypeWaddleMdsDisplayedEntry.write(it, buf)
+        }
+    }
+}
+
+
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterSequenceTypeWaddleMentionTarget: FfiConverterRustBuffer<List<WaddleMentionTarget>> {
+    override fun read(buf: ByteBuffer): List<WaddleMentionTarget> {
+        val len = buf.getInt()
+        return List<WaddleMentionTarget>(len) {
+            FfiConverterTypeWaddleMentionTarget.read(buf)
+        }
+    }
+
+    override fun allocationSize(value: List<WaddleMentionTarget>): ULong {
+        val sizeForLength = 4UL
+        val sizeForItems = value.map { FfiConverterTypeWaddleMentionTarget.allocationSize(it) }.sum()
+        return sizeForLength + sizeForItems
+    }
+
+    override fun write(value: List<WaddleMentionTarget>, buf: ByteBuffer) {
+        buf.putInt(value.size)
+        value.iterator().forEach {
+            FfiConverterTypeWaddleMentionTarget.write(it, buf)
         }
     }
 }

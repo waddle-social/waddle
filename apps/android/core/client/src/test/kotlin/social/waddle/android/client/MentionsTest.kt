@@ -5,6 +5,7 @@ import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.client.ffi.WaddleMentionTarget
 import social.waddle.client.ffi.WaddleMucRole
 
 class MentionsTest {
@@ -109,5 +110,18 @@ class MentionsTest {
         )
 
         assertEquals(listOf("everyone", "here"), candidates.map { it.display })
+    }
+
+    @Test
+    fun `room mention directory lists mentionable occupants and enables broadcasts`() {
+        val directory = roomMentionDirectoryOf(
+            mapOf(
+                "bob" to testPresence(from = "room@muc.waddle.test/bob", mucJid = "bob@waddle.test/phone"),
+                "ghost" to testPresence(from = "room@muc.waddle.test/ghost", mucRole = WaddleMucRole.PARTICIPANT),
+            ),
+        )
+
+        assertEquals(listOf(WaddleMentionTarget(label = "bob", jid = "bob@waddle.test")), directory.targets)
+        assertTrue(directory.broadcasts)
     }
 }

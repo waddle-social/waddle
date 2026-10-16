@@ -1,6 +1,9 @@
 package social.waddle.android.client
 
 import kotlinx.serialization.Serializable
+import social.waddle.android.client.store.SessionStores
+import social.waddle.client.ffi.WaddleMentionDirectory
+import social.waddle.client.ffi.WaddleMentionTarget
 import social.waddle.client.ffi.WaddlePresence
 
 /**
@@ -90,6 +93,24 @@ fun mentionCandidatesOf(occupants: Map<String, WaddlePresence>): List<MentionCan
         }
     return broadcasts + members
 }
+
+/**
+ * The room's mention directory for the Rust send builder, which turns
+ * typed `@nick` tokens into XEP-0372 mention references. Same people the
+ * `@` popover offers ([mentionCandidatesOf]), plus the room broadcasts, so
+ * a nick typed without the popover still addresses its occupant.
+ */
+fun roomMentionDirectoryOf(occupants: Map<String, WaddlePresence>): WaddleMentionDirectory =
+    WaddleMentionDirectory(
+        targets = mentionCandidatesOf(occupants).mapNotNull { candidate ->
+            candidate.jid?.let { jid -> WaddleMentionTarget(label = candidate.display, jid = jid) }
+        },
+        broadcasts = true,
+    )
+
+/** [roomMentionDirectoryOf] for the current occupants of [roomJid]. */
+internal fun SessionStores.roomMentionDirectory(roomJid: String): WaddleMentionDirectory =
+    roomMentionDirectoryOf(presenceStore.occupants.value[roomJid].orEmpty())
 
 /**
  * One accepted composer mention: [begin] inclusive / [end] exclusive,

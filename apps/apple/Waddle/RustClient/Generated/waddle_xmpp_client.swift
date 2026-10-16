@@ -8743,6 +8743,126 @@ public func FfiConverterTypeWaddleMdsDisplayedEntry_lower(_ value: WaddleMdsDisp
 }
 
 
+/**
+ * Who a typed `@label` can address in this conversation.
+ */
+public struct WaddleMentionDirectory: Equatable, Hashable {
+    public var targets: [WaddleMentionTarget]
+    /**
+     * Resolve `@everyone` / `@here` to broadcast mention URIs.
+     */
+    public var broadcasts: Bool
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(targets: [WaddleMentionTarget],
+        /**
+         * Resolve `@everyone` / `@here` to broadcast mention URIs.
+         */broadcasts: Bool) {
+        self.targets = targets
+        self.broadcasts = broadcasts
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMentionDirectory: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMentionDirectory: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMentionDirectory {
+        return
+            try WaddleMentionDirectory(
+                targets: FfiConverterSequenceTypeWaddleMentionTarget.read(from: &buf),
+                broadcasts: FfiConverterBool.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleMentionDirectory, into buf: inout [UInt8]) {
+        FfiConverterSequenceTypeWaddleMentionTarget.write(value.targets, into: &buf)
+        FfiConverterBool.write(value.broadcasts, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMentionDirectory_lift(_ buf: RustBuffer) throws -> WaddleMentionDirectory {
+    return try FfiConverterTypeWaddleMentionDirectory.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMentionDirectory_lower(_ value: WaddleMentionDirectory) -> RustBuffer {
+    return FfiConverterTypeWaddleMentionDirectory.lower(value)
+}
+
+
+/**
+ * One mentionable entity: the label typed after `@` and its real bare JID.
+ */
+public struct WaddleMentionTarget: Equatable, Hashable {
+    public var label: String
+    public var jid: String
+
+    // Default memberwise initializers are never public by default, so we
+    // declare one manually.
+    public init(label: String, jid: String) {
+        self.label = label
+        self.jid = jid
+    }
+
+
+
+
+}
+
+#if compiler(>=6)
+extension WaddleMentionTarget: Sendable {}
+#endif
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public struct FfiConverterTypeWaddleMentionTarget: FfiConverterRustBuffer {
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> WaddleMentionTarget {
+        return
+            try WaddleMentionTarget(
+                label: FfiConverterString.read(from: &buf),
+                jid: FfiConverterString.read(from: &buf)
+        )
+    }
+
+    public static func write(_ value: WaddleMentionTarget, into buf: inout [UInt8]) {
+        FfiConverterString.write(value.label, into: &buf)
+        FfiConverterString.write(value.jid, into: &buf)
+    }
+}
+
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMentionTarget_lift(_ buf: RustBuffer) throws -> WaddleMentionTarget {
+    return try FfiConverterTypeWaddleMentionTarget.lift(buf)
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+public func FfiConverterTypeWaddleMentionTarget_lower(_ value: WaddleMentionTarget) -> RustBuffer {
+    return FfiConverterTypeWaddleMentionTarget.lower(value)
+}
+
+
 public struct WaddleMessage: Equatable, Hashable {
     public var id: String?
     public var from: String?
@@ -10841,6 +10961,11 @@ public struct WaddleSendOptions: Equatable, Hashable {
      * pack. The sticker image itself travels in `shared_files`.
      */
     public var sticker: WaddleStickerRef?
+    /**
+     * Resolve typed `@label` tokens in the body to XEP-0372 mention
+     * references (room sends). `None` resolves nothing.
+     */
+    public var mentionDirectory: WaddleMentionDirectory?
 
     // Default memberwise initializers are never public by default, so we
     // declare one manually.
@@ -10862,7 +10987,11 @@ public struct WaddleSendOptions: Equatable, Hashable {
         /**
          * XEP-0449: mark this send as a sticker referencing its source
          * pack. The sticker image itself travels in `shared_files`.
-         */sticker: WaddleStickerRef?) {
+         */sticker: WaddleStickerRef?,
+        /**
+         * Resolve typed `@label` tokens in the body to XEP-0372 mention
+         * references (room sends). `None` resolves nothing.
+         */mentionDirectory: WaddleMentionDirectory?) {
         self.stanzaId = stanzaId
         self.subject = subject
         self.reply = reply
@@ -10875,6 +11004,7 @@ public struct WaddleSendOptions: Equatable, Hashable {
         self.requestDisplayedMarker = requestDisplayedMarker
         self.mucPm = mucPm
         self.sticker = sticker
+        self.mentionDirectory = mentionDirectory
     }
 
 
@@ -10904,7 +11034,8 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
                 linkPreviewToken: FfiConverterOptionString.read(from: &buf),
                 requestDisplayedMarker: FfiConverterBool.read(from: &buf),
                 mucPm: FfiConverterBool.read(from: &buf),
-                sticker: FfiConverterOptionTypeWaddleStickerRef.read(from: &buf)
+                sticker: FfiConverterOptionTypeWaddleStickerRef.read(from: &buf),
+                mentionDirectory: FfiConverterOptionTypeWaddleMentionDirectory.read(from: &buf)
         )
     }
 
@@ -10921,6 +11052,7 @@ public struct FfiConverterTypeWaddleSendOptions: FfiConverterRustBuffer {
         FfiConverterBool.write(value.requestDisplayedMarker, into: &buf)
         FfiConverterBool.write(value.mucPm, into: &buf)
         FfiConverterOptionTypeWaddleStickerRef.write(value.sticker, into: &buf)
+        FfiConverterOptionTypeWaddleMentionDirectory.write(value.mentionDirectory, into: &buf)
     }
 }
 
@@ -16046,6 +16178,30 @@ fileprivate struct FfiConverterOptionTypeWaddleLinkPreviewVideo: FfiConverterRus
 #if swift(>=5.8)
 @_documentation(visibility: private)
 #endif
+fileprivate struct FfiConverterOptionTypeWaddleMentionDirectory: FfiConverterRustBuffer {
+    typealias SwiftType = WaddleMentionDirectory?
+
+    public static func write(_ value: SwiftType, into buf: inout [UInt8]) {
+        guard let value = value else {
+            writeInt(&buf, Int8(0))
+            return
+        }
+        writeInt(&buf, Int8(1))
+        FfiConverterTypeWaddleMentionDirectory.write(value, into: &buf)
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> SwiftType {
+        switch try readInt(&buf) as Int8 {
+        case 0: return nil
+        case 1: return try FfiConverterTypeWaddleMentionDirectory.read(from: &buf)
+        default: throw UniffiInternalError.unexpectedOptionalTag
+        }
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
 fileprivate struct FfiConverterOptionTypeWaddleMood: FfiConverterRustBuffer {
     typealias SwiftType = WaddleMood?
 
@@ -17237,6 +17393,31 @@ fileprivate struct FfiConverterSequenceTypeWaddleMdsDisplayedEntry: FfiConverter
         seq.reserveCapacity(Int(len))
         for _ in 0 ..< len {
             seq.append(try FfiConverterTypeWaddleMdsDisplayedEntry.read(from: &buf))
+        }
+        return seq
+    }
+}
+
+#if swift(>=5.8)
+@_documentation(visibility: private)
+#endif
+fileprivate struct FfiConverterSequenceTypeWaddleMentionTarget: FfiConverterRustBuffer {
+    typealias SwiftType = [WaddleMentionTarget]
+
+    public static func write(_ value: [WaddleMentionTarget], into buf: inout [UInt8]) {
+        let len = Int32(value.count)
+        writeInt(&buf, len)
+        for item in value {
+            FfiConverterTypeWaddleMentionTarget.write(item, into: &buf)
+        }
+    }
+
+    public static func read(from buf: inout (data: Data, offset: Data.Index)) throws -> [WaddleMentionTarget] {
+        let len: Int32 = try readInt(&buf)
+        var seq = [WaddleMentionTarget]()
+        seq.reserveCapacity(Int(len))
+        for _ in 0 ..< len {
+            seq.append(try FfiConverterTypeWaddleMentionTarget.read(from: &buf))
         }
         return seq
     }

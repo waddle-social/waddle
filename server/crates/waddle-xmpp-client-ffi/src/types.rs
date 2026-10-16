@@ -909,6 +909,24 @@ pub struct WaddleSendOptions {
     /// XEP-0449: mark this send as a sticker referencing its source
     /// pack. The sticker image itself travels in `shared_files`.
     pub sticker: Option<WaddleStickerRef>,
+    /// Resolve typed `@label` tokens in the body to XEP-0372 mention
+    /// references (room sends). `None` resolves nothing.
+    pub mention_directory: Option<WaddleMentionDirectory>,
+}
+
+/// Who a typed `@label` can address in this conversation.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleMentionDirectory {
+    pub targets: Vec<WaddleMentionTarget>,
+    /// Resolve `@everyone` / `@here` to broadcast mention URIs.
+    pub broadcasts: bool,
+}
+
+/// One mentionable entity: the label typed after `@` and its real bare JID.
+#[derive(uniffi::Record, Clone, Debug, PartialEq, Eq)]
+pub struct WaddleMentionTarget {
+    pub label: String,
+    pub jid: String,
 }
 
 /// Typed outcome for outbound message sends. The old FFI surface

@@ -5,10 +5,32 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 import social.waddle.android.client.prefs.EncryptedFileRef
 import social.waddle.android.client.prefs.SharedFileRef
+import social.waddle.client.ffi.WaddleMentionDirectory
+import social.waddle.client.ffi.WaddleMentionTarget
 import social.waddle.client.ffi.WaddleReferenceType
 import social.waddle.client.ffi.WaddleStickerHash
 
 class MessageSendExtrasTest {
+    @Test
+    fun `room directory rides the send options with or without extras`() {
+        val directory = WaddleMentionDirectory(
+            targets = listOf(WaddleMentionTarget(label = "bob", jid = "bob@waddle.test")),
+            broadcasts = true,
+        )
+
+        val (_, plain) = preparedSend("sid-1", "@bob hi", extras = null, mentionDirectory = directory)
+        val (_, reply) = preparedSend(
+            stanzaId = "sid-2",
+            body = "@bob hi",
+            extras = MessageSendExtras(replyToId = "s1", replyToAuthorJid = "room@muc.waddle.test/alice"),
+            mentionDirectory = directory,
+        )
+
+        assertEquals(directory, plain.mentionDirectory)
+        assertEquals(directory, reply.mentionDirectory)
+        assertNull(preparedSend("sid-3", "@bob hi", extras = null).second.mentionDirectory)
+    }
+
     @Test
     fun `reply prefixes the quoted fallback and marks its codepoint range`() {
         val (body, options) = preparedSend(

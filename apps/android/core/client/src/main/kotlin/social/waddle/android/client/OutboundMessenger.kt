@@ -233,7 +233,8 @@ internal class OutboundMessenger(
         stanzaId: String,
         extras: MessageSendExtras? = null,
     ): ActiveSession.LeaseSendResult {
-        val (finalBody, options) = preparedSend(stanzaId, body, extras)
+        val mentionDirectory = if (isGroupchat) stores.roomMentionDirectory(conversationJid) else null
+        val (finalBody, options) = preparedSend(stanzaId, body, extras, mentionDirectory)
         val attempt = activeSession.sendIfCurrent(lease) { client ->
             if (isGroupchat) {
                 client.sendGroupchatMessage(conversationJid, finalBody, options)

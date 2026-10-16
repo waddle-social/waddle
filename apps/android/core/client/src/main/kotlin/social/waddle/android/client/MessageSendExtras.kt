@@ -8,6 +8,7 @@ import social.waddle.client.ffi.WaddleEncryptedFileHash
 import social.waddle.client.ffi.WaddleFallbackRange
 import social.waddle.client.ffi.WaddleMarkupSpan
 import social.waddle.client.ffi.WaddleMarkupSpanType
+import social.waddle.client.ffi.WaddleMentionDirectory
 import social.waddle.client.ffi.WaddleReference
 import social.waddle.client.ffi.WaddleReferenceType
 import social.waddle.client.ffi.WaddleReplyTarget
@@ -87,8 +88,10 @@ internal fun preparedSend(
     stanzaId: String,
     body: String,
     extras: MessageSendExtras?,
+    /** Room sends: resolve typed `@nick` tokens (see [roomMentionDirectoryOf]). */
+    mentionDirectory: WaddleMentionDirectory? = null,
 ): Pair<String, WaddleSendOptions> {
-    val base = sendOptionsFor(stanzaId)
+    val base = sendOptionsFor(stanzaId).copy(mentionDirectory = mentionDirectory)
     if (extras == null) return body to base
     var finalBody = body
     var fallback: WaddleFallbackRange? = null
