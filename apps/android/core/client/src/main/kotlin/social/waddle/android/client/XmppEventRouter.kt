@@ -18,6 +18,7 @@ import social.waddle.android.client.store.isTimelineMutation
 import social.waddle.client.ffi.WaddleArchivedMessage
 import social.waddle.client.ffi.WaddleInboxEntry
 import social.waddle.client.ffi.WaddleMessage
+import social.waddle.client.ffi.WaddleStatusPreference
 
 /**
  * Single fan-out point for the serialized domain event stream: every
@@ -34,6 +35,8 @@ internal class XmppEventRouter(
     private val callStore: CallStore,
     /** XEP-0084 metadata notifications, for the peer-avatar policy. */
     private val onAvatarChanged: (jid: String, avatarId: String?) -> Unit = { _, _ -> },
+    /** ADR-010 manual-status picks from the account's other resources. */
+    private val onStatusPreference: (WaddleStatusPreference) -> Unit = {},
     private val persistDmSeen: (peer: String, timestamp: String) -> Unit,
 ) {
     private val _events = MutableSharedFlow<XmppEvent>(
@@ -81,6 +84,7 @@ internal class XmppEventRouter(
             // interleave with tie-break sends (web single-thread parity).
             is XmppEvent.Call -> callStore.onCallEvent(event.event)
             is XmppEvent.AvatarChanged -> onAvatarChanged(event.jid, event.avatarId)
+            is XmppEvent.StatusPreferenceChanged -> onStatusPreference(event.preference)
             else -> Unit
         }
         _events.tryEmit(event)

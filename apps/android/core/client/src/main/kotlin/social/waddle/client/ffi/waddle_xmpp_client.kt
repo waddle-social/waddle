@@ -881,6 +881,8 @@ external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_set_room
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config(
 ): Int
+external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference(
+): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack(
 ): Int
 external fun uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_packs(
@@ -1127,6 +1129,8 @@ external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_search_users(`
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_set_room_affiliation(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`targetJid`: RustBuffer.ByValue,`affiliation`: RustBuffer.ByValue,`reason`: RustBuffer.ByValue,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_submit_room_config(`ptr`: Long,`roomJid`: RustBuffer.ByValue,`patch`: RustBuffer.ByValue,
+): Long
+external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_status_preference(`ptr`: Long,
 ): Long
 external fun uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_sticker_pack(`ptr`: Long,`ownerJid`: RustBuffer.ByValue,`node`: RustBuffer.ByValue,`packId`: RustBuffer.ByValue,
 ): Long
@@ -1580,6 +1584,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_submit_room_config() != 32340) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_status_preference() != 15536) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_waddle_xmpp_client_ffi_checksum_method_waddleclient_fetch_sticker_pack() != 49898) {
@@ -2931,6 +2938,14 @@ public interface WaddleClientInterface {
      * unedited settings round-trip verbatim.
      */
     suspend fun `submitRoomConfig`(`roomJid`: kotlin.String, `patch`: WaddleRoomConfigPatch)
+
+    /**
+     * The account's stored presence mode from its own
+     * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
+     * stored. Errors (not connected, timeout, other stanza errors) let
+     * the caller keep what it knew.
+     */
+    suspend fun `fetchStatusPreference`(): WaddleStatusPreference
 
     /**
      * XEP-0449: fetch one sticker pack by id from `owner_jid`'s node
@@ -5785,6 +5800,33 @@ open class WaddleClient: Disposable, AutoCloseable, WaddleClientInterface
         // lift function
         { Unit },
 
+        // Error FFI converter
+        WaddleException.ErrorHandler,
+    )
+    }
+
+
+    /**
+     * The account's stored presence mode from its own
+     * `urn:waddle:status-preference:0` PEP node; `Automatic` when none is
+     * stored. Errors (not connected, timeout, other stanza errors) let
+     * the caller keep what it knew.
+     */
+    @Throws(WaddleException::class)
+    @Suppress("ASSIGNED_BUT_NEVER_ACCESSED_VARIABLE")
+    override suspend fun `fetchStatusPreference`() : WaddleStatusPreference {
+        return uniffiRustCallAsync(
+        callWithHandle { uniffiHandle ->
+            UniffiLib.uniffi_waddle_xmpp_client_ffi_fn_method_waddleclient_fetch_status_preference(
+                uniffiHandle,
+
+            )
+        },
+        { future, callback, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_poll_rust_buffer(future, callback, continuation) },
+        { future, continuation -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_complete_rust_buffer(future, continuation) },
+        { future -> UniffiLib.ffi_waddle_xmpp_client_ffi_rust_future_free_rust_buffer(future) },
+        // lift function
+        { FfiConverterTypeWaddleStatusPreference.lift(it) },
         // Error FFI converter
         WaddleException.ErrorHandler,
     )
@@ -12567,6 +12609,19 @@ sealed class WaddleClientEvent {
     }
 
     /**
+     * ADR-010: another resource of this account published a presence
+     * mode to its own `urn:waddle:status-preference:0` PEP node.
+     */
+    data class StatusPreferenceChanged(
+        val `preference`: social.waddle.client.ffi.WaddleStatusPreference) : WaddleClientEvent()
+
+    {
+
+
+        companion object
+    }
+
+    /**
      * Waddle live inbox push (`urn:waddle:inbox:0` headline wrapping
      * a XEP-0430 `<entry/>`). Fires ONLY for unsolicited pushes —
      * query-response entries resolve the `fetch_inbox` verb and are
@@ -12665,16 +12720,19 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterTypeJid.read(buf),
                 FfiConverterOptionalString.read(buf),
                 )
-            10 -> WaddleClientEvent.InboxPush(
+            10 -> WaddleClientEvent.StatusPreferenceChanged(
+                FfiConverterTypeWaddleStatusPreference.read(buf),
+                )
+            11 -> WaddleClientEvent.InboxPush(
                 FfiConverterTypeWaddleInboxEntry.read(buf),
                 )
-            11 -> WaddleClientEvent.Call(
+            12 -> WaddleClientEvent.Call(
                 FfiConverterTypeWaddleCallEvent.read(buf),
                 )
-            12 -> WaddleClientEvent.AuthenticationFailed(
+            13 -> WaddleClientEvent.AuthenticationFailed(
                 FfiConverterTypeWaddleSaslCondition.read(buf),
                 )
-            13 -> WaddleClientEvent.Error(
+            14 -> WaddleClientEvent.Error(
                 FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
@@ -12744,6 +12802,13 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 4UL
                 + FfiConverterTypeJid.allocationSize(value.`jid`)
                 + FfiConverterOptionalString.allocationSize(value.`avatarId`)
+            )
+        }
+        is WaddleClientEvent.StatusPreferenceChanged -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleStatusPreference.allocationSize(value.`preference`)
             )
         }
         is WaddleClientEvent.InboxPush -> {
@@ -12824,23 +12889,28 @@ public object FfiConverterTypeWaddleClientEvent : FfiConverterRustBuffer<WaddleC
                 FfiConverterOptionalString.write(value.`avatarId`, buf)
                 Unit
             }
-            is WaddleClientEvent.InboxPush -> {
+            is WaddleClientEvent.StatusPreferenceChanged -> {
                 buf.putInt(10)
+                FfiConverterTypeWaddleStatusPreference.write(value.`preference`, buf)
+                Unit
+            }
+            is WaddleClientEvent.InboxPush -> {
+                buf.putInt(11)
                 FfiConverterTypeWaddleInboxEntry.write(value.`entry`, buf)
                 Unit
             }
             is WaddleClientEvent.Call -> {
-                buf.putInt(11)
+                buf.putInt(12)
                 FfiConverterTypeWaddleCallEvent.write(value.`event`, buf)
                 Unit
             }
             is WaddleClientEvent.AuthenticationFailed -> {
-                buf.putInt(12)
+                buf.putInt(13)
                 FfiConverterTypeWaddleSaslCondition.write(value.`condition`, buf)
                 Unit
             }
             is WaddleClientEvent.Error -> {
-                buf.putInt(13)
+                buf.putInt(14)
                 FfiConverterString.write(value.`description`, buf)
                 Unit
             }
@@ -13427,6 +13497,49 @@ public object FfiConverterTypeWaddleLinkPreviewLookupStatus: FfiConverterRustBuf
     override fun allocationSize(value: WaddleLinkPreviewLookupStatus) = 4UL
 
     override fun write(value: WaddleLinkPreviewLookupStatus, buf: ByteBuffer) {
+        buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * A status the user pinned by hand (ADR-010): an RFC 6121 §4.7.2.1
+ * `<show/>` value, or plain available.
+ */
+
+enum class WaddleManualStatus {
+
+    AVAILABLE,
+    /**
+     * `<show>chat</show>`, free for chat.
+     */
+    CHAT,
+    AWAY,
+    DND;
+
+
+
+
+    companion object
+}
+
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleManualStatus: FfiConverterRustBuffer<WaddleManualStatus> {
+    override fun read(buf: ByteBuffer) = try {
+        WaddleManualStatus.values()[buf.getInt() - 1]
+    } catch (e: IndexOutOfBoundsException) {
+        throw RuntimeException("invalid enum value, something is very wrong!!", e)
+    }
+
+    override fun allocationSize(value: WaddleManualStatus) = 4UL
+
+    override fun write(value: WaddleManualStatus, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
     }
 }
@@ -14587,6 +14700,84 @@ public object FfiConverterTypeWaddleStanzaErrorType: FfiConverterRustBuffer<Wadd
 
     override fun write(value: WaddleStanzaErrorType, buf: ByteBuffer) {
         buf.putInt(value.ordinal + 1)
+    }
+}
+
+
+
+
+
+/**
+ * The account-wide presence mode (ADR-010 decision 5). `Automatic` lets
+ * each device's auto-away govern; `Manual` pins one status on every
+ * device until the user resets it.
+ */
+sealed class WaddleStatusPreference {
+
+    object Automatic : WaddleStatusPreference()
+
+
+    data class Manual(
+        val `status`: social.waddle.client.ffi.WaddleManualStatus) : WaddleStatusPreference()
+
+    {
+
+
+        companion object
+    }
+
+
+
+
+
+
+
+
+    companion object
+}
+
+/**
+ * @suppress
+ */
+public object FfiConverterTypeWaddleStatusPreference : FfiConverterRustBuffer<WaddleStatusPreference>{
+    override fun read(buf: ByteBuffer): WaddleStatusPreference {
+        return when(buf.getInt()) {
+            1 -> WaddleStatusPreference.Automatic
+            2 -> WaddleStatusPreference.Manual(
+                FfiConverterTypeWaddleManualStatus.read(buf),
+                )
+            else -> throw RuntimeException("invalid enum value, something is very wrong!!")
+        }
+    }
+
+    override fun allocationSize(value: WaddleStatusPreference) = when(value) {
+        is WaddleStatusPreference.Automatic -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+            )
+        }
+        is WaddleStatusPreference.Manual -> {
+            // Add the size for the Int that specifies the variant plus the size needed for all fields
+            (
+                4UL
+                + FfiConverterTypeWaddleManualStatus.allocationSize(value.`status`)
+            )
+        }
+    }
+
+    override fun write(value: WaddleStatusPreference, buf: ByteBuffer) {
+        when(value) {
+            is WaddleStatusPreference.Automatic -> {
+                buf.putInt(1)
+                Unit
+            }
+            is WaddleStatusPreference.Manual -> {
+                buf.putInt(2)
+                FfiConverterTypeWaddleManualStatus.write(value.`status`, buf)
+                Unit
+            }
+        }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
     }
 }
 

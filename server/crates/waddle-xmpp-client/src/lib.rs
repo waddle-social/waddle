@@ -29,6 +29,7 @@ pub mod push;
 pub mod request;
 pub mod runtime;
 pub mod state;
+pub mod status_preference;
 pub mod stickers;
 pub mod stream_management;
 pub mod transport;

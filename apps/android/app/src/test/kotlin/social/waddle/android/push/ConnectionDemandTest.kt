@@ -1,20 +1,89 @@
 package social.waddle.android.push
 
 import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
 import kotlinx.coroutines.test.TestScope
 import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
+import social.waddle.android.client.DesiredPresence
 import social.waddle.android.client.calls.CallState
 import social.waddle.client.ffi.WaddleCallMedia
+import java.time.Instant
 
 /** What holds the stream open, and that letting go waits out a grace period. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionDemandTest {
-    private fun TestScope.demand() = ConnectionDemand(backgroundScope, graceMillis = GRACE).also { runCurrent() }
+    /**
+     * The phone's clocks and its wake alarm. Elapsed realtime and the wall
+     * clock move together; the alarm fires only when the test says the
+     * phone was awake to run it.
+     */
+    private class FakePhone : WakeTimer {
+        var elapsedMillis = 0L
+        var wall: Instant = STARTED_AT
+        var dueAt: Long? = null
+            private set
+        private var onFire: (() -> Unit)? = null
+
+        override fun schedule(atElapsedRealtimeMillis: Long, onFire: () -> Unit) {
+            dueAt = atElapsedRealtimeMillis
+            this.onFire = onFire
+        }
+
+        override fun cancel() {
+            dueAt = null
+            onFire = null
+        }
+
+        fun pass(minutes: Long) {
+            elapsedMillis += minutes * MINUTE_MILLIS
+            wall = wall.plusMillis(minutes * MINUTE_MILLIS)
+        }
+
+        fun fireIfDue() {
+            val due = dueAt ?: return
+            if (due > elapsedMillis) return
+            val fire = onFire
+            cancel()
+            fire?.invoke()
+        }
+    }
+
+    private val phone = FakePhone()
+
+    private fun now(): Instant = phone.wall
+
+    private fun TestScope.demand() = ConnectionDemand(
+        backgroundScope,
+        graceMillis = GRACE,
+        wakeTimer = phone,
+        wallClock = { phone.wall },
+        elapsedRealtime = { phone.elapsedMillis },
+    ).also { runCurrent() }
+
+    /** Bring the app up and leave it again; returns when it left. */
+    private fun TestScope.leaveApp(demand: ConnectionDemand): Instant {
+        demand.setProcessStarted(true)
+        runCurrent()
+        val left = now()
+        demand.setProcessStarted(false)
+        runCurrent()
+        return left
+    }
+
+    /** Minutes pass with the phone awake: a due alarm fires on time. */
+    private fun TestScope.advanceMinutes(minutes: Long) {
+        repeat(minutes.toInt()) {
+            phone.pass(1)
+            phone.fireIfDue()
+            runCurrent()
+        }
+    }
 
     @Test
     fun `a background cold start wants nothing`() = runTest {
@@ -100,7 +169,177 @@ class ConnectionDemandTest {
         assertFalse(CallState.Idle.needsStream())
     }
 
+    @Test
+    fun `the foreground is available`() = runTest {
+        val demand = demand()
+        demand.setProcessStarted(true)
+        runCurrent()
+        assertEquals(DesiredPresence.Available, demand.presence.value)
+    }
+
+    @Test
+    fun `backgrounding with the stream kept steps through ADR-010 auto-away`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        advanceMinutes(1)
+        val left = leaveApp(demand)
+
+        advanceMinutes(AWAY_MINUTES - 1)
+        assertEquals("still available before ten minutes", DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(1)
+        assertEquals("idle since leaving the app", DesiredPresence.Away(left), demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES - AWAY_MINUTES - 1)
+        assertEquals(DesiredPresence.Away(left), demand.presence.value)
+        advanceMinutes(1)
+        assertEquals("same idle stamp", DesiredPresence.ExtendedAway(left), demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES)
+        assertEquals("nothing past extended away", DesiredPresence.ExtendedAway(left), demand.presence.value)
+    }
+
+    @Test
+    fun `the wake alarm is armed for each step in elapsed realtime`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        leaveApp(demand)
+        val leftAt = phone.elapsedMillis
+
+        assertEquals(leftAt + AWAY_MINUTES * MINUTE_MILLIS, phone.dueAt)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals(leftAt + EXTENDED_AWAY_MINUTES * MINUTE_MILLIS, phone.dueAt)
+        advanceMinutes(EXTENDED_AWAY_MINUTES - AWAY_MINUTES)
+        assertEquals("nothing after extended away", null, phone.dueAt)
+        assertTrue(demand.presence.value is DesiredPresence.ExtendedAway)
+    }
+
+    @Test
+    fun `the presence after a wake-up is the step it produced`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        val left = leaveApp(demand)
+        phone.pass(AWAY_MINUTES)
+
+        // The alarm callback only asks for a re-evaluation; the wake lock
+        // holder waits for its result rather than reading a stale value.
+        demand.reevaluate()
+        val afterWake = async { demand.presenceAfterWake() }
+        runCurrent()
+
+        assertEquals(DesiredPresence.Away(left), afterWake.await())
+    }
+
+    @Test
+    fun `a step missed in deep sleep applies on the next evaluation`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        val left = leaveApp(demand)
+
+        // Locked phone: coroutine time and the deferred alarm stand still
+        // while elapsed realtime runs on.
+        phone.pass(EXTENDED_AWAY_MINUTES + 5)
+        runCurrent()
+        assertEquals("nothing ran in sleep", DesiredPresence.Available, demand.presence.value)
+
+        // The first wake (the late alarm, or any re-evaluation) catches up
+        // straight to the step that is due now.
+        demand.reevaluate()
+        runCurrent()
+        assertEquals(DesiredPresence.ExtendedAway(left), demand.presence.value)
+        assertEquals(null, phone.dueAt)
+    }
+
+    @Test
+    fun `a late alarm skips straight past the step it was set for`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        val left = leaveApp(demand)
+
+        phone.pass(EXTENDED_AWAY_MINUTES)
+        phone.fireIfDue()
+        runCurrent()
+
+        assertEquals(DesiredPresence.ExtendedAway(left), demand.presence.value)
+    }
+
+    @Test
+    fun `returning to the foreground cancels the pending auto-away step`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        leaveApp(demand)
+        advanceMinutes(AWAY_MINUTES - 1)
+
+        demand.setProcessStarted(true)
+        runCurrent()
+        assertEquals(DesiredPresence.Available, demand.presence.value)
+        assertEquals("the wake alarm is cancelled", null, phone.dueAt)
+        advanceMinutes(EXTENDED_AWAY_MINUTES * 2)
+        assertEquals("the old timer never fires", DesiredPresence.Available, demand.presence.value)
+
+        // Leaving again restarts the clock from the new departure.
+        val leftAgain = leaveApp(demand)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals(DesiredPresence.Away(leftAgain), demand.presence.value)
+        demand.setProcessStarted(true)
+        runCurrent()
+        assertEquals("back from away at once", DesiredPresence.Available, demand.presence.value)
+    }
+
+    @Test
+    fun `a background cold start held for the user is away with no known idle`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        runCurrent()
+        assertEquals(DesiredPresence.Away(idleSince = null), demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES)
+        assertEquals(DesiredPresence.Away(idleSince = null), demand.presence.value)
+    }
+
+    @Test
+    fun `a lease-only stream advertises nothing`() = runTest {
+        val demand = demand()
+        demand.acquire()
+        runCurrent()
+        assertTrue(demand.wanted.value)
+        assertEquals(DesiredPresence.None, demand.presence.value)
+
+        // Push mode: leaving the app keeps the stream for the grace only.
+        leaveApp(demand)
+        assertEquals(DesiredPresence.None, demand.presence.value)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals(DesiredPresence.None, demand.presence.value)
+    }
+
+    @Test
+    fun `a ringing call follows auto-away but a live call is present`() = runTest {
+        val demand = demand()
+        val left = leaveApp(demand)
+        demand.setCallActive(true)
+        runCurrent()
+        assertEquals("a ring holds the stream for the user", DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals("a ring is not presence", DesiredPresence.Away(left), demand.presence.value)
+
+        // ADR-010: a live call is proof of presence and pauses auto-away.
+        demand.setInCall(true)
+        runCurrent()
+        assertEquals(DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES)
+        assertEquals(DesiredPresence.Available, demand.presence.value)
+
+        val callEnded = now()
+        demand.setInCall(false)
+        demand.setStayConnected(true)
+        demand.setCallActive(false)
+        runCurrent()
+        assertEquals(DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals("idle runs from the end of the call", DesiredPresence.Away(callEnded), demand.presence.value)
+    }
+
     private companion object {
         const val GRACE = 30_000L
+        const val MINUTE_MILLIS = 60_000L
+        const val AWAY_MINUTES = 10L
+        const val EXTENDED_AWAY_MINUTES = 30L
+        val STARTED_AT: Instant = Instant.parse("2026-10-16T08:00:00Z")
     }
 }

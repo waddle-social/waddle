@@ -125,7 +125,7 @@ impl XmppRuntime {
         }
 
         if let Some(ev) = messaging::parse(element) {
-            let pubsub_events = pubsub_notification_events(&ev);
+            let pubsub_events = pubsub_notification_events(&ev, self.account_bare_jid());
             let mut events = vec![ClientEvent::Messaging(ev)];
             events.extend(pubsub_events);
             return events;
@@ -136,17 +136,21 @@ impl XmppRuntime {
 }
 
 /// Flatten the XEP-0060 notifications attached to a parsed message
-/// into standalone [`ClientEvent`]s: §7.2.2.1 item retractions and
-/// XEP-0470 attachment-summary updates. Emitted *alongside* the
+/// into standalone [`ClientEvent`]s: §7.2.2.1 item retractions,
+/// XEP-0470 attachment-summary updates, XEP-0084 avatar changes and the
+/// account's own ADR-010 status preference. Emitted *alongside* the
 /// [`ClientEvent::Messaging`] event (which still carries the full
-/// `pubsub_events` list) so consumers that only care about these two
-/// state transitions need not unpack the message envelope.
+/// `pubsub_events` list) so consumers that only care about these state
+/// transitions need not unpack the message envelope.
 ///
 /// Only the direct message path feeds this: carbon-unwrapped messages
 /// deliberately skip it because XEP-0280 carbons only cover
 /// chat-eligible messages — a pubsub service's headline notifications
 /// are never carbon-copied.
-fn pubsub_notification_events(event: &crate::messaging::MessagingEvent) -> Vec<ClientEvent> {
+fn pubsub_notification_events(
+    event: &crate::messaging::MessagingEvent,
+    account: &jid::BareJid,
+) -> Vec<ClientEvent> {
     let crate::messaging::MessagingEvent::Message(message) = event else {
         return Vec::new();
     };
@@ -154,6 +158,11 @@ fn pubsub_notification_events(event: &crate::messaging::MessagingEvent) -> Vec<C
     for pubsub_event in &message.pubsub_events {
         if let Some(avatar_changed) = crate::avatar::parse_metadata_event(pubsub_event) {
             events.push(ClientEvent::AvatarChanged(avatar_changed));
+        }
+        if let Some(preference) =
+            crate::status_preference::parse_status_preference_event(pubsub_event, account)
+        {
+            events.push(ClientEvent::StatusPreferenceChanged(preference));
         }
         if let Some(retracted) = pubsub_event.retracted_items() {
             events.push(ClientEvent::PubsubItemsRetracted(retracted));

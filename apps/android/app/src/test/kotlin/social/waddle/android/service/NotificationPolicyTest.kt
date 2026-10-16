@@ -79,6 +79,20 @@ class NotificationPolicyTest {
     }
 
     @Test
+    fun `a delayed delivery notifies like any other`() = runTest {
+        // XEP-0198 redelivery to a sibling resource carries the server's
+        // XEP-0203 <delay/> and was never pushed: the delay alone must not
+        // silence it (AnnouncedItems dedupes pushed messages by id).
+        val redelivered = testMessage(
+            from = "alice@waddle.test/phone",
+            stanzaId = "s-redelivered",
+            timestamp = "2026-10-16T09:00:00Z",
+        )
+
+        assertEquals("alice@waddle.test", policy.decide(redelivered)?.conversationJid)
+    }
+
+    @Test
     fun `bodyless messages never notify`() = runTest {
         assertNull(policy.decide(testMessage(body = null)))
     }

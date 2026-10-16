@@ -159,6 +159,10 @@ internal class ConnectionLoop(
         val client = clientFactory.create(config, bridge)
         try {
             return coroutineScope {
+                // Ready work (the pipeline, the presence collector) lives in
+                // the attempt scope, not under the consumer: the attempt ends
+                // as soon as its stream does, and ending it cancels that work.
+                val attemptScope = this
                 val connector = async {
                     try {
                         client.connect()
@@ -177,7 +181,7 @@ internal class ConnectionLoop(
                             session = session,
                             attempt = attempt,
                             ownFullJid = ownFullJid,
-                            scope = this,
+                            scope = attemptScope,
                         ),
                     )
                 }
