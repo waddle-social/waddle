@@ -1117,6 +1117,7 @@ async fn sqlite_sealed_reflection_only_ghost_is_evicted_and_retired() {
     let cursor = MaintenanceCursor::default();
     for _ in 0..4 {
         assert_eq!(pass(&f, &env, &cursor).await, MaintenanceOutcome::Complete);
+        cursor.wait_for_recovery_accounting().await;
     }
     let mut tx = f.uow.begin().await.expect("inspect retired reflection");
     assert!(CanonicalMessageRepository::is_terminal(&mut tx, key)
