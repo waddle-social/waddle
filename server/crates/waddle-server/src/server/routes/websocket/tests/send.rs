@@ -307,12 +307,12 @@ struct RevokeBeforeStartSendSink {
 /// A transport write that has parked in `poll_ready`. Tests explicitly fence
 /// the serving generation while the future is pending, then poll it again to
 /// prove no stale frame reaches the synchronous `start_send` commit point.
-struct PendingReadySink {
-    sent: Vec<Message>,
+pub(super) struct PendingReadySink {
+    pub(super) sent: Vec<Message>,
 }
 
-struct PendingFlushSink {
-    sent: Vec<Message>,
+pub(super) struct PendingFlushSink {
+    pub(super) sent: Vec<Message>,
 }
 
 struct DetachOnReadySink {
