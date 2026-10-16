@@ -28,7 +28,10 @@
 //! - Platform-discriminated provider credentials:
 //!   - Web Push: `web-push-endpoint`, `web-push-p256dh`, `web-push-auth`.
 //!   - APNs: `apns-token`.
-//!   - FCM: `fcm-token`.
+//!   - FCM: `fcm-token`, `fcm-p256dh`, `fcm-auth`. The two keys are the
+//!     client's RFC 8291 envelope-encryption keys: the Push Service
+//!     encrypts the v1 push envelope to them so FCM only ever carries
+//!     ciphertext.
 //!
 //! Result form FORM_TYPE matches the submit form. Two fields:
 //! `node` (the assigned XEP-0357 push-service node id, feeds the
@@ -63,6 +66,8 @@ use std::sync::Arc;
 use uuid::Uuid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
 use waddle_xmpp::push::apns::ApnsDeviceToken;
+use waddle_xmpp::push::fcm::FcmRegistrationToken;
+use waddle_xmpp::push::types::SubscriptionKeys;
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType};
 use waddle_xmpp::xep::xep0050::AdHocCommandCondition;
 use waddle_xmpp::XmppError;
@@ -112,6 +117,12 @@ pub const FIELD_WEB_PUSH_AUTH: &str = "web-push-auth";
 pub const FIELD_APNS_TOKEN: &str = "apns-token";
 /// XEP-0004 form field carrying an FCM registration token.
 pub const FIELD_FCM_TOKEN: &str = "fcm-token";
+/// XEP-0004 form field carrying the Android client's base64url P-256
+/// public key for RFC 8291 envelope encryption.
+pub const FIELD_FCM_P256DH: &str = "fcm-p256dh";
+/// XEP-0004 form field carrying the Android client's base64url 16-byte
+/// RFC 8291 auth secret.
+pub const FIELD_FCM_AUTH: &str = "fcm-auth";
 /// XEP-0004 form field carrying the Push Service-assigned device-id
 /// (returned in the `register-device` result form, persisted by the
 /// caller so it can later opt this device out).
@@ -185,8 +196,50 @@ pub enum RegisterDeviceRequest {
     Fcm {
         app_id: String,
         environment: PushDeviceEnvironment,
-        registration_token: String,
+        /// Validated at the form boundary so the Push Service never
+        /// stores a token FCM would reject as malformed.
+        registration_token: FcmRegistrationToken,
+        /// The envelope-encryption keys, validated at the form boundary.
+        keys: FcmRegisteredKeys,
     },
+}
+
+/// The base64url `p256dh` / `auth` pair an FCM device registers for
+/// envelope encryption (RFC 8291), checked to decode as a P-256 point
+/// and a 16-byte secret. Kept in its submitted base64url form because
+/// that is what the store seals; `Debug` never prints the auth secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FcmRegisteredKeys {
+    p256dh: String,
+    auth: String,
+}
+
+impl FcmRegisteredKeys {
+    /// Validate a submitted pair.
+    pub fn parse(p256dh: &str, auth: &str) -> Result<Self, String> {
+        SubscriptionKeys::from_base64url(p256dh, auth).map_err(|error| error.to_string())?;
+        Ok(Self {
+            p256dh: p256dh.to_owned(),
+            auth: auth.to_owned(),
+        })
+    }
+
+    pub fn p256dh(&self) -> &str {
+        &self.p256dh
+    }
+
+    pub fn auth(&self) -> &str {
+        &self.auth
+    }
+}
+
+impl std::fmt::Debug for FcmRegisteredKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FcmRegisteredKeys")
+            .field("p256dh", &self.p256dh)
+            .field("auth", &"<redacted>")
+            .finish()
+    }
 }
 
 /// Typed parse of the [`DISABLE_DEVICE_NODE`] submit form. Per-device
@@ -437,6 +490,14 @@ pub fn build_register_device_form_prompt() -> DataForm {
             Field::new(FIELD_FCM_TOKEN, FieldType::TextSingle)
                 .with_label("FCM registration token (fcm only)"),
         )
+        .add_field(
+            Field::new(FIELD_FCM_P256DH, FieldType::TextSingle)
+                .with_label("FCM envelope P-256 public key (fcm only)"),
+        )
+        .add_field(
+            Field::new(FIELD_FCM_AUTH, FieldType::TextSingle)
+                .with_label("FCM envelope auth secret (fcm only)"),
+        )
 }
 
 /// Build the stage-2 `<x type='form'>` prompt the service returns when
@@ -518,11 +579,19 @@ pub fn parse_register_request(form: &DataForm) -> Result<RegisterDeviceRequest, 
             })
         }
         PLATFORM_WIRE_FCM => {
-            let registration_token = require_value(form, FIELD_FCM_TOKEN)?.to_string();
+            let registration_token =
+                FcmRegistrationToken::parse(require_value(form, FIELD_FCM_TOKEN)?)
+                    .map_err(|error| format!("{FIELD_FCM_TOKEN}: {error}"))?;
+            let keys = FcmRegisteredKeys::parse(
+                require_value(form, FIELD_FCM_P256DH)?,
+                require_value(form, FIELD_FCM_AUTH)?,
+            )
+            .map_err(|error| format!("{FIELD_FCM_P256DH}/{FIELD_FCM_AUTH}: {error}"))?;
             Ok(RegisterDeviceRequest::Fcm {
                 app_id,
                 environment,
                 registration_token,
+                keys,
             })
         }
         other => Err(format!(
@@ -595,6 +664,7 @@ fn build_registration(
         RegisterDeviceRequest::Fcm {
             environment,
             registration_token,
+            keys,
             ..
         } => PushDeviceRegistration::new(
             device_id,
@@ -602,7 +672,9 @@ fn build_registration(
             crate::push_service::PushDevicePlatform::Fcm,
             environment.as_wire_str(),
         )
-        .with_provider_token(Some(registration_token.clone())),
+        .with_provider_token(Some(registration_token.as_str().to_owned()))
+        .with_provider_key_material(Some(keys.p256dh().to_owned()))
+        .with_provider_auth(Some(keys.auth().to_owned())),
     }
 }
 
@@ -729,27 +801,88 @@ mod tests {
         assert!(err.contains(FIELD_APNS_TOKEN), "{err}");
     }
 
-    #[test]
-    fn parse_fcm_request_carries_registration_token() {
-        let form = submit_form_with(vec![
+    fn fcm_form(token: &str, p256dh: &str, auth: &str) -> DataForm {
+        submit_form_with(vec![
             Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_FCM),
             Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
-            Field::text_single(FIELD_APP_ID, "android-app"),
-            Field::text_single(FIELD_FCM_TOKEN, "fcm-reg-token"),
-        ]);
-        let request = parse_register_request(&form).expect("parses");
+            Field::text_single(FIELD_APP_ID, "social.waddle.android"),
+            Field::text_single(FIELD_FCM_TOKEN, token),
+            Field::text_single(FIELD_FCM_P256DH, p256dh),
+            Field::text_single(FIELD_FCM_AUTH, auth),
+        ])
+    }
+
+    #[test]
+    fn parse_fcm_request_carries_token_and_envelope_keys() {
+        let keys = crate::push_service::test_support::FcmEnvelopeKeys::generate();
+        let request = parse_register_request(&fcm_form("fcm-reg-token", &keys.p256dh, &keys.auth))
+            .expect("parses");
         match request {
             RegisterDeviceRequest::Fcm {
                 app_id,
                 environment,
                 registration_token,
+                keys: registered,
             } => {
-                assert_eq!(app_id, "android-app");
+                assert_eq!(app_id, "social.waddle.android");
                 assert_eq!(environment, PushDeviceEnvironment::Production);
-                assert_eq!(registration_token, "fcm-reg-token");
+                assert_eq!(registration_token.as_str(), "fcm-reg-token");
+                assert_eq!(registered.p256dh(), keys.p256dh);
+                assert_eq!(registered.auth(), keys.auth);
+                let debug = format!("{registered:?}");
+                assert!(!debug.contains(&keys.auth), "{debug}");
             }
             other => panic!("expected Fcm, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn parse_fcm_request_requires_both_envelope_keys() {
+        let keys = crate::push_service::test_support::FcmEnvelopeKeys::generate();
+        let without_keys = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_FCM),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "social.waddle.android"),
+            Field::text_single(FIELD_FCM_TOKEN, "fcm-reg-token"),
+            Field::text_single(FIELD_FCM_P256DH, &keys.p256dh),
+        ]);
+        let err = parse_register_request(&without_keys).expect_err("auth is required");
+        assert!(err.contains(FIELD_FCM_AUTH), "{err}");
+    }
+
+    #[test]
+    fn parse_fcm_request_rejects_malformed_token_and_keys() {
+        let keys = crate::push_service::test_support::FcmEnvelopeKeys::generate();
+        let err = parse_register_request(&fcm_form("not a token", &keys.p256dh, &keys.auth))
+            .expect_err("token with a space must reject");
+        assert!(err.contains(FIELD_FCM_TOKEN), "{err}");
+        let err = parse_register_request(&fcm_form("fcm-reg-token", "p256-key", &keys.auth))
+            .expect_err("p256dh must be a P-256 point");
+        assert!(err.contains(FIELD_FCM_P256DH), "{err}");
+        let err = parse_register_request(&fcm_form("fcm-reg-token", &keys.p256dh, "c2hvcnQ"))
+            .expect_err("auth must be 16 bytes");
+        assert!(err.contains(FIELD_FCM_AUTH), "{err}");
+    }
+
+    #[test]
+    fn fcm_registration_seals_token_p256dh_and_auth_separately() {
+        let keys = crate::push_service::test_support::FcmEnvelopeKeys::generate();
+        let request = parse_register_request(&fcm_form("fcm-reg-token", &keys.p256dh, &keys.auth))
+            .expect("parses");
+        let registration = build_registration(&request, "device-1", "node-1");
+        assert_eq!(
+            registration.provider_token.as_deref(),
+            Some("fcm-reg-token")
+        );
+        assert_eq!(
+            registration.provider_key_material.as_deref(),
+            Some(keys.p256dh.as_str())
+        );
+        assert_eq!(
+            registration.provider_auth.as_deref(),
+            Some(keys.auth.as_str())
+        );
+        assert_eq!(registration.provider_endpoint, None);
     }
 
     #[test]
@@ -867,6 +1000,8 @@ mod tests {
             FIELD_WEB_PUSH_AUTH,
             FIELD_APNS_TOKEN,
             FIELD_FCM_TOKEN,
+            FIELD_FCM_P256DH,
+            FIELD_FCM_AUTH,
         ] {
             assert!(
                 form.field(var).is_some(),

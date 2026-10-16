@@ -30,6 +30,10 @@ pub(super) const MAX_PROVIDER_TOKEN_LEN: usize = 4_096;
 
 pub(super) const MAX_PROVIDER_KEY_MATERIAL_LEN: usize = 4_096;
 
+/// The FCM `auth` secret is 16 bytes (22 base64url characters); the
+/// bound leaves room for padding and whitespace variants.
+pub(super) const MAX_PROVIDER_AUTH_LEN: usize = 256;
+
 fn validate_device_registration(registration: &PushDeviceRegistration) -> Result<(), XmppError> {
     validate_len(
         "Push Service device-id",
@@ -61,6 +65,11 @@ fn validate_device_registration(registration: &PushDeviceRegistration) -> Result
         "Push Service provider key material",
         registration.provider_key_material.as_deref(),
         MAX_PROVIDER_KEY_MATERIAL_LEN,
+    )?;
+    validate_optional_len(
+        "Push Service provider auth secret",
+        registration.provider_auth.as_deref(),
+        MAX_PROVIDER_AUTH_LEN,
     )?;
     Ok(())
 }
@@ -233,7 +242,7 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
         .query(
             r#"
             SELECT device_id, platform, environment, provider_endpoint, provider_token,
-                   provider_key_material
+                   provider_key_material, provider_auth
             FROM push_devices
             WHERE node = ? AND status = ?
             ORDER BY device_id ASC
@@ -268,6 +277,9 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
         let sealed_key_material: Option<String> = row
             .get(5)
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        let sealed_provider_auth: Option<String> = row
+            .get(6)
+            .map_err(|error| XmppError::internal(error.to_string()))?;
         devices.push(dispatch::SealedActiveDevice {
             device_id,
             platform,
@@ -275,6 +287,7 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
             sealed_endpoint,
             sealed_provider_token,
             sealed_key_material,
+            sealed_provider_auth,
         });
     }
     Ok(devices)
@@ -285,7 +298,10 @@ pub(super) async fn active_devices_with_subscription_for_node_tx(
 /// unusable (relay returned 404/410, stored keys are structurally
 /// invalid, etc.). Idempotent — already-disabled rows stay disabled.
 /// `reason` is stored on the row as `last_error` so an operator can
-/// see which permanent-failure outcome triggered the disable.
+/// see which permanent-failure outcome triggered the disable. The
+/// sealed provider secrets are scrubbed exactly as an owner disable
+/// does: a disabled row is never sent to again, and re-registering
+/// writes fresh ones.
 pub(super) async fn mark_device_disabled_tx(
     tx: &mut crate::db::Transaction<'_>,
     node: &str,
@@ -297,6 +313,10 @@ pub(super) async fn mark_device_disabled_tx(
         r#"
         UPDATE push_devices
         SET status = ?,
+            provider_endpoint = NULL,
+            provider_token = NULL,
+            provider_key_material = NULL,
+            provider_auth = NULL,
             failure_count = failure_count + 1,
             last_error = ?,
             updated_at_ms = ?
@@ -327,7 +347,8 @@ async fn get_device_for_owner_on_node_tx(
         .query(
             r#"
             SELECT d.device_id, d.node, d.platform, d.environment,
-                   d.provider_endpoint, d.provider_token, d.provider_key_material
+                   d.provider_endpoint, d.provider_token, d.provider_key_material,
+                   d.provider_auth
             FROM push_devices d
             JOIN push_nodes n ON n.node = d.node
             WHERE n.owner_bare_jid = ? AND d.node = ? AND d.device_id = ?
@@ -364,6 +385,11 @@ fn decode_device(
         row.get(6)
             .map_err(|error| XmppError::internal(error.to_string()))?,
     )?;
+    #[cfg(test)]
+    let provider_auth = secrets.open_optional(
+        row.get(7)
+            .map_err(|error| XmppError::internal(error.to_string()))?,
+    )?;
     Ok(PushServiceDevice {
         device_id: row
             .get(0)
@@ -383,6 +409,8 @@ fn decode_device(
         provider_token,
         #[cfg(test)]
         provider_key_material,
+        #[cfg(test)]
+        provider_auth,
     })
 }
 
@@ -453,6 +481,7 @@ pub(super) async fn upsert_device_tx(
     let sealed_provider_token = secrets.seal_optional(registration.provider_token.clone())?;
     let sealed_provider_key_material =
         secrets.seal_optional(registration.provider_key_material.clone())?;
+    let sealed_provider_auth = secrets.seal_optional(registration.provider_auth.clone())?;
     let device_id = registration.device_id.clone();
     tx.execute(
         r#"
@@ -464,18 +493,20 @@ pub(super) async fn upsert_device_tx(
             provider_endpoint,
             provider_token,
             provider_key_material,
+            provider_auth,
             status,
             failure_count,
             last_error,
             created_at_ms,
             updated_at_ms
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, NULL, ?, ?)
         ON CONFLICT(node, device_id) DO UPDATE SET
             platform = excluded.platform,
             environment = excluded.environment,
             provider_endpoint = excluded.provider_endpoint,
             provider_token = excluded.provider_token,
             provider_key_material = excluded.provider_key_material,
+            provider_auth = excluded.provider_auth,
             status = excluded.status,
             failure_count = 0,
             last_error = NULL,
@@ -489,6 +520,7 @@ pub(super) async fn upsert_device_tx(
             sealed_provider_endpoint,
             sealed_provider_token,
             sealed_provider_key_material,
+            sealed_provider_auth,
             DEVICE_STATUS_ACTIVE,
             now_ms,
             now_ms,
@@ -661,6 +693,7 @@ impl DatabasePushServiceStore {
                     provider_endpoint = NULL,
                     provider_token = NULL,
                     provider_key_material = NULL,
+                    provider_auth = NULL,
                     last_error = ?,
                     updated_at_ms = ?
                 WHERE device_id = ?
@@ -702,7 +735,8 @@ impl DatabasePushServiceStore {
             .query(
                 r#"
                 SELECT d.device_id, d.node, d.platform, d.environment,
-                       d.provider_endpoint, d.provider_token, d.provider_key_material
+                       d.provider_endpoint, d.provider_token, d.provider_key_material,
+                       d.provider_auth
                 FROM push_devices d
                 JOIN push_nodes n ON n.node = d.node
                 WHERE n.owner_bare_jid = ? AND d.device_id = ?
@@ -741,7 +775,8 @@ impl DatabasePushServiceStore {
             .query(
                 r#"
                 SELECT d.device_id, d.node, d.platform, d.environment,
-                       d.provider_endpoint, d.provider_token, d.provider_key_material
+                       d.provider_endpoint, d.provider_token, d.provider_key_material,
+                       d.provider_auth
                 FROM push_devices d
                 JOIN push_nodes n ON n.node = d.node
                 WHERE n.owner_bare_jid = ? AND d.node = ? AND d.status = ?
@@ -772,7 +807,8 @@ impl DatabasePushServiceStore {
             .query(
                 r#"
                 SELECT d.device_id, d.node, d.platform, d.environment,
-                       d.provider_endpoint, d.provider_token, d.provider_key_material
+                       d.provider_endpoint, d.provider_token, d.provider_key_material,
+                       d.provider_auth
                 FROM push_devices d
                 JOIN push_nodes n ON n.node = d.node
                 WHERE n.owner_bare_jid = ? AND d.node = ? AND d.device_id = ?

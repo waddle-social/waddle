@@ -191,8 +191,14 @@ pub enum PushDeviceCredentials {
     Apns {
         device_token: String,
     },
+    /// FCM (Android push). `p256dh` / `auth` are the device's
+    /// RFC 8291 envelope-encryption keys (base64url, no padding): the
+    /// Push Service encrypts every notification to them, so FCM only
+    /// carries ciphertext.
     Fcm {
         registration_token: String,
+        p256dh: String,
+        auth: String,
     },
 }
 
@@ -316,8 +322,14 @@ pub fn build_register_device_submit_form(
         PushDeviceCredentials::Apns { device_token } => {
             fields.push(text_single("apns-token", device_token));
         }
-        PushDeviceCredentials::Fcm { registration_token } => {
+        PushDeviceCredentials::Fcm {
+            registration_token,
+            p256dh,
+            auth,
+        } => {
             fields.push(text_single("fcm-token", registration_token));
+            fields.push(text_single("fcm-p256dh", p256dh));
+            fields.push(text_single("fcm-auth", auth));
         }
     }
     DataForm::new(DataFormType::Submit, REGISTER_DEVICE_FORM_TYPE, fields)
@@ -577,7 +589,9 @@ mod tests {
         );
         assert_eq!(
             PushDeviceCredentials::Fcm {
-                registration_token: "r".into()
+                registration_token: "r".into(),
+                p256dh: "p".into(),
+                auth: "a".into(),
             }
             .platform(),
             PushPlatform::Fcm
@@ -631,12 +645,16 @@ mod tests {
         assert!(!vars.contains(&"web-push-p256dh"));
         assert!(!vars.contains(&"web-push-auth"));
         assert!(!vars.contains(&"fcm-token"));
+        assert!(!vars.contains(&"fcm-p256dh"));
+        assert!(!vars.contains(&"fcm-auth"));
     }
 
     #[test]
-    fn build_submit_form_for_fcm_carries_only_fcm_token() {
+    fn build_submit_form_for_fcm_carries_token_and_envelope_keys() {
         let credentials = PushDeviceCredentials::Fcm {
             registration_token: "fcm-reg-token".to_string(),
+            p256dh: "fcm-p256dh-key".to_string(),
+            auth: "fcm-auth-secret".to_string(),
         };
         let form = build_register_device_submit_form(
             "app-android",
@@ -650,8 +668,12 @@ mod tests {
             .collect();
         assert_eq!(values.get("platform").copied(), Some("fcm"));
         assert_eq!(values.get("fcm-token").copied(), Some("fcm-reg-token"));
+        assert_eq!(values.get("fcm-p256dh").copied(), Some("fcm-p256dh-key"));
+        assert_eq!(values.get("fcm-auth").copied(), Some("fcm-auth-secret"));
         assert!(!values.contains_key("apns-token"));
         assert!(!values.contains_key("web-push-endpoint"));
+        assert!(!values.contains_key("web-push-p256dh"));
+        assert!(!values.contains_key("web-push-auth"));
     }
 
     #[test]

@@ -58,7 +58,7 @@ advertised_features = ["urn:xmpp:push:0"]
 server_evidence = ["crates/waddle-server/tests/xep0357_push_service_ws.rs"]
 topologies = { local = "beta", federated = "unsupported" }
 [capability.protocol_evidence]
-XEP-0357 = ["crates/waddle-server/tests/xep0357_push_service_ws.rs"]
+XEP-0357 = ["crates/waddle-server/tests/xep0357_push_service_ws.rs", "crates/waddle-server/tests/xep0357_push_service_web_push.rs", "crates/waddle-server/tests/xep0357_push_service_apns.rs", "crates/waddle-server/tests/xep0357_push_service_fcm.rs"]
 XEP-0492 = ["crates/waddle-server/tests/xep0492_push_enforcement_ws.rs"]
 
 [[capability]]

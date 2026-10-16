@@ -2,6 +2,7 @@
 
 use super::attributes::{PushProvider, PushStage};
 use crate::push::apns::{ApnsOutcome, ApnsTransient};
+use crate::push::fcm::{FcmOutcome, FcmTransient};
 use crate::push::types::{TransientFailure, WebPushOutcome};
 
 fn add_pipeline(stage: PushStage, count: u64) {
@@ -171,6 +172,47 @@ pub fn record_apns_outcome(outcome: &ApnsOutcome) -> Option<PushStage> {
     Some(stage)
 }
 
+/// Classify and record a typed result returned by FCM.
+///
+/// Mirrors [`record_apns_outcome`]: network and timeout failures do not
+/// increment the provider family (FCM never answered), and a local
+/// preflight rejection (`status: 0`, no HTTP exchange) is not a provider
+/// response either. An OAuth token-endpoint failure never reaches here:
+/// FCM was not contacted.
+pub fn record_fcm_outcome(outcome: &FcmOutcome) -> Option<PushStage> {
+    let stage = match outcome {
+        FcmOutcome::Sent => {
+            increment_provider_sent(PushProvider::Fcm);
+            PushStage::ProviderSent
+        }
+        FcmOutcome::Unregistered { .. } | FcmOutcome::InvalidToken { .. } => {
+            increment_provider_token_expired(PushProvider::Fcm);
+            PushStage::ProviderTokenExpired
+        }
+        // The dispatcher records outcomes after resolving this variant;
+        // seen unresolved, it is a provider rejection that disabled nothing.
+        FcmOutcome::UnattributedInvalidArgument { .. }
+        | FcmOutcome::Unauthenticated { .. }
+        | FcmOutcome::ProviderAuth { .. }
+        | FcmOutcome::SenderIdMismatch { .. }
+        | FcmOutcome::Rejected { status: 1.., .. }
+        | FcmOutcome::Transient {
+            cause:
+                FcmTransient::RateLimited | FcmTransient::Failure(TransientFailure::ServerError { .. }),
+            ..
+        } => {
+            increment_provider_rejected(PushProvider::Fcm);
+            PushStage::ProviderRejected
+        }
+        FcmOutcome::Rejected { status: 0, .. }
+        | FcmOutcome::Transient {
+            cause: FcmTransient::Failure(TransientFailure::Network | TransientFailure::Timeout),
+            ..
+        } => return None,
+    };
+    Some(stage)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,6 +334,71 @@ mod tests {
             ),
             Some(1)
         );
+    }
+
+    #[tokio::test]
+    async fn fcm_sent_exports_sent_for_the_fcm_provider() {
+        let guard = crate::telemetry::test_support::acquire().await;
+        record_fcm_outcome(&FcmOutcome::Sent);
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.push.provider",
+                &[("stage", "provider_sent"), ("provider", "fcm")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn fcm_unregistered_exports_token_expired() {
+        let guard = crate::telemetry::test_support::acquire().await;
+        record_fcm_outcome(&FcmOutcome::Unregistered {
+            status: 404,
+            detail: crate::push::fcm::FcmErrorDetail::default(),
+        });
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.push.provider",
+                &[("stage", "provider_token_expired"), ("provider", "fcm")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn fcm_provider_auth_exports_rejected() {
+        let guard = crate::telemetry::test_support::acquire().await;
+        record_fcm_outcome(&FcmOutcome::ProviderAuth {
+            status: 404,
+            detail: crate::push::fcm::FcmErrorDetail::default(),
+        });
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.push.provider",
+                &[("stage", "provider_rejected"), ("provider", "fcm")]
+            ),
+            Some(1)
+        );
+    }
+
+    #[tokio::test]
+    async fn fcm_timeout_and_preflight_export_nothing() {
+        let guard = crate::telemetry::test_support::acquire().await;
+        assert_eq!(
+            record_fcm_outcome(&FcmOutcome::Transient {
+                cause: FcmTransient::Failure(TransientFailure::Timeout),
+                retry_after: None,
+            }),
+            None
+        );
+        assert_eq!(
+            record_fcm_outcome(&FcmOutcome::Rejected {
+                status: 0,
+                detail: crate::push::fcm::FcmErrorDetail::default(),
+            }),
+            None
+        );
+        assert_eq!(guard.counter_sum("waddle.push.provider", &[]), None);
     }
 
     #[tokio::test]

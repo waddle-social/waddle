@@ -207,7 +207,9 @@ mod tests {
     use crate::push_service::publish_jobs::{
         PUBLISH_JOB_CLAIM_TIMEOUT_MS, PUBLISH_JOB_STATUS_IN_PROGRESS,
     };
-    use crate::push_service::test_support::{notification_item, owner, store};
+    use crate::push_service::test_support::{
+        fcm_registration, notification_item, owner, store, store_with_fake_fcm, FCM_TEST_APP_ID,
+    };
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
 
     #[tokio::test]
@@ -264,14 +266,14 @@ mod tests {
 
     #[tokio::test]
     async fn wire_publication_does_not_reuse_another_acceptance_claim() {
-        let store = store().await;
+        let (store, _fcm) = store_with_fake_fcm().await;
         let owner = owner();
-        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
         store
-            .upsert_device(
-                &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
-            )
+            .upsert_device(&owner, fcm_registration("dev-1", node.node()))
             .await
             .expect("device");
         store
@@ -320,6 +322,10 @@ mod tests {
         assert_eq!(result.attempted_devices(), 1);
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].item_id(), "recover-direct-claim");
+        assert_eq!(
+            attempts[0].status(),
+            crate::push_service::fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED
+        );
         assert!(queued.is_empty());
         let mut rows = store
             .query(

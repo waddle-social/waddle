@@ -205,10 +205,14 @@ pub(crate) struct SealedActiveDevice {
     /// command, which requires one of the two).
     pub environment: Option<PushDeviceEnvironment>,
     pub sealed_endpoint: Option<String>,
-    /// `push_devices.provider_token`: the Web Push `auth` secret or
-    /// the APNs device token, sealed.
+    /// `push_devices.provider_token`: the Web Push `auth` secret, the
+    /// APNs device token or the FCM registration token, sealed.
     pub sealed_provider_token: Option<String>,
+    /// `push_devices.provider_key_material`: the Web Push or FCM
+    /// `p256dh` key, sealed.
     pub sealed_key_material: Option<String>,
+    /// `push_devices.provider_auth`: the FCM `auth` secret, sealed.
+    pub sealed_provider_auth: Option<String>,
 }
 
 /// Resolved Web Push target ready for `encrypt` + `send`.
@@ -355,9 +359,6 @@ pub(crate) const ATTEMPT_STATUS_WEB_MISSING_MATERIAL: &str = "web-missing-materi
 pub(crate) const ATTEMPT_STATUS_WEB_UNSEAL_FAILED: &str = "web-unseal-failed";
 pub(crate) const ATTEMPT_STATUS_WEB_INVALID_ENDPOINT: &str = "web-invalid-endpoint";
 pub(crate) const ATTEMPT_STATUS_WEB_INVALID_KEYS: &str = "web-invalid-keys";
-/// Recorded for FCM devices until #530 lands the real FCM sender.
-/// APNs devices are dispatched for real (#529) and never record it.
-pub(crate) const ATTEMPT_STATUS_FAKE_SENT_NON_WEB: &str = "fake-sent";
 
 #[cfg(test)]
 mod tests {
@@ -623,7 +624,7 @@ mod tests {
     }
 
     #[test]
-    fn skip_reason_status_never_records_fake_sent() {
+    fn skip_reason_status_never_looks_delivered() {
         for reason in [
             DeviceSkipReason::MissingProviderMaterial,
             DeviceSkipReason::UnsealFailed,
@@ -632,7 +633,7 @@ mod tests {
         ] {
             assert_ne!(
                 skip_reason_to_attempt_status(reason),
-                ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
+                ATTEMPT_STATUS_WEB_DELIVERED,
                 "a non-deliverable Web Push row must not look delivered"
             );
         }

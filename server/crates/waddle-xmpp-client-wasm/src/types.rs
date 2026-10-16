@@ -763,6 +763,12 @@ pub struct RegisterPushDeviceOptions {
     pub apns_token: Option<String>,
     /// FCM registration token (only valid for `platform: "fcm"`).
     pub fcm_token: Option<String>,
+    /// FCM envelope-encryption P-256 public key, base64url (only valid
+    /// for `platform: "fcm"`).
+    pub fcm_p256dh: Option<String>,
+    /// FCM envelope-encryption auth secret, base64url (only valid for
+    /// `platform: "fcm"`).
+    pub fcm_auth: Option<String>,
 }
 
 impl RegisterPushDeviceOptions {
@@ -787,6 +793,8 @@ impl RegisterPushDeviceOptions {
             }),
             PushPlatform::Fcm => Ok(PushDeviceCredentials::Fcm {
                 registration_token: require_field(self.fcm_token, "fcmToken", "fcm")?,
+                p256dh: require_field(self.fcm_p256dh, "fcmP256dh", "fcm")?,
+                auth: require_field(self.fcm_auth, "fcmAuth", "fcm")?,
             }),
         }
     }
@@ -1445,15 +1453,37 @@ mod tests {
             "environment": "prod",
             "platform": "fcm",
             "fcmToken": "fcm-reg-token",
+            "fcmP256dh": "fcm-p256dh-key",
+            "fcmAuth": "fcm-auth-secret",
         });
         let parsed: RegisterPushDeviceOptions =
             serde_json::from_value(json).expect("camelCase deserialize");
         assert_eq!(
             parsed.into_credentials().unwrap(),
             PushDeviceCredentials::Fcm {
-                registration_token: "fcm-reg-token".to_string()
+                registration_token: "fcm-reg-token".to_string(),
+                p256dh: "fcm-p256dh-key".to_string(),
+                auth: "fcm-auth-secret".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn register_push_device_options_requires_fcm_envelope_keys() {
+        let json = serde_json::json!({
+            "serviceJid": "push.example.com",
+            "appId": "app-android",
+            "environment": "prod",
+            "platform": "fcm",
+            "fcmToken": "fcm-reg-token",
+            "fcmP256dh": "fcm-p256dh-key",
+        });
+        let parsed: RegisterPushDeviceOptions =
+            serde_json::from_value(json).expect("camelCase deserialize");
+        let err = parsed
+            .into_credentials()
+            .expect_err("fcmAuth is required for fcm");
+        assert!(err.contains("fcmAuth"), "{err}");
     }
 
     #[test]

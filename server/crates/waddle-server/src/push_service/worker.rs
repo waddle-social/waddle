@@ -17,6 +17,7 @@ use super::devices::{
     mark_device_disabled_tx,
 };
 use super::dispatch;
+use super::fcm_dispatch;
 use super::nodes::get_node_tx;
 use super::publish_jobs::{
     claim_publish_job_tx, delivered_device_ids_for_acceptance_tx, get_publish_job_payload_xml_tx,
@@ -137,11 +138,6 @@ fn web_push_outcome_diagnostic(outcome: &waddle_xmpp::push::types::WebPushOutcom
     }
 }
 
-/// `true` when an attempt status represents a transient/recoverable
-/// failure that should requeue the publish-job for retry. Permanent
-/// statuses (delivered, gone, payload-too-large, bad-request, invalid
-/// endpoint/keys, missing material, unseal failed, fake-sent) mark the
-/// job as published.
 /// Dispatch one Web Push device row: unseal the subscription, then
 /// encrypt+sign+POST. Translates typed outcomes into the
 /// `push_delivery_attempts.status` wire format. Free function (not a
@@ -286,6 +282,11 @@ async fn dispatch_web_device_owned(
     }
 }
 
+/// `true` when an attempt status represents a transient/recoverable
+/// failure that should requeue the publish-job for retry. Permanent
+/// statuses (delivered, gone, payload-too-large, bad-request, invalid
+/// endpoint/keys, missing material, unseal failed, not-configured APNs
+/// or FCM) mark the job as published or failed.
 fn attempt_status_is_transient(status: &str) -> bool {
     matches!(
         status,
@@ -295,6 +296,9 @@ fn attempt_status_is_transient(status: &str) -> bool {
             | ATTEMPT_STATUS_WEB_NOT_CONFIGURED
             | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
             | apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_RATE_LIMITED
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_TOKEN_TRANSIENT
     )
     // `web-internal-error` is deliberately NOT transient: encrypt /
     // sign / aud-derive failures are deterministic bugs that recur
@@ -324,6 +328,14 @@ fn attempt_status_is_transient(status: &str) -> bool {
 ///   `apns-topic-mismatch`, `apns-not-configured`) are deliberately
 ///   NOT listed: they are server configuration errors that would
 ///   otherwise disable every Apple device at once.
+/// - `fcm-gone` (`UNREGISTERED`) and `fcm-invalid-token` (FCM blamed
+///   `message.token`, or the stored token is not a registration token)
+///   are the FCM token-death statuses; `fcm-invalid-keys` is the FCM
+///   twin of `web-invalid-keys`. Provider-wide FCM failures
+///   (`fcm-provider-auth`, `fcm-sender-id-mismatch`,
+///   `fcm-app-id-mismatch`, `fcm-not-configured`), including a bare
+///   `404` without an FCM error code (an unknown project), are NOT
+///   listed.
 /// - Transient statuses are handled by the retry path; we keep the
 ///   device row active so the next attempt has somewhere to land.
 fn attempt_status_warrants_device_disable(status: &str) -> bool {
@@ -334,6 +346,9 @@ fn attempt_status_warrants_device_disable(status: &str) -> bool {
             | dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT
             | apns_dispatch::ATTEMPT_STATUS_APNS_GONE
             | apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_TOKEN
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_GONE
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_TOKEN
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_KEYS
     )
 }
 
@@ -345,7 +360,8 @@ fn attempt_status_warrants_device_disable(status: &str) -> bool {
 ///
 /// These statuses are deterministic on the fan-out: every device hits
 /// the same encoder/padding bug or server misconfiguration (APNs key,
-/// bundle id, missing `WADDLE_APNS_*`), so the job will recur
+/// bundle id, missing `WADDLE_APNS_*`; FCM credentials, project or app
+/// id, missing `WADDLE_FCM_*`), so the job will recur
 /// identically on retry. Surfacing FAILED on `push_publish_jobs.status`
 /// lets monitors alert without auditing the attempts table.
 fn all_attempts_with_encoder_bug_signature(attempts: &[DispatchedAttempt]) -> Option<&'static str> {
@@ -362,6 +378,12 @@ fn all_attempts_with_encoder_bug_signature(attempts: &[DispatchedAttempt]) -> Op
             | apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_AUTH
             | apns_dispatch::ATTEMPT_STATUS_APNS_TOPIC_MISMATCH
             | apns_dispatch::ATTEMPT_STATUS_APNS_NOT_CONFIGURED
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_REJECTED
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_PAYLOAD_TOO_LARGE
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_AUTH
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_SENDER_ID_MISMATCH
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_APP_ID_MISMATCH
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_NOT_CONFIGURED
     ) && attempts.iter().all(|a| a.status == first);
     if uniform {
         Some(first)
@@ -478,13 +500,12 @@ impl DatabasePushServiceStore {
 
         // ---- Phase 2: outside any tx — encrypt, sign, and send.
         // The XEP-0357 payload only needs to be parsed when a real
-        // provider (Web Push or APNs) is wired up. Without one, every
-        // device records a not-configured (or FCM `fake-sent`) marker
-        // and we never look at the conversation / class /
-        // message-count fields. Parsing unconditionally would reject
-        // test fixtures whose `<notification>` payload omits the
-        // `urn:waddle:push:context:0` child the chat publisher attaches
-        // in production.
+        // provider (Web Push, APNs or FCM) is wired up. Without one,
+        // every device records a not-configured marker and we never
+        // look at the conversation / class / message-count fields.
+        // Parsing unconditionally would reject test fixtures whose
+        // `<notification>` payload omits the `urn:waddle:push:context:0`
+        // child the chat publisher attaches in production.
         let any_provider_ready = self.any_provider_ready();
         let parsed = match dispatch::parse_publish_payload(&payload_xml) {
             Ok(parsed) => Some(parsed),
@@ -805,6 +826,24 @@ impl DatabasePushServiceStore {
             (Some(provider), Some(parsed)) => Some((provider.clone(), parsed.clone(), badge_count)),
             _ => None,
         };
+        // FCM: one OAuth access token for the whole fan-out, fetched
+        // before any device is contacted (like the badge read above).
+        // Not fetched when the node belongs to another app: every device
+        // then records `fcm-app-id-mismatch` without unsealing anything.
+        let has_fcm_device = sealed_devices
+            .iter()
+            .any(|device| device.platform == PushDevicePlatform::Fcm);
+        let fcm_provider = match (self.fcm.as_ref(), parsed) {
+            (Some(provider), Some(parsed)) => {
+                let access_token = if has_fcm_device && provider.serves_app_id(job.app_id) {
+                    Some(provider.tokens.current().await)
+                } else {
+                    None
+                };
+                Some(Arc::new((provider.clone(), parsed.clone(), access_token)))
+            }
+            _ => None,
+        };
         let item_id_arc: Arc<str> = Arc::from(job.item_id);
         let node_arc: Arc<str> = Arc::from(job.node);
         let app_id_arc: Arc<str> = Arc::from(job.app_id);
@@ -821,6 +860,7 @@ impl DatabasePushServiceStore {
                 let secrets = Arc::clone(&secrets);
                 let web_provider = web_provider.clone();
                 let apns_provider = apns_provider.clone();
+                let fcm_provider = fcm_provider.clone();
                 let log_context = Arc::clone(&log_context);
                 async move {
                     match (&web_provider, device.platform) {
@@ -909,17 +949,52 @@ impl DatabasePushServiceStore {
                                 }
                             }
                         },
-                        (_, PushDevicePlatform::Fcm) => {
-                            // FCM is stubbed until #530 lands its real
-                            // sender and keeps the `fake-sent` marker.
-                            DispatchedAttempt {
-                                device_id: device.device_id.clone(),
-                                platform: device.platform,
-                                status: dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
-                                last_error: None,
-                                retry_after: None,
+                        (_, PushDevicePlatform::Fcm) => match fcm_provider.as_deref() {
+                            Some((provider, parsed, access_token)) => {
+                                let attempt = fcm_dispatch::dispatch_fcm_device(
+                                    &device,
+                                    parsed,
+                                    fcm_dispatch::FcmJobContext {
+                                        item_id: &item_id,
+                                        app_id: &app_id,
+                                    },
+                                    provider,
+                                    &secrets,
+                                    access_token.as_ref(),
+                                )
+                                .await;
+                                DispatchedAttempt {
+                                    device_id: device.device_id.clone(),
+                                    platform: device.platform,
+                                    status: attempt.status,
+                                    last_error: attempt
+                                        .last_error
+                                        .map(|error| truncate_last_error(&error)),
+                                    retry_after: attempt.retry_after,
+                                }
                             }
-                        }
+                            // No `WADDLE_FCM_*` configuration. Permanent
+                            // and non-disabling, like `apns-not-configured`.
+                            None => {
+                                if let Some(parsed) = log_context.as_ref() {
+                                    tracing::warn!(
+                                        notification_class = parsed.class.as_db_value(),
+                                        provider = "fcm",
+                                        push_stage = "provider_not_configured",
+                                        provider_outcome =
+                                            fcm_dispatch::ATTEMPT_STATUS_FCM_NOT_CONFIGURED,
+                                        "push provider transition"
+                                    );
+                                }
+                                DispatchedAttempt {
+                                    device_id: device.device_id.clone(),
+                                    platform: device.platform,
+                                    status: fcm_dispatch::ATTEMPT_STATUS_FCM_NOT_CONFIGURED,
+                                    last_error: Some("FCM provider not configured".to_string()),
+                                    retry_after: None,
+                                }
+                            }
+                        },
                     }
                 }
             })
@@ -1102,12 +1177,16 @@ impl DatabasePushServiceStore {
                 .find(|attempt| attempt_status_is_transient(attempt.status))
                 .and_then(|attempt| attempt.last_error.clone())
                 .unwrap_or_else(|| "Web Push transient failure".to_string());
+            // Only a send the provider may have accepted is uncertain.
+            // `fcm-token-transient` never reached FCM, and rate limits
+            // are explicit refusals.
             let unknown_send = prior_uncertainty
                 || attempts.iter().any(|attempt| {
                     matches!(
                         attempt.status,
                         dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
                             | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
+                            | fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT
                     )
                 });
             if !unknown_send && attempt_count_so_far + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS {
@@ -1201,7 +1280,7 @@ impl DatabasePushServiceStore {
                         attempt.status,
                         dispatch::ATTEMPT_STATUS_WEB_DELIVERED
                             | apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED
-                            | dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB
+                            | fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED
                     )
                 }))
         {
@@ -1327,7 +1406,9 @@ mod uncertainty_tests;
 mod tests {
     use super::*;
 
-    use crate::push_service::test_support::{notification_item, owner, store};
+    use crate::push_service::test_support::{
+        fcm_registration, notification_item, owner, store, store_with_fake_fcm, FCM_TEST_APP_ID,
+    };
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
     use waddle_xmpp::inbox::storage::InboxStorage;
 
@@ -1740,10 +1821,10 @@ mod tests {
 
     #[tokio::test]
     async fn expired_unknown_send_past_cap_survives_known_transient_and_settles_only_disposition() {
-        let store = store().await;
+        let (store, _fcm) = store_with_fake_fcm().await;
         let owner = owner();
         let node = store
-            .ensure_node(&owner, "unknown-history")
+            .ensure_node(&owner, FCM_TEST_APP_ID)
             .await
             .expect("node");
         store
@@ -1788,15 +1869,7 @@ mod tests {
             .await
             .expect("revoke unavailable device");
         store
-            .upsert_device(
-                &owner,
-                PushDeviceRegistration::new(
-                    "known-device",
-                    node.node(),
-                    PushDevicePlatform::Fcm,
-                    "test",
-                ),
-            )
+            .upsert_device(&owner, fcm_registration("known-device", node.node()))
             .await
             .expect("known dispatcher fixture");
         store
@@ -1898,6 +1971,9 @@ mod tests {
             ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
             apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT,
             apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_RATE_LIMITED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TOKEN_TRANSIENT,
         ] {
             assert!(
                 attempt_status_is_transient(transient),
@@ -1913,7 +1989,6 @@ mod tests {
             dispatch::ATTEMPT_STATUS_WEB_INVALID_ENDPOINT,
             dispatch::ATTEMPT_STATUS_WEB_UNSEAL_FAILED,
             dispatch::ATTEMPT_STATUS_WEB_MISSING_MATERIAL,
-            dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
             ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
             apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
             apns_dispatch::ATTEMPT_STATUS_APNS_GONE,
@@ -1927,6 +2002,20 @@ mod tests {
             apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_TOKEN,
             apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_ENVIRONMENT,
             apns_dispatch::ATTEMPT_STATUS_APNS_INTERNAL_ERROR,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_GONE,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_TOKEN,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_KEYS,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_AUTH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_REJECTED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_SENDER_ID_MISMATCH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PAYLOAD_TOO_LARGE,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_APP_ID_MISMATCH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_NOT_CONFIGURED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_MISSING_TOKEN,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_MISSING_KEYS,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_UNSEAL_FAILED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INTERNAL_ERROR,
         ] {
             assert!(
                 !attempt_status_is_transient(permanent),
@@ -1957,6 +2046,16 @@ mod tests {
         assert!(attempt_status_warrants_device_disable(
             apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_TOKEN
         ));
+        for disable in [
+            fcm_dispatch::ATTEMPT_STATUS_FCM_GONE,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_TOKEN,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_KEYS,
+        ] {
+            assert!(
+                attempt_status_warrants_device_disable(disable),
+                "{disable} must disable the device"
+            );
+        }
         for never_disable in [
             dispatch::ATTEMPT_STATUS_WEB_DELIVERED,
             dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW,
@@ -1966,7 +2065,6 @@ mod tests {
             dispatch::ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE,
             dispatch::ATTEMPT_STATUS_WEB_UNSEAL_FAILED,
             dispatch::ATTEMPT_STATUS_WEB_MISSING_MATERIAL,
-            dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB,
             ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
             ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
             apns_dispatch::ATTEMPT_STATUS_APNS_DELIVERED,
@@ -1981,6 +2079,20 @@ mod tests {
             apns_dispatch::ATTEMPT_STATUS_APNS_UNSEAL_FAILED,
             apns_dispatch::ATTEMPT_STATUS_APNS_INVALID_ENVIRONMENT,
             apns_dispatch::ATTEMPT_STATUS_APNS_INTERNAL_ERROR,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TOKEN_TRANSIENT,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_RATE_LIMITED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_AUTH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_REJECTED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_SENDER_ID_MISMATCH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PAYLOAD_TOO_LARGE,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_APP_ID_MISMATCH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_NOT_CONFIGURED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_MISSING_TOKEN,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_MISSING_KEYS,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_UNSEAL_FAILED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INTERNAL_ERROR,
         ] {
             assert!(
                 !attempt_status_warrants_device_disable(never_disable),
@@ -1989,31 +2101,69 @@ mod tests {
         }
     }
 
-    // #529: without `WADDLE_APNS_*`, Apple devices record the typed
-    // `apns-not-configured` status (never `fake-sent`), stay active,
-    // and the job is not requeued; FCM keeps its `fake-sent` stub
-    // until #530.
+    #[test]
+    fn uniform_provider_wide_failures_fail_the_job() {
+        let attempt = |status: &'static str| DispatchedAttempt {
+            device_id: "device".to_string(),
+            platform: PushDevicePlatform::Fcm,
+            status,
+            last_error: None,
+            retry_after: None,
+        };
+        for uniform in [
+            fcm_dispatch::ATTEMPT_STATUS_FCM_NOT_CONFIGURED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_AUTH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_APP_ID_MISMATCH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_SENDER_ID_MISMATCH,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_REJECTED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PAYLOAD_TOO_LARGE,
+        ] {
+            assert_eq!(
+                all_attempts_with_encoder_bug_signature(&[attempt(uniform), attempt(uniform)]),
+                Some(uniform)
+            );
+        }
+        for per_device in [
+            fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_GONE,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_TOKEN,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_INVALID_KEYS,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TOKEN_TRANSIENT,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_MISSING_TOKEN,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_UNSEAL_FAILED,
+        ] {
+            assert_eq!(
+                all_attempts_with_encoder_bug_signature(&[attempt(per_device)]),
+                None,
+                "{per_device} is not a provider-wide failure"
+            );
+        }
+    }
+
+    // #529/#530: without `WADDLE_APNS_*` / `WADDLE_FCM_*`, Apple and
+    // Android devices record the typed `*-not-configured` statuses, stay
+    // active, and the job is not requeued.
     #[tokio::test]
-    async fn unconfigured_apns_is_not_fake_sent_and_fcm_still_is() {
+    async fn unconfigured_apns_and_fcm_record_not_configured_and_keep_devices() {
         let store = store().await;
         let owner = owner();
         let node = store
             .ensure_node(&owner, "p4x.waddle.social")
             .await
             .expect("node");
-        for (device_id, platform) in [
-            ("ios-1", PushDevicePlatform::Apns),
-            ("android-1", PushDevicePlatform::Fcm),
-        ] {
-            store
-                .upsert_device(
-                    &owner,
-                    PushDeviceRegistration::new(device_id, node.node(), platform, "prod")
-                        .with_provider_token(Some("abcdef0123".to_string())),
-                )
-                .await
-                .expect("device");
-        }
+        store
+            .upsert_device(
+                &owner,
+                PushDeviceRegistration::new("ios-1", node.node(), PushDevicePlatform::Apns, "prod")
+                    .with_provider_token(Some("abcdef0123".to_string())),
+            )
+            .await
+            .expect("apple device");
+        store
+            .upsert_device(&owner, fcm_registration("android-1", node.node()))
+            .await
+            .expect("android device");
         store
             .enqueue_notification_publish_job_from_user_server(
                 node.node(),
@@ -2044,34 +2194,36 @@ mod tests {
         );
         assert_eq!(
             status_of("android-1").as_deref(),
-            Some(dispatch::ATTEMPT_STATUS_FAKE_SENT_NON_WEB)
+            Some(fcm_dispatch::ATTEMPT_STATUS_FCM_NOT_CONFIGURED)
         );
         assert!(store
             .queued_publish_jobs()
             .await
             .expect("queued")
             .is_empty());
-        let mut rows = store
-            .query(
-                "SELECT status FROM push_devices WHERE node = ? AND device_id = ?",
-                crate::db_params![node.node(), "ios-1"],
-            )
-            .await
-            .expect("device status");
-        let row = rows.next().await.expect("row").expect("device row");
-        assert_eq!(row.get::<String>(0).expect("status"), "active");
+        for device_id in ["ios-1", "android-1"] {
+            let mut rows = store
+                .query(
+                    "SELECT status FROM push_devices WHERE node = ? AND device_id = ?",
+                    crate::db_params![node.node(), device_id],
+                )
+                .await
+                .expect("device status");
+            let row = rows.next().await.expect("row").expect("device row");
+            assert_eq!(row.get::<String>(0).expect("status"), "active");
+        }
     }
 
     #[tokio::test]
     async fn concurrent_publish_job_drains_claim_each_job_once() {
-        let store = store().await;
+        let (store, fcm) = store_with_fake_fcm().await;
         let owner = owner();
-        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
         store
-            .upsert_device(
-                &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
-            )
+            .upsert_device(&owner, fcm_registration("dev-1", node.node()))
             .await
             .expect("device");
 
@@ -2102,19 +2254,24 @@ mod tests {
         assert_eq!(left.len() + right.len(), 1);
         assert_eq!(attempts.len(), 1);
         assert_eq!(attempts[0].item_id(), "claim-once");
+        assert_eq!(
+            attempts[0].status(),
+            fcm_dispatch::ATTEMPT_STATUS_FCM_DELIVERED
+        );
+        assert_eq!(fcm.sent(), 1, "the job reached FCM exactly once");
         assert!(queued.is_empty());
     }
 
     #[tokio::test]
     async fn drain_continues_after_retryable_publish_job_failure() {
-        let store = store().await;
+        let (store, _fcm) = store_with_fake_fcm().await;
         let owner = owner();
-        let node = store.ensure_node(&owner, "web").await.expect("node");
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
         store
-            .upsert_device(
-                &owner,
-                PushDeviceRegistration::new("dev-1", node.node(), PushDevicePlatform::Fcm, "test"),
-            )
+            .upsert_device(&owner, fcm_registration("dev-1", node.node()))
             .await
             .expect("device");
         store
@@ -2178,23 +2335,15 @@ mod tests {
 
     #[tokio::test]
     async fn zero_device_retry_backoff_does_not_block_newer_jobs() {
-        let store = store().await;
+        let (store, _fcm) = store_with_fake_fcm().await;
         let owner = owner();
         let zero_device_node = store.ensure_node(&owner, "web").await.expect("zero node");
         let live_node = store
-            .ensure_node(&owner, "android")
+            .ensure_node(&owner, FCM_TEST_APP_ID)
             .await
             .expect("live node");
         store
-            .upsert_device(
-                &owner,
-                PushDeviceRegistration::new(
-                    "android-1",
-                    live_node.node(),
-                    PushDevicePlatform::Fcm,
-                    "test",
-                ),
-            )
+            .upsert_device(&owner, fcm_registration("android-1", live_node.node()))
             .await
             .expect("live device");
         store

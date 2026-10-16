@@ -178,9 +178,11 @@ async fn postgres_notification_ancestry_fanout_coalescing_and_late_parent() {
 }
 
 async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
-    use crate::push_service::{
-        DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
+    use crate::push_service::test_support::{
+        apns_registration, fcm_registration, with_fake_apns, with_fake_fcm, FakeFcmSender,
+        APNS_TEST_TOPIC, FCM_TEST_APP_ID,
     };
+    use crate::push_service::DatabasePushServiceStore;
     let outbox = NotificationOutboxStore::new(fixture.db.clone())
         .await
         .expect("outbox");
@@ -188,33 +190,41 @@ async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
         crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
             .await
             .expect("registrations");
-    let push = DatabasePushServiceStore::new_with_secret_key(
-        fixture.db.clone(),
-        &rand::random::<[u8; 32]>(),
-    )
-    .await
-    .expect("push service");
+    // Two nodes of one owner that both deliver: the victim is the
+    // Android app (fake FCM), the other the Apple app (fake APNs).
+    let push = with_fake_apns(with_fake_fcm(
+        DatabasePushServiceStore::new_with_secret_key(
+            fixture.db.clone(),
+            &rand::random::<[u8; 32]>(),
+        )
+        .await
+        .expect("push service"),
+        FakeFcmSender::default(),
+    ));
     let candidate = candidate("provider-bound");
     let owner = candidate.recipient_bare_jid.clone();
     let service: BareJid = "push.example.com".parse().expect("service");
     let victim = push
-        .ensure_node(&owner, "victim-app")
+        .ensure_node(&owner, FCM_TEST_APP_ID)
         .await
         .expect("victim node");
     let other = push
-        .ensure_node(&owner, "other-app")
+        .ensure_node(&owner, APNS_TEST_TOPIC)
         .await
         .expect("other node");
-    for (node, device) in [
-        (victim.node(), "victim-device"),
-        (other.node(), "other-device"),
+    for (node, registration) in [
+        (
+            victim.node(),
+            fcm_registration("victim-device", victim.node()),
+        ),
+        (
+            other.node(),
+            apns_registration("other-device", other.node()),
+        ),
     ] {
-        push.upsert_device(
-            &owner,
-            PushDeviceRegistration::new(device, node, PushDevicePlatform::Fcm, "test"),
-        )
-        .await
-        .expect("registered device");
+        push.upsert_device(&owner, registration)
+            .await
+            .expect("registered device");
         push.register_first_party_node_for_owner(&owner, service.as_str(), node, None)
             .await
             .expect("registration");
@@ -259,17 +269,9 @@ async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
     );
     // Knowing a canonical PubSub UUID does not grant the right to settle it
     // through another owned node's provider scheduler.
-    push.upsert_device(
-        &owner,
-        PushDeviceRegistration::new(
-            "other-device",
-            other.node(),
-            PushDevicePlatform::Fcm,
-            "test",
-        ),
-    )
-    .await
-    .expect("other device");
+    push.upsert_device(&owner, apns_registration("other-device", other.node()))
+        .await
+        .expect("other device");
     push.publish_registered_notification_from_user_server_with_publish_options(
         service.as_str(),
         other.node(),

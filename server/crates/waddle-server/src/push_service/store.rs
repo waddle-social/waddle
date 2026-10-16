@@ -8,6 +8,7 @@ use jid::BareJid;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::pubsub::PubSubStorage;
 use waddle_xmpp::push::apns::{ApnsProviderTokenSource, ApnsSender, ApnsTopic};
+use waddle_xmpp::push::fcm::{FcmAccessTokenSource, FcmAppId, FcmProjectId, FcmSender};
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
@@ -16,6 +17,7 @@ use waddle_xmpp::XmppError;
 use crate::db::{Database, IntoParams};
 
 use super::apns_dispatch::ApnsProvider;
+use super::fcm_dispatch::FcmProvider;
 use super::secrets::PushSecretCipher;
 
 #[derive(Clone)]
@@ -42,6 +44,9 @@ pub struct DatabasePushServiceStore {
     /// APNs provider (#529). `None` when `WADDLE_APNS_*` is unset:
     /// Apple devices then record `apns-not-configured`.
     pub(super) apns: Option<ApnsProvider>,
+    /// FCM provider (#530). `None` when `WADDLE_FCM_*` is unset:
+    /// Android devices then record `fcm-not-configured`.
+    pub(super) fcm: Option<FcmProvider>,
 }
 
 #[derive(Clone)]
@@ -102,6 +107,7 @@ impl DatabasePushServiceStore {
             web_push_sender: None,
             vapid_sub: None,
             apns: None,
+            fcm: None,
         };
         store.initialize().await?;
         Ok(store)
@@ -125,6 +131,7 @@ impl DatabasePushServiceStore {
             web_push_sender: None,
             vapid_sub: None,
             apns: None,
+            fcm: None,
         };
         store.initialize().await?;
         Ok(store)
@@ -168,6 +175,21 @@ impl DatabasePushServiceStore {
             sender,
             topic,
         });
+        self
+    }
+
+    /// Install the FCM OAuth access-token source, HTTP v1 transport, the
+    /// Firebase project id and the Android application id this server
+    /// delivers for. Called once at boot from `server::http` when
+    /// `WADDLE_FCM_*` is configured.
+    pub fn with_fcm_provider(
+        mut self,
+        tokens: Arc<dyn FcmAccessTokenSource>,
+        sender: Arc<dyn FcmSender>,
+        project_id: FcmProjectId,
+        app_id: FcmAppId,
+    ) -> Self {
+        self.fcm = Some(FcmProvider::new(tokens, sender, project_id, app_id));
         self
     }
 
@@ -268,6 +290,12 @@ impl DatabasePushServiceStore {
             (),
         )
         .await?;
+        // FCM (#530): the RFC 8291 `auth` secret of the Android client's
+        // envelope-encryption keys, sealed like every provider secret.
+        // The registration token lives in `provider_token` and the
+        // `p256dh` key in `provider_key_material`.
+        self.add_column_if_missing("push_devices", "provider_auth TEXT")
+            .await?;
         self.execute(
             &format!(
                 r#"
@@ -480,11 +508,11 @@ impl DatabasePushServiceStore {
         self.vapid_signer.is_some() && self.web_push_sender.is_some() && self.vapid_sub.is_some()
     }
 
-    /// `true` when any real provider (Web Push or APNs) is wired, i.e.
-    /// when the worker needs the parsed XEP-0357 payload to build a
+    /// `true` when any real provider (Web Push, APNs or FCM) is wired,
+    /// i.e. when the worker needs the parsed XEP-0357 payload to build a
     /// provider request.
     pub(super) fn any_provider_ready(&self) -> bool {
-        self.web_push_provider_ready() || self.apns.is_some()
+        self.web_push_provider_ready() || self.apns.is_some() || self.fcm.is_some()
     }
 
     /// Public snapshot of the Web Push capability — `Ready` when the
@@ -577,7 +605,9 @@ mod tests {
     use minidom::Element;
     use tempfile::tempdir;
 
-    use crate::push_service::test_support::{assert_item_not_found, notification_item, owner};
+    use crate::push_service::test_support::{
+        assert_item_not_found, fcm_registration, notification_item, owner, FCM_TEST_APP_ID,
+    };
     use crate::push_service::types::PushNodeStatus;
     use crate::push_service::{PushDevicePlatform, PushDeviceRegistration};
 
@@ -645,10 +675,118 @@ mod tests {
 
         assert_eq!(node.status, PushNodeStatus::Disabled);
         assert_eq!(device.provider_endpoint(), None);
+        assert_eq!(device.provider_auth(), None);
         assert_eq!(device.provider_token(), None);
         assert_eq!(device.provider_key_material(), None);
         assert_item_not_found(publish_err);
     }
+    #[tokio::test]
+    async fn fcm_device_seals_its_auth_secret_and_disable_scrubs_every_secret() {
+        let store = DatabasePushServiceStore::new(
+            Database::in_memory("push-service-fcm-secrets")
+                .await
+                .expect("database"),
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
+        store
+            .upsert_device(&owner, fcm_registration("android-1", node.node()))
+            .await
+            .expect("device");
+
+        let device = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("device");
+        assert_eq!(device.provider_token(), Some("fcm-token-android-1"));
+        assert!(device.provider_key_material().is_some());
+        let auth = device
+            .provider_auth()
+            .expect("FCM auth secret is stored")
+            .to_string();
+        let mut rows = store
+            .query(
+                "SELECT provider_auth FROM push_devices WHERE node = ? AND device_id = ?",
+                crate::db_params![node.node(), "android-1"],
+            )
+            .await
+            .expect("sealed auth");
+        let sealed: String = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("device row")
+            .get(0)
+            .expect("provider_auth column");
+        drop(rows);
+        assert!(
+            sealed.starts_with("waddle-push-secret-v1:"),
+            "provider_auth is sealed at rest"
+        );
+        assert!(!sealed.contains(&auth), "no plaintext auth secret at rest");
+
+        store
+            .disable_device_for_owner(&owner, node.node(), "android-1", Some("revoked"))
+            .await
+            .expect("disable device");
+        let disabled = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("disabled device");
+        assert_eq!(disabled.provider_token(), None);
+        assert_eq!(disabled.provider_key_material(), None);
+        assert_eq!(disabled.provider_auth(), None);
+    }
+
+    #[tokio::test]
+    async fn provider_disable_scrubs_every_secret_like_an_owner_disable() {
+        let store = DatabasePushServiceStore::new(
+            Database::in_memory("push-service-fcm-provider-disable")
+                .await
+                .expect("database"),
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
+        store
+            .upsert_device(&owner, fcm_registration("android-1", node.node()))
+            .await
+            .expect("device");
+
+        // The worker's path when FCM reports the token gone.
+        let mut tx = store.db.begin().await.expect("tx");
+        crate::push_service::devices::mark_device_disabled_tx(
+            &mut tx,
+            node.node(),
+            "android-1",
+            "fcm-gone",
+            1,
+        )
+        .await
+        .expect("provider disable");
+        tx.commit().await.expect("commit");
+
+        let disabled = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("disabled device");
+        assert_eq!(disabled.provider_token(), None);
+        assert_eq!(disabled.provider_key_material(), None);
+        assert_eq!(disabled.provider_auth(), None);
+    }
+
     async fn disposition_schema_upgrade(
         fixture: crate::ingress::test_support::IngressFixture,
         rebuild: bool,

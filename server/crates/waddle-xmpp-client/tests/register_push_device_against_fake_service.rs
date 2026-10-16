@@ -365,6 +365,8 @@ async fn register_push_device_rejects_stage_2_without_session_id() {
     let driver = ScriptedDriver::new(vec![Ok(bogus)]);
     let credentials = PushDeviceCredentials::Fcm {
         registration_token: "t".to_string(),
+        p256dh: "p".to_string(),
+        auth: "a".to_string(),
     };
     let err = register_test_device(
         &driver,
@@ -640,6 +642,8 @@ async fn register_push_device_rejects_response_without_from_attr() {
     let driver = ScriptedDriver::new(vec![Ok(stripped)]);
     let credentials = PushDeviceCredentials::Fcm {
         registration_token: "fcm".to_string(),
+        p256dh: "p".to_string(),
+        auth: "a".to_string(),
     };
     let err = register_test_device(
         &driver,

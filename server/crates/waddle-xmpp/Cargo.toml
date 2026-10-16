@@ -97,6 +97,9 @@ serde_json = { workspace = true }
 jsonwebtoken = { workspace = true }
 waddle-xmpp-core = { path = "../waddle-xmpp-core", features = ["test-utils"] }
 mockito = "1.7"
+# RSA-2048 service-account keys for the FCM OAuth tests (already in the
+# tree as jsonwebtoken's `aws_lc_rs` backend).
+aws-lc-rs = "1.17"
 opentelemetry_sdk = { workspace = true, features = ["testing"] }
 proptest = { workspace = true }
 

@@ -13815,8 +13815,15 @@ sealed class WaddlePushDeviceCredentials {
         companion object
     }
 
+    /**
+     * `p256dh` / `auth` are the device's RFC 8291 envelope-encryption
+     * keys (base64url, no padding); the Push Service encrypts every FCM
+     * message to them.
+     */
     data class Fcm(
-        val `registrationToken`: kotlin.String) : WaddlePushDeviceCredentials()
+        val `registrationToken`: kotlin.String,
+        val `p256dh`: kotlin.String,
+        val `auth`: kotlin.String) : WaddlePushDeviceCredentials()
 
     {
 
@@ -13850,6 +13857,8 @@ public object FfiConverterTypeWaddlePushDeviceCredentials : FfiConverterRustBuff
                 )
             3 -> WaddlePushDeviceCredentials.Fcm(
                 FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
+                FfiConverterString.read(buf),
                 )
             else -> throw RuntimeException("invalid enum value, something is very wrong!!")
         }
@@ -13877,6 +13886,8 @@ public object FfiConverterTypeWaddlePushDeviceCredentials : FfiConverterRustBuff
             (
                 4UL
                 + FfiConverterString.allocationSize(value.`registrationToken`)
+                + FfiConverterString.allocationSize(value.`p256dh`)
+                + FfiConverterString.allocationSize(value.`auth`)
             )
         }
     }
@@ -13898,6 +13909,8 @@ public object FfiConverterTypeWaddlePushDeviceCredentials : FfiConverterRustBuff
             is WaddlePushDeviceCredentials.Fcm -> {
                 buf.putInt(3)
                 FfiConverterString.write(value.`registrationToken`, buf)
+                FfiConverterString.write(value.`p256dh`, buf)
+                FfiConverterString.write(value.`auth`, buf)
                 Unit
             }
         }.let { /* this makes the `when` an expression, which ensures it is exhaustive */ }
