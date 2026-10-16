@@ -1739,6 +1739,24 @@ async fn promote_terminal_recovery(
     jid: &FullJid,
     conn: &mut WsConnState,
 ) -> ConnectionShutdownOutcome {
+    // Cleanup reaches terminal recovery from several mutually exclusive
+    // branches. Keep its inventory and replay futures out of each branch's
+    // inline state so polling cleanup stays within the thread's stack budget.
+    Box::pin(promote_terminal_recovery_inner(
+        state,
+        outbound_rx,
+        jid,
+        conn,
+    ))
+    .await
+}
+
+async fn promote_terminal_recovery_inner(
+    state: &WebSocketState,
+    outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
+    jid: &FullJid,
+    conn: &mut WsConnState,
+) -> ConnectionShutdownOutcome {
     let detached_snapshot = terminal_recovery_snapshot(jid, conn);
     let Some(mut detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) else {
         cleanup_terminal_muc_presence(state, jid, conn).await;

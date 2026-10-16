@@ -2538,6 +2538,7 @@ async fn assert_promotion_failure_survives_restart(terminal_recovery: bool) {
     .await;
     let jid: FullJid = "alice@example.com/durable-terminal".parse().expect("jid");
     let stream_id = "durable-terminal-promotion";
+    assert!(registry.ensure_session_claim(stream_id).await.is_some());
     let (tx, mut rx) = mpsc::channel::<OutboundStanza>(3);
     let mut conn = WsConnState::new();
     conn.phase = ConnectionPhase::ready(jid.clone(), false);
@@ -2891,7 +2892,7 @@ async fn terminal_incremental_overflow_rechecks_tombstones_per_item() {
 }
 
 #[tokio::test]
-async fn refused_detach_confirm_failure_defers_claim_when_retry_is_untracked() {
+async fn refused_detach_confirm_failure_keeps_durable_promotion_custody() {
     let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
         Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let persistence = Arc::new(FailDeleteSmPersistence::new());
@@ -2951,24 +2952,26 @@ async fn refused_detach_confirm_failure_defers_claim_when_retry_is_untracked() {
     );
     assert_eq!(
         sm_registry.pending_claim_release_count(),
+        0,
+        "the registered inventory owns its claim until durable confirmation succeeds"
+    );
+    let retry = sm_registry
+        .drain_expired()
+        .await
+        .expect("drain registered inventory");
+    assert_eq!(
+        retry.len(),
         1,
-        "an untracked synthetic session must fall back to terminal claim defer"
+        "failed confirmation retains janitor custody"
     );
-    assert!(
-        sm_registry
-            .drain_expired()
-            .await
-            .expect("drain retry")
-            .is_empty(),
-        "cleanup must not report a retry unless the registry actually retained one"
-    );
+    assert_eq!(retry[0].stream_id, stream_id);
     assert!(
         sm_registry
             .locally_owned_claim_ids()
             .expect("owned claim inventory")
             .iter()
             .any(|owned| owned == stream_id),
-        "the deferred terminal-release inventory must still hold the exact claim"
+        "the promotion inventory must still hold the exact claim"
     );
 }
 
@@ -3006,6 +3009,12 @@ async fn ownership_moved_before_terminal_cleanup_still_promotes_without_touching
         .to_string();
     old_conn.publish_pending_sm_enable(state.as_ref());
     let mut prefix = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
+    prefix.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+    prefix.type_ = xmpp_parsers::message::MessageType::Chat;
+    prefix.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "recorded peer prefix".to_owned(),
+    );
     prefix.id = Some(xmpp_parsers::message::Id("superseded-prefix".to_string()));
     let _ = old_conn.sm_state.record_outbound(
         waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize prefix"),

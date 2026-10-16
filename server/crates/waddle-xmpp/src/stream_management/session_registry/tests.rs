@@ -4856,10 +4856,26 @@ async fn assert_ambiguous_claim_survives_displacement(
             .read()
             .expect("pending promotions")
             .contains_key(old_stream));
-        let drained = registry.drain_expired().await.expect("drain retry session");
-        assert!(drained
-            .iter()
-            .any(|session| session.stream_id == old_stream));
+        let drained = registry.drain_expired().await;
+        if rotate_identity {
+            assert!(
+                drained.is_err(),
+                "a new incarnation cannot promote the previous owner's queue"
+            );
+            assert!(
+                registry
+                    .pending_promotion_retries
+                    .read()
+                    .expect("retained retries")
+                    .contains_key(old_stream),
+                "fence rejection must retain the displaced payload for recovery"
+            );
+        } else {
+            assert!(drained
+                .expect("drain retry session")
+                .iter()
+                .any(|session| session.stream_id == old_stream));
+        }
     } else {
         let displaced = replacement.expect("replacement snapshot");
         assert!(displaced
@@ -4877,6 +4893,44 @@ async fn assert_ambiguous_claim_survives_displacement(
             .expect("claim lookup")
             .is_some()
     );
+
+    if rotate_identity {
+        // Identity rotation alone grants no authority over the old queue.
+        // Production demotion/reclamation supplies the subsequent handoff;
+        // this regression proves ambiguous reconciliation never releases or
+        // discards the prior incarnation's still-durable responsibility.
+        assert!(
+            !registry.confirm_drained(old_stream).await,
+            "a rejected stale promotion cannot confirm deletion of the old queue"
+        );
+        let retained_claim = crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("retained exact claim")
+            .expect("prior claim remains held");
+        assert_eq!(retained_claim.owner, me);
+        assert!(storage
+            .get_session(&crate::pending_delivery::SmSessionId::new(old_stream))
+            .await
+            .expect("retained durable source")
+            .is_some());
+        assert_eq!(
+            storage
+                .list_unacked(&crate::pending_delivery::SmSessionId::new(old_stream))
+                .await
+                .expect("retained durable queue")
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![6, 7]
+        );
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .iter()
+            .all(|(stream_id, _)| stream_id != old_stream));
+        return;
+    }
 
     assert!(registry.confirm_drained(old_stream).await);
     assert!(
@@ -5588,11 +5642,20 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
     // non-matching one preserved.
     let restarted = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
     assert_eq!(restarted.restore_from_persistence().await.unwrap(), 1);
-    let hydrated = restarted
-        .peek_session("stream-offmap")
+    assert!(
+        restarted
+            .peek_session("stream-offmap")
+            .await
+            .unwrap()
+            .is_none(),
+        "promotion inventory must never reappear as a resumable stream"
+    );
+    let mut recovered = restarted
+        .drain_expired()
         .await
-        .unwrap()
-        .expect("session rehydrates");
+        .expect("recover promotion inventory");
+    assert_eq!(recovered.len(), 1);
+    let hydrated = recovered.remove(0);
     assert_eq!(hydrated.unacked_stanzas.len(), 1);
     assert!(
         !hydrated
@@ -5920,6 +5983,15 @@ async fn reinsert_for_retry_preserves_detached_at_for_eviction_ordering() {
     let mut failing =
         make_test_session_for_jid("stream-failing", "alice@example.com/web".parse().unwrap());
     failing.detached_at = Instant::now() - Duration::from_secs(100);
+    let original_detached_at = failing.detached_at;
+    // A real retry inherits its enabled stream's exact claim. Establish that
+    // source authority before filling the bounded registry with other streams.
+    drop(
+        registry
+            .ensure_session_claim(&failing.stream_id)
+            .await
+            .expect("enabled retry source claim"),
+    );
     registry.reinsert_for_retry(failing).await.unwrap();
 
     let mut healthy =
@@ -5943,6 +6015,7 @@ async fn reinsert_for_retry_preserves_detached_at_for_eviction_ordering() {
         "the reinserted session must keep its original detached_at and \
          be evicted before a fresher healthy session"
     );
+    assert_eq!(displaced[0].detached_at, original_detached_at);
     assert!(
         registry
             .peek_session("stream-healthy")
