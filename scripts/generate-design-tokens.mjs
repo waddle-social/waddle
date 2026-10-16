@@ -371,7 +371,7 @@ function huddleCubicBezier(name) {
   const value = String(huddleValue("easings", name));
   const match = /^cubic-bezier\(([^)]+)\)$/.exec(value);
   const points = match?.[1].split(",").map((v) => Number(v.trim()));
-  if (!points || points.length !== 4 || points.some(Number.isNaN)) {
+  if (points?.length !== 4 || points.some(Number.isNaN)) {
     throw new Error(`easings.${name}: expected cubic-bezier(x1, y1, x2, y2), got "${value}"`);
   }
   return `CubicBezierEasing(${points.map(ktFloat).join(", ")})`;
