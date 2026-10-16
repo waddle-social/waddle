@@ -23,6 +23,7 @@ RES = ROOT / "apps/android/app/src/main/res"
 DENSITIES = {"mdpi": 1, "hdpi": 1.5, "xhdpi": 2, "xxhdpi": 3, "xxxhdpi": 4}
 CANVAS_DP = 108
 MARK_DP = 66
+IN_APP_PX = 384
 
 
 def main() -> None:
@@ -40,6 +41,11 @@ def main() -> None:
         canvas.save(mark_path, optimize=True)
         tmp.unlink()
         print(f"wrote {mark_path.relative_to(ROOT)}")
+    # Full-bleed mark for in-app use (login): no adaptive-icon padding.
+    nodpi = RES / "drawable-nodpi" / "waddle_mark.png"
+    nodpi.parent.mkdir(parents=True, exist_ok=True)
+    cairosvg.svg2png(url=str(SOURCE), write_to=str(nodpi), output_width=IN_APP_PX, output_height=IN_APP_PX)
+    print(f"wrote {nodpi.relative_to(ROOT)}")
 
 
 if __name__ == "__main__":

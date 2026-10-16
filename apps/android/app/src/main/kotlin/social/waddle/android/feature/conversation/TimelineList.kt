@@ -120,7 +120,16 @@ fun TimelineList(
                     },
                 ) { entry ->
                     // Item content is not reversed: separators sit above their row.
-                    Column {
+                    // New rows fade and settle in (web `message-in`); Compose
+                    // scales this with the system animator setting, so
+                    // "remove animations" turns it off.
+                    Column(
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = tween(MOTION_MESSAGE_IN),
+                            placementSpec = tween(MOTION_FAST),
+                            fadeOutSpec = tween(MOTION_FAST),
+                        ),
+                    ) {
                         entry.daySeparator?.let { DaySeparator(it, today) }
                         if (entry.unreadDivider) UnreadDivider()
                         val stored = (entry.row as? ConversationRow.Stored)?.item
@@ -338,6 +347,7 @@ private val SKELETON_WIDTHS = listOf(listOf(220, 140), listOf(260), listOf(180, 
 private const val LOAD_MORE_THRESHOLD = 3
 private const val JUMP_THRESHOLD = 6
 private const val MOTION_FAST = 160
+private const val MOTION_MESSAGE_IN = 240
 private const val LOADING_KEY = "loading-older"
 private const val START_KEY = "history-start"
 private const val CONTENT_CALL = "call"
