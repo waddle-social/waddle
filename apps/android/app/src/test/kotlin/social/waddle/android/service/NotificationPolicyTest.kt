@@ -3,6 +3,7 @@ package social.waddle.android.service
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -12,6 +13,7 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testMessage
 import social.waddle.android.client.testSessionInfo
+import social.waddle.client.ffi.WaddleCarbonDirection
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleStanzaId
 
@@ -76,6 +78,47 @@ class NotificationPolicyTest {
                 ),
             ),
         )
+    }
+
+    @Test
+    fun `an offline flush replay does not notify again`() = runTest {
+        // XEP-0160 §3: the flush replays the stored message with the
+        // server's XEP-0203 <delay/>; push already announced it.
+        val flushed = testMessage(
+            from = "alice@waddle.test/phone",
+            stanzaId = "s-offline",
+            timestamp = "2026-10-16T09:00:00Z",
+        )
+
+        assertTrue(policy.isReplay(flushed))
+        assertNull(policy.decide(flushed))
+        assertNull(
+            policy.decide(
+                mucMessage().copy(timestamp = "2026-10-16T09:00:00Z"),
+            ),
+        )
+    }
+
+    @Test
+    fun `live messages without a delay still notify`() = runTest {
+        val live = testMessage(from = "alice@waddle.test/phone", timestamp = null)
+
+        assertFalse(policy.isReplay(live))
+        assertNotNull(policy.decide(live))
+        assertNotNull(policy.decide(mucMessage()))
+    }
+
+    @Test
+    fun `a received carbon is live although its forwarded wrapper is stamped`() = runTest {
+        // XEP-0280/0297: the server stamps the <forwarded/> wrapper, and the
+        // FFI falls back to that stamp for the carbon's timestamp.
+        val carbon = testMessage(
+            from = "alice@waddle.test/phone",
+            timestamp = "2026-10-16T09:00:00Z",
+        ).copy(carbon = WaddleCarbonDirection.RECEIVED)
+
+        assertFalse(policy.isReplay(carbon))
+        assertNotNull(policy.decide(carbon))
     }
 
     @Test

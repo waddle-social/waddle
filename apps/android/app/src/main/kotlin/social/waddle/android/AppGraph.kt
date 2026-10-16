@@ -35,6 +35,7 @@ import social.waddle.android.client.WaddleAppState
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.auth.WaddleAuthApi
 import social.waddle.android.client.auth.WaddleSessionInfo
+import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
@@ -128,6 +129,7 @@ class AppGraph(
         userPrefs = userPrefs,
         livenessTicks = fixedRateTicks(),
         connectionWanted = connectionWanted ?: connectionDemand.wanted,
+        desiredPresence = connectionDemand.presence,
     )
 
     /** Push delivery for the signed-in account, known from disk on a cold start. */
@@ -260,7 +262,7 @@ class AppGraph(
         return "#" + (name ?: localpartOf(conversationJid))
     }
 
-    /** Feed the connection demand from the process, the delivery mode and calls. */
+    /** Feed the connection demand (and own presence) from the process, the delivery mode and calls. */
     private fun startConnectionDemand() {
         ProcessLifecycleOwner.get().lifecycle.addObserver(object : DefaultLifecycleObserver {
             override fun onStart(owner: LifecycleOwner) = connectionDemand.setProcessStarted(true)
@@ -273,7 +275,11 @@ class AppGraph(
         applicationScope.launch {
             // An ended call waits in its slot until the UI dismisses it;
             // only ringing or live calls need signalling.
-            sessionManager.callStore.state.collect { connectionDemand.setCallActive(it.needsStream()) }
+            sessionManager.callStore.state.collect {
+                connectionDemand.setCallActive(it.needsStream())
+                // ADR-010: a live call pauses auto-away; a ring does not.
+                connectionDemand.setInCall(it is CallState.Active)
+            }
         }
         // A newly learned or rotated server key needs a fresh endpoint.
         applicationScope.launch {

@@ -16,9 +16,10 @@ import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
  * The should-this-message-notify decision for [MessageNotifier], free of
- * notification plumbing: own-JID filtering, prefs gating, app
- * visibility, message-type classification, XEP-0492 per-conversation
- * mode gating, and the XEP-0333/0490 displayed-target resolution.
+ * notification plumbing: own-JID filtering, replay (offline flush)
+ * filtering, prefs gating, app visibility, message-type classification,
+ * XEP-0492 per-conversation mode gating, and the XEP-0333/0490
+ * displayed-target resolution.
  *
  * [notifyModeFor] is the XEP-0492 store's effective-mode snapshot
  * (conversation bare JID + kind → mode), injected as a function so the
@@ -42,12 +43,30 @@ class NotificationPolicy(
         val isMention: Boolean = false,
     )
 
+    /**
+     * A replay of stored traffic rather than a live delivery: the stanza
+     * itself carries a XEP-0203 `<delay/>`, which the FFI surfaces as
+     * [WaddleMessage.timestamp]. The XEP-0160 offline flush stamps every
+     * message it replays this way (§3), and whatever was stored offline
+     * was already announced by push, so the flush must not announce it
+     * again. Live deliveries carry no delay of their own. A received
+     * carbon is still live: the server stamps its XEP-0297 `<forwarded/>`
+     * wrapper with a delay that the FFI falls back to, so carbons are told
+     * apart by [WaddleMessage.carbon].
+     */
+    fun isReplay(message: WaddleMessage): Boolean = message.timestamp != null && message.carbon == null
+
+    /**
+     * New content arriving now: not a replay, and not a correction (which
+     * carries a body but only rewrites an existing row, so notifying would
+     * re-announce old content as a new message).
+     */
+    private fun isNewContent(message: WaddleMessage): Boolean = !isReplay(message) && !message.isTimelineMutation()
+
     /** `null` means the message must not raise a notification. */
     suspend fun decide(message: WaddleMessage): Notify? {
         val body = message.body ?: return null
-        // A correction carries a body but only rewrites an existing row —
-        // notifying would re-announce old content as a new message.
-        if (message.isTimelineMutation()) return null
+        if (!isNewContent(message)) return null
         if (isAppVisible()) return null
         if (!userPrefs.notificationsEnabled.first()) return null
         val session = currentSession.value ?: return null

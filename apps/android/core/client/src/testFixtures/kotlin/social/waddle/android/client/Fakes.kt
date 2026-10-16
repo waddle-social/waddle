@@ -1345,7 +1345,12 @@ class FakeWaddleClient : FakeRoomAndAdminClient() {
         body: String,
         options: WaddleSendOptions?,
     ): WaddleSendMessageOutcome = messageSends.send(roomJid, body, options)
-    override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) = unused()
+
+    /** Own-presence sends (RFC 6121 §4), ordered against joins and sends. */
+    val presence = FakePresenceState()
+
+    override suspend fun sendPresence(status: String?, show: String?, idleSince: String?) =
+        presence.send(RecordedPresence(status, show, idleSince, joinRoomCalls.size, sendCalls.size))
 
     /** Recorded (conversation, targetId, emojis) reaction sends. */
     val reactionCalls = CopyOnWriteArrayList<Triple<String, String, List<String>>>()

@@ -219,6 +219,10 @@ class MessageNotifier(
     }
 
     private suspend fun onMessage(message: WaddleMessage) {
+        // A replay (the XEP-0160 offline flush) is left to the push that
+        // announced it. Not remembering it as handled live matters when the
+        // flush wins the race with that push: the push must still post.
+        if (policy.isReplay(message)) return
         rememberLiveItem(message)
         val decision = policy.decide(message) ?: return
 
