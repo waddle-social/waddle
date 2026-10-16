@@ -2,13 +2,13 @@ package social.waddle.android.feature.call
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.viewinterop.AndroidView
 import io.livekit.android.renderer.TextureViewRenderer
 import io.livekit.android.room.track.VideoTrack
+import social.waddle.android.theme.Waddle
 
 /**
  * Renders a [VideoTrackHandle]: a LiveKit `TextureViewRenderer` for
@@ -45,7 +45,7 @@ fun CallVideoView(handle: VideoTrackHandle, modifier: Modifier = Modifier) {
         )
         else -> Box(
             modifier = modifier
-                .background(MaterialTheme.colorScheme.surfaceVariant)
+                .background(Waddle.colors.surface2)
                 .testTag(CallTestTags.FAKE_VIDEO_SURFACE),
         )
     }

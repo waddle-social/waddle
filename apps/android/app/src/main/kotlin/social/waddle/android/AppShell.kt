@@ -112,7 +112,13 @@ private fun ReadyShell(
     val graph = LocalAppGraph.current
     RequestNotificationPermissionOnce()
 
-    Box(modifier = Modifier.fillMaxSize()) {
+    // Call surfaces wrap whatever screen is open: the ring and the
+    // in-call screen layer over it; the minimized and ended banners take
+    // a row above it so they never cover a top bar.
+    CallOverlayHost(
+        pendingCallAnswer = pendingCallAnswer,
+        onCallAnswerConsumed = onCallAnswerConsumed,
+    ) {
         WaddleNavDisplay { backStack ->
             val pendingJid by pendingConversationJid.collectAsStateWithLifecycle()
             LaunchedEffect(pendingJid) {
@@ -141,12 +147,6 @@ private fun ReadyShell(
                 onConversationConsumed()
             }
         }
-        // Call surfaces layer over whatever screen is open: the ring,
-        // the in-call screen, or the minimized banner.
-        CallOverlayHost(
-            pendingCallAnswer = pendingCallAnswer,
-            onCallAnswerConsumed = onCallAnswerConsumed,
-        )
     }
 }
 
