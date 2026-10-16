@@ -8,6 +8,7 @@ import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -18,10 +19,12 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material3.Button
+import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenuAnchorType
@@ -35,7 +38,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -61,6 +64,9 @@ import social.waddle.android.R
 import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.GENERAL_ACTIVITIES
 import social.waddle.android.client.MOOD_KINDS
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.GroupedSection
+import social.waddle.android.ui.WaddleTopBar
 import social.waddle.client.ffi.WaddleAvatar
 
 /**
@@ -85,7 +91,7 @@ fun ProfileScreen(onBack: () -> Unit) {
 
     Scaffold(
         topBar = {
-            TopAppBar(
+            WaddleTopBar(
                 title = { Text(text = stringResource(R.string.profile_title)) },
                 navigationIcon = {
                     IconButton(onClick = onBack) {
@@ -103,18 +109,21 @@ fun ProfileScreen(onBack: () -> Unit) {
                 .padding(padding)
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp),
-            verticalArrangement = Arrangement.spacedBy(8.dp),
+                .padding(bottom = Waddle.space.xl),
         ) {
             AvatarSection(state = state.avatar, avatar = avatar, viewModel = viewModel)
-            SectionHeader(text = stringResource(R.string.profile_vcard_section))
-            VcardSection(state = state.vcard, viewModel = viewModel)
-            SectionHeader(text = stringResource(R.string.profile_mood_section))
-            MoodSection(state = state.mood, viewModel = viewModel)
-            SectionHeader(text = stringResource(R.string.profile_activity_section))
-            ActivitySection(state = state.activity, viewModel = viewModel)
-            SectionHeader(text = stringResource(R.string.profile_tune_section))
-            TuneSection(state = state.tune, viewModel = viewModel)
+            ProfileCard(title = stringResource(R.string.profile_vcard_section)) {
+                VcardSection(state = state.vcard, viewModel = viewModel)
+            }
+            ProfileCard(title = stringResource(R.string.profile_mood_section)) {
+                MoodSection(state = state.mood, viewModel = viewModel)
+            }
+            ProfileCard(title = stringResource(R.string.profile_activity_section)) {
+                ActivitySection(state = state.activity, viewModel = viewModel)
+            }
+            ProfileCard(title = stringResource(R.string.profile_tune_section)) {
+                TuneSection(state = state.tune, viewModel = viewModel)
+            }
         }
     }
 }
@@ -141,38 +150,52 @@ private fun AvatarSection(
         }
     }
 
-    Row(
+    // Identity first: the picture large and centred, its two actions under it.
+    Column(
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(top = 16.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalAlignment = Alignment.CenterVertically,
+            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.md),
     ) {
         val selfName by viewModel.selfName.collectAsStateWithLifecycle()
         SelfAvatarImage(avatar = avatar, restAvatarUrl = restAvatarUrl, selfName = selfName)
-        Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
-            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                OutlinedButton(
-                    onClick = {
-                        pickAvatar.launch(
-                            PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                        )
-                    },
-                    enabled = !state.busy,
-                    modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_CHANGE),
-                ) {
-                    Text(text = stringResource(R.string.profile_avatar_change))
-                }
-                OutlinedButton(
-                    onClick = viewModel::removeAvatar,
-                    enabled = !state.busy && avatar != null,
-                    modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_REMOVE),
-                ) {
-                    Text(text = stringResource(R.string.profile_avatar_remove))
-                }
+        Text(text = selfName, style = MaterialTheme.typography.titleLarge)
+        Row(horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
+            OutlinedButton(
+                onClick = {
+                    pickAvatar.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
+                    )
+                },
+                enabled = !state.busy,
+                shape = RoundedCornerShape(Waddle.radius.md),
+                modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_CHANGE),
+            ) {
+                Text(text = stringResource(R.string.profile_avatar_change))
             }
-            FeedbackText(feedback = state.feedback)
+            TextButton(
+                onClick = viewModel::removeAvatar,
+                enabled = !state.busy && avatar != null,
+                colors = ButtonDefaults.textButtonColors(contentColor = Waddle.colors.dangerText),
+                modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_REMOVE),
+            ) {
+                Text(text = stringResource(R.string.profile_avatar_remove))
+            }
         }
+        FeedbackText(feedback = state.feedback)
+    }
+}
+
+/** A profile section: kicker plus a padded card of fields. */
+@Composable
+private fun ProfileCard(title: String, content: @Composable ColumnScope.() -> Unit) {
+    GroupedSection(title = title) {
+        Column(
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+            modifier = Modifier.padding(Waddle.space.md),
+            content = content,
+        )
     }
 }
 
@@ -181,7 +204,7 @@ private fun AvatarSection(
 private fun SelfAvatarImage(avatar: WaddleAvatar?, restAvatarUrl: String?, selfName: String) {
     val avatarLabel = stringResource(R.string.settings_avatar)
     val modifier = Modifier
-        .size(64.dp)
+        .size(PROFILE_AVATAR_SIZE)
         .clip(CircleShape)
     val bitmap = remember(avatar?.id) {
         avatar?.data?.let { bytes ->
@@ -205,7 +228,7 @@ private fun SelfAvatarImage(avatar: WaddleAvatar?, restAvatarUrl: String?, selfN
         else -> PeerAvatar(
             jid = null,
             displayName = selfName,
-            size = 64.dp,
+            size = PROFILE_AVATAR_SIZE,
             modifier = Modifier.semantics { contentDescription = avatarLabel },
         )
     }
@@ -555,6 +578,7 @@ private fun ProfileField(
         enabled = enabled,
         singleLine = singleLine,
         isError = isError,
+        shape = RoundedCornerShape(Waddle.radius.md),
         modifier = Modifier
             .fillMaxWidth()
             .testTag(testTag),
@@ -577,6 +601,7 @@ private fun PublishClearRow(
         Button(
             onClick = onPublish,
             enabled = !busy,
+            shape = RoundedCornerShape(Waddle.radius.md),
             modifier = Modifier.testTag(publishTag),
         ) {
             Text(text = stringResource(R.string.profile_publish))
@@ -584,6 +609,7 @@ private fun PublishClearRow(
         OutlinedButton(
             onClick = onClear,
             enabled = !busy,
+            shape = RoundedCornerShape(Waddle.radius.md),
             modifier = Modifier.testTag(clearTag),
         ) {
             Text(text = stringResource(R.string.profile_clear))
@@ -601,7 +627,7 @@ private fun FeedbackText(feedback: ProfileFeedback?, testTag: String? = null) {
     Text(
         text = message,
         style = MaterialTheme.typography.bodySmall,
-        color = if (isError) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        color = if (isError) Waddle.colors.dangerText else MaterialTheme.colorScheme.onSurfaceVariant,
         modifier = testTag?.let { Modifier.testTag(it) } ?: Modifier,
     )
 }
@@ -615,15 +641,7 @@ private fun ProfileFeedback.messageRes(): Int = when (this) {
     ProfileFeedback.OFFLINE -> R.string.profile_feedback_offline
 }
 
-@Composable
-private fun SectionHeader(text: String) {
-    Text(
-        text = text,
-        style = MaterialTheme.typography.titleSmall,
-        color = MaterialTheme.colorScheme.primary,
-        modifier = Modifier.padding(top = 16.dp, bottom = 4.dp),
-    )
-}
+private val PROFILE_AVATAR_SIZE = 96.dp
 
 /** Semantics tags shared with instrumented tests. */
 object ProfileScreenTestTags {

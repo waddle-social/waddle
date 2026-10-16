@@ -1,17 +1,25 @@
 package social.waddle.android.feature.members
 
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -27,7 +35,6 @@ import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -50,6 +57,10 @@ import social.waddle.android.avatar.LIST_AVATAR_SIZE
 import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.RoomAdminResult
 import social.waddle.android.client.store.MemberListStatus
+import social.waddle.android.theme.MonoMeta
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.SectionKicker
+import social.waddle.android.ui.WaddleTopBar
 import social.waddle.client.ffi.WaddleMucAffiliation
 
 /** A pending destructive member action awaiting confirmation. */
@@ -102,7 +113,7 @@ fun MembersScreen(roomJid: String, name: String, onBack: () -> Unit) {
     Scaffold(
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
-            TopAppBar(
+            WaddleTopBar(
                 title = {
                     Text(
                         text = stringResource(R.string.members_title, name),
@@ -175,18 +186,20 @@ private fun AddMemberSearch(state: MembersUiState, viewModel: MembersViewModel) 
     OutlinedTextField(
         value = state.searchQuery,
         onValueChange = viewModel::onSearchQueryChanged,
-        label = { Text(text = stringResource(R.string.members_search_hint)) },
+        placeholder = { Text(text = stringResource(R.string.members_search_hint)) },
+        leadingIcon = { Icon(Icons.Outlined.PersonAdd, contentDescription = null) },
         singleLine = true,
+        shape = RoundedCornerShape(Waddle.radius.lg),
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp, vertical = 4.dp)
+            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xs)
             .testTag(MembersScreenTestTags.SEARCH_FIELD),
     )
     state.searchResults.forEach { entry ->
         key(entry.jid) {
             ListItem(
                 headlineContent = { Text(text = entry.displayName ?: entry.username) },
-                supportingContent = { Text(text = entry.jid) },
+                supportingContent = { Text(text = entry.jid, style = MonoMeta) },
                 leadingContent = {
                     PeerAvatar(
                         jid = entry.jid,
@@ -194,7 +207,13 @@ private fun AddMemberSearch(state: MembersUiState, viewModel: MembersViewModel) 
                         size = LIST_AVATAR_SIZE,
                     )
                 },
-                trailingContent = { Text(text = stringResource(R.string.members_add_as_member)) },
+                trailingContent = {
+                    Text(
+                        text = stringResource(R.string.members_add_as_member),
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.primary,
+                    )
+                },
                 modifier = Modifier.clickable { viewModel.addMember(entry) },
             )
         }
@@ -223,7 +242,7 @@ private fun StatusBanner(state: MembersUiState) {
 }
 
 @Composable
-private fun MemberList(state: MembersUiState, onRowClick: (MemberRow) -> Unit) {
+internal fun MemberList(state: MembersUiState, onRowClick: (MemberRow) -> Unit) {
     if (state.rows.isEmpty() && state.bots.isEmpty() && state.status == MemberListStatus.LOADED) {
         Text(
             text = stringResource(R.string.members_empty),
@@ -237,12 +256,7 @@ private fun MemberList(state: MembersUiState, onRowClick: (MemberRow) -> Unit) {
         memberItems(state.rows, onRowClick)
         if (state.bots.isNotEmpty()) {
             item(key = "bots-header") {
-                Text(
-                    text = stringResource(R.string.members_bots_section),
-                    style = MaterialTheme.typography.labelLarge,
-                    color = MaterialTheme.colorScheme.primary,
-                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                )
+                SectionKicker(text = stringResource(R.string.members_bots_section))
             }
             items(items = state.bots, key = { "bot:${it.jid}" }) { bot -> BotListRow(bot) }
         }
@@ -259,7 +273,7 @@ private fun LazyListScope.memberItems(rows: List<MemberRow>, onRowClick: (Member
 private fun BotListRow(bot: BotRow) {
     ListItem(
         headlineContent = { Text(text = bot.displayName) },
-        supportingContent = { Text(text = bot.jid, style = MaterialTheme.typography.bodySmall) },
+        supportingContent = { Text(text = bot.jid, style = MonoMeta) },
         leadingContent = { PeerAvatar(jid = bot.jid, displayName = bot.displayName, size = LIST_AVATAR_SIZE) },
     )
 }
@@ -267,37 +281,71 @@ private fun BotListRow(bot: BotRow) {
 @Composable
 private fun MemberListRow(row: MemberRow, onClick: () -> Unit) {
     ListItem(
-        headlineContent = { Text(text = row.displayName) },
+        headlineContent = { Text(text = row.displayName, maxLines = 1, overflow = TextOverflow.Ellipsis) },
         supportingContent = {
-            Column {
-                row.jid?.let { Text(text = it, style = MaterialTheme.typography.bodySmall) }
+            Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                row.jid?.let { Text(text = it, style = MonoMeta, maxLines = 1, overflow = TextOverflow.Ellipsis) }
                 if (row.hats.isNotEmpty()) {
                     Text(
                         text = row.hats.joinToString(" · "),
                         style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
+                        color = Waddle.colors.goldText,
                     )
                 }
             }
         },
         leadingContent = { PeerAvatar(jid = row.jid, displayName = row.displayName, size = LIST_AVATAR_SIZE) },
         trailingContent = {
-            Column {
-                Text(text = affiliationLabel(row.affiliation))
-                if (row.presentNow) {
-                    Text(
-                        text = stringResource(R.string.members_present_now),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.primary,
-                    )
-                }
+            Column(horizontalAlignment = Alignment.End, verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs)) {
+                AffiliationChip(row.affiliation)
+                if (row.presentNow) PresentNow()
             }
         },
+        colors = ListItemDefaults.colors(containerColor = Color.Transparent),
         modifier = Modifier
             .clickable(onClick = onClick)
             .testTag(MembersScreenTestTags.MEMBER_ROW_PREFIX + row.displayName),
     )
 }
+
+/** Affiliation as a quiet capsule; owners and admins read accented. */
+@Composable
+private fun AffiliationChip(affiliation: WaddleMucAffiliation) {
+    val elevated = affiliation == WaddleMucAffiliation.OWNER || affiliation == WaddleMucAffiliation.ADMIN
+    val banned = affiliation == WaddleMucAffiliation.OUTCAST
+    val color = when {
+        banned -> Waddle.colors.dangerText
+        elevated -> MaterialTheme.colorScheme.primary
+        else -> MaterialTheme.colorScheme.onSurfaceVariant
+    }
+    Text(
+        text = affiliationLabel(affiliation),
+        style = MaterialTheme.typography.labelMedium,
+        color = color,
+        modifier = Modifier
+            .border(1.dp, color.copy(alpha = CHIP_BORDER_ALPHA), RoundedCornerShape(Waddle.radius.sm))
+            .padding(horizontal = Waddle.space.xs, vertical = 2.dp),
+    )
+}
+
+/** Live in the room now: presence dot plus the words. */
+@Composable
+private fun PresentNow() {
+    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box(
+            modifier = Modifier
+                .size(6.dp)
+                .background(Waddle.colors.presenceOnline, CircleShape),
+        )
+        Text(
+            text = stringResource(R.string.members_present_now),
+            style = MaterialTheme.typography.labelSmall,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+private const val CHIP_BORDER_ALPHA = 0.4f
 
 /** Wire value stays `outcast`; only the label reads "Banned" (web parity). */
 @Composable
