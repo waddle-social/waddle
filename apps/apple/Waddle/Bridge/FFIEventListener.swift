@@ -48,6 +48,10 @@ final class FFIEventListener: WaddleEventListener {
             // just refuses anything else rather than truncating it.
             guard let owner = FFIInbound.bareJID(jid) else { return nil }
             return .avatarChanged(jid: owner, id: avatarId)
+        case .statusPreferenceChanged:
+            // ADR-010 cross-device manual status: the Apple client does not
+            // advertise its own presence through this bridge yet.
+            return nil
         case .call:
             BridgeLog.debug("dropped call event: calls are not bridged")
             return nil
