@@ -14,6 +14,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -23,8 +24,12 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.calls.CallStore
 import social.waddle.android.client.calls.ClientCallSignaling
+import social.waddle.android.client.prefs.PushEndpoint
+import social.waddle.android.client.prefs.PushState
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.push.PushRegistrar
+import social.waddle.android.client.push.pushInstanceFor
 import social.waddle.android.client.session.ActiveSession
 import social.waddle.android.client.session.ConnectionLoop
 import social.waddle.android.client.session.ConnectionLoopCallbacks
@@ -204,6 +209,11 @@ class XmppSessionManager(
 
     val connectionState: StateFlow<ConnectionState> = loop.state
 
+    private val pushRegistrar = PushRegistrar(sessionPrefs.push, activeSession)
+
+    /** Persisted push delivery state (any account; check [PushState.owner]). */
+    val pushState: Flow<PushState?> = sessionPrefs.push.state
+
     /** Every domain event, after store fan-out. */
     val events: SharedFlow<XmppEvent> = router.events
 
@@ -240,6 +250,18 @@ class XmppSessionManager(
 
     /** Disconnect, cancel the loop, and wipe session persistence. */
     suspend fun logout() = lifecycleMutex.withLock {
+        // While the stream is still ours: disable this device at the Push
+        // Service so it stops pushing for an account that is leaving.
+        // Bounded like the call teardown below.
+        activeSession.captureOwnerLease()?.let { lease ->
+            try {
+                withTimeoutOrNull(LOGOUT_PUSH_TEARDOWN_MILLIS) { pushRegistrar.retireForLogout(lease) }
+            } catch (cancellation: CancellationException) {
+                throw cancellation
+            } catch (_: Throwable) {
+                // Best-effort: the distributor unregister kills the endpoint anyway.
+            }
+        }
         // Fence ALL ordinary outbound work before the call teardown can
         // suspend. The one captured connection is call-teardown-only;
         // concurrent sends cannot capture a lease, persist a row, or use
@@ -274,6 +296,39 @@ class XmppSessionManager(
         loop.resetToIdle()
         _appState.value = WaddleAppState.SignedOut
     }
+
+    /**
+     * The UnifiedPush distributor handed out [endpoint] for [instance].
+     * Recorded only when [instance] is the signed-in account's (see
+     * [pushInstanceFor]); a stale callback for another account is
+     * ignored. Registration with the Push Service follows on the next
+     * ready stream, or at once if one is ready.
+     */
+    suspend fun recordPushEndpoint(instance: String, endpoint: PushEndpoint): Boolean {
+        val owner = pushOwnerFor(instance) ?: return false
+        sessionPrefs.push.update(owner) { it.copy(endpoint = endpoint, failed = false) }
+        pushRegistrar.requestReconcile()
+        return true
+    }
+
+    /** The distributor dropped [instance]'s endpoint; the device is retired next. */
+    suspend fun recordPushEndpointRevoked(instance: String) {
+        val owner = pushOwnerFor(instance) ?: return
+        sessionPrefs.push.update(owner) { it.copy(endpoint = null) }
+        pushRegistrar.requestReconcile()
+    }
+
+    /** The app asked the distributor to register under VAPID key [kid]. */
+    suspend fun recordPushDistributorRequest(instance: String, kid: String) {
+        val owner = pushOwnerFor(instance) ?: return
+        sessionPrefs.push.update(owner) { it.copy(requestedKid = kid) }
+    }
+
+    /** The persisted account's UnifiedPush instance, readable before restore. */
+    suspend fun pushInstance(): String? = sessionPrefs.ownerBareJid.first()?.let(::pushInstanceFor)
+
+    private suspend fun pushOwnerFor(instance: String): String? =
+        sessionPrefs.ownerBareJid.first()?.takeIf { pushInstanceFor(it) == instance }
 
     // UI passthroughs (M1): the app module never touches the FFI client
     // directly — [ConversationVerbs], [OutboundMessenger], and
@@ -610,6 +665,9 @@ class XmppSessionManager(
         attemptScope.launch {
             if (activeSession.isCurrent(lease)) catchup.onSessionReady(session, freshStream)
         }
+        // Push registration runs beside the ready pipeline, never in it:
+        // a slow Push Service must not hold up queued sends or catch-up.
+        if (activeSession.isCurrent(lease)) pushRegistrar.onReady(attemptScope, lease)
         // Once per connect: retry the XEP-0166 mixer terminates a
         // previous group-call leave still owes (terminate-pending
         // session-cache entries survive process death and reconnects).
@@ -697,6 +755,9 @@ class XmppSessionManager(
     )
 
     companion object {
+        /** Sign-out waits at most this long to disable the push device. */
+        const val LOGOUT_PUSH_TEARDOWN_MILLIS = 3_000L
+
         /** Web parity: 15s budget from connect to `SessionReady`. */
         const val CONNECT_TIMEOUT_MILLIS = ConnectionLoop.CONNECT_TIMEOUT_MILLIS
 

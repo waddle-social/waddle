@@ -24,7 +24,8 @@ data class RecordedPushDisable(val serviceJid: String, val node: String, val dev
  */
 class FakePushServiceState {
     @Volatile
-    var vapid: WaddlePushVapidLookup = WaddlePushVapidLookup.Advertised(publicKey = TEST_VAPID_KEY, kid = TEST_VAPID_KID)
+    var vapid: WaddlePushVapidLookup =
+        WaddlePushVapidLookup.Advertised(publicKey = TEST_VAPID_KEY, kid = TEST_VAPID_KID)
 
     val vapidLookups = CopyOnWriteArrayList<String>()
     val registers = CopyOnWriteArrayList<RecordedPushRegister>()
@@ -68,7 +69,9 @@ class FakePushServiceState {
     }
 
     companion object {
-        const val TEST_VAPID_KEY = "BAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        /** base64url of a 65-byte uncompressed P-256 point. */
+        val TEST_VAPID_KEY = "B" + "A".repeat(VAPID_KEY_LENGTH - 1)
+        private const val VAPID_KEY_LENGTH = 87
         const val TEST_VAPID_KID = "0b3c1d7e-8f4a-4d2b-9c6e-1a2b3c4d5e6f"
     }
 }
