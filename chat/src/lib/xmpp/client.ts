@@ -2123,9 +2123,9 @@ export class BrowserXmppClient {
   // which already serializes thread/parent into the wasm send options used by
   // build_outbound_message — so passing { threadId, parentThreadId } here is
   // all the wire-level conformance needs.
-  async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"], thread?: { id: string; parent?: string }, preview?: Pick<SendGroupMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt">, mentionJidsByNick?: Readonly<Record<string, string>>): Promise<string | null> {
+  async sendCorrection(spaceId: string, channelId: string, body: string, replacesId: string, markup?: SendGroupMessageOptions["markup"], references?: SendGroupMessageOptions["references"], thread?: { id: string; parent?: string }, extras?: Pick<SendGroupMessageOptions, "linkPreviewToken" | "linkPreviewExpiresAt" | "mentionJidsByNick">): Promise<string | null> {
     const { xmpp, roomJid } = await this.requireJoinedRoom(spaceId, channelId);
-    const opts: SendGroupMessageOptions = { markup, references, ...preview, mentionJidsByNick: { ...(mentionJidsByNick ?? {}), ...this.memberJidsFor(roomJid) } };
+    const opts: SendGroupMessageOptions = { markup, references, ...extras, mentionJidsByNick: { ...extras?.mentionJidsByNick, ...this.memberJidsFor(roomJid) } };
     if (thread?.id) opts.threadId = thread.id;
     if (thread?.parent) opts.parentThreadId = thread.parent;
     return await this.compatSendCorrection(xmpp, roomJid, "groupchat", body, replacesId, opts);
