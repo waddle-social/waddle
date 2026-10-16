@@ -146,7 +146,10 @@ dependencies {
     // Installs the bundled Compose/AndroidX baseline profiles (and the
     // app's own, when generated) so release builds skip JIT warm-up.
     implementation(libs.androidx.profileinstaller)
-    implementation(libs.unifiedpush.connector)
+    implementation(libs.unifiedpush.connector) {
+        exclude(group = "com.google.crypto.tink", module = "tink")
+    }
+    implementation(libs.tink.android)
     implementation(libs.androidx.navigation3.runtime)
     implementation(libs.androidx.navigation3.ui)
     implementation(libs.androidx.lifecycle.viewmodel.navigation3)

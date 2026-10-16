@@ -29,6 +29,9 @@ coreSplashscreen = "1.2.0"
 profileinstaller = "1.4.1"
 # UnifiedPush: push without Google Play, over the server's Web Push path.
 unifiedpush = "3.3.5"
+# The connector declares JVM Tink, whose full protobuf clashes with
+# LiveKit's protobuf-lite; the Android build has the same API.
+tink = "1.23.0"
 browser = "1.10.0"
 coil = "3.5.0"
 detekt = "1.23.8"
@@ -49,6 +52,7 @@ androidx-browser = { group = "androidx.browser", name = "browser", version.ref =
 androidx-core-splashscreen = { group = "androidx.core", name = "core-splashscreen", version.ref = "coreSplashscreen" }
 androidx-lifecycle-runtime-compose = { group = "androidx.lifecycle", name = "lifecycle-runtime-compose", version.ref = "lifecycle" }
 androidx-lifecycle-viewmodel-compose = { group = "androidx.lifecycle", name = "lifecycle-viewmodel-compose", version.ref = "lifecycle" }
+tink-android = { group = "com.google.crypto.tink", name = "tink-android", version.ref = "tink" }
 unifiedpush-connector = { group = "org.unifiedpush.android", name = "connector", version.ref = "unifiedpush" }
 androidx-profileinstaller = { group = "androidx.profileinstaller", name = "profileinstaller", version.ref = "profileinstaller" }
 androidx-lifecycle-process = { group = "androidx.lifecycle", name = "lifecycle-process", version.ref = "lifecycle" }
