@@ -327,7 +327,9 @@ fun GlyphTile(
     modifier: Modifier = Modifier,
     size: Dp = Waddle.control.lg,
     tint: Color = Waddle.colors.fgMuted,
-    container: Color = Waddle.colors.surface2,
+    // Neutral fill that reads on the daylight ground too, where surface2
+    // equals the background.
+    container: Color = Waddle.colors.neutralBadge,
 ) {
     val radius = if (size >= Waddle.space.xxl) Waddle.radius.card else Waddle.radius.control
     Box(
