@@ -646,7 +646,7 @@
             baseArgs
             // {
               CARGO_BUILD_TARGET = "wasm32-wasip2";
-              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes --package jev-judgments";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package jev-judgments";
               cargoCheckExtraArgs = "";
               cargoBuildExtraArgs = "";
               cargoTestExtraArgs = "";
@@ -727,13 +727,13 @@
               pname = "waddle-server-extension-modules";
               CARGO_BUILD_TARGET = "wasm32-wasip2";
               cargoArtifacts = extensionWasmArtifacts;
-              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package stargate-quotes --package jev-judgments";
+              cargoExtraArgs = "--locked --package ai-chatbot --package decision-polls --package github --package link-board --package jev-judgments";
               # Publish these exact immutable outputs instead of compiling
               # the same extensions again in the publication job.
               doInstallCargoArtifacts = false;
               installPhaseCommand = ''
                 mkdir -p "$out/wasm"
-                for module in ai_chatbot decision_polls github link_board stargate_quotes jev_judgments; do
+                for module in ai_chatbot decision_polls github link_board jev_judgments; do
                   wasm="''${CARGO_TARGET_DIR:-target}/wasm32-wasip2/release/$module.wasm"
                   test -s "$wasm"
                   cp "$wasm" "$out/wasm/$module.wasm"

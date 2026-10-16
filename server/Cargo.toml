@@ -16,7 +16,6 @@ members = [
     "extensions/github",
     "extensions/jev-judgments",
     "extensions/link-board",
-    "extensions/stargate-quotes",
 ]
 
 [workspace.package]

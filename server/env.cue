@@ -589,7 +589,7 @@ schema.#Project & {
 					nix_system="$(nix eval --impure --raw --expr builtins.currentSystem)"
 					extension_bundle="$(nix build --print-out-paths --no-link "../#checks.${nix_system}.waddle-server-extension-modules")"
 					mkdir -p target/wasm32-wasip2/release
-					for module in link_board ai_chatbot decision_polls github stargate_quotes jev_judgments; do
+					for module in link_board ai_chatbot decision_polls github jev_judgments; do
 					  test -s "${extension_bundle}/wasm/${module}.wasm"
 					  install -m 0644 "${extension_bundle}/wasm/${module}.wasm" "target/wasm32-wasip2/release/${module}.wasm"
 					done
@@ -600,7 +600,6 @@ schema.#Project & {
 				"server/target/wasm32-wasip2/release/ai_chatbot.wasm",
 				"server/target/wasm32-wasip2/release/decision_polls.wasm",
 				"server/target/wasm32-wasip2/release/github.wasm",
-				"server/target/wasm32-wasip2/release/stargate_quotes.wasm",
 				"server/target/wasm32-wasip2/release/jev_judgments.wasm",
 			]
 			dependsOn: [tasks.fmt, tasks.clippy, tasks.test, tasks.doctest]
@@ -930,7 +929,6 @@ schema.#Project & {
 					  -t aiChatbotDigest="${sample_digest}" \
 					  -t decisionPollsDigest="${sample_digest}" \
 					  -t githubDigest="${sample_digest}" \
-					  -t stargateQuotesDigest="${sample_digest}" \
 					  -t jevJudgmentsDigest="${sample_digest}" > "${modules_yaml}"
 					cp "${gitops_values}" "${published_values}"
 					MODULES_YAML="${modules_yaml}" SAMPLE_DIGEST="${sample_digest}" SAMPLE_GIT_SHA="${sample_git_sha}" yq -i '
@@ -946,7 +944,6 @@ schema.#Project & {
 					  -t aiChatbotDigest="${sample_digest}" \
 					  -t decisionPollsDigest="${sample_digest}" \
 					  -t githubDigest="${sample_digest}" \
-					  -t stargateQuotesDigest="${sample_digest}" \
 					  -t jevJudgmentsDigest="${sample_digest}"
 					helm lint charts/waddle-server \
 					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
@@ -1040,7 +1037,7 @@ schema.#Project & {
 					image_stream="$(nix build --print-out-paths --no-link ../#waddle-server-image-stream)"
 					extension_bundle="$(nix build --print-out-paths --no-link ../#checks.x86_64-linux.waddle-server-extension-modules)"
 					mkdir -p target/wasm32-wasip2/release
-					for module in link_board ai_chatbot decision_polls github stargate_quotes jev_judgments; do
+					for module in link_board ai_chatbot decision_polls github jev_judgments; do
 					  test -s "${extension_bundle}/wasm/${module}.wasm"
 					  install -m 0644 "${extension_bundle}/wasm/${module}.wasm" "target/wasm32-wasip2/release/${module}.wasm"
 					done
@@ -1096,7 +1093,6 @@ schema.#Project & {
 					  "ai-chatbot:ai_chatbot:urn:waddle:ai-chatbot:1"
 					  "decision-polls:decision_polls:urn:waddle:decision-polls:1"
 					  "github:github:urn:waddle:web-integration:1"
-					  "stargate-quotes:stargate_quotes:urn:waddle:stargate-quotes:1"
 					  "jev-judgments:jev_judgments:urn:waddle:safety-scores:1"
 					)
 
@@ -1104,7 +1100,6 @@ schema.#Project & {
 					ai_chatbot_digest=""
 					decision_polls_digest=""
 					github_digest=""
-					stargate_quotes_digest=""
 					jev_judgments_digest=""
 					modules_yaml="../target/digests/extensions-modules.yaml"
 					for extension_spec in "${EXTENSIONS[@]}"; do
@@ -1137,7 +1132,6 @@ schema.#Project & {
 					    ai-chatbot) ai_chatbot_digest="${extension_digest}" ;;
 					    decision-polls) decision_polls_digest="${extension_digest}" ;;
 					    github) github_digest="${extension_digest}" ;;
-					    stargate-quotes) stargate_quotes_digest="${extension_digest}" ;;
 					    jev-judgments) jev_judgments_digest="${extension_digest}" ;;
 					    *) echo "unknown extension ${extension_name}" >&2; exit 1 ;;
 					  esac
@@ -1147,7 +1141,6 @@ schema.#Project & {
 					  -t aiChatbotDigest="${ai_chatbot_digest:?missing ai-chatbot digest}" \
 					  -t decisionPollsDigest="${decision_polls_digest:?missing decision-polls digest}" \
 					  -t githubDigest="${github_digest:?missing github digest}" \
-					  -t stargateQuotesDigest="${stargate_quotes_digest:?missing stargate-quotes digest}" \
 					  -t jevJudgmentsDigest="${jev_judgments_digest:?missing jev-judgments digest}" > "${modules_yaml}"
 
 					# The complete source history identifies the last Recreate window,
@@ -1192,7 +1185,6 @@ schema.#Project & {
 					  -t aiChatbotDigest="${ai_chatbot_digest}" \
 					  -t decisionPollsDigest="${decision_polls_digest}" \
 					  -t githubDigest="${github_digest}" \
-					  -t stargateQuotesDigest="${stargate_quotes_digest}" \
 					  -t jevJudgmentsDigest="${jev_judgments_digest}"
 					# CI-only stand-in: prod is clustered, so chart 0.4.4 hard-requires
 					# deployment.uuid — the REAL value must land in the infrastructure

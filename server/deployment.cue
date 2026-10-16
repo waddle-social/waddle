@@ -4,13 +4,12 @@ package cuenv
 #Digest:            =~"^sha256:[a-f0-9]{64}$" & !=#PlaceholderDigest
 #GitSha:            =~"^[a-f0-9]{40}$"
 
-#LinkBoardDigest:      #Digest @tag(linkBoardDigest)
-#AiChatbotDigest:      #Digest @tag(aiChatbotDigest)
-#DecisionPollsDigest:  #Digest @tag(decisionPollsDigest)
-#GithubDigest:         #Digest @tag(githubDigest)
-#StargateQuotesDigest: #Digest @tag(stargateQuotesDigest)
-#JevJudgmentsDigest:   #Digest @tag(jevJudgmentsDigest)
-#ServerImageDigest:    #Digest @tag(serverImageDigest)
+#LinkBoardDigest:     #Digest @tag(linkBoardDigest)
+#AiChatbotDigest:     #Digest @tag(aiChatbotDigest)
+#DecisionPollsDigest: #Digest @tag(decisionPollsDigest)
+#GithubDigest:        #Digest @tag(githubDigest)
+#JevJudgmentsDigest:  #Digest @tag(jevJudgmentsDigest)
+#ServerImageDigest:   #Digest @tag(serverImageDigest)
 
 #GitHubActionsRoom: "github-actions@muc.waddle.social"
 
@@ -79,18 +78,6 @@ package cuenv
 			"host.message.send",
 			"commands",
 			"pubsub.publish",
-		]
-	},
-	{
-		name:      "stargate-quotes"
-		registry:  "ghcr.io/waddle-social/waddle/extensions/stargate-quotes"
-		digest:    #StargateQuotesDigest
-		namespace: "urn:waddle:stargate-quotes:1"
-		config: {}
-		capabilityGrants: [
-			"commands",
-			"host.message.send",
-			"message.enrich",
 		]
 	},
 	{
