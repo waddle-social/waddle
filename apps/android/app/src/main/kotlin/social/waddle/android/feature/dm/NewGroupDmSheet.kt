@@ -5,16 +5,20 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.outlined.CheckCircle
 import androidx.compose.material.icons.outlined.Close
-import androidx.compose.material3.Button
+import androidx.compose.material.icons.outlined.PersonAdd
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.ListItem
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Text
@@ -25,14 +29,22 @@ import androidx.compose.runtime.key
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
-import social.waddle.android.avatar.LIST_AVATAR_SIZE
-import social.waddle.android.avatar.PeerAvatar
+import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.HuddleFieldShape
+import social.waddle.android.ui.SectionKicker
+import social.waddle.android.ui.SheetTitle
+import social.waddle.android.ui.huddle.AvatarSize
+import social.waddle.android.ui.huddle.HuddleAvatar
+import social.waddle.android.ui.huddle.PillButton
+import social.waddle.android.ui.huddleFieldColors
 
 /**
  * Create-group-DM sheet (web `NewGroupDmDialog` parity): XEP-0055
@@ -53,20 +65,21 @@ fun NewGroupDmSheet(
         factory = NewGroupDmViewModel.factory(graph, initialMembers),
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
+    val colors = Waddle.colors
 
-    ModalBottomSheet(onDismissRequest = onDismiss) {
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
                 .verticalScroll(rememberScrollState())
-                .padding(horizontal = 16.dp)
-                .padding(bottom = 24.dp)
+                .padding(bottom = Waddle.space.lg)
                 .testTag(NewGroupDmTestTags.SHEET),
-            verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
-            Text(
+            SheetTitle(
                 text = stringResource(R.string.new_group_dm_title),
-                style = MaterialTheme.typography.titleLarge,
+                supporting = stringResource(R.string.huddle_new_group_supporting),
             )
             OutlinedTextField(
                 value = state.name,
@@ -80,83 +93,153 @@ fun NewGroupDmSheet(
                     )
                 },
                 singleLine = true,
+                shape = HuddleFieldShape,
+                colors = huddleFieldColors(),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .padding(horizontal = Waddle.space.md)
                     .testTag(NewGroupDmTestTags.NAME_FIELD),
             )
-            state.selected.forEach { (jid, label) ->
-                key(jid) {
-                    ListItem(
-                        headlineContent = { Text(text = label) },
-                        supportingContent = { Text(text = jid) },
-                        leadingContent = { PeerAvatar(jid = jid, displayName = label, size = LIST_AVATAR_SIZE) },
-                        trailingContent = {
-                            Icon(
-                                Icons.Outlined.Close,
-                                contentDescription = stringResource(R.string.new_group_dm_remove_member),
-                            )
-                        },
-                        modifier = Modifier
-                            .testTag(NewGroupDmTestTags.SELECTED_ROW_PREFIX + jid)
-                            .clickable { viewModel.removeMember(jid) },
-                    )
+            if (state.selected.isNotEmpty()) {
+                SectionKicker(
+                    text = pluralStringResource(
+                        R.plurals.huddle_new_group_selected,
+                        state.selected.size,
+                        state.selected.size,
+                    ),
+                )
+                state.selected.forEach { (jid, label) ->
+                    key(jid) {
+                        PersonPickRow(
+                            jid = jid,
+                            name = label,
+                            modifier = Modifier.testTag(NewGroupDmTestTags.SELECTED_ROW_PREFIX + jid),
+                            trailing = {
+                                IconButton(onClick = { viewModel.removeMember(jid) }) {
+                                    Icon(
+                                        Icons.Outlined.Close,
+                                        contentDescription = stringResource(R.string.new_group_dm_remove_member),
+                                        tint = colors.fgMuted,
+                                    )
+                                }
+                            },
+                        )
+                    }
                 }
             }
             OutlinedTextField(
                 value = state.searchQuery,
                 onValueChange = viewModel::onSearchQueryChanged,
-                label = { Text(text = stringResource(R.string.new_group_dm_search_hint)) },
+                placeholder = { Text(text = stringResource(R.string.new_group_dm_search_hint)) },
+                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
                 singleLine = true,
+                shape = HuddleFieldShape,
+                colors = huddleFieldColors(),
                 modifier = Modifier
                     .fillMaxWidth()
+                    .padding(horizontal = Waddle.space.md)
+                    .padding(top = Waddle.space.md)
                     .testTag(NewGroupDmTestTags.SEARCH_FIELD),
             )
             state.searchResults.forEach { entry ->
                 key(entry.jid) {
-                    ListItem(
-                        headlineContent = { Text(text = memberLabelOf(entry)) },
-                        supportingContent = { Text(text = entry.jid) },
-                        leadingContent = {
-                            PeerAvatar(jid = entry.jid, displayName = memberLabelOf(entry), size = LIST_AVATAR_SIZE)
+                    val picked = entry.jid in state.selected
+                    PersonPickRow(
+                        jid = entry.jid,
+                        name = memberLabelOf(entry),
+                        onClick = { viewModel.toggleMember(entry) },
+                        modifier = Modifier.testTag(NewGroupDmTestTags.RESULT_ROW_PREFIX + entry.jid),
+                        trailing = {
+                            Icon(
+                                if (picked) Icons.Outlined.CheckCircle else Icons.Outlined.PersonAdd,
+                                contentDescription = null,
+                                tint = if (picked) colors.actionText else colors.fgSoft,
+                            )
                         },
-                        modifier = Modifier
-                            .testTag(NewGroupDmTestTags.RESULT_ROW_PREFIX + entry.jid)
-                            .clickable { viewModel.toggleMember(entry) },
                     )
                 }
-            }
-            if (!state.canCreate && !state.isSubmitting) {
-                Text(
-                    text = stringResource(R.string.new_group_dm_min_members),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
             }
             if (state.createFailed) {
                 Text(
                     text = stringResource(R.string.action_failed),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
+                    style = Waddle.type.control,
+                    color = colors.dangerText,
+                    modifier = Modifier.padding(horizontal = Waddle.space.md, vertical = Waddle.space.xs),
                 )
             }
             Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp, Alignment.End),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Waddle.space.md)
+                    .padding(top = Waddle.space.lg),
             ) {
+                Text(
+                    text = if (state.canCreate || state.isSubmitting) {
+                        ""
+                    } else {
+                        stringResource(R.string.new_group_dm_min_members)
+                    },
+                    style = Waddle.type.control.copy(fontWeight = null),
+                    color = colors.fgMuted,
+                    modifier = Modifier.weight(1f),
+                )
                 TextButton(onClick = onDismiss) {
-                    Text(text = stringResource(R.string.action_cancel))
+                    Text(text = stringResource(R.string.action_cancel), color = colors.fgMuted)
                 }
-                Button(
+                PillButton(
+                    text = stringResource(R.string.new_group_dm_create),
                     onClick = { viewModel.create(onCreated) },
                     enabled = state.canCreate,
                     modifier = Modifier.testTag(NewGroupDmTestTags.CREATE_BUTTON),
-                ) {
-                    Text(text = stringResource(R.string.new_group_dm_create))
-                }
+                )
             }
         }
     }
 }
+
+/** A person in the picker: avatar, name, JID; [trailing] says picked or removes. */
+@Composable
+private fun PersonPickRow(
+    jid: String,
+    name: String,
+    modifier: Modifier = Modifier,
+    onClick: (() -> Unit)? = null,
+    trailing: @Composable () -> Unit,
+) {
+    val colors = Waddle.colors
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+        modifier = modifier
+            .fillMaxWidth()
+            .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
+            .heightIn(min = PICK_ROW)
+            .padding(start = Waddle.space.md, end = Waddle.space.xs),
+    ) {
+        HuddleAvatar(jid = jid, name = name, size = AvatarSize.MD, ground = colors.surface)
+        Column(modifier = Modifier.weight(1f)) {
+            Text(
+                text = name,
+                style = Waddle.type.body,
+                color = colors.fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+            Text(
+                text = jid,
+                style = Waddle.type.time,
+                color = colors.fgMuted,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        trailing()
+    }
+}
+
+private val PICK_ROW = 56.dp
 
 /** Semantics tags shared with instrumented tests. */
 object NewGroupDmTestTags {

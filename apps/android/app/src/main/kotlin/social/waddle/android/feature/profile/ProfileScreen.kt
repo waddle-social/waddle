@@ -10,23 +10,26 @@ import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
+import androidx.compose.material.icons.outlined.Check
+import androidx.compose.material.icons.outlined.Mood
+import androidx.compose.material.icons.outlined.PhotoCamera
+import androidx.compose.material.icons.outlined.Search
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExposedDropdownMenu
@@ -36,10 +39,9 @@ import androidx.compose.material3.ExposedDropdownMenuDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -56,9 +58,9 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.window.Dialog
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil3.compose.AsyncImage
@@ -68,8 +70,16 @@ import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.GENERAL_ACTIVITIES
 import social.waddle.android.client.MOOD_KINDS
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.GlyphTile
+import social.waddle.android.ui.GroupedRow
 import social.waddle.android.ui.GroupedSection
+import social.waddle.android.ui.HuddleFieldShape
+import social.waddle.android.ui.RowChevron
+import social.waddle.android.ui.SheetTitle
 import social.waddle.android.ui.WaddleTopBar
+import social.waddle.android.ui.huddle.PillButton
+import social.waddle.android.ui.huddle.PillTone
+import social.waddle.android.ui.huddleFieldColors
 import social.waddle.client.ffi.WaddleAvatar
 
 /**
@@ -77,7 +87,6 @@ import social.waddle.client.ffi.WaddleAvatar
  * parity): XEP-0084 avatar, XEP-0292 vCard4 editor with optimistic
  * save, and the XEP-0107/0108/0118 status signal sections.
  */
-@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfileScreen(onBack: () -> Unit) {
     val graph = LocalAppGraph.current
@@ -91,15 +100,97 @@ fun ProfileScreen(onBack: () -> Unit) {
     )
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val avatar by viewModel.selfAvatar.collectAsStateWithLifecycle()
+    val restAvatarUrl by viewModel.restAvatarUrl.collectAsStateWithLifecycle()
+    val selfName by viewModel.selfName.collectAsStateWithLifecycle()
+    val context = LocalContext.current
+    val processor = remember { BitmapAvatarProcessor(context.contentResolver) }
+    val pickAvatar = rememberLauncherForActivityResult(ActivityResultContracts.PickVisualMedia()) { uri ->
+        if (uri != null) {
+            // The whole process→publish pipeline runs in the VM scope:
+            // busy flips before processing and navigating away no
+            // longer silently discards the pick.
+            viewModel.publishAvatar { processor.process(uri) }
+        }
+    }
+    ProfileContent(
+        state = state,
+        identity = ProfileIdentity(name = selfName, avatar = avatar, restAvatarUrl = restAvatarUrl),
+        actions = ProfileActions(
+            onBack = onBack,
+            onPickAvatar = {
+                pickAvatar.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly))
+            },
+            onRemoveAvatar = viewModel::removeAvatar,
+            onFullName = viewModel::setFullName,
+            onNickname = viewModel::setNickname,
+            onPronouns = viewModel::setPronouns,
+            onUrl = viewModel::setUrl,
+            onNote = viewModel::setNote,
+            onSaveVcard = viewModel::saveVcard,
+            onRevertVcard = viewModel::revertVcard,
+            onRetryLoad = viewModel::retryLoad,
+            onMoodKind = viewModel::setMoodKind,
+            onMoodText = viewModel::setMoodText,
+            onPublishMood = viewModel::publishMood,
+            onClearMood = viewModel::clearMood,
+            onActivityGeneral = viewModel::setActivityGeneral,
+            onActivitySpecific = viewModel::setActivitySpecific,
+            onActivityText = viewModel::setActivityText,
+            onPublishActivity = viewModel::publishActivity,
+            onClearActivity = viewModel::clearActivity,
+            onTuneField = viewModel::setTuneField,
+            onPublishTune = viewModel::publishTune,
+            onClearTune = viewModel::clearTune,
+        ),
+    )
+}
 
+/** Whose profile this is: the picture and the name it falls back to. */
+internal data class ProfileIdentity(
+    val name: String,
+    val avatar: WaddleAvatar? = null,
+    val restAvatarUrl: String? = null,
+)
+
+/** Everything the profile surface can ask for. */
+internal data class ProfileActions(
+    val onBack: () -> Unit = {},
+    val onPickAvatar: () -> Unit = {},
+    val onRemoveAvatar: () -> Unit = {},
+    val onFullName: (String) -> Unit = {},
+    val onNickname: (String) -> Unit = {},
+    val onPronouns: (String) -> Unit = {},
+    val onUrl: (String) -> Unit = {},
+    val onNote: (String) -> Unit = {},
+    val onSaveVcard: () -> Unit = {},
+    val onRevertVcard: () -> Unit = {},
+    val onRetryLoad: () -> Unit = {},
+    val onMoodKind: (String) -> Unit = {},
+    val onMoodText: (String) -> Unit = {},
+    val onPublishMood: () -> Unit = {},
+    val onClearMood: () -> Unit = {},
+    val onActivityGeneral: (String) -> Unit = {},
+    val onActivitySpecific: (String) -> Unit = {},
+    val onActivityText: (String) -> Unit = {},
+    val onPublishActivity: () -> Unit = {},
+    val onClearActivity: () -> Unit = {},
+    val onTuneField: (ProfileViewModel.TuneField, String) -> Unit = { _, _ -> },
+    val onPublishTune: () -> Unit = {},
+    val onClearTune: () -> Unit = {},
+)
+
+/** Stateless profile editor: who you are, then one card per thing you publish. */
+@Composable
+internal fun ProfileContent(state: ProfileUiState, identity: ProfileIdentity, actions: ProfileActions) {
     Scaffold(
+        containerColor = Waddle.colors.bg,
         topBar = {
             WaddleTopBar(
                 title = { Text(text = stringResource(R.string.profile_title)) },
                 navigationIcon = {
-                    IconButton(onClick = onBack) {
+                    IconButton(onClick = actions.onBack) {
                         Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
+                            Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = stringResource(R.string.action_back),
                         )
                     }
@@ -109,27 +200,25 @@ fun ProfileScreen(onBack: () -> Unit) {
     ) { padding ->
         Column(
             modifier = Modifier
-                .padding(padding)
-                .consumeWindowInsets(padding)
                 .fillMaxSize()
+                .consumeWindowInsets(padding)
                 // The keyboard shrinks the scroll viewport, so a focused
                 // field low in the form scrolls into view above it.
                 .imePadding()
                 .verticalScroll(rememberScrollState())
+                .padding(padding)
                 .padding(bottom = Waddle.space.xl),
         ) {
-            AvatarSection(state = state.avatar, avatar = avatar, viewModel = viewModel)
-            ProfileCard(title = stringResource(R.string.profile_vcard_section)) {
-                VcardSection(state = state.vcard, viewModel = viewModel)
+            AvatarSection(state = state.avatar, identity = identity, actions = actions)
+            ProfileCard(title = stringResource(R.string.huddle_profile_about)) {
+                VcardSection(state = state.vcard, actions = actions)
             }
-            ProfileCard(title = stringResource(R.string.profile_mood_section)) {
-                MoodSection(state = state.mood, viewModel = viewModel)
+            MoodCard(state = state.mood, actions = actions)
+            ProfileCard(title = stringResource(R.string.huddle_profile_activity)) {
+                ActivitySection(state = state.activity, actions = actions)
             }
-            ProfileCard(title = stringResource(R.string.profile_activity_section)) {
-                ActivitySection(state = state.activity, viewModel = viewModel)
-            }
-            ProfileCard(title = stringResource(R.string.profile_tune_section)) {
-                TuneSection(state = state.tune, viewModel = viewModel)
+            ProfileCard(title = stringResource(R.string.huddle_profile_tune)) {
+                TuneSection(state = state.tune, actions = actions)
             }
         }
     }
@@ -138,25 +227,7 @@ fun ProfileScreen(onBack: () -> Unit) {
 // ── Avatar (XEP-0084) ─────────────────────────────────────────────────
 
 @Composable
-private fun AvatarSection(
-    state: AvatarSectionState,
-    avatar: WaddleAvatar?,
-    viewModel: ProfileViewModel,
-) {
-    val context = LocalContext.current
-    val processor = remember { BitmapAvatarProcessor(context.contentResolver) }
-    val restAvatarUrl by viewModel.restAvatarUrl.collectAsStateWithLifecycle()
-    val pickAvatar = rememberLauncherForActivityResult(
-        ActivityResultContracts.PickVisualMedia(),
-    ) { uri ->
-        if (uri != null) {
-            // The whole process→publish pipeline runs in the VM scope:
-            // busy flips before processing and navigating away no
-            // longer silently discards the pick.
-            viewModel.publishAvatar { processor.process(uri) }
-        }
-    }
-
+private fun AvatarSection(state: AvatarSectionState, identity: ProfileIdentity, actions: ProfileActions) {
     // Identity first: the picture large and centred, its two actions under it.
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
@@ -165,29 +236,33 @@ private fun AvatarSection(
             .fillMaxWidth()
             .padding(horizontal = Waddle.space.md, vertical = Waddle.space.md),
     ) {
-        val selfName by viewModel.selfName.collectAsStateWithLifecycle()
-        SelfAvatarImage(avatar = avatar, restAvatarUrl = restAvatarUrl, selfName = selfName)
-        Text(text = selfName, style = MaterialTheme.typography.titleLarge)
-        Row(horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs)) {
-            OutlinedButton(
-                onClick = {
-                    pickAvatar.launch(
-                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly),
-                    )
-                },
+        SelfAvatarImage(avatar = identity.avatar, restAvatarUrl = identity.restAvatarUrl, selfName = identity.name)
+        Text(
+            text = identity.name,
+            style = MaterialTheme.typography.headlineSmall,
+            color = Waddle.colors.fg,
+            modifier = Modifier.semantics { heading() },
+        )
+        Row(
+            horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            PillButton(
+                text = stringResource(R.string.profile_avatar_change),
+                onClick = actions.onPickAvatar,
                 enabled = !state.busy,
-                shape = RoundedCornerShape(Waddle.radius.control),
+                tone = PillTone.QUIET,
+                icon = Icons.Outlined.PhotoCamera,
                 modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_CHANGE),
-            ) {
-                Text(text = stringResource(R.string.profile_avatar_change))
-            }
-            TextButton(
-                onClick = viewModel::removeAvatar,
-                enabled = !state.busy && avatar != null,
-                colors = ButtonDefaults.textButtonColors(contentColor = Waddle.colors.dangerText),
-                modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_REMOVE),
-            ) {
-                Text(text = stringResource(R.string.profile_avatar_remove))
+            )
+            if (identity.avatar != null) {
+                TextButton(
+                    onClick = actions.onRemoveAvatar,
+                    enabled = !state.busy,
+                    modifier = Modifier.testTag(ProfileScreenTestTags.AVATAR_REMOVE),
+                ) {
+                    Text(text = stringResource(R.string.profile_avatar_remove), color = Waddle.colors.dangerText)
+                }
             }
         }
         FeedbackText(feedback = state.feedback)
@@ -221,13 +296,13 @@ private fun SelfAvatarImage(avatar: WaddleAvatar?, restAvatarUrl: String?, selfN
     when {
         bitmap != null -> Image(
             bitmap = bitmap,
-            contentDescription = stringResource(R.string.settings_avatar),
+            contentDescription = avatarLabel,
             contentScale = ContentScale.Crop,
             modifier = modifier.testTag(ProfileScreenTestTags.AVATAR_XMPP_IMAGE),
         )
         restAvatarUrl != null -> AsyncImage(
             model = restAvatarUrl,
-            contentDescription = stringResource(R.string.settings_avatar),
+            contentDescription = avatarLabel,
             contentScale = ContentScale.Crop,
             modifier = modifier,
         )
@@ -244,128 +319,129 @@ private fun SelfAvatarImage(avatar: WaddleAvatar?, restAvatarUrl: String?, selfN
 // ── vCard4 (XEP-0292) ─────────────────────────────────────────────────
 
 @Composable
-private fun VcardSection(state: VcardSectionState, viewModel: ProfileViewModel) {
+private fun VcardSection(state: VcardSectionState, actions: ProfileActions) {
     val enabled = !state.loading && !state.saving
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        ProfileField(
-            value = state.fullName,
-            onValueChange = viewModel::setFullName,
-            labelRes = R.string.profile_full_name,
-            enabled = enabled,
-            testTag = ProfileScreenTestTags.VCARD_FULL_NAME,
-        )
+    ProfileField(
+        value = state.fullName,
+        onValueChange = actions.onFullName,
+        labelRes = R.string.profile_full_name,
+        enabled = enabled,
+        testTag = ProfileScreenTestTags.VCARD_FULL_NAME,
+    )
+    FieldPair {
         ProfileField(
             value = state.nickname,
-            onValueChange = viewModel::setNickname,
+            onValueChange = actions.onNickname,
             labelRes = R.string.profile_nickname,
             enabled = enabled,
             testTag = ProfileScreenTestTags.VCARD_NICKNAME,
+            modifier = Modifier.weight(1f),
         )
         ProfileField(
             value = state.pronouns,
-            onValueChange = viewModel::setPronouns,
+            onValueChange = actions.onPronouns,
             labelRes = R.string.profile_pronouns,
             enabled = enabled,
             testTag = ProfileScreenTestTags.VCARD_PRONOUNS,
+            modifier = Modifier.weight(1f),
         )
-        ProfileField(
-            value = state.url,
-            onValueChange = viewModel::setUrl,
-            labelRes = R.string.profile_url,
-            enabled = enabled,
-            testTag = ProfileScreenTestTags.VCARD_URL,
-        )
-        ProfileField(
-            value = state.note,
-            onValueChange = viewModel::setNote,
-            labelRes = R.string.profile_note,
-            enabled = enabled,
-            testTag = ProfileScreenTestTags.VCARD_NOTE,
-            singleLine = false,
-        )
+    }
+    ProfileField(
+        value = state.url,
+        onValueChange = actions.onUrl,
+        labelRes = R.string.profile_url,
+        enabled = enabled,
+        testTag = ProfileScreenTestTags.VCARD_URL,
+    )
+    ProfileField(
+        value = state.note,
+        onValueChange = actions.onNote,
+        labelRes = R.string.profile_note,
+        enabled = enabled,
+        testTag = ProfileScreenTestTags.VCARD_NOTE,
+        singleLine = false,
+    )
+    if (state.loadFailed) {
         Row(
-            horizontalArrangement = Arrangement.spacedBy(8.dp),
+            horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Button(
-                onClick = viewModel::saveVcard,
-                enabled = enabled && state.loaded,
-                modifier = Modifier.testTag(ProfileScreenTestTags.VCARD_SAVE),
+            Text(
+                text = stringResource(R.string.profile_load_failed),
+                style = Waddle.type.control,
+                color = Waddle.colors.dangerText,
+                modifier = Modifier.weight(1f),
+            )
+            TextButton(
+                onClick = actions.onRetryLoad,
+                modifier = Modifier.testTag(ProfileScreenTestTags.VCARD_RETRY),
             ) {
-                Text(
-                    text = stringResource(
-                        if (state.saving) R.string.profile_saving else R.string.profile_save,
-                    ),
-                )
-            }
-            OutlinedButton(
-                onClick = viewModel::revertVcard,
-                enabled = enabled,
-                modifier = Modifier.testTag(ProfileScreenTestTags.VCARD_REVERT),
-            ) {
-                Text(text = stringResource(R.string.profile_revert))
+                Text(text = stringResource(R.string.profile_retry), color = Waddle.colors.actionText)
             }
         }
-        if (state.loadFailed) {
-            Row(
-                horizontalArrangement = Arrangement.spacedBy(8.dp),
-                verticalAlignment = Alignment.CenterVertically,
-            ) {
-                Text(
-                    text = stringResource(R.string.profile_load_failed),
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.error,
-                )
-                OutlinedButton(
-                    onClick = viewModel::retryLoad,
-                    modifier = Modifier.testTag(ProfileScreenTestTags.VCARD_RETRY),
-                ) {
-                    Text(text = stringResource(R.string.profile_retry))
-                }
-            }
-        }
-        FeedbackText(feedback = state.feedback, testTag = ProfileScreenTestTags.VCARD_FEEDBACK)
     }
+    SectionFooter(
+        feedback = state.feedback,
+        feedbackTag = ProfileScreenTestTags.VCARD_FEEDBACK,
+        primary = FooterButton(
+            text = stringResource(if (state.saving) R.string.profile_saving else R.string.profile_save),
+            onClick = actions.onSaveVcard,
+            enabled = enabled && state.loaded,
+            testTag = ProfileScreenTestTags.VCARD_SAVE,
+        ),
+        secondary = FooterButton(
+            text = stringResource(R.string.profile_revert),
+            onClick = actions.onRevertVcard,
+            enabled = enabled,
+            testTag = ProfileScreenTestTags.VCARD_REVERT,
+        ),
+    )
 }
 
 // ── Mood (XEP-0107) ───────────────────────────────────────────────────
 
 @Composable
-private fun MoodSection(state: MoodSectionState, viewModel: ProfileViewModel) {
+private fun MoodCard(state: MoodSectionState, actions: ProfileActions) {
     var pickerOpen by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        val pickerLabel = if (state.draft.kind.isEmpty()) {
-            stringResource(R.string.profile_mood_choose)
-        } else {
-            formatPepKeyword(state.draft.kind)
-        }
-        OutlinedButton(
-            onClick = { pickerOpen = true },
-            enabled = !state.busy,
+    GroupedSection(title = stringResource(R.string.profile_mood_section)) {
+        GroupedRow(
+            title = if (state.draft.kind.isEmpty()) {
+                stringResource(R.string.profile_mood_choose)
+            } else {
+                formatPepKeyword(state.draft.kind)
+            },
+            titleColor = if (state.draft.kind.isEmpty()) Waddle.colors.fgMuted else Waddle.colors.fg,
+            leading = { GlyphTile(Icons.Outlined.Mood) },
+            trailing = { RowChevron() },
+            onClick = { if (!state.busy) pickerOpen = true },
             modifier = Modifier.testTag(ProfileScreenTestTags.MOOD_PICKER),
+        )
+        Column(
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+            modifier = Modifier.padding(start = Waddle.space.md, end = Waddle.space.md, bottom = Waddle.space.md),
         ) {
-            Text(text = pickerLabel)
+            ProfileField(
+                value = state.draft.text,
+                onValueChange = actions.onMoodText,
+                labelRes = R.string.profile_optional_note,
+                enabled = !state.busy,
+                testTag = ProfileScreenTestTags.MOOD_TEXT,
+            )
+            PublishClearFooter(
+                busy = state.busy,
+                feedback = state.feedback,
+                onPublish = actions.onPublishMood,
+                onClear = actions.onClearMood,
+                publishTag = ProfileScreenTestTags.MOOD_PUBLISH,
+                clearTag = ProfileScreenTestTags.MOOD_CLEAR,
+            )
         }
-        ProfileField(
-            value = state.draft.text,
-            onValueChange = viewModel::setMoodText,
-            labelRes = R.string.profile_optional_note,
-            enabled = !state.busy,
-            testTag = ProfileScreenTestTags.MOOD_TEXT,
-        )
-        PublishClearRow(
-            busy = state.busy,
-            feedback = state.feedback,
-            onPublish = viewModel::publishMood,
-            onClear = viewModel::clearMood,
-            publishTag = ProfileScreenTestTags.MOOD_PUBLISH,
-            clearTag = ProfileScreenTestTags.MOOD_CLEAR,
-        )
     }
     if (pickerOpen) {
-        MoodPickerDialog(
+        MoodPickerSheet(
+            selected = state.draft.kind,
             onSelect = { kind ->
-                viewModel.setMoodKind(kind)
+                actions.onMoodKind(kind)
                 pickerOpen = false
             },
             onDismiss = { pickerOpen = false },
@@ -373,39 +449,52 @@ private fun MoodSection(state: MoodSectionState, viewModel: ProfileViewModel) {
     }
 }
 
-/** Searchable picker over the 84 XEP-0107 mood kinds. */
+/** Searchable picker over the 84 XEP-0107 mood kinds, as proper rows. */
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun MoodPickerDialog(onSelect: (String) -> Unit, onDismiss: () -> Unit) {
+private fun MoodPickerSheet(selected: String, onSelect: (String) -> Unit, onDismiss: () -> Unit) {
     var query by remember { mutableStateOf("") }
+    val colors = Waddle.colors
     val matches = MOOD_KINDS.filter { kind ->
         query.isBlank() || formatPepKeyword(kind).contains(query.trim(), ignoreCase = true)
     }
-    Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            shape = MaterialTheme.shapes.large,
-            modifier = Modifier.heightIn(max = 480.dp),
-        ) {
-            Column(modifier = Modifier.padding(16.dp)) {
-                OutlinedTextField(
-                    value = query,
-                    onValueChange = { query = it },
-                    label = { Text(text = stringResource(R.string.profile_mood_search)) },
-                    singleLine = true,
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .testTag(ProfileScreenTestTags.MOOD_SEARCH),
-                )
-                LazyColumn(modifier = Modifier.padding(top = 8.dp)) {
-                    items(matches) { kind ->
+    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
+        Column(modifier = Modifier.navigationBarsPadding().imePadding()) {
+            SheetTitle(text = stringResource(R.string.profile_mood_choose))
+            OutlinedTextField(
+                value = query,
+                onValueChange = { query = it },
+                placeholder = { Text(text = stringResource(R.string.profile_mood_search)) },
+                leadingIcon = { Icon(Icons.Outlined.Search, contentDescription = null) },
+                singleLine = true,
+                shape = HuddleFieldShape,
+                colors = huddleFieldColors(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(horizontal = Waddle.space.md)
+                    .testTag(ProfileScreenTestTags.MOOD_SEARCH),
+            )
+            LazyColumn(modifier = Modifier.padding(top = Waddle.space.xs)) {
+                items(matches, key = { it }) { kind ->
+                    val chosen = kind == selected
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onSelect(kind) }
+                            .heightIn(min = PICKER_ROW)
+                            .padding(horizontal = Waddle.space.md)
+                            .testTag("profile-mood-option-$kind"),
+                    ) {
                         Text(
                             text = formatPepKeyword(kind),
-                            style = MaterialTheme.typography.bodyLarge,
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { onSelect(kind) }
-                                .padding(vertical = 12.dp)
-                                .testTag("profile-mood-option-$kind"),
+                            style = Waddle.type.body,
+                            color = if (chosen) colors.actionText else colors.fg,
+                            modifier = Modifier.weight(1f),
                         )
+                        if (chosen) {
+                            Icon(Icons.Outlined.Check, contentDescription = null, tint = colors.actionText)
+                        }
                     }
                 }
             }
@@ -417,156 +506,162 @@ private fun MoodPickerDialog(onSelect: (String) -> Unit, onDismiss: () -> Unit) 
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun ActivitySection(state: ActivitySectionState, viewModel: ProfileViewModel) {
+private fun ActivitySection(state: ActivitySectionState, actions: ProfileActions) {
     var menuOpen by remember { mutableStateOf(false) }
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-        ExposedDropdownMenuBox(expanded = menuOpen, onExpandedChange = { menuOpen = it }) {
-            OutlinedTextField(
-                value = if (state.draft.general.isEmpty()) "" else formatPepKeyword(state.draft.general),
-                onValueChange = {},
-                readOnly = true,
-                label = { Text(text = stringResource(R.string.profile_activity_general)) },
-                trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = menuOpen) },
-                isError = ActivityFieldError.MISSING_GENERAL in state.errors,
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
-                    .testTag(ProfileScreenTestTags.ACTIVITY_GENERAL),
-            )
-            ExposedDropdownMenu(expanded = menuOpen, onDismissRequest = { menuOpen = false }) {
-                GENERAL_ACTIVITIES.forEach { general ->
-                    DropdownMenuItem(
-                        text = { Text(text = formatPepKeyword(general)) },
-                        onClick = {
-                            viewModel.setActivityGeneral(general)
-                            menuOpen = false
-                        },
-                        modifier = Modifier.testTag("profile-activity-option-$general"),
-                    )
-                }
+    ExposedDropdownMenuBox(expanded = menuOpen, onExpandedChange = { menuOpen = it }) {
+        OutlinedTextField(
+            value = if (state.draft.general.isEmpty()) "" else formatPepKeyword(state.draft.general),
+            onValueChange = {},
+            readOnly = true,
+            label = { Text(text = stringResource(R.string.profile_activity_general)) },
+            trailingIcon = { ExposedDropdownMenuDefaults.TrailingIcon(expanded = menuOpen) },
+            isError = ActivityFieldError.MISSING_GENERAL in state.errors,
+            shape = HuddleFieldShape,
+            colors = huddleFieldColors(),
+            modifier = Modifier
+                .fillMaxWidth()
+                .menuAnchor(ExposedDropdownMenuAnchorType.PrimaryNotEditable)
+                .testTag(ProfileScreenTestTags.ACTIVITY_GENERAL),
+        )
+        ExposedDropdownMenu(
+            expanded = menuOpen,
+            onDismissRequest = { menuOpen = false },
+            containerColor = Waddle.colors.surface,
+        ) {
+            GENERAL_ACTIVITIES.forEach { general ->
+                DropdownMenuItem(
+                    text = { Text(text = formatPepKeyword(general)) },
+                    onClick = {
+                        actions.onActivityGeneral(general)
+                        menuOpen = false
+                    },
+                    modifier = Modifier.testTag("profile-activity-option-$general"),
+                )
             }
         }
-        ProfileField(
-            value = state.draft.specific,
-            onValueChange = viewModel::setActivitySpecific,
-            labelRes = R.string.profile_activity_specific,
-            enabled = !state.busy,
-            testTag = ProfileScreenTestTags.ACTIVITY_SPECIFIC,
-            isError = ActivityFieldError.INVALID_SPECIFIC in state.errors,
-        )
-        ProfileField(
-            value = state.draft.text,
-            onValueChange = viewModel::setActivityText,
-            labelRes = R.string.profile_optional_note,
-            enabled = !state.busy,
-            testTag = ProfileScreenTestTags.ACTIVITY_TEXT,
-        )
-        PublishClearRow(
-            busy = state.busy,
-            feedback = state.feedback,
-            onPublish = viewModel::publishActivity,
-            onClear = viewModel::clearActivity,
-            publishTag = ProfileScreenTestTags.ACTIVITY_PUBLISH,
-            clearTag = ProfileScreenTestTags.ACTIVITY_CLEAR,
-        )
     }
+    ProfileField(
+        value = state.draft.specific,
+        onValueChange = actions.onActivitySpecific,
+        labelRes = R.string.profile_activity_specific,
+        enabled = !state.busy,
+        testTag = ProfileScreenTestTags.ACTIVITY_SPECIFIC,
+        isError = ActivityFieldError.INVALID_SPECIFIC in state.errors,
+    )
+    ProfileField(
+        value = state.draft.text,
+        onValueChange = actions.onActivityText,
+        labelRes = R.string.profile_optional_note,
+        enabled = !state.busy,
+        testTag = ProfileScreenTestTags.ACTIVITY_TEXT,
+    )
+    PublishClearFooter(
+        busy = state.busy,
+        feedback = state.feedback,
+        onPublish = actions.onPublishActivity,
+        onClear = actions.onClearActivity,
+        publishTag = ProfileScreenTestTags.ACTIVITY_PUBLISH,
+        clearTag = ProfileScreenTestTags.ACTIVITY_CLEAR,
+    )
 }
 
 // ── Tune (XEP-0118) ───────────────────────────────────────────────────
 
 @Composable
-private fun TuneSection(state: TuneSectionState, viewModel: ProfileViewModel) {
-    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+private fun TuneSection(state: TuneSectionState, actions: ProfileActions) {
+    TuneDraftField(state, actions, ProfileViewModel.TuneField.TITLE, R.string.profile_tune_title, state.draft.title)
+    TuneDraftField(state, actions, ProfileViewModel.TuneField.ARTIST, R.string.profile_tune_artist, state.draft.artist)
+    FieldPair {
         TuneDraftField(
             state,
-            viewModel,
-            ProfileViewModel.TuneField.TITLE,
-            R.string.profile_tune_title,
-            state.draft.title,
-        )
-        TuneDraftField(
-            state,
-            viewModel,
-            ProfileViewModel.TuneField.ARTIST,
-            R.string.profile_tune_artist,
-            state.draft.artist,
-        )
-        TuneDraftField(
-            state,
-            viewModel,
+            actions,
             ProfileViewModel.TuneField.SOURCE,
             R.string.profile_tune_source,
             state.draft.source,
+            modifier = Modifier.weight(1f),
         )
         TuneDraftField(
             state,
-            viewModel,
+            actions,
             ProfileViewModel.TuneField.TRACK,
             R.string.profile_tune_track,
             state.draft.track,
+            modifier = Modifier.weight(1f),
         )
+    }
+    FieldPair {
         TuneDraftField(
             state,
-            viewModel,
+            actions,
             ProfileViewModel.TuneField.LENGTH,
             R.string.profile_tune_length,
             state.draft.length,
             isError = TuneFieldError.INVALID_LENGTH in state.errors,
+            modifier = Modifier.weight(1f),
         )
         TuneDraftField(
             state,
-            viewModel,
+            actions,
             ProfileViewModel.TuneField.RATING,
             R.string.profile_tune_rating,
             state.draft.rating,
             isError = TuneFieldError.INVALID_RATING in state.errors,
-        )
-        TuneDraftField(
-            state,
-            viewModel,
-            ProfileViewModel.TuneField.URI,
-            R.string.profile_tune_uri,
-            state.draft.uri,
-            isError = TuneFieldError.INVALID_URI in state.errors,
-        )
-        if (TuneFieldError.EMPTY_FORM in state.errors) {
-            Text(
-                text = stringResource(R.string.profile_tune_empty),
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.error,
-            )
-        }
-        PublishClearRow(
-            busy = state.busy,
-            feedback = state.feedback,
-            onPublish = viewModel::publishTune,
-            onClear = viewModel::clearTune,
-            publishTag = ProfileScreenTestTags.TUNE_PUBLISH,
-            clearTag = ProfileScreenTestTags.TUNE_CLEAR,
+            modifier = Modifier.weight(1f),
         )
     }
+    TuneDraftField(
+        state,
+        actions,
+        ProfileViewModel.TuneField.URI,
+        R.string.profile_tune_uri,
+        state.draft.uri,
+        isError = TuneFieldError.INVALID_URI in state.errors,
+    )
+    if (TuneFieldError.EMPTY_FORM in state.errors) {
+        Text(
+            text = stringResource(R.string.profile_tune_empty),
+            style = Waddle.type.control,
+            color = Waddle.colors.dangerText,
+        )
+    }
+    PublishClearFooter(
+        busy = state.busy,
+        feedback = state.feedback,
+        onPublish = actions.onPublishTune,
+        onClear = actions.onClearTune,
+        publishTag = ProfileScreenTestTags.TUNE_PUBLISH,
+        clearTag = ProfileScreenTestTags.TUNE_CLEAR,
+    )
 }
 
 @Composable
 private fun TuneDraftField(
     state: TuneSectionState,
-    viewModel: ProfileViewModel,
+    actions: ProfileActions,
     field: ProfileViewModel.TuneField,
     labelRes: Int,
     value: String,
     isError: Boolean = false,
+    modifier: Modifier = Modifier,
 ) {
     ProfileField(
         value = value,
-        onValueChange = { viewModel.setTuneField(field, it) },
+        onValueChange = { actions.onTuneField(field, it) },
         labelRes = labelRes,
         enabled = !state.busy,
         testTag = "profile-tune-${field.name.lowercase()}",
         isError = isError,
+        modifier = modifier,
     )
 }
 
 // ── Shared pieces ─────────────────────────────────────────────────────
+
+/** Two short fields side by side. */
+@Composable
+private fun FieldPair(content: @Composable RowScope.() -> Unit) {
+    Row(horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm), content = content)
+}
 
 @Composable
 private fun ProfileField(
@@ -577,23 +672,67 @@ private fun ProfileField(
     testTag: String,
     singleLine: Boolean = true,
     isError: Boolean = false,
+    modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
     OutlinedTextField(
         value = value,
         onValueChange = onValueChange,
-        label = { Text(text = stringResource(labelRes)) },
+        label = { Text(text = stringResource(labelRes), maxLines = 1) },
         enabled = enabled,
         singleLine = singleLine,
+        minLines = if (singleLine) 1 else NOTE_LINES,
         isError = isError,
-        shape = RoundedCornerShape(Waddle.radius.control),
-        modifier = Modifier
-            .fillMaxWidth()
-            .testTag(testTag),
+        shape = HuddleFieldShape,
+        colors = huddleFieldColors(),
+        modifier = modifier.testTag(testTag),
     )
 }
 
+/** One button of a section footer. */
+private data class FooterButton(
+    val text: String,
+    val onClick: () -> Unit,
+    val enabled: Boolean,
+    val testTag: String,
+)
+
+/**
+ * The end of a section: what happened last (left), then the quiet
+ * secondary and the teal primary (right). One button style everywhere.
+ */
 @Composable
-private fun PublishClearRow(
+private fun SectionFooter(
+    feedback: ProfileFeedback?,
+    primary: FooterButton,
+    secondary: FooterButton,
+    feedbackTag: String? = null,
+) {
+    Row(
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+        verticalAlignment = Alignment.CenterVertically,
+        modifier = Modifier.padding(top = Waddle.space.xxs),
+    ) {
+        Column(modifier = Modifier.weight(1f)) {
+            FeedbackText(feedback = feedback, testTag = feedbackTag)
+        }
+        PillButton(
+            text = secondary.text,
+            onClick = secondary.onClick,
+            enabled = secondary.enabled,
+            tone = PillTone.QUIET,
+            modifier = Modifier.testTag(secondary.testTag),
+        )
+        PillButton(
+            text = primary.text,
+            onClick = primary.onClick,
+            enabled = primary.enabled,
+            modifier = Modifier.testTag(primary.testTag),
+        )
+    }
+}
+
+@Composable
+private fun PublishClearFooter(
     busy: Boolean,
     feedback: ProfileFeedback?,
     onPublish: () -> Unit,
@@ -601,28 +740,11 @@ private fun PublishClearRow(
     publishTag: String,
     clearTag: String,
 ) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Button(
-            onClick = onPublish,
-            enabled = !busy,
-            shape = RoundedCornerShape(Waddle.radius.control),
-            modifier = Modifier.testTag(publishTag),
-        ) {
-            Text(text = stringResource(R.string.profile_publish))
-        }
-        OutlinedButton(
-            onClick = onClear,
-            enabled = !busy,
-            shape = RoundedCornerShape(Waddle.radius.control),
-            modifier = Modifier.testTag(clearTag),
-        ) {
-            Text(text = stringResource(R.string.profile_clear))
-        }
-    }
-    FeedbackText(feedback = feedback)
+    SectionFooter(
+        feedback = feedback,
+        primary = FooterButton(stringResource(R.string.profile_publish), onPublish, !busy, publishTag),
+        secondary = FooterButton(stringResource(R.string.profile_clear), onClear, !busy, clearTag),
+    )
 }
 
 @Composable
@@ -633,8 +755,8 @@ private fun FeedbackText(feedback: ProfileFeedback?, testTag: String? = null) {
         feedback == ProfileFeedback.INVALID
     Text(
         text = message,
-        style = MaterialTheme.typography.bodySmall,
-        color = if (isError) Waddle.colors.dangerText else MaterialTheme.colorScheme.onSurfaceVariant,
+        style = Waddle.type.control.copy(fontWeight = null),
+        color = if (isError) Waddle.colors.dangerText else Waddle.colors.fgMuted,
         modifier = testTag?.let { Modifier.testTag(it) } ?: Modifier,
     )
 }
@@ -648,7 +770,9 @@ private fun ProfileFeedback.messageRes(): Int = when (this) {
     ProfileFeedback.OFFLINE -> R.string.profile_feedback_offline
 }
 
+private const val NOTE_LINES = 3
 private val PROFILE_AVATAR_SIZE = 96.dp
+private val PICKER_ROW = 48.dp
 
 /** Semantics tags shared with instrumented tests. */
 object ProfileScreenTestTags {

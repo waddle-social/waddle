@@ -3,6 +3,7 @@ package social.waddle.android.feature.members
 import androidx.activity.ComponentActivity
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.ui.test.junit4.v2.createAndroidComposeRule
+import androidx.compose.ui.test.onAllNodesWithTag
 import androidx.compose.ui.test.onAllNodesWithText
 import androidx.compose.ui.test.onNodeWithTag
 import androidx.compose.ui.test.onNodeWithText
@@ -72,13 +73,19 @@ class MembersScreenViewerTest {
 
     @Test
     fun nonManagersSeeAReadOnlyList() {
+        // bob is a member who is not in the room: he lists under Everyone.
         composeRule.waitUntil(timeoutMillis = 10_000) {
-            composeRule.onAllNodesWithText("bob@waddle.test").fetchSemanticsNodes().isNotEmpty()
+            composeRule.onAllNodesWithText("Everyone").fetchSemanticsNodes().isNotEmpty()
+        }
+        composeRule.onNodeWithText("Everyone").performClick()
+        composeRule.waitUntil(timeoutMillis = 10_000) {
+            composeRule.onAllNodesWithTag(MembersScreenTestTags.MEMBER_ROW_PREFIX + "bob")
+                .fetchSemanticsNodes().isNotEmpty()
         }
         // No add-member search for non-managers.
         composeRule.onNodeWithTag(MembersScreenTestTags.SEARCH_FIELD).assertDoesNotExist()
 
-        // Tapping a row must not open the management sheet.
+        // Tapping a row opens the profile, never the management verbs.
         composeRule.onNodeWithTag(MembersScreenTestTags.MEMBER_ROW_PREFIX + "bob").performClick()
         composeRule.onNodeWithText("Make admin").assertDoesNotExist()
         composeRule.onNodeWithText("Ban").assertDoesNotExist()

@@ -93,10 +93,10 @@ class MembersScreenTest {
 
     @Test
     fun memberListRendersSeededAffiliationsMergedWithPresence() {
-        waitForText("bob@waddle.test")
-        composeRule.onNodeWithText("icepuma@waddle.test").assertExists()
-        // bob is live: the presence merge shows "Present now".
-        waitForText("Present now")
+        waitForText("bob")
+        composeRule.onNodeWithTag(MembersScreenTestTags.MEMBER_ROW_PREFIX + "icepuma").assertExists()
+        // bob is live: the presence merge shows him here now.
+        waitForText("Here now")
         // Owner + member tier labels render.
         waitForText("Owner")
         waitForText("Member")
@@ -104,7 +104,7 @@ class MembersScreenTest {
 
     @Test
     fun kickFlowRecordsTheFfiCallAfterConfirmation() {
-        waitForText("bob@waddle.test")
+        waitForText("bob")
         composeRule.onNodeWithTag(MembersScreenTestTags.MEMBER_ROW_PREFIX + "bob").performClick()
         waitForText("Kick")
         composeRule.onNodeWithText("Kick").performClick()

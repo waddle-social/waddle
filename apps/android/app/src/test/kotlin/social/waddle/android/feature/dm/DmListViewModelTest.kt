@@ -19,11 +19,18 @@ import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.PinnedRandom
 import social.waddle.android.client.ReconnectPolicy
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.prefs.UserPrefs
+import social.waddle.android.client.store.ContactPresence
+import social.waddle.android.client.store.DirectoryPerson
 import social.waddle.android.client.store.NotifySettingsEntry
+import social.waddle.android.client.store.PeopleDirectorySnapshot
+import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.client.testChannel
 import social.waddle.android.client.testInboxEntry
+import social.waddle.android.client.testPresence
+import social.waddle.client.ffi.WaddleCallMedia
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddleTopology
 
@@ -145,6 +152,68 @@ class DmListViewModelTest {
             ),
             rows,
         )
+    }
+
+    @Test
+    fun `peer presence comes from the people projection, then contacts, else none`() {
+        val rows = listOf(
+            DmListRow.Peer("Alice@Waddle.test", name = "alice", unreadCount = 0),
+            DmListRow.Peer("bob@waddle.test", name = "bob", unreadCount = 0),
+            DmListRow.Peer("carol@waddle.test", name = "carol", unreadCount = 0),
+        )
+        val items = decoratedDmRows(
+            rows,
+            DmLiveInputs(
+                directory = PeopleDirectorySnapshot(
+                    people = listOf(
+                        DirectoryPerson(
+                            bareJid = "alice@waddle.test",
+                            displayName = "alice",
+                            show = PresenceShow.DND,
+                            huddleRoomJid = "general@muc.waddle.test",
+                            roomJids = listOf("general@muc.waddle.test"),
+                        ),
+                    ),
+                    rooms = emptyMap(),
+                ),
+                contacts = mapOf(
+                    "bob@waddle.test" to ContactPresence(
+                        bareJid = "bob@waddle.test",
+                        show = PresenceShow.AWAY,
+                        presence = testPresence(from = "bob@waddle.test/phone", show = "away"),
+                    ),
+                ),
+            ),
+        )
+        assertEquals(listOf(PresenceShow.DND, PresenceShow.AWAY, null), items.map { it.presence })
+        assertEquals(listOf(true, false, false), items.map { it.inHuddle })
+    }
+
+    @Test
+    fun `calls and huddles light rows ember, mentions count per conversation`() {
+        val rows = listOf(
+            DmListRow.Peer("alice@waddle.test", name = "alice", unreadCount = 1),
+            DmListRow.Peer("bob@waddle.test", name = "bob", unreadCount = 0),
+            DmListRow.Group("gdm-1@muc.waddle.test", name = "crew", unreadCount = 3),
+        )
+        val items = decoratedDmRows(
+            rows,
+            DmLiveInputs(
+                call = CallState.Incoming(
+                    from = "alice@waddle.test/phone",
+                    sid = "s1",
+                    media = WaddleCallMedia(audio = true, video = false),
+                ),
+                huddleNicks = mapOf("gdm-1@muc.waddle.test" to setOf("carol", "dana")),
+                mentions = mapOf("gdm-1@muc.waddle.test" to 2),
+            ),
+        )
+        assertEquals(
+            listOf(DmLiveState.RINGING, DmLiveState.NONE, DmLiveState.LIVE),
+            items.map { it.live },
+        )
+        assertEquals(listOf(0, 0, 2), items.map { it.mentionCount })
+        assertEquals(2, items.last().huddleCount)
     }
 
     private fun testSnapshot(partner: String, lastUpdated: Long) =

@@ -147,7 +147,6 @@
 
     <!-- DMs -->
     <string name="dm_list_title">Direct messages</string>
-    <string name="dm_list_empty">No direct messages yet.</string>
     <string name="dm_list_new_group_action">New group DM</string>
     <string name="dm_list_group_subtitle">Group DM</string>
     <string name="dm_start_group_action">Start a group DM</string>
@@ -202,12 +201,6 @@
     </plurals>
     <string name="push_distributor_message">Waddle messages</string>
     <string name="settings_delivery">Background delivery</string>
-    <string name="settings_delivery_push_active">Push via %1$s. Waddle connects only while open, so calls ring only while the app is open, and DM pushes wait while Waddle is open on another device.</string>
-    <string name="settings_delivery_push_pending">Setting up push via %1$s…</string>
-    <string name="settings_delivery_no_distributor">No UnifiedPush distributor is installed, so Waddle stays connected in the background. Install one (ntfy, for example) for push.</string>
-    <string name="settings_delivery_choose_distributor">A distributor is installed. Choose it to switch to push.</string>
-    <string name="settings_delivery_unsupported">This server does not offer push, so Waddle stays connected in the background.</string>
-    <string name="settings_delivery_failed">The server refused push registration, so Waddle stays connected in the background.</string>
     <string name="settings_delivery_distributor">Push distributor</string>
     <string name="settings_delivery_distributor_none">None chosen</string>
     <string name="settings_stay_connected">Stay connected</string>
@@ -279,14 +272,11 @@
     <string name="moderate_confirm_title">Delete this message for everyone?</string>
     <string name="moderate_confirm_body">The message will be removed from the channel for all members. This cannot be undone.</string>
     <string name="members_action">Members</string>
-    <string name="members_title">Members — %1$s</string>
     <string name="members_search_hint">Add a member — search users</string>
     <string name="members_add_as_member">Add</string>
-    <string name="members_present_now">Present now</string>
     <string name="members_bots_section">Bots</string>
     <string name="members_last_synced">Showing last synced members.</string>
     <string name="members_unavailable">Members are unavailable right now.</string>
-    <string name="members_empty">No members</string>
     <string name="members_make_admin">Make admin</string>
     <string name="members_make_member">Make member</string>
     <string name="members_kick">Kick</string>
@@ -334,10 +324,7 @@
 
     <!-- Profile publishing (XEP-0292 vCard4, XEP-0084 avatar, XEP-0107/0108/0118 status) -->
     <string name="profile_title">Profile</string>
-    <string name="profile_vcard_section">Profile (vCard4)</string>
     <string name="profile_mood_section">Mood</string>
-    <string name="profile_activity_section">Activity</string>
-    <string name="profile_tune_section">Tune</string>
     <string name="profile_full_name">Full name</string>
     <string name="profile_nickname">Nickname</string>
     <string name="profile_pronouns">Pronouns</string>
@@ -560,4 +547,83 @@
     <string name="people_status_dnd">Do not disturb</string>
     <string name="people_status_offline">Offline</string>
     <string name="people_message">Message %1$s</string>
+    <!-- Huddle: screens -->
+    <string name="huddle_wordmark">waddle</string>
+    <string name="huddle_open_action">Open</string>
+    <plurals name="huddle_unread_count">
+        <item quantity="one">%1$d unread message</item>
+        <item quantity="other">%1$d unread messages</item>
+    </plurals>
+    <plurals name="huddle_mentions_count">
+        <item quantity="one">%1$d mention</item>
+        <item quantity="other">%1$d mentions</item>
+    </plurals>
+    <string name="huddle_status_in_huddle">In a huddle</string>
+    <string name="huddle_status_around">Around</string>
+    <string name="huddle_status_away">Away</string>
+    <string name="huddle_status_dnd">Do not disturb</string>
+    <string name="huddle_dm_list_empty_body">Message someone from People, or bring a few people together in a group.</string>
+    <string name="huddle_dm_list_start_group">Start a group</string>
+    <string name="huddle_dm_ringing">Ringing</string>
+    <string name="huddle_dm_live">Live</string>
+    <string name="huddle_dm_say_hello">Say hello</string>
+    <string name="huddle_new_group_supporting">A private room for a few people. Pick at least two.</string>
+    <plurals name="huddle_new_group_selected">
+        <item quantity="one">%1$d person</item>
+        <item quantity="other">%1$d people</item>
+    </plurals>
+    <string name="huddle_you_connected">Here — your rooms see you as available</string>
+    <string name="huddle_you_connecting">Connecting…</string>
+    <string name="huddle_you_paused">Away from the app — push delivers new messages</string>
+    <string name="huddle_you_offline">Offline</string>
+    <string name="huddle_app_checking_session">Checking session.</string>
+    <string name="huddle_app_restore_body">We couldn\'t pick up where you left off. Check your connection and try again — nothing you sent is lost.</string>
+    <string name="huddle_login_lead">Your community, live. See who\'s around and drop into a huddle.</string>
+    <string name="huddle_delivery_push_title">Push via %1$s</string>
+    <string name="huddle_delivery_push_detail">Waddle connects only while open. Calls ring while the app is open, and DM pushes wait while you are active on another device.</string>
+    <string name="huddle_delivery_pending_title">Setting up push</string>
+    <string name="huddle_delivery_pending_detail">Registering with %1$s…</string>
+    <string name="huddle_delivery_connected_title">Staying connected</string>
+    <string name="huddle_delivery_off_title">Push is off</string>
+    <string name="huddle_delivery_choose_detail">A distributor is installed. Choose it below to switch to push.</string>
+    <string name="huddle_delivery_no_distributor_detail">No UnifiedPush distributor is installed. Install one, such as ntfy, to switch to push.</string>
+    <string name="huddle_delivery_unsupported_detail">This server does not offer push.</string>
+    <string name="huddle_delivery_failed_title">Push was refused</string>
+    <string name="huddle_delivery_failed_detail">The server refused push registration, so Waddle stays connected instead.</string>
+    <string name="huddle_delivery_tag_on">On</string>
+    <string name="huddle_delivery_tag_pending">Pending</string>
+    <string name="huddle_delivery_tag_off">Off</string>
+    <string name="huddle_delivery_tag_failed">Failed</string>
+    <string name="huddle_members_in_room">In %1$s</string>
+    <plurals name="huddle_members_count">
+        <item quantity="one">%1$d member</item>
+        <item quantity="other">%1$d members</item>
+    </plurals>
+    <plurals name="huddle_members_lead">
+        <item quantity="one">%1$d here now. Pick someone to see their profile.</item>
+        <item quantity="other">%1$d here now. Pick someone to see their profile.</item>
+    </plurals>
+    <string name="huddle_members_filter_here">Here now</string>
+    <string name="huddle_members_filter_everyone">Everyone</string>
+    <string name="huddle_members_empty_title">It is quiet in here</string>
+    <string name="huddle_members_empty_here">Nobody is here right now. Switch to Everyone to see the whole list.</string>
+    <string name="huddle_members_empty_everyone">Be the one who breaks the silence.</string>
+    <string name="huddle_member_in_huddle">In the huddle</string>
+    <string name="huddle_member_here">Here now</string>
+    <string name="huddle_member_here_away">Here · away</string>
+    <string name="huddle_member_here_dnd">Here · do not disturb</string>
+    <string name="huddle_member_elsewhere">Around, not in this room</string>
+    <string name="huddle_member_not_here">Not here right now</string>
+    <string name="huddle_member_bot">Bot</string>
+    <string name="huddle_member_profile">Profile</string>
+    <string name="huddle_member_message">Message</string>
+    <string name="huddle_member_manage">Manage</string>
+    <string name="huddle_users_empty_title">Nobody here yet</string>
+    <string name="huddle_users_empty_body">People appear here once they sign in to the community.</string>
+    <string name="huddle_users_no_match_title">No one matches “%1$s”</string>
+    <string name="huddle_users_no_match_body">Usernames match from the start: try fewer letters.</string>
+    <string name="huddle_users_failed_body">Only the community owner can list users, and only while connected.</string>
+    <string name="huddle_profile_about">About you</string>
+    <string name="huddle_profile_activity">What you are doing</string>
+    <string name="huddle_profile_tune">Listening to</string>
 </resources>

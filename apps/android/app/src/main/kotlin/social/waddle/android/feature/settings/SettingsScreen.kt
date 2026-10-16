@@ -7,34 +7,33 @@ import android.content.Intent
 import android.graphics.BitmapFactory
 import android.os.PowerManager
 import android.provider.Settings
-import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.defaultMinSize
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowBack
-import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
+import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Logout
+import androidx.compose.material.icons.outlined.DarkMode
+import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Group
-import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material.icons.outlined.LightMode
+import androidx.compose.material.icons.outlined.NotificationsActive
+import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
-import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
-import androidx.compose.material3.SegmentedButton
-import androidx.compose.material3.SegmentedButtonDefaults
-import androidx.compose.material3.SingleChoiceSegmentedButtonRow
 import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -43,16 +42,18 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.unit.dp
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.core.net.toUri
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -63,12 +64,19 @@ import social.waddle.android.R
 import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.prefs.ThemeMode
 import social.waddle.android.client.push.PushStatus
-import social.waddle.android.theme.MonoMeta
 import social.waddle.android.theme.Waddle
+import social.waddle.android.ui.ChoiceOption
+import social.waddle.android.ui.GlyphTile
 import social.waddle.android.ui.GroupDivider
+import social.waddle.android.ui.GroupedRow
 import social.waddle.android.ui.GroupedSection
+import social.waddle.android.ui.KickerText
+import social.waddle.android.ui.RowChevron
+import social.waddle.android.ui.SegmentedChoice
 import social.waddle.android.ui.WaddleTopBar
-import social.waddle.android.ui.groupedRowColors
+import social.waddle.android.ui.dangerSubtle
+import social.waddle.android.ui.huddle.AvatarSize
+import social.waddle.android.ui.huddleSwitchColors
 import social.waddle.client.ffi.WaddleAvatar
 
 /**
@@ -135,7 +143,7 @@ internal data class SettingsActions(
     val onSetWallpaperColors: (Boolean) -> Unit = {},
 )
 
-/** Stateless settings surface: grouped cards on the screen ground. */
+/** Stateless settings surface: Huddle card groups on the screen ground. */
 @Composable
 internal fun SettingsContent(
     state: SettingsUiState,
@@ -145,13 +153,14 @@ internal fun SettingsContent(
     delivery: DeliveryUiState = DeliveryUiState(),
 ) {
     Scaffold(
+        containerColor = Waddle.colors.bg,
         topBar = {
             WaddleTopBar(
                 title = { Text(text = stringResource(R.string.settings_title)) },
                 navigationIcon = {
                     IconButton(onClick = actions.onBack) {
                         Icon(
-                            Icons.AutoMirrored.Filled.ArrowBack,
+                            Icons.AutoMirrored.Outlined.ArrowBack,
                             contentDescription = stringResource(R.string.action_back),
                         )
                     }
@@ -161,9 +170,10 @@ internal fun SettingsContent(
     ) { padding ->
         Column(
             modifier = Modifier
-                .padding(padding)
                 .fillMaxSize()
+                .consumeWindowInsets(padding)
                 .verticalScroll(rememberScrollState())
+                .padding(padding)
                 .padding(bottom = Waddle.space.xl),
         ) {
             GroupedSection(title = null, modifier = Modifier.padding(top = Waddle.space.xs)) {
@@ -203,85 +213,63 @@ internal fun SettingsContent(
                     toggleTestTag = SettingsScreenTestTags.READ_RECEIPTS_TOGGLE,
                 )
             }
+            GroupedSection(title = stringResource(R.string.settings_delivery)) {
+                DeliverySection(delivery = delivery, actions = actions)
+            }
             // Reduced-scope community admin (web admin console has 6
             // desktop operator panels; mobile ships the V1 users list
             // only). Entry hidden unless the owner probe succeeds; the
             // server re-authorizes every admin command regardless.
             if (isCommunityOwner) {
                 GroupedSection(title = stringResource(R.string.settings_community_admin)) {
-                    ListItem(
-                        headlineContent = { Text(text = stringResource(R.string.community_users_title)) },
-                        supportingContent = { Text(text = stringResource(R.string.community_users_subtitle)) },
-                        leadingContent = { Icon(Icons.Outlined.Group, contentDescription = null) },
-                        trailingContent = { Chevron() },
-                        colors = groupedRowColors(),
-                        modifier = Modifier
-                            .clickable(onClick = actions.onOpenCommunityUsers)
-                            .testTag(SettingsScreenTestTags.COMMUNITY_USERS_ROW),
+                    GroupedRow(
+                        title = stringResource(R.string.community_users_title),
+                        supporting = stringResource(R.string.community_users_subtitle),
+                        leading = { GlyphTile(Icons.Outlined.Group) },
+                        trailing = { RowChevron() },
+                        onClick = actions.onOpenCommunityUsers,
+                        modifier = Modifier.testTag(SettingsScreenTestTags.COMMUNITY_USERS_ROW),
                     )
                 }
             }
-            GroupedSection(title = stringResource(R.string.settings_delivery)) {
-                DeliverySection(delivery = delivery, actions = actions)
-            }
-            OutlinedButton(
-                onClick = actions.onLogout,
-                shape = RoundedCornerShape(Waddle.radius.panel),
-                border = BorderStroke(1.dp, Waddle.colors.hairline),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Waddle.colors.dangerText),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = Waddle.space.md, vertical = Waddle.space.lg)
-                    .defaultMinSize(minHeight = 48.dp),
-            ) {
-                Icon(
-                    Icons.AutoMirrored.Outlined.Logout,
-                    contentDescription = null,
-                    modifier = Modifier
-                        .padding(end = Waddle.space.xs)
-                        .size(18.dp),
+            GroupedSection(title = null, modifier = Modifier.padding(top = Waddle.space.lg)) {
+                GroupedRow(
+                    title = stringResource(R.string.action_logout),
+                    titleColor = Waddle.colors.dangerText,
+                    leading = {
+                        GlyphTile(
+                            icon = Icons.AutoMirrored.Outlined.Logout,
+                            tint = Waddle.colors.dangerText,
+                            container = Waddle.colors.dangerSubtle(),
+                        )
+                    },
+                    onClick = actions.onLogout,
                 )
-                Text(text = stringResource(R.string.action_logout))
             }
         }
     }
 }
 
-/** Push status, the distributor, the stay-connected switch and battery. */
+/** What background delivery is doing, first; then the controls that change it. */
 @Composable
 private fun DeliverySection(delivery: DeliveryUiState, actions: SettingsActions) {
-    Text(
-        text = deliveryStatusText(delivery),
-        style = MaterialTheme.typography.bodyMedium,
-        color = MaterialTheme.colorScheme.onSurfaceVariant,
-        modifier = Modifier
-            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.sm)
-            .testTag(SettingsScreenTestTags.DELIVERY_STATUS),
-    )
+    DeliveryStatusRow(delivery)
     if (delivery.distributorInstalled) {
         GroupDivider()
-        ListItem(
-            headlineContent = { Text(text = stringResource(R.string.settings_delivery_distributor)) },
-            supportingContent = {
-                Text(text = delivery.distributorLabel ?: stringResource(R.string.settings_delivery_distributor_none))
-            },
-            trailingContent = { Chevron() },
-            colors = groupedRowColors(),
-            modifier = Modifier.clickable(onClick = actions.onPickDistributor),
+        GroupedRow(
+            title = stringResource(R.string.settings_delivery_distributor),
+            supporting = delivery.distributorLabel ?: stringResource(R.string.settings_delivery_distributor_none),
+            trailing = { RowChevron() },
+            onClick = actions.onPickDistributor,
         )
     }
     GroupDivider()
-    ListItem(
-        headlineContent = { Text(text = stringResource(R.string.settings_stay_connected)) },
-        supportingContent = { Text(text = stringResource(R.string.settings_stay_connected_body)) },
-        trailingContent = {
-            Switch(
-                checked = delivery.stayConnected,
-                onCheckedChange = actions.onSetStayConnected,
-                modifier = Modifier.testTag(SettingsScreenTestTags.STAY_CONNECTED_TOGGLE),
-            )
-        },
-        colors = groupedRowColors(),
+    ToggleRow(
+        title = stringResource(R.string.settings_stay_connected),
+        supporting = stringResource(R.string.settings_stay_connected_body),
+        checked = delivery.stayConnected,
+        onCheckedChange = actions.onSetStayConnected,
+        toggleTestTag = SettingsScreenTestTags.STAY_CONNECTED_TOGGLE,
     )
     // Battery exemption only matters while a connection is held.
     if (delivery.stayConnected) {
@@ -290,28 +278,87 @@ private fun DeliverySection(delivery: DeliveryUiState, actions: SettingsActions)
     }
 }
 
+/** How a delivery status reads: icon, words, tag and tone. */
+private data class DeliveryLook(
+    val icon: ImageVector,
+    val title: String,
+    val detail: String,
+    val tag: String,
+    val tone: DeliveryTone,
+)
+
+private enum class DeliveryTone { GOOD, WAITING, NEUTRAL, PROBLEM }
+
 @Composable
-private fun deliveryStatusText(delivery: DeliveryUiState): String {
-    val distributor = delivery.distributorLabel
+private fun deliveryLookOf(delivery: DeliveryUiState): DeliveryLook {
+    val distributor = delivery.distributorLabel.orEmpty()
+    val connectedTitle = stringResource(R.string.huddle_delivery_connected_title)
+    val off = stringResource(R.string.huddle_delivery_tag_off)
     return when (delivery.status) {
-        PushStatus.ACTIVE -> stringResource(R.string.settings_delivery_push_active, distributor.orEmpty())
-        PushStatus.PENDING -> stringResource(R.string.settings_delivery_push_pending, distributor.orEmpty())
-        PushStatus.UNSUPPORTED -> stringResource(R.string.settings_delivery_unsupported)
-        PushStatus.FAILED -> stringResource(R.string.settings_delivery_failed)
-        PushStatus.NONE -> if (delivery.distributorInstalled) {
-            stringResource(R.string.settings_delivery_choose_distributor)
-        } else {
-            stringResource(R.string.settings_delivery_no_distributor)
-        }
+        PushStatus.ACTIVE -> DeliveryLook(
+            icon = Icons.Outlined.NotificationsActive,
+            title = stringResource(R.string.huddle_delivery_push_title, distributor),
+            detail = stringResource(R.string.huddle_delivery_push_detail),
+            tag = stringResource(R.string.huddle_delivery_tag_on),
+            tone = DeliveryTone.GOOD,
+        )
+        PushStatus.PENDING -> DeliveryLook(
+            icon = Icons.Outlined.Sync,
+            title = stringResource(R.string.huddle_delivery_pending_title),
+            detail = stringResource(R.string.huddle_delivery_pending_detail, distributor),
+            tag = stringResource(R.string.huddle_delivery_tag_pending),
+            tone = DeliveryTone.WAITING,
+        )
+        PushStatus.UNSUPPORTED -> DeliveryLook(
+            icon = Icons.Outlined.Wifi,
+            title = connectedTitle,
+            detail = stringResource(R.string.huddle_delivery_unsupported_detail),
+            tag = off,
+            tone = DeliveryTone.NEUTRAL,
+        )
+        PushStatus.FAILED -> DeliveryLook(
+            icon = Icons.Outlined.ErrorOutline,
+            title = stringResource(R.string.huddle_delivery_failed_title),
+            detail = stringResource(R.string.huddle_delivery_failed_detail),
+            tag = stringResource(R.string.huddle_delivery_tag_failed),
+            tone = DeliveryTone.PROBLEM,
+        )
+        PushStatus.NONE -> DeliveryLook(
+            icon = Icons.Outlined.Wifi,
+            title = if (delivery.distributorInstalled) {
+                stringResource(R.string.huddle_delivery_off_title)
+            } else {
+                connectedTitle
+            },
+            detail = if (delivery.distributorInstalled) {
+                stringResource(R.string.huddle_delivery_choose_detail)
+            } else {
+                stringResource(R.string.huddle_delivery_no_distributor_detail)
+            },
+            tag = off,
+            tone = DeliveryTone.NEUTRAL,
+        )
     }
 }
 
 @Composable
-private fun Chevron() {
-    Icon(
-        Icons.AutoMirrored.Outlined.KeyboardArrowRight,
-        contentDescription = null,
-        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+private fun DeliveryStatusRow(delivery: DeliveryUiState) {
+    val colors = Waddle.colors
+    val look = deliveryLookOf(delivery)
+    val (ink, wash) = when (look.tone) {
+        DeliveryTone.GOOD -> colors.actionText to colors.actionSubtle
+        DeliveryTone.WAITING -> colors.warningText to colors.surface2
+        DeliveryTone.NEUTRAL -> colors.fgMuted to colors.surface2
+        DeliveryTone.PROBLEM -> colors.dangerText to colors.dangerSubtle()
+    }
+    GroupedRow(
+        title = look.title,
+        supporting = look.detail,
+        leading = { GlyphTile(icon = look.icon, tint = ink, container = wash) },
+        trailing = { KickerText(text = look.tag, color = ink) },
+        modifier = Modifier
+            .semantics(mergeDescendants = true) {}
+            .testTag(SettingsScreenTestTags.DELIVERY_STATUS),
     )
 }
 
@@ -327,70 +374,79 @@ private fun AccountRow(
             BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap()
         }
     }
+    val colors = Waddle.colors
     val avatarLabel = stringResource(R.string.settings_avatar)
-    ListItem(
-        headlineContent = {
+    val avatarModifier = Modifier
+        .size(AvatarSize.LG.dp)
+        .clip(CircleShape)
+    Row(
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onOpenProfile)
+            .padding(Waddle.space.md)
+            .testTag(SettingsScreenTestTags.ACCOUNT_ROW),
+    ) {
+        when {
+            xmppAvatar != null -> Image(
+                bitmap = xmppAvatar,
+                contentDescription = avatarLabel,
+                contentScale = ContentScale.Crop,
+                modifier = avatarModifier,
+            )
+            state.avatarUrl != null -> AsyncImage(
+                model = state.avatarUrl,
+                contentDescription = avatarLabel,
+                contentScale = ContentScale.Crop,
+                modifier = avatarModifier,
+            )
+            // No image yet: initials, like every other person surface.
+            else -> PeerAvatar(
+                jid = null,
+                displayName = state.username ?: state.jid?.substringBefore('@').orEmpty(),
+                size = AvatarSize.LG.dp,
+                modifier = Modifier.semantics { contentDescription = avatarLabel },
+            )
+        }
+        Column(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs)) {
             Text(
                 text = state.username ?: stringResource(R.string.settings_account),
                 style = MaterialTheme.typography.titleMedium,
+                color = colors.fg,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
-        },
-        supportingContent = { state.jid?.let { Text(text = it, style = MonoMeta) } },
-        leadingContent = {
-            when {
-                xmppAvatar != null -> Image(
-                    bitmap = xmppAvatar,
-                    contentDescription = avatarLabel,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(ACCOUNT_AVATAR_SIZE)
-                        .clip(CircleShape),
+            state.jid?.let {
+                Text(
+                    text = it,
+                    style = Waddle.type.time,
+                    color = colors.fgMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                state.avatarUrl != null -> AsyncImage(
-                    model = state.avatarUrl,
-                    contentDescription = avatarLabel,
-                    contentScale = ContentScale.Crop,
-                    modifier = Modifier
-                        .size(ACCOUNT_AVATAR_SIZE)
-                        .clip(CircleShape),
-                )
-                // No image yet: initials, like every other person surface.
-                else -> PeerAvatar(
-                    jid = null,
-                    displayName = state.username ?: state.jid?.substringBefore('@').orEmpty(),
-                    size = ACCOUNT_AVATAR_SIZE,
-                    modifier = Modifier.semantics { contentDescription = avatarLabel },
-                )
-            }
-        },
-        trailingContent = { Chevron() },
-        colors = groupedRowColors(),
-        modifier = Modifier
-            .clickable(onClick = onOpenProfile)
-            .testTag(SettingsScreenTestTags.ACCOUNT_ROW),
-    )
-}
-
-private val ACCOUNT_AVATAR_SIZE = 52.dp
-
-@Composable
-private fun ThemeSelector(selected: ThemeMode, onSelect: (ThemeMode) -> Unit) {
-    val modes = listOf(ThemeMode.NIGHT, ThemeMode.DAYLIGHT)
-    SingleChoiceSegmentedButtonRow(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(Waddle.space.sm),
-    ) {
-        modes.forEachIndexed { index, mode ->
-            SegmentedButton(
-                selected = mode == selected,
-                onClick = { onSelect(mode) },
-                shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size),
-            ) {
-                Text(text = stringResource(mode.labelRes()))
             }
         }
+        RowChevron()
     }
+}
+
+/** Night or Daylight, as Material 3 Expressive's connected button group. */
+@Composable
+private fun ThemeSelector(selected: ThemeMode, onSelect: (ThemeMode) -> Unit) {
+    SegmentedChoice(
+        options = listOf(
+            ChoiceOption(ThemeMode.NIGHT, stringResource(R.string.settings_theme_night), Icons.Outlined.DarkMode),
+            ChoiceOption(
+                ThemeMode.DAYLIGHT,
+                stringResource(R.string.settings_theme_daylight),
+                Icons.Outlined.LightMode,
+            ),
+        ),
+        selected = selected,
+        onSelect = onSelect,
+        modifier = Modifier.padding(Waddle.space.md),
+    )
 }
 
 @Composable
@@ -401,17 +457,17 @@ private fun ToggleRow(
     toggleTestTag: String,
     supporting: String? = null,
 ) {
-    ListItem(
-        headlineContent = { Text(text = title) },
-        supportingContent = supporting?.let { { Text(text = it) } },
-        trailingContent = {
+    GroupedRow(
+        title = title,
+        supporting = supporting,
+        trailing = {
             Switch(
                 checked = checked,
                 onCheckedChange = onCheckedChange,
+                colors = huddleSwitchColors(),
                 modifier = Modifier.testTag(toggleTestTag),
             )
         },
-        colors = groupedRowColors(),
     )
 }
 
@@ -438,27 +494,18 @@ private fun BatteryOptimizationRow() {
         onPauseOrDispose {}
     }
 
-    ListItem(
-        headlineContent = { Text(text = stringResource(R.string.settings_battery_row_title)) },
-        supportingContent = {
-            Text(
-                text = stringResource(
-                    if (exempt) {
-                        R.string.settings_battery_exempt
-                    } else {
-                        R.string.settings_battery_not_exempt
-                    },
-                ),
-            )
-        },
-        trailingContent = {
+    GroupedRow(
+        title = stringResource(R.string.settings_battery_row_title),
+        supporting = stringResource(
+            if (exempt) R.string.settings_battery_exempt else R.string.settings_battery_not_exempt,
+        ),
+        trailing = {
             if (!exempt) {
                 TextButton(onClick = { requestBatteryExemption(context) }) {
-                    Text(text = stringResource(R.string.settings_battery_request))
+                    Text(text = stringResource(R.string.settings_battery_request), color = Waddle.colors.actionText)
                 }
             }
         },
-        colors = groupedRowColors(),
     )
 }
 
@@ -472,9 +519,4 @@ private fun requestBatteryExemption(context: Context) {
         "package:${context.packageName}".toUri(),
     )
     runCatching { context.startActivity(intent) }
-}
-
-private fun ThemeMode.labelRes(): Int = when (this) {
-    ThemeMode.NIGHT -> R.string.settings_theme_night
-    ThemeMode.DAYLIGHT -> R.string.settings_theme_daylight
 }

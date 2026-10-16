@@ -22,7 +22,9 @@ import social.waddle.android.client.canManageMembersOf
 import social.waddle.android.client.hasBotHat
 import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.store.MemberListStatus
+import social.waddle.android.client.store.PresenceShow
 import social.waddle.android.client.store.RoomMembersState
+import social.waddle.android.client.store.presenceShowOf
 import social.waddle.android.jid.bareJidOf
 import social.waddle.android.jid.localpartOf
 import social.waddle.android.viewModelFactoryOf
@@ -45,6 +47,13 @@ data class MemberRow(
     val hats: List<String>,
     /** Presence-only row: shown, never editable (web parity). */
     val inferred: Boolean,
+    /**
+     * Their Show: from their occupancy here, else from the People
+     * projection (other rooms, contacts); `null` when not seen anywhere.
+     */
+    val presence: PresenceShow? = null,
+    /** In this room's huddle (XEP-0272 Muji) right now. */
+    val inHuddle: Boolean = false,
 )
 
 /**
@@ -92,12 +101,19 @@ class MembersViewModel(
         sessionManager.roomMembersStore.rooms,
         sessionManager.presenceStore.occupants,
         search,
-    ) { rooms, occupants, searchState ->
+        sessionManager.callStore.mucCallPresence.participants,
+        sessionManager.peopleDirectory,
+    ) { rooms, occupants, searchState, huddles, directory ->
         val members = rooms[roomJid] ?: RoomMembersState()
         val roomOccupants = occupants[roomJid].orEmpty()
         MembersUiState(
             status = members.status,
-            rows = memberRowsOf(members, roomOccupants),
+            rows = memberRowsOf(
+                members = members,
+                occupants = roomOccupants,
+                huddleNicks = huddles[normalizedBareJid(roomJid)].orEmpty(),
+                knownShows = directory.people.associate { it.bareJid to it.show },
+            ),
             bots = botRowsOf(members.bots),
             canManage = canManageMembersOf(roomOccupants),
             searchQuery = searchState.query,
@@ -226,16 +242,35 @@ private fun tierOrderOf(affiliation: WaddleMucAffiliation): Int = when (affiliat
 }
 
 /**
+ * Who comes first (Huddle People order): the huddle, then who is here
+ * by availability (available, away, do not disturb), then everyone not
+ * in the room.
+ */
+private fun presenceOrderOf(row: MemberRow): Int = when {
+    row.inHuddle -> 0
+    !row.presentNow -> 4
+    row.presence == PresenceShow.AWAY || row.presence == PresenceShow.XA -> 2
+    row.presence == PresenceShow.DND -> 3
+    else -> 1
+}
+
+/**
  * Merge the authoritative member list with live occupants: list rows
  * gain "present now" + nick + hats when an occupant's real JID
  * matches; occupants missing from the list append as read-only
  * inferred rows (web `mergeMentionMembers` behavior). A momentary
  * occupant the server hatted `urn:waddle:hats:bot` is a bot (see
  * [botRowsOf]), never a person.
+ *
+ * Rows carry presence (their occupancy here, else [knownShows] by bare
+ * JID) and whether they are in this room's huddle ([huddleNicks]), and
+ * sort by presence, then affiliation tier, then name.
  */
 internal fun memberRowsOf(
     members: RoomMembersState,
     occupants: Map<String, WaddlePresence>,
+    huddleNicks: Set<String> = emptySet(),
+    knownShows: Map<String, PresenceShow> = emptyMap(),
 ): List<MemberRow> {
     val occupantsByBareJid = occupants.entries
         .mapNotNull { (nick, presence) ->
@@ -253,6 +288,8 @@ internal fun memberRowsOf(
             presentNow = occupant != null,
             hats = occupant?.second?.hats?.map { it.title }.orEmpty(),
             inferred = false,
+            presence = occupant?.second?.let(::presenceShowOf) ?: knownShows[normalizedBareJid(entry.jid)],
+            inHuddle = occupant?.first in huddleNicks,
         )
     }
     val inferred = occupants.entries
@@ -269,10 +306,12 @@ internal fun memberRowsOf(
                 presentNow = true,
                 hats = presence.hats.map { it.title },
                 inferred = true,
+                presence = presenceShowOf(presence),
+                inHuddle = nick in huddleNicks,
             )
         }
     return (listed + inferred).sortedWith(
-        compareBy({ tierOrderOf(it.affiliation) }, { it.displayName.lowercase() }),
+        compareBy({ presenceOrderOf(it) }, { tierOrderOf(it.affiliation) }, { it.displayName.lowercase() }),
     )
 }
 
