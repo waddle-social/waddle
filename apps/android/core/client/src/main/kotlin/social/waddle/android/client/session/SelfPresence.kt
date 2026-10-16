@@ -6,6 +6,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import social.waddle.android.client.DesiredPresence
+import java.time.Instant
 import java.time.temporal.ChronoUnit
 
 /**
@@ -75,15 +76,19 @@ internal class SelfPresence(
     /**
      * `(show, idleSince)` for the FFI: an RFC 6121 §4.7.2.1 `<show/>`
      * token (`null` is plain available) and a XEP-0319 `since`, a
-     * XEP-0082 DateTime in UTC. Returning to available omits `<idle/>`
-     * (XEP-0319 §2.2).
+     * XEP-0082 DateTime in UTC, whole seconds. Returning to available
+     * omits `<idle/>` (XEP-0319 §2.2).
      */
     private fun wireShapeOf(presence: DesiredPresence): Pair<String?, String?> = when (presence) {
         DesiredPresence.None, DesiredPresence.Available -> null to null
-        is DesiredPresence.Away -> SHOW_AWAY to presence.idleSince?.truncatedTo(ChronoUnit.SECONDS)?.toString()
+        is DesiredPresence.Away -> SHOW_AWAY to xep0082(presence.idleSince)
+        is DesiredPresence.ExtendedAway -> SHOW_EXTENDED_AWAY to xep0082(presence.idleSince)
     }
+
+    private fun xep0082(instant: Instant?): String? = instant?.truncatedTo(ChronoUnit.SECONDS)?.toString()
 
     private companion object {
         const val SHOW_AWAY = "away"
+        const val SHOW_EXTENDED_AWAY = "xa"
     }
 }

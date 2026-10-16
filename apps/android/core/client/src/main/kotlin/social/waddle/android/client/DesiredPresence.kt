@@ -27,4 +27,10 @@ sealed interface DesiredPresence {
      * present, is known.
      */
     data class Away(val idleSince: Instant?) : DesiredPresence
+
+    /**
+     * `<show>xa</show>` (RFC 6121 §4.7.2.1, extended away), stamped with
+     * XEP-0319 idle like [Away]. ADR-010 reaches it only automatically.
+     */
+    data class ExtendedAway(val idleSince: Instant?) : DesiredPresence
 }

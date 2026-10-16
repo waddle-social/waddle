@@ -139,11 +139,13 @@ class XmppSessionManagerPresenceTest {
     }
 
     @Test
-    fun `backgrounding with the stream kept sends away with idle, and returning sends available`() = runTest {
+    fun `auto-away sends away then xa with the same idle, and returning sends available`() = runTest {
         val harness = Harness(this)
         ready(harness)
 
         harness.desired.value = DesiredPresence.Away(LEFT_AT)
+        runCurrent()
+        harness.desired.value = DesiredPresence.ExtendedAway(LEFT_AT)
         runCurrent()
         harness.desired.value = DesiredPresence.Available
         runCurrent()
@@ -153,12 +155,14 @@ class XmppSessionManagerPresenceTest {
                 null to null,
                 // XEP-0319: a XEP-0082 UTC DateTime, whole seconds.
                 "away" to "2026-10-16T09:15:30Z",
+                // RFC 6121 §4.7.2.1 extended away, idle still since leaving.
+                "xa" to "2026-10-16T09:15:30Z",
                 // XEP-0319 §2.2: back from idle omits <idle/>.
                 null to null,
             ),
             harness.advertised(),
         )
-        assertEquals(listOf(null, null, null), harness.client.presence.calls.map { it.status })
+        assertEquals(listOf(null, null, null, null), harness.client.presence.calls.map { it.status })
         harness.manager.logout()
     }
 

@@ -17,10 +17,26 @@ import java.time.Instant
 /** What holds the stream open, and that letting go waits out a grace period. */
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConnectionDemandTest {
-    private var clock: Instant = STARTED_AT
+    /** Wall clock tied to virtual time, so auto-away steps are deterministic. */
+    private fun TestScope.now(): Instant = STARTED_AT.plusMillis(testScheduler.currentTime)
 
     private fun TestScope.demand() =
-        ConnectionDemand(backgroundScope, graceMillis = GRACE, now = { clock }).also { runCurrent() }
+        ConnectionDemand(backgroundScope, graceMillis = GRACE, now = { now() }).also { runCurrent() }
+
+    /** Bring the app up and leave it again; returns when it left. */
+    private fun TestScope.leaveApp(demand: ConnectionDemand): Instant {
+        demand.setProcessStarted(true)
+        runCurrent()
+        val left = now()
+        demand.setProcessStarted(false)
+        runCurrent()
+        return left
+    }
+
+    private fun TestScope.advanceMinutes(minutes: Long) {
+        advanceTimeBy(minutes * MINUTE_MILLIS)
+        runCurrent()
+    }
 
     @Test
     fun `a background cold start wants nothing`() = runTest {
@@ -115,21 +131,44 @@ class ConnectionDemandTest {
     }
 
     @Test
-    fun `backgrounding with stay-connected goes away idle since leaving`() = runTest {
+    fun `backgrounding with the stream kept steps through ADR-010 auto-away`() = runTest {
         val demand = demand()
         demand.setStayConnected(true)
-        demand.setProcessStarted(true)
-        runCurrent()
+        advanceMinutes(1)
+        val left = leaveApp(demand)
 
-        clock = LEFT_AT
-        demand.setProcessStarted(false)
-        clock = LEFT_AT.plusSeconds(LATER_SECONDS)
-        runCurrent()
-        assertEquals(DesiredPresence.Away(LEFT_AT), demand.presence.value)
+        advanceMinutes(AWAY_MINUTES - 1)
+        assertEquals("still available before ten minutes", DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(1)
+        assertEquals("idle since leaving the app", DesiredPresence.Away(left), demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES - AWAY_MINUTES - 1)
+        assertEquals(DesiredPresence.Away(left), demand.presence.value)
+        advanceMinutes(1)
+        assertEquals("same idle stamp", DesiredPresence.ExtendedAway(left), demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES)
+        assertEquals("nothing past extended away", DesiredPresence.ExtendedAway(left), demand.presence.value)
+    }
+
+    @Test
+    fun `returning to the foreground cancels the pending auto-away step`() = runTest {
+        val demand = demand()
+        demand.setStayConnected(true)
+        leaveApp(demand)
+        advanceMinutes(AWAY_MINUTES - 1)
 
         demand.setProcessStarted(true)
         runCurrent()
         assertEquals(DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES * 2)
+        assertEquals("the old timer never fires", DesiredPresence.Available, demand.presence.value)
+
+        // Leaving again restarts the clock from the new departure.
+        val leftAgain = leaveApp(demand)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals(DesiredPresence.Away(leftAgain), demand.presence.value)
+        demand.setProcessStarted(true)
+        runCurrent()
+        assertEquals("back from away at once", DesiredPresence.Available, demand.presence.value)
     }
 
     @Test
@@ -137,6 +176,8 @@ class ConnectionDemandTest {
         val demand = demand()
         demand.setStayConnected(true)
         runCurrent()
+        assertEquals(DesiredPresence.Away(idleSince = null), demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES)
         assertEquals(DesiredPresence.Away(idleSince = null), demand.presence.value)
     }
 
@@ -149,44 +190,44 @@ class ConnectionDemandTest {
         assertEquals(DesiredPresence.None, demand.presence.value)
 
         // Push mode: leaving the app keeps the stream for the grace only.
-        demand.setProcessStarted(true)
-        runCurrent()
-        demand.setProcessStarted(false)
-        runCurrent()
+        leaveApp(demand)
+        assertEquals(DesiredPresence.None, demand.presence.value)
+        advanceMinutes(AWAY_MINUTES)
         assertEquals(DesiredPresence.None, demand.presence.value)
     }
 
     @Test
-    fun `a ringing call in the background is away but a live call is present`() = runTest {
+    fun `a ringing call follows auto-away but a live call is present`() = runTest {
         val demand = demand()
-        clock = LEFT_AT
-        demand.setProcessStarted(true)
-        demand.setProcessStarted(false)
+        val left = leaveApp(demand)
         demand.setCallActive(true)
         runCurrent()
-        assertEquals("a ring is not presence", DesiredPresence.Away(LEFT_AT), demand.presence.value)
+        assertEquals("a ring holds the stream for the user", DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals("a ring is not presence", DesiredPresence.Away(left), demand.presence.value)
 
         // ADR-010: a live call is proof of presence and pauses auto-away.
         demand.setInCall(true)
         runCurrent()
         assertEquals(DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(EXTENDED_AWAY_MINUTES)
+        assertEquals(DesiredPresence.Available, demand.presence.value)
 
-        clock = LEFT_AT.plusSeconds(LATER_SECONDS)
+        val callEnded = now()
         demand.setInCall(false)
         demand.setStayConnected(true)
         demand.setCallActive(false)
         runCurrent()
-        assertEquals(
-            "idle runs from the end of the call",
-            DesiredPresence.Away(LEFT_AT.plusSeconds(LATER_SECONDS)),
-            demand.presence.value,
-        )
+        assertEquals(DesiredPresence.Available, demand.presence.value)
+        advanceMinutes(AWAY_MINUTES)
+        assertEquals("idle runs from the end of the call", DesiredPresence.Away(callEnded), demand.presence.value)
     }
 
     private companion object {
         const val GRACE = 30_000L
-        const val LATER_SECONDS = 600L
+        const val MINUTE_MILLIS = 60_000L
+        const val AWAY_MINUTES = 10L
+        const val EXTENDED_AWAY_MINUTES = 30L
         val STARTED_AT: Instant = Instant.parse("2026-10-16T08:00:00Z")
-        val LEFT_AT: Instant = Instant.parse("2026-10-16T09:15:30Z")
     }
 }
