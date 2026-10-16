@@ -419,7 +419,10 @@
     <string name="home_quiet_day">All caught up. The room is yours.</string>
     <string name="home_quiet_evening">All caught up. Maybe say hi to someone.</string>
     <string name="home_quiet_night">Quiet night. Sleep well — or send a long-form note.</string>
-    <string name="home_kicker_around">%1$d around</string>
+    <plurals name="home_kicker_around">
+        <item quantity="one">%1$d around</item>
+        <item quantity="other">%1$d around</item>
+    </plurals>
     <string name="home_kicker_in_huddle">%1$d in a huddle</string>
     <plurals name="home_summary_mentions">
         <item quantity="one">mention</item>
@@ -486,19 +489,28 @@
         <item quantity="one">%1$d room</item>
         <item quantity="other">%1$d rooms</item>
     </plurals>
-    <string name="rooms_live">%1$d live</string>
+    <plurals name="rooms_live">
+        <item quantity="one">%1$d live</item>
+        <item quantity="other">%1$d live</item>
+    </plurals>
     <string name="rooms_new">New room</string>
     <string name="rooms_search">Find a room</string>
     <string name="rooms_loading">Finding your rooms.</string>
     <string name="rooms_empty">No rooms yet. Create the first one and invite people in.</string>
     <string name="rooms_no_match">No rooms match “%1$s”.</string>
     <string name="room_kicker_room">Room</string>
-    <string name="room_kicker_here">Room · %1$d here</string>
+    <plurals name="room_kicker_here">
+        <item quantity="one">Room · %1$d here</item>
+        <item quantity="other">Room · %1$d here</item>
+    </plurals>
     <plurals name="room_kicker_mentions">
         <item quantity="one">Room · %1$d mention</item>
         <item quantity="other">Room · %1$d mentions</item>
     </plurals>
-    <string name="room_kicker_unread">Room · %1$d unread</string>
+    <plurals name="room_kicker_unread">
+        <item quantity="one">Room · %1$d unread</item>
+        <item quantity="other">Room · %1$d unread</item>
+    </plurals>
     <string name="room_kicker_active">Room · active</string>
     <string name="room_kicker_quiet">Room · quiet</string>
     <string name="room_kicker_voice_huddle">Voice huddle · %1$d in</string>
@@ -512,7 +524,10 @@
         <item quantity="one">%1$d mention</item>
         <item quantity="other">%1$d mentions</item>
     </plurals>
-    <string name="room_unread_description">%1$d unread</string>
+    <plurals name="room_unread_description">
+        <item quantity="one">%1$d unread</item>
+        <item quantity="other">%1$d unread</item>
+    </plurals>
     <string name="people_title">People</string>
     <string name="people_lead">Everyone in your rooms. Tap someone to message them.</string>
     <plurals name="people_count">

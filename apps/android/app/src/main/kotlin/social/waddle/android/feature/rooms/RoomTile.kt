@@ -53,9 +53,9 @@ fun roomKickerText(kicker: RoomKicker): String = when (kicker) {
         if (kicker.video) R.string.room_kicker_video_huddle else R.string.room_kicker_voice_huddle,
         kicker.count,
     )
-    is RoomKicker.Here -> stringResource(R.string.room_kicker_here, kicker.count)
+    is RoomKicker.Here -> pluralStringResource(R.plurals.room_kicker_here, kicker.count, kicker.count)
     is RoomKicker.Mentions -> pluralStringResource(R.plurals.room_kicker_mentions, kicker.count, kicker.count)
-    is RoomKicker.Unread -> stringResource(R.string.room_kicker_unread, kicker.count)
+    is RoomKicker.Unread -> pluralStringResource(R.plurals.room_kicker_unread, kicker.count, kicker.count)
     RoomKicker.Active -> stringResource(R.string.room_kicker_active)
     RoomKicker.Quiet -> stringResource(R.string.room_kicker_quiet)
     RoomKicker.Room -> stringResource(R.string.room_kicker_room)
@@ -168,7 +168,7 @@ private fun RoomBadge(room: RoomActivity) {
             )
         }
         room.loudUnread > 0 -> {
-            val description = stringResource(R.string.room_unread_description, room.loudUnread)
+            val description = pluralStringResource(R.plurals.room_unread_description, room.loudUnread, room.loudUnread)
             CountBadge(
                 count = room.loudUnread,
                 modifier = Modifier.clearAndSetSemantics { contentDescription = description },

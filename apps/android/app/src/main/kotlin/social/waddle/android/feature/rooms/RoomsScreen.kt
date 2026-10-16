@@ -185,7 +185,7 @@ fun RoomsContent(
 private fun RoomsHeader(rooms: List<RoomActivity>, canCreate: Boolean, onCreate: () -> Unit) {
     val live = rooms.count { it.live }
     val count = pluralStringResource(R.plurals.rooms_count, rooms.size, rooms.size)
-    val kicker = if (live > 0) "$count · ${stringResource(R.string.rooms_live, live)}" else count
+    val kicker = if (live > 0) "$count · ${pluralStringResource(R.plurals.rooms_live, live, live)}" else count
     PageHeader(
         title = stringResource(R.string.rooms_title),
         kicker = kicker,

@@ -255,7 +255,7 @@ private fun heroKickerOf(model: HeroModel): String {
     val parts = buildList {
         // Web parity ("Fri 16 Oct"): the kicker's dots already separate.
         add(DateTimeFormatter.ofPattern(pattern, locale).format(model.now).replace(",", ""))
-        if (model.around > 0) add(stringResource(R.string.home_kicker_around, model.around))
+        if (model.around > 0) add(pluralStringResource(R.plurals.home_kicker_around, model.around, model.around))
         if (model.inHuddle > 0) add(stringResource(R.string.home_kicker_in_huddle, model.inHuddle))
     }
     // Each segment stays whole when large text wraps the line.
@@ -413,7 +413,7 @@ fun BusyRoomCard(room: RoomActivity, now: ZonedDateTime, onOpen: () -> Unit, mod
         Kicker(
             text = when {
                 room.mentions > 0 -> pluralStringResource(R.plurals.room_kicker_mentions, room.mentions, room.mentions)
-                else -> stringResource(R.string.room_kicker_unread, room.loudUnread)
+                else -> pluralStringResource(R.plurals.room_kicker_unread, room.loudUnread, room.loudUnread)
             },
             color = if (room.mentions > 0) colors.liveText else colors.fgMuted,
         )

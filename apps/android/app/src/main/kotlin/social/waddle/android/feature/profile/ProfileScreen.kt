@@ -641,8 +641,8 @@ private fun TuneDraftField(
     field: ProfileViewModel.TuneField,
     labelRes: Int,
     value: String,
-    isError: Boolean = false,
     modifier: Modifier = Modifier,
+    isError: Boolean = false,
 ) {
     ProfileField(
         value = value,
@@ -670,9 +670,9 @@ private fun ProfileField(
     labelRes: Int,
     enabled: Boolean,
     testTag: String,
+    modifier: Modifier = Modifier,
     singleLine: Boolean = true,
     isError: Boolean = false,
-    modifier: Modifier = Modifier.fillMaxWidth(),
 ) {
     OutlinedTextField(
         value = value,
@@ -684,7 +684,9 @@ private fun ProfileField(
         isError = isError,
         shape = HuddleFieldShape,
         colors = huddleFieldColors(),
-        modifier = modifier.testTag(testTag),
+        // Full width of whatever slot it is given: the whole form, or a
+        // weighted half of a FieldPair.
+        modifier = modifier.fillMaxWidth().testTag(testTag),
     )
 }
 
