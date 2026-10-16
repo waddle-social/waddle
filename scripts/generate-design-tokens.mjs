@@ -344,7 +344,7 @@ function huddleColor(name, scheme) {
 // rem (16px root) or px -> a dp/sp number.
 function huddleLength(category, name) {
   const value = String(huddleValue(category, name));
-  const match = value.match(/^(-?[0-9.]+)(rem|px)$/);
+  const match = /^(-?[\d.]+)(rem|px)$/.exec(value);
   if (!match) throw new Error(`${category}.${name}: expected rem or px, got "${value}"`);
   return Number(match[1]) * (match[2] === "rem" ? 16 : 1);
 }
@@ -355,21 +355,21 @@ const ktFloat = (n) => `${n}f`;
 
 function huddleEm(category, name) {
   const value = String(huddleValue(category, name));
-  const match = value.match(/^(-?[0-9.]+)(em)?$/);
+  const match = /^(-?[\d.]+)(em)?$/.exec(value);
   if (!match) throw new Error(`${category}.${name}: expected a number or em, got "${value}"`);
   return `${ktNumber(Number(match[1]))}.em`;
 }
 
 function huddleMillis(name) {
   const value = String(huddleValue("durations", name));
-  const match = value.match(/^([0-9]+)ms$/);
+  const match = /^(\d+)ms$/.exec(value);
   if (!match) throw new Error(`durations.${name}: expected ms, got "${value}"`);
   return Number(match[1]);
 }
 
 function huddleCubicBezier(name) {
   const value = String(huddleValue("easings", name));
-  const match = value.match(/^cubic-bezier\(([^)]+)\)$/);
+  const match = /^cubic-bezier\(([^)]+)\)$/.exec(value);
   const points = match?.[1].split(",").map((v) => Number(v.trim()));
   if (!points || points.length !== 4 || points.some(Number.isNaN)) {
     throw new Error(`easings.${name}: expected cubic-bezier(x1, y1, x2, y2), got "${value}"`);
@@ -377,18 +377,27 @@ function huddleCubicBezier(name) {
   return `CubicBezierEasing(${points.map(ktFloat).join(", ")})`;
 }
 
-// Single-layer box-shadow: `x y blur [spread] color`.
+// Single-layer box-shadow: `x y blur [spread] color`. Lengths are peeled
+// off the front one at a time (no backtracking); the rest is the colour.
+const SHADOW_LENGTH = /^(-?[\d.]+(?:px)?)\s+/;
+
 function huddleShadow(name) {
-  const value = String(huddleValue("shadows", name));
-  const match = value.match(/^(-?[0-9.]+(?:px)?)\s+(-?[0-9.]+(?:px)?)\s+([0-9.]+(?:px)?)(?:\s+(-?[0-9.]+(?:px)?))?\s+(.+)$/);
-  const color = match && colorLiteral(match[5].trim());
+  const value = String(huddleValue("shadows", name)).trim();
+  const lengths = [];
+  let rest = value;
+  for (let m = SHADOW_LENGTH.exec(rest); m && lengths.length < 4; m = SHADOW_LENGTH.exec(rest)) {
+    lengths.push(m[1]);
+    rest = rest.slice(m[0].length);
+  }
+  const color = lengths.length >= 3 ? colorLiteral(rest.trim()) : null;
   if (!color) throw new Error(`shadows.${name}: expected "x y blur [spread] colour", got "${value}"`);
+  const [offsetX, offsetY, blur, spread] = lengths;
   const dp = (v) => `${ktNumber(Number.parseFloat(v ?? "0"))}.dp`;
   return [
-    `offsetX = ${dp(match[1])}`,
-    `offsetY = ${dp(match[2])}`,
-    `blur = ${dp(match[3])}`,
-    `spread = ${dp(match[4])}`,
+    `offsetX = ${dp(offsetX)}`,
+    `offsetY = ${dp(offsetY)}`,
+    `blur = ${dp(blur)}`,
+    `spread = ${dp(spread)}`,
     `color = Color(${color})`,
   ];
 }

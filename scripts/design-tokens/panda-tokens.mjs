@@ -99,7 +99,7 @@ export function createPandaTokenResolver({ tokens, semanticTokens, conditions })
 
   function substitute(raw, scheme, stack) {
     if (typeof raw !== "string") return raw;
-    const whole = raw.match(/^\{([^{}]+)\}$/);
+    const whole = /^\{([^{}]+)\}$/.exec(raw);
     if (whole) return lookupPath(whole[1], scheme, stack);
     return raw.replace(REFERENCE, (_, path) => String(lookupPath(path, scheme, stack)));
   }

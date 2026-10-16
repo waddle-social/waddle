@@ -213,7 +213,7 @@ class BareJidMap<V> internal constructor(private val normalized: Map<String, V>)
 
     override fun containsKey(key: String): Boolean = normalized.containsKey(normalizedBareJid(key))
 
-    override fun equals(other: Any?): Boolean = normalized == other
+    override fun equals(other: Any?): Boolean = other is Map<*, *> && normalized == other
 
     override fun hashCode(): Int = normalized.hashCode()
 
