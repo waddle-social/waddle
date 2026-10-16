@@ -163,6 +163,25 @@ pub(crate) async fn wire_for_test(
     services.web_socket_state = Arc::downgrade(state);
     bridge.wire(Arc::new(services));
 }
+
+#[cfg(test)]
+pub(crate) async fn track_remote_socket_for_test(
+    bridge: &OrderedRelayDeliveryBridge,
+    jid: &jid::FullJid,
+    owner: Arc<AtomicBool>,
+) -> RemoteResourceRegistrationId {
+    let registration_id = RemoteResourceRegistrationId::fresh();
+    bridge.remote_socket_resources.lock().await.insert(
+        jid.clone(),
+        RemoteSocketRegistration {
+            registration_id,
+            socket_generation: RemoteResourceSocketGeneration::next(None),
+            owner,
+            user_owner: NodeId::new("owner-node".to_owned()),
+        },
+    );
+    registration_id
+}
 pub(crate) use types::{RemoteResourceRegisterOutcome, RemoteResourceUnregisterOutcome};
 use validation::*;
 

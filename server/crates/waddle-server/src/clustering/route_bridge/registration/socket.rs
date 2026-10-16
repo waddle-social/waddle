@@ -1036,6 +1036,14 @@ impl OrderedRelayDeliveryBridge {
                 status: RelayRemoteResourceForceDetachStatus::Unknown,
             };
         };
+        if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+            && msg.requester_bare_jid != msg.jid.to_bare()
+        {
+            return RelayForceDetachRemoteUserResourceReply {
+                outcome: ForceDetachOutcome::IdentityMismatch,
+                status: RelayRemoteResourceForceDetachStatus::Refused,
+            };
+        }
         let registration = {
             let registrations = self.remote_socket_resources.lock().await;
             registrations
@@ -1079,7 +1087,13 @@ impl OrderedRelayDeliveryBridge {
             requester_bare_jid: msg.requester_bare_jid.clone(),
             ack,
         };
-        if entry.force_detach_sender().try_send(request).is_err() {
+        let queued = if msg.origin == waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement
+        {
+            entry.try_force_detach_and_interrupt(request)
+        } else {
+            entry.force_detach_sender().try_send(request)
+        };
+        if queued.is_err() {
             return RelayForceDetachRemoteUserResourceReply {
                 outcome: ForceDetachOutcome::NotPersisted,
                 status: RelayRemoteResourceForceDetachStatus::Unknown,
@@ -1195,6 +1209,10 @@ async fn complete_fresh_remote_retirement(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "socket_retirement_tests.rs"]
+mod retirement_tests;
 
 #[cfg(test)]
 mod tests {

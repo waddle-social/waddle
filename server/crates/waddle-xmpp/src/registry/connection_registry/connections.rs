@@ -48,15 +48,7 @@ impl ConnectionRegistry {
         if blocklist_interested {
             entry.blocklist_interested.store(true, Ordering::Relaxed);
         }
-        let carbons_handle = entry.carbons_handle();
-        let existing = self.connections.insert(jid.clone(), entry);
-        if existing.is_some() {
-            debug!("Replaced existing connection registration");
-        } else {
-            crate::metrics::adjust_connections_active(1);
-            debug!("Registered new connection");
-        }
-        carbons_handle
+        self.register_entry(jid, entry)
     }
 
     /// Register an already-constructed connection entry.
@@ -69,12 +61,19 @@ impl ConnectionRegistry {
     #[instrument(skip(self, entry, jid), fields(jid = %jid))]
     pub fn register_entry(&self, jid: FullJid, entry: ConnectionEntry) -> Arc<AtomicBool> {
         let carbons_handle = entry.carbons_handle();
-        let existing = self.connections.insert(jid, entry);
-        if existing.is_some() {
-            debug!("Replaced existing connection registration");
-        } else {
-            crate::metrics::adjust_connections_active(1);
-            debug!("Registered new connection");
+        match self.connections.entry(jid.clone()) {
+            dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
+                if occupied.get().sm_stream_id() != entry.sm_stream_id() {
+                    Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
+                }
+                occupied.insert(entry);
+                debug!("Replaced existing connection registration");
+            }
+            dashmap::mapref::entry::Entry::Vacant(vacant) => {
+                vacant.insert(entry);
+                crate::metrics::adjust_connections_active(1);
+                debug!("Registered new connection");
+            }
         }
         carbons_handle
     }
@@ -91,11 +90,14 @@ impl ConnectionRegistry {
             debug!("Skipped register: entry owner does not match guard owner");
             return false;
         }
-        match self.connections.entry(jid) {
+        match self.connections.entry(jid.clone()) {
             dashmap::mapref::entry::Entry::Occupied(mut occupied) => {
                 if !Arc::ptr_eq(&occupied.get().carbons_enabled, owner) {
                     debug!("Skipped register: ownership moved to replacement connection");
                     return false;
+                }
+                if occupied.get().sm_stream_id() != entry.sm_stream_id() {
+                    Self::remove_sm_stream_owner(&self.sm_stream_owners, &jid, occupied.get());
                 }
                 occupied.insert(entry);
                 debug!("Replaced owned connection registration");
@@ -115,7 +117,10 @@ impl ConnectionRegistry {
     /// Returns the connection entry if the connection was registered, None otherwise.
     #[instrument(skip(self, jid), fields(jid = %jid))]
     pub fn unregister(&self, jid: &FullJid) -> Option<ConnectionEntry> {
-        let removed = self.connections.remove(jid);
+        let removed = self.connections.remove_if(jid, |_, entry| {
+            Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            true
+        });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
@@ -145,7 +150,11 @@ impl ConnectionRegistry {
         carbons_handle: &Arc<AtomicBool>,
     ) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
-            Arc::ptr_eq(&entry.carbons_enabled, carbons_handle)
+            if !Arc::ptr_eq(&entry.carbons_enabled, carbons_handle) {
+                return false;
+            }
+            Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
@@ -174,7 +183,11 @@ impl ConnectionRegistry {
         stream_id: &crate::pending_delivery::SmSessionId,
     ) -> Option<ConnectionEntry> {
         let removed = self.connections.remove_if(jid, |_, entry| {
-            entry.sm_stream_id().as_ref() == Some(stream_id)
+            if entry.sm_stream_id().as_ref() != Some(stream_id) {
+                return false;
+            }
+            Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);

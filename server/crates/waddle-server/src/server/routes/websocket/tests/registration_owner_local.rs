@@ -1,3 +1,9 @@
+use super::super::super::{
+    connection::{finish_connection, ConnectionShutdownChannels, FrameAuthority},
+    outbound::{handle_outbound_stanza, OutboundAuthority},
+    send::InterruptibleSink,
+    timers::TransportTimers,
+};
 use super::*;
 use crate::clustering::{
     relay::RelayRemoteResourceRegistrationStatus,
@@ -12,6 +18,170 @@ use waddle_xmpp::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
 };
 use waddle_xmpp::registry::{ForceDetachOrigin, SocketCleanupState};
+
+#[tokio::test]
+async fn remote_fresh_bind_interrupts_owner_local_write_in_readiness() {
+    assert_remote_fresh_bind_interrupts_owner_local_write(super::super::send::PendingReadySink {
+        sent: Vec::new(),
+    })
+    .await;
+}
+
+#[tokio::test]
+async fn remote_fresh_bind_interrupts_owner_local_write_in_flush() {
+    assert_remote_fresh_bind_interrupts_owner_local_write(super::super::send::PendingFlushSink {
+        sent: Vec::new(),
+    })
+    .await;
+}
+
+async fn assert_remote_fresh_bind_interrupts_owner_local_write<S>(inner: S)
+where
+    S: futures::Sink<axum::extract::ws::Message, Error = &'static str> + Unpin,
+{
+    use waddle_xmpp::stream_management::SmSessionRegistry;
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/owner-local-stall".parse().expect("JID");
+    let (outcome, mut incumbent, mut outbound_rx, _) =
+        bind_fresh_test_connection(state.clone(), jid.clone()).await;
+    assert!(matches!(outcome, RegistrationAfterFrame::Registered(_)));
+    incumbent.authenticated_session = Some(create_test_session(&state, "alice").await);
+    let lifecycle = incumbent.socket_lifecycle.clone().expect("lifecycle");
+    let old_owner = incumbent.registry_owner.clone().expect("owner");
+    let mut force_detach_rx = Some(lifecycle.entry.take_force_detach_rx().expect("control"));
+    let stream_id = "owner-local-stalled-stream";
+    incumbent
+        .sm_state
+        .enable(stream_id.to_owned(), true, Some(300));
+    drop(
+        state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim(stream_id)
+            .await
+            .expect("stream claim"),
+    );
+    publish_stream_id_and_presence(&state, &jid, &old_owner, &incumbent);
+    let bridge = owner_bridge(&state, &jid).await;
+    let replacement = remote_registration_request(
+        &bridge,
+        jid.clone(),
+        NodeId::new("remote-socket".to_owned()),
+    )
+    .await;
+    let permit = state.deps.app_state.node_lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let mut sink = InterruptibleSink::new(inner, incumbent.write_interruption.clone());
+    let mut reader = futures::stream::pending::<Result<axum::extract::ws::Message, &'static str>>();
+    let mut timers = TransportTimers::new();
+    let stanza = xmpp_parsers::iq::Iq::from_get("blocked-outbound", xmpp_parsers::ping::Ping);
+    let started = tokio::time::Instant::now();
+    {
+        let outbound = handle_outbound_stanza(
+            &mut sink,
+            &mut reader,
+            &state,
+            &mut incumbent,
+            &mut timers,
+            OutboundStanza::new(Stanza::Iq(Box::new(stanza))),
+            OutboundAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+        );
+        tokio::pin!(outbound);
+        assert!(futures::poll!(outbound.as_mut()).is_pending());
+        assert_eq!(
+            bridge
+                .register_remote_user_resource_on_owner(replacement.clone())
+                .await
+                .status,
+            RelayRemoteResourceRegistrationStatus::Busy
+        );
+        assert!(!timeout(Duration::from_secs(1), outbound)
+            .await
+            .expect("remote fresh bind interrupts the owner-local 60-second write budget"));
+    }
+    assert_eq!(lifecycle.state(), SocketCleanupState::Running);
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .is_owned_by(&jid, &old_owner));
+
+    // Leave the request queued: the production shutdown tail must identify
+    // fresh replacement and retire, rather than preserve, the old SM state.
+    let (_handoff_tx, mut handoff_rx) = mpsc::unbounded_channel();
+    let mut pending_force_detach = Vec::new();
+    timeout(
+        Duration::from_secs(1),
+        finish_connection(
+            &state,
+            &mut incumbent,
+            sink.uninterrupted(),
+            FrameAuthority {
+                permit: &permit,
+                shutdown: &shutdown,
+            },
+            false,
+            ConnectionShutdownChannels {
+                outbound_rx: &mut outbound_rx,
+                handoff_rx: &mut handoff_rx,
+                force_detach_rx: &mut force_detach_rx,
+                pending_force_detach: &mut pending_force_detach,
+            },
+        ),
+    )
+    .await
+    .expect("owning socket shutdown completes within bind and relay budgets");
+    let guard = timeout(
+        Duration::from_secs(1),
+        state.deps.protocol.connection_registry.lock_bind(&jid),
+    )
+    .await
+    .expect("background owner-local retirement completes");
+    assert!(guard.pending_retirements().is_empty());
+    drop(guard);
+    assert_eq!(lifecycle.state(), SocketCleanupState::Retired);
+    assert!(state
+        .deps
+        .protocol
+        .sm_session_registry
+        .peek_session(stream_id)
+        .await
+        .expect("snapshot lookup")
+        .is_none());
+    assert_eq!(
+        bridge
+            .register_remote_user_resource_on_owner(replacement.clone())
+            .await
+            .status,
+        RelayRemoteResourceRegistrationStatus::Registered
+    );
+    assert!(started.elapsed() < crate::config::ORDERED_RELAY_REPLY_TIMEOUT);
+    assert!(started.elapsed() < Duration::from_secs(10));
+    let successor = state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .expect("successor mirror");
+    assert!(!successor.is_locally_hosted());
+    assert_eq!(
+        successor.occupancy_session(),
+        replacement.state.occupancy_session
+    );
+    let successor_owner = successor.carbons_handle();
+    finish_test_socket_cleanup(&state, &mut incumbent, &mut outbound_rx).await;
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .is_owned_by(&jid, &successor_owner));
+    assert!(!successor.write_interruption.is_cancelled());
+}
 
 async fn owner_bridge(
     state: &Arc<super::super::super::WebSocketState>,
@@ -330,6 +500,10 @@ async fn remote_same_generation_resume_preserves_owner_local_sm_snapshot() {
         .expect("detach request")
         .expect("request");
     assert_eq!(detach.origin, ForceDetachOrigin::CrossNodeResume);
+    assert!(
+        !incumbent.write_interruption.is_cancelled(),
+        "same-generation resume keeps the existing socket interruption policy"
+    );
     finish_requested_cleanup(&state, &mut incumbent, &mut rx, detach.origin).await;
     let guard = timeout(
         Duration::from_secs(5),

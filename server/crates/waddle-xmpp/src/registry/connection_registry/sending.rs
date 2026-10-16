@@ -472,6 +472,7 @@ impl ConnectionRegistry {
     ) -> impl FnOnce() -> BroadcastOutcome + Send + 'static {
         let connections = self.connections.clone();
         let presence_states = self.presence_states.clone();
+        let sm_stream_owners = self.sm_stream_owners.clone();
         move || {
             let entry = match connections.get(&jid) {
                 Some(entry) if Arc::ptr_eq(&entry.carbons_enabled, &owner) => entry.value().clone(),
@@ -494,6 +495,7 @@ impl ConnectionRegistry {
                     Self::remove_closed_owner_entry(
                         &connections,
                         &presence_states,
+                        &sm_stream_owners,
                         &jid,
                         &entry.sender,
                     );
@@ -512,9 +514,13 @@ impl ConnectionRegistry {
     /// and the connected-users metric and presence state are updated;
     /// otherwise this is a no-op.
     pub(super) fn remove_if_sender_closed(&self, jid: &FullJid) {
-        let removed = self
-            .connections
-            .remove_if(jid, |_, entry| entry.sender.is_closed());
+        let removed = self.connections.remove_if(jid, |_, entry| {
+            if !entry.sender.is_closed() {
+                return false;
+            }
+            Self::remove_sm_stream_owner(&self.sm_stream_owners, jid, entry);
+            true
+        });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);
             self.presence_states.remove(jid);
@@ -533,17 +539,28 @@ impl ConnectionRegistry {
         jid: &FullJid,
         sender: &mpsc::Sender<OutboundStanza>,
     ) {
-        Self::remove_closed_owner_entry(&self.connections, &self.presence_states, jid, sender);
+        Self::remove_closed_owner_entry(
+            &self.connections,
+            &self.presence_states,
+            &self.sm_stream_owners,
+            jid,
+            sender,
+        );
     }
 
     fn remove_closed_owner_entry(
         connections: &DashMap<FullJid, ConnectionEntry>,
         presence_states: &DashMap<FullJid, PresenceState>,
+        sm_stream_owners: &DashMap<crate::pending_delivery::SmSessionId, FullJid>,
         jid: &FullJid,
         sender: &mpsc::Sender<OutboundStanza>,
     ) {
         let removed = connections.remove_if(jid, |_, entry| {
-            entry.sender.is_closed() && entry.sender.same_channel(sender)
+            if !entry.sender.is_closed() || !entry.sender.same_channel(sender) {
+                return false;
+            }
+            Self::remove_sm_stream_owner(sm_stream_owners, jid, entry);
+            true
         });
         if removed.is_some() {
             crate::metrics::adjust_connections_active(-1);

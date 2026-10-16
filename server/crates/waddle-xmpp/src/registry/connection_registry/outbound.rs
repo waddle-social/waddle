@@ -324,8 +324,8 @@ pub struct ConnectionEntry {
     /// **Council-adjudicated fix (updating this comment to match reality,
     /// not the original design intent)**: the capacity here is
     /// belt-and-suspenders, not the load-bearing bound it once was.
-    /// `ResumeStealBridge::request_forced_detach` (the sole production
-    /// sender) uses `try_send`, not a blocking `send().await` — a full or
+    /// `ResumeStealBridge::request_forced_detach` uses `try_send`, not a
+    /// blocking `send().await` — a full or
     /// closed channel answers `NotLiveLocally` immediately rather than
     /// waiting for capacity that may never free up. This is belt-and
     /// -suspenders alongside (not a replacement for) the
@@ -422,6 +422,20 @@ impl ConnectionEntry {
     /// -detach.
     pub fn force_detach_sender(&self) -> mpsc::Sender<ForceDetachRequest> {
         self.force_detach_tx.clone()
+    }
+
+    /// Queue retirement before interrupting this captured connection's I/O.
+    /// The caller must first verify requester identity, ownership, and any
+    /// applicable stream or occupancy generation. Cleanup and acknowledgement
+    /// remain the owning task's responsibility. A failed enqueue leaves I/O
+    /// uninterrupted; callers that must preserve I/O use the ordinary sender.
+    pub fn try_force_detach_and_interrupt(
+        &self,
+        request: ForceDetachRequest,
+    ) -> Result<(), mpsc::error::TrySendError<ForceDetachRequest>> {
+        self.force_detach_tx.try_send(request)?;
+        self.write_interruption.cancel();
+        Ok(())
     }
 
     /// Take this connection's force-detach receiver, wiring it into the

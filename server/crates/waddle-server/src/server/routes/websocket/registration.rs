@@ -72,25 +72,20 @@ async fn prepare_socket_bind(
         }
         if incumbent.state() == SocketCleanupState::Running {
             let (ack, _ack_rx) = tokio::sync::oneshot::channel();
-            let retirement_queued = incumbent
-                .entry
-                .force_detach_sender()
-                .try_send(ForceDetachRequest {
-                    origin: if resumed {
-                        ForceDetachOrigin::CrossNodeResume
-                    } else {
-                        ForceDetachOrigin::FreshBindReplacement
-                    },
-                    requester_bare_jid: jid.to_bare(),
-                    ack,
-                })
-                .is_ok();
-            if retirement_queued && !resumed {
-                // Wake only this captured incumbent's socket writes after its
-                // terminal retirement is queued. Protocol work and deferred
-                // inbound processing still finish on the owning task.
-                incumbent.entry.write_interruption.cancel();
-            }
+            let request = ForceDetachRequest {
+                origin: if resumed {
+                    ForceDetachOrigin::CrossNodeResume
+                } else {
+                    ForceDetachOrigin::FreshBindReplacement
+                },
+                requester_bare_jid: jid.to_bare(),
+                ack,
+            };
+            let _ = if resumed {
+                incumbent.entry.force_detach_sender().try_send(request)
+            } else {
+                incumbent.entry.try_force_detach_and_interrupt(request)
+            };
             // Neither a closed channel nor a missing route proves cleanup.
             incumbent.wait_stopped().await;
         }
