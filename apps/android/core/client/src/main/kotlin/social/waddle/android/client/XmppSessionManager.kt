@@ -9,12 +9,15 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
+import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.flow.flowOn
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
@@ -35,7 +38,10 @@ import social.waddle.android.client.session.ConnectionLoop
 import social.waddle.android.client.session.ConnectionLoopCallbacks
 import social.waddle.android.client.session.ResumePersistence
 import social.waddle.android.client.session.SessionCatchup
+import social.waddle.android.client.store.MentionStore
+import social.waddle.android.client.store.PeopleDirectorySnapshot
 import social.waddle.android.client.store.SessionStores
+import social.waddle.android.client.store.peopleDirectoryFlow
 import social.waddle.client.ffi.WaddleAdminUsersPage
 import social.waddle.client.ffi.WaddleAvatar
 import social.waddle.client.ffi.WaddleChatState
@@ -102,6 +108,9 @@ class XmppSessionManager(
     val occupantJidStore = stores.occupantJidStore
     val extensionCommandStore = stores.extensionCommandStore
 
+    /** Unread mentions per conversation, live-only (see [MentionStore]). */
+    val mentionStore: MentionStore = stores.unreadStore.mentions
+
     private val _appState = MutableStateFlow<WaddleAppState>(WaddleAppState.Loading)
     val appState: StateFlow<WaddleAppState> = _appState.asStateFlow()
 
@@ -136,6 +145,27 @@ class XmppSessionManager(
         ownFullJid = { activeSession.ownFullJid },
         mucSessionCache = sessionPrefs.mucCallSessions,
     )
+
+    /** Manager-lifetime: one shared People projection for every screen. */
+    private val directoryScope = CoroutineScope(SupervisorJob() + dispatcher)
+
+    /**
+     * People in joined rooms (real JIDs) plus online contacts, and
+     * per-room headcounts; recomputed off the main thread, at most once
+     * per [PEOPLE_DIRECTORY_SAMPLE_MILLIS], while anything observes it.
+     */
+    val peopleDirectory: StateFlow<PeopleDirectorySnapshot> = peopleDirectoryFlow(
+        presence = presenceStore,
+        roomBots = roomMembersStore.rooms,
+        huddleNicks = callStore.mucCallPresence.participants,
+        sampleMillis = PEOPLE_DIRECTORY_SAMPLE_MILLIS,
+    )
+        .flowOn(dispatcher)
+        .stateIn(
+            directoryScope,
+            SharingStarted.WhileSubscribed(DIRECTORY_STOP_TIMEOUT_MILLIS),
+            PeopleDirectorySnapshot.EMPTY,
+        )
 
     private val router: XmppEventRouter =
         XmppEventRouter(
@@ -236,6 +266,7 @@ class XmppSessionManager(
         activeSession.activateOwner(bareJid(session.jid))
         persistQuietly { sessionPrefs.setOwnerBareJid(bareJid(session.jid)) }
         timelineStore.setOwnBareJid(session.jid)
+        presenceStore.setOwnBareJid(session.jid)
         persistQuietly { sessionPrefs.setSessionId(session.sessionId) }
         persistQuietly { seedStoresFromPrefs() }
 
@@ -681,7 +712,14 @@ class XmppSessionManager(
             // would be stamped with the former holder. Stamps already
             // stored on rows are kept. Synchronous: it lands before the
             // stream's first post-ready event is dispatched.
-            if (freshStream) stores.occupantJidStore.clear()
+            if (freshStream) {
+                stores.occupantJidStore.clear()
+                // Presence and mentions are per stream: the server
+                // re-sends current presence, and anyone who left while
+                // we were away must not linger. Mentions are live-only.
+                stores.presenceStore.resetForFreshSession()
+                stores.unreadStore.resetMentions()
+            }
         }
         // The ready pipeline: queued sends, topology, joins, catch-up.
         attemptScope.launch {
@@ -794,5 +832,11 @@ class XmppSessionManager(
 
         /** Sign-out budget for the pre-disconnect call hang-up. */
         const val LOGOUT_CALL_TEARDOWN_MILLIS = 5_000L
+
+        /** People projection: at most one recompute per window. */
+        const val PEOPLE_DIRECTORY_SAMPLE_MILLIS = 250L
+
+        /** Keep the projection warm across a screen change. */
+        private const val DIRECTORY_STOP_TIMEOUT_MILLIS = 5_000L
     }
 }

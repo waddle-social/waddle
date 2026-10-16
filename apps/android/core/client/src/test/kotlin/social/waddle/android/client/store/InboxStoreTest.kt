@@ -214,4 +214,28 @@ class InboxStoreTest {
         val applied = store.applyEntry(testInboxEntry(lastStanzaId = "s1", unread = 3u))
         assertEquals(3, applied?.unread)
     }
+
+    // ── Thread unread per room ──────────────────────────────────────────
+
+    @Test
+    fun `thread unread sums a room's thread entries and clears per thread`() {
+        val room = "room@muc.waddle.test"
+        store.applyEntry(testInboxEntry(partner = room, kind = "muc", threadId = "t-1", unread = 2u))
+        store.applyEntry(
+            testInboxEntry(partner = room, kind = "muc", threadId = "t-2", unread = 3u, lastStanzaId = "s2"),
+        )
+        store.applyEntry(testInboxEntry(partner = room, kind = "muc", unread = 7u))
+        assertEquals(mapOf(room to 5), store.threadUnread.value)
+
+        store.markReadLocally(room, threadId = "t-1")
+        assertEquals(mapOf(room to 3), store.threadUnread.value)
+        store.markReadLocally(room, threadId = "t-2")
+        assertTrue(store.threadUnread.value.isEmpty())
+
+        store.applyEntry(
+            testInboxEntry(partner = room, kind = "muc", threadId = "t-3", unread = 1u, lastStanzaId = "s3"),
+        )
+        store.clear()
+        assertTrue(store.threadUnread.value.isEmpty())
+    }
 }
