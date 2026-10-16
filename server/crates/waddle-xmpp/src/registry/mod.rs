@@ -23,9 +23,9 @@ pub mod user_registry;
 
 pub use connection_registry::{
     BroadcastOutcome, ConnectionBindGuard, ConnectionEntry, ConnectionRegistry, DeliveryKind,
-    ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest, OutboundStanza,
-    OutboundWriteAcceptance, PendingFlushReservation, PendingFlushReserveError, PresenceState,
-    SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe,
+    ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest, LiveResumeControl, LocalResumeReply,
+    OutboundStanza, OutboundWriteAcceptance, PendingFlushReservation, PendingFlushReserveError,
+    PresenceState, SendResult, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe,
     TerminalOrderingRetryLease,
 };
 pub use selection::{

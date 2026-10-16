@@ -27,6 +27,7 @@
 pub mod ingress_append;
 pub mod persistence;
 mod replay;
+mod resume_checkpoint;
 pub mod sequence;
 mod session_registry;
 mod stanzas;
@@ -40,6 +41,7 @@ pub use ingress_append::{
     SmKeyedAppendOutcome, SmRelayedAppendObligation,
 };
 pub use replay::{stamp_replay_delay, ReplayStanza, SmIngressFrameReceipt, SmIngressReceiptKind};
+pub use resume_checkpoint::{SmResumeCheckpointHandle, SmResumeRejection};
 pub use session_registry::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedPresenceState, DetachedSession,
     DetachedUnackedStanza, InMemorySmSessionRegistry, PendingPromotionRetryRetention,

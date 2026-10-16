@@ -2,9 +2,7 @@ use jid::FullJid;
 use std::sync::Arc;
 use tracing::warn;
 use waddle_xmpp::protocol::ConnectionPhase;
-use waddle_xmpp::stream_management::{
-    SmClaimCompletion, SmFailed, SmResumed, StreamManagementState,
-};
+use waddle_xmpp::stream_management::{SmClaimCompletion, SmFailed, SmResumed};
 
 use super::super::{
     cleanup::cleanup_invalidated_detached_session, state::WsConnState, WebSocketState,
@@ -316,7 +314,7 @@ async fn reset_resume_attempt(
     let keepalive = conn.keepalive_config;
     conn.init_prebind_state_machine(&domain, &state.deps.protocol.dispatcher, keepalive);
     conn.sm_ingress_fence = None;
-    conn.sm_state = StreamManagementState::new();
+    conn.sm_state.reset();
     // These flags belong to the failed resumed stream. The next fresh bind
     // starts unavailable until initial presence and must opt in again to
     // carbons, roster pushes, and other session-scoped subscriptions.

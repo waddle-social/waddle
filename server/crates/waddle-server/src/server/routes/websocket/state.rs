@@ -1767,6 +1767,10 @@ pub(super) struct WsConnState {
     /// Ownership handle for the current connection-registry entry.
     pub(super) registry_owner: Option<Arc<std::sync::atomic::AtomicBool>>,
     pub(super) socket_lifecycle: Option<Arc<waddle_xmpp::registry::SocketLifecycle>>,
+    pub(super) write_interruption: tokio_util::sync::CancellationToken,
+    /// Resume preflight is serviced only by this connection's owning task,
+    /// including while transport readiness or flushing is blocked.
+    pub(super) live_resume_control: Arc<waddle_xmpp::registry::LiveResumeControl>,
     /// One-shot flag: when set, the main loop must NOT push the current
     /// frame's responses into `sm_state.record_outbound`. The flag is
     /// raised by `handle_sm_resume` because the responses it returns are
@@ -1857,6 +1861,12 @@ impl WsConnState {
     pub(super) fn new() -> Self {
         static NEXT_INGRESS_GENERATION: std::sync::atomic::AtomicU64 =
             std::sync::atomic::AtomicU64::new(1);
+        let sm_state = StreamManagementState::new();
+        let write_interruption = tokio_util::sync::CancellationToken::new();
+        let live_resume_control = waddle_xmpp::registry::LiveResumeControl::new(
+            sm_state.resume_checkpoint(),
+            write_interruption.clone(),
+        );
         Self {
             ingress_generation: waddle_xmpp::ingress::ConnectionGeneration::from_storage(
                 NEXT_INGRESS_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
@@ -1866,7 +1876,7 @@ impl WsConnState {
             stream_open_wire_state: StreamOpenWireState::NotCommitted,
             authenticated_session: None,
             occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            sm_state: StreamManagementState::new(),
+            sm_state,
             sm_ingress_fence: None,
             sm_inbound_completion:
                 crate::server::routes::interpret::SmInboundCompletionTracker::default(),
@@ -1891,6 +1901,8 @@ impl WsConnState {
             post_sm_finalization_test_hook: None,
             registry_owner: None,
             socket_lifecycle: None,
+            write_interruption,
+            live_resume_control,
             suppress_sm_record_next_batch: false,
             pending_sm_enable_commit: None,
             deferred_inbound: std::collections::VecDeque::new(),

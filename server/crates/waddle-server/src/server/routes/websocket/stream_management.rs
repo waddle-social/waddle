@@ -4,6 +4,8 @@ use super::{
     transport_xml::websocket_stream_close_element,
 };
 mod observe;
+#[cfg(test)]
+mod timeout_tests;
 use observe::{apply_sm_ack_observation, observe_sm_ack, SmAckObservation};
 
 /// Operation-owned resume claim.  Dropping an uncommitted guard returns the
@@ -917,6 +919,72 @@ async fn handle_sm_resume_terminal(
             waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
             SmResumeOutcome::UnexpectedRequest,
         );
+    }
+
+    // Capture and retire the old transport before claiming its snapshot. The
+    // connection-owned handshake retains counters, replay and occupancy and
+    // acknowledges only after cleanup. Never re-resolve/retry the live owner:
+    // another resume can publish the same SM ID on a replacement meanwhile.
+    if let ConnectionPhase::Authenticated { bare_jid } = &*phase {
+        use crate::clustering::resume_bridge::{
+            request_validated_local_resume, LocalForcedDetachOutcome, LocalResumeRejected,
+        };
+        use waddle_xmpp::stream_management::SmResumeRejection;
+        let shutdown = state.deps.shutdown.stop_token();
+        let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new(&resume.previd);
+        let outcome = tokio::select! {
+            biased;
+            _ = shutdown.cancelled() => {
+                return SmResumeTerminal::failed(
+                    waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                    SmResumeOutcome::ShutdownAbandoned,
+                );
+            }
+            outcome = request_validated_local_resume(
+                &state.deps.protocol.connection_registry,
+                &stream_id,
+                bare_jid,
+                resume.h,
+            ) => outcome,
+        };
+        match outcome {
+            Ok(LocalForcedDetachOutcome::IdentityMismatch) => {
+                return SmResumeTerminal::failed(stream_id, SmResumeOutcome::IdentityMismatch);
+            }
+            Err(LocalResumeRejected {
+                reason: SmResumeRejection::NotResumable,
+                ..
+            }) => {
+                return SmResumeTerminal::failed(stream_id, SmResumeOutcome::NotFound);
+            }
+            Err(LocalResumeRejected {
+                jid,
+                reason:
+                    SmResumeRejection::ReplayGap {
+                        inbound_count,
+                        replay_gap_through,
+                    },
+            }) => {
+                return SmResumeTerminal::replay_gap(
+                    stream_id,
+                    inbound_count,
+                    jid,
+                    resume.h,
+                    replay_gap_through,
+                );
+            }
+            Err(LocalResumeRejected {
+                reason: SmResumeRejection::HandledTooHigh { outbound_count },
+                ..
+            }) => {
+                *phase = ConnectionPhase::closing(None);
+                return SmResumeTerminal::handled_too_high(stream_id, resume.h, outbound_count);
+            }
+            Ok(LocalForcedDetachOutcome::Detached | LocalForcedDetachOutcome::NotLiveLocally) => {}
+        }
+        // NotLiveLocally is not proof of cleanup. A snapshot must still be
+        // claimable below; prepare_socket_bind separately waits for the exact
+        // incumbent to stop before <resumed/>, replay or route publication.
     }
 
     let mut detached = match state

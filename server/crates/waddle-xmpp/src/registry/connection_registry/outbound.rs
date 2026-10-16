@@ -264,6 +264,7 @@ pub struct ConnectionEntry {
     pub(super) archive_dispatch:
         Arc<std::sync::Mutex<super::archive_dispatch::ArchiveDispatchFrontiers>>,
     hosting: ConnectionHosting,
+    resume_control: Arc<std::sync::OnceLock<Arc<super::LiveResumeControl>>>,
     /// Bounds terminal ordering retry tasks to one per connection generation.
     terminal_ordering_retry: Arc<AtomicBool>,
     /// Channel to send stanzas to this connection
@@ -339,6 +340,10 @@ pub struct ConnectionEntry {
     /// own asker-side ack timeout instead (a bounded, not indefinite, wait).
     force_detach_tx: mpsc::Sender<ForceDetachRequest>,
     force_detach_rx: Arc<std::sync::Mutex<Option<mpsc::Receiver<ForceDetachRequest>>>>,
+    /// Per-generation socket I/O interruption, shared only with its owning
+    /// transport. Cancel after successfully queueing an identity-verified
+    /// force detach so blocked writes yield to connection-owned cleanup.
+    pub write_interruption: tokio_util::sync::CancellationToken,
 }
 
 /// See [`ConnectionEntry::force_detach_tx`]'s doc comment for why this is
@@ -351,6 +356,7 @@ impl ConnectionEntry {
         let (force_detach_tx, force_detach_rx) = mpsc::channel(FORCE_DETACH_CHANNEL_CAPACITY);
         Self {
             hosting: ConnectionHosting::Local,
+            resume_control: Arc::new(std::sync::OnceLock::new()),
             terminal_ordering_retry: Arc::new(AtomicBool::new(false)),
             archive_dispatch: Arc::new(std::sync::Mutex::new(Default::default())),
             sender,
@@ -365,7 +371,28 @@ impl ConnectionEntry {
             occupancy_session: Arc::new(std::sync::Mutex::new(None)),
             force_detach_tx,
             force_detach_rx: Arc::new(std::sync::Mutex::new(Some(force_detach_rx))),
+            write_interruption: tokio_util::sync::CancellationToken::new(),
         }
+    }
+
+    /// Wire the owner-serviced control before publishing this entry.
+    pub fn wire_resume_control(
+        &self,
+        owner: jid::FullJid,
+        control: Arc<super::LiveResumeControl>,
+    ) -> bool {
+        if !control.bind(
+            owner,
+            Arc::clone(&self.sm_stream_id),
+            self.force_detach_tx.clone(),
+        ) {
+            return false;
+        }
+        self.resume_control.set(control).is_ok()
+    }
+
+    pub fn resume_control(&self) -> Option<Arc<super::LiveResumeControl>> {
+        self.resume_control.get().cloned()
     }
 
     pub fn remote_hosted(sender: mpsc::Sender<OutboundStanza>) -> Self {

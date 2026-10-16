@@ -42,6 +42,7 @@ pub struct DetachedSessionSnapshot {
 /// needed for XEP-0198 operation.
 #[derive(Debug)]
 pub struct StreamManagementState {
+    resume_checkpoint: super::SmResumeCheckpointHandle,
     /// Whether stream management is enabled
     pub enabled: bool,
     /// Unique stream ID (for resumption)
@@ -153,9 +154,36 @@ impl Default for StreamManagementState {
 }
 
 impl StreamManagementState {
+    /// Owner-maintained resume frontier, shared with the transport control path.
+    pub fn resume_checkpoint(&self) -> super::SmResumeCheckpointHandle {
+        self.sync_resume_checkpoint();
+        self.resume_checkpoint.clone()
+    }
+
+    /// Reset protocol state after a recoverable resume attempt while retaining
+    /// the transport owner's shared checkpoint for a later bind on this socket.
+    pub fn reset(&mut self) {
+        let checkpoint = self.resume_checkpoint.clone();
+        *self = Self::new();
+        self.resume_checkpoint = checkpoint;
+        self.sync_resume_checkpoint();
+    }
+
+    fn sync_resume_checkpoint(&self) {
+        self.resume_checkpoint
+            .update(super::resume_checkpoint::SmResumeCheckpoint {
+                resumable: self.is_resumable(),
+                inbound_count: self.inbound_count,
+                outbound_count: self.outbound_count,
+                last_acked: self.last_acked,
+                replay_gap_through: self.replay_gap_through,
+            });
+    }
+
     /// Create a new disabled stream management state.
     pub fn new() -> Self {
         Self {
+            resume_checkpoint: Default::default(),
             enabled: false,
             stream_id: None,
             resumable: false,
@@ -180,6 +208,7 @@ impl StreamManagementState {
     /// Create with custom configuration.
     pub fn with_config(max_queue_size: usize, ack_threshold: u32) -> Self {
         Self {
+            resume_checkpoint: Default::default(),
             enabled: false,
             stream_id: None,
             resumable: false,
@@ -208,16 +237,19 @@ impl StreamManagementState {
         self.resumable = resumable;
         self.max_resume_time = max_time;
         self.oldest_outstanding_request = None;
+        self.sync_resume_checkpoint();
     }
 
     /// Increment the inbound stanza count (stanzas received from client).
     pub fn increment_inbound(&mut self) {
         self.inbound_count = self.inbound_count.wrapping_add(1);
+        self.sync_resume_checkpoint();
     }
 
     /// Increment the outbound stanza count (stanzas sent to client).
     pub fn increment_outbound(&mut self) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
+        self.sync_resume_checkpoint();
     }
 
     /// Record an outbound stanza and add it to the unacked queue.
@@ -271,6 +303,7 @@ impl StreamManagementState {
         // The window just grew — engage the send-window pause latch if it
         // crossed the high watermark (issue #1219).
         self.refresh_send_window_pause();
+        self.sync_resume_checkpoint();
         self.ack_request_cadence()
     }
 
@@ -345,6 +378,7 @@ impl StreamManagementState {
         // The window just shrank — release the send-window pause latch if it
         // fell back to the low watermark (issue #1219).
         self.refresh_send_window_pause();
+        self.sync_resume_checkpoint();
     }
 
     /// Mark that an XEP-0198 `<r/>` was successfully written on the wire.
@@ -540,6 +574,7 @@ impl StreamManagementState {
         {
             self.replay_gap_through = Some(sequence);
         }
+        self.sync_resume_checkpoint();
     }
 
     /// Create a detached session for storage in the registry.
@@ -606,6 +641,7 @@ impl StreamManagementState {
         // above the high watermark the connection must pace new sends until
         // the client acks the replay (issue #1219).
         self.refresh_send_window_pause();
+        self.sync_resume_checkpoint();
     }
 }
 

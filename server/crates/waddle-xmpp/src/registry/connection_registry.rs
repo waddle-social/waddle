@@ -17,6 +17,7 @@ use crate::Stanza;
 mod archive_dispatch;
 mod binding;
 mod connections;
+mod live_resume;
 mod outbound;
 mod presence;
 mod resources;
@@ -25,6 +26,7 @@ mod state;
 mod subscriptions;
 
 pub use binding::{ConnectionBindGuard, SocketCleanupState, SocketLifecycle, SocketLifecycleProbe};
+pub use live_resume::{LiveResumeControl, LocalResumeReply};
 pub use outbound::{
     BroadcastOutcome, ConnectionEntry, DeliveryKind, ForceDetachOrigin, ForceDetachOutcome,
     ForceDetachRequest, OutboundStanza, OutboundWriteAcceptance, SendResult,

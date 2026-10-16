@@ -158,7 +158,7 @@ async fn send_window_message<S, E>(
 ) -> Result<(), SendWindowOutcome>
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
     match send_ws_message_with_authority(sender, message, failure_message, authority).await {
         AuthoritySendOutcome::Sent => Ok(()),
@@ -184,7 +184,7 @@ pub(super) async fn write_response_batch_with_admission<S, SE, R, RE, F>(
 ) -> BatchWriteOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
     F: Into<ResponseFrame>,
@@ -208,7 +208,7 @@ pub(super) async fn write_ingress_response_batch_with_admission<S, SE, R, RE>(
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
@@ -264,7 +264,7 @@ pub(super) async fn write_response_batch_report_with_admission<S, SE, R, RE, F>(
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
     F: Into<ResponseFrame>,
@@ -295,7 +295,7 @@ async fn write_response_batch_impl<S, SE, R, RE>(
 ) -> BatchWriteReport
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
@@ -564,10 +564,13 @@ async fn await_send_window_recovery<S, SE, R, RE>(
 ) -> SendWindowOutcome
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
+    if conn.write_interruption.is_cancelled() {
+        return SendWindowOutcome::TransportClosed;
+    }
     if !batch_authoritative(authority) {
         return SendWindowOutcome::AuthorityRevoked;
     }
@@ -594,7 +597,11 @@ where
         return outcome;
     }
     conn.sm_state.note_ack_request_sent();
+    let live_resume = std::sync::Arc::clone(&conn.live_resume_control);
     loop {
+        if conn.write_interruption.is_cancelled() {
+            return SendWindowOutcome::TransportClosed;
+        }
         if !batch_authoritative(authority) {
             return SendWindowOutcome::AuthorityRevoked;
         }
@@ -611,6 +618,10 @@ where
         }
         let next = match tokio::select! {
             biased;
+            _ = std::future::poll_fn(|cx| live_resume.poll(cx)) => continue,
+            _ = conn.write_interruption.cancelled() => {
+                return SendWindowOutcome::TransportClosed;
+            }
             _ = batch_authority_revoked(authority) => {
                 return SendWindowOutcome::AuthorityRevoked;
             }
@@ -630,6 +641,9 @@ where
                 return SendWindowOutcome::TimedOut;
             }
         };
+        if conn.write_interruption.is_cancelled() {
+            return SendWindowOutcome::TransportClosed;
+        }
         if !batch_authoritative(authority) {
             return SendWindowOutcome::AuthorityRevoked;
         }
@@ -761,7 +775,7 @@ async fn service_paused_sm_requests_from_deferred<S, E>(
 ) -> Result<(), SendWindowOutcome>
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
     // Service every parked SM request, not only one sitting at the queue
     // front: ordinary frames parked ahead of an `<r/>` must not keep it
@@ -775,10 +789,13 @@ where
         .iter()
         .position(|text| is_client_sm_request(text.as_str()))
     {
-        conn.deferred_inbound.remove(index);
+        if conn.write_interruption.is_cancelled() {
+            return Err(SendWindowOutcome::TransportClosed);
+        }
         if !batch_authoritative(authority) {
             return Err(SendWindowOutcome::AuthorityRevoked);
         }
+        conn.deferred_inbound.remove(index);
         super::stream_management::flush_ingress_checkpoint(
             state,
             &conn.sm_state,
@@ -955,11 +972,21 @@ async fn drain_ready_inbound<S, SE, R, RE>(
 ) -> DrainSignal
 where
     S: Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
     loop {
+        // Inline drains run on the owner task too. Service preflight before
+        // consuming another ACK, so a ready Pong/ACK flood cannot starve it.
+        std::future::poll_fn(|cx| {
+            let _ = conn.live_resume_control.poll(cx);
+            std::task::Poll::Ready(())
+        })
+        .await;
+        if conn.write_interruption.is_cancelled() {
+            return DrainSignal::TransportClosed;
+        }
         if !batch_authoritative(authority) {
             return DrainSignal::AuthorityRevoked;
         }
@@ -970,6 +997,9 @@ where
             // Nothing buffered right now — back to writing.
             return DrainSignal::Idle;
         };
+        if conn.write_interruption.is_cancelled() {
+            return DrainSignal::TransportClosed;
+        }
         match next {
             Some(Ok(Message::Text(text))) => {
                 conn.note_transport_activity();

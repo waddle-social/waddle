@@ -12,7 +12,7 @@ use super::{
     replay::drive_interpret_loop,
     send::{
         close_ws_connection, send_ws_message, send_ws_message_with_authority, send_ws_text_frames,
-        send_ws_text_frames_with_authority, AuthoritySendOutcome,
+        send_ws_text_frames_with_authority, AuthoritySendOutcome, InterruptibleSink,
     },
     session_init::build_internal_server_error_stream_error,
     state::{InboundFrameTerminal, WsConnState, TERMINAL_RECOVERY_QUEUE_CAP},
@@ -62,7 +62,7 @@ fn revalidate_websocket_admission(
 async fn close_revoked_upgraded_socket<S, E>(socket: &mut S)
 where
     S: futures::Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
     let _ = send_ws_message(
         socket,
@@ -151,6 +151,16 @@ async fn xmpp_websocket_handler(
 /// Size of the outbound message channel buffer
 const OUTBOUND_CHANNEL_SIZE: usize = 256;
 
+/// Dropping an aborted connection task must release resume callers too. The
+/// normal path finishes this control after cleanup; repeated finish is safe.
+struct LiveResumeOwnerGuard(Arc<waddle_xmpp::registry::LiveResumeControl>);
+
+impl Drop for LiveResumeOwnerGuard {
+    fn drop(&mut self) {
+        self.0.finish();
+    }
+}
+
 /// Deadline for a loop-level XEP-0198 send-window pause (issue #1219).
 /// While `sm_state.needs_send_pause()` latches, the connection loop stops
 /// draining the outbound mpsc so its producers backpressure; client acks
@@ -171,6 +181,8 @@ const DEFERRED_INBOUND_DRAIN_CHUNK: usize = 8;
 /// drain window — the notification is best-effort, while the SM detach
 /// that follows the break is what actually preserves the session.
 const SHUTDOWN_CLOSE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+const FORCE_DETACH_CONFLICT_CLOSE_TIMEOUT: std::time::Duration =
+    std::time::Duration::from_millis(250);
 
 /// Aggregate grace period for ordered-relay completions that precede a
 /// terminal XEP-0198 handled-count hole. Those tasks have already spent the
@@ -234,7 +246,7 @@ async fn handle_xmpp_websocket(
     let shutdown_token = state.deps.shutdown.stop_token();
     info!(domain = %domain, "XMPP WebSocket connection established");
 
-    let (mut ws_sender, mut ws_receiver) = socket.split();
+    let (ws_sender, mut ws_receiver) = socket.split();
 
     // Create outbound channel for receiving messages from other connections.
     // After the session is registered, `pending_tx` is handed to the
@@ -263,6 +275,10 @@ async fn handle_xmpp_websocket(
 
     // Track connection state
     let mut conn = WsConnState::new();
+    let live_resume_control = conn.live_resume_control.clone();
+    let _live_resume_owner_guard = LiveResumeOwnerGuard(live_resume_control.clone());
+    let mut ws_sender = InterruptibleSink::new(ws_sender, conn.write_interruption.clone())
+        .with_resume_control(live_resume_control.clone());
     let (handoff_tx, mut handoff_rx) = mpsc::unbounded_channel::<
         crate::server::routes::interpret::OrderedRelayHandoffCompletion,
     >();
@@ -423,7 +439,7 @@ async fn handle_xmpp_websocket(
                         } else {
                             info!("force-detaching this session (<conflict/> close)");
                             close_live_session_for_force_detach(
-                                &mut ws_sender,
+                                ws_sender.uninterrupted(),
                                 &conn,
                                 &admission_permit,
                                 &shutdown_token,
@@ -449,6 +465,11 @@ async fn handle_xmpp_websocket(
                     }
                 }
             }
+
+            // Accepted detach requests stay ahead of new preflight work, so
+            // a stream of rejected attempts cannot starve its own retirement.
+            // Validation still precedes ordinary inbound/deferred work.
+            _ = std::future::poll_fn(|cx| live_resume_control.poll(cx)) => {}
 
             // Process a bounded drain-deferred inbound chunk.
             _ = std::future::ready(()), if deferred_pending => {
@@ -709,6 +730,26 @@ async fn handle_xmpp_websocket(
         }
     }
 
+    // A blocked ready/flush can end the loop before its queued control arm
+    // runs. Collect that request before any deferred old-client input can
+    // mutate state that is about to be resumed elsewhere.
+    if let Some(bound_bare) = conn.phase.bound_jid().map(|jid| jid.to_bare()) {
+        let was_detaching = !pending_force_detach.is_empty();
+        pending_force_detach.extend(drain_ready_force_detach_requests(
+            &mut force_detach_rx,
+            &bound_bare,
+        ));
+        if !was_detaching && !pending_force_detach.is_empty() {
+            close_live_session_for_force_detach(
+                ws_sender.uninterrupted(),
+                &conn,
+                &admission_permit,
+                &shutdown_token,
+            )
+            .await;
+        }
+    }
+
     // Frames the mid-batch ack drain had already pulled off the
     // socket when the transport went away (issue #1089). The old loop
     // would have processed them before ever seeing the close, so
@@ -738,44 +779,15 @@ async fn handle_xmpp_websocket(
         // claim here, pre-drain, would hand the still-captured fence to the
         // release-retry janitor while admitted submissions are in flight.
     } else {
-        // A claim-loss teardown (the stream's live fence is already gone —
-        // demotion or terminal release) gets the same treatment as node
-        // authority revocation: dispatching the parked frames would run
-        // them fenceless, and the terminal recovery below rejects
-        // resumption, so the client retransmits them anyway (XEP-0198) —
-        // processing here would double their non-idempotent effects. No
-        // pending force-detach prerequisite: an ordinary or keepalive close
-        // can win the race before the demotion signal is consumed.
-        let fenceless_teardown = conn.sm_state.is_resumable()
-            && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
-                state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .current_sm_claim_fence(stream_id)
-                    .is_none()
-            });
-        if shutdown_token.is_cancelled()
-            || admission_permit.revalidate().is_err()
-            || fenceless_teardown
-        {
-            let dropped = discard_deferred_inbound(&mut conn);
-            if dropped > 0 {
-                info!(
-                    dropped,
-                    "Dropping deferred inbound frames after authority or claim loss; sender may replay them"
-                );
-            }
-        } else {
-            process_deferred_inbound_after_transport_loss(
-                &domain,
-                &state,
-                &mut conn,
-                &admission_permit,
-                &shutdown_token,
-            )
-            .await;
-        }
+        settle_deferred_inbound_before_cleanup(
+            &domain,
+            &state,
+            &mut conn,
+            &admission_permit,
+            &shutdown_token,
+            &pending_force_detach,
+        )
+        .await;
         drain_ordered_relay_handoffs_before_cleanup(&mut handoff_rx, &mut conn).await;
     }
 
@@ -836,7 +848,7 @@ async fn handle_xmpp_websocket(
 async fn close_live_session_for_node_unavailable<S, E>(ws_sender: &mut S, conn: &WsConnState)
 where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
     let close_peer = async {
         if conn.has_committed_live_stream_open() {
@@ -869,7 +881,7 @@ where
     }
 }
 
-/// Close a live stream displaced by a cross-node XEP-0198 resume.  The
+/// Close a live stream displaced by an XEP-0198 resume. The
 /// conflict wire frames are deliberately gated on a committed live stream;
 /// regardless of that gate the WebSocket transport is closed.
 async fn close_live_session_for_force_detach<S, E>(
@@ -879,21 +891,27 @@ async fn close_live_session_for_force_detach<S, E>(
     shutdown_token: &tokio_util::sync::CancellationToken,
 ) where
     S: Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
-    if conn.has_committed_live_stream_open() {
-        let _ = send_ws_text_frames_with_authority(
+    // XEP-0198 §5 recommends conflict closure, but a black-holed transport
+    // must not delay detach persistence and recovery. The socket is discarded
+    // after this attempt, so cancelling a pending write is safe.
+    let _ = tokio::time::timeout(FORCE_DETACH_CONFLICT_CLOSE_TIMEOUT, async {
+        if conn.has_committed_live_stream_open() {
+            let _ = send_ws_text_frames_with_authority(
+                ws_sender,
+                [build_conflict_stream_error(), websocket_stream_close_xml()],
+                "Failed to send conflict stream error",
+                (admission_permit, shutdown_token),
+            )
+            .await;
+        }
+        let _ = close_ws_connection(
             ws_sender,
-            [build_conflict_stream_error(), websocket_stream_close_xml()],
-            "Failed to send conflict stream error",
-            (admission_permit, shutdown_token),
+            "Failed to send WebSocket close frame after conflict",
         )
         .await;
-    }
-    let _ = close_ws_connection(
-        ws_sender,
-        "Failed to send WebSocket close frame after conflict",
-    )
+    })
     .await;
 }
 
@@ -1343,7 +1361,7 @@ pub(super) async fn handle_inbound_text<S, SE, R, RE>(
 ) -> bool
 where
     S: futures::Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
@@ -1656,7 +1674,7 @@ async fn close_if_frame_authority_revoked<S, E>(
 ) -> bool
 where
     S: futures::Sink<Message, Error = E> + Unpin,
-    E: std::fmt::Display,
+    E: super::send::WebSocketWriteError,
 {
     if !shutdown.is_cancelled() && permit.revalidate().is_ok() {
         return false;
@@ -1690,7 +1708,7 @@ async fn handle_ordered_relay_handoff_completion<S, SE, R, RE>(
 ) -> bool
 where
     S: futures::Sink<Message, Error = SE> + Unpin,
-    SE: std::fmt::Display,
+    SE: super::send::WebSocketWriteError,
     R: futures::Stream<Item = Result<Message, RE>> + Unpin,
     RE: std::fmt::Display,
 {
@@ -1818,6 +1836,54 @@ fn serialize_ordered_relay_handoff_replies(replies: Vec<Stanza>) -> Vec<String> 
             }
         })
         .collect()
+}
+
+/// Settle parked frames before cleanup using the force-detach operation that
+/// owns the teardown and the connection's current dispatch authority.
+async fn settle_deferred_inbound_before_cleanup(
+    domain: &str,
+    state: &Arc<WebSocketState>,
+    conn: &mut WsConnState,
+    permit: &crate::clustering::NodeAdmissionPermit,
+    shutdown: &tokio_util::sync::CancellationToken,
+    pending_force_detach: &[waddle_xmpp::registry::ForceDetachRequest],
+) {
+    // A claim-loss teardown (the stream's live fence is already gone —
+    // demotion or terminal release) gets the same treatment as node
+    // authority revocation: dispatching the parked frames would run
+    // them fenceless, and the terminal recovery below rejects
+    // resumption, so the client retransmits them anyway (XEP-0198) —
+    // processing here would double their non-idempotent effects. No
+    // pending force-detach prerequisite: an ordinary or keepalive close
+    // can win the race before the demotion signal is consumed.
+    let fenceless_teardown = conn.sm_state.is_resumable()
+        && conn.sm_state.stream_id.as_deref().is_some_and(|stream_id| {
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .current_sm_claim_fence(stream_id)
+                .is_none()
+        });
+    // Only resume takeovers leave these unhandled frames for client replay.
+    // Fresh binds and retirement still owe their already-received input, even
+    // when a resume request is also queued behind an authoritative fresh bind.
+    if authoritative_force_detach_origin(pending_force_detach)
+        == Some(waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume)
+        || shutdown.is_cancelled()
+        || permit.revalidate().is_err()
+        || fenceless_teardown
+    {
+        let dropped = discard_deferred_inbound(conn);
+        if dropped > 0 {
+            info!(
+                dropped,
+                "Dropping deferred inbound frames for resume takeover or after authority or claim loss; sender may replay them"
+            );
+        }
+    } else {
+        process_deferred_inbound_after_transport_loss(domain, state, conn, permit, shutdown).await;
+    }
 }
 
 /// Process inbound frames the mid-batch drain deferred before the
@@ -2147,6 +2213,31 @@ mod tests {
     use std::task::{Context, Poll};
     use tokio::sync::oneshot;
     use waddle_xmpp::stream_management::SmSessionRegistry;
+
+    #[tokio::test]
+    async fn unfinished_live_resume_returns_when_socket_owner_drops() {
+        let conn = WsConnState::new();
+        let (outbound, _outbound_rx) = mpsc::channel(1);
+        let entry = waddle_xmpp::registry::ConnectionEntry::new(outbound);
+        let owner: FullJid = "alice@example.test/old".parse().expect("full JID");
+        assert!(entry.wire_resume_control(owner.clone(), conn.live_resume_control.clone()));
+        let guard = LiveResumeOwnerGuard(conn.live_resume_control.clone());
+        let request = conn.live_resume_control.request(
+            waddle_xmpp::pending_delivery::SmSessionId::try_from_wire("old-stream")
+                .expect("valid stream ID"),
+            owner.to_bare(),
+            0,
+        );
+        tokio::pin!(request);
+        assert!(futures::poll!(request.as_mut()).is_pending());
+
+        drop(guard);
+        assert_eq!(
+            request.await,
+            waddle_xmpp::registry::LocalResumeReply::NotPersisted
+        );
+        assert!(!conn.write_interruption.is_cancelled());
+    }
 
     #[derive(Default)]
     struct UpgradeCloseSink {
@@ -2503,6 +2594,26 @@ mod tests {
             ]
         );
         assert!(sender.closed, "force-detach completes the WebSocket close");
+    }
+
+    #[tokio::test]
+    async fn force_detach_does_not_wait_for_a_blocked_conflict_write() {
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.begin_server_stream_open_response();
+        conn.commit_server_stream_open_response();
+        let mut sender = Box::pin(futures::sink::unfold((), |(), _message: Message| async {
+            futures::future::pending::<Result<(), &'static str>>().await
+        }));
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(1),
+            close_live_session_for_force_detach(&mut sender, &conn, &permit, &shutdown),
+        )
+        .await
+        .expect("optional conflict writes must not block SM detach cleanup");
     }
 
     #[tokio::test]
@@ -3727,6 +3838,110 @@ mod tests {
         assert_eq!(discard_deferred_inbound(&mut conn), 2);
         assert!(conn.deferred_inbound.is_empty());
         assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    }
+
+    async fn assert_deferred_force_detach_handling(
+        origins: &[waddle_xmpp::registry::ForceDetachOrigin],
+        resumable: bool,
+        expected_handled: u32,
+    ) {
+        let state = super::super::tests::create_test_websocket_state().await;
+        let lifecycle = crate::clustering::NodeLifecycle::new();
+        let permit = lifecycle.admit().expect("serving permit");
+        let shutdown = tokio_util::sync::CancellationToken::new();
+        let mut conn = WsConnState::new();
+        conn.phase = ConnectionPhase::ready(
+            "alice@example.com/deferred".parse().expect("bound JID"),
+            false,
+        );
+        conn.sm_state
+            .enable("deferred-force-detach".to_string(), resumable, Some(300));
+        drop(
+            state
+                .deps
+                .protocol
+                .sm_session_registry
+                .ensure_session_claim("deferred-force-detach")
+                .await
+                .expect("live SM claim"),
+        );
+        let ping = xmpp_parsers::iq::Iq::from_get("deferred-ping", xmpp_parsers::ping::Ping);
+        conn.deferred_inbound.push_back(
+            waddle_xmpp::parser::stanza_to_string(ping)
+                .expect("serialize deferred ping")
+                .into(),
+        );
+        let requests: Vec<_> = origins
+            .iter()
+            .map(|&origin| waddle_xmpp::registry::ForceDetachRequest {
+                origin,
+                requester_bare_jid: "alice@example.com".parse().expect("requester JID"),
+                ack: tokio::sync::oneshot::channel().0,
+            })
+            .collect();
+
+        settle_deferred_inbound_before_cleanup(
+            "example.com",
+            &state,
+            &mut conn,
+            &permit,
+            &shutdown,
+            &requests,
+        )
+        .await;
+
+        assert!(conn.deferred_inbound.is_empty());
+        assert_eq!(conn.sm_state.get_inbound_count(), expected_handled);
+        let responses = conn.sm_state.get_stanzas_to_resend(0);
+        assert_eq!(responses.len(), expected_handled as usize);
+        if let Some(response) = responses.first() {
+            let response = Element::from_str(&response.stanza_xml).expect("replay IQ XML");
+            assert_eq!(response.name(), "iq");
+            assert_eq!(response.attr("id"), Some("deferred-ping"));
+            assert_eq!(response.attr("type"), Some("result"));
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_force_detach_fresh_bind_processes_parked_frames_without_resume() {
+        assert_deferred_force_detach_handling(
+            &[waddle_xmpp::registry::ForceDetachOrigin::FreshBindReplacement],
+            false,
+            1,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn deferred_force_detach_resume_leaves_parked_frames_for_replay() {
+        assert_deferred_force_detach_handling(
+            &[waddle_xmpp::registry::ForceDetachOrigin::CrossNodeResume],
+            true,
+            0,
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn deferred_force_detach_retirement_processes_parked_frames() {
+        for origin in [
+            waddle_xmpp::registry::ForceDetachOrigin::RegistryStaleActorRetirement,
+            waddle_xmpp::registry::ForceDetachOrigin::OwnerManagedRetirement,
+        ] {
+            assert_deferred_force_detach_handling(&[origin], true, 1).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn deferred_force_detach_fresh_bind_precedes_resume_for_parked_frames() {
+        use waddle_xmpp::registry::ForceDetachOrigin::{CrossNodeResume, FreshBindReplacement};
+
+        for origins in [
+            [FreshBindReplacement, CrossNodeResume],
+            [CrossNodeResume, FreshBindReplacement],
+        ] {
+            assert_deferred_force_detach_handling(&origins, true, 1).await;
+        }
     }
 
     #[tokio::test]
