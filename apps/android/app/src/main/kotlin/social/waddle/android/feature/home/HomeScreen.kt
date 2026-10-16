@@ -200,6 +200,7 @@ internal fun ChannelListBody(
                     onClick = { onChannelClick(channel) },
                     unreadCount = channel.unreadCount,
                     isMuted = channel.isMuted,
+                    conversationJid = channel.roomJid,
                     trailingExtra = { CallBadge(inCallCount = channel.inCallCount) },
                 )
             }

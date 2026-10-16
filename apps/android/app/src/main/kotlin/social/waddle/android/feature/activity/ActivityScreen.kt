@@ -74,5 +74,6 @@ private fun ActivityListRow(row: ActivityRow, onClick: () -> Unit) {
         preview = row.preview,
         time = row.lastUpdated?.let { listTimeOf(Instant.ofEpochMilli(it)) },
         unreadCount = row.unreadCount,
+        conversationJid = row.jid,
     )
 }

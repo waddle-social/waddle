@@ -32,6 +32,8 @@
     <string name="home_filter_placeholder">Jump to a channel</string>
     <string name="home_filter_no_match">No channels match “%1$s”.</string>
     <string name="tab_home">Home</string>
+    <string name="no_conversation_title">No conversation open</string>
+    <string name="no_conversation_body">Pick a channel or a direct message.</string>
     <string name="tab_dms">DMs</string>
     <string name="tab_activity">Activity</string>
     <string name="tab_you">You</string>

@@ -102,6 +102,7 @@ fun DmListScreen(
                             time = row.lastUpdated?.let { listTimeOf(Instant.ofEpochMilli(it)) },
                             unreadCount = row.unreadCount,
                             isMuted = row.isMuted,
+                            conversationJid = row.peerJid,
                             modifier = Modifier.testTag(DmListTestTags.PEER_ROW_PREFIX + row.peerJid),
                         )
                         is DmListRow.Group -> ConversationListRow(
@@ -112,6 +113,7 @@ fun DmListScreen(
                             time = row.lastUpdated?.let { listTimeOf(Instant.ofEpochMilli(it)) },
                             unreadCount = row.unreadCount,
                             isMuted = row.isMuted,
+                            conversationJid = row.roomJid,
                             modifier = Modifier.testTag(DmListTestTags.GROUP_ROW_PREFIX + row.roomJid),
                         )
                     }

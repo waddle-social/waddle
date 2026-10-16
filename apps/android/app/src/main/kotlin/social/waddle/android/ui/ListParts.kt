@@ -24,8 +24,10 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.material3.TopAppBarDefaults
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.res.stringResource
@@ -110,9 +112,17 @@ fun SectionKicker(text: String, modifier: Modifier = Modifier) {
 }
 
 /**
+ * The conversation open beside the lists (bare JID), or null. Only wide
+ * layouts show a list and a conversation together; on phones the list is
+ * hidden whenever this is set, so the highlight never shows there.
+ */
+val LocalOpenConversation = compositionLocalOf<String?> { null }
+
+/**
  * One conversation in a list (channels, DMs, activity): leading glyph or
  * avatar, title, optional one-line preview, time, mute and unread. Unread
- * rows read heavier; read rows recede.
+ * rows read heavier; read rows recede. The row for [conversationJid] is
+ * highlighted while that conversation is open beside the list.
  */
 @Composable
 fun ConversationListRow(
@@ -124,14 +134,17 @@ fun ConversationListRow(
     time: String? = null,
     unreadCount: Int = 0,
     isMuted: Boolean = false,
+    conversationJid: String? = null,
     trailingExtra: @Composable () -> Unit = {},
 ) {
     val unread = unreadCount > 0 && !isMuted
+    val open = conversationJid != null && conversationJid == LocalOpenConversation.current
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
         modifier = modifier
             .fillMaxWidth()
+            .background(if (open) Waddle.colors.selection else Color.Transparent)
             .clickable(onClick = onClick)
             .heightIn(min = if (preview != null) 64.dp else 48.dp)
             .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xs),
