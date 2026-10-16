@@ -29,8 +29,9 @@ churn test for session changes, and an on-device check before release.
 | Push over UnifiedPush (XEP-0357, Web Push provider) | ✅ | `PushRegistrarTest`, `PushMessageHandlerTest` | `settings` | — |
 | Stay-connected foreground service (no distributor, or by choice) | n/a | — | `settings` | — |
 | Inline reply and mark-read hold the stream until delivered | n/a | — | — | — |
-| Own presence: available in the foreground, away with XEP-0319 idle when held in the background, none for notification actions (Automatic mode only) | 🟡 | `XmppSessionManagerPresenceTest`, `ConnectionDemandTest` (app) | — | — |
-| Offline flush (XEP-0160) does not re-notify what push announced | n/a | `NotificationPolicyTest` | — | — |
+| Own presence (ADR-010 Automatic only): available in the foreground or a live call; held in the background, away after 10 min and xa after 30 min with XEP-0319 idle; nothing for notification actions | 🟡 | `XmppSessionManagerPresenceTest`, `ConnectionDemandTest` (app) | — | — |
+| A drop mid-pipeline ends the attempt at once; the next stream restarts the pipeline | n/a | `ConnectionLoopReadyWorkTest` | — | — |
+| With push active, the offline flush (XEP-0160) does not re-notify; without push it does | n/a | `NotificationPolicyTest` | — | — |
 
 Push mode limits, by design: incoming calls ring only while the app is
 open (the server has no call push class), and DM pushes wait while any
