@@ -119,7 +119,8 @@ class AppShellNavigationTest {
         openTab(MainTab.PEOPLE)
         waitForTag(PeopleScreenTestTags.SCREEN)
         openTab(MainTab.DMS)
-        waitForText("No direct messages yet.")
+        // From the resource, so a copy change cannot strand the test.
+        waitForText(composeRule.activity.getString(R.string.dm_list_empty_title))
         openTab(MainTab.YOU)
         waitForText("Settings")
         openTab(MainTab.HOME)
