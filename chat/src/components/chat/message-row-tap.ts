@@ -39,18 +39,21 @@ function canClosest(value: unknown): value is ClosestCapable {
   return !!value && typeof (value as ClosestCapable).closest === "function";
 }
 
+/** The element a tap landed on; text-node targets resolve through their parent. */
+function closestCapableTarget(target: unknown): ClosestCapable | null {
+  if (canClosest(target)) return target;
+  const parent = (target as { parentElement?: unknown } | null)?.parentElement;
+  if (canClosest(parent)) return parent;
+  return null;
+}
+
 /**
  * Whether a tap on `target` lands on an interactive child of `row`.
  * Only matches inside the row (never the row itself or its ancestors),
  * so a timeline wrapper with a role or tabindex does not count.
  */
 export function tapTargetIsInteractive(target: unknown, row: ContainsCapable): boolean {
-  // Text-node targets (rare for clicks) resolve through their parent.
-  const element = canClosest(target)
-    ? target
-    : canClosest((target as { parentElement?: unknown } | null)?.parentElement)
-      ? (target as { parentElement: ClosestCapable }).parentElement
-      : null;
+  const element = closestCapableTarget(target);
   if (!element) return false;
   const hit = element.closest(INTERACTIVE_TAP_TARGET_SELECTOR);
   return !!hit && hit !== row && row.contains(hit);

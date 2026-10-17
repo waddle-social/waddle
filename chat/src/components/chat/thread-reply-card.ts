@@ -40,11 +40,9 @@ export function threadReplySnippet(message: TimelineMessage): string {
   );
   const hasImage = files.some((file) => isImageFile(file.mediaType, file.url))
     || (files.length === 0 && bodyIsMedia);
-  const text = message.isSticker && hasImage
-    ? ""
-    : bodyIsMedia
-      ? ""
-      : formatMePreview(rawBody, message.author).replace(/\s+/g, " ").trim();
+  // A sticker's body is alt text and a media URL body is the media itself.
+  const bodyIsText = !bodyIsMedia && !(message.isSticker && hasImage);
+  const text = bodyIsText ? formatMePreview(rawBody, message.author).replace(/\s+/g, " ").trim() : "";
   if (text) {
     return text.length > SNIPPET_MAX_LENGTH ? `${text.slice(0, SNIPPET_MAX_LENGTH - 1).trimEnd()}…` : text;
   }

@@ -51,6 +51,7 @@ import {
 } from "./message-row-tap";
 import { useMessageActionSurfaces } from "./composables/use-message-action-surfaces";
 import { useMessageGestures } from "./composables/use-message-gestures";
+import { swallowNextClick } from "@/ui/gestures/long-press";
 
 const props = defineProps<{
   message: TimelineMessage;
@@ -359,9 +360,14 @@ const gestures = useMessageGestures({
 const swipe = gestures.swipe;
 
 // Touch only: a plain tap on a post with replies opens its thread. Fine
-// pointers keep text selection and use the reply card. Rows inside the
-// thread pane hide the card, so they never open a thread from a tap.
-function onRowClick(event: MouseEvent) {
+// pointers keep text selection and use the reply card, which is also the
+// keyboard path, so the row itself stays a non-interactive element. Rows
+// inside the thread pane hide the card, so they never open a thread from
+// a tap. Decided on pointerup (a touch-only gesture, like swipe and long
+// press); the click that follows is swallowed so it cannot land on the
+// thread pane that opens under the finger.
+function onRowPointerup(event: PointerEvent) {
+  gestures.handlers.onPointerup(event);
   const row = bubbleEl.value;
   if (!row || isEditing.value || sheetOpen.value) return;
   const open = shouldOpenThreadOnRowTap({
@@ -371,7 +377,9 @@ function onRowClick(event: MouseEvent) {
     hasTextSelection: hasActiveTextSelection(),
     targetIsInteractive: tapTargetIsInteractive(event.target, row),
   });
-  if (open) emit("openThread", props.message.id);
+  if (!open) return;
+  swallowNextClick();
+  emit("openThread", props.message.id);
 }
 </script>
 
@@ -523,11 +531,10 @@ function onRowClick(event: MouseEvent) {
       : undefined"
     @pointerdown="gestures.handlers.onPointerdown"
     @pointermove="gestures.handlers.onPointermove"
-    @pointerup="gestures.handlers.onPointerup"
+    @pointerup="onRowPointerup"
     @pointercancel="gestures.handlers.onPointercancel"
     @pointerleave="gestures.handlers.onPointerleave"
     @contextmenu="gestures.handlers.onContextMenu"
-    @click="onRowClick"
   >
     <span class="chat-message-swipe-hint chat-message-swipe-hint--reply" aria-hidden="true" />
     <span class="chat-message-swipe-hint chat-message-swipe-hint--thread" aria-hidden="true" />

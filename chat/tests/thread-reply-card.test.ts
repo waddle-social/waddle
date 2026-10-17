@@ -70,7 +70,7 @@ describe("threadReplySnippet", () => {
   test("/me bodies read as actions and long bodies are capped", () => {
     expect(threadReplySnippet(message({ id: "m", author: "guzzle", body: "/me waves" }))).toBe("* guzzle waves");
     const long = threadReplySnippet(message({ id: "l", body: "x".repeat(400) }));
-    expect(long.length).toBe(140);
+    expect(long).toHaveLength(140);
     expect(long.endsWith("…")).toBe(true);
   });
 
@@ -158,9 +158,9 @@ const participants = [
 </template>
 `;
 
-  // Template comments mention class names; SSR fragment markers split text.
-  function section(rawHtml: string, name: string): string {
-    const html = rawHtml.replace(/<!--[\s\S]*?-->/g, "");
+  // Assertions match class attributes (template comments mention class
+  // names in prose) and tolerate SSR fragment markers between text runs.
+  function section(html: string, name: string): string {
     const start = html.indexOf(`data-case="${name}"`);
     expect(start).toBeGreaterThanOrEqual(0);
     const end = html.indexOf("</section>", start);
@@ -182,8 +182,10 @@ const participants = [
     expect(loaded).toContain(">+1</span>");
     expect(loaded).toContain('<span class="chat-thread-card__count">3 replies</span>');
     expect(loaded).toContain('<span class="chat-thread-card__recency"> · 2 hours ago</span>');
-    expect(loaded).toContain('<span class="chat-thread-card__latest-author">guzzle</span>: Love this, watching now');
-    expect(loaded).toContain("chat-thread-rail chat-thread-rail--two-line");
+    expect(loaded).toMatch(
+      /<span class="chat-thread-card__latest-author">guzzle<\/span>(?:<!--\[-->)?: Love this, watching now/,
+    );
+    expect(loaded).toContain('class="chat-thread-rail chat-thread-rail--two-line"');
     // Avatar and author name open the profile with the spec's label.
     expect(loaded.match(/aria-label="rawkode, open profile"/g) ?? []).toHaveLength(2);
   }, 30_000);
@@ -192,7 +194,7 @@ const participants = [
     const html = await renderVueComponentSource(wrapper, { post, lastReplyAt: "" });
     const countOnly = section(html, "count-only");
     expect(countOnly).toContain('aria-label="1 reply. Open thread"');
-    expect(countOnly).not.toContain("chat-thread-card__latest");
+    expect(countOnly).not.toContain('class="chat-thread-card__latest"');
     expect(countOnly).not.toContain("chat-thread-card--two-line");
   }, 30_000);
 
@@ -200,8 +202,8 @@ const participants = [
     const html = await renderVueComponentSource(wrapper, { post, lastReplyAt: "" });
     for (const name of ["thread-pane", "no-replies"]) {
       const body = section(html, name);
-      expect(body).not.toContain("chat-thread-card");
-      expect(body).not.toContain("chat-thread-rail");
+      expect(body).not.toContain('class="chat-thread-card');
+      expect(body).not.toContain('class="chat-thread-rail');
     }
   }, 30_000);
 });
