@@ -82,7 +82,7 @@ sum(
   max by(job,instance) (
     max_over_time(target_info{
       job="waddle-server",deployment_environment="production"
-    }[15m])
+    }[30m])
   )
 )
 ```
@@ -91,6 +91,11 @@ Substitute `waddle_pending_delivery_aged_out_total` for age-out increments.
 The counters expose only `job` and `instance`, so `target_info` qualifies the
 observed instances as production. The baseline instances matched production;
 no counter instances lacked matching production metadata in that window.
+The metadata lookup extends to 30 minutes because a draining replica's final
+counter scrape can outlive its final `target_info` scrape. All four post-window
+counter instances matched production using that lookback; using only 15 minutes
+would omit one retiring instance. The unqualified job-wide increases were also
+zero in the post window.
 
 Use the `grafanacloud-logs` datasource for the missing-target warnings:
 
