@@ -858,6 +858,45 @@ impl PostgresFencedSmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for PostgresFencedSmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _owned_authority = if let Some(authority) = authority {
+            self.assert_fenced_with_authority(&mut tx, stream_id, expected_fence, authority)
+                .await?;
+            None
+        } else {
+            Some(
+                self.assert_fenced(&mut tx, stream_id, expected_fence)
+                    .await?,
+            )
+        };
+        let updated = tx
+            .execute(
+                "UPDATE sm_sessions SET max_resume_secs = 0, max_resume_duration_ms = 0 \
+                 WHERE stream_id = ?",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        if updated == 0 {
+            return Err(SmPersistenceError::Other(
+                "Expired SM promotion source is missing".to_owned(),
+            ));
+        }
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         let fence = self.claim_fence_for(&session.stream_id).await?;
         self.upsert_promotion_session_inner(session, &fence).await

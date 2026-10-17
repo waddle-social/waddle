@@ -129,10 +129,20 @@ impl InMemorySmSessionRegistry {
                 if resumable {
                     self.mark_snapshot_stale(&stream)?;
                     // Metadata-only update preserves concurrent sink pruning.
-                    storage
-                        .upsert_promotion_session(persisted.clone(), &fence)
-                        .await
-                        .map_err(|error| storage_error(error, &fence))?;
+                    if session.promotion_custody.requires_existing_source() {
+                        // A cancelled expiry conversion can still encounter
+                        // resumable metadata. Preserve its source-required
+                        // contract inside the write, not only this prior read.
+                        storage
+                            .mark_session_nonresumable(&stream, &fence, None)
+                            .await
+                            .map_err(|error| storage_error(error, &fence))?;
+                    } else {
+                        storage
+                            .upsert_promotion_session(persisted.clone(), &fence)
+                            .await
+                            .map_err(|error| storage_error(error, &fence))?;
+                    }
                 }
                 // A terminal capture can extend the last durable snapshot.
                 // Only genuinely newer sequences may be merged: an absent
@@ -173,7 +183,10 @@ impl InMemorySmSessionRegistry {
                 inventory.detached_at = session.detached_at;
                 inventory.pending_subscribes_flushed = session.pending_subscribes_flushed;
             } else {
-                if require_existing {
+                // Expiry-conversion retries may still find resumable metadata
+                // after cancellation, but unlike fresh terminal admissions
+                // they must never reconstruct a vanished canonical source.
+                if require_existing || session.promotion_custody.requires_existing_source() {
                     return Err(SmRegistryError::Internal(
                         "Registered promotion inventory disappeared".to_owned(),
                     ));

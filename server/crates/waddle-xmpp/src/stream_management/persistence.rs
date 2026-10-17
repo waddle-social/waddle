@@ -294,6 +294,21 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// detaches and the session is moved into the resumable pool.
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError>;
 
+    /// Retire resume eligibility without deleting or replacing an existing
+    /// source or its queue. The immutable fence authorizes this transition;
+    /// clustered stores reuse supplied identity authority without reacquiring
+    /// its writer-preferring gate. A missing source is an error, never admission.
+    async fn mark_session_nonresumable(
+        &self,
+        _stream_id: &SmSessionId,
+        _expected_fence: &SmClaimFence,
+        _authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "SM persistence cannot retire resume eligibility".to_owned(),
+        ))
+    }
+
     /// Promotion writes carry the captured owner/epoch through the actual
     /// transaction. Clustered stores must never replace it from a claim cache.
     async fn upsert_promotion_session(
@@ -782,6 +797,24 @@ impl InMemorySmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for InMemorySmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        _expected_fence: &SmClaimFence,
+        _authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let session = guard.sessions.get_mut(stream_id).ok_or_else(|| {
+            SmPersistenceError::Other("Expired SM promotion source is missing".to_owned())
+        })?;
+        session.max_resume_time = Some(0);
+        session.max_resume_duration = Duration::ZERO;
+        Ok(())
+    }
+
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,

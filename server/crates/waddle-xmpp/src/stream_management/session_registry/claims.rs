@@ -2954,8 +2954,10 @@ impl InMemorySmSessionRegistry {
     ) -> Result<Option<SmClaimCompletion>, SmRegistryError> {
         self.reconcile_stale_session_locked(&SmSessionId::new(stream_id))
             .await?;
-        // Persist-first ordering: durably erase the session BEFORE
-        // we hand it back to the resuming connection. If the durable
+        // Successful-resume persist-first ordering: durably erase the
+        // session BEFORE handing it back to the resuming connection.
+        // Expired claims instead retain their source for promotion below.
+        // If the durable
         // delete fails, abort the resume — the in-memory entry stays
         // in claimed_sessions and the caller can retry, or
         // release_claim to put it back. Without persist-first, a
@@ -2975,6 +2977,15 @@ impl InMemorySmSessionRegistry {
         let Some(session) = exists else {
             return Ok(None);
         };
+        // Completion makes one expiry decision before any destructive write.
+        // Returning Expired after a successful delete would discard its queue
+        // if the resume window crossed during that await.
+        if session.is_expired() {
+            return self
+                .complete_expired_claim_locked(session, authority)
+                .await
+                .map(|session| Some(SmClaimCompletion::Expired(session)));
+        }
         if let Some(client_h) = client_h {
             // Ordering matters, mirroring the websocket resume path:
             // `handled_count_exceeds_outbound` is an exact mod-2^32
@@ -2987,7 +2998,7 @@ impl InMemorySmSessionRegistry {
             // branch below. (#1099: this replaces a naive
             // `client_h > outbound_count` check that had a half-window
             // blind spot at `h == outbound + 2^31`.)
-            if !session.is_expired() && !session.can_resume_from(client_h) {
+            if !session.can_resume_from(client_h) {
                 let restored = {
                     let mut claimed = self
                         .claimed_sessions
@@ -3011,7 +3022,7 @@ impl InMemorySmSessionRegistry {
                 }
                 return Ok(None);
             }
-            if !session.is_expired() && session.handled_count_exceeds_outbound(client_h) {
+            if session.handled_count_exceeds_outbound(client_h) {
                 let restored = {
                     let mut claimed = self
                         .claimed_sessions
@@ -3054,21 +3065,8 @@ impl InMemorySmSessionRegistry {
             .write()
             .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_string()))?
             .remove(stream_id)
-            .map(|session| {
-                if session.is_expired() {
-                    SmClaimCompletion::Expired(session)
-                } else {
-                    SmClaimCompletion::Resumed(session)
-                }
-            });
-        if matches!(outcome, Some(SmClaimCompletion::Expired(_))) {
-            // Expiry ends the claim. A successful resume does not: the
-            // reattached stream keeps the exact owner+epoch fence for its
-            // attached lifetime, symmetrical with fresh `<enable/>`. Its
-            // next detach self-reacquires idempotently under that fence; a
-            // non-detach teardown releases it explicitly.
-            self.release_claim_store_entry(stream_id).await;
-        } else if matches!(outcome, Some(SmClaimCompletion::Resumed(_))) {
+            .map(SmClaimCompletion::Resumed);
+        if matches!(outcome, Some(SmClaimCompletion::Resumed(_))) {
             // The attached lifecycle adopted this fence: cancel any stale
             // exact-release retry for the identical owner+epoch (e.g. an
             // earlier failed resume's restore-release) — the janitor's
@@ -3078,6 +3076,104 @@ impl InMemorySmSessionRegistry {
             );
         }
         Ok(outcome)
+    }
+
+    /// Expired completion returns a cleanup snapshot, while the registry owns
+    /// its queue until the ordinary janitor's promote -> confirm sequence.
+    /// Publish retry custody before the first authority/storage await so a
+    /// dropped resume future cannot release or orphan the recorded payload.
+    async fn complete_expired_claim_locked(
+        &self,
+        mut session: DetachedSession,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<DetachedSession, SmRegistryError> {
+        self.validate_promotion_capture_locked(&session)?;
+        let fence = session.promotion_custody.captured_fence().cloned().ok_or(
+            SmRegistryError::StorageUnavailable(super::traits::StorageOutageCause::Backend),
+        )?;
+        session.promotion_custody = super::PromotionCaptureCustody::existing_source(fence.clone());
+        session.max_resume_time = Some(0);
+        {
+            // Match cancellation release and demotion's publication order.
+            let _sessions = self
+                .sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let mut claimed = self
+                .claimed_sessions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let mut promotions = self
+                .pending_promotions
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            let mut retries = self
+                .pending_promotion_retries
+                .write()
+                .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?;
+            claimed.remove(&session.stream_id);
+            promotions.insert(
+                session.stream_id.clone(),
+                (session.jid.clone(), session.occupancy_session),
+            );
+            retries.insert(session.stream_id.clone(), session.clone());
+        }
+
+        let owned_authority;
+        let authority = if let Some(authority) = authority {
+            authority
+        } else {
+            owned_authority = self.node_identity.guard_if_current(fence.owner()).await;
+            owned_authority.as_ref().ok_or_else(|| {
+                SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(fence.clone()))
+            })?
+        };
+        match tokio::time::timeout(
+            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
+            self.claim_store.fence(
+                &sm_session_entity(&session.stream_id),
+                fence.owner(),
+                fence.epoch(),
+            ),
+        )
+        .await
+        {
+            Ok(Ok(true)) => {}
+            Ok(Ok(false)) => {
+                return Err(SmRegistryError::PromotionClaimLost(
+                    ShutdownSmClaimLoss::Recorded(fence),
+                ));
+            }
+            Ok(Err(_)) => {
+                return Err(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Backend,
+                ));
+            }
+            Err(_) => {
+                return Err(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Timeout,
+                ));
+            }
+        }
+        if let Some(storage) = &self.persistence {
+            storage
+                .mark_session_nonresumable(
+                    &SmSessionId::new(&session.stream_id),
+                    &fence,
+                    Some(authority),
+                )
+                .await
+                .map_err(|error| match error {
+                    super::super::persistence::SmPersistenceError::NotOwner { .. } => {
+                        SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(
+                            fence.clone(),
+                        ))
+                    }
+                    error => SmRegistryError::Internal(error.to_string()),
+                })?;
+        }
+        self.record_promotion_snapshot_locked(&session)?;
+        Ok(session)
     }
 
     /// Remove a stored detached session from the in-memory view only

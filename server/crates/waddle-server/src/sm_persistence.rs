@@ -189,6 +189,29 @@ impl DatabaseSmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for DatabaseSmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        _expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        _authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let lock = self.lock_for(stream_id);
+        let _guard = lock.lock().await;
+        let updated = self
+            .execute(
+                "UPDATE sm_sessions SET max_resume_secs = 0, max_resume_duration_ms = 0 \
+                 WHERE stream_id = ?",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await?;
+        if updated == 0 {
+            return Err(SmPersistenceError::Other(
+                "Expired SM promotion source is missing".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
     #[instrument(skip(self, session), fields(stream_id = %session.stream_id))]
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         let lock = self.lock_for(&session.stream_id);
