@@ -2,6 +2,7 @@ package social.waddle.android.feature.channel
 
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.map
@@ -17,6 +18,7 @@ import social.waddle.android.client.canManageMembersOf
 import social.waddle.android.client.canModerateOf
 import social.waddle.android.client.isRoomOwnerOf
 import social.waddle.android.client.mentionCandidatesOf
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
@@ -34,6 +36,7 @@ class ChannelViewModel(
     nick: String,
     uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
+    timelineDirection: StateFlow<TimelineDirection> = MutableStateFlow(TimelineDirection.CHAT),
     selfBareJid: String? = null,
 ) : ConversationViewModel(
     conversationJid = roomJid,
@@ -55,6 +58,7 @@ class ChannelViewModel(
     notifyMode = sessionManager.notifySettingsStore.modeFlow(roomJid, ConversationKind.PRIVATE_GROUP),
     canModerate = sessionManager.presenceStore.occupants
         .map { rooms -> canModerateOf(rooms[roomJid].orEmpty()) },
+    timelineDirection = timelineDirection,
     uploader = uploader,
     onConversationRead = onConversationRead,
     selfBareJid = selfBareJid,
@@ -81,6 +85,7 @@ class ChannelViewModel(
                     sessionManager = graph.sessionManager,
                     roomJid = roomJid,
                     nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+                    timelineDirection = graph.timelineDirection,
                     uploader = graph.attachmentUploader,
                     onConversationRead = graph.messageNotifier::clearConversationNotification,
                     selfBareJid = graph.currentSession.value?.jid?.let(::selfBareJidOf),

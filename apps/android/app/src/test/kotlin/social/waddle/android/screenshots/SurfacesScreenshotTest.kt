@@ -86,7 +86,7 @@ class SurfacesScreenshotTest {
             state = SettingsUiState(
                 username = "david",
                 jid = "david@waddle.test",
-                theme = ThemeMode.NIGHT,
+                theme = ThemeMode.SYSTEM,
                 messageSoundsEnabled = false,
             ),
             selfAvatar = null,

@@ -38,6 +38,7 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.calls.CallState
 import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.SessionPrefs
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.prefs.sessionPreferencesDataStore
 import social.waddle.android.client.prefs.userPreferencesDataStore
@@ -188,6 +189,13 @@ class AppGraph(
             // No background connection service in this build.
             MutableStateFlow(false).asStateFlow()
         }
+
+    /**
+     * Chat or social timelines, read from the start so a conversation
+     * opens straight in its layout instead of flipping once it loads.
+     */
+    val timelineDirection: StateFlow<TimelineDirection> =
+        userPrefs.timelineDirection.stateIn(applicationScope, SharingStarted.Eagerly, TimelineDirection.CHAT)
 
     private val _currentSession = MutableStateFlow<WaddleSessionInfo?>(null)
 

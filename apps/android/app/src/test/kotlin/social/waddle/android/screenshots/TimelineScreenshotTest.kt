@@ -1,6 +1,7 @@
 package social.waddle.android.screenshots
 
 import android.app.Application
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.ui.Modifier
 import androidx.test.ext.junit.runners.AndroidJUnit4
@@ -9,6 +10,7 @@ import org.junit.Test
 import org.junit.runner.RunWith
 import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
+import social.waddle.android.feature.conversation.MessageComposer
 import social.waddle.android.feature.conversation.MessageRowActions
 import social.waddle.android.feature.conversation.MessageRowContext
 import social.waddle.android.feature.conversation.PendingMessage
@@ -19,8 +21,9 @@ import java.util.TimeZone
 
 /**
  * Golden screenshots of the conversation timeline, light and dark: the
- * shared channel fixture plus a failed and a sending own message, and
- * the skeleton shown while the first page loads. Clock, locale, the
+ * shared channel fixture plus a failed and a sending own message, the
+ * same channel in the social layout, and the skeleton shown while the
+ * first page loads. Clock, locale, the
  * 24-hour setting and reduced motion are pinned.
  * Re-record after an intended change: `./gradlew :app:recordRoborazziFossDebug`.
  */
@@ -52,6 +55,27 @@ class TimelineScreenshotTest {
                 today = ScreenshotFixtures.TODAY,
                 modifier = Modifier.fillMaxSize(),
             )
+        }
+    }
+
+    /** Social layout: composer on top, the newest post first, the unread divider under the oldest unread. */
+    @Test
+    fun social() = captureThemed("timeline_social") {
+        ConversationFixtures.Pinned {
+            Column(Modifier.fillMaxSize()) {
+                MessageComposer(onSend = { _, _ -> }, onAttach = {}, placeholder = "Message #general", pinnedTop = true)
+                TimelineList(
+                    entries = ScreenshotFixtures.channelEntries(newestFirst = true),
+                    isLoadingOlder = false,
+                    reachedHistoryStart = true,
+                    onTopReached = {},
+                    actions = MessageRowActions(onOpenThread = {}),
+                    context = MessageRowContext(selfBareJid = ScreenshotFixtures.SELF),
+                    today = ScreenshotFixtures.TODAY,
+                    modifier = Modifier.weight(1f),
+                    newestAtTop = true,
+                )
+            }
         }
     }
 

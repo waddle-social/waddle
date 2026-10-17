@@ -33,10 +33,11 @@ class UserPrefsTest {
     }
 
     @Test
-    fun `defaults are night theme with notifications and sounds on`() = runBlocking {
+    fun `defaults are system theme, chat timeline, notifications and sounds on`() = runBlocking {
         val prefs = newPrefs()
 
-        assertEquals(ThemeMode.NIGHT, prefs.theme.first())
+        assertEquals(ThemeMode.SYSTEM, prefs.theme.first())
+        assertEquals(TimelineDirection.CHAT, prefs.timelineDirection.first())
         assertTrue(prefs.notificationsEnabled.first())
         assertTrue(prefs.messageSoundsEnabled.first())
     }
@@ -46,25 +47,43 @@ class UserPrefsTest {
         val prefs = newPrefs()
 
         prefs.setTheme(ThemeMode.DAYLIGHT)
+        prefs.setTimelineDirection(TimelineDirection.SOCIAL)
         prefs.setNotificationsEnabled(false)
         prefs.setMessageSoundsEnabled(false)
 
         assertEquals(ThemeMode.DAYLIGHT, prefs.theme.first())
+        assertEquals(TimelineDirection.SOCIAL, prefs.timelineDirection.first())
         assertFalse(prefs.notificationsEnabled.first())
         assertFalse(prefs.messageSoundsEnabled.first())
 
         prefs.clear()
-        assertEquals(ThemeMode.NIGHT, prefs.theme.first())
+        assertEquals(ThemeMode.SYSTEM, prefs.theme.first())
+        assertEquals(TimelineDirection.CHAT, prefs.timelineDirection.first())
         assertTrue(prefs.notificationsEnabled.first())
     }
 
     @Test
-    fun `the old system and unknown values read as night`() {
-        assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage("system"))
-        assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage(null))
-        assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage("sepia"))
+    fun `nothing stored and unknown values follow the system`() {
+        assertEquals(ThemeMode.SYSTEM, ThemeMode.fromStorage("system"))
+        assertEquals(ThemeMode.SYSTEM, ThemeMode.fromStorage(null))
+        assertEquals(ThemeMode.SYSTEM, ThemeMode.fromStorage("sepia"))
         assertEquals(ThemeMode.NIGHT, ThemeMode.fromStorage("dark"))
         assertEquals(ThemeMode.DAYLIGHT, ThemeMode.fromStorage("light"))
+    }
+
+    @Test
+    fun `system follows the phone, the pinned themes do not`() {
+        assertTrue(ThemeMode.SYSTEM.isNight(systemDark = true))
+        assertFalse(ThemeMode.SYSTEM.isNight(systemDark = false))
+        assertTrue(ThemeMode.NIGHT.isNight(systemDark = false))
+        assertFalse(ThemeMode.DAYLIGHT.isNight(systemDark = true))
+    }
+
+    @Test
+    fun `unknown timeline directions read as chat`() {
+        assertEquals(TimelineDirection.CHAT, TimelineDirection.fromStorage(null))
+        assertEquals(TimelineDirection.CHAT, TimelineDirection.fromStorage("sideways"))
+        assertEquals(TimelineDirection.SOCIAL, TimelineDirection.fromStorage("social"))
     }
 
     @Test

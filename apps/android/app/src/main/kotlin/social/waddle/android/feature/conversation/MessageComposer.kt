@@ -1,10 +1,16 @@
 package social.waddle.android.feature.conversation
 
+import android.net.Uri
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
+import androidx.compose.foundation.content.MediaType
+import androidx.compose.foundation.content.consume
+import androidx.compose.foundation.content.contentReceiver
+import androidx.compose.foundation.content.hasMediaType
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -23,6 +29,8 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardOptions
+import androidx.compose.foundation.text.input.TextFieldLineLimits
+import androidx.compose.foundation.text.input.TextFieldState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.Send
 import androidx.compose.material.icons.outlined.Add
@@ -50,12 +58,15 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -74,6 +85,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.text.TextRange
+import androidx.compose.ui.text.coerceIn
 import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardCapitalization
@@ -133,6 +145,16 @@ fun MessageComposer(
     slashDispatch: (suspend (SlashInvocation) -> Boolean)? = null,
     /** "Message #general", "Message alice"; `null` reads "Message". */
     placeholder: String? = null,
+    /**
+     * An image pasted, inserted from the keyboard or dropped on the text
+     * field; `null` leaves such content alone.
+     */
+    onImage: ((Uri) -> Unit)? = null,
+    /**
+     * Social layout: the composer sits on top of the timeline, so its
+     * hairline moves below it and the popovers open underneath.
+     */
+    pinnedTop: Boolean = false,
 ) {
     var draft by rememberSaveable(stateSaver = TextFieldValue.Saver) {
         mutableStateOf(TextFieldValue(""))
@@ -262,14 +284,8 @@ fun MessageComposer(
 
     var focused by remember { mutableStateOf(false) }
     val colors = Waddle.colors
-    Column(
-        modifier = modifier
-            .fillMaxWidth()
-            .background(colors.bg)
-            .drawBehind { drawLine(colors.borderSoft, Offset.Zero, Offset(size.width, 0f), 1.dp.toPx()) }
-            .navigationBarsPadding()
-            .padding(horizontal = Waddle.space.sm, vertical = Waddle.space.sm),
-    ) {
+    // Above the card, or under it when the composer is pinned on top.
+    val popovers: @Composable () -> Unit = {
         if (slashCandidates.isNotEmpty()) {
             SlashCommandPopover(
                 candidates = slashCandidates,
@@ -296,6 +312,20 @@ fun MessageComposer(
                 },
             )
         }
+    }
+    Column(
+        modifier = modifier
+            .fillMaxWidth()
+            .background(colors.bg)
+            .drawBehind {
+                // The hairline parts the composer from the timeline.
+                val y = if (pinnedTop) size.height else 0f
+                drawLine(colors.borderSoft, Offset(0f, y), Offset(size.width, y), 1.dp.toPx())
+            }
+            .then(if (pinnedTop) Modifier else Modifier.navigationBarsPadding())
+            .padding(horizontal = Waddle.space.sm, vertical = Waddle.space.sm),
+    ) {
+        if (!pinnedTop) popovers()
         ComposerCard(focused = focused) {
             slashBlockedPrefix?.let { blocked ->
                 // Dismissing the hint is the mobile Esc: it disarms interception
@@ -328,6 +358,8 @@ fun MessageComposer(
             ComposerTextField(
                 value = draft,
                 placeholder = placeholder ?: stringResource(R.string.composer_placeholder),
+                // One upload at a time: content arriving meanwhile is left alone.
+                onImage = onImage?.takeIf { uploadState != UploadState.Uploading },
                 onFocusChanged = { focused = it },
                 onValueChange = { value ->
                     if (value.text != draft.text) onDraftChanged()
@@ -347,6 +379,7 @@ fun MessageComposer(
                 onSend = ::submit,
             )
         }
+        if (pinnedTop) popovers()
     }
 }
 
@@ -391,29 +424,60 @@ private fun ComposerCard(focused: Boolean, content: @Composable ColumnScope.() -
     }
 }
 
+/**
+ * The draft's text field. It runs on a [TextFieldState], the only text
+ * field that can receive content (pasted, keyboard-inserted or dropped
+ * images), while the composer keeps its draft as a [TextFieldValue]:
+ * the user's edits report through [onValueChange], and a [value] the
+ * composer sets itself (send, mention, format, edit) is written back.
+ */
 @Composable
 private fun ComposerTextField(
     value: TextFieldValue,
     placeholder: String,
+    onImage: ((Uri) -> Unit)?,
     onFocusChanged: (Boolean) -> Unit,
     onValueChange: (TextFieldValue) -> Unit,
 ) {
+    val state = remember { TextFieldState(value.text, value.selection) }
+    // What both sides last agreed on: an echo of the user's own edit is
+    // never written back over typing that has happened since.
+    val synced = remember { SyncedDraft(value.text, value.selection) }
+    val latestOnValueChange by rememberUpdatedState(onValueChange)
+    SideEffect {
+        if (!synced.matches(value.text, value.selection)) {
+            synced.set(value.text, value.selection)
+            state.edit {
+                replace(0, length, value.text)
+                selection = value.selection.coerceIn(0, length)
+            }
+        }
+    }
+    LaunchedEffect(state) {
+        snapshotFlow { state.text.toString() to state.selection }
+            .collect { (text, selection) ->
+                if (!synced.matches(text, selection)) {
+                    synced.set(text, selection)
+                    latestOnValueChange(TextFieldValue(text, selection))
+                }
+            }
+    }
     val colors = Waddle.colors
     val textStyle = Waddle.type.body.copy(color = colors.fg)
     BasicTextField(
-        value = value,
-        onValueChange = onValueChange,
+        state = state,
         textStyle = textStyle,
         cursorBrush = SolidColor(colors.action),
-        maxLines = COMPOSER_MAX_LINES,
+        lineLimits = TextFieldLineLimits.MultiLine(maxHeightInLines = COMPOSER_MAX_LINES),
         keyboardOptions = KeyboardOptions(capitalization = KeyboardCapitalization.Sentences),
         modifier = Modifier
             .fillMaxWidth()
+            .imageReceiver(onImage)
             .onFocusChanged { onFocusChanged(it.isFocused) }
             .padding(start = Waddle.space.md, end = Waddle.space.md, top = Waddle.space.sm),
-        decorationBox = { inner ->
+        decorator = { inner ->
             Box {
-                if (value.text.isEmpty()) {
+                if (state.text.isEmpty()) {
                     Text(
                         text = placeholder,
                         style = textStyle,
@@ -426,6 +490,41 @@ private fun ComposerTextField(
             }
         },
     )
+}
+
+/** The text and selection the composer and its field last agreed on. */
+private class SyncedDraft(private var text: String, private var selection: TextRange) {
+    fun matches(text: String, selection: TextRange): Boolean = this.text == text && this.selection == selection
+
+    fun set(text: String, selection: TextRange) {
+        this.text = text
+        this.selection = selection
+    }
+}
+
+/**
+ * Hands the first image of content pasted, inserted from the keyboard or
+ * dropped here to [onImage]; the rest (text above all) goes on to the
+ * field. `null` takes nothing.
+ */
+@OptIn(ExperimentalFoundationApi::class)
+private fun Modifier.imageReceiver(onImage: ((Uri) -> Unit)?): Modifier = if (onImage == null) {
+    this
+} else {
+    contentReceiver { content ->
+        if (!content.hasMediaType(MediaType.Image)) return@contentReceiver content
+        var taken = false
+        content.consume { item ->
+            val uri = item.uri
+            if (taken || uri == null) {
+                false
+            } else {
+                taken = true
+                onImage(uri)
+                true
+            }
+        }
+    }
 }
 
 /** Reply / edit / upload state, inside the card above the text. */

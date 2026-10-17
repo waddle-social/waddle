@@ -1,12 +1,15 @@
 package social.waddle.android.feature.dm
 
 import androidx.lifecycle.ViewModelProvider
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import social.waddle.android.AppGraph
 import social.waddle.android.client.MessageSendExtras
 import social.waddle.android.client.NotifySettingsResult
 import social.waddle.android.client.SendResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppSessionManager
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.store.ConversationKind
 import social.waddle.android.feature.conversation.AttachmentUploader
 import social.waddle.android.feature.conversation.ConversationIo
@@ -23,6 +26,7 @@ class DmViewModel(
     peerJid: String,
     uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
+    timelineDirection: StateFlow<TimelineDirection> = MutableStateFlow(TimelineDirection.CHAT),
     selfBareJid: String? = null,
 ) : ConversationViewModel(
     conversationJid = peerJid,
@@ -33,6 +37,7 @@ class DmViewModel(
     io = DmIo(sessionManager, peerJid),
     typingNames = sessionManager.chatStateStore.composingNames(peerJid),
     notifyMode = sessionManager.notifySettingsStore.modeFlow(peerJid, ConversationKind.DIRECT_CHAT),
+    timelineDirection = timelineDirection,
     uploader = uploader,
     onConversationRead = onConversationRead,
     selfBareJid = selfBareJid,
@@ -43,6 +48,7 @@ class DmViewModel(
                 DmViewModel(
                     sessionManager = graph.sessionManager,
                     peerJid = peerJid,
+                    timelineDirection = graph.timelineDirection,
                     uploader = graph.attachmentUploader,
                     onConversationRead = graph.messageNotifier::clearConversationNotification,
                     selfBareJid = graph.currentSession.value?.jid?.let(::selfBareJidOf),

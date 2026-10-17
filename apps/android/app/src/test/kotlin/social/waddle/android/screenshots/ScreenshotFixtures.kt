@@ -145,7 +145,11 @@ internal object ScreenshotFixtures {
             ),
         )
 
-    fun channelEntries(unreadAtOpen: Int = 2, pending: List<PendingMessage> = emptyList()): List<FeedEntry> =
+    fun channelEntries(
+        unreadAtOpen: Int = 2,
+        pending: List<PendingMessage> = emptyList(),
+        newestFirst: Boolean = false,
+    ): List<FeedEntry> =
         feedEntriesOf(
             items = channelItems(),
             pending = pending,
@@ -155,6 +159,7 @@ internal object ScreenshotFixtures {
                 pinnedIds = emptySet(),
                 unreadAtOpen = unreadAtOpen,
                 zone = ZONE,
+                newestFirst = newestFirst,
             ),
         )
 }

@@ -33,6 +33,7 @@ import social.waddle.android.client.composeMarkdown
 import social.waddle.android.client.firstEligibleHttpsUrl
 import social.waddle.android.client.linkPreviewSendToken
 import social.waddle.android.client.prefs.SharedFileRef
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.client.ffi.WaddleNotifyMode
@@ -88,6 +89,11 @@ open class ConversationViewModel(
      * re-checks moderator privileges on every request.
      */
     canModerate: Flow<Boolean> = flowOf(false),
+    /**
+     * Chat or social layout (web `waddle:scroll-direction`). A StateFlow:
+     * the first state already carries the layout, so it never flips.
+     */
+    timelineDirection: StateFlow<TimelineDirection> = MutableStateFlow(TimelineDirection.CHAT),
     private val uploader: AttachmentUploader? = null,
     private val pageSize: UInt = PAGE_SIZE,
     private val historyPageBudget: Int = HISTORY_PAGE_BUDGET,
@@ -171,9 +177,9 @@ open class ConversationViewModel(
             timeline,
             tracker.pending,
             history,
-            pinnedIds,
-            canModerate,
-        ) { items, unconfirmed, load, pins, moderate ->
+            combine(pinnedIds, canModerate, timelineDirection, ::Triple),
+        ) { items, unconfirmed, load, (pins, moderate, direction) ->
+            val newestFirst = direction == TimelineDirection.SOCIAL
             ConversationUiState(
                 entries = feedEntriesOf(
                     items = items,
@@ -185,8 +191,10 @@ open class ConversationViewModel(
                         unreadAtOpen = unreadAtOpen,
                         unreadAnchor = unreadAnchor,
                         newestHistoryLoaded = load.newestLoaded,
+                        newestFirst = newestFirst,
                     ),
                 ),
+                newestFirst = newestFirst,
                 isLoadingOlder = load.inFlight,
                 reachedHistoryStart = load.reachedStart,
                 awaitingFirstPage = !load.settled,
@@ -199,7 +207,11 @@ open class ConversationViewModel(
                     emptyList()
                 },
             )
-        }.flowOn(feedDispatcher).stateIn(viewModelScope, SharingStarted.Eagerly, ConversationUiState())
+        }.flowOn(feedDispatcher).stateIn(
+            viewModelScope,
+            SharingStarted.Eagerly,
+            ConversationUiState(newestFirst = timelineDirection.value == TimelineDirection.SOCIAL),
+        )
 
     /** Normal sends vs editing an existing own message (XEP-0308). */
     val composerMode: StateFlow<ComposerMode> = composer.mode

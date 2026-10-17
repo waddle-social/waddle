@@ -354,4 +354,57 @@ class FeedEntriesTest {
         assertTrue(avatarOf(avatars, first)!!.visible)
         assertEquals(false, avatarOf(avatars, second)!!.visible)
     }
+
+    private fun socialEntries(rows: List<ConversationRow.Stored>, unreadAtOpen: Int = 0) = feedEntriesOf(
+        items = rows.map { it.item },
+        pending = emptyList(),
+        context = FeedContext(
+            threadId = null,
+            selfBareJid = self,
+            pinnedIds = emptySet(),
+            unreadAtOpen = unreadAtOpen,
+            zone = ZoneOffset.UTC,
+            newestFirst = true,
+        ),
+    )
+
+    @Test
+    fun `newest first, the newest row of a burst carries the header and the list stays oldest first`() {
+        val stamp = "alice@waddle.test"
+        val first = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = stamp)
+        val second = row("2", "alice", "2026-07-15T10:01:00Z", authorJid = stamp)
+        val third = row("3", "alice", "2026-07-15T10:02:00Z", authorJid = stamp)
+        val entries = socialEntries(listOf(first, second, third))
+
+        assertEquals(listOf(first, second, third).map(::rowKeyOf), entries.map { it.key })
+        assertEquals(listOf(false, false, true), entries.map { it.startsGroup })
+    }
+
+    @Test
+    fun `newest first, the day separator heads each day's newest row`() {
+        val late = row("1", "alice", "2026-07-15T23:58:00Z", authorJid = "alice@waddle.test")
+        val early = row("2", "alice", "2026-07-16T00:01:00Z", authorJid = "alice@waddle.test")
+        val earlier = row("3", "alice", "2026-07-16T00:02:00Z", authorJid = "alice@waddle.test")
+        val entries = socialEntries(listOf(late, early, earlier))
+
+        assertEquals(
+            listOf(LocalDate.of(2026, 7, 15), null, LocalDate.of(2026, 7, 16)),
+            entries.map { it.daySeparator },
+        )
+        assertEquals(listOf(true, false, true), entries.map { it.startsGroup })
+    }
+
+    @Test
+    fun `newest first, the divider stays on the oldest unread row and splits the group below it`() {
+        val a1 = row("1", "alice", "2026-07-15T10:00:00Z", authorJid = "alice@waddle.test")
+        val a2 = row("2", "alice", "2026-07-15T10:01:00Z", authorJid = "alice@waddle.test")
+        val a3 = row("3", "alice", "2026-07-15T10:02:00Z", authorJid = "alice@waddle.test")
+        val entries = socialEntries(listOf(a1, a2, a3), unreadAtOpen = 2)
+
+        // Drawn top to bottom: a3, a2, divider, a1.
+        assertEquals(listOf(false, true, false), entries.map { it.unreadDivider })
+        assertEquals("the row under the divider restarts the header", true, entries[0].startsGroup)
+        assertEquals(false, entries[1].startsGroup)
+        assertTrue(entries[2].startsGroup)
+    }
 }

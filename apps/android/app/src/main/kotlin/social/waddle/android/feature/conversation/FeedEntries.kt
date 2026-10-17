@@ -23,11 +23,14 @@ data class FeedEntry(
     /** Stable LazyColumn key. */
     val key: String,
     val row: ConversationRow,
-    /** Local day to label above this row, when it starts a new day. */
+    /** Local day to label above this row, when it starts a new day on screen. */
     val daySeparator: LocalDate?,
-    /** The first row that was unread when the conversation opened. */
+    /**
+     * The first row that was unread when the conversation opened. The
+     * divider sits above it, or below it when the newest is on top.
+     */
     val unreadDivider: Boolean,
-    /** First row of an author burst: draws avatar and header. */
+    /** Top row of an author burst on screen: draws avatar and header. */
     val startsGroup: Boolean,
     /** Real bare JID behind the avatar; `null` = initials only. */
     val authorJid: String?,
@@ -68,6 +71,12 @@ data class FeedContext(
      * rows can be missing unread messages, so [unreadAnchor] does not pin.
      */
     val newestHistoryLoaded: Boolean = true,
+    /**
+     * Social layout: the newest row is drawn on top. Grouping and day
+     * separators then run newest to oldest, as the reader sees them
+     * (web `buildMessageDisplayMeta` over the flipped list).
+     */
+    val newestFirst: Boolean = false,
 )
 
 /**
@@ -97,9 +106,11 @@ class UnreadAnchor(private val unreadAtOpen: Int, private val openedAt: Instant)
 
 /**
  * The visible rows ([visibleRows]) turned into feed entries, oldest first.
- * A row continues the previous author's group when the same person wrote
- * it on the same local day within [GROUP_WINDOW], with no day separator
- * or unread divider between them (web `buildMessageDisplayMeta` parity).
+ * A row continues the group of the row drawn above it when the same
+ * person wrote both on the same local day within [GROUP_WINDOW], with no
+ * day separator or unread divider between them (web
+ * `buildMessageDisplayMeta` parity). [FeedContext.newestFirst] flips
+ * which row is drawn above; the list stays oldest first either way.
  */
 fun feedEntriesOf(
     items: List<TimelineItem>,
@@ -116,11 +127,13 @@ fun feedEntriesOf(
     )
     val out = ArrayList<FeedEntry>(rows.size)
     var previous: Placed? = null
-    rows.forEachIndexed { index, row ->
-        val placed = place(row, index, previous, context, derived)
+    val onScreen = if (context.newestFirst) rows.indices.reversed() else rows.indices
+    for (index in onScreen) {
+        val placed = place(rows[index], index, previous, context, derived)
         out += placed.entry
         previous = placed
     }
+    if (context.newestFirst) out.reverse()
     return out
 }
 
@@ -135,6 +148,7 @@ private class Derived(
 /** An entry plus the grouping key the next row compares against. */
 private class Placed(val entry: FeedEntry, val authorKey: String?)
 
+/** Places [row] under [previous], the row drawn just above it. */
 private fun place(
     row: ConversationRow,
     index: Int,
@@ -146,11 +160,13 @@ private fun place(
     val day = sentAt.atZone(context.zone).toLocalDate()
     val separator = day.takeIf { it != previous?.entry?.sentAt?.atZone(context.zone)?.toLocalDate() }
     val divider = index == derived.dividerIndex
+    // The divider is drawn above its row, or below it when the newest is on top.
+    val dividerAbove = if (context.newestFirst) previous?.entry?.unreadDivider == true else divider
     val authorJid = authorJidOf(row, context.selfBareJid)
     val authorKey = authorKeyOf(row, authorJid)
     val startsGroup = previous == null ||
         separator != null ||
-        divider ||
+        dividerAbove ||
         !continuesGroup(previous, row, authorKey, sentAt)
     val item = (row as? ConversationRow.Stored)?.item
     val parent = item?.replyToId?.let { derived.byIdentity[it] }

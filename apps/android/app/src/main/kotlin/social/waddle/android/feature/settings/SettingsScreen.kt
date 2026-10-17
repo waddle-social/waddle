@@ -23,12 +23,15 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
 import androidx.compose.material.icons.automirrored.outlined.Logout
+import androidx.compose.material.icons.outlined.BrightnessAuto
 import androidx.compose.material.icons.outlined.DarkMode
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.LightMode
 import androidx.compose.material.icons.outlined.NotificationsActive
 import androidx.compose.material.icons.outlined.Sync
+import androidx.compose.material.icons.outlined.VerticalAlignBottom
+import androidx.compose.material.icons.outlined.VerticalAlignTop
 import androidx.compose.material.icons.outlined.Wifi
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -64,6 +67,7 @@ import social.waddle.android.R
 import social.waddle.android.avatar.PeerAvatar
 import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.ThemeMode
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.push.PushStatus
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.ChoiceOption
@@ -81,7 +85,7 @@ import social.waddle.android.ui.huddleSwitchColors
 import social.waddle.client.ffi.WaddleAvatar
 
 /**
- * Account, theme mode, notification toggles, battery-optimization
+ * Account, theme mode, timeline direction, notification toggles, battery-optimization
  * exemption, logout.
  */
 @Composable
@@ -112,6 +116,7 @@ fun SettingsScreen(
             onOpenProfile = onOpenProfile,
             onOpenCommunityUsers = onOpenCommunityUsers,
             onSetTheme = viewModel::setTheme,
+            onSetTimelineDirection = viewModel::setTimelineDirection,
             onSetWallpaperColors = viewModel::setWallpaperColors,
             onSetNotificationsEnabled = viewModel::setNotificationsEnabled,
             onSetMessageSoundsEnabled = viewModel::setMessageSoundsEnabled,
@@ -144,6 +149,7 @@ internal data class SettingsActions(
     val onPickDistributor: () -> Unit = {},
     val onUseFcm: () -> Unit = {},
     val onSetWallpaperColors: (Boolean) -> Unit = {},
+    val onSetTimelineDirection: (TimelineDirection) -> Unit = {},
 )
 
 /** Stateless settings surface: Huddle card groups on the screen ground. */
@@ -184,6 +190,8 @@ internal fun SettingsContent(
             }
             GroupedSection(title = stringResource(R.string.settings_appearance)) {
                 ThemeSelector(selected = state.theme, onSelect = actions.onSetTheme)
+                GroupDivider()
+                TimelineDirectionSelector(selected = state.timelineDirection, onSelect = actions.onSetTimelineDirection)
                 GroupDivider()
                 ToggleRow(
                     title = stringResource(R.string.settings_wallpaper_colors),
@@ -482,11 +490,16 @@ private fun AccountRow(
     }
 }
 
-/** Night or Daylight, as Material 3 Expressive's connected button group. */
+/** System, Night or Daylight, as Material 3 Expressive's connected button group. */
 @Composable
 private fun ThemeSelector(selected: ThemeMode, onSelect: (ThemeMode) -> Unit) {
     SegmentedChoice(
         options = listOf(
+            ChoiceOption(
+                ThemeMode.SYSTEM,
+                stringResource(R.string.settings_theme_system),
+                Icons.Outlined.BrightnessAuto,
+            ),
             ChoiceOption(ThemeMode.NIGHT, stringResource(R.string.settings_theme_night), Icons.Outlined.DarkMode),
             ChoiceOption(
                 ThemeMode.DAYLIGHT,
@@ -498,6 +511,46 @@ private fun ThemeSelector(selected: ThemeMode, onSelect: (ThemeMode) -> Unit) {
         onSelect = onSelect,
         modifier = Modifier.padding(Waddle.space.md),
     )
+}
+
+/** Chat (newest at the bottom) or Social (newest at the top), with what the choice does. */
+@Composable
+private fun TimelineDirectionSelector(selected: TimelineDirection, onSelect: (TimelineDirection) -> Unit) {
+    Column(
+        verticalArrangement = Arrangement.spacedBy(Waddle.space.sm),
+        modifier = Modifier.padding(Waddle.space.md),
+    ) {
+        Column(verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs)) {
+            Text(text = stringResource(R.string.settings_timeline), style = Waddle.type.body, color = Waddle.colors.fg)
+            Text(
+                text = stringResource(
+                    when (selected) {
+                        TimelineDirection.CHAT -> R.string.settings_timeline_chat_detail
+                        TimelineDirection.SOCIAL -> R.string.settings_timeline_social_detail
+                    },
+                ),
+                style = Waddle.type.control.copy(fontWeight = null),
+                color = Waddle.colors.fgMuted,
+            )
+        }
+        SegmentedChoice(
+            options = listOf(
+                ChoiceOption(
+                    TimelineDirection.CHAT,
+                    stringResource(R.string.settings_timeline_chat),
+                    Icons.Outlined.VerticalAlignBottom,
+                ),
+                ChoiceOption(
+                    TimelineDirection.SOCIAL,
+                    stringResource(R.string.settings_timeline_social),
+                    Icons.Outlined.VerticalAlignTop,
+                ),
+            ),
+            selected = selected,
+            onSelect = onSelect,
+            modifier = Modifier.testTag(SettingsScreenTestTags.TIMELINE_DIRECTION),
+        )
+    }
 }
 
 @Composable
@@ -532,6 +585,7 @@ object SettingsScreenTestTags {
     const val DELIVERY_STATUS = "settings-delivery-status"
     const val STAY_CONNECTED_TOGGLE = "settings-stay-connected-toggle"
     const val WALLPAPER_COLORS_TOGGLE = "settings-wallpaper-colors-toggle"
+    const val TIMELINE_DIRECTION = "settings-timeline-direction"
 }
 
 @Composable

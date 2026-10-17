@@ -205,8 +205,14 @@
     <string name="settings_account">Account</string>
     <string name="settings_avatar">Avatar</string>
     <string name="settings_appearance">Appearance</string>
+    <string name="settings_theme_system">System</string>
     <string name="settings_theme_night">Night</string>
     <string name="settings_theme_daylight">Daylight</string>
+    <string name="settings_timeline">Timeline</string>
+    <string name="settings_timeline_chat">Chat</string>
+    <string name="settings_timeline_social">Social</string>
+    <string name="settings_timeline_chat_detail">Newest at the bottom: fresh posts land below older ones, above the composer.</string>
+    <string name="settings_timeline_social_detail">Newest at the top: the composer sits first and the latest posts follow as you read down.</string>
     <string name="settings_wallpaper_colors">Match wallpaper</string>
     <string name="settings_wallpaper_colors_detail">Material You: buttons and surfaces take your wallpaper\'s colours. Live things stay ember.</string>
     <string name="settings_notifications">Notifications</string>
