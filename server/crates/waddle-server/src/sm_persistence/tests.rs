@@ -1649,3 +1649,387 @@ async fn postgres_promotion_append_distinguishes_retries_retirement_and_conflict
     )
     .await;
 }
+
+fn expiry_ingress_append(entry: &PersistedUnackedStanza) -> PersistedIngressAppend {
+    PersistedIngressAppend {
+        key: waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [7; 32],
+            resource: full("alice@example.com/web"),
+        },
+        accepting_stream: entry.stream_id.clone(),
+        sequence: entry.sequence,
+        appended_at: entry.original_receipt_at,
+        payload: *entry.stanza.clone(),
+        original_receipt_at: entry.original_receipt_at,
+        disposition: IngressCustodyDisposition::Pending,
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_atomically_trims_valid_wrapping_acknowledgements() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("database");
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, h, retained) in [
+        ("ordinary-expiry", 10_u32, 12_u32, 11_u32, vec![12]),
+        ("wrapping-expiry", u32::MAX - 1, 1, 0, vec![1]),
+        ("unchanged-ack", 10, 12, 10, vec![11, 12]),
+        ("fully-acknowledged", 10, 12, 12, vec![]),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let queue = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| fixture_unacked(name, floor.wrapping_add(distance)))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        for _ in 0..2 {
+            storage
+                .mark_session_nonresumable(&stream, h, &fence, None)
+                .await
+                .expect("retire existing source idempotently");
+            let source = storage
+                .get_session(&stream)
+                .await
+                .expect("read source")
+                .expect("retained source");
+            assert_eq!(source.last_acked, h);
+            assert_eq!(source.outbound_count, outbound);
+            assert_eq!(source.max_resume_time, Some(0));
+            assert_eq!(source.max_resume_duration, Duration::ZERO);
+            for append in &appends {
+                let allocation = storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read ingress allocation")
+                    .expect("retained allocation proof");
+                let expected = if retained.contains(&append.sequence) {
+                    IngressCustodyDisposition::Pending
+                } else {
+                    IngressCustodyDisposition::Acknowledged
+                };
+                assert_eq!(allocation.disposition, expected);
+            }
+            assert_eq!(
+                storage
+                    .list_unacked(&stream)
+                    .await
+                    .expect("retained suffix")
+                    .iter()
+                    .map(|entry| entry.sequence)
+                    .collect::<Vec<_>>(),
+                retained
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_writes() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("database");
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, invalid) in [
+        ("ack-ahead", 10_u32, 12_u32, 13_u32),
+        ("ack-behind", 10, 12, 9),
+        ("wrapping-ahead", u32::MAX - 1, 1, 2),
+        ("wrapping-behind", u32::MAX - 1, 1, u32::MAX - 2),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let resume_time = session.max_resume_time;
+        let resume_duration = session.max_resume_duration;
+        let sequences = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| floor.wrapping_add(distance))
+            .collect::<Vec<_>>();
+        let queue = sequences
+            .iter()
+            .map(|sequence| fixture_unacked(name, *sequence))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        let before_sequences = storage
+            .list_unacked(&stream)
+            .await
+            .expect("canonical queue before rejected acknowledgement")
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>();
+        assert!(storage
+            .mark_session_nonresumable(&stream, invalid, &fence, None)
+            .await
+            .is_err());
+        let source = storage
+            .get_session(&stream)
+            .await
+            .expect("read source")
+            .expect("unchanged source");
+        assert_eq!(source.last_acked, floor);
+        assert_eq!(source.outbound_count, outbound);
+        assert_eq!(source.max_resume_time, resume_time);
+        assert_eq!(source.max_resume_duration, resume_duration);
+        for append in &appends {
+            assert_eq!(
+                storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read untouched custody")
+                    .expect("allocation remains")
+                    .disposition,
+                IngressCustodyDisposition::Pending
+            );
+        }
+        assert_eq!(
+            storage
+                .list_unacked(&stream)
+                .await
+                .expect("unchanged queue")
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            before_sequences
+        );
+        storage
+            .delete_session(&stream)
+            .await
+            .expect("delete source");
+        assert!(storage
+            .mark_session_nonresumable(&stream, floor, &fence, None)
+            .await
+            .is_err());
+        assert!(storage
+            .get_session(&stream)
+            .await
+            .expect("missing source")
+            .is_none());
+        assert!(storage
+            .list_unacked(&stream)
+            .await
+            .expect("missing queue")
+            .is_empty());
+    }
+}
+
+async fn assert_ack_journal_custody(storage: &dyn SmPersistenceStorage, name: &str) {
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+    let fence = SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("ack-node", "ack-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let mut session = fixture_session(name);
+    session.last_acked = u32::MAX - 1;
+    session.outbound_count = 1;
+    let stream = session.stream_id.clone();
+    storage
+        .store_session_atomic(
+            session,
+            vec![
+                fixture_unacked(name, u32::MAX),
+                fixture_unacked(name, 0),
+                fixture_unacked(name, 1),
+            ],
+        )
+        .await
+        .expect("seed wrapping source");
+    assert!(
+        storage
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&stream),
+        "canonical source without ACK proof is protected"
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .expect("commit ACK and journal");
+    let expected = SmAckWindow {
+        from_exclusive: u32::MAX - 1,
+        to_inclusive: 0,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+    let source = storage.get_session(&stream).await.unwrap().unwrap();
+    assert_eq!(source.last_acked, 0);
+    assert_eq!(source.max_resume_time, Some(60));
+    assert_eq!(source.max_resume_duration, Duration::from_secs(60));
+    assert_eq!(
+        storage
+            .list_unacked(&stream)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .expect("no-op retry");
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(
+        storage.delete_session(&stream).await.is_err(),
+        "pending settlement blocks source deletion"
+    );
+    storage
+        .confirm_acknowledgement(
+            &stream,
+            SmAckWindow {
+                from_exclusive: 0,
+                to_inclusive: 1,
+            },
+            &fence,
+            None,
+        )
+        .await
+        .expect("unrelated confirmation is idempotent");
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(storage.list_unacked(&stream).await.unwrap().len(), 1);
+    for _ in 0..2 {
+        storage
+            .confirm_acknowledgement(&stream, expected, &fence, None)
+            .await
+            .expect("retry exact confirmation");
+    }
+    assert!(storage
+        .pending_acknowledgements(&stream)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(
+        storage
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&stream),
+        "settled canonical source remains protected"
+    );
+    storage
+        .delete_session(&stream)
+        .await
+        .expect("settled source may be deleted");
+    assert!(!storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+}
+
+#[tokio::test]
+async fn sqlite_claimed_ack_journal_preserves_custody_until_exact_confirmation() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    assert_ack_journal_custody(&storage, "sqlite-ack-journal").await;
+}
+
+#[tokio::test]
+async fn postgres_claimed_ack_journal_preserves_custody_until_exact_confirmation() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    #[cfg(feature = "clustering")]
+    let _lock = crate::clustering::claims::clustering_control_plane_table_lock()
+        .lock()
+        .await;
+    let storage = DatabaseSmPersistence::open(Some(&url)).await.unwrap();
+    assert_ack_journal_custody(
+        &storage,
+        &format!("postgres-ack-journal-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_ack_journal_survives_reopen_before_pending_settlement() {
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ack-journal.sqlite");
+    let url = path.to_str().unwrap();
+    let fence = SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("node", "incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let stream = SmSessionId::new("reopened-ack");
+    {
+        let storage = DatabaseSmPersistence::open(Some(url)).await.unwrap();
+        storage
+            .store_session_atomic(
+                fixture_session(stream.as_str()),
+                vec![
+                    fixture_unacked(stream.as_str(), 11),
+                    fixture_unacked(stream.as_str(), 12),
+                ],
+            )
+            .await
+            .unwrap();
+        storage
+            .acknowledge_claimed_session(&stream, 11, &fence, None)
+            .await
+            .unwrap();
+    }
+    let storage = DatabaseSmPersistence::open(Some(url)).await.unwrap();
+    let window = SmAckWindow {
+        from_exclusive: 10,
+        to_inclusive: 11,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(
+        storage
+            .get_session(&stream)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_acked,
+        11
+    );
+    assert_eq!(storage.list_unacked(&stream).await.unwrap()[0].sequence, 12);
+    storage
+        .confirm_acknowledgement(&stream, window, &fence, None)
+        .await
+        .unwrap();
+    storage.delete_session(&stream).await.unwrap();
+}

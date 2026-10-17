@@ -512,7 +512,7 @@ async fn startup_upgrades_existing_work_and_retraction_fences_start(fixture: Ing
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022, 1023, 1024, 1025, 1026]
+        vec![1022, 1023, 1024, 1025, 1026, 1027]
     );
     initialize_room_observations(&fixture.db)
         .await
@@ -683,7 +683,7 @@ async fn legacy_upgrade_bounds_ambiguity_once(fixture: IngressFixture) {
             .run(&fixture.db)
             .await
             .expect("legacy upgrade"),
-        vec![1022, 1023, 1024, 1025, 1026]
+        vec![1022, 1023, 1024, 1025, 1026, 1027]
     );
     let after = Utc::now().timestamp_millis();
     assert!(crate::db::MigrationRunner::single()
@@ -863,7 +863,7 @@ async fn postgres_observer_upgrade_preserves_owned_work() {
             .run(&fixture.db)
             .await
             .expect("upgrade"),
-        vec![1022, 1023, 1024, 1025, 1026]
+        vec![1022, 1023, 1024, 1025, 1026, 1027]
     );
     assert_eq!(fixture.count("extension_room_observation_work WHERE status = 'started' AND lease_node_id IS NOT NULL AND lease_node_incarnation IS NOT NULL AND terminal_category IS NULL").await, 1);
     let mut tx = fixture.uow.begin().await.expect("finish");

@@ -4491,6 +4491,61 @@ struct HangingSmReadPersistence {
 impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
     for HangingSmReadPersistence
 {
+    async fn acknowledge_claimed_session(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        h: u32,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .acknowledge_claimed_session(stream, h, fence, authority)
+            .await
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::SmAckWindow>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_acknowledgements(stream).await
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        window: waddle_xmpp::stream_management::persistence::SmAckWindow,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .confirm_acknowledgement(stream, window, fence, authority)
+            .await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_claim_protected_streams().await
+    }
+
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
+            .await
+    }
+
     async fn upsert_session(
         &self,
         session: waddle_xmpp::stream_management::persistence::PersistedSession,
@@ -7213,6 +7268,16 @@ pub(crate) async fn run_pending_delivery_claim_sweep(
             .active_sm_stream_ids();
         let mut live_sessions = detached_live;
         live_sessions.extend(active_live);
+        match state.deps.protocol.sm_session_registry.pending_claim_protected_streams().await {
+            Ok(streams) => live_sessions.extend(streams),
+            Err(error) => {
+                warn!(%error, "claim-expiry janitor: ACK journal unavailable; skipping orphan release");
+                waddle_xmpp::telemetry::reliability::record_janitor_sweep(
+                    Janitor::PendingDeliveryClaim, SweepOutcome::Failed,
+                );
+                return;
+            }
+        }
         // #1124 claim recency floor: only release claims older
         // than several janitor intervals. Non-SM flushes claim
         // rows under a synthetic `transient:` session id that is
@@ -7505,6 +7570,89 @@ mod pending_delivery_retention_tests {
             presence_priority: 0,
             presence_payloads: Vec::new(),
         }
+    }
+
+    #[tokio::test]
+    async fn orphan_claim_sweep_protects_durable_sm_custody_before_and_after_resume_ack() {
+        use waddle_xmpp::ownership::{ClaimEpoch, NodeIdentity};
+        use waddle_xmpp::stream_management::persistence::{SmAckWindow, SmClaimFence};
+        let pending = Arc::new(
+            DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+                .await
+                .expect("pending database"),
+        );
+        let row = pending_row();
+        let recipient = row.recipient.clone();
+        let stream = SmSessionId::new("restart-with-unsettled-resume-ack");
+        pending.insert(row).await.expect("pending row");
+        let claimed = pending
+            .claim_for_session(&recipient, &stream)
+            .await
+            .expect("claim");
+        pending
+            .record_pushed_at(&claimed[0].id, 1)
+            .await
+            .expect("offered sequence");
+        let source = Arc::new(InMemorySmPersistence::new());
+        source
+            .upsert_session(live_source(stream.as_str()))
+            .await
+            .expect("source");
+        let fence = SmClaimFence::new(
+            NodeIdentity::new("test-node", "test-incarnation"),
+            ClaimEpoch(1),
+        );
+        // Simulate a restart before this source has been rehydrated locally.
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(source.clone()));
+        assert!(registry.live_session_ids().expect("local IDs").is_empty());
+        let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+            registry,
+            pending.clone(),
+        )
+        .await;
+        let mut recovery = crate::pending_delivery::PendingRecovery::default();
+        run_pending_delivery_claim_sweep(&state, 0, &mut recovery).await;
+        let retained = pending
+            .list(&recipient)
+            .await
+            .expect("retained pending row");
+        assert_eq!(retained[0].flushed_in_session, Some(stream.clone()));
+        assert_eq!(retained[0].outbound_sequence, Some(1));
+        source
+            .acknowledge_claimed_session(&stream, 1, &fence, None)
+            .await
+            .expect("durable ACK");
+        run_pending_delivery_claim_sweep(&state, 0, &mut recovery).await;
+        let retained = pending
+            .list(&recipient)
+            .await
+            .expect("ACK remains protected");
+        assert_eq!(retained[0].flushed_in_session, Some(stream.clone()));
+        // Remove only the protection in this control: it proves claim age and
+        // the ordinary orphan predicate would otherwise release this row.
+        source
+            .confirm_acknowledgement(
+                &stream,
+                SmAckWindow {
+                    from_exclusive: 0,
+                    to_inclusive: 1,
+                },
+                &fence,
+                None,
+            )
+            .await
+            .expect("clear control protection");
+        source
+            .delete_session(&stream)
+            .await
+            .expect("retire control source");
+        run_pending_delivery_claim_sweep(&state, 0, &mut recovery).await;
+        let released = pending
+            .list(&recipient)
+            .await
+            .expect("ordinary orphan release");
+        assert!(released[0].flushed_in_session.is_none());
+        assert!(released[0].outbound_sequence.is_none());
     }
 
     #[tokio::test]

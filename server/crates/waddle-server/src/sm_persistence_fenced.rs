@@ -136,7 +136,7 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, PromotionAppendOutcome, SmClaimFence, SmPersistenceError,
+    PersistedUnackedStanza, PromotionAppendOutcome, SmAckWindow, SmClaimFence, SmPersistenceError,
     SmPersistenceStorage,
 };
 
@@ -390,6 +390,17 @@ impl PostgresFencedSmPersistence {
         )
         .await
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS sm_acknowledged_windows (
+                stream_id TEXT NOT NULL,
+                from_exclusive BIGINT NOT NULL,
+                to_inclusive BIGINT NOT NULL,
+                PRIMARY KEY (stream_id, from_exclusive, to_inclusive)
+            )",
+            (),
+        )
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
         conn.execute(
             "CREATE TABLE IF NOT EXISTS sm_ingress_appends (
                 message_key TEXT NOT NULL,
@@ -740,6 +751,12 @@ impl PostgresFencedSmPersistence {
 
         // Two statements rather than ON DELETE CASCADE, matching the
         // portable impl's observable lifecycle exactly.
+        crate::sm_persistence::promotion_inventory::require_settled(
+            &mut tx,
+            stream_id,
+            DatabaseDriver::Postgres,
+        )
+        .await?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -858,6 +875,162 @@ impl PostgresFencedSmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for PostgresFencedSmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _owned_authority = if let Some(authority) = authority {
+            self.assert_fenced_with_authority(&mut tx, stream_id, expected_fence, authority)
+                .await?;
+            None
+        } else {
+            Some(
+                self.assert_fenced(&mut tx, stream_id, expected_fence)
+                    .await?,
+            )
+        };
+        crate::sm_persistence::promotion_inventory::acknowledge(
+            &mut tx,
+            stream_id,
+            acknowledged_h,
+            crate::db::DatabaseDriver::Postgres,
+            true,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
+    async fn acknowledge_claimed_session(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _owned_authority = if let Some(authority) = authority {
+            self.assert_fenced_with_authority(&mut tx, stream_id, expected_fence, authority)
+                .await?;
+            None
+        } else {
+            Some(
+                self.assert_fenced(&mut tx, stream_id, expected_fence)
+                    .await?,
+            )
+        };
+        crate::sm_persistence::promotion_inventory::acknowledge(
+            &mut tx,
+            stream_id,
+            acknowledged_h,
+            crate::db::DatabaseDriver::Postgres,
+            false,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<SmAckWindow>, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        crate::sm_persistence::promotion_inventory::pending(&mut tx, stream_id).await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let tag = EntityType::SmSession.as_db_str();
+        let prefix = format!("{tag}:");
+        // One SQL snapshot covers sources and attached streams whose claim precedes
+        // creation of their first canonical snapshot. Never renew a claim here.
+        let mut rows = tx
+            .query(
+                "SELECT stream_id, 0 FROM sm_sessions \
+             UNION SELECT stream_id, 0 FROM sm_acknowledged_windows \
+             UNION SELECT entity, 1 FROM clustering_claims WHERE entity_type = ?",
+                crate::db_params![tag],
+            )
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let mut streams = std::collections::HashSet::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+        {
+            let key = row
+                .get::<String>(0)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            let is_claim = row
+                .get::<i64>(1)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+                == 1;
+            let stream = if is_claim {
+                key.strip_prefix(&prefix).ok_or_else(|| {
+                    SmPersistenceError::Other("SM claim key disagrees with entity type".to_owned())
+                })?
+            } else {
+                key.as_str()
+            };
+            streams.insert(SmSessionId::new(stream));
+        }
+        Ok(streams.into_iter().collect())
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream_id: &SmSessionId,
+        window: SmAckWindow,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _owned_authority = if let Some(authority) = authority {
+            self.assert_fenced_with_authority(&mut tx, stream_id, expected_fence, authority)
+                .await?;
+            None
+        } else {
+            Some(
+                self.assert_fenced(&mut tx, stream_id, expected_fence)
+                    .await?,
+            )
+        };
+        crate::sm_persistence::promotion_inventory::confirm(&mut tx, stream_id, window).await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         let fence = self.claim_fence_for(&session.stream_id).await?;
         self.upsert_promotion_session_inner(session, &fence).await
@@ -955,6 +1128,12 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         self.assert_fenced_with_authority(&mut tx, stream_id, &fence, authority)
             .await?;
+        crate::sm_persistence::promotion_inventory::require_settled(
+            &mut tx,
+            stream_id,
+            DatabaseDriver::Postgres,
+        )
+        .await?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],
@@ -987,6 +1166,12 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         let _identity_guard = self
             .assert_fenced(&mut tx, stream_id, expected_fence)
             .await?;
+        crate::sm_persistence::promotion_inventory::require_settled(
+            &mut tx,
+            stream_id,
+            DatabaseDriver::Postgres,
+        )
+        .await?;
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
             crate::db_params![stream_id.as_str().to_string()],

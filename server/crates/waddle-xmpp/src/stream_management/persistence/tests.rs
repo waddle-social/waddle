@@ -311,3 +311,264 @@ async fn store_session_atomic_replaces_existing_unacked_snapshot() {
         "full detached snapshots must replace prior unacked rows, not append duplicates"
     );
 }
+
+fn expiry_ingress_append(entry: &PersistedUnackedStanza) -> PersistedIngressAppend {
+    PersistedIngressAppend {
+        key: crate::stream_management::SmIngressAppendKey {
+            message_key: crate::ingress::MessageKey::new(),
+            kind: crate::stream_management::SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [7; 32],
+            resource: full("alice@example.com/web"),
+        },
+        accepting_stream: entry.stream_id.clone(),
+        sequence: entry.sequence,
+        appended_at: entry.original_receipt_at,
+        payload: *entry.stanza.clone(),
+        original_receipt_at: entry.original_receipt_at,
+        disposition: IngressCustodyDisposition::Pending,
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_atomically_trims_valid_wrapping_acknowledgements() {
+    let storage = InMemorySmPersistence::new();
+    let fence = crate::stream_management::persistence::SmClaimFence::new(
+        crate::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        crate::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, h, retained) in [
+        ("ordinary-expiry", 10_u32, 12_u32, 11_u32, vec![12]),
+        ("wrapping-expiry", u32::MAX - 1, 1, 0, vec![1]),
+        ("unchanged-ack", 10, 12, 10, vec![11, 12]),
+        ("fully-acknowledged", 10, 12, 12, vec![]),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let queue = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| fixture_unacked(name, floor.wrapping_add(distance)))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        for _ in 0..2 {
+            storage
+                .mark_session_nonresumable(&stream, h, &fence, None)
+                .await
+                .expect("retire existing source idempotently");
+            let source = storage
+                .get_session(&stream)
+                .await
+                .expect("read source")
+                .expect("retained source");
+            assert_eq!(source.last_acked, h);
+            assert_eq!(source.outbound_count, outbound);
+            assert_eq!(source.max_resume_time, Some(0));
+            assert_eq!(source.max_resume_duration, Duration::ZERO);
+            for append in &appends {
+                let allocation = storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read ingress allocation")
+                    .expect("retained allocation proof");
+                let expected = if retained.contains(&append.sequence) {
+                    IngressCustodyDisposition::Pending
+                } else {
+                    IngressCustodyDisposition::Acknowledged
+                };
+                assert_eq!(allocation.disposition, expected);
+            }
+            assert_eq!(
+                storage
+                    .list_unacked(&stream)
+                    .await
+                    .expect("retained suffix")
+                    .iter()
+                    .map(|entry| entry.sequence)
+                    .collect::<Vec<_>>(),
+                retained
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_writes() {
+    let storage = InMemorySmPersistence::new();
+    let fence = crate::stream_management::persistence::SmClaimFence::new(
+        crate::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        crate::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, invalid) in [
+        ("ack-ahead", 10_u32, 12_u32, 13_u32),
+        ("ack-behind", 10, 12, 9),
+        ("wrapping-ahead", u32::MAX - 1, 1, 2),
+        ("wrapping-behind", u32::MAX - 1, 1, u32::MAX - 2),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let resume_time = session.max_resume_time;
+        let resume_duration = session.max_resume_duration;
+        let sequences = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| floor.wrapping_add(distance))
+            .collect::<Vec<_>>();
+        let queue = sequences
+            .iter()
+            .map(|sequence| fixture_unacked(name, *sequence))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        assert!(storage
+            .mark_session_nonresumable(&stream, invalid, &fence, None)
+            .await
+            .is_err());
+        let source = storage
+            .get_session(&stream)
+            .await
+            .expect("read source")
+            .expect("unchanged source");
+        assert_eq!(source.last_acked, floor);
+        assert_eq!(source.outbound_count, outbound);
+        assert_eq!(source.max_resume_time, resume_time);
+        assert_eq!(source.max_resume_duration, resume_duration);
+        for append in &appends {
+            assert_eq!(
+                storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read untouched custody")
+                    .expect("allocation remains")
+                    .disposition,
+                IngressCustodyDisposition::Pending
+            );
+        }
+        assert_eq!(
+            storage
+                .list_unacked(&stream)
+                .await
+                .expect("unchanged queue")
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            sequences
+        );
+        storage
+            .delete_session(&stream)
+            .await
+            .expect("delete source");
+        assert!(storage
+            .mark_session_nonresumable(&stream, floor, &fence, None)
+            .await
+            .is_err());
+        assert!(storage
+            .get_session(&stream)
+            .await
+            .expect("missing source")
+            .is_none());
+        assert!(storage
+            .list_unacked(&stream)
+            .await
+            .expect("missing queue")
+            .is_empty());
+    }
+}
+
+#[tokio::test]
+async fn acknowledged_windows_retain_source_until_exact_settlement() {
+    let storage = InMemorySmPersistence::new();
+    let fence = SmClaimFence::new(
+        crate::ownership::NodeIdentity::new("node", "incarnation"),
+        crate::ownership::ClaimEpoch(1),
+    );
+    let stream = sid("ack-journal");
+    let mut source = fixture_session(stream.as_str());
+    source.last_acked = u32::MAX;
+    source.outbound_count = 1;
+    storage
+        .store_session_atomic(
+            source,
+            vec![
+                fixture_unacked(stream.as_str(), 0),
+                fixture_unacked(stream.as_str(), 1),
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .unwrap();
+    let window = SmAckWindow {
+        from_exclusive: u32::MAX,
+        to_inclusive: 0,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    assert_eq!(
+        storage.pending_claim_protected_streams().await.unwrap(),
+        vec![stream.clone()]
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    let source = storage.get_session(&stream).await.unwrap().unwrap();
+    assert_eq!(source.last_acked, 0);
+    assert_eq!(source.max_resume_time, Some(60));
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(storage.list_unacked(&stream).await.unwrap()[0].sequence, 1);
+    storage
+        .confirm_acknowledgement(
+            &stream,
+            SmAckWindow {
+                from_exclusive: 0,
+                to_inclusive: 1,
+            },
+            &fence,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(storage.delete_session(&stream).await.is_err());
+    for _ in 0..2 {
+        storage
+            .confirm_acknowledgement(&stream, window, &fence, None)
+            .await
+            .unwrap();
+    }
+    storage.delete_session(&stream).await.unwrap();
+    assert!(storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .is_empty());
+}

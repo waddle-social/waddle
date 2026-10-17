@@ -42,6 +42,9 @@ pub struct DetachedUnackedStanza {
 pub enum PromotionCaptureCustody {
     /// Existing stream captured under this exact owner and claim epoch.
     Claimed(super::super::persistence::SmClaimFence),
+    /// A claimed resume source entering expiry recovery. Its canonical row
+    /// must survive until confirmation; retries may never recreate it.
+    ExistingSource(super::super::persistence::SmClaimFence),
     /// A newly created source which has never held a claim.
     NeverClaimed(std::sync::Arc<FreshPromotionAdmission>),
     /// A reserved resume attempt may have obtained a new exact fence. Only
@@ -54,6 +57,14 @@ pub enum PromotionCaptureCustody {
 impl PromotionCaptureCustody {
     pub fn claimed(fence: super::super::persistence::SmClaimFence) -> Self {
         Self::Claimed(fence)
+    }
+
+    pub(super) fn existing_source(fence: super::super::persistence::SmClaimFence) -> Self {
+        Self::ExistingSource(fence)
+    }
+
+    pub(super) fn requires_existing_source(&self) -> bool {
+        matches!(self, Self::ExistingSource(_))
     }
 
     pub fn never_claimed() -> Self {
@@ -100,7 +111,7 @@ impl PromotionCaptureCustody {
 
     pub(super) fn fence(&self) -> Option<&super::super::persistence::SmClaimFence> {
         match self {
-            Self::Claimed(fence) => Some(fence),
+            Self::Claimed(fence) | Self::ExistingSource(fence) => Some(fence),
             Self::NeverClaimed(admission) | Self::Acquiring(admission) => admission.fence.get(),
             Self::Unproven => None,
         }
@@ -117,7 +128,9 @@ impl PromotionCaptureCustody {
     pub(super) fn begin_first_claim(&self, owner: &crate::ownership::NodeIdentity) -> bool {
         match self {
             Self::NeverClaimed(admission) => admission.first_owner.set(owner.clone()).is_ok(),
-            Self::Claimed(_) | Self::Acquiring(_) | Self::Unproven => false,
+            Self::Claimed(_) | Self::ExistingSource(_) | Self::Acquiring(_) | Self::Unproven => {
+                false
+            }
         }
     }
 
@@ -126,7 +139,7 @@ impl PromotionCaptureCustody {
             Self::NeverClaimed(admission) | Self::Acquiring(admission) => {
                 admission.first_owner.get()
             }
-            Self::Claimed(_) | Self::Unproven => None,
+            Self::Claimed(_) | Self::ExistingSource(_) | Self::Unproven => None,
         }
     }
 }

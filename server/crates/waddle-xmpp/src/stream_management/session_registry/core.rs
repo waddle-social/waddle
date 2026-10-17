@@ -145,6 +145,9 @@ pub struct InMemorySmSessionRegistry {
     /// this via [`Self::with_persistence`] before Arc-wrapping.
     pub(super) persistence:
         Option<std::sync::Arc<dyn super::super::persistence::SmPersistenceStorage>>,
+    /// Pending custody needed to settle ACK evidence even when durable XML is corrupt.
+    pub(super) pending_delivery_storage:
+        Option<Arc<dyn crate::pending_delivery::storage::PendingDeliveryStorage>>,
     /// The entity-ownership authority for this registry's SM-session claims
     /// (ADR-0017 Phase 3 Slice 1, Q2 "retrofit, not wrap"). Defaults to
     /// [`InProcessClaimStore`] — correct for every build today, since no
@@ -877,6 +880,7 @@ impl InMemorySmSessionRegistry {
             max_sessions: DEFAULT_MAX_SESSIONS,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            pending_delivery_storage: None,
             claim_store: crate::ownership::observed_claim_store(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_fences: RwLock::new(HashMap::new()),
@@ -906,6 +910,7 @@ impl InMemorySmSessionRegistry {
             max_sessions,
             recent_tombstones: RwLock::new(Vec::new()),
             persistence: None,
+            pending_delivery_storage: None,
             claim_store: crate::ownership::observed_claim_store(InProcessClaimStore::new()),
             node_identity: SharedNodeIdentity::new(NodeIdentity::local()),
             claim_fences: RwLock::new(HashMap::new()),
@@ -933,6 +938,16 @@ impl InMemorySmSessionRegistry {
         storage: std::sync::Arc<dyn super::super::persistence::SmPersistenceStorage>,
     ) -> Self {
         self.persistence = Some(storage);
+        self
+    }
+
+    /// Attach pending custody for ACK settlement before poison quarantine.
+    /// Without it, quarantine retains any unsettled ACK journal for retry.
+    pub fn with_pending_delivery_storage(
+        mut self,
+        storage: Arc<dyn crate::pending_delivery::storage::PendingDeliveryStorage>,
+    ) -> Self {
+        self.pending_delivery_storage = Some(storage);
         self
     }
 
@@ -1667,6 +1682,24 @@ impl InMemorySmSessionRegistry {
         caller_fence: &super::super::persistence::SmClaimFence,
         session_id: &crate::pending_delivery::SmSessionId,
     ) -> Result<ReclaimedHydrationOutcome, SmRegistryError> {
+        // Poisoned headers/queues cannot produce a DetachedSession. Settle by
+        // immutable stream identity and fence before the guarded source delete.
+        if let Err(error) = self
+            .settle_acknowledgements_locked(
+                session_id,
+                caller_fence,
+                self.pending_delivery_storage.as_deref(),
+            )
+            .await
+        {
+            if self.node_identity.current() != *caller_fence.owner() {
+                return Ok(ReclaimedHydrationOutcome::StaleIdentity);
+            }
+            return Ok(match error {
+                SmRegistryError::PromotionClaimLost(_) => ReclaimedHydrationOutcome::LostClaim,
+                _ => ReclaimedHydrationOutcome::TransientFailure,
+            });
+        }
         if self.node_identity.current() != *caller_fence.owner() {
             return Ok(ReclaimedHydrationOutcome::StaleIdentity);
         }

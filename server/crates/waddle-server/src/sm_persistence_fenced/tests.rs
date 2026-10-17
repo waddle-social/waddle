@@ -216,6 +216,7 @@ async fn fixture() -> Option<Fixture> {
         "DELETE FROM clustering_nodes",
         "DELETE FROM clustering_steal_intents",
         "DELETE FROM sm_ingress_appends",
+        "DELETE FROM sm_acknowledged_windows",
         "DELETE FROM sm_unacked",
         "DELETE FROM sm_sessions",
     ] {
@@ -1733,4 +1734,254 @@ async fn promotion_mutations_never_replace_captured_fence_from_new_cache() {
             replacement
         );
     }
+}
+
+#[tokio::test]
+async fn acknowledged_windows_require_exact_fence_and_settlement_before_source_deletion() {
+    let Some(f) = fixture().await else { return };
+    let stream = SmSessionId::new("fenced-ack-journal");
+    let mut source = fixture_session(stream.as_str());
+    source.last_acked = u32::MAX - 1;
+    source.outbound_count = 1;
+    f.fenced
+        .store_session_atomic(
+            source,
+            vec![
+                fixture_unacked(stream.as_str(), u32::MAX),
+                fixture_unacked(stream.as_str(), 0),
+                fixture_unacked(stream.as_str(), 1),
+            ],
+        )
+        .await
+        .unwrap();
+    let original = f.fenced.claim_fence_for(&stream).await.unwrap();
+    let authority = f
+        .shared_identity
+        .guard_if_current(&f.identity)
+        .await
+        .unwrap();
+    f.fenced
+        .acknowledge_claimed_session(&stream, 0, &original, Some(&authority))
+        .await
+        .unwrap();
+    drop(authority);
+    let window = SmAckWindow {
+        from_exclusive: u32::MAX - 1,
+        to_inclusive: 0,
+    };
+    assert_eq!(
+        f.fenced.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    assert_eq!(
+        f.fenced.pending_claim_protected_streams().await.unwrap(),
+        vec![stream.clone()]
+    );
+    for _ in 0..2 {
+        assert!(f
+            .fenced
+            .delete_promotion_session(&stream, &original)
+            .await
+            .is_err());
+    }
+    assert!(f
+        .fenced
+        .quarantine_session(&stream, &original)
+        .await
+        .is_err());
+    let authority = f
+        .shared_identity
+        .guard_if_current(&f.identity)
+        .await
+        .unwrap();
+    assert!(f
+        .fenced
+        .delete_session_with_authority(&stream, &authority)
+        .await
+        .is_err());
+    drop(authority);
+    assert_eq!(f.fenced.list_unacked(&stream).await.unwrap()[0].sequence, 1);
+    assert_eq!(
+        f.fenced
+            .get_session(&stream)
+            .await
+            .unwrap()
+            .unwrap()
+            .max_resume_time,
+        Some(60)
+    );
+    let entity = Entity::new(EntityType::SmSession, stream.as_str());
+    f.claims
+        .release_exact(&entity, original.owner(), original.epoch())
+        .await
+        .unwrap();
+    let epoch = f.claims.ensure_claimed(&entity, &f.identity).await.unwrap();
+    let replacement = SmClaimFence::new(f.identity.clone(), epoch);
+    assert_ne!(replacement, original);
+    f.fenced.evict_claim_cache(&stream, &original);
+    assert!(matches!(
+        f.fenced
+            .acknowledge_claimed_session(&stream, 1, &original, None)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert!(matches!(
+        f.fenced
+            .confirm_acknowledgement(&stream, window, &original, None)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert_eq!(
+        f.fenced.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    let authority = f
+        .shared_identity
+        .guard_if_current(&f.identity)
+        .await
+        .unwrap();
+    f.fenced
+        .confirm_acknowledgement(&stream, window, &replacement, Some(&authority))
+        .await
+        .unwrap();
+    f.fenced
+        .confirm_acknowledgement(&stream, window, &replacement, Some(&authority))
+        .await
+        .unwrap();
+    drop(authority);
+    f.fenced
+        .delete_promotion_session(&stream, &replacement)
+        .await
+        .unwrap();
+    assert!(f.fenced.get_session(&stream).await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn fenced_only_initialization_creates_ack_journal_and_protects_attached_claims() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let admin = sqlx::PgPool::connect(&database_url).await.unwrap();
+    let schema = format!("waddle_test_fenced_ack_{}", uuid::Uuid::new_v4().simple());
+    sqlx::query(&format!("CREATE SCHEMA {schema}"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    let mut url = url::Url::parse(&database_url).unwrap();
+    let retained: Vec<(String, String)> = url
+        .query_pairs()
+        .filter(|(key, _)| key != "options")
+        .map(|(key, value)| (key.into_owned(), value.into_owned()))
+        .collect();
+    url.query_pairs_mut()
+        .clear()
+        .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+        .append_pair("options", &format!("-c search_path={schema}"));
+    {
+        let db = Database::from_config(
+            "fenced-only-ack-journal",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string())
+                .with_control_plane_pool(crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .unwrap();
+        // This fresh schema has never passed through the portable initializer.
+        let conn = db.guard().await.unwrap();
+        let mut rows = conn.query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = current_schema() AND table_name = 'sm_acknowledged_windows'", ()).await.unwrap();
+        assert_eq!(
+            rows.next().await.unwrap().unwrap().get::<i64>(0).unwrap(),
+            0
+        );
+        drop(rows);
+        drop(conn);
+        let claims = Arc::new(PostgresClaimStore::new(db.clone()));
+        claims.ensure_schema().await.unwrap();
+        let identity = node_identity();
+        let fenced = PostgresFencedSmPersistence::open(
+            db.clone(),
+            claims.clone(),
+            SharedNodeIdentity::new(identity.clone()),
+        )
+        .await
+        .unwrap();
+        let attached = SmSessionId::new("attached:claim-only");
+        let attached_entity = Entity::new(EntityType::SmSession, attached.as_str());
+        let attached_epoch = claims
+            .ensure_claimed(&attached_entity, &identity)
+            .await
+            .unwrap();
+        assert!(fenced.get_session(&attached).await.unwrap().is_none());
+        let canonical = SmSessionId::new("canonical-without-ack");
+        fenced
+            .store_session_atomic(
+                fixture_session(canonical.as_str()),
+                vec![
+                    fixture_unacked(canonical.as_str(), 11),
+                    fixture_unacked(canonical.as_str(), 12),
+                ],
+            )
+            .await
+            .unwrap();
+        assert!(fenced
+            .pending_acknowledgements(&canonical)
+            .await
+            .unwrap()
+            .is_empty());
+        let protected = fenced.pending_claim_protected_streams().await.unwrap();
+        assert!(protected.contains(&attached));
+        assert!(protected.contains(&canonical));
+        let fence = fenced.claim_fence_for(&canonical).await.unwrap();
+        fenced
+            .acknowledge_claimed_session(&canonical, 11, &fence, None)
+            .await
+            .unwrap();
+        assert_eq!(
+            fenced.pending_acknowledgements(&canonical).await.unwrap(),
+            vec![SmAckWindow {
+                from_exclusive: 10,
+                to_inclusive: 11
+            }]
+        );
+        assert!(fenced
+            .delete_promotion_session(&canonical, &fence)
+            .await
+            .is_err());
+        fenced
+            .confirm_acknowledgement(
+                &canonical,
+                SmAckWindow {
+                    from_exclusive: 10,
+                    to_inclusive: 11,
+                },
+                &fence,
+                None,
+            )
+            .await
+            .unwrap();
+        fenced
+            .delete_promotion_session(&canonical, &fence)
+            .await
+            .unwrap();
+        // Protection is global and lasts through attached claim lifetime, even
+        // when neither a canonical source nor a journal row exists.
+        assert!(fenced
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&attached));
+        claims
+            .release_exact(&attached_entity, &identity, attached_epoch)
+            .await
+            .unwrap();
+        assert!(!fenced
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&attached));
+    }
+    sqlx::query(&format!("DROP SCHEMA {schema} CASCADE"))
+        .execute(&admin)
+        .await
+        .unwrap();
+    admin.close().await;
 }

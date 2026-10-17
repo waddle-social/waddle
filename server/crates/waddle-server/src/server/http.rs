@@ -862,21 +862,9 @@ async fn create_websocket_state(
         }
     }
     let stanza_dispatcher = Arc::new(stanza_dispatcher);
-    let sm_session_registry = create_sm_session_registry(
-        xmpp_config,
-        server_config,
-        &state.clustering_claims,
-        state.db_pool.global(),
-        &state,
-    )
-    .await?;
-    #[cfg(feature = "clustering")]
-    if let Some(local_claims) = &state.clustering_claims.local_claims {
-        local_claims.wire_connection_registry(Arc::clone(&connection_registry));
-    }
-    // Pending delivery opens here (rather than with the other protocol
-    // stores below) so that EVERY durable pool is registered before the
-    // startup attestation gate that follows — it is the last registrant.
+    // Open pending delivery before SM recovery so poison-source quarantine can
+    // settle durable ACK windows through the same store used by live delivery.
+    // Both stores register their pools before the startup attestation gate.
     let pending_delivery_storage = create_pending_delivery_storage(
         xmpp_config,
         server_config,
@@ -885,6 +873,19 @@ async fn create_websocket_state(
         &state,
     )
     .await?;
+    let sm_session_registry = create_sm_session_registry(
+        xmpp_config,
+        server_config,
+        &state.clustering_claims,
+        state.db_pool.global(),
+        &state,
+        Arc::clone(&pending_delivery_storage),
+    )
+    .await?;
+    #[cfg(feature = "clustering")]
+    if let Some(local_claims) = &state.clustering_claims.local_claims {
+        local_claims.wire_connection_registry(Arc::clone(&connection_registry));
+    }
     // ---- Startup lineage attestation gate (#1652) ----
     // All durable stores are open and registered; seal the registry and run
     // the one startup attestation pass BEFORE anything mutates application
@@ -1630,6 +1631,7 @@ async fn create_sm_session_registry(
     clustering: &crate::clustering::ClusteringHandles,
     global_db: &crate::db::Database,
     state: &Arc<AppState>,
+    pending: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>,
 ) -> Result<Arc<waddle_xmpp::stream_management::InMemorySmSessionRegistry>> {
     let sm_database_url = xmpp_config.sm_database_url.clone();
     if sm_database_url.is_ephemeral_fallback() {
@@ -1655,7 +1657,8 @@ async fn create_sm_session_registry(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::with_capacity(
             sm_max_sessions_from_env(),
         )
-        .with_persistence(Arc::clone(&sm_persistence));
+        .with_persistence(Arc::clone(&sm_persistence))
+        .with_pending_delivery_storage(pending);
     // ADR-0017 Phase 3 Slice 5: wire the SAME `ClaimStore`/live-identity
     // pair `clustering::start_if_enabled` constructed (never a second,
     // independent store) into the session registry's own claim

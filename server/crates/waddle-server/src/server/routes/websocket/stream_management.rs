@@ -609,7 +609,7 @@ async fn settle_pending_ack_window(
     sm_state: &StreamManagementState,
     acked_from_exclusive: u32,
     h: u32,
-) {
+) -> bool {
     if let Some(stream_id) = sm_state.stream_id.clone() {
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
         match state
@@ -635,9 +635,11 @@ async fn settle_pending_ack_window(
                     failure = "storage",
                     "pending_delivery ACK deletion retained; claim release must settle it"
                 );
+                return false;
             }
         }
     }
+    true
 }
 
 async fn handle_sm_enable(
@@ -1297,12 +1299,54 @@ async fn handle_sm_resume_terminal(
         );
     }
 
-    // Receipt settlement can fail or be cancelled. Keep the live connection
-    // untouched until the detached prefix's completion proof is durable.
+    // Retain the original window for receipt and pending-row settlement, but
+    // commit its ACK to the canonical source first. A failed final resume or
+    // cancellation must not restore replay entries whose pending rows vanished.
     let mut staged_sm_state = StreamManagementState::new();
     staged_sm_state.restore_from_session(&detached);
+    let restored_inbound = detached.inbound_count;
+    detached = match state
+        .deps
+        .protocol
+        .sm_session_registry
+        .acknowledge_claimed_resume(&detached, resume.h)
+        .await
+    {
+        Ok(mut acknowledged) => {
+            acknowledged.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
+                acknowledged.inbound_count,
+                restored_inbound,
+            );
+            acknowledged
+        }
+        Err(error) => {
+            warn!(%error, "SM resume ACK could not commit; retaining source and pending rows");
+            claim_guard.release().await;
+            return SmResumeTerminal::failed(
+                waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
+                SmResumeOutcome::Storage,
+            );
+        }
+    };
     if !complete_acknowledged_ingress_custody(state, &staged_sm_state, resume.h).await
         || !complete_acknowledged_ingress_receipts(state, &staged_sm_state, resume.h).await
+        || !settle_pending_ack_window(
+            state,
+            &staged_sm_state,
+            staged_sm_state.last_acked,
+            resume.h,
+        )
+        .await
+        || state
+            .deps
+            .protocol
+            .sm_session_registry
+            .settle_session_acknowledgements(
+                &detached,
+                state.deps.protocol.pending_delivery_storage.as_ref(),
+            )
+            .await
+            .is_err()
     {
         claim_guard.release().await;
         return SmResumeTerminal::failed(

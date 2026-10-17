@@ -7,6 +7,7 @@
 //! the server stores the session state. When the client reconnects with
 //! a resume request, the server can restore the session.
 
+mod acknowledgements;
 mod claims;
 mod core;
 mod cross_node_resume;

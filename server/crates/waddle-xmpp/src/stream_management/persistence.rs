@@ -228,6 +228,13 @@ pub enum PromotionAppendOutcome {
     Retired,
 }
 
+/// A durable acknowledgement interval awaiting pending-delivery settlement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SmAckWindow {
+    pub from_exclusive: u32,
+    pub to_inclusive: u32,
+}
+
 /// Durable proof that one ingress obligation allocated a queue entry.
 ///
 /// An immutable ingress allocation and the payload whose custody it proves.
@@ -293,6 +300,55 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// Insert or replace a session record. Called when a stream
     /// detaches and the session is moved into the resumable pool.
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError>;
+
+    /// Atomically retire resume eligibility, advance the acknowledgement floor,
+    /// and remove exactly the wrapping interval `(last_acked, acknowledged_h]`,
+    /// discharging that interval's pending ingress allocations as acknowledged.
+    /// Validate that interval against the canonical outbound count before any
+    /// writes. A missing source is an error, never admission or recreation.
+    /// Clustered stores check the immutable fence in this transaction and reuse
+    /// supplied identity authority through commit without reacquiring its gate.
+    /// Portable stores rely on the registry's claim checks and stream gate.
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError>;
+
+    /// Advance the canonical ACK floor and journal the wrapping interval atomically,
+    /// preserving resume eligibility. Requires an existing source and exact claim.
+    async fn acknowledge_claimed_session(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError>;
+
+    /// Read outstanding ACK settlements without acquiring identity authority.
+    async fn pending_acknowledgements(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<SmAckWindow>, SmPersistenceError>;
+
+    /// Discharge exactly one durable window after its pending rows are deleted.
+    /// Missing windows are idempotent; stale ownership must never discharge one.
+    async fn confirm_acknowledgement(
+        &self,
+        stream_id: &SmSessionId,
+        window: SmAckWindow,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError>;
+
+    /// Read one durable liveness snapshot for orphaned pending-delivery cleanup.
+    /// Include canonical sources, outstanding ACK settlements and, for clustered
+    /// storage, all SM claims (including attached streams without a source).
+    /// Reads must not acquire or renew ownership; errors must fail cleanup closed.
+    async fn pending_claim_protected_streams(&self)
+        -> Result<Vec<SmSessionId>, SmPersistenceError>;
 
     /// Promotion writes carry the captured owner/epoch through the actual
     /// transaction. Clustered stores must never replace it from a claim cache.
@@ -772,6 +828,68 @@ struct InMemoryState {
     // snapshot deletion a resume performs and is shared across rebinds. A flat list keeps
     // the obligation key free of a `Hash` bound; only tests use this backend.
     ingress_appends: Vec<PersistedIngressAppend>,
+    acknowledgement_windows: std::collections::HashMap<SmSessionId, Vec<SmAckWindow>>,
+}
+
+impl InMemoryState {
+    fn acknowledge(
+        &mut self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        retire: bool,
+    ) -> Result<(), SmPersistenceError> {
+        let guard = self;
+        let session = guard.sessions.get(stream_id).ok_or_else(|| {
+            SmPersistenceError::Other("Expired SM promotion source is missing".to_owned())
+        })?;
+        let last_acked = session.last_acked;
+        let acknowledged = acknowledged_h.wrapping_sub(last_acked);
+        if acknowledged >= 0x8000_0000
+            || acknowledged > session.outbound_count.wrapping_sub(last_acked)
+        {
+            return Err(SmPersistenceError::Other(
+                "Expired SM acknowledgement exceeds canonical outbound count".to_owned(),
+            ));
+        }
+        for append in &mut guard.ingress_appends {
+            let distance = append.sequence.wrapping_sub(last_acked);
+            if &append.accepting_stream == stream_id
+                && distance > 0
+                && distance <= acknowledged
+                && append.disposition == IngressCustodyDisposition::Pending
+            {
+                append.disposition = IngressCustodyDisposition::Acknowledged;
+            }
+        }
+        if let Some(queue) = guard.unacked.get_mut(stream_id) {
+            queue.retain(|entry| {
+                let distance = entry.sequence.wrapping_sub(last_acked);
+                distance == 0 || distance > acknowledged
+            });
+        }
+        let session = guard.sessions.get_mut(stream_id).ok_or_else(|| {
+            SmPersistenceError::Other("Expired SM promotion source is missing".to_owned())
+        })?;
+        session.last_acked = acknowledged_h;
+        if acknowledged > 0 {
+            guard
+                .acknowledgement_windows
+                .entry(stream_id.clone())
+                .or_default()
+                .push(SmAckWindow {
+                    from_exclusive: last_acked,
+                    to_inclusive: acknowledged_h,
+                });
+        }
+        if retire {
+            let session = guard.sessions.get_mut(stream_id).ok_or_else(|| {
+                SmPersistenceError::Other("SM acknowledgement source is missing".to_owned())
+            })?;
+            session.max_resume_time = Some(0);
+            session.max_resume_duration = Duration::ZERO;
+        }
+        Ok(())
+    }
 }
 
 impl InMemorySmPersistence {
@@ -782,6 +900,86 @@ impl InMemorySmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for InMemorySmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        _expected_fence: &SmClaimFence,
+        _authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        guard.acknowledge(stream_id, acknowledged_h, true)?;
+        Ok(())
+    }
+
+    async fn acknowledge_claimed_session(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        _expected_fence: &SmClaimFence,
+        _authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        self.inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+            .acknowledge(stream_id, acknowledged_h, false)
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<SmAckWindow>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard
+            .acknowledgement_windows
+            .get(stream_id)
+            .cloned()
+            .unwrap_or_default())
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream_id: &SmSessionId,
+        window: SmAckWindow,
+        _expected_fence: &SmClaimFence,
+        _authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        if let Some(windows) = guard.acknowledgement_windows.get_mut(stream_id) {
+            windows.retain(|existing| *existing != window);
+            if windows.is_empty() {
+                guard.acknowledgement_windows.remove(stream_id);
+            }
+        }
+        Ok(())
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(guard
+            .sessions
+            .keys()
+            .chain(guard.acknowledgement_windows.keys())
+            .cloned()
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .collect())
+    }
+
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,
@@ -851,6 +1049,15 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .inner
             .lock()
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        if guard
+            .acknowledgement_windows
+            .get(stream_id)
+            .is_some_and(|windows| !windows.is_empty())
+        {
+            return Err(SmPersistenceError::Other(
+                "SM acknowledgement settlement is pending".to_owned(),
+            ));
+        }
         guard.sessions.remove(stream_id);
         guard.unacked.remove(stream_id);
         guard.principals.remove(stream_id);

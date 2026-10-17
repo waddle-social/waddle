@@ -1496,6 +1496,18 @@ ALTER TABLE ingress_delivery_receipts ADD COLUMN policy_discard_reason TEXT
     CHECK (policy_discard_reason IN ('occupancy_departed', 'occupancy_superseded', 'occupancy_incarnation_lost', 'room_retired'));
 "#;
 
+/// ACK settlement custody must exist under the serialized migration lock before
+/// concurrent SM persistence initializers run. Its lifetime is independent of
+/// canonical sources and has no cascade or time-based deletion.
+pub const V1027_SM_ACKNOWLEDGED_WINDOWS: &str = r#"
+CREATE TABLE IF NOT EXISTS sm_acknowledged_windows (
+    stream_id TEXT NOT NULL,
+    from_exclusive BIGINT NOT NULL,
+    to_inclusive BIGINT NOT NULL,
+    PRIMARY KEY (stream_id, from_exclusive, to_inclusive)
+);
+"#;
+
 pub fn all() -> Vec<Migration> {
     vec![
         Migration {
@@ -1656,6 +1668,13 @@ pub fn all() -> Vec<Migration> {
                 .to_string(),
             sql_sqlite: V1026_SEALED_ROOM_ENVELOPES,
             sql_postgres: V1026_SEALED_ROOM_ENVELOPES_POSTGRES,
+        },
+        Migration {
+            version: 1027,
+            description: "Preserve acknowledged SM windows until pending settlement completes"
+                .to_string(),
+            sql_sqlite: V1027_SM_ACKNOWLEDGED_WINDOWS,
+            sql_postgres: V1027_SM_ACKNOWLEDGED_WINDOWS,
         },
     ]
 }
