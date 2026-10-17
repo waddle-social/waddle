@@ -111,6 +111,16 @@ describe("threadChipParticipants", () => {
     expect(participants.map((p) => p.jid)).toEqual([null, "bob@example.com", "alice@example.com"]);
   });
 
+  test("includes sub-thread repliers, newest first, so the latest replier has a face", () => {
+    const direct = message({ id: "c0", author: "alice", createdAt: "2026-07-01T10:00:00Z" });
+    const nested = message({ id: "s0", author: "bob", createdAt: "2026-07-01T10:30:00Z", threadId: "c0" });
+    const again = message({ id: "s1", author: "alice", createdAt: "2026-07-01T10:20:00Z", threadId: "c0" });
+    const entry = threadIndexWith([direct]).get("root")!;
+    const index = new Map([["root", { ...entry, allDescendants: [direct, again, nested], count: 3, lastTs: nested.createdAt }]]);
+    const participants = threadChipParticipants(index, "root", () => null, {});
+    expect(participants.map((p) => p.nick)).toEqual(["bob", "alice"]);
+  });
+
   test("returns empty for unknown threads", () => {
     expect(threadChipParticipants(new Map(), "missing", () => null, {})).toEqual([]);
   });

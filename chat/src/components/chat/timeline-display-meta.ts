@@ -83,7 +83,9 @@ export function threadChipParticipants(
   if (!entry) return [];
   const seen = new Set<string>();
   const ordered: ThreadChipParticipant[] = [];
-  const children = entry.directChildren;
+  // Every loaded reply the count covers (sub-threads included, chronological),
+  // so the faces include the author of the card's latest reply.
+  const children = entry.allDescendants;
   for (let i = children.length - 1; i >= 0; i--) {
     const c = children[i];
     if (!c) continue;
