@@ -9,11 +9,13 @@ extension SessionCoordinator {
     @discardableResult
     public func send(_ draft: Draft, in conversation: ConversationID) async -> String? {
         guard let composed = MessageComposer.compose(draft) else { return nil }
+        var options = composed.options
+        options.mentionDirectory = mentionDirectory(for: conversation)
         let message = OutboundMessage(
             clientID: Self.makeClientID(),
             conversation: conversation,
             body: composed.body,
-            options: composed.options
+            options: options
         )
         timelines.insertLocalEcho(localEcho(of: message), in: conversation)
         if conversation.kind == .direct {
@@ -315,7 +317,9 @@ extension SessionCoordinator {
               let from = ownJID(in: item.conversation),
               let composed = MessageComposer.compose(correctionDraft(of: item, draft: draft))
         else { return false }
-        let outcome = await port.sendCorrection(of: target, body: composed.body, in: item.conversation, options: composed.options)
+        var options = composed.options
+        options.mentionDirectory = mentionDirectory(for: item.conversation)
+        let outcome = await port.sendCorrection(of: target, body: composed.body, in: item.conversation, options: options)
         guard case .sent = outcome else { return false }
         // A room reflects the correction, and may reject it (for example
         // after a reconnect changed our occupancy); apply only in 1:1.
@@ -325,6 +329,14 @@ extension SessionCoordinator {
             in: item.conversation
         )
         return true
+    }
+
+    /// The room's mention directory for typed `@nick` tokens; nil in 1:1.
+    func mentionDirectory(for conversation: ConversationID) -> MentionDirectory? {
+        guard conversation.isRoom else { return nil }
+        let room = conversation.jid
+        let occupants = presence.occupants[room].map { Array($0.values) } ?? []
+        return .room(occupants: occupants, ownNick: presence.selfNicks[room])
     }
 
     private func correctionDraft(of item: TimelineItem, draft: Draft) -> Draft {

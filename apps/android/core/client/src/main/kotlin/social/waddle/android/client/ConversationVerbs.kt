@@ -311,8 +311,14 @@ internal class ConversationVerbs(
     ): VerbResult {
         val lease = activeSession.captureOwnerLease() ?: return VerbResult.NotReady
         val sender = ownMutationSender(conversationJid, isGroupchat, lease) ?: return VerbResult.NotReady
-        val options = threadId?.let {
-            sendOptionsFor(newClientStanzaId()).copy(thread = WaddleThreadTarget(id = it, parent = null))
+        val mentionDirectory = if (isGroupchat) stores.roomMentionDirectory(conversationJid) else null
+        val options = if (threadId == null && mentionDirectory == null) {
+            null
+        } else {
+            sendOptionsFor(newClientStanzaId()).copy(
+                thread = threadId?.let { WaddleThreadTarget(id = it, parent = null) },
+                mentionDirectory = mentionDirectory,
+            )
         }
         val outcome = try {
             when (

@@ -20,7 +20,15 @@ enum FFIOutbound {
             linkPreviewToken: nil,
             requestDisplayedMarker: options.requestDisplayedMarker,
             mucPm: false,
-            sticker: nil
+            sticker: nil,
+            mentionDirectory: options.mentionDirectory.map(mentionDirectory)
+        )
+    }
+
+    static func mentionDirectory(_ directory: MentionDirectory) -> WaddleMentionDirectory {
+        WaddleMentionDirectory(
+            targets: directory.targets.map { WaddleMentionTarget(label: $0.label, jid: $0.jid.description) },
+            broadcasts: directory.broadcasts
         )
     }
 

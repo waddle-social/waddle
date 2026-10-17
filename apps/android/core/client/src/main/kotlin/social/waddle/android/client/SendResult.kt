@@ -45,4 +45,5 @@ internal fun sendOptionsFor(stanzaId: String): WaddleSendOptions = WaddleSendOpt
     requestDisplayedMarker = true,
     mucPm = false,
     sticker = null,
+    mentionDirectory = null,
 )

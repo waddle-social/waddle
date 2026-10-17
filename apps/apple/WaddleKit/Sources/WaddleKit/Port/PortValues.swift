@@ -8,6 +8,8 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
     public var references: [Reference]
     public var sharedFiles: [SharedFile]
     public var requestDisplayedMarker: Bool
+    /// Room sends: resolve typed `@nick` tokens to mention references.
+    public var mentionDirectory: MentionDirectory?
 
     /// XEP-0461 reply with its XEP-0428 fallback range.
     public struct Reply: Hashable, Sendable, Codable {
@@ -28,7 +30,8 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         markupSpans: [MarkupSpan] = [],
         references: [Reference] = [],
         sharedFiles: [SharedFile] = [],
-        requestDisplayedMarker: Bool = false
+        requestDisplayedMarker: Bool = false,
+        mentionDirectory: MentionDirectory? = nil
     ) {
         self.reply = reply
         self.thread = thread
@@ -36,6 +39,7 @@ public struct OutboundOptions: Hashable, Sendable, Codable {
         self.references = references
         self.sharedFiles = sharedFiles
         self.requestDisplayedMarker = requestDisplayedMarker
+        self.mentionDirectory = mentionDirectory
     }
 }
 

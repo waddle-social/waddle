@@ -28,9 +28,9 @@ use crate::{
     WaddleLinkPreviewImage, WaddleLinkPreviewLookup, WaddleLinkPreviewLookupPreview,
     WaddleLinkPreviewLookupStatus, WaddleLinkPreviewPlayer, WaddleLinkPreviewVideo,
     WaddleLiveKitJoin, WaddleMarkupSpan, WaddleMarkupSpanType, WaddleMdsDisplayedEntry,
-    WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence, WaddlePackSticker,
-    WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview, WaddlePresence,
-    WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
+    WaddleMentionDirectory, WaddleMessage, WaddleMucAffiliation, WaddleMucRole, WaddleMujiPresence,
+    WaddlePackSticker, WaddlePinAction, WaddlePinEntry, WaddlePinEvent, WaddlePinPreview,
+    WaddlePresence, WaddlePresenceHat, WaddleReference, WaddleReferenceType, WaddleSaslCondition,
     WaddleSendOptions, WaddleSharedFile, WaddleStanzaErrorType, WaddleStanzaId, WaddleStickerHash,
     WaddleStickerPack,
 };
@@ -1014,6 +1014,26 @@ pub(crate) fn archived_to_ffi(
 /// are parsed here (the earliest boundary) so the rest of the send path flows
 /// through typed values per the typed-payloads hard rule. Returns a
 /// human-readable error string on malformed input - surfaced via the listener.
+/// Typed mention directory. A target whose JID is not a bare JID is
+/// dropped: it can never be a conformant `xmpp:<barejid>` mention, and one
+/// bad roster entry must not fail the send.
+fn mention_directory_from_ffi(directory: WaddleMentionDirectory) -> messaging::MentionDirectory {
+    messaging::MentionDirectory {
+        targets: directory
+            .targets
+            .into_iter()
+            .filter_map(|target| {
+                let jid = target.jid.parse::<jid::BareJid>().ok()?;
+                Some(messaging::MentionTarget {
+                    label: target.label,
+                    jid,
+                })
+            })
+            .collect(),
+        broadcasts: directory.broadcasts,
+    }
+}
+
 pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessageOptions, String> {
     let reply = match opts.reply {
         Some(target) => {
@@ -1114,9 +1134,7 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
             .transpose()
             .map_err(|err| err.to_string())?,
         sticker: opts.sticker.map(sticker_marker_from_ffi).transpose()?,
-        // Native composers emit references for popover-picked mentions
-        // themselves; typed-label resolution is not exposed over UniFFI yet.
-        mention_directory: None,
+        mention_directory: opts.mention_directory.map(mention_directory_from_ffi),
     })
 }
 
@@ -2347,6 +2365,45 @@ mod tests {
     }
 
     // ── Outbound send-options mapping ────────────────────────────────────────
+
+    #[test]
+    fn send_options_map_mention_directory_and_drop_invalid_jids() {
+        let opts = WaddleSendOptions {
+            mention_directory: Some(crate::WaddleMentionDirectory {
+                targets: vec![
+                    crate::WaddleMentionTarget {
+                        label: "rawkode".to_string(),
+                        jid: "rawkode@waddle.test".to_string(),
+                    },
+                    crate::WaddleMentionTarget {
+                        label: "ghost".to_string(),
+                        jid: "not a jid@".to_string(),
+                    },
+                ],
+                broadcasts: true,
+            }),
+            ..Default::default()
+        };
+
+        let options = send_options_from_ffi(opts).expect("options convert");
+
+        assert_eq!(
+            options.mention_directory,
+            Some(messaging::MentionDirectory {
+                targets: vec![messaging::MentionTarget {
+                    label: "rawkode".to_string(),
+                    jid: "rawkode@waddle.test".parse().expect("bare JID"),
+                }],
+                broadcasts: true,
+            })
+        );
+        assert_eq!(
+            send_options_from_ffi(WaddleSendOptions::default())
+                .expect("options convert")
+                .mention_directory,
+            None
+        );
+    }
 
     #[test]
     fn send_options_map_subject_muc_pm_markup_and_references() {
