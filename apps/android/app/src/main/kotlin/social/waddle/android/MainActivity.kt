@@ -5,6 +5,7 @@ import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.DisposableEffect
@@ -75,14 +76,14 @@ class MainActivity : ComponentActivity() {
         watchPushKey(graph)
         setContent {
             val themeMode by graph.userPrefs.theme
-                // Night until the stored choice loads: the window ground is
-                // night too, so a night first frame never flashes.
-                .collectAsStateWithLifecycle(initialValue = ThemeMode.NIGHT)
+                // System until the stored choice loads: the window ground
+                // follows the system too, so the first frame never flashes.
+                .collectAsStateWithLifecycle(initialValue = ThemeMode.SYSTEM)
             // enableEdgeToEdge derives bar-icon contrast from the SYSTEM
-            // night mode once at onCreate; the in-app theme is independent
-            // of it, so a daylight app on a dark phone would get invisible
+            // night mode once at onCreate; a pinned in-app theme can differ
+            // from it, so a daylight app on a dark phone would get invisible
             // white status icons. Track the app's theme.
-            val darkTheme = themeMode == ThemeMode.NIGHT
+            val darkTheme = themeMode.isNight(isSystemInDarkTheme())
             val wallpaperColors by graph.userPrefs.wallpaperColors
                 .collectAsStateWithLifecycle(initialValue = false)
             val view = LocalView.current

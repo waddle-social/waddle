@@ -1,5 +1,6 @@
 package social.waddle.android.theme
 
+import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.ExperimentalMaterial3ExpressiveApi
@@ -333,7 +334,7 @@ private const val ACTION_GLOW_ALPHA = 0.45f
 /**
  * Material 3 Expressive driven by Huddle's tokens: every colour role in
  * both themes, the type scale, the radii and the expressive motion
- * scheme. Night is the default theme. [wallpaperColors] is Material You's
+ * scheme. [ThemeMode.SYSTEM] follows the phone's dark mode. [wallpaperColors] is Material You's
  * dynamic colour, opt-in (see [withWallpaper]).
  */
 @OptIn(ExperimentalMaterial3ExpressiveApi::class)
@@ -343,7 +344,7 @@ fun WaddleTheme(
     wallpaperColors: Boolean = false,
     content: @Composable () -> Unit,
 ) {
-    val night = themeMode == ThemeMode.NIGHT
+    val night = themeMode.isNight(isSystemInDarkTheme())
     val huddle = if (night) NightPalette.extended else DaylightPalette.extended
     val context = LocalContext.current
     val palette = if (wallpaperColors) {

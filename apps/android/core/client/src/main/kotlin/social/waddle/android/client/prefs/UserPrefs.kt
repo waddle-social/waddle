@@ -9,29 +9,57 @@ import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
 
 /**
- * Theme, mirroring web `waddle:theme` and Huddle's two themes: night is
- * home, daylight is the alternative. The stored values stay `dark` and
- * `light`; a stored `system` (the old three-way switch) or nothing at all
- * reads as night, as on the web.
+ * Theme: follow the phone's dark mode (the default), or pin one of
+ * Huddle's two themes. Stored as `system`, `dark` and `light` (web
+ * `waddle:theme`'s spellings); nothing stored reads as system.
  */
 enum class ThemeMode(val storageValue: String) {
+    SYSTEM("system"),
     NIGHT("dark"),
     DAYLIGHT("light"),
     ;
 
+    /** Whether this mode draws night, given the phone's own dark mode. */
+    fun isNight(systemDark: Boolean): Boolean = when (this) {
+        SYSTEM -> systemDark
+        NIGHT -> true
+        DAYLIGHT -> false
+    }
+
     companion object {
         fun fromStorage(value: String?): ThemeMode =
-            entries.firstOrNull { it.storageValue == value } ?: NIGHT
+            entries.firstOrNull { it.storageValue == value } ?: SYSTEM
+    }
+}
+
+/**
+ * Which way conversation timelines run, mirroring web
+ * `waddle:scroll-direction`: CHAT keeps the newest message at the bottom
+ * above the composer; SOCIAL flips the timeline so the newest is first,
+ * under a composer pinned to the top.
+ */
+enum class TimelineDirection(val storageValue: String) {
+    CHAT("chat"),
+    SOCIAL("social"),
+    ;
+
+    companion object {
+        fun fromStorage(value: String?): TimelineDirection =
+            entries.firstOrNull { it.storageValue == value } ?: CHAT
     }
 }
 
 /**
  * User-scoped settings (`user.preferences_pb`), mirroring the web keys
- * `waddle:theme`, `waddle.chat.notifications-enabled`, and
+ * `waddle:theme`, `waddle:scroll-direction`, `waddle.chat.notifications-enabled`, and
  * `waddle.chat.message-sounds-enabled`.
  */
 class UserPrefs(private val dataStore: DataStore<Preferences>) {
     val theme: Flow<ThemeMode> = dataStore.data.map { ThemeMode.fromStorage(it[KEY_THEME]) }
+
+    /** Newest at the bottom (chat, the default) or at the top (social). */
+    val timelineDirection: Flow<TimelineDirection> =
+        dataStore.data.map { TimelineDirection.fromStorage(it[KEY_TIMELINE_DIRECTION]) }
     val notificationsEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_NOTIFICATIONS] ?: true }
     val messageSoundsEnabled: Flow<Boolean> = dataStore.data.map { it[KEY_MESSAGE_SOUNDS] ?: true }
 
@@ -100,6 +128,10 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
         dataStore.edit { it[KEY_THEME] = mode.storageValue }
     }
 
+    suspend fun setTimelineDirection(direction: TimelineDirection) {
+        dataStore.edit { it[KEY_TIMELINE_DIRECTION] = direction.storageValue }
+    }
+
     suspend fun setNotificationsEnabled(enabled: Boolean) {
         dataStore.edit { it[KEY_NOTIFICATIONS] = enabled }
     }
@@ -122,6 +154,7 @@ class UserPrefs(private val dataStore: DataStore<Preferences>) {
 
     private companion object {
         val KEY_THEME = stringPreferencesKey("theme")
+        val KEY_TIMELINE_DIRECTION = stringPreferencesKey("timeline_direction")
         val KEY_NOTIFICATIONS = booleanPreferencesKey("notifications_enabled")
         val KEY_MESSAGE_SOUNDS = booleanPreferencesKey("message_sounds_enabled")
         val KEY_READ_RECEIPTS = booleanPreferencesKey("read_receipts_enabled")

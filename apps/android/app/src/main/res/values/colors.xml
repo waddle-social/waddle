@@ -3,9 +3,9 @@
     <!-- Adaptive-icon tile behind the brand mark: the night card colour
          the Apple app icon is rendered on (sync_brand_assets.swift). -->
     <color name="ic_launcher_background">#121F2B</color>
-    <!-- Pre-Compose window and splash ground: Huddle's night `bg`. Night is
-         the default theme whatever the system says, so launch never flashes
-         a colour the first frame does not use; a daylight choice takes over
-         once the stored preference loads. -->
-    <color name="window_background">#0B1219</color>
+    <!-- Pre-Compose window and splash ground: Huddle's daylight `bg` here,
+         night `bg` in values-night. The default theme follows the system,
+         so launch grounds in the colour the first frame uses; a pinned
+         theme takes over once the stored preference loads. -->
+    <color name="window_background">#F2F6F7</color>
 </resources>

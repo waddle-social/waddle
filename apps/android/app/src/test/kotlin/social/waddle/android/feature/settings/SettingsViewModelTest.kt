@@ -19,6 +19,7 @@ import org.junit.Test
 import social.waddle.android.client.InMemoryPreferencesDataStore
 import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.prefs.ThemeMode
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.testSessionInfo
 
@@ -83,7 +84,8 @@ class SettingsViewModelTest {
 
         assertEquals(
             SettingsUiState(
-                theme = ThemeMode.NIGHT,
+                theme = ThemeMode.SYSTEM,
+                timelineDirection = TimelineDirection.CHAT,
                 notificationsEnabled = true,
                 messageSoundsEnabled = true,
                 readReceiptsEnabled = true,
@@ -100,6 +102,16 @@ class SettingsViewModelTest {
 
         assertEquals(ThemeMode.DAYLIGHT, viewModel.uiState.value.theme)
         assertEquals(ThemeMode.DAYLIGHT, userPrefs.theme.first())
+    }
+
+    @Test
+    fun `timeline direction round-trips through the prefs store`() = runTest {
+        val viewModel = createViewModel()
+        viewModel.setTimelineDirection(TimelineDirection.SOCIAL)
+        runCurrent()
+
+        assertEquals(TimelineDirection.SOCIAL, viewModel.uiState.value.timelineDirection)
+        assertEquals(TimelineDirection.SOCIAL, userPrefs.timelineDirection.first())
     }
 
     @Test

@@ -17,6 +17,7 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.normalizedBareJid
 import social.waddle.android.client.prefs.PushEndpointKind
 import social.waddle.android.client.prefs.ThemeMode
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.client.prefs.UserPrefs
 import social.waddle.android.client.push.PushStatus
 import social.waddle.android.viewModelFactoryOf
@@ -26,7 +27,9 @@ data class SettingsUiState(
     val username: String? = null,
     val jid: String? = null,
     val avatarUrl: String? = null,
-    val theme: ThemeMode = ThemeMode.NIGHT,
+    val theme: ThemeMode = ThemeMode.SYSTEM,
+    /** Newest message at the bottom (chat) or the top (social). */
+    val timelineDirection: TimelineDirection = TimelineDirection.CHAT,
     val notificationsEnabled: Boolean = true,
     val messageSoundsEnabled: Boolean = true,
     val readReceiptsEnabled: Boolean = true,
@@ -146,16 +149,18 @@ class SettingsViewModel(
 
     val uiState: StateFlow<SettingsUiState> = combine(
         currentSession,
-        combine(userPrefs.theme, userPrefs.wallpaperColors, ::Pair),
+        combine(userPrefs.theme, userPrefs.wallpaperColors, userPrefs.timelineDirection, ::Triple),
         userPrefs.notificationsEnabled,
         userPrefs.messageSoundsEnabled,
         userPrefs.readReceiptsEnabled,
-    ) { session, (theme, wallpaperColors), notificationsEnabled, messageSoundsEnabled, readReceiptsEnabled ->
+    ) { session, appearance, notificationsEnabled, messageSoundsEnabled, readReceiptsEnabled ->
+        val (theme, wallpaperColors, timelineDirection) = appearance
         SettingsUiState(
             username = session?.username,
             jid = session?.jid,
             avatarUrl = session?.avatarUrl,
             theme = theme,
+            timelineDirection = timelineDirection,
             notificationsEnabled = notificationsEnabled,
             messageSoundsEnabled = messageSoundsEnabled,
             readReceiptsEnabled = readReceiptsEnabled,
@@ -174,6 +179,10 @@ class SettingsViewModel(
 
     fun setTheme(mode: ThemeMode) {
         viewModelScope.launch { userPrefs.setTheme(mode) }
+    }
+
+    fun setTimelineDirection(direction: TimelineDirection) {
+        viewModelScope.launch { userPrefs.setTimelineDirection(direction) }
     }
 
     fun setWallpaperColors(enabled: Boolean) {

@@ -27,6 +27,7 @@ import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.outlined.ArrowDownward
+import androidx.compose.material.icons.outlined.ArrowUpward
 import androidx.compose.material3.Icon
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
@@ -63,9 +64,10 @@ import social.waddle.android.ui.huddle.reducedMotion
 import java.time.LocalDate
 
 /**
- * Reverse-layout timeline (newest pinned at the bottom). Rows arrive
- * fully derived ([FeedEntry]); this only draws them. Reaching the top
- * (the end in reverse coordinates) requests older history.
+ * The timeline, newest pinned at the bottom (reverse layout), or at the
+ * top when [newestAtTop] (social). Rows arrive fully derived
+ * ([FeedEntry], derived for the same direction); this only draws them.
+ * Reaching the oldest loaded row requests older history.
  *
  * While the first page loads it shows six skeleton rows; once history is
  * known to be empty it shows [emptyState]. Times and day labels follow
@@ -86,12 +88,15 @@ fun TimelineList(
     /** The newest page has not answered yet: skeleton, not the empty state. */
     loadingFirstPage: Boolean = false,
     emptyState: @Composable () -> Unit = { TimelineEmpty(ConversationKind.Room(name = null)) },
+    /** Social layout: newest row on top, history below it. */
+    newestAtTop: Boolean = false,
 ) {
     val deviceClock = rememberConversationClock()
     val clock = remember(deviceClock, today) { today?.let(deviceClock::withToday) ?: deviceClock }
     val listState = rememberLazyListState()
     val scope = rememberCoroutineScope()
-    // reverseLayout renders index 0 at the bottom → newest first.
+    // Index 0 is the newest row: at the bottom in reverse layout (chat),
+    // at the top in social.
     val newestFirst = remember(entries) { entries.asReversed() }
     val indexByKey = remember(entries) {
         HashMap<String, Int>(newestFirst.size).apply { newestFirst.forEachIndexed { i, e -> put(e.key, i) } }
@@ -115,7 +120,7 @@ fun TimelineList(
     CompositionLocalProvider(LocalConversationClock provides clock) {
         Box(modifier = modifier.fillMaxWidth()) {
             when {
-                entries.isEmpty() && (isLoadingOlder || loadingFirstPage) -> TimelineSkeleton()
+                entries.isEmpty() && (isLoadingOlder || loadingFirstPage) -> TimelineSkeleton(newestAtTop = newestAtTop)
                 entries.isEmpty() -> Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) { emptyState() }
                 else -> TimelineRows(
                     newestFirst = newestFirst,
@@ -125,6 +130,7 @@ fun TimelineList(
                     arrivals = arrivals,
                     actions = jumpActions,
                     context = context,
+                    newestAtTop = newestAtTop,
                 )
             }
             val awayFromLive by remember {
@@ -134,19 +140,28 @@ fun TimelineList(
                 visible = awayFromLive,
                 enter = fadeIn(HuddleMotion.fast()) + slideInVertically(HuddleMotion.fast()) { it / 2 },
                 exit = fadeOut(HuddleMotion.fast()) + slideOutVertically(HuddleMotion.fast()) { it / 2 },
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(bottom = Waddle.space.md),
+                modifier = if (newestAtTop) {
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = Waddle.space.md)
+                } else {
+                    Modifier
+                        .align(Alignment.BottomCenter)
+                        .padding(bottom = Waddle.space.md)
+                },
             ) {
-                JumpToLatest(onClick = { scope.launch { listState.animateScrollToItem(0) } })
+                JumpToLatest(
+                    newestAtTop = newestAtTop,
+                    onClick = { scope.launch { listState.animateScrollToItem(0) } },
+                )
             }
         }
     }
 
     FollowNewest(listState, newestFirst.firstOrNull())
 
-    // Web isPinnedAtEdge parity: in reverse layout, item 0 visible ==
-    // scrolled to the newest message. Read markers gate on this.
+    // Web isPinnedAtEdge parity: item 0 visible == scrolled to the newest
+    // message, in either layout. Read markers gate on this.
     LaunchedEffect(listState) {
         snapshotFlow { listState.firstVisibleItemIndex == 0 }
             .distinctUntilChanged()
@@ -173,13 +188,18 @@ private fun TimelineRows(
     arrivals: Arrivals,
     actions: MessageRowActions,
     context: MessageRowContext,
+    newestAtTop: Boolean,
 ) {
     val still = reducedMotion
     LazyColumn(
         state = listState,
-        reverseLayout = true,
+        reverseLayout = !newestAtTop,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(top = Waddle.space.md, bottom = Waddle.space.xs),
+        contentPadding = if (newestAtTop) {
+            PaddingValues(top = Waddle.space.xs, bottom = Waddle.space.md)
+        } else {
+            PaddingValues(top = Waddle.space.md, bottom = Waddle.space.xs)
+        },
     ) {
         itemsIndexed(
             items = newestFirst,
@@ -192,9 +212,11 @@ private fun TimelineRows(
                 }
             },
         ) { index, entry ->
-            // Item content is not reversed: separators sit above their row.
-            // The next row in time is the one below, at index - 1.
-            val endsGroup = index == 0 || newestFirst[index - 1].startsGroup
+            // Item content is not reversed: the day separator sits above
+            // its row. The row drawn below is the next newer one (index - 1)
+            // in chat, the next older one (index + 1) in social.
+            val below = if (newestAtTop) newestFirst.getOrNull(index + 1) else newestFirst.getOrNull(index - 1)
+            val endsGroup = below == null || below.startsGroup
             // Latched per row: once drawn, the row is no longer an arrival.
             val fresh = remember(entry.key) { arrivals.isFresh(entry, index) && !still }
             val enter = rememberMessageEnter(fresh)
@@ -208,13 +230,16 @@ private fun TimelineRows(
                     .enterLayer(enter),
             ) {
                 entry.daySeparator?.let { DaySeparator(it) }
-                if (entry.unreadDivider) UnreadDivider()
+                // The divider parts unread from read: above the oldest
+                // unread row in chat, below it in social (web "after").
+                if (entry.unreadDivider && !newestAtTop) UnreadDivider()
                 val stored = (entry.row as? ConversationRow.Stored)?.item
                 if (entry.isCallRow && stored != null) {
                     CallTimelineRow(item = stored, sentAt = entry.sentAt)
                 } else {
                     MessageRow(entry = entry, actions = actions, context = context, endsGroup = endsGroup)
                 }
+                if (entry.unreadDivider && newestAtTop) UnreadDivider()
             }
         }
         if (isLoadingOlder) {
@@ -278,7 +303,7 @@ private fun Modifier.enterLayer(progress: Animatable<Float, *>?): Modifier = if 
 /**
  * Keeps the newest message in view as messages arrive. A keyed lazy list
  * holds its first visible item in place when rows are inserted before
- * it, so in reverse layout a new message can land below the viewport.
+ * it, so a new message can land past the viewport's newest edge.
  * When the reader was at the newest message, or has just sent one, the
  * list follows it down; a reader scrolled back through history stays put.
  *
@@ -377,9 +402,9 @@ private fun Rule(modifier: Modifier, color: Color) {
     )
 }
 
-/** Centred "↓ Latest" pill on the card colour, lifted by the overlay shadow. */
+/** Centred "↓ Latest" pill (↑ when the newest is on top) on the card colour, lifted by the overlay shadow. */
 @Composable
-private fun JumpToLatest(onClick: () -> Unit) {
+private fun JumpToLatest(newestAtTop: Boolean, onClick: () -> Unit) {
     val colors = Waddle.colors
     Surface(
         onClick = onClick,
@@ -396,7 +421,11 @@ private fun JumpToLatest(onClick: () -> Unit) {
                 .height(JUMP_HEIGHT)
                 .padding(horizontal = Waddle.space.sm),
         ) {
-            Icon(Icons.Outlined.ArrowDownward, contentDescription = null, modifier = Modifier.size(JUMP_ICON))
+            Icon(
+                if (newestAtTop) Icons.Outlined.ArrowUpward else Icons.Outlined.ArrowDownward,
+                contentDescription = null,
+                modifier = Modifier.size(JUMP_ICON),
+            )
             Text(
                 text = stringResource(R.string.timeline_jump_to_latest),
                 style = MetaStyle.copy(fontWeight = FontWeight.SemiBold),
@@ -418,14 +447,20 @@ private fun StartOfHistory() {
     )
 }
 
-/** Six placeholder rows while the first history page loads (web `MessageListSkeleton`). */
+/**
+ * Six placeholder rows while the first history page loads (web
+ * `MessageListSkeleton`), gathered at the newest edge.
+ */
 @Composable
-fun TimelineSkeleton(modifier: Modifier = Modifier) {
+fun TimelineSkeleton(modifier: Modifier = Modifier, newestAtTop: Boolean = false) {
     Column(
         modifier = modifier
             .fillMaxSize()
             .padding(vertical = Waddle.space.md),
-        verticalArrangement = Arrangement.spacedBy(Waddle.space.sm, Alignment.Bottom),
+        verticalArrangement = Arrangement.spacedBy(
+            Waddle.space.sm,
+            if (newestAtTop) Alignment.Top else Alignment.Bottom,
+        ),
     ) {
         SKELETON_LINES.forEach { lines -> SkeletonRow(lines) }
     }

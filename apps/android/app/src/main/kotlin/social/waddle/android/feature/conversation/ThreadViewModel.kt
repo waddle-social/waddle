@@ -1,12 +1,15 @@
 package social.waddle.android.feature.conversation
 
 import androidx.lifecycle.ViewModelProvider
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.flow.map
 import social.waddle.android.AppGraph
 import social.waddle.android.DEFAULT_NICK
 import social.waddle.android.client.XmppSessionManager
 import social.waddle.android.client.mentionCandidatesOf
+import social.waddle.android.client.prefs.TimelineDirection
 import social.waddle.android.feature.channel.ChannelIo
 import social.waddle.android.feature.dm.DmIo
 import social.waddle.android.viewModelFactoryOf
@@ -25,6 +28,7 @@ class ThreadViewModel(
     nick: String,
     uploader: AttachmentUploader? = null,
     onConversationRead: suspend (String) -> Unit = {},
+    timelineDirection: StateFlow<TimelineDirection> = MutableStateFlow(TimelineDirection.CHAT),
     selfBareJid: String? = null,
 ) : ConversationViewModel(
     conversationJid = conversationJid,
@@ -62,6 +66,7 @@ class ThreadViewModel(
         flowOf(emptySet())
     },
     threadId = threadId,
+    timelineDirection = timelineDirection,
     uploader = uploader,
     onConversationRead = onConversationRead,
     selfBareJid = selfBareJid,
@@ -79,6 +84,7 @@ class ThreadViewModel(
                 isGroupchat = isGroupchat,
                 threadId = threadId,
                 nick = graph.currentSession.value?.xmppLocalpart ?: DEFAULT_NICK,
+                timelineDirection = graph.timelineDirection,
                 uploader = graph.attachmentUploader,
                 onConversationRead = graph.messageNotifier::clearConversationNotification,
                     selfBareJid = graph.currentSession.value?.jid?.let(::selfBareJidOf),

@@ -43,6 +43,11 @@ data class ConversationUiState(
     val canModerate: Boolean = false,
     /** Feed mode: loaded-history threads overview, newest first. */
     val threads: List<ThreadSummary> = emptyList(),
+    /**
+     * Social layout: newest row on top under a top-pinned composer.
+     * Derived with [entries] so the layout and the grouping always agree.
+     */
+    val newestFirst: Boolean = false,
 ) {
     /** The rows behind [entries], oldest first. */
     val rows: List<ConversationRow> get() = entries.map { it.row }

@@ -9,8 +9,8 @@
     </style>
 
     <!-- core-splashscreen theme; MainActivity holds the splash until the
-         app state leaves Loading, then swaps to Theme.Waddle. A calm night
-         ground (Huddle's default), not a full-bleed accent flash. -->
+         app state leaves Loading, then swaps to Theme.Waddle. A calm ground
+         in the system's theme, not a full-bleed accent flash. -->
     <style name="Theme.Waddle.Splash" parent="Theme.SplashScreen">
         <item name="windowSplashScreenBackground">@color/window_background</item>
         <item name="windowSplashScreenAnimatedIcon">@mipmap/ic_launcher_foreground</item>

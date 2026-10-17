@@ -4,6 +4,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.imePadding
@@ -61,7 +62,7 @@ import social.waddle.client.ffi.WaddleNotifyMode
 
 /**
  * Shared conversation scaffold (channel + DM + thread): top bar,
- * timeline, composer. Marks the conversation active (unread clearing)
+ * timeline, composer (on top of the timeline in the social layout). Marks the conversation active (unread clearing)
  * while resumed. [onOpenThread] is null on thread screens — threads do
  * not nest, so reply cards, opening a thread from a post and the
  * overview affordance hide. A message's avatar or author name opens
@@ -311,43 +312,60 @@ private fun ConversationScaffold(
                     trustedMediaOrigin = trustedMediaOrigin,
                 )
             }
-            TimelineList(
-                entries = state.entries,
-                isLoadingOlder = state.isLoadingOlder,
-                reachedHistoryStart = state.reachedHistoryStart,
-                onTopReached = viewModel::loadOlder,
-                actions = rowActions,
-                context = rowContext,
-                modifier = Modifier.weight(1f),
-                onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
-                loadingFirstPage = state.awaitingFirstPage,
-                emptyState = { TimelineEmpty(kind) },
-            )
-            TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)
+            val timeline: @Composable ColumnScope.() -> Unit = {
+                TimelineList(
+                    entries = state.entries,
+                    isLoadingOlder = state.isLoadingOlder,
+                    reachedHistoryStart = state.reachedHistoryStart,
+                    onTopReached = viewModel::loadOlder,
+                    actions = rowActions,
+                    context = rowContext,
+                    modifier = Modifier.weight(1f),
+                    onAtNewestEdgeChanged = viewModel::onAtNewestEdgeChanged,
+                    loadingFirstPage = state.awaitingFirstPage,
+                    emptyState = { TimelineEmpty(kind) },
+                    newestAtTop = state.newestFirst,
+                )
+            }
             val slashCommands = slashCommandHost
                 ?.let { host -> host.controller.commands.collectAsStateWithLifecycle().value }
                 .orEmpty()
-            MessageComposer(
-                onSend = viewModel::send,
-                mentionCandidates = mentionCandidates,
-                onDraftChanged = viewModel::onDraftChanged,
-                editing = composerMode as? ComposerMode.Editing,
-                onCancelEdit = viewModel::cancelEdit,
-                replying = composerMode as? ComposerMode.Replying,
-                onCancelReply = viewModel::cancelReply,
-                onAttach = { attachmentPicker.launch("*/*") },
-                onGif = { gifPickerOpen = true },
-                onSticker = { stickerPickerOpen = true },
-                uploadState = uploadState,
-                onClearUpload = viewModel::clearUploadState,
-                slashCommands = slashCommands,
-                inMuc = viewModel.isGroupchat,
-                onSlashArmed = { slashCommandHost?.controller?.ensureDiscovered() },
-                slashDispatch = slashCommandHost?.let { host ->
-                    slashDispatchOf(host) { body -> viewModel.send(body) }
-                },
-                placeholder = composerPlaceholderOf(kind),
-            )
+            val composer: @Composable () -> Unit = {
+                MessageComposer(
+                    onSend = viewModel::send,
+                    mentionCandidates = mentionCandidates,
+                    onDraftChanged = viewModel::onDraftChanged,
+                    editing = composerMode as? ComposerMode.Editing,
+                    onCancelEdit = viewModel::cancelEdit,
+                    replying = composerMode as? ComposerMode.Replying,
+                    onCancelReply = viewModel::cancelReply,
+                    onAttach = { attachmentPicker.launch("*/*") },
+                    onGif = { gifPickerOpen = true },
+                    onSticker = { stickerPickerOpen = true },
+                    uploadState = uploadState,
+                    onClearUpload = viewModel::clearUploadState,
+                    slashCommands = slashCommands,
+                    inMuc = viewModel.isGroupchat,
+                    onSlashArmed = { slashCommandHost?.controller?.ensureDiscovered() },
+                    slashDispatch = slashCommandHost?.let { host ->
+                        slashDispatchOf(host) { body -> viewModel.send(body) }
+                    },
+                    placeholder = composerPlaceholderOf(kind),
+                    onImage = viewModel::sendAttachment,
+                    pinnedTop = state.newestFirst,
+                )
+            }
+            // Social (web "Newest at top"): the composer and who is typing
+            // lead, the newest posts follow. Chat: they close the column.
+            if (state.newestFirst) {
+                composer()
+                TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)
+                timeline()
+            } else {
+                timeline()
+                TypingIndicator(names = typing, avatarJidOf = viewModel::typingAuthorJid)
+                composer()
+            }
         }
     }
 
