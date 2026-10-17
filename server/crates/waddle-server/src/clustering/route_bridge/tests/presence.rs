@@ -312,6 +312,49 @@ type SmResult<T> = Result<T, waddle_xmpp::stream_management::persistence::SmPers
 
 #[async_trait::async_trait]
 impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for UnreadableSmPersistence {
+    async fn acknowledge_claimed_session(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        h: u32,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .acknowledge_claimed_session(stream, h, fence, authority)
+            .await
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<waddle_xmpp::stream_management::persistence::SmAckWindow>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_acknowledgements(stream).await
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream: &waddle_xmpp::pending_delivery::SmSessionId,
+        window: waddle_xmpp::stream_management::persistence::SmAckWindow,
+        fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .confirm_acknowledgement(stream, window, fence, authority)
+            .await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<
+        Vec<waddle_xmpp::pending_delivery::SmSessionId>,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_claim_protected_streams().await
+    }
+
     async fn mark_session_nonresumable(
         &self,
         stream_id: &waddle_xmpp::pending_delivery::SmSessionId,

@@ -277,6 +277,35 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
     let session = recorded_resume_session("expired-resume-completion", 1);
     let stream = SmSessionId::new(&session.stream_id);
     let entity = Entity::new(EntityType::SmSession, session.stream_id.clone());
+    // This first stanza originated in pending storage and was flushed before
+    // detaching. Leave its ACK settlement unfinished across the restart.
+    let Stanza::Message(first_message) = message("first") else {
+        unreachable!();
+    };
+    let first_pending_id = PendingRowId::fresh();
+    pending
+        .insert(PendingRow {
+            id: first_pending_id.clone(),
+            recipient: session.jid.to_bare(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(first_message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("original offline delivery");
+    assert_eq!(
+        pending
+            .claim_for_session(&session.jid.to_bare(), &stream)
+            .await
+            .expect("flush original pending row")
+            .len(),
+        1
+    );
+    pending
+        .record_pushed_at(&first_pending_id, 1)
+        .await
+        .expect("record original outbound sequence");
     assert!(registry
         .store_session(session)
         .await
@@ -312,6 +341,16 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
     assert_eq!(durable.max_resume_time, Some(0));
     assert_eq!(durable.max_resume_duration, Duration::ZERO);
     assert_eq!(durable.last_acked, 1);
+    assert_eq!(
+        storage
+            .pending_acknowledgements(&stream)
+            .await
+            .expect("durable pending ACK window"),
+        vec![waddle_xmpp::stream_management::persistence::SmAckWindow {
+            from_exclusive: 0,
+            to_inclusive: 1,
+        }]
+    );
     let retained = storage.list_unacked(&stream).await.expect("retained queue");
     assert_eq!(retained.len(), 1);
     for (retained, original) in retained.iter().zip(&recorded[1..]) {
@@ -423,6 +462,19 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
     .await;
     assert!(!summary.has_storage_failure(), "{summary:?}");
     assert_eq!(summary.queued, 1);
+    assert!(
+        !restarted.confirm_promotion_session(&recovered).await,
+        "canonical source must retain its unsettled pending ACK journal"
+    );
+    restarted
+        .settle_session_acknowledgements(&recovered, pending.as_ref())
+        .await
+        .expect("restart settles the original pending ACK window");
+    assert!(storage
+        .pending_acknowledgements(&stream)
+        .await
+        .expect("settled durable ACK journal")
+        .is_empty());
     let rows = pending
         .list(&recovered.jid.to_bare())
         .await

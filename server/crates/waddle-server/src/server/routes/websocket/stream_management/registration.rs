@@ -203,6 +203,20 @@ async fn complete_pending_resume_claim(
         }
         Ok(Some(SmClaimCompletion::Expired(detached))) => {
             warn!(stream_id = %stream_id, jid = %jid, "SM resume claim expired before completion");
+            if let Err(error) = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .settle_session_acknowledgements(
+                    &detached,
+                    state.deps.protocol.pending_delivery_storage.as_ref(),
+                )
+                .await
+            {
+                // Registry retry custody and the durable journal keep pending
+                // rows protected until the expiry janitor can settle them.
+                warn!(%error, "Expired resume retained pending ACK settlement");
+            }
             // Completion has durably parked this queue in non-resumable
             // promotion inventory under its original claim. This snapshot
             // retires presence/occupancy only; the janitor owns promotion and

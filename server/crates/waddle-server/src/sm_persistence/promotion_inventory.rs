@@ -2,7 +2,7 @@
 use crate::db::{DatabaseDriver, Transaction};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    PersistedUnackedStanza, PromotionAppendOutcome, SmPersistenceError,
+    PersistedUnackedStanza, PromotionAppendOutcome, SmAckWindow, SmPersistenceError,
 };
 
 fn storage_error(error: impl std::fmt::Display) -> SmPersistenceError {
@@ -11,11 +11,12 @@ fn storage_error(error: impl std::fmt::Display) -> SmPersistenceError {
 
 /// Retire only an existing canonical source, preserving its unacknowledged
 /// suffix. The caller owns the transaction and any required ownership fence.
-pub(crate) async fn mark_nonresumable(
+pub(crate) async fn acknowledge(
     tx: &mut Transaction<'_>,
     stream_id: &SmSessionId,
     acknowledged_h: u32,
     driver: DatabaseDriver,
+    retire: bool,
 ) -> Result<(), SmPersistenceError> {
     let sql = match driver {
         DatabaseDriver::Postgres => {
@@ -39,7 +40,7 @@ pub(crate) async fn mark_nonresumable(
     let last_acked =
         u32::try_from(row.get::<i64>(1).map_err(storage_error)?).map_err(storage_error)?;
     let acknowledged = acknowledged_h.wrapping_sub(last_acked);
-    if acknowledged > outbound.wrapping_sub(last_acked) {
+    if acknowledged >= 0x8000_0000 || acknowledged > outbound.wrapping_sub(last_acked) {
         return Err(storage_error(
             "Expired SM acknowledgement exceeds canonical outbound count",
         ));
@@ -59,13 +60,105 @@ pub(crate) async fn mark_nonresumable(
     )
     .await
     .map_err(storage_error)?;
+    if acknowledged > 0 {
+        tx.execute(
+            "INSERT INTO sm_acknowledged_windows (stream_id, from_exclusive, to_inclusive) \
+             VALUES (?, ?, ?) ON CONFLICT (stream_id, from_exclusive, to_inclusive) DO NOTHING",
+            crate::db_params![
+                stream_id.as_str(),
+                i64::from(last_acked),
+                i64::from(acknowledged_h)
+            ],
+        )
+        .await
+        .map_err(storage_error)?;
+    }
+    let sql = if retire {
+        "UPDATE sm_sessions SET last_acked = ?, max_resume_secs = 0, max_resume_duration_ms = 0 WHERE stream_id = ?"
+    } else {
+        "UPDATE sm_sessions SET last_acked = ? WHERE stream_id = ?"
+    };
     tx.execute(
-        "UPDATE sm_sessions SET last_acked = ?, max_resume_secs = 0, max_resume_duration_ms = 0 \
-         WHERE stream_id = ?",
+        sql,
         crate::db_params![i64::from(acknowledged_h), stream_id.as_str()],
     )
     .await
     .map_err(storage_error)?;
+    Ok(())
+}
+
+/// Serialize deletion with ACK publication, then fail closed while settlement remains.
+pub(crate) async fn require_settled(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+    driver: DatabaseDriver,
+) -> Result<(), SmPersistenceError> {
+    let sql = match driver {
+        DatabaseDriver::Postgres => {
+            "SELECT stream_id FROM sm_sessions WHERE stream_id = ? FOR UPDATE"
+        }
+        DatabaseDriver::Sqlite => "SELECT stream_id FROM sm_sessions WHERE stream_id = ?",
+    };
+    let mut source = tx
+        .query(sql, crate::db_params![stream_id.as_str()])
+        .await
+        .map_err(storage_error)?;
+    let _ = source.next().await.map_err(storage_error)?;
+    drop(source);
+    if !pending(tx, stream_id).await?.is_empty() {
+        return Err(storage_error("SM acknowledgement settlement is pending"));
+    }
+    Ok(())
+}
+
+pub(crate) async fn pending(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+) -> Result<Vec<SmAckWindow>, SmPersistenceError> {
+    let mut rows = tx.query(
+        "SELECT from_exclusive, to_inclusive FROM sm_acknowledged_windows WHERE stream_id = ? ORDER BY from_exclusive, to_inclusive",
+        crate::db_params![stream_id.as_str()],
+    ).await.map_err(storage_error)?;
+    let mut windows = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage_error)? {
+        windows.push(SmAckWindow {
+            from_exclusive: u32::try_from(row.get::<i64>(0).map_err(storage_error)?)
+                .map_err(storage_error)?,
+            to_inclusive: u32::try_from(row.get::<i64>(1).map_err(storage_error)?)
+                .map_err(storage_error)?,
+        });
+    }
+    Ok(windows)
+}
+
+pub(crate) async fn claim_protected_streams(
+    tx: &mut Transaction<'_>,
+) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+    let mut rows = tx
+        .query(
+            "SELECT stream_id FROM sm_sessions UNION SELECT stream_id FROM sm_acknowledged_windows ORDER BY stream_id",
+            (),
+        )
+        .await
+        .map_err(storage_error)?;
+    let mut streams = Vec::new();
+    while let Some(row) = rows.next().await.map_err(storage_error)? {
+        streams.push(SmSessionId::new(
+            row.get::<String>(0).map_err(storage_error)?,
+        ));
+    }
+    Ok(streams)
+}
+
+pub(crate) async fn confirm(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+    window: SmAckWindow,
+) -> Result<(), SmPersistenceError> {
+    tx.execute(
+        "DELETE FROM sm_acknowledged_windows WHERE stream_id = ? AND from_exclusive = ? AND to_inclusive = ?",
+        crate::db_params![stream_id.as_str(), i64::from(window.from_exclusive), i64::from(window.to_inclusive)],
+    ).await.map_err(storage_error)?;
     Ok(())
 }
 

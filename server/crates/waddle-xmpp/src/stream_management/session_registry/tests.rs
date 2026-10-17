@@ -1,3 +1,4 @@
+mod acknowledgements;
 mod expired_completion;
 mod keyed_append;
 pub(super) mod promotion_custody;
@@ -4443,6 +4444,8 @@ struct GatedSnapshotPersistence {
     fail_after_gate: std::sync::atomic::AtomicBool,
     block_new_delivery: std::sync::atomic::AtomicBool,
     gate_nonresumable: std::sync::atomic::AtomicBool,
+    gate_acknowledgement: std::sync::atomic::AtomicBool,
+    fail_acknowledgement_reads: std::sync::atomic::AtomicBool,
     gate_delete: std::sync::atomic::AtomicBool,
     fail_source_read: std::sync::atomic::AtomicBool,
     fail_delete_after_commit: std::sync::atomic::AtomicBool,
@@ -4460,6 +4463,8 @@ impl GatedSnapshotPersistence {
             fail_after_gate: std::sync::atomic::AtomicBool::new(false),
             block_new_delivery: std::sync::atomic::AtomicBool::new(false),
             gate_nonresumable: std::sync::atomic::AtomicBool::new(false),
+            gate_acknowledgement: std::sync::atomic::AtomicBool::new(false),
+            fail_acknowledgement_reads: std::sync::atomic::AtomicBool::new(false),
             gate_delete: std::sync::atomic::AtomicBool::new(false),
             fail_source_read: std::sync::atomic::AtomicBool::new(false),
             fail_delete_after_commit: std::sync::atomic::AtomicBool::new(false),
@@ -4471,6 +4476,88 @@ impl GatedSnapshotPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistence {
+    async fn acknowledge_claimed_session(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        h: u32,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        let gated = self
+            .gate_acknowledgement
+            .load(std::sync::atomic::Ordering::SeqCst);
+        let committed = gated
+            && self
+                .commit_then_gate
+                .load(std::sync::atomic::Ordering::SeqCst);
+        if committed {
+            self.inner
+                .acknowledge_claimed_session(stream, h, fence, authority)
+                .await?;
+        }
+        if gated {
+            self.reached.notify_one();
+            self.proceed.notified().await;
+        }
+        if !committed {
+            self.inner
+                .acknowledge_claimed_session(stream, h, fence, authority)
+                .await?;
+        }
+        Ok(())
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::SmAckWindow>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        if self
+            .fail_acknowledgement_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                crate::stream_management::persistence::SmPersistenceError::Other(
+                    "injected ACK journal read failure".to_owned(),
+                ),
+            );
+        }
+        self.inner.pending_acknowledgements(stream).await
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        window: crate::stream_management::persistence::SmAckWindow,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .confirm_acknowledgement(stream, window, fence, authority)
+            .await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<
+        Vec<crate::pending_delivery::SmSessionId>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        if self
+            .fail_acknowledgement_reads
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                crate::stream_management::persistence::SmPersistenceError::Other(
+                    "injected ACK journal stream read failure".to_owned(),
+                ),
+            );
+        }
+        self.inner.pending_claim_protected_streams().await
+    }
+
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
@@ -6288,6 +6375,49 @@ impl FailingSnapshotPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersistence {
+    async fn acknowledge_claimed_session(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        h: u32,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .acknowledge_claimed_session(stream, h, fence, authority)
+            .await
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::SmAckWindow>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_acknowledgements(stream).await
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        window: crate::stream_management::persistence::SmAckWindow,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .confirm_acknowledgement(stream, window, fence, authority)
+            .await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<
+        Vec<crate::pending_delivery::SmSessionId>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_claim_protected_streams().await
+    }
+
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
@@ -7091,6 +7221,49 @@ impl GatedGetSessionPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersistence {
+    async fn acknowledge_claimed_session(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        h: u32,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .acknowledge_claimed_session(stream, h, fence, authority)
+            .await
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::SmAckWindow>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_acknowledgements(stream).await
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        window: crate::stream_management::persistence::SmAckWindow,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .confirm_acknowledgement(stream, window, fence, authority)
+            .await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<
+        Vec<crate::pending_delivery::SmSessionId>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_claim_protected_streams().await
+    }
+
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
@@ -7954,6 +8127,49 @@ impl ScopedProbePersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for ScopedProbePersistence {
+    async fn acknowledge_claimed_session(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        h: u32,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .acknowledge_claimed_session(stream, h, fence, authority)
+            .await
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+    ) -> Result<
+        Vec<crate::stream_management::persistence::SmAckWindow>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_acknowledgements(stream).await
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream: &crate::pending_delivery::SmSessionId,
+        window: crate::stream_management::persistence::SmAckWindow,
+        fence: &crate::stream_management::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .confirm_acknowledgement(stream, window, fence, authority)
+            .await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<
+        Vec<crate::pending_delivery::SmSessionId>,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.pending_claim_protected_streams().await
+    }
+
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,

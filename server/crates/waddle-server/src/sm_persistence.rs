@@ -18,7 +18,8 @@ use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, PromotionAppendOutcome, SmPersistenceError, SmPersistenceStorage,
+    PersistedUnackedStanza, PromotionAppendOutcome, SmAckWindow, SmPersistenceError,
+    SmPersistenceStorage,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::presence::Show;
@@ -203,13 +204,84 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .begin_immediate()
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        promotion_inventory::mark_nonresumable(
+        promotion_inventory::acknowledge(
             &mut tx,
             stream_id,
             acknowledged_h,
             self.db.driver(),
+            true,
         )
         .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
+    async fn acknowledge_claimed_session(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        _expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        _authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let lock = self.lock_for(stream_id);
+        let _guard = lock.lock().await;
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        promotion_inventory::acknowledge(
+            &mut tx,
+            stream_id,
+            acknowledged_h,
+            self.db.driver(),
+            false,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
+    async fn pending_acknowledgements(
+        &self,
+        stream_id: &SmSessionId,
+    ) -> Result<Vec<SmAckWindow>, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        promotion_inventory::pending(&mut tx, stream_id).await
+    }
+
+    async fn pending_claim_protected_streams(
+        &self,
+    ) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        promotion_inventory::claim_protected_streams(&mut tx).await
+    }
+
+    async fn confirm_acknowledgement(
+        &self,
+        stream_id: &SmSessionId,
+        window: SmAckWindow,
+        _expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        _authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let lock = self.lock_for(stream_id);
+        let _guard = lock.lock().await;
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        promotion_inventory::confirm(&mut tx, stream_id, window).await?;
         tx.commit()
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))
@@ -392,6 +464,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             .begin_immediate()
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        promotion_inventory::require_settled(&mut tx, stream_id, self.db.driver()).await?;
         // Two statements rather than ON DELETE CASCADE so the trait's
         // observable lifecycle matches the in-memory fake.
         for sql in [

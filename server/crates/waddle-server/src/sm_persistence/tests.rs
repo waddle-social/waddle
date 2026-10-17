@@ -1835,3 +1835,201 @@ async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_
             .is_empty());
     }
 }
+
+async fn assert_ack_journal_custody(storage: &dyn SmPersistenceStorage, name: &str) {
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+    let fence = SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("ack-node", "ack-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let mut session = fixture_session(name);
+    session.last_acked = u32::MAX - 1;
+    session.outbound_count = 1;
+    let stream = session.stream_id.clone();
+    storage
+        .store_session_atomic(
+            session,
+            vec![
+                fixture_unacked(name, u32::MAX),
+                fixture_unacked(name, 0),
+                fixture_unacked(name, 1),
+            ],
+        )
+        .await
+        .expect("seed wrapping source");
+    assert!(
+        storage
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&stream),
+        "canonical source without ACK proof is protected"
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .expect("commit ACK and journal");
+    let expected = SmAckWindow {
+        from_exclusive: u32::MAX - 1,
+        to_inclusive: 0,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+    let source = storage.get_session(&stream).await.unwrap().unwrap();
+    assert_eq!(source.last_acked, 0);
+    assert_eq!(source.max_resume_time, Some(60));
+    assert_eq!(source.max_resume_duration, Duration::from_secs(60));
+    assert_eq!(
+        storage
+            .list_unacked(&stream)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .expect("no-op retry");
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(
+        storage.delete_session(&stream).await.is_err(),
+        "pending settlement blocks source deletion"
+    );
+    storage
+        .confirm_acknowledgement(
+            &stream,
+            SmAckWindow {
+                from_exclusive: 0,
+                to_inclusive: 1,
+            },
+            &fence,
+            None,
+        )
+        .await
+        .expect("unrelated confirmation is idempotent");
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(storage.list_unacked(&stream).await.unwrap().len(), 1);
+    for _ in 0..2 {
+        storage
+            .confirm_acknowledgement(&stream, expected, &fence, None)
+            .await
+            .expect("retry exact confirmation");
+    }
+    assert!(storage
+        .pending_acknowledgements(&stream)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(
+        storage
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&stream),
+        "settled canonical source remains protected"
+    );
+    storage
+        .delete_session(&stream)
+        .await
+        .expect("settled source may be deleted");
+    assert!(!storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+}
+
+#[tokio::test]
+async fn sqlite_claimed_ack_journal_preserves_custody_until_exact_confirmation() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    assert_ack_journal_custody(&storage, "sqlite-ack-journal").await;
+}
+
+#[tokio::test]
+async fn postgres_claimed_ack_journal_preserves_custody_until_exact_confirmation() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    #[cfg(feature = "clustering")]
+    let _lock = crate::clustering::claims::clustering_control_plane_table_lock()
+        .lock()
+        .await;
+    let storage = DatabaseSmPersistence::open(Some(&url)).await.unwrap();
+    assert_ack_journal_custody(
+        &storage,
+        &format!("postgres-ack-journal-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_ack_journal_survives_reopen_before_pending_settlement() {
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ack-journal.sqlite");
+    let url = path.to_str().unwrap();
+    let fence = SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("node", "incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let stream = SmSessionId::new("reopened-ack");
+    {
+        let storage = DatabaseSmPersistence::open(Some(url)).await.unwrap();
+        storage
+            .store_session_atomic(
+                fixture_session(stream.as_str()),
+                vec![
+                    fixture_unacked(stream.as_str(), 11),
+                    fixture_unacked(stream.as_str(), 12),
+                ],
+            )
+            .await
+            .unwrap();
+        storage
+            .acknowledge_claimed_session(&stream, 11, &fence, None)
+            .await
+            .unwrap();
+    }
+    let storage = DatabaseSmPersistence::open(Some(url)).await.unwrap();
+    let window = SmAckWindow {
+        from_exclusive: 10,
+        to_inclusive: 11,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(
+        storage
+            .get_session(&stream)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_acked,
+        11
+    );
+    assert_eq!(storage.list_unacked(&stream).await.unwrap()[0].sequence, 12);
+    storage
+        .confirm_acknowledgement(&stream, window, &fence, None)
+        .await
+        .unwrap();
+    storage.delete_session(&stream).await.unwrap();
+}

@@ -378,6 +378,20 @@ pub(crate) async fn release_row_backed_replay_copies(
     pending_storage: &Arc<dyn PendingDeliveryStorage>,
     detached: &mut DetachedSession,
 ) -> RowBackedReleaseOutcome {
+    // An ACK can commit before its independent pending deletion. Resolve
+    // that durable interval before releasing rows, even for an empty replay
+    // suffix; otherwise a restored claim would replay acknowledged messages.
+    if let Err(error) = sm_registry
+        .settle_session_acknowledgements(detached, pending_storage.as_ref())
+        .await
+    {
+        tracing::warn!(stream_id = %detached.stream_id, %error,
+            "SM ACK settlement failed; preserving pending-row ownership");
+        return RowBackedReleaseOutcome {
+            ownership_unknown: true,
+            ..RowBackedReleaseOutcome::default()
+        };
+    }
     let sequences: HashSet<u32> = detached
         .unacked_stanzas
         .iter()

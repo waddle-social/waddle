@@ -1836,7 +1836,7 @@ impl InMemorySmSessionRegistry {
 
     /// Reuse supplied authority rather than reacquiring the writer-preferring
     /// identity gate. This check never acquires or replaces an SM claim.
-    async fn exact_claim_is_current(
+    pub(super) async fn exact_claim_is_current(
         &self,
         stream_id: &SmSessionId,
         fence: &super::super::persistence::SmClaimFence,

@@ -86,6 +86,19 @@ pub(super) async fn initialize(storage: &DatabaseSmPersistence) -> Result<(), Sm
     storage
         .execute(
             &format!(
+                "CREATE TABLE IF NOT EXISTS sm_acknowledged_windows (
+            stream_id TEXT NOT NULL,
+            from_exclusive {bigint} NOT NULL,
+            to_inclusive {bigint} NOT NULL,
+            PRIMARY KEY (stream_id, from_exclusive, to_inclusive)
+        )"
+            ),
+            (),
+        )
+        .await?;
+    storage
+        .execute(
+            &format!(
                 "CREATE TABLE IF NOT EXISTS sm_ingress_appends (
                     message_key TEXT NOT NULL,
                     receipt_kind INTEGER NOT NULL,

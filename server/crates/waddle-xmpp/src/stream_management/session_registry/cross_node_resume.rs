@@ -1443,6 +1443,49 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SmPersistenceStorage for DelayedGetSessionPersistence {
+        async fn acknowledge_claimed_session(
+            &self,
+            stream: &crate::pending_delivery::SmSessionId,
+            h: u32,
+            fence: &crate::stream_management::persistence::SmClaimFence,
+            authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+        ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+            self.inner
+                .acknowledge_claimed_session(stream, h, fence, authority)
+                .await
+        }
+
+        async fn pending_acknowledgements(
+            &self,
+            stream: &crate::pending_delivery::SmSessionId,
+        ) -> Result<
+            Vec<crate::stream_management::persistence::SmAckWindow>,
+            crate::stream_management::persistence::SmPersistenceError,
+        > {
+            self.inner.pending_acknowledgements(stream).await
+        }
+
+        async fn confirm_acknowledgement(
+            &self,
+            stream: &crate::pending_delivery::SmSessionId,
+            window: crate::stream_management::persistence::SmAckWindow,
+            fence: &crate::stream_management::persistence::SmClaimFence,
+            authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+        ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+            self.inner
+                .confirm_acknowledgement(stream, window, fence, authority)
+                .await
+        }
+
+        async fn pending_claim_protected_streams(
+            &self,
+        ) -> Result<
+            Vec<crate::pending_delivery::SmSessionId>,
+            crate::stream_management::persistence::SmPersistenceError,
+        > {
+            self.inner.pending_claim_protected_streams().await
+        }
+
         async fn mark_session_nonresumable(
             &self,
             stream_id: &crate::pending_delivery::SmSessionId,

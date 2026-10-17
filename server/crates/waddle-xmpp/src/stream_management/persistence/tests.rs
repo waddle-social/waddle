@@ -490,3 +490,85 @@ async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_
             .is_empty());
     }
 }
+
+#[tokio::test]
+async fn acknowledged_windows_retain_source_until_exact_settlement() {
+    let storage = InMemorySmPersistence::new();
+    let fence = SmClaimFence::new(
+        crate::ownership::NodeIdentity::new("node", "incarnation"),
+        crate::ownership::ClaimEpoch(1),
+    );
+    let stream = sid("ack-journal");
+    let mut source = fixture_session(stream.as_str());
+    source.last_acked = u32::MAX;
+    source.outbound_count = 1;
+    storage
+        .store_session_atomic(
+            source,
+            vec![
+                fixture_unacked(stream.as_str(), 0),
+                fixture_unacked(stream.as_str(), 1),
+            ],
+        )
+        .await
+        .unwrap();
+    assert!(storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .unwrap();
+    let window = SmAckWindow {
+        from_exclusive: u32::MAX,
+        to_inclusive: 0,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    assert_eq!(
+        storage.pending_claim_protected_streams().await.unwrap(),
+        vec![stream.clone()]
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .unwrap();
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    let source = storage.get_session(&stream).await.unwrap().unwrap();
+    assert_eq!(source.last_acked, 0);
+    assert_eq!(source.max_resume_time, Some(60));
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(storage.list_unacked(&stream).await.unwrap()[0].sequence, 1);
+    storage
+        .confirm_acknowledgement(
+            &stream,
+            SmAckWindow {
+                from_exclusive: 0,
+                to_inclusive: 1,
+            },
+            &fence,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(storage.delete_session(&stream).await.is_err());
+    for _ in 0..2 {
+        storage
+            .confirm_acknowledgement(&stream, window, &fence, None)
+            .await
+            .unwrap();
+    }
+    storage.delete_session(&stream).await.unwrap();
+    assert!(storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .is_empty());
+}
