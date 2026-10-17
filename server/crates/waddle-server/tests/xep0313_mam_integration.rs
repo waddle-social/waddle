@@ -639,6 +639,50 @@ async fn dm_archived_in_sender_personal_archive() {
     let _ = client.close().await;
 }
 
+/// XEP-0313 §4 (first example) and RFC 6120 §10.3.3: a query with no
+/// 'to' is handled on behalf of the sender's account, so it reads the
+/// user's own archive. The native client sends DM history queries this
+/// way; refusing them left Android and iOS DMs empty.
+#[tokio::test]
+async fn personal_archive_query_without_to_reads_own_archive() {
+    let _guard = TEST_SERIAL.lock().await;
+    let (_server, mut client) = setup().await;
+    let bare_jid = format!("{USERNAME}@{DOMAIN}");
+
+    let unique_body = format!("no-to-{}", uuid::Uuid::new_v4());
+    client
+        .send(&format!(
+            r#"<message type="chat" to="{bare_jid}"><body>{unique_body}</body></message>"#
+        ))
+        .await
+        .expect("send DM");
+    let _ = client
+        .recv_timeout(std::time::Duration::from_millis(500))
+        .await;
+
+    let q_id = format!("no-to-{}", uuid::Uuid::new_v4());
+    let query = format!(
+        r#"<iq type="set" id="{q_id}"><query xmlns="urn:xmpp:mam:2"><x xmlns="jabber:x:data" type="submit"><field var="FORM_TYPE" type="hidden"><value>urn:xmpp:mam:2</value></field><field var="with"><value>{bare_jid}</value></field></x><set xmlns="http://jabber.org/protocol/rsm"><max>50</max><before/></set></query></iq>"#
+    );
+    let frames = query_mam(&mut client, &query)
+        .await
+        .expect("MAM query without 'to' failed");
+
+    let fin = frames.last().expect("no fin");
+    assert!(
+        fin.contains("<fin") && (fin.contains("type='result'") || fin.contains(r#"type="result""#)),
+        "a query without 'to' must complete, got: {fin}"
+    );
+    assert!(
+        frames
+            .iter()
+            .any(|f| f.contains("<forwarded") && f.contains(&unique_body)),
+        "the user's own archive must answer a query without 'to'"
+    );
+
+    let _ = client.close().await;
+}
+
 // =========================================================================
 // Typed-JID round-trip (#228 commit 6)
 // =========================================================================

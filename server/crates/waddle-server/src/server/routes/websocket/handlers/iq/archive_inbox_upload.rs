@@ -11,29 +11,41 @@ pub(super) async fn handle_archive_inbox_upload_iq(
     // MAM (Message Archive Management) query
     if is_mam_query(iq) {
         let request_iq = &iq;
-        let Some(target) = request_iq.to().map(|jid| jid.to_string()) else {
-            return vec![build_iq_error_xml_typed(
-                id,
-                None,
-                None,
-                bad_request_iq_error("Malformed IQ payload."),
-            )];
-        };
-
-        let room_target = target.split('/').next().unwrap_or(target.as_str());
-        let Ok(target_bare) = room_target.parse::<BareJid>() else {
-            return vec![build_iq_error_xml_typed(
-                id,
-                None,
-                None,
-                jid_malformed_iq_error("Malformed JID in IQ addressing."),
-            )];
-        };
-
-        // Determine whether this is a personal archive query (to=self) or a
-        // MUC room archive query. Personal queries are allowed only when the
-        // bound session identity matches the requested bare JID.
         let sender_bare = phase.bound_jid().map(|jid| jid.to_bare());
+
+        // A query without 'to' is handled on behalf of the sender's account
+        // (RFC 6120 §10.3.3): it queries the user's own archive, as in
+        // XEP-0313 §4's first example.
+        let target_bare = match request_iq.to() {
+            Some(jid) => {
+                let target = jid.to_string();
+                let room_target = target.split('/').next().unwrap_or(target.as_str());
+                let Ok(target_bare) = room_target.parse::<BareJid>() else {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        jid_malformed_iq_error("Malformed JID in IQ addressing."),
+                    )];
+                };
+                target_bare
+            }
+            None => {
+                let Some(own_bare) = sender_bare.clone() else {
+                    return vec![build_iq_error_xml_typed(
+                        id,
+                        None,
+                        None,
+                        bad_request_iq_error("Malformed IQ payload."),
+                    )];
+                };
+                own_bare
+            }
+        };
+
+        // Determine whether this is a personal archive query (to=self or no
+        // 'to') or a MUC room archive query. Personal queries are allowed only
+        // when the bound session identity matches the requested bare JID.
 
         let is_personal = sender_bare
             .as_ref()
