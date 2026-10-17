@@ -5,9 +5,9 @@ import {
   AlertCircle,
   Clock,
   Loader2,
+  ChevronRight,
   MoreHorizontal,
   CornerDownRight,
-  MessagesSquare,
   PhoneCall,
   Pin,
   PinOff,
@@ -42,6 +42,13 @@ import { authorBadge as authorBadgeFor, authorBadgeTooltip as authorBadgeTooltip
 import { eventBandsFor, rendersAsSystemBand } from "./message-system-band";
 import { visibleQuestionScore, visibleSafetyScores } from "./message-safety-scores";
 import { formatThreadRecency } from "./message-thread-recency";
+import { threadReplyCardLabel, threadReplyCountLabel, type ThreadLatestReply } from "./thread-reply-card";
+import {
+  hasActiveTextSelection,
+  prefersCoarsePointer,
+  shouldOpenThreadOnRowTap,
+  tapTargetIsInteractive,
+} from "./message-row-tap";
 import { useMessageActionSurfaces } from "./composables/use-message-action-surfaces";
 import { useMessageGestures } from "./composables/use-message-gestures";
 
@@ -65,8 +72,11 @@ const props = defineProps<{
    * so the eye can triage threads without opening them. */
   threadParticipants?: { key: string; nick: string; jid: string | null; presence: OccupantPresence }[];
   /** ISO timestamp of the most-recent reply in this thread, used to
-   * suffix the chip with a relative-time hint ("· 2 min ago"). */
+   * suffix the card's count with a relative-time hint ("· 2 min ago"). */
   threadLastReplyAt?: string;
+  /** Newest loaded reply, for the card's "author: snippet" line; absent
+   * when the count is known but no reply is loaded. */
+  threadLatestReply?: ThreadLatestReply | null;
   hideThreadChip?: boolean;
   /**
    * Unconditional kill switch for the inline reply-to chip. The thread
@@ -202,6 +212,14 @@ const threadParticipantOverflow = computed(() => {
 });
 
 const threadChipRecency = computed(() => formatThreadRecency(props.threadLastReplyAt));
+const threadCountLabel = computed(() => threadReplyCountLabel(threadReplyCountValue.value));
+const threadCardLabel = computed(() =>
+  threadReplyCardLabel({
+    count: threadReplyCountValue.value,
+    latest: props.threadLatestReply ?? null,
+    recency: threadChipRecency.value,
+  }),
+);
 const threadActionTargetId = computed(() => resolveThreadActionTarget(props.message, props.threadActionThreadId));
 const callThreadLabel = computed(() => callThreadAnchorLabel(props.message));
 const callThreadId = computed(() => callThreadAnchorThreadId(props.message));
@@ -339,6 +357,22 @@ const gestures = useMessageGestures({
   },
 });
 const swipe = gestures.swipe;
+
+// Touch only: a plain tap on a post with replies opens its thread. Fine
+// pointers keep text selection and use the reply card. Rows inside the
+// thread pane hide the card, so they never open a thread from a tap.
+function onRowClick(event: MouseEvent) {
+  const row = bubbleEl.value;
+  if (!row || isEditing.value || sheetOpen.value) return;
+  const open = shouldOpenThreadOnRowTap({
+    opensThread: showThreadChip.value,
+    coarsePointer: prefersCoarsePointer(),
+    stationaryTouch: gestures.lastPressWasStationaryTouch(),
+    hasTextSelection: hasActiveTextSelection(),
+    targetIsInteractive: tapTargetIsInteractive(event.target, row),
+  });
+  if (open) emit("openThread", props.message.id);
+}
 </script>
 
 <template>
@@ -443,7 +477,7 @@ const swipe = gestures.swipe;
         <button
           type="button"
           class="type-message-author chat-message-author-button"
-          :aria-label="`Open profile for ${message.author}`"
+          :aria-label="`${message.author}, open profile`"
           @click.stop="emitAvatarClick"
         >{{ message.author }}</button>
         <span class="type-meta type-numeric text-muted-foreground">
@@ -493,6 +527,7 @@ const swipe = gestures.swipe;
     @pointercancel="gestures.handlers.onPointercancel"
     @pointerleave="gestures.handlers.onPointerleave"
     @contextmenu="gestures.handlers.onContextMenu"
+    @click="onRowClick"
   >
     <span class="chat-message-swipe-hint chat-message-swipe-hint--reply" aria-hidden="true" />
     <span class="chat-message-swipe-hint chat-message-swipe-hint--thread" aria-hidden="true" />
@@ -503,32 +538,28 @@ const swipe = gestures.swipe;
       v-else
       class="chat-message-avatar-cell rounded-lg"
       type="button"
-      :aria-label="`Open profile for ${message.author}`"
+      :aria-label="`${message.author}, open profile`"
       @click.stop="emitAvatarClick"
     >
       <UserAvatar :name="message.author" :jid="avatarJid" :presence="presence" :last-seen="lastSeen" size="message" />
     </button>
-    <!-- Thread rail glyph — a small "messages-stack" icon centred in the
-         avatar column, vertically aligned with the in-body chip's
-         avatar row. Structural marker that this row anchors a thread;
-         the rich summary (who replied, how many, how recently) lives
-         in the in-body chip. Position-absolute relative to the row's
-         grid; bottom-anchored so its centre line matches the chip
-         avatars' centre line — see .chat-thread-rail-glyph in
-         messages.css for the offset derivation. -->
+    <!-- Thread rail: an elbow from under the avatar into the reply card,
+         joining the card to its post. Decorative; see .chat-thread-rail. -->
     <div
       v-if="showThreadChip"
-      class="chat-thread-rail-glyph"
+      class="chat-thread-rail"
+      :class="[
+        grouped ? 'chat-thread-rail--grouped' : '',
+        threadLatestReply ? 'chat-thread-rail--two-line' : '',
+      ]"
       aria-hidden="true"
-    >
-      <MessagesSquare class="chat-thread-rail-glyph__icon" />
-    </div>
+    />
     <div class="chat-message-body-stack">
       <div v-if="!grouped" class="chat-message-meta-row">
         <button
           type="button"
           class="type-message-author chat-message-author-button"
-          :aria-label="`Open profile for ${message.author}`"
+          :aria-label="`${message.author}, open profile`"
           @click.stop="emitAvatarClick"
         >{{ message.author }}</button>
         <span
@@ -635,47 +666,6 @@ const swipe = gestures.swipe;
       :invoke-extension-action="invokeExtensionAction"
     />
 
-    <!-- Thread replies affordance. Visible in the main channel feed on roots
-         that have replies; the thread panel hides it via hideThreadChip since
-         the panel already shows children. The chip carries a row of
-         participant avatars (current user excluded by the caller) + reply
-         count, with the recency timestamp right-aligned so the eye can
-         triage threads at a glance — who's been talking, how many turns,
-         how recently — without opening the panel. The structural "this is
-         a thread" marker lives in the avatar gutter as the rail glyph. -->
-    <AppTooltip v-if="showThreadChip" :label="`Open thread (${threadReplyCountValue} ${threadReplyCountValue === 1 ? 'reply' : 'replies'})`">
-    <button
-      type="button"
-      class="chat-thread-chip type-caption flex w-full items-center rounded-md py-0.5 text-primary/85 transition-colors hover:text-primary"
-      @click="openThreadFromChip"
-    >
-      <span
-        v-if="visibleThreadParticipants.length > 0"
-        class="chat-thread-chip__avatars"
-        aria-hidden="true"
-      >
-        <span
-          v-for="participant in visibleThreadParticipants"
-          :key="`thread-chip-avatar:${message.id}:${participant.key}`"
-          class="chat-thread-chip__avatar-wrap"
-        >
-          <UserAvatar
-            :name="participant.nick"
-            :jid="participant.jid"
-            :presence="participant.presence"
-            size="xs"
-          />
-        </span>
-        <span
-          v-if="threadParticipantOverflow > 0"
-          class="chat-thread-chip__overflow"
-        >+{{ threadParticipantOverflow }}</span>
-      </span>
-      <span class="chat-thread-chip__count min-w-0 truncate">{{ threadReplyCountValue }} {{ threadReplyCountValue === 1 ? "reply" : "replies" }}</span>
-      <span v-if="threadChipRecency" class="chat-thread-chip__recency">{{ threadChipRecency }}</span>
-    </button>
-    </AppTooltip>
-
     <MessageReactionChips
       v-if="message.reactions && Object.keys(message.reactions).length > 0"
       :reactions="message.reactions"
@@ -689,6 +679,51 @@ const swipe = gestures.swipe;
       :message-id="message.id"
       :data-message-row-key="timelineRowKey(message)"
     />
+
+    <!-- Attached reply card: the thread's summary under the post, joined
+         to it by the gutter rail. One button; hidden in the thread pane
+         (hideThreadChip), which already lists the replies. -->
+    <button
+      v-if="showThreadChip"
+      type="button"
+      class="chat-thread-card chat-message-fill"
+      :class="threadLatestReply ? 'chat-thread-card--two-line' : ''"
+      :aria-label="threadCardLabel"
+      @click="openThreadFromChip"
+    >
+      <span class="chat-thread-card__summary">
+        <span
+          v-if="visibleThreadParticipants.length > 0"
+          class="chat-thread-card__faces"
+          aria-hidden="true"
+        >
+          <span
+            v-for="participant in visibleThreadParticipants"
+            :key="`thread-card-avatar:${message.id}:${participant.key}`"
+            class="chat-thread-card__face"
+          >
+            <UserAvatar
+              :name="participant.nick"
+              :jid="participant.jid"
+              :presence="participant.presence"
+              size="xs"
+            />
+          </span>
+          <span
+            v-if="threadParticipantOverflow > 0"
+            class="chat-thread-card__overflow"
+          >+{{ threadParticipantOverflow }}</span>
+        </span>
+        <span class="chat-thread-card__meta">
+          <span class="chat-thread-card__count">{{ threadCountLabel }}</span>
+          <span v-if="threadChipRecency" class="chat-thread-card__recency"> · {{ threadChipRecency }}</span>
+        </span>
+      </span>
+      <span v-if="threadLatestReply" class="chat-thread-card__latest">
+        <span class="chat-thread-card__latest-author">{{ threadLatestReply.author }}</span><template v-if="threadLatestReply.snippet">: {{ threadLatestReply.snippet }}</template>
+      </span>
+      <ChevronRight class="chat-thread-card__chevron" aria-hidden="true" />
+    </button>
 
     <MessageHoverToolbar
       v-if="!isEditing && !desktopToolbarLockedByAnother"

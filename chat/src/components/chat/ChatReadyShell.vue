@@ -321,6 +321,11 @@ function threadsListRootAuthorJid(entry: WasmThreadEntry): string | null {
 function openMessageSearch() {
   contentAreaRef.value?.openSearch();
 }
+/** Thread-pane avatars open the same profile drawer ContentArea owns, so
+ * presence, hats and the DM action resolve exactly as in the timeline. */
+function openProfileFromThread(author: string, avatarJid: string | null) {
+  contentAreaRef.value?.openProfile(author, avatarJid);
+}
 function startHuddleFromHeader() {
   const channel = activeRoomChannel.value;
   const roomJid = activeChannelRoomJid.value;
@@ -1109,6 +1114,7 @@ async function recoverSupersededFromShell() {
               @displayed="markActiveDisplayed"
               @load-older="loadOlderThreadMessages"
               @join-channel-call="joinChannelCallFromActivity"
+              @avatar-click="openProfileFromThread"
             />
           </div>
 
@@ -1156,6 +1162,7 @@ async function recoverSupersededFromShell() {
               @typing="notifyActiveComposing"
               @load-older="loadOlderThreadMessages"
               @join-channel-call="joinChannelCallFromActivity"
+              @avatar-click="openProfileFromThread"
             />
           </div>
 

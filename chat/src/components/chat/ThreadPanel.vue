@@ -110,6 +110,8 @@ const emit = defineEmits<{
   typing: [threadOverride?: { threadId: string; parentThreadId?: string }];
   loadOlder: [threadId: string];
   joinChannelCall: [channelId: string | null, roomJid: string, media: CallMedia];
+  /** Avatar or author name on a thread row: open that person's profile. */
+  avatarClick: [author: string, jid: string | null];
 }>();
 
 const { mode: scrollDirectionMode } = useScrollDirectionPreference();
@@ -516,6 +518,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
             @retract="(id) => emit('retractMessage', id)"
             @react="(id, emoji) => emit('reactMessage', id, emoji)"
             @reply="beginReplyInThread"
+            @avatar-click="(author, jid) => emit('avatarClick', author, jid)"
             @open-thread="onOpenThreadFromCard"
             @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
           />
@@ -567,6 +570,7 @@ function replyChildHasNestedThread(message: TimelineMessage): boolean {
               @retract="(id) => emit('retractMessage', id)"
               @react="(id, emoji) => emit('reactMessage', id, emoji)"
               @reply="beginReplyInThread"
+              @avatar-click="(author, jid) => emit('avatarClick', author, jid)"
               @open-thread="onOpenThreadFromCard"
               @join-channel-call="(channelId, roomJid, media) => emit('joinChannelCall', channelId, roomJid, media)"
             />

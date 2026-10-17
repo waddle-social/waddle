@@ -59,6 +59,7 @@ import {
   threadChipLastReplyAt as threadChipLastReplyAtFor,
   threadChipParticipants as threadChipParticipantsFor,
 } from "./timeline-display-meta";
+import { latestThreadReply } from "./thread-reply-card";
 import { useConnectionNotice } from "./composables/use-connection-notice";
 import { useMessageJump } from "./composables/use-message-jump";
 
@@ -599,7 +600,7 @@ function openSearch(): void {
   showSearch.value = true;
 }
 
-defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage, openSearch });
+defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage, openSearch, openProfile: onAvatarClick });
 
 function presenceText(show?: string): string {
   if (show === "available") return "online";
@@ -719,6 +720,10 @@ function threadChipParticipants(messageId: string) {
 
 function threadChipLastReplyAt(messageId: string): string | undefined {
   return threadChipLastReplyAtFor(props.threadIndex, messageId);
+}
+
+function threadChipLatestReply(messageId: string) {
+  return latestThreadReply(props.threadIndex.get(messageId));
 }
 
 function showDayDividerBefore(message: TimelineMessage): boolean {
@@ -1085,6 +1090,7 @@ function dayDividerLabel(createdAt: string): string {
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
             :thread-participants="threadChipParticipants(msg.id)"
             :thread-last-reply-at="threadChipLastReplyAt(msg.id)"
+            :thread-latest-reply="threadChipLatestReply(msg.id)"
             :grouped="isGroupedFollowUp(msg)"
             :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
             :invoke-extension-action="props.invokeExtensionAction"
