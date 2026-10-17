@@ -16,13 +16,12 @@ members = [
     "extensions/github",
     "extensions/jev-judgments",
     "extensions/link-board",
-    "extensions/stargate-quotes",
 ]
 
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-license = "AGPL-3.0"
+license = "AGPL-3.0-or-later"
 authors = ["Waddle Contributors"]
 repository = "https://github.com/waddle-social/waddle"
 

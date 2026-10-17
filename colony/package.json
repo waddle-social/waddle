@@ -1,5 +1,6 @@
 {
   "name": "@waddle/colony",
+  "license": "AGPL-3.0-or-later",
   "type": "module",
   "version": "0.1.0",
   "engines": {

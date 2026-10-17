@@ -33,7 +33,7 @@ async fn async_main() -> Result<()> {
 
     info!("Waddle Server starting...");
     info!("Version: {}", env!("CARGO_PKG_VERSION"));
-    info!("License: AGPL-3.0");
+    info!("License: {}", env!("CARGO_PKG_LICENSE"));
 
     // Check for inherited listeners (Ecdysis restart from parent process)
     let inherited = waddle_ecdysis::ListenerSet::from_env();

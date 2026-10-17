@@ -124,7 +124,7 @@ pub(crate) async fn health_handler(State(state): State<Arc<AppState>>) -> impl I
                 "status": "healthy",
                 "service": "waddle-server",
                 "version": env!("CARGO_PKG_VERSION"),
-                "license": "AGPL-3.0"
+                "license": env!("CARGO_PKG_LICENSE")
             })),
         ),
         Ok(false) => {
@@ -440,7 +440,7 @@ pub(crate) async fn detailed_health_handler(
                     status: status.to_string(),
                     service: "waddle-server".to_string(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
-                    license: "AGPL-3.0".to_string(),
+                    license: env!("CARGO_PKG_LICENSE").to_string(),
                     database: health.into(),
                 }),
             )
@@ -453,7 +453,7 @@ pub(crate) async fn detailed_health_handler(
                     status: "unhealthy".to_string(),
                     service: "waddle-server".to_string(),
                     version: env!("CARGO_PKG_VERSION").to_string(),
-                    license: "AGPL-3.0".to_string(),
+                    license: env!("CARGO_PKG_LICENSE").to_string(),
                     database: DatabaseHealthStatus {
                         status: format!("error: {}", e),
                         global_healthy: false,

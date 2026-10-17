@@ -117,19 +117,6 @@ const EXTENSIONS: &[ExtSpec] = &[
         allowed_http_origins: &[],
         config: empty_config,
     },
-    ExtSpec {
-        name: "stargate-quotes",
-        namespace: "urn:waddle:stargate-quotes:1",
-        wasm_filename: "stargate_quotes.wasm",
-        grants: &[
-            ExtensionCapability::Commands,
-            ExtensionCapability::HostMessageSend,
-            ExtensionCapability::MessageEnrich,
-        ],
-        provider_room_grants: &[],
-        allowed_http_origins: &[],
-        config: empty_config,
-    },
 ];
 
 fn wasm_root() -> PathBuf {
