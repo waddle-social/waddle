@@ -966,6 +966,7 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     fixture.close().await;
 }
 
+#[cfg(feature = "clustering")]
 async fn postgres_fenced_poison_settles_ack_before_quarantine(corrupt_header: bool) {
     use waddle_server::{
         clustering::claims::{NodeLeaseStore, PostgresClaimStore},
@@ -1202,11 +1203,13 @@ async fn postgres_fenced_poison_settles_ack_before_quarantine(corrupt_header: bo
 }
 
 #[tokio::test]
+#[cfg(feature = "clustering")]
 async fn postgres_fenced_poison_header_settles_ack_before_quarantine() {
     postgres_fenced_poison_settles_ack_before_quarantine(true).await;
 }
 
 #[tokio::test]
+#[cfg(feature = "clustering")]
 async fn postgres_fenced_poison_replay_settles_ack_before_quarantine() {
     postgres_fenced_poison_settles_ack_before_quarantine(false).await;
 }
