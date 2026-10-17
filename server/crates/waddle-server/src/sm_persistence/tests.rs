@@ -1774,6 +1774,13 @@ async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_
             )
             .await
             .expect("seed source and ingress custody");
+        let before_sequences = storage
+            .list_unacked(&stream)
+            .await
+            .expect("canonical queue before rejected acknowledgement")
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>();
         assert!(storage
             .mark_session_nonresumable(&stream, invalid, &fence, None)
             .await
@@ -1806,7 +1813,7 @@ async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_
                 .iter()
                 .map(|entry| entry.sequence)
                 .collect::<Vec<_>>(),
-            sequences
+            before_sequences
         );
         storage
             .delete_session(&stream)
