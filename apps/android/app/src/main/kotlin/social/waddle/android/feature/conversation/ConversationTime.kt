@@ -11,6 +11,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.lifecycle.compose.LifecycleResumeEffect
 import kotlinx.coroutines.delay
@@ -136,14 +137,40 @@ fun ageBetween(instant: Instant, now: Instant, clock: ConversationClock): Age {
     }
 }
 
-/** The words for an [Age]: "now", "5m", "2h", "3d" or a date. */
+/** The compact words for an [Age]: "now", "5m", "2h", "3d" or a date. */
 @Composable
-fun ConversationClock.ageText(instant: Instant): String = when (val age = ageOf(instant)) {
+fun ConversationClock.ageText(age: Age): String = when (age) {
     Age.Now -> stringResource(R.string.age_now)
     is Age.Minutes -> stringResource(R.string.age_minutes, age.minutes)
     is Age.Hours -> stringResource(R.string.age_hours, age.hours)
     is Age.Days -> stringResource(R.string.age_days, age.days)
     is Age.On -> dayText(age.label)
+}
+
+/** An [Age] as a screen reader says it: "just now", "5 minutes ago", "on Fri 9 Oct". */
+@Composable
+fun ConversationClock.spokenAge(age: Age): String = when (age) {
+    Age.Now -> stringResource(R.string.age_spoken_now)
+    is Age.Minutes -> pluralStringResource(R.plurals.age_spoken_minutes, age.minutes.toInt(), age.minutes)
+    is Age.Hours -> pluralStringResource(R.plurals.age_spoken_hours, age.hours.toInt(), age.hours)
+    is Age.Days -> pluralStringResource(R.plurals.age_spoken_days, age.days.toInt(), age.days)
+    is Age.On -> stringResource(R.string.age_spoken_on, dayText(age.label))
+}
+
+/**
+ * A count that moves on once a minute while it is composed, for labels
+ * that say how long ago something was. Read it to recompute those ages.
+ */
+@Composable
+fun rememberMinuteTick(): Int {
+    var minutes by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(MINUTE_MILLIS)
+            minutes += 1
+        }
+    }
+    return minutes
 }
 
 /** The words for a day separator. */
@@ -208,6 +235,7 @@ private const val SKELETON_DATE_YEAR = "EEEMMMdy"
 private const val DAYS_IN_WEEK = 7L
 private const val MINUTES_PER_HOUR = 60L
 private const val HOURS_PER_DAY = 24L
+private const val MINUTE_MILLIS = 60_000L
 
 /** Lands just past midnight, so LocalDate.now() is already the new day. */
 private const val MIDNIGHT_SLACK_MILLIS = 50L

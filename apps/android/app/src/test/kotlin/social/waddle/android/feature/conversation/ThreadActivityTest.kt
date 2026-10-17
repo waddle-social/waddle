@@ -10,6 +10,7 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testMessage
 import social.waddle.android.feature.search.highlighted
+import social.waddle.client.ffi.WaddleMessage
 import social.waddle.client.ffi.WaddleSharedFile
 import java.time.Instant
 import java.time.ZoneOffset
@@ -18,41 +19,36 @@ import java.time.ZoneOffset
 class ThreadActivityTest {
     private val room = "room@muc.waddle.test"
 
-    private fun item(
-        id: String,
-        nick: String,
-        at: String,
-        thread: String? = null,
+    private fun message(id: String, nick: String, at: String, thread: String? = null) = testMessage(
+        id = id,
+        stanzaId = id,
+        stanzaIdBy = room,
+        from = "$room/$nick",
+        body = "hi",
+        messageType = "groupchat",
+        isMuc = true,
+        thread = thread,
+        timestamp = at,
+    )
+
+    private fun itemOf(
+        message: WaddleMessage,
         jid: String? = null,
-        body: String = "hi",
-        files: List<WaddleSharedFile> = emptyList(),
-        isSticker: Boolean = false,
         tombstone: MessageTombstone? = null,
     ) = TimelineItem(
-        id = id,
+        id = checkNotNull(message.id),
         conversationJid = room,
-        from = "$room/$nick",
-        body = body,
-        timestamp = at,
+        from = message.from,
+        body = message.body.orEmpty(),
+        timestamp = message.timestamp,
         isMine = false,
-        source = TimelineSource.Live(
-            testMessage(
-                id = id,
-                stanzaId = id,
-                stanzaIdBy = room,
-                from = "$room/$nick",
-                body = body,
-                messageType = "groupchat",
-                isMuc = true,
-                thread = thread,
-                timestamp = at,
-                isSticker = isSticker,
-                sharedFiles = files,
-            ),
-        ),
+        source = TimelineSource.Live(message),
         tombstone = tombstone,
         authorJid = jid,
     )
+
+    private fun item(id: String, nick: String, at: String, thread: String? = null, jid: String? = null) =
+        itemOf(message(id, nick, at, thread), jid)
 
     private fun file(mediaType: String, url: String = "https://upload.waddle.test/f") = WaddleSharedFile(
         url = url,
@@ -68,7 +64,10 @@ class ThreadActivityTest {
     )
 
     private fun reply(body: String = "hi", files: List<WaddleSharedFile> = emptyList(), isSticker: Boolean = false) =
-        item("r", "bob", "2026-10-16T09:01:00Z", thread = "root", body = body, files = files, isSticker = isSticker)
+        itemOf(
+            message("r", "bob", "2026-10-16T09:01:00Z", thread = "root")
+                .copy(body = body, sharedFiles = files, isSticker = isSticker),
+        )
 
     @Test
     fun `repliers are deduped, most recent first, with the last reply time`() {
@@ -95,9 +94,9 @@ class ThreadActivityTest {
     fun `the latest reply is the newest by wire time, not arrival`() {
         val items = listOf(
             item("root", "alice", "2026-10-16T09:00:00Z"),
-            item("r1", "bob", "2026-10-16T09:05:00Z", thread = "root", body = "late page, newer"),
+            itemOf(message("r1", "bob", "2026-10-16T09:05:00Z", thread = "root").copy(body = "late page, newer")),
             // An older archive page landing after a newer live reply.
-            item("r2", "carol", "2026-10-16T09:02:00Z", thread = "root", body = "older"),
+            itemOf(message("r2", "carol", "2026-10-16T09:02:00Z", thread = "root").copy(body = "older")),
         )
         val latest = threadActivityOf(items, selfBareJid = null).getValue("root").latestReply
 
@@ -129,6 +128,35 @@ class ThreadActivityTest {
     }
 
     @Test
+    fun `a reply with nothing to quote leaves the card without a latest line`() {
+        val blank = reply(body = "   ")
+        assertNull(replySnippetOf(blank))
+
+        val items = listOf(item("root", "alice", "2026-10-16T09:00:00Z"), blank)
+        val activity = threadActivityOf(items, selfBareJid = null).getValue("root")
+        assertEquals(1, activity.replyCount)
+        assertNull(activity.latestReply)
+    }
+
+    @Test
+    fun `faces and the latest reply follow wire time, not arrival`() {
+        val items = listOf(
+            item("root", "alice", "2026-10-16T09:00:00Z"),
+            item("r1", "bob", "2026-10-16T09:05:00Z", thread = "root"),
+            item("r2", "carol", "2026-10-16T09:02:00Z", thread = "root"),
+        )
+        val activity = threadActivityOf(items, selfBareJid = null).getValue("root")
+
+        assertEquals(listOf("bob", "carol"), activity.participants.map { it.name })
+        assertEquals("bob", activity.latestReply?.author)
+    }
+
+    @Test
+    fun `a sticker without its file still reads as a photo`() {
+        assertEquals(ReplySnippet.Photo, replySnippetOf(reply(body = "waving penguin", isSticker = true)))
+    }
+
+    @Test
     fun `a captioned file quotes its caption`() {
         assertEquals(
             ReplySnippet.Text("the export"),
@@ -138,7 +166,7 @@ class ThreadActivityTest {
 
     @Test
     fun `a retracted reply reads as deleted`() {
-        val retracted = item("r", "bob", "2026-10-16T09:01:00Z", tombstone = MessageTombstone.Retracted)
+        val retracted = itemOf(message("r", "bob", "2026-10-16T09:01:00Z"), tombstone = MessageTombstone.Retracted)
         assertEquals(ReplySnippet.Deleted, replySnippetOf(retracted))
     }
 

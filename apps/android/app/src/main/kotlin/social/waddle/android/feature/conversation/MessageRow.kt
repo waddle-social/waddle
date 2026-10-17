@@ -32,10 +32,12 @@ import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
-import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.CustomAccessibilityAction
 import androidx.compose.ui.semantics.clearAndSetSemantics
-import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -123,6 +125,14 @@ private fun RowFrame(
     val haptics = LocalHapticFeedback.current
     val colors = Waddle.colors
     val onLongPress = taps.onLongPress
+    // The avatar and name are hidden from screen readers (the name stays
+    // in the row's text); the row offers their "open profile" instead.
+    val profileAction = taps.onOpenProfile?.let { open ->
+        CustomAccessibilityAction(stringResource(R.string.author_open_profile, author)) {
+            open()
+            true
+        }
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -146,7 +156,9 @@ private fun RowFrame(
                     Modifier
                 },
             )
-            .semantics(mergeDescendants = true) {}
+            .semantics(mergeDescendants = true) {
+                if (profileAction != null) customActions = listOf(profileAction)
+            }
             .padding(
                 start = Waddle.space.md,
                 end = Waddle.space.md,
@@ -170,7 +182,8 @@ private fun RowFrame(
 
 /**
  * The 40dp author face. Tappable, it opens their profile through a 48dp
- * target that overhangs the gutter without widening it.
+ * target that overhangs the gutter without widening it. Screen readers
+ * skip it: the row carries the profile action.
  */
 @Composable
 private fun AuthorAvatar(jid: String?, author: String, onClick: (() -> Unit)?) {
@@ -178,20 +191,16 @@ private fun AuthorAvatar(jid: String?, author: String, onClick: (() -> Unit)?) {
         HuddleAvatar(jid = jid, name = author, size = AvatarSize.MESSAGE)
         return
     }
-    val label = stringResource(R.string.author_open_profile, author)
-    Box(
-        contentAlignment = Alignment.Center,
-        modifier = Modifier
-            .overhang(visible = AvatarSize.MESSAGE.dp, target = MIN_TOUCH_TARGET)
-            .clip(CircleShape)
-            .clickable(
-                onClickLabel = stringResource(R.string.action_open_profile),
-                role = Role.Button,
-                onClick = onClick,
-            )
-            .clearAndSetSemantics { contentDescription = label },
-    ) {
-        HuddleAvatar(jid = jid, name = author, size = AvatarSize.MESSAGE)
+    Box(modifier = Modifier.clearAndSetSemantics {}) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .overhang(visible = AvatarSize.MESSAGE.dp, target = MIN_TOUCH_TARGET)
+                .clip(CircleShape)
+                .clickable(onClick = onClick),
+        ) {
+            HuddleAvatar(jid = jid, name = author, size = AvatarSize.MESSAGE)
+        }
     }
 }
 
@@ -376,25 +385,7 @@ private fun MessageHeader(
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
         itemVerticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = author,
-            style = AuthorStyle,
-            color = Waddle.colors.fg,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-            modifier = if (onAuthorClick != null) {
-                // Compose widens the touch area of this short line to 48dp.
-                Modifier
-                    .clip(RoundedCornerShape(Waddle.radius.tag))
-                    .clickable(
-                        onClickLabel = stringResource(R.string.action_open_profile),
-                        role = Role.Button,
-                        onClick = onAuthorClick,
-                    )
-            } else {
-                Modifier
-            },
-        )
+        AuthorName(author = author, onClick = onAuthorClick)
         badge?.let { HatTag(it) }
         Text(
             text = clock.time(sentAt),
@@ -403,6 +394,31 @@ private fun MessageHeader(
             maxLines = 1,
         )
         MetaMarkItems(marks, onRetry)
+    }
+}
+
+/**
+ * The author's name. Tappable, it opens their profile; to a screen
+ * reader it stays plain text in the row, which carries that action.
+ */
+@Composable
+private fun AuthorName(author: String, onClick: (() -> Unit)?) {
+    Box(modifier = Modifier.clearAndSetSemantics { text = AnnotatedString(author) }) {
+        Text(
+            text = author,
+            style = AuthorStyle,
+            color = Waddle.colors.fg,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            // Compose widens the touch area of this short line to 48dp.
+            modifier = if (onClick != null) {
+                Modifier
+                    .clip(RoundedCornerShape(Waddle.radius.tag))
+                    .clickable(onClick = onClick)
+            } else {
+                Modifier
+            },
+        )
     }
 }
 

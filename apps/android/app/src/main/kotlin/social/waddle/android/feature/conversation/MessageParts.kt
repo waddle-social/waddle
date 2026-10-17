@@ -3,6 +3,9 @@ package social.waddle.android.feature.conversation
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,6 +33,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.minimumInteractiveComponentSize
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.Immutable
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
@@ -41,6 +45,7 @@ import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
@@ -196,7 +201,9 @@ internal fun ReplyChip(parent: TimelineItem?, fallbackSender: String?, onClick: 
         modifier = Modifier
             .height(IntrinsicSize.Min)
             .clip(RoundedCornerShape(Waddle.radius.tag))
-            .clickable(enabled = parent != null, onClick = onClick)
+            // Unloaded, the quote is inert but still keeps the tap from
+            // reaching the post (which would open its thread).
+            .then(if (parent != null) Modifier.clickable(onClick = onClick) else Modifier.swallowTaps())
             .padding(vertical = Waddle.space.xxs),
     ) {
         Box(
@@ -300,14 +307,18 @@ internal fun ReplyCard(count: Int, activity: ThreadActivity?, onClick: () -> Uni
     val clock = rememberConversationClock()
     val shape = RoundedCornerShape(Waddle.radius.card)
     val countText = pluralStringResource(R.plurals.thread_card_replies, count, count)
-    val age = activity?.lastReplyAt?.let { clock.ageText(it) }
+    // Recomputed each minute, so "2m" does not sit still while on screen.
+    val minute = rememberMinuteTick()
+    val lastReplyAt = activity?.lastReplyAt
+    val age = remember(clock, lastReplyAt, minute) { lastReplyAt?.let(clock::ageOf) }
     val latest = activity?.latestReply
     val snippet = latest?.let { snippetText(it.snippet) }
+    val spokenAge = age?.let { clock.spokenAge(it) }.orEmpty()
     val description = if (latest != null && snippet != null) {
-        val latestAge = clock.ageText(latest.sentAt)
-        pluralStringResource(R.plurals.thread_card_description_latest, count, count, latest.author, snippet, latestAge)
+        val plural = R.plurals.thread_card_description_latest
+        pluralStringResource(plural, count, count, latest.author, snippet, spokenAge)
     } else {
-        pluralStringResource(R.plurals.thread_card_description, count, count, age.orEmpty())
+        pluralStringResource(R.plurals.thread_card_description, count, count, spokenAge)
     }
     Row(
         verticalAlignment = Alignment.CenterVertically,
@@ -344,7 +355,8 @@ internal fun ReplyCard(count: Int, activity: ThreadActivity?, onClick: () -> Uni
                     maxLines = 1,
                 )
                 age?.let {
-                    Text(text = "· $it", style = Waddle.type.time, color = colors.fgMuted, maxLines = 1)
+                    val ageWords = clock.ageText(it)
+                    Text(text = "· $ageWords", style = Waddle.type.time, color = colors.fgMuted, maxLines = 1)
                 }
             }
             if (latest != null && snippet != null) {
@@ -427,6 +439,17 @@ private fun Modifier.threadRail(color: Color): Modifier = drawBehind {
         lineTo(x(0f), y)
     }
     drawPath(path, color, style = Stroke(width = ELBOW_STROKE.toPx(), cap = StrokeCap.Round))
+}
+
+/**
+ * Takes taps on an inert child so they do not fall through to the row,
+ * where a tap opens the thread. A long press still reaches the row.
+ */
+internal fun Modifier.swallowTaps(): Modifier = pointerInput(Unit) {
+    awaitEachGesture {
+        awaitFirstDown(requireUnconsumed = false)
+        waitForUpOrCancellation()?.consume()
+    }
 }
 
 /** Meta and chip text: Outfit 12. */

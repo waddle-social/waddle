@@ -24,7 +24,7 @@ data class ThreadActivity(
     val moreParticipants: Int,
     /** Wire time of the newest loaded reply. */
     val lastReplyAt: Instant?,
-    /** The newest loaded reply, when its author is known. */
+    /** The newest loaded reply, when its author and something to quote are known. */
     val latestReply: LatestReply? = null,
 )
 
@@ -35,7 +35,7 @@ data class LatestReply(val author: String, val snippet: ReplySnippet, val sentAt
 /** One line standing for a reply: plain text, or a word for what it carries. */
 @Immutable
 sealed interface ReplySnippet {
-    /** Plain text with whitespace collapsed to single spaces; may be empty. */
+    /** Plain text with whitespace collapsed to single spaces; never empty. */
     data class Text(val text: String) : ReplySnippet
 
     /** Only images (photos, GIFs, stickers). */
@@ -64,16 +64,17 @@ fun threadActivityOf(items: List<TimelineItem>, selfBareJid: String?): Map<Strin
 }
 
 private fun activityOf(members: List<TimelineItem>, selfBareJid: String?): ThreadActivity {
+    // By wire time, so an older archive page landing late sorts in place;
+    // the sort is stable, so equal times keep arrival order.
+    val bySentAt = members.sortedBy(::sentAtOf)
     val people = LinkedHashMap<String, ThreadParticipant>()
     // Newest first, so the most recent repliers lead the stack.
-    members.asReversed().forEach { reply ->
+    bySentAt.asReversed().forEach { reply ->
         val jid = authorBareJidOf(reply, selfBareJid)
-        val name = authorNameOf(reply, isGroupchatRow(reply)) ?: return@forEach
-        people.putIfAbsent(jid ?: "name:$name", ThreadParticipant(name, jid))
+        replierNameOf(reply)?.let { name -> people.putIfAbsent(jid ?: "name:$name", ThreadParticipant(name, jid)) }
     }
     val faces = people.values.take(MAX_THREAD_FACES)
-    // The last of equal timestamps wins: rows arrive oldest first.
-    val newest = members.withIndex().maxWithOrNull(compareBy({ sentAtOf(it.value) }, { it.index }))?.value
+    val newest = bySentAt.lastOrNull()
     return ThreadActivity(
         replyCount = members.size,
         participants = faces,
@@ -83,20 +84,25 @@ private fun activityOf(members: List<TimelineItem>, selfBareJid: String?): Threa
     )
 }
 
+private fun replierNameOf(reply: TimelineItem): String? = authorNameOf(reply, isGroupchatRow(reply))
+
+/** The newest reply as the card quotes it; `null` when there is no author or nothing to quote. */
 private fun latestReplyOf(reply: TimelineItem): LatestReply? {
-    val author = authorNameOf(reply, isGroupchatRow(reply)) ?: return null
-    return LatestReply(author = author, snippet = replySnippetOf(reply), sentAt = sentAtOf(reply))
+    val author = replierNameOf(reply)
+    val snippet = replySnippetOf(reply)
+    if (author == null || snippet == null) return null
+    return LatestReply(author = author, snippet = snippet, sentAt = sentAtOf(reply))
 }
 
 /**
  * The reply card's line for [item], following what the row itself shows
- * (its content): a retraction is "deleted"; a body that never renders
- * as text (sticker alt-text, a lone image URL, an echoed file URL, blank)
- * stands for its media; anything else is the body as one plain line. The
- * body is plain already: XEP-0394 markup rides beside it and the XEP-0461
- * fallback is stripped when the row is stored.
+ * (its content): a retraction is "deleted"; a sticker, a lone image URL
+ * or an echoed file URL stands for its media; anything else is the body
+ * as one plain line. `null` when the row shows nothing to quote (a blank
+ * body without files). The body is plain already: XEP-0394 markup rides
+ * beside it and the XEP-0461 fallback is stripped when the row is stored.
  */
-fun replySnippetOf(item: TimelineItem): ReplySnippet {
+fun replySnippetOf(item: TimelineItem): ReplySnippet? {
     if (item.tombstone != null) return ReplySnippet.Deleted
     val files = item.sharedFiles
     val body = item.body.trim()
@@ -104,9 +110,9 @@ fun replySnippetOf(item: TimelineItem): ReplySnippet {
     val bodyHidden = body.isEmpty() || item.isSticker || loneImageUrl || files.any { it.url == body }
     return when {
         !bodyHidden -> ReplySnippet.Text(collapseWhitespace(body))
-        loneImageUrl || (files.isNotEmpty() && files.all(::isImageFile)) -> ReplySnippet.Photo
+        item.isSticker || loneImageUrl || (files.isNotEmpty() && files.all(::isImageFile)) -> ReplySnippet.Photo
         files.isNotEmpty() -> ReplySnippet.Attachment
-        else -> ReplySnippet.Text(collapseWhitespace(body))
+        else -> null
     }
 }
 
