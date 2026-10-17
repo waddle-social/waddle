@@ -28,6 +28,8 @@ enum Theme {
         static let mediaMaxWidth: CGFloat = 360
         /// Readable line length for the conversation column.
         static let readableWidth: CGFloat = 820
+        /// Smallest tap target (Human Interface Guidelines).
+        static let minHitTarget: CGFloat = 44
     }
 
     /// Consecutive messages from one author within this window share one
@@ -52,6 +54,11 @@ extension Color {
         #else
         Color(uiColor: .secondarySystemBackground)
         #endif
+    }
+
+    /// Hairline border of raised cards.
+    static var cardBorder: Color {
+        Color.secondary.opacity(0.22)
     }
 
     static var primaryBackground: Color {

@@ -45,6 +45,16 @@ public final class ConversationTimeline {
         return ids.reduce(0) { $0 + (repliesByThread[$1]?.count ?? 0) }
     }
 
+    /// Reply count, participants and newest reply of the thread rooted at
+    /// `item`, counted over the same ids as `replyCount(for:)`. Nil when
+    /// it has no loaded replies.
+    public func threadSummary(for item: TimelineItem) -> ThreadSummary? {
+        var ids = item.targetableIDs
+        ids.insert(item.id)
+        let indices = Set(ids.flatMap { repliesByThread[$0] ?? [] }).sorted()
+        return ThreadSummary.of(replies: indices.map { items[$0] })
+    }
+
     /// Newest content row, used for previews and recency.
     public var lastContentItem: TimelineItem? {
         items.last(where: { $0.isFeedVisible && $0.tombstone == nil })

@@ -53,7 +53,7 @@ private struct TimelineScroller: View {
             unreadAnchorID: unreadAnchorID,
             groupingWindow: Theme.groupingWindow,
             newestFirst: newestFirst,
-            replyCount: { timeline.replyCount(for: $0) },
+            thread: { timeline.threadSummary(for: $0) },
             replyParent: { timeline.item(withID: $0) }
         )
         ScrollViewReader { proxy in

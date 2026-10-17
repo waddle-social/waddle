@@ -13,10 +13,13 @@ struct TimelineFeedEntry: Identifiable, Hashable {
     let unreadDivider: TimelineUnreadDivider.Edge?
     /// First row of an author run: shows the avatar and name header.
     let startsGroup: Bool
-    /// XEP-0201 replies in the thread rooted at this row.
-    let replyCount: Int
+    /// XEP-0201 replies in the thread rooted at this row: count, faces
+    /// and the newest loaded reply. Nil when it has none.
+    let thread: ThreadSummary?
     /// The XEP-0461 parent, when it is loaded.
     let replyParent: TimelineItem?
+
+    var replyCount: Int { thread?.replyCount ?? 0 }
 }
 
 /// Derives day separators, author grouping and the unread divider from the
@@ -34,7 +37,7 @@ enum TimelineFeedLayout {
         groupingWindow: TimeInterval,
         newestFirst: Bool = false,
         calendar: Calendar = .current,
-        replyCount: (TimelineItem) -> Int = { _ in 0 },
+        thread: (TimelineItem) -> ThreadSummary? = { _ in nil },
         replyParent: (String) -> TimelineItem? = { _ in nil }
     ) -> [TimelineFeedEntry] {
         let ordered: [TimelineItem] = newestFirst ? items.reversed() : items
@@ -55,7 +58,7 @@ enum TimelineFeedLayout {
                 daySeparator: separator,
                 unreadDivider: unread ? edge : nil,
                 startsGroup: starts,
-                replyCount: replyCount(item),
+                thread: thread(item),
                 replyParent: item.message.reply.flatMap { replyParent($0.id) }
             ))
             previous = item

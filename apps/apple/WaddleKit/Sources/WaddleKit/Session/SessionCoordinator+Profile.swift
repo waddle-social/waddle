@@ -14,8 +14,7 @@ extension SessionCoordinator {
     /// local echo, or the occupant when an undelayed message arrived):
     /// a nick may have changed hands since, and initials beat a wrong face.
     public func authorJID(of item: TimelineItem) -> BareJID? {
-        guard item.conversation.isRoom else { return item.from?.bare }
-        return item.message.authorRealJID
+        item.authorJID
     }
 
     public func publishAvatar(_ image: AvatarImage) async throws {

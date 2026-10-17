@@ -106,6 +106,8 @@ private struct SheetHost: View {
             NavigationStack { SettingsView() }
         case let .search(conversation):
             SearchSheet(conversation: conversation)
+        case let .peer(profile):
+            PeerProfileSheet(profile: profile)
         }
     }
 }
