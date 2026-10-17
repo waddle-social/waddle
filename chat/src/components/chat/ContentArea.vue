@@ -59,6 +59,7 @@ import {
   threadChipLastReplyAt as threadChipLastReplyAtFor,
   threadChipParticipants as threadChipParticipantsFor,
 } from "./timeline-display-meta";
+import { latestThreadReply } from "./thread-reply-card";
 import { useConnectionNotice } from "./composables/use-connection-notice";
 import { useMessageJump } from "./composables/use-message-jump";
 
@@ -514,6 +515,7 @@ const queuedMessageCount = computed(() =>
     message.isSelf && (message.deliveryStatus === "sending" || message.deliveryStatus === "failed")
   ).length,
 );
+/** `jid` is the author's real bare JID, or "" for an anonymous occupant. */
 const popoverAuthor = ref<{ username: string; jid: string; avatarJid: string | null } | null>(null);
 const profileDrawerOpen = computed({
   get: () => !!popoverAuthor.value,
@@ -599,7 +601,7 @@ function openSearch(): void {
   showSearch.value = true;
 }
 
-defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage, openSearch });
+defineExpose({ messagesContainer, scrollToPinnedEdge, scrollToMessage, openSearch, openProfile: onAvatarClick });
 
 function presenceText(show?: string): string {
   if (show === "available") return "online";
@@ -618,15 +620,17 @@ function presenceTextForAuthor(username: string): string {
 
 function onAvatarClick(author: string, avatarJid: string | null) {
   // Only the row's own resolved author: the current nick map may name
-  // someone who reused the nick after this row was sent.
-  const authorJid = avatarJid;
-  if (!authorJid) return;
-  popoverAuthor.value = { username: author, jid: authorJid, avatarJid };
+  // someone who reused the nick after this row was sent. An anonymous
+  // occupant (no real JID) still gets a profile with what the room shows
+  // (nick, avatar, presence, hats); `jid` stays empty, which hides
+  // "Message" and skips the vCard/PEP fetch.
+  popoverAuthor.value = { username: author, jid: avatarJid ?? "", avatarJid };
 }
 
 function openPopoverDm() {
-  if (!popoverAuthor.value) return;
-  emit("openDm", popoverAuthor.value.jid);
+  const jid = popoverAuthor.value?.jid;
+  if (!jid) return;
+  emit("openDm", jid);
   popoverAuthor.value = null;
 }
 
@@ -719,6 +723,10 @@ function threadChipParticipants(messageId: string) {
 
 function threadChipLastReplyAt(messageId: string): string | undefined {
   return threadChipLastReplyAtFor(props.threadIndex, messageId);
+}
+
+function threadChipLatestReply(messageId: string) {
+  return latestThreadReply(props.threadIndex.get(messageId));
 }
 
 function showDayDividerBefore(message: TimelineMessage): boolean {
@@ -1085,6 +1093,7 @@ function dayDividerLabel(createdAt: string): string {
             :thread-reply-count="threadIndex.get(msg.id)?.count ?? 0"
             :thread-participants="threadChipParticipants(msg.id)"
             :thread-last-reply-at="threadChipLastReplyAt(msg.id)"
+            :thread-latest-reply="threadChipLatestReply(msg.id)"
             :grouped="isGroupedFollowUp(msg)"
             :reaction-mode-selected="reactionMode?.selectedMessageId === msg.id"
             :invoke-extension-action="props.invokeExtensionAction"

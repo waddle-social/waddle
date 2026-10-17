@@ -11,6 +11,8 @@ export type ContentAreaHandle = ComponentPublicInstance & {
   scrollToPinnedEdge: (mode: ScrollDirectionMode) => Promise<boolean>;
   scrollToMessage: (messageId: string) => Promise<void>;
   openSearch: () => void;
+  /** Opens the profile drawer for a row author; thread-pane rows route here. */
+  openProfile: (author: string, avatarJid: string | null) => void;
 };
 
 interface ActiveConversationDeps {

@@ -230,15 +230,6 @@
   color: var(--muted-foreground);
 }
 
-.chat-thread-chip {
-  min-width: 0;
-  width: fit-content;
-  max-width: 100%;
-  align-self: flex-start;
-  justify-content: flex-start;
-  white-space: nowrap;
-}
-
 .chat-message-reactions {
   width: 100%;
 }
@@ -341,140 +332,186 @@
   flex-shrink: 0;
 }
 
-/* Thread "N replies" chip — quieter inline link, not a button.
- * Carries a tiny avatar stack of participants + a relative-time
- * suffix so the eye can triage threads from the channel feed
- * without opening the panel.
- *
- * Spacing system: the chip mixes four element kinds (svg icon, text
- * count, avatar stack, text recency) at three different visual
- * heights. A uniform Tailwind `gap-1.5` (0.375 rem) is too tight for
- * that variety — text and avatars end up visually touching even
- * though their boxes are notionally apart. Override with explicit
- * design-system spacing (`--space-xs` = 0.5 rem) between every
- * group, and shrink the inline avatar from xs (1.5 rem) to
- * 1.125 rem so its scale matches the 0.6875 rem chip text. */
-.chat-thread-chip {
-  font-size: 0.6875rem;
-  line-height: 1.4;
-  gap: var(--space-xs);
-  align-items: center;
-  /* Lift the chip away from the message body — the body-stack's base
-   * gap (0.25rem) is too tight for a chip that carries its own avatar
-   * row and recency suffix, especially with the in-gutter rail glyph
-   * sitting on the same horizontal line. */
-  margin-block-start: var(--chat-thread-chip-gap);
+/* Attached reply card — the thread summary under a post with replies.
+ * One button spanning the content column: participant faces, the reply
+ * count in the accent and the recency on the first line; the newest
+ * loaded reply as "author: snippet" on the second; a trailing chevron.
+ * Raised on the strong surface with a hairline border so it reads as
+ * attached to the post rather than as another message. Heights are
+ * fixed per layout (tokens.css) so the gutter rail can meet the card's
+ * vertical centre; text never wraps, it ellipsises. */
+.chat-thread-card {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-content: center;
+  column-gap: var(--space-xs);
+  row-gap: 0.125rem;
+  height: var(--chat-thread-card-height);
+  margin-block-start: var(--chat-thread-card-gap);
+  padding: 0 var(--space-sm);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--surface-strong);
+  color: var(--foreground);
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color 0.16s ease,
+    border-color 0.16s ease;
 }
 
-.chat-thread-chip__icon {
-  opacity: 0.85;
+.chat-thread-card--two-line {
+  height: var(--chat-thread-card-height-two-line);
 }
 
-.chat-thread-chip__count {
-  /* count text sits on the left right after the icon */
-  flex-shrink: 0;
+/* Hover/press tint toward the accent: in dark, --muted equals the card
+ * surface, so a muted mix would not register. */
+.chat-thread-card:hover {
+  border-color: color-mix(in oklab, var(--primary) 32%, var(--border));
+  background: color-mix(in oklab, var(--primary) 6%, var(--surface-strong));
 }
 
-/* Recency suffix is pushed to the right edge of the message body —
- * matches the visual rhythm of "icon + label on the left, timestamp
- * on the right" the user explicitly asked for. The "·" bullet that
- * used to live in the markup is dropped now that there's real
- * space-between alignment doing the job of a separator. */
-.chat-thread-chip__recency {
-  margin-left: auto;
-  color: color-mix(in oklab, var(--muted-foreground) 92%, transparent);
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-  flex-shrink: 0;
+.chat-thread-card:active {
+  background: color-mix(in oklab, var(--primary) 12%, var(--surface-strong));
 }
 
-/* Thread rail glyph — a single "stacked messages" icon centred in the
- * avatar column, vertically aligned with the chip's avatar row in the
- * body. Structural rail marker that this row anchors a thread; the
- * rich summary (who replied + how many + how recently) lives in the
- * in-body chip.
- *
- * The chip is the last child of the body stack, so its avatars sit at
- * a predictable y-offset from the row's bottom edge:
- *   row pad-bottom (--chat-message-row-pad) + chip pad-bottom (0.125rem)
- *     + half chip avatar (0.5625rem of 1.125rem) − half icon (0.5rem)
- *   = --chat-message-row-pad + 0.1875rem
- *
- * Tracks the row-pad token rather than hardcoding --space-xs so the
- * glyph stays centred on the chip avatars when the design system tunes
- * row breathing room.
- *
- * Anchoring the icon by that distance from the bottom makes the
- * icon's vertical centre line up exactly with the chip avatars'
- * centre line, so "thread marker (gutter) ↔ thread participants
- * (body)" reads as one horizontal row instead of a drifting pair. */
-.chat-thread-rail-glyph {
-  position: absolute;
-  bottom: calc(var(--chat-message-row-pad) + 0.1875rem);
-  left: 0;
-  width: var(--chat-message-avatar-size);
-  height: 1rem;
+.chat-thread-card:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+.chat-thread-card__summary {
+  grid-column: 1;
   display: flex;
-  justify-content: center;
+  min-width: 0;
   align-items: center;
-  pointer-events: none;
-  color: color-mix(in oklab, var(--primary) 55%, var(--muted-foreground));
-  opacity: 0.75;
+  gap: var(--space-xs);
+  font-size: var(--text-meta);
+  line-height: 1.5rem;
+  white-space: nowrap;
 }
 
-.chat-thread-rail-glyph__icon {
+/* Count and recency read as one run of text ("3 replies · 2 hours ago")
+ * that ellipsises as a whole on narrow rows. */
+.chat-thread-card__meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--muted-foreground);
+}
+
+.chat-thread-card__count {
+  font-weight: 600;
+  color: var(--primary);
+}
+
+.chat-thread-card__recency {
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-thread-card__latest {
+  grid-column: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-control);
+  line-height: 1.25rem;
+  color: var(--muted-foreground);
+}
+
+.chat-thread-card__latest-author {
+  font-weight: 600;
+  color: var(--foreground);
+}
+
+.chat-thread-card__chevron {
+  grid-column: 2;
+  grid-row: 1;
+  align-self: center;
   width: 1rem;
   height: 1rem;
+  color: var(--muted-foreground);
+  transition: color 0.16s ease, transform 0.16s ease;
 }
 
-/* Participant stack lives inside the thread chip body, ahead of the
- * reply count, so the eye reads "[who's here] [how many turns] …
- * [how recently]" left-to-right. Avatars shrink to 1.125 rem so they
- * sit comfortably on the 0.6875 rem chip text baseline and remain
- * legible without overpowering the count. The gutter holds only the
- * structural rail glyph; this stack carries the richness. */
-.chat-thread-chip__avatars {
+.chat-thread-card--two-line .chat-thread-card__chevron {
+  grid-row: 1 / span 2;
+}
+
+.chat-thread-card:hover .chat-thread-card__chevron {
+  color: var(--foreground);
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .chat-thread-card:hover .chat-thread-card__chevron {
+    transform: translateX(2px);
+  }
+}
+
+/* Overlapping participant faces (up to three, then +N) at the avatar
+ * "xs" size, ringed in the card surface so each reads as its own disc. */
+.chat-thread-card__faces {
   display: inline-flex;
+  flex-shrink: 0;
   align-items: center;
   isolation: isolate;
-  flex-shrink: 0;
 }
 
-.chat-thread-chip__avatar-wrap {
+.chat-thread-card__face {
   display: inline-flex;
-  margin-left: -0.35rem;
-  border-radius: 9999px;
-  outline: 1.5px solid var(--background);
+  margin-left: -0.375rem;
+  border-radius: var(--radius-pill);
+  outline: 1.5px solid var(--surface-strong);
 }
 
-.chat-thread-chip__avatar-wrap:first-child {
+.chat-thread-card__face:first-child {
   margin-left: 0;
 }
 
-.chat-thread-chip__avatar-wrap > .app-avatar,
-.chat-thread-chip__avatar-wrap > .app-avatar > .type-avatar-mark,
-.chat-thread-chip__avatar-wrap > .app-avatar > img {
-  width: 1.125rem;
-  height: 1.125rem;
-  font-size: 0.55rem;
-}
-
-.chat-thread-chip__overflow {
+.chat-thread-card__overflow {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.05rem;
-  height: 1.125rem;
+  min-width: 1.5rem;
+  height: 1.5rem;
   padding: 0 0.3rem;
   margin-left: -0.25rem;
   border-radius: var(--radius-pill);
-  background: var(--muted);
+  background: color-mix(in oklab, var(--foreground) 10%, var(--surface-strong));
   font-family: var(--font-code);
-  font-size: 0.55rem;
+  font-size: 0.6rem;
   font-weight: 600;
   color: var(--muted-foreground);
   font-variant-numeric: tabular-nums;
-  outline: 1.5px solid var(--background);
+  outline: 1.5px solid var(--surface-strong);
+}
+
+/* Thread rail — an elbow in the avatar gutter that drops from under the
+ * avatar (or the grouped row's first line) and turns into the reply
+ * card's left edge at the card's vertical centre. The card is the last
+ * in-flow child of the row, so the elbow's bottom sits
+ *   row pad-bottom + half the card's fixed height
+ * above the row's bottom edge. It reaches across the grid's column gap
+ * to touch the card. */
+.chat-thread-rail {
+  position: absolute;
+  top: calc(var(--chat-message-row-pad) + var(--chat-message-avatar-size) + var(--space-2xs));
+  bottom: calc(var(--chat-message-row-pad) + var(--chat-thread-card-height) / 2);
+  left: calc(var(--chat-message-avatar-size) / 2 - 1px);
+  width: calc(var(--chat-message-avatar-size) / 2 + var(--space-sm) + 1px);
+  border-left: 2px solid color-mix(in oklab, var(--primary) 28%, var(--border));
+  border-bottom: 2px solid color-mix(in oklab, var(--primary) 28%, var(--border));
+  border-bottom-left-radius: var(--radius-lg);
+  pointer-events: none;
+}
+
+.chat-thread-rail--grouped {
+  top: calc(var(--chat-message-row-pad) + var(--chat-message-first-line-box));
+}
+
+.chat-thread-rail--two-line {
+  bottom: calc(var(--chat-message-row-pad) + var(--chat-thread-card-height-two-line) / 2);
 }
 
 /* Typing indicator — gets a tiny avatar of who's typing (with the

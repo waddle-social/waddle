@@ -23,6 +23,30 @@ interface UseLongPressReturn {
 }
 
 /**
+ * Swallow the synthetic click that follows a long press, so a button under
+ * the press does not also fire. Removed after 400ms if no click arrives.
+ */
+function swallowNextClick() {
+  if (
+    typeof window === "undefined"
+    || typeof window.addEventListener !== "function"
+    || typeof window.removeEventListener !== "function"
+  ) {
+    return;
+  }
+  const targetWindow = window;
+  const handler = (event: MouseEvent) => {
+    event.stopPropagation();
+    event.preventDefault();
+  };
+  targetWindow.addEventListener("click", handler, { capture: true, once: true });
+  // Safety net: if no click arrives, remove after a tick.
+  setTimeout(() => {
+    targetWindow.removeEventListener("click", handler, { capture: true } as EventListenerOptions);
+  }, 400);
+}
+
+/**
  * Touch-only long-press detector built on Pointer Events.
  *
  * Fires `onLongPress` after {@link UseLongPressOptions.delay}ms of a stationary
@@ -106,26 +130,6 @@ export function useLongPress(options: UseLongPressOptions): UseLongPressReturn {
     isPressing.value = false;
     activePointerId = null;
     fired = false;
-  }
-
-  function swallowNextClick() {
-    if (
-      typeof window === "undefined"
-      || typeof window.addEventListener !== "function"
-      || typeof window.removeEventListener !== "function"
-    ) {
-      return;
-    }
-    const targetWindow = window;
-    const handler = (event: MouseEvent) => {
-      event.stopPropagation();
-      event.preventDefault();
-    };
-    targetWindow.addEventListener("click", handler, { capture: true, once: true });
-    // Safety net: if no click arrives, remove after a tick.
-    setTimeout(() => {
-      targetWindow.removeEventListener("click", handler, { capture: true } as EventListenerOptions);
-    }, 400);
   }
 
   function onPointerdown(event: PointerEvent) {

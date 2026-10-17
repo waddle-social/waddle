@@ -147,11 +147,13 @@
    * room between independent voices. */
   --chat-message-row-pad: var(--space-sm);
   --chat-message-burst-overlap: 1.1rem;
-  /* Thread-chip lift: the chip is the last child of the body stack and
-   * carries its own avatar row + recency suffix, so it needs more air
-   * above it than the 0.25rem --chat-message-body-gap supplies between
-   * plain inline children. */
-  --chat-thread-chip-gap: var(--space-2xs);
+  /* Attached reply card: lifted off the body/reactions above it, and a
+   * fixed height per layout (summary only / summary + latest reply) so
+   * the gutter rail can meet the card's vertical centre from the row's
+   * bottom edge. The one-line card is the 44px touch-target minimum. */
+  --chat-thread-card-gap: var(--space-2xs);
+  --chat-thread-card-height: 2.75rem;
+  --chat-thread-card-height-two-line: 3.5rem;
   --chat-attachment-image-width: min(100%, 20rem);
   --chat-attachment-card-width: min(100%, 28rem);
   --chat-composer-block: var(--space-sm);
