@@ -117,12 +117,21 @@ describe("threadChipParticipants", () => {
 });
 
 describe("threadChipLastReplyAt", () => {
-  test("returns the newest direct child's timestamp", () => {
+  test("returns the newest reply's timestamp", () => {
     const children = [
       message({ id: "c0", author: "u1", createdAt: "2026-07-01T10:00:00Z" }),
       message({ id: "c1", author: "u2", createdAt: "2026-07-01T10:05:00Z" }),
     ];
     expect(threadChipLastReplyAt(threadIndexWith(children), "root")).toBe("2026-07-01T10:05:00Z");
     expect(threadChipLastReplyAt(new Map(), "root")).toBeUndefined();
+  });
+
+  test("counts sub-thread replies, matching the reply count", () => {
+    const direct = message({ id: "c0", author: "u1", createdAt: "2026-07-01T10:00:00Z" });
+    const nested = message({ id: "s0", author: "u2", createdAt: "2026-07-01T10:30:00Z", threadId: "c0" });
+    const index = threadIndexWith([direct]);
+    const entry = index.get("root")!;
+    const withNested = new Map([["root", { ...entry, allDescendants: [direct, nested], count: 2, lastTs: nested.createdAt }]]);
+    expect(threadChipLastReplyAt(withNested, "root")).toBe("2026-07-01T10:30:00Z");
   });
 });

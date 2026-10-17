@@ -92,6 +92,14 @@ describe("latestThreadReply", () => {
     });
   });
 
+  test("includes sub-thread replies, the same set the count covers", () => {
+    const direct = message({ id: "r1", author: "alice", body: "first", createdAt: "2026-10-17T10:01:00Z" });
+    const nested = message({ id: "s1", author: "bob", body: "deeper", createdAt: "2026-10-17T10:09:00Z", threadId: "r1" });
+    const base = entry([direct]);
+    const latest = latestThreadReply({ ...base, allDescendants: [direct, nested], count: 2 });
+    expect(latest).toEqual({ author: "bob", snippet: "deeper", createdAt: "2026-10-17T10:09:00Z" });
+  });
+
   test("is null when the count is known but no reply is loaded", () => {
     expect(latestThreadReply(entry([]))).toBeNull();
     expect(latestThreadReply(undefined)).toBeNull();

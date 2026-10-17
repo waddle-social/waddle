@@ -15,6 +15,7 @@ const open = defineModel<boolean>("open", { required: true });
 
 const props = defineProps<{
   username: string;
+  /** Real bare JID, or "" when unknown (an anonymous room occupant). */
   jid: string;
   /** Real bare JID to show the avatar for; `null` = initials. */
   avatarJid?: string | null;
@@ -33,6 +34,13 @@ const pepProfile = ref<UserPepProfile | null>(null);
 const vcard = ref<VCard4Profile | null>(null);
 const loading = ref(false);
 const shownHats = computed(() => identityHats(props.hats, props.jid));
+/** Only a real JID can be messaged; never emit a DM for an unknown one. */
+const canMessage = computed(() => !!props.jid && !props.isSelf && !isBotJid(props.jid));
+
+function messagePerson() {
+  if (!canMessage.value) return;
+  emit("message");
+}
 
 watch(
   () => [open.value, props.jid] as const,
@@ -204,11 +212,11 @@ const hasVCardSection = computed(
 
       <!-- Message button (hidden for own profile and bots, which take no DMs) -->
       <button
-        v-if="!isSelf && !isBotJid(jid)"
+        v-if="canMessage"
         class="chat-action-button chat-action-button--primary type-action w-full"
         type="button"
         aria-label="Message this person"
-        @click="emit('message')"
+        @click="messagePerson"
       >
         <MessageCircle class="h-4 w-4" />
         Message

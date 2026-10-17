@@ -10,9 +10,11 @@ const TAP_SLOP = 10;
  * every pointer event so a drag that starts as a potential long-press can
  * still resolve as a swipe (and vice versa cancel each other).
  *
- * Also remembers whether the latest press was a stationary touch, so the
- * row's click handler can tell a plain tap from the click a browser
- * synthesises after a swipe, scroll or long press.
+ * Also records whether the latest single-finger touch ended as a
+ * stationary tap, so the row's click handler can tell a plain tap from a
+ * click that follows a swipe, a scroll, a long press or a multi-touch
+ * gesture. A click a browser suppresses (e.g. a tap that stops momentum
+ * scrolling) never reaches that handler, so it opens nothing.
  */
 export function useMessageGestures(input: {
   onLongPress: () => void;
@@ -22,11 +24,13 @@ export function useMessageGestures(input: {
    * message — same path as the toolbar reply button. */
   onSwipeRight: () => void;
 }) {
+  // The first touch pointer of the current press; null when none is down.
   let tapPointerId: number | null = null;
-  let tapIsTouch = false;
   let tapDisqualified = false;
   let tapStartX = 0;
   let tapStartY = 0;
+  // Outcome of the last completed press, consumed by the next click.
+  let lastPressWasTap = false;
 
   const longPress = useLongPress({
     onLongPress: () => {
@@ -41,11 +45,18 @@ export function useMessageGestures(input: {
   });
 
   function onPointerdown(event: PointerEvent) {
-    tapPointerId = event.pointerId;
-    tapIsTouch = event.pointerType === "touch";
-    tapDisqualified = false;
-    tapStartX = event.clientX;
-    tapStartY = event.clientY;
+    if (tapPointerId !== null) {
+      // A second finger: this press is a multi-touch gesture, not a tap.
+      tapDisqualified = true;
+    } else {
+      lastPressWasTap = false;
+      if (event.pointerType === "touch") {
+        tapPointerId = event.pointerId;
+        tapDisqualified = false;
+        tapStartX = event.clientX;
+        tapStartY = event.clientY;
+      }
+    }
     swipe.handlers.onPointerdown(event);
     longPress.handlers.onPointerdown(event);
   }
@@ -59,12 +70,19 @@ export function useMessageGestures(input: {
     longPress.handlers.onPointermove(event);
   }
   function onPointerup(event: PointerEvent) {
+    if (event.pointerId === tapPointerId) {
+      lastPressWasTap = !tapDisqualified;
+      tapPointerId = null;
+    }
     swipe.handlers.onPointerup(event);
     longPress.handlers.onPointerup(event);
   }
   function onPointercancel(event: PointerEvent) {
     // The browser took the pointer (scroll, pinch): whatever follows is not a tap.
-    if (event.pointerId === tapPointerId) tapDisqualified = true;
+    if (event.pointerId === tapPointerId) {
+      lastPressWasTap = false;
+      tapPointerId = null;
+    }
     swipe.handlers.onPointercancel(event);
     longPress.handlers.onPointercancel(event);
   }
@@ -80,14 +98,20 @@ export function useMessageGestures(input: {
     if (longPress.isPressing.value) event.preventDefault();
   }
 
-  /** True when the latest press was a touch that neither moved, scrolled nor long-pressed. */
-  function lastPressWasStationaryTouch(): boolean {
-    return tapPointerId !== null && tapIsTouch && !tapDisqualified;
+  /**
+   * Whether the press behind the current click was a single-finger touch
+   * that neither moved, scrolled nor long-pressed. One-shot: reading it
+   * clears it, so a later click without a fresh press never reuses it.
+   */
+  function consumeStationaryTap(): boolean {
+    const tap = lastPressWasTap;
+    lastPressWasTap = false;
+    return tap;
   }
 
   return {
     swipe,
-    lastPressWasStationaryTouch,
+    consumeStationaryTap,
     handlers: {
       onPointerdown,
       onPointermove,

@@ -23,11 +23,10 @@ interface UseLongPressReturn {
 }
 
 /**
- * Swallow the synthetic click that follows a touch gesture handled on
- * pointerup, so whatever renders under the finger (or a button under the
- * press) does not also fire. Removed after 400ms if no click arrives.
+ * Swallow the synthetic click that follows a long press, so a button under
+ * the press does not also fire. Removed after 400ms if no click arrives.
  */
-export function swallowNextClick() {
+function swallowNextClick() {
   if (
     typeof window === "undefined"
     || typeof window.addEventListener !== "function"

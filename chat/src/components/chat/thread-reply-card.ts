@@ -51,9 +51,13 @@ export function threadReplySnippet(message: TimelineMessage): string {
   return "";
 }
 
-/** The newest loaded direct reply of a thread, or `null` when none is loaded. */
+/**
+ * The newest loaded reply of a thread, sub-threads included (the same set
+ * the reply count covers; `allDescendants` is chronological), or `null`
+ * when none is loaded.
+ */
 export function latestThreadReply(entry: MessageThreadEntry | null | undefined): ThreadLatestReply | null {
-  const latest = entry?.directChildren.at(-1);
+  const latest = entry?.allDescendants.at(-1);
   if (!latest) return null;
   return {
     author: latest.author,

@@ -106,6 +106,7 @@ export function threadChipLastReplyAt(
   threadIndex: MessageThreadIndex,
   messageId: string,
 ): string | undefined {
+  // Newest of every loaded reply the count covers (sub-threads included).
   const entry = threadIndex.get(messageId);
-  return entry?.directChildren.at(-1)?.createdAt;
+  return entry?.allDescendants.at(-1)?.createdAt;
 }

@@ -515,6 +515,7 @@ const queuedMessageCount = computed(() =>
     message.isSelf && (message.deliveryStatus === "sending" || message.deliveryStatus === "failed")
   ).length,
 );
+/** `jid` is the author's real bare JID, or "" for an anonymous occupant. */
 const popoverAuthor = ref<{ username: string; jid: string; avatarJid: string | null } | null>(null);
 const profileDrawerOpen = computed({
   get: () => !!popoverAuthor.value,
@@ -619,15 +620,17 @@ function presenceTextForAuthor(username: string): string {
 
 function onAvatarClick(author: string, avatarJid: string | null) {
   // Only the row's own resolved author: the current nick map may name
-  // someone who reused the nick after this row was sent.
-  const authorJid = avatarJid;
-  if (!authorJid) return;
-  popoverAuthor.value = { username: author, jid: authorJid, avatarJid };
+  // someone who reused the nick after this row was sent. An anonymous
+  // occupant (no real JID) still gets a profile with what the room shows
+  // (nick, avatar, presence, hats); `jid` stays empty, which hides
+  // "Message" and skips the vCard/PEP fetch.
+  popoverAuthor.value = { username: author, jid: avatarJid ?? "", avatarJid };
 }
 
 function openPopoverDm() {
-  if (!popoverAuthor.value) return;
-  emit("openDm", popoverAuthor.value.jid);
+  const jid = popoverAuthor.value?.jid;
+  if (!jid) return;
+  emit("openDm", jid);
   popoverAuthor.value = null;
 }
 

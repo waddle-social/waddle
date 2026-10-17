@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { timelineRowKey } from "@/lib/timeline-row-key";
-import { ref, computed } from "vue";
+import { ref, computed, watch } from "vue";
 import {
   AlertCircle,
   Clock,
@@ -51,7 +51,6 @@ import {
 } from "./message-row-tap";
 import { useMessageActionSurfaces } from "./composables/use-message-action-surfaces";
 import { useMessageGestures } from "./composables/use-message-gestures";
-import { swallowNextClick } from "@/ui/gestures/long-press";
 
 const props = defineProps<{
   message: TimelineMessage;
@@ -361,26 +360,31 @@ const swipe = gestures.swipe;
 
 // Touch only: a plain tap on a post with replies opens its thread. Fine
 // pointers keep text selection and use the reply card, which is also the
-// keyboard path, so the row itself stays a non-interactive element. Rows
-// inside the thread pane hide the card, so they never open a thread from
-// a tap. Decided on pointerup (a touch-only gesture, like swipe and long
-// press); the click that follows is swallowed so it cannot land on the
-// thread pane that opens under the finger.
-function onRowPointerup(event: PointerEvent) {
-  gestures.handlers.onPointerup(event);
+// keyboard path, so the row stays a non-interactive element (no role, no
+// tab stop). Decided on the click the browser sends after a stationary
+// single-finger tap: a tap that only stops momentum scrolling gets no
+// click and opens nothing. Rows inside the thread pane hide the card, so
+// they never open a thread from a tap. The listener is attached in script
+// because it is a touch-tap refinement of the row, not a mouse affordance.
+function onRowClick(event: MouseEvent) {
   const row = bubbleEl.value;
+  // Always consume the press state so a stale tap is never reused.
+  const stationaryTouch = gestures.consumeStationaryTap();
   if (!row || isEditing.value || sheetOpen.value) return;
   const open = shouldOpenThreadOnRowTap({
     opensThread: showThreadChip.value,
     coarsePointer: prefersCoarsePointer(),
-    stationaryTouch: gestures.lastPressWasStationaryTouch(),
+    stationaryTouch,
     hasTextSelection: hasActiveTextSelection(),
     targetIsInteractive: tapTargetIsInteractive(event.target, row),
   });
-  if (!open) return;
-  swallowNextClick();
-  emit("openThread", props.message.id);
+  if (open) emit("openThread", props.message.id);
 }
+
+watch(bubbleEl, (row, previous) => {
+  previous?.removeEventListener("click", onRowClick);
+  row?.addEventListener("click", onRowClick);
+});
 </script>
 
 <template>
@@ -531,7 +535,7 @@ function onRowPointerup(event: PointerEvent) {
       : undefined"
     @pointerdown="gestures.handlers.onPointerdown"
     @pointermove="gestures.handlers.onPointermove"
-    @pointerup="onRowPointerup"
+    @pointerup="gestures.handlers.onPointerup"
     @pointercancel="gestures.handlers.onPointercancel"
     @pointerleave="gestures.handlers.onPointerleave"
     @contextmenu="gestures.handlers.onContextMenu"
