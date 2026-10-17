@@ -9,13 +9,14 @@ import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.jid.bareJidOf
 
-/** One thread over the shared conversation scaffold (no nesting). */
+/** One thread over the shared conversation scaffold (no nesting); [onOpenDm] backs "Message" on profiles. */
 @Composable
 fun ThreadScreen(
     conversationJid: String,
     isGroupchat: Boolean,
     threadId: String,
     onBack: () -> Unit,
+    onOpenDm: ((peerJid: String, name: String) -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: ThreadViewModel = viewModel(
@@ -27,6 +28,7 @@ fun ThreadScreen(
         title = stringResource(R.string.thread_title),
         viewModel = viewModel,
         onBack = onBack,
+        onOpenDm = onOpenDm,
         selfBareJid = session?.jid?.let(::bareJidOf),
     )
 }

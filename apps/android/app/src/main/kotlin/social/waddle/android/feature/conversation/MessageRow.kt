@@ -1,6 +1,7 @@
 package social.waddle.android.feature.conversation
 
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -12,6 +13,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -21,16 +24,24 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.layout.layout
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
+import androidx.compose.ui.semantics.CustomAccessibilityAction
+import androidx.compose.ui.semantics.clearAndSetSemantics
+import androidx.compose.ui.semantics.customActions
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.text
+import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
@@ -55,6 +66,8 @@ class MessageRowActions(
     val onOpenThread: ((TimelineItem) -> Unit)? = null,
     val onQuoteClick: (TimelineItem) -> Unit = {},
     val onRetry: (Long) -> Unit = {},
+    /** Avatar or author name tapped; `null` leaves them inert. */
+    val onOpenProfile: ((MessageAuthor) -> Unit)? = null,
 )
 
 /** Context shared by every row of one conversation. */
@@ -90,27 +103,49 @@ fun MessageRow(
     }
 }
 
+/** What tapping a row and its author does; `null` leaves that part inert. */
+private class RowTaps(
+    val onLongPress: (() -> Unit)?,
+    /** The post itself: opens its thread when it has replies. */
+    val onOpenThread: (() -> Unit)?,
+    val onOpenProfile: (() -> Unit)?,
+)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun RowFrame(
     entry: FeedEntry,
     author: String,
     endsGroup: Boolean,
-    onLongPress: (() -> Unit)?,
+    taps: RowTaps,
     modifier: Modifier = Modifier,
     header: @Composable () -> Unit,
     content: @Composable () -> Unit,
 ) {
     val haptics = LocalHapticFeedback.current
     val colors = Waddle.colors
+    val onLongPress = taps.onLongPress
+    // The avatar and name are hidden from screen readers (the name stays
+    // in the row's text); the row offers their "open profile" instead.
+    val profileAction = taps.onOpenProfile?.let { open ->
+        CustomAccessibilityAction(stringResource(R.string.author_open_profile, author)) {
+            open()
+            true
+        }
+    }
     Row(
         modifier = modifier
             .fillMaxWidth()
             .then(if (entry.mentionsSelf) Modifier.mentionWash(colors.live) else Modifier)
             .then(
                 if (onLongPress != null) {
+                    // Touch: a tap on a post with replies opens its
+                    // thread; children with their own clicks (links,
+                    // chips, media, reactions, the quote, the author)
+                    // take theirs first.
                     Modifier.combinedClickable(
-                        onClick = {},
+                        onClick = taps.onOpenThread ?: {},
+                        onClickLabel = taps.onOpenThread?.let { stringResource(R.string.action_open_thread) },
                         onLongClickLabel = stringResource(R.string.message_actions_label),
                         onLongClick = {
                             haptics.performHapticFeedback(HapticFeedbackType.LongPress)
@@ -121,7 +156,9 @@ private fun RowFrame(
                     Modifier
                 },
             )
-            .semantics(mergeDescendants = true) {}
+            .semantics(mergeDescendants = true) {
+                if (profileAction != null) customActions = listOf(profileAction)
+            }
             .padding(
                 start = Waddle.space.md,
                 end = Waddle.space.md,
@@ -131,9 +168,7 @@ private fun RowFrame(
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.sm),
     ) {
         Box(modifier = Modifier.width(AvatarSize.MESSAGE.dp)) {
-            if (entry.startsGroup) {
-                HuddleAvatar(jid = entry.authorJid, name = author, size = AvatarSize.MESSAGE)
-            }
+            if (entry.startsGroup) AuthorAvatar(jid = entry.authorJid, author = author, onClick = taps.onOpenProfile)
         }
         Column(
             modifier = Modifier.weight(1f),
@@ -142,6 +177,44 @@ private fun RowFrame(
             if (entry.startsGroup) header()
             content()
         }
+    }
+}
+
+/**
+ * The 40dp author face. Tappable, it opens their profile through a 48dp
+ * target that overhangs the gutter without widening it. Screen readers
+ * skip it: the row carries the profile action.
+ */
+@Composable
+private fun AuthorAvatar(jid: String?, author: String, onClick: (() -> Unit)?) {
+    if (onClick == null) {
+        HuddleAvatar(jid = jid, name = author, size = AvatarSize.MESSAGE)
+        return
+    }
+    Box(modifier = Modifier.clearAndSetSemantics {}) {
+        Box(
+            contentAlignment = Alignment.Center,
+            modifier = Modifier
+                .overhang(visible = AvatarSize.MESSAGE.dp, target = MIN_TOUCH_TARGET)
+                .clip(CircleShape)
+                .clickable(onClick = onClick),
+        ) {
+            HuddleAvatar(jid = jid, name = author, size = AvatarSize.MESSAGE)
+        }
+    }
+}
+
+/**
+ * Measures the content at [target] but takes only [visible] of layout,
+ * centred: a full touch target around a smaller face, with the layout
+ * (and the row rhythm) unchanged.
+ */
+private fun Modifier.overhang(visible: Dp, target: Dp): Modifier = layout { measurable, _ ->
+    val targetPx = target.roundToPx()
+    val visiblePx = visible.roundToPx()
+    val placeable = measurable.measure(Constraints.fixed(targetPx, targetPx))
+    layout(visiblePx, visiblePx) {
+        placeable.place((visiblePx - targetPx) / 2, (visiblePx - targetPx) / 2)
     }
 }
 
@@ -171,6 +244,10 @@ private fun StoredMessageRow(
     modifier: Modifier,
 ) {
     val author = authorNameOf(item)
+    val groupchat = isGroupchatRow(item)
+    val profileAuthor = MessageAuthor(name = author, jid = entry.authorJid, nick = author.takeIf { groupchat })
+    val openProfile = actions.onOpenProfile?.let { open -> { open(profileAuthor) } }
+    val openThread = actions.onOpenThread?.takeIf { entry.replyCount > 0 }?.let { open -> { open(item) } }
     val marks = MetaMarks(
         edited = item.edited && item.tombstone == null,
         pinned = entry.isPinned,
@@ -180,12 +257,17 @@ private fun StoredMessageRow(
         entry = entry,
         author = author,
         endsGroup = endsGroup,
-        onLongPress = if (item.rejected) null else ({ actions.onLongPress(item) }),
+        taps = RowTaps(
+            onLongPress = if (item.rejected) null else ({ actions.onLongPress(item) }),
+            onOpenThread = openThread,
+            onOpenProfile = openProfile,
+        ),
         modifier = modifier,
         header = {
             MessageHeader(
                 author = author,
-                badge = if (isGroupchatRow(item)) {
+                onAuthorClick = openProfile,
+                badge = if (groupchat) {
                     messageAuthorBadgeOf(item.authorJid, context.declaredBotJids) { context.authorPresence[author] }
                 } else {
                     null
@@ -204,28 +286,36 @@ private fun StoredMessageRow(
         }
         if (item.tombstone != null) {
             TombstoneLine()
-            return@RowFrame
+        } else {
+            StoredMessageBody(entry, item, marks, actions, context)
         }
-        MessageContent(item, context)
-        // A continuation row has no author line to carry its marks.
-        if (!entry.startsGroup && !marks.isEmpty) MetaLine(marks)
-        if (item.reactions.isNotEmpty()) {
-            ReactionPills(item.reactions) { emoji -> actions.onToggleReaction(item, emoji) }
+        // A deleted root keeps its card: the replies are still there.
+        if (openThread != null) {
+            ReplyCard(count = entry.replyCount, activity = entry.threadActivity, onClick = openThread)
         }
-        item.safetyScores?.let { scores ->
-            val category = safetyScoreChipCategory(scores) ?: return@let
-            var scoresOpen by remember { mutableStateOf(false) }
-            SafetyScoresChip(category = category, onClick = { scoresOpen = true })
-            if (scoresOpen) SafetyScoresSheet(scores = scores, onDismiss = { scoresOpen = false })
-        }
-        val openThread = actions.onOpenThread
-        if (entry.replyCount > 0 && openThread != null) {
-            ThreadChip(
-                count = entry.replyCount,
-                activity = entry.threadActivity,
-                onClick = { openThread(item) },
-            )
-        }
+    }
+}
+
+/** A live (not deleted) stored message: content, marks, reactions and scores. */
+@Composable
+private fun StoredMessageBody(
+    entry: FeedEntry,
+    item: TimelineItem,
+    marks: MetaMarks,
+    actions: MessageRowActions,
+    context: MessageRowContext,
+) {
+    MessageContent(item, context)
+    // A continuation row has no author line to carry its marks.
+    if (!entry.startsGroup && !marks.isEmpty) MetaLine(marks)
+    if (item.reactions.isNotEmpty()) {
+        ReactionPills(item.reactions) { emoji -> actions.onToggleReaction(item, emoji) }
+    }
+    item.safetyScores?.let { scores ->
+        val category = safetyScoreChipCategory(scores) ?: return@let
+        var scoresOpen by remember { mutableStateOf(false) }
+        SafetyScoresChip(category = category, onClick = { scoresOpen = true })
+        if (scoresOpen) SafetyScoresSheet(scores = scores, onDismiss = { scoresOpen = false })
     }
 }
 
@@ -241,6 +331,8 @@ private fun PendingMessageRow(
     // The name the server echo will carry, so the row does not change
     // name when it is confirmed.
     val author = context.selfBareJid?.let(::localpartOf) ?: stringResource(R.string.message_author_me)
+    val profileAuthor = MessageAuthor(name = author, jid = entry.authorJid, nick = null)
+    val openProfile = actions.onOpenProfile?.let { open -> { open(profileAuthor) } }
     val marks = MetaMarks(
         delivery = when {
             message.failed -> Delivery.Failed(message.localId)
@@ -253,11 +345,12 @@ private fun PendingMessageRow(
         entry = entry,
         author = author,
         endsGroup = endsGroup,
-        onLongPress = null,
+        taps = RowTaps(onLongPress = null, onOpenThread = null, onOpenProfile = openProfile),
         modifier = modifier,
         header = {
             MessageHeader(
                 author = author,
+                onAuthorClick = openProfile,
                 badge = null,
                 sentAt = entry.sentAt,
                 marks = marks,
@@ -281,6 +374,7 @@ private fun PendingMessageRow(
 @Composable
 private fun MessageHeader(
     author: String,
+    onAuthorClick: (() -> Unit)?,
     badge: AuthorBadge?,
     sentAt: Instant,
     marks: MetaMarks,
@@ -291,13 +385,7 @@ private fun MessageHeader(
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
         itemVerticalAlignment = Alignment.CenterVertically,
     ) {
-        Text(
-            text = author,
-            style = AuthorStyle,
-            color = Waddle.colors.fg,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
-        )
+        AuthorName(author = author, onClick = onAuthorClick)
         badge?.let { HatTag(it) }
         Text(
             text = clock.time(sentAt),
@@ -306,6 +394,31 @@ private fun MessageHeader(
             maxLines = 1,
         )
         MetaMarkItems(marks, onRetry)
+    }
+}
+
+/**
+ * The author's name. Tappable, it opens their profile; to a screen
+ * reader it stays plain text in the row, which carries that action.
+ */
+@Composable
+private fun AuthorName(author: String, onClick: (() -> Unit)?) {
+    Box(modifier = Modifier.clearAndSetSemantics { text = AnnotatedString(author) }) {
+        Text(
+            text = author,
+            style = AuthorStyle,
+            color = Waddle.colors.fg,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            // Compose widens the touch area of this short line to 48dp.
+            modifier = if (onClick != null) {
+                Modifier
+                    .clip(RoundedCornerShape(Waddle.radius.tag))
+                    .clickable(onClick = onClick)
+            } else {
+                Modifier
+            },
+        )
     }
 }
 
@@ -373,6 +486,7 @@ internal val AuthorStyle: TextStyle
     )
 
 private val ROW_GAP: Dp = 2.dp
+private val MIN_TOUCH_TARGET: Dp = 48.dp
 private val MENTION_BAR: Dp = 3.dp
 private val HAT_MAX_WIDTH: Dp = 120.dp
 private const val MENTION_BASE_ALPHA = 0.06f

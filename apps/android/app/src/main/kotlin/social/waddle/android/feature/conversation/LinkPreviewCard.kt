@@ -69,7 +69,10 @@ fun LinkPreviewCard(
         modifier = modifier
             .padding(top = Waddle.space.xxs)
             .widthIn(max = PREVIEW_MAX_WIDTH)
-            .fillMaxWidth(),
+            .fillMaxWidth()
+            // Without a link the card is inert, but a tap on it is still
+            // not a tap on the post (which would open its thread).
+            .then(if (open == null) Modifier.swallowTaps() else Modifier),
     ) {
         PreviewBody(preview, trustedMediaOrigin)
     }

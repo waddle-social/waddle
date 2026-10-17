@@ -102,6 +102,7 @@ fun TimelineList(
             onToggleReaction = actions.onToggleReaction,
             onOpenThread = actions.onOpenThread,
             onRetry = actions.onRetry,
+            onOpenProfile = actions.onOpenProfile,
             onQuoteClick = { parent ->
                 indexByKey["s:${parent.presentationId}"]?.let { index ->
                     scope.launch { listState.animateScrollToItem(index) }

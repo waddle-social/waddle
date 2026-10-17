@@ -51,6 +51,7 @@ fun DmScreen(
     onBack: () -> Unit,
     onOpenThread: (threadId: String) -> Unit,
     onOpenGroupDm: (roomJid: String, name: String) -> Unit = { _, _ -> },
+    onOpenDm: ((peerJid: String, name: String) -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: DmViewModel = viewModel(
@@ -91,6 +92,7 @@ fun DmScreen(
         onBack = onBack,
         onOpenThread = onOpenThread,
         searchTarget = MessageSearchTarget(peerJid, isGroupchat = false),
+        onOpenDm = onOpenDm,
         selfBareJid = session?.jid?.let(::bareJidOf),
         kind = ConversationKind.Dm(name),
         titleLeading = { DmHeaderAvatar(jid = bareJidOf(peerJid), name = name, presence = peerShow) },

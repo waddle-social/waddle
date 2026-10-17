@@ -100,4 +100,26 @@ class ConversationTimeTest {
         assertEquals("09:05", pinned.time(morning))
         assertEquals(DayLabel.Yesterday, pinned.labelOf(LocalDate.of(2026, 1, 1)))
     }
+
+    @Test
+    fun `ages bucket to now, minutes, hours, days, then the date`() {
+        val now = Instant.parse("2026-10-16T12:00:00Z")
+        val pinned = ConversationClock(
+            locale = Locale.UK,
+            use24Hour = true,
+            zone = ZoneOffset.UTC,
+            today = today,
+            now = { now },
+        )
+
+        assertEquals(Age.Now, pinned.ageOf(now.minusSeconds(59)))
+        assertEquals(Age.Now, pinned.ageOf(now.plusSeconds(600)))
+        assertEquals(Age.Minutes(5), pinned.ageOf(now.minusSeconds(5 * 60)))
+        assertEquals(Age.Hours(2), pinned.ageOf(now.minusSeconds(2 * 3600 + 59 * 60)))
+        assertEquals(Age.Days(6), pinned.ageOf(now.minusSeconds(6 * 86_400)))
+        assertEquals(
+            Age.On(DayLabel.Date(LocalDate.of(2026, 10, 9), withYear = false)),
+            pinned.ageOf(now.minusSeconds(7 * 86_400)),
+        )
+    }
 }

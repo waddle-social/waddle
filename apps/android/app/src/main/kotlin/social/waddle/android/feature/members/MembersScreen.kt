@@ -1,8 +1,5 @@
 package social.waddle.android.feature.members
 
-import androidx.compose.foundation.BorderStroke
-import androidx.compose.foundation.background
-import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -18,19 +15,15 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.outlined.ArrowBack
-import androidx.compose.material.icons.outlined.ChatBubbleOutline
 import androidx.compose.material.icons.outlined.Group
 import androidx.compose.material.icons.outlined.PersonAdd
 import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
@@ -46,13 +39,11 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.semantics.semantics
-import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -76,11 +67,9 @@ import social.waddle.android.ui.WaddleTopBar
 import social.waddle.android.ui.huddle.AvatarSize
 import social.waddle.android.ui.huddle.HuddleAvatar
 import social.waddle.android.ui.huddle.HuddleCard
-import social.waddle.android.ui.huddle.LiveDot
 import social.waddle.android.ui.huddle.PillButton
 import social.waddle.android.ui.huddle.PillTone
 import social.waddle.android.ui.huddle.SkeletonBlock
-import social.waddle.android.ui.huddle.glow
 import social.waddle.android.ui.huddleFieldColors
 import social.waddle.client.ffi.WaddleMucAffiliation
 import social.waddle.client.ffi.WaddleUserSearchEntry
@@ -193,9 +182,17 @@ fun MembersScreen(
     profileTarget?.let { row ->
         val selfJid = session?.jid?.let(::bareJidOf)
         val isSelf = row.jid != null && selfJid != null && normalizedBareJid(row.jid) == normalizedBareJid(selfJid)
-        MemberProfileSheet(
-            row = row,
-            canManage = state.canManage && !row.inferred && !isSelf && row.affiliation != WaddleMucAffiliation.OWNER,
+        val canManage = state.canManage && !row.inferred && !isSelf && row.affiliation != WaddleMucAffiliation.OWNER
+        PeerProfileSheet(
+            profile = PeerProfile(
+                displayName = row.displayName,
+                jid = row.jid,
+                presence = row.presence,
+                inHuddle = row.inHuddle,
+                affiliation = row.affiliation,
+                hats = row.hats,
+            ),
+            presenceLine = statusOf(row),
             onDismiss = { profileTarget = null },
             onMessage = row.jid?.takeIf { onOpenDm != null && !isSelf }?.let { jid ->
                 {
@@ -203,12 +200,22 @@ fun MembersScreen(
                     onOpenDm?.invoke(jid, row.displayName)
                 }
             },
-            actions = MemberSheetActions(
-                onSetAffiliation = { affiliation -> viewModel.setAffiliation(row, affiliation) },
-                onKick = { pendingAction = PendingAction.Kick(row) },
-                onBan = { pendingAction = PendingAction.Ban(row) },
-                onRemove = { pendingAction = PendingAction.Remove(row) },
-            ),
+            manage = if (canManage) {
+                {
+                    ManageActions(
+                        row = row,
+                        onDismiss = { profileTarget = null },
+                        actions = MemberSheetActions(
+                            onSetAffiliation = { affiliation -> viewModel.setAffiliation(row, affiliation) },
+                            onKick = { pendingAction = PendingAction.Kick(row) },
+                            onBan = { pendingAction = PendingAction.Ban(row) },
+                            onRemove = { pendingAction = PendingAction.Remove(row) },
+                        ),
+                    )
+                }
+            } else {
+                null
+            },
         )
     }
 
@@ -437,30 +444,6 @@ private fun MemberCard(row: MemberRow, onClick: () -> Unit) {
     }
 }
 
-/** Affiliation and hats as mono kickers: owner gold, admin teal, banned danger. */
-@Composable
-private fun RoleLine(affiliation: WaddleMucAffiliation, hats: List<String>) {
-    val colors = Waddle.colors
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
-    ) {
-        KickerText(text = affiliationLabel(affiliation), color = affiliationColor(affiliation))
-        hats.forEach { hat -> KickerText(text = hat, color = colors.actionText) }
-    }
-}
-
-@Composable
-private fun affiliationColor(affiliation: WaddleMucAffiliation): Color {
-    val colors = Waddle.colors
-    return when (affiliation) {
-        WaddleMucAffiliation.OWNER -> colors.goldText
-        WaddleMucAffiliation.ADMIN -> colors.actionText
-        WaddleMucAffiliation.OUTCAST -> colors.dangerText
-        WaddleMucAffiliation.MEMBER, WaddleMucAffiliation.NONE -> colors.fgMuted
-    }
-}
-
 /** Where someone is, in words (web member status line). */
 @Composable
 private fun statusOf(row: MemberRow): String = stringResource(
@@ -529,18 +512,6 @@ private fun MemberCardSkeleton() {
     }
 }
 
-/** Wire value stays `outcast`; only the label reads "Banned" (web parity). */
-@Composable
-private fun affiliationLabel(affiliation: WaddleMucAffiliation): String = stringResource(
-    when (affiliation) {
-        WaddleMucAffiliation.OWNER -> R.string.affiliation_owner
-        WaddleMucAffiliation.ADMIN -> R.string.affiliation_admin
-        WaddleMucAffiliation.MEMBER -> R.string.affiliation_member
-        WaddleMucAffiliation.OUTCAST -> R.string.affiliation_banned
-        WaddleMucAffiliation.NONE -> R.string.affiliation_none
-    },
-)
-
 /** The owner/admin verbs the profile sheet offers. */
 private data class MemberSheetActions(
     val onSetAffiliation: (WaddleMucAffiliation) -> Unit,
@@ -548,98 +519,6 @@ private data class MemberSheetActions(
     val onBan: () -> Unit,
     val onRemove: () -> Unit,
 )
-
-/**
- * A member's profile (web member profile sheet): who they are, where
- * they are — a glowing ember banner while in the huddle — "Message" when
- * a DM can be opened, and the management verbs for owners and admins.
- */
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun MemberProfileSheet(
-    row: MemberRow,
-    canManage: Boolean,
-    onDismiss: () -> Unit,
-    onMessage: (() -> Unit)?,
-    actions: MemberSheetActions,
-) {
-    val colors = Waddle.colors
-    ModalBottomSheet(onDismissRequest = onDismiss, containerColor = colors.surface) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
-            modifier = Modifier
-                .fillMaxWidth()
-                .navigationBarsPadding()
-                .padding(bottom = Waddle.space.md),
-        ) {
-            KickerText(text = stringResource(R.string.huddle_member_profile))
-            HuddleAvatar(
-                jid = row.jid,
-                name = row.displayName,
-                size = AvatarSize.XL,
-                presence = row.presence,
-                inHuddle = row.inHuddle,
-                ground = colors.surface,
-                modifier = Modifier.padding(vertical = Waddle.space.sm),
-            )
-            Text(
-                text = row.displayName,
-                style = MaterialTheme.typography.headlineSmall,
-                color = colors.fg,
-                textAlign = TextAlign.Center,
-                modifier = Modifier
-                    .padding(horizontal = Waddle.space.md)
-                    .semantics { heading() },
-            )
-            row.jid?.let {
-                Text(text = it, style = Waddle.type.time, color = colors.fgMuted, maxLines = 1)
-            }
-            Row(modifier = Modifier.padding(top = Waddle.space.xxs)) {
-                RoleLine(affiliation = row.affiliation, hats = row.hats)
-            }
-            if (row.inHuddle) {
-                HuddleBanner(modifier = Modifier.padding(top = Waddle.space.sm))
-            } else {
-                Text(text = statusOf(row), style = Waddle.type.control, color = colors.fgMuted)
-            }
-            onMessage?.let {
-                PillButton(
-                    text = stringResource(R.string.huddle_member_message),
-                    onClick = it,
-                    icon = Icons.Outlined.ChatBubbleOutline,
-                    modifier = Modifier.padding(top = Waddle.space.md),
-                )
-            }
-        }
-        if (canManage) {
-            ManageActions(row = row, onDismiss = onDismiss, actions = actions)
-        }
-    }
-}
-
-@Composable
-private fun HuddleBanner(modifier: Modifier = Modifier) {
-    val colors = Waddle.colors
-    val shape = RoundedCornerShape(Waddle.radius.panel)
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
-        modifier = modifier
-            .padding(horizontal = Waddle.space.md)
-            .glow(colors.glowLive, blur = BANNER_GLOW, cornerRadius = Waddle.radius.panel, spread = BANNER_GLOW_SPREAD)
-            .background(colors.liveSubtle, shape)
-            .border(BorderStroke(1.dp, colors.live), shape)
-            .padding(horizontal = Waddle.space.md, vertical = Waddle.space.xs),
-    ) {
-        LiveDot()
-        Text(
-            text = stringResource(R.string.huddle_member_in_huddle),
-            style = Waddle.type.control,
-            color = colors.liveText,
-        )
-    }
-}
 
 @Composable
 private fun ManageActions(row: MemberRow, onDismiss: () -> Unit, actions: MemberSheetActions) {
@@ -723,8 +602,6 @@ private const val SKELETON_CARDS = 4
 private val SKELETON_NAME = 120.dp
 private val SKELETON_ROLE = 72.dp
 private val RESULT_ROW = 56.dp
-private val BANNER_GLOW = 28.dp
-private val BANNER_GLOW_SPREAD = (-10).dp
 
 /** Semantics tags shared with instrumented tests. */
 object MembersScreenTestTags {

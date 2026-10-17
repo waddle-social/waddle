@@ -67,6 +67,7 @@ fun GroupDmScreen(
     onBack: () -> Unit,
     onOpenThread: (threadId: String) -> Unit,
     onOpenMembers: () -> Unit,
+    onOpenDm: ((peerJid: String, name: String) -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     // Group DMs are plain hidden MUCs: the channel conversation
@@ -94,6 +95,7 @@ fun GroupDmScreen(
         onBack = onBack,
         onOpenThread = onOpenThread,
         searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
+        onOpenDm = onOpenDm,
         selfBareJid = session?.jid?.let(::bareJidOf),
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
         extraTopBarActions = {

@@ -63,7 +63,9 @@ import social.waddle.client.ffi.WaddleNotifyMode
  * Shared conversation scaffold (channel + DM + thread): top bar,
  * timeline, composer. Marks the conversation active (unread clearing)
  * while resumed. [onOpenThread] is null on thread screens — threads do
- * not nest, so reply-count chips and the overview affordance hide.
+ * not nest, so reply cards, opening a thread from a post and the
+ * overview affordance hide. A message's avatar or author name opens
+ * their profile; [onOpenDm] adds its "Message" action.
  * [searchTarget] names the archive the top-bar search action queries;
  * null (thread screens) hides the affordance.
  */
@@ -75,6 +77,8 @@ fun ConversationScreen(
     onBack: () -> Unit,
     onOpenThread: ((threadId: String) -> Unit)? = null,
     searchTarget: MessageSearchTarget? = null,
+    /** Opens a DM from a message author's profile; `null` hides "Message". */
+    onOpenDm: ((peerJid: String, name: String) -> Unit)? = null,
     /** Own bare JID for the self-mention row highlight (XEP-0372). */
     selfBareJid: String? = null,
     /** Presence line under the title (XEP-0319 idle, DM screens). */
@@ -108,6 +112,7 @@ fun ConversationScreen(
             onBack = onBack,
             onOpenThread = onOpenThread,
             searchTarget = searchTarget,
+            onOpenDm = onOpenDm,
             selfBareJid = selfBareJid,
             trustedMediaOrigin = trustedMediaOrigin,
             chrome = ConversationChromeSlots(
@@ -148,6 +153,7 @@ private fun ConversationScaffold(
     onBack: () -> Unit,
     onOpenThread: ((threadId: String) -> Unit)?,
     searchTarget: MessageSearchTarget?,
+    onOpenDm: ((peerJid: String, name: String) -> Unit)?,
     selfBareJid: String?,
     trustedMediaOrigin: String?,
     chrome: ConversationChromeSlots,
@@ -167,6 +173,7 @@ private fun ConversationScaffold(
     val declaredBotJids by viewModel.declaredBotJids.collectAsStateWithLifecycle()
     var sheetTarget by remember { mutableStateOf<TimelineItem?>(null) }
     var moderateTarget by remember { mutableStateOf<TimelineItem?>(null) }
+    var profileTarget by remember { mutableStateOf<MessageAuthor?>(null) }
     var threadsOverviewOpen by remember { mutableStateOf(false) }
     var notifySheetOpen by remember { mutableStateOf(false) }
     var gifPickerOpen by remember { mutableStateOf(false) }
@@ -293,6 +300,7 @@ private fun ConversationScaffold(
                     onToggleReaction = viewModel::toggleReaction,
                     onOpenThread = onOpenThread?.let { open -> { item -> open(viewModel.threadIdFor(item)) } },
                     onRetry = viewModel::retry,
+                    onOpenProfile = { author -> profileTarget = author },
                 )
             }
             val rowContext = remember(selfBareJid, authorPresence, declaredBotJids, trustedMediaOrigin) {
@@ -371,6 +379,23 @@ private fun ConversationScaffold(
             onCopy = { clipboard.setText(AnnotatedString(item.body)) },
             onSetPinned = { pinned -> viewModel.setPinned(item, pinned) },
             onModerate = { moderateTarget = item },
+        )
+    }
+
+    profileTarget?.let { author ->
+        val peer = author.jid?.takeIf { canMessage(it, selfBareJid, viewModel.dmPeerJid) }
+        MessageAuthorProfileSheet(
+            author = author,
+            occupant = author.nick?.let { authorPresence[it] },
+            onDismiss = { profileTarget = null },
+            onMessage = if (peer != null && onOpenDm != null) {
+                {
+                    profileTarget = null
+                    onOpenDm(peer, author.name)
+                }
+            } else {
+                null
+            },
         )
     }
 

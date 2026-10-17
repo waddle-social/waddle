@@ -76,10 +76,44 @@
         <item quantity="one">%1$d reply · started by %2$s</item>
         <item quantity="other">%1$d replies · started by %2$s</item>
     </plurals>
-    <plurals name="thread_replies_chip">
+    <!-- The attached reply card under a thread root -->
+    <plurals name="thread_card_replies">
         <item quantity="one">%1$d reply</item>
         <item quantity="other">%1$d replies</item>
     </plurals>
+    <string name="thread_card_latest">%1$s: %2$s</string>
+    <string name="thread_reply_photo">Photo</string>
+    <string name="thread_reply_deleted">Message deleted</string>
+    <plurals name="thread_card_description">
+        <item quantity="one">%1$d reply, %2$s. Open thread</item>
+        <item quantity="other">%1$d replies, %2$s. Open thread</item>
+    </plurals>
+    <plurals name="thread_card_description_latest">
+        <item quantity="one">%1$d reply, latest from %2$s: %3$s, %4$s. Open thread</item>
+        <item quantity="other">%1$d replies, latest from %2$s: %3$s, %4$s. Open thread</item>
+    </plurals>
+    <string name="action_open_thread">Open thread</string>
+    <string name="author_open_profile">%1$s, open profile</string>
+    <!-- Compact ages ("2h"): reply card -->
+    <string name="age_now">now</string>
+    <string name="age_minutes">%1$dm</string>
+    <string name="age_hours">%1$dh</string>
+    <string name="age_days">%1$dd</string>
+    <!-- The same ages spoken (accessibility labels) -->
+    <string name="age_spoken_now">just now</string>
+    <plurals name="age_spoken_minutes">
+        <item quantity="one">%1$d minute ago</item>
+        <item quantity="other">%1$d minutes ago</item>
+    </plurals>
+    <plurals name="age_spoken_hours">
+        <item quantity="one">%1$d hour ago</item>
+        <item quantity="other">%1$d hours ago</item>
+    </plurals>
+    <plurals name="age_spoken_days">
+        <item quantity="one">%1$d day ago</item>
+        <item quantity="other">%1$d days ago</item>
+    </plurals>
+    <string name="age_spoken_on">on %1$s</string>
     <!-- XEP-0422 urn:waddle:safety-scores:1 (automated message scores) -->
     <string name="safety_scores_chip_description">%1$s score; view message scores</string>
     <string name="safety_scores_title">Message scores</string>
