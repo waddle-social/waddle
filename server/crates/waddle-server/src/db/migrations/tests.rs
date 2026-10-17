@@ -37,10 +37,10 @@ async fn test_migration_runner_global() {
     assert_eq!(auth_context_columns, 3);
 
     // Check version (global + shared waddle schema). `current_version` reads
-    // the ledger max, which the waddle namespace (V1026) still dominates
+    // the ledger max, which the waddle namespace (V1027) still dominates
     // after global V0015.
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1026));
+    assert_eq!(version, Some(1027));
 }
 
 #[tokio::test]
@@ -157,7 +157,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
         applied,
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027
         ]
     );
 
@@ -178,7 +178,7 @@ async fn test_waddle_v1002_adds_pin_permission_to_existing_v1001_schema() {
     assert_eq!(public_room, 1);
 
     let version = runner.current_version(&db).await.unwrap();
-    assert_eq!(version, Some(1026));
+    assert_eq!(version, Some(1027));
 }
 
 #[tokio::test]
@@ -237,7 +237,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     drop(conn);
 
     // `MigrationRunner::global()` composes global + waddle migrations,
-    // so the runner also reports applying 1001 through 1026 (the waddle
+    // so the runner also reports applying 1001 through 1027 (the waddle
     // schema tables) on top of V0004. The test's invariant is V0004
     // specifically, asserted via the `pragma_table_info` probe below;
     // the version list is included in the assertion so a future PR
@@ -249,7 +249,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
         vec![
             4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
             1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021,
-            1022, 1023, 1024, 1025, 1026
+            1022, 1023, 1024, 1025, 1026, 1027
         ]
     );
 
@@ -313,7 +313,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(
         version,
-        Some(1026),
+        Some(1027),
         "current version reflects the highest applied across global+waddle"
     );
 }
@@ -473,7 +473,7 @@ async fn sqlite_pre_ledger_history_is_adopted_once_before_pending_migrations() {
         runner.run(&db).await.unwrap(),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Sqlite);
@@ -786,7 +786,7 @@ async fn v1010_rolls_forward_from_a_v1009_ledger() {
         applied,
         vec![
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026
+            1024, 1025, 1026, 1027
         ]
     );
     assert_eq!(
@@ -959,7 +959,7 @@ async fn postgres_pre_ledger_history_is_adopted_once_before_pending_migrations()
         runner.run(&db).await.expect("adopt and run migrations"),
         vec![
             1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015,
-            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
+            1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027
         ]
     );
     let expected_checksum = migration_checksum(&first, DatabaseDriver::Postgres);
@@ -2328,7 +2328,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
         vec![
             6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
             1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
-            1023, 1024, 1025, 1026
+            1023, 1024, 1025, 1026, 1027
         ]
     );
     assert_postgres_column_type(&db, "upload_slots", "size_bytes", "bigint").await;
@@ -2406,7 +2406,7 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026
+            1024, 1025, 1026, 1027
         ]
     );
 
@@ -3060,7 +3060,7 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
         vec![
             7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
             1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026
+            1024, 1025, 1026, 1027
         ]
     );
 
@@ -3334,7 +3334,7 @@ async fn postgres_v1003_widens_existing_attachment_size_bytes() {
         applied,
         vec![
             1003, 1004, 1005, 1006, 1007, 1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016,
-            1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026
+            1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027
         ]
     );
     assert_postgres_column_type(&db, "attachments", "size_bytes", "bigint").await;
@@ -4038,7 +4038,7 @@ async fn sqlite_v1012_rolls_forward_from_v1011() {
             .expect("apply V1012 through V1014"),
         vec![
             1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
-            1026
+            1026, 1027
         ]
     );
     assert_nonterminal_monitoring_index(&db).await;
@@ -4104,7 +4104,7 @@ async fn postgres_v1012_resets_epoch_zero_soak_rows() {
             .expect("apply V1012 through V1014"),
         vec![
             1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
-            1026
+            1026, 1027
         ]
     );
     assert!(postgres_table_exists(&db, "sm_sessions").await);
@@ -4138,7 +4138,7 @@ async fn sqlite_v1014_resets_only_ledger_owned_ingress_and_sm_state() {
             .run(&db)
             .await
             .expect("apply V1014"),
-        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026]
+        vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027]
     );
 
     assert_v1014_cutover_result(&db, 0).await;
@@ -4170,7 +4170,9 @@ async fn postgres_v1014_resets_at_epoch_zero_and_epoch_one_with_trigger_proof() 
                 .run(&db)
                 .await
                 .expect("apply V1014 at live epoch"),
-            vec![1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026]
+            vec![
+                1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027
+            ]
         );
         assert_v1014_cutover_result(&db, epoch).await;
 
@@ -4419,7 +4421,7 @@ async fn migration_v1012_recreates_sql_sm_store(database_url: &str) {
             .expect("cutover migration"),
         vec![
             1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023, 1024, 1025,
-            1026
+            1026, 1027
         ]
     );
     drop(storage);
@@ -4597,6 +4599,12 @@ async fn v1012_concurrent_sm_initializers(database_url: &str) {
     // initializer, so it must already exist under the runner lock too (#1756).
     conn.query("SELECT message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms, custody_payload, original_receipt_at_ms, disposition FROM sm_ingress_appends", ())
         .await.expect("complete append ledger schema before startup");
+    conn.query(
+        "SELECT stream_id, from_exclusive, to_inclusive FROM sm_acknowledged_windows",
+        (),
+    )
+    .await
+    .expect("complete ACK journal schema before concurrent startup");
     let index_sql = match driver {
         DatabaseDriver::Postgres => "SELECT COUNT(*) FROM pg_indexes WHERE schemaname = current_schema() AND indexname IN ('idx_sm_sessions_detached', 'idx_sm_unacked_dedup')",
         DatabaseDriver::Sqlite => "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND name IN ('idx_sm_sessions_detached', 'idx_sm_unacked_dedup')",
@@ -4699,7 +4707,7 @@ async fn assert_v1019_custody_cutover(db: &Database) {
             .run(db)
             .await
             .expect("apply custody cutover migration"),
-        vec![1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026]
+        vec![1019, 1020, 1021, 1022, 1023, 1024, 1025, 1026, 1027]
     );
     let conn = db
         .guard()
@@ -5156,7 +5164,7 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
             .run(db)
             .await
             .expect("append V1025"),
-        vec![1025, 1026]
+        vec![1025, 1026, 1027]
     );
     let conn = db.guard().await.expect("catalog");
     let references_query = match db.driver() {
@@ -5239,7 +5247,7 @@ async fn assert_v1026_preserves_envelopes_and_expands_versions(db: &Database) {
     }
     assert_eq!(
         MigrationRunner::single().run(db).await.expect("V1026"),
-        vec![1026]
+        vec![1026, 1027]
     );
     assert!(MigrationRunner::single()
         .run(db)
@@ -5356,4 +5364,119 @@ async fn postgres_v1026_preserves_envelopes_and_expands_versions() {
     assert_v1026_preserves_envelopes_and_expands_versions(&db).await;
     drop(db);
     drop_postgres_schema(&admin, &schema).await;
+}
+
+async fn assert_v1027_preserves_sm_sources_and_adopts_ack_journal(
+    db: &Database,
+    preexisting_journal: bool,
+) {
+    let previous_catalog = || {
+        MigrationRunner::new(
+            global::all()
+                .into_iter()
+                .chain(
+                    waddle::all()
+                        .into_iter()
+                        .filter(|migration| migration.version <= 1026),
+                )
+                .collect(),
+        )
+    };
+    previous_catalog()
+        .run(db)
+        .await
+        .expect("apply catalog through V1026");
+    {
+        let conn = db.guard().await.expect("seed guard");
+        conn.execute("INSERT INTO sm_sessions (stream_id, user_id, full_jid, inbound_count, outbound_count, last_acked, detached_at_ms, max_resume_duration_ms, carbons_enabled, roster_interested, blocklist_interested, presence_available, presence_priority) VALUES ('ack-migration-source', 'alice', 'alice@example.com/web', 7, 12, 11, 1, 60000, 0, 0, 0, 1, 0)", ()).await.expect("seed retained source");
+        conn.execute("INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) VALUES ('ack-migration-source', 12, 'retained-opaque-queue', 123)", ()).await.expect("seed retained queue bytes");
+        if preexisting_journal {
+            // Model the runtime initializer from a deployed pre-migration build.
+            conn.execute_batch(waddle::V1027_SM_ACKNOWLEDGED_WINDOWS)
+                .await
+                .expect("legacy runtime journal");
+            conn.execute("INSERT INTO sm_acknowledged_windows (stream_id, from_exclusive, to_inclusive) VALUES ('ack-migration-source', 10, 11)", ()).await.expect("seed outstanding settlement");
+        }
+    }
+    assert_eq!(
+        MigrationRunner::single()
+            .run(db)
+            .await
+            .expect("apply additive ACK migration"),
+        vec![1027]
+    );
+    assert!(MigrationRunner::single()
+        .run(db)
+        .await
+        .expect("idempotent ACK migration")
+        .is_empty());
+    {
+        let conn = db.guard().await.expect("verification guard");
+        let mut source = conn.query("SELECT inbound_count, outbound_count, last_acked, max_resume_duration_ms FROM sm_sessions WHERE stream_id = 'ack-migration-source'", ()).await.expect("retained source");
+        let row = source.next().await.unwrap().unwrap();
+        assert_eq!(
+            (
+                row.get::<i64>(0).unwrap(),
+                row.get::<i64>(1).unwrap(),
+                row.get::<i64>(2).unwrap(),
+                row.get::<i64>(3).unwrap()
+            ),
+            (7, 12, 11, 60000)
+        );
+        drop(source);
+        let mut queue = conn.query("SELECT sequence, stanza_xml, original_receipt_at_ms FROM sm_unacked WHERE stream_id = 'ack-migration-source'", ()).await.expect("retained queue");
+        let row = queue.next().await.unwrap().unwrap();
+        assert_eq!(row.get::<i64>(0).unwrap(), 12);
+        assert_eq!(row.get::<String>(1).unwrap(), "retained-opaque-queue");
+        assert_eq!(row.get::<i64>(2).unwrap(), 123);
+        drop(queue);
+        let mut windows = conn
+            .query(
+                "SELECT stream_id, from_exclusive, to_inclusive FROM sm_acknowledged_windows",
+                (),
+            )
+            .await
+            .expect("migrated ACK journal");
+        if preexisting_journal {
+            let row = windows
+                .next()
+                .await
+                .unwrap()
+                .expect("existing window survives migration");
+            assert_eq!(row.get::<String>(0).unwrap(), "ack-migration-source");
+            assert_eq!(row.get::<i64>(1).unwrap(), 10);
+            assert_eq!(row.get::<i64>(2).unwrap(), 11);
+        }
+        assert!(windows.next().await.unwrap().is_none());
+    }
+    assert!(matches!(
+        previous_catalog().run(db).await,
+        Err(DatabaseError::MigrationLedger(
+            MigrationLedgerError::UnknownVersion { version: 1027, .. }
+        ))
+    ));
+}
+
+#[tokio::test]
+async fn sqlite_v1027_preserves_sm_sources_and_adopts_existing_ack_journal() {
+    for preexisting in [false, true] {
+        let db = Database::in_memory("v1027-ack-upgrade")
+            .await
+            .expect("SQLite");
+        assert_v1027_preserves_sm_sources_and_adopts_ack_journal(&db, preexisting).await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_v1027_preserves_sm_sources_and_adopts_existing_ack_journal() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    for preexisting in [false, true] {
+        let schema = unique_postgres_schema_name("v1027_ack_upgrade");
+        let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+        assert_v1027_preserves_sm_sources_and_adopts_ack_journal(&db, preexisting).await;
+        drop(db);
+        drop_postgres_schema(&admin, &schema).await;
+    }
 }

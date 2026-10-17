@@ -213,9 +213,12 @@ ALTER TABLE ingress_messages ADD CONSTRAINT ingress_messages_envelope_version_ch
         tx.execute("DELETE FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_effect_descendants'", ()).await.expect("remove later manifest entry");
         tx.execute("ALTER TABLE ingress_epoch_guard_manifest ENABLE ALWAYS TRIGGER ingress_epoch_guard_manifest_append_only_row", ()).await.expect("restore append-only protection");
     }
-    tx.execute("DELETE FROM _migrations WHERE version IN (1025, 1026)", ())
-        .await
-        .expect("remove later ledger entry");
+    tx.execute(
+        "DELETE FROM _migrations WHERE version IN (1025, 1026, 1027)",
+        (),
+    )
+    .await
+    .expect("remove later ledger entry");
     tx.commit().await.expect("downgrade fixture commit");
 }
 
