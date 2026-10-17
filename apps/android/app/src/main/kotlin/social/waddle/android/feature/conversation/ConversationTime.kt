@@ -62,6 +62,8 @@ class ConversationClock(
     val today: LocalDate,
     /** Locale skeleton → pattern; Android's ICU best pattern in production. */
     private val bestPattern: (Locale, String) -> String = ::androidBestPattern,
+    /** The current instant, for "2h ago" labels; goldens pin it. */
+    private val now: () -> Instant = Instant::now,
 ) {
     private val timeFormatter = DateTimeFormatter.ofPattern(
         bestPattern(locale, if (use24Hour) SKELETON_24H else SKELETON_12H),
@@ -74,7 +76,10 @@ class ConversationClock(
     fun time(instant: Instant): String = timeFormatter.format(instant.atZone(zone))
 
     /** The same device on another day (screenshots pin "today"). */
-    fun withToday(day: LocalDate): ConversationClock = ConversationClock(locale, use24Hour, zone, day, bestPattern)
+    fun withToday(day: LocalDate): ConversationClock = ConversationClock(locale, use24Hour, zone, day, bestPattern, now)
+
+    /** How long before now [instant] was, bucketed for a compact label. */
+    fun ageOf(instant: Instant): Age = ageBetween(instant, now(), this)
 
     fun dayOf(instant: Instant): LocalDate = instant.atZone(zone).toLocalDate()
 
@@ -101,6 +106,44 @@ class ConversationClock(
         other.today == today
 
     override fun hashCode(): Int = listOf(locale, use24Hour, zone, today).hashCode()
+}
+
+/** A compact "how long ago": now, minutes, hours, days, then the day itself. */
+sealed interface Age {
+    data object Now : Age
+
+    data class Minutes(val minutes: Long) : Age
+
+    data class Hours(val hours: Long) : Age
+
+    data class Days(val days: Long) : Age
+
+    /** A week or more ago: the date reads better than a count. */
+    data class On(val label: DayLabel) : Age
+}
+
+/** [Age] buckets (web relative-time parity); a future [instant] (clock skew) is [Age.Now]. */
+fun ageBetween(instant: Instant, now: Instant, clock: ConversationClock): Age {
+    val minutes = Duration.between(instant, now).toMinutes()
+    val hours = minutes / MINUTES_PER_HOUR
+    val days = hours / HOURS_PER_DAY
+    return when {
+        minutes < 1 -> Age.Now
+        hours < 1 -> Age.Minutes(minutes)
+        days < 1 -> Age.Hours(hours)
+        days < DAYS_IN_WEEK -> Age.Days(days)
+        else -> Age.On(clock.labelOf(clock.dayOf(instant)))
+    }
+}
+
+/** The words for an [Age]: "now", "5m", "2h", "3d" or a date. */
+@Composable
+fun ConversationClock.ageText(instant: Instant): String = when (val age = ageOf(instant)) {
+    Age.Now -> stringResource(R.string.age_now)
+    is Age.Minutes -> stringResource(R.string.age_minutes, age.minutes)
+    is Age.Hours -> stringResource(R.string.age_hours, age.hours)
+    is Age.Days -> stringResource(R.string.age_days, age.days)
+    is Age.On -> dayText(age.label)
 }
 
 /** The words for a day separator. */
@@ -163,6 +206,8 @@ private const val SKELETON_12H = "hm"
 private const val SKELETON_DATE = "EEEMMMd"
 private const val SKELETON_DATE_YEAR = "EEEMMMdy"
 private const val DAYS_IN_WEEK = 7L
+private const val MINUTES_PER_HOUR = 60L
+private const val HOURS_PER_DAY = 24L
 
 /** Lands just past midnight, so LocalDate.now() is already the new day. */
 private const val MIDNIGHT_SLACK_MILLIS = 50L

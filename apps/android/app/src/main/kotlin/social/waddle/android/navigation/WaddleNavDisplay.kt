@@ -97,6 +97,8 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     onOpenMembers = {
                         backStack.add(WaddleNavKey.Members(roomJid = key.roomJid, name = key.name))
                     },
+                    // Pushed on top, so back returns to the conversation.
+                    onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name)) },
                 )
             }
             entry<WaddleNavKey.Members> { key ->
@@ -130,6 +132,8 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     onOpenGroupDm = { roomJid, name ->
                         backStack.add(WaddleNavKey.GroupDm(roomJid = roomJid, name = name))
                     },
+                    // Pushed on top, so back returns to the conversation.
+                    onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name)) },
                 )
             }
             entry<WaddleNavKey.GroupDm>(metadata = ListDetailSceneStrategy.detailPane()) { key ->
@@ -149,6 +153,8 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     onOpenMembers = {
                         backStack.add(WaddleNavKey.Members(roomJid = key.roomJid, name = key.name))
                     },
+                    // Pushed on top, so back returns to the conversation.
+                    onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name)) },
                 )
             }
             entry<WaddleNavKey.Thread>(metadata = ListDetailSceneStrategy.extraPane()) { key ->
@@ -157,6 +163,8 @@ fun WaddleNavDisplay(sideEffects: @Composable (NavBackStack<NavKey>) -> Unit) {
                     isGroupchat = key.isGroupchat,
                     threadId = key.threadId,
                     onBack = { backStack.popSafely() },
+                    // Pushed on top, so back returns to the conversation.
+                    onOpenDm = { peerJid, name -> backStack.add(WaddleNavKey.Dm(peerJid = peerJid, name = name)) },
                 )
             }
             entry<WaddleNavKey.DmList> {

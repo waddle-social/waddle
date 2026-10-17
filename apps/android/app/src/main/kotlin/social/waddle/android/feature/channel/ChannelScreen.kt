@@ -66,6 +66,7 @@ fun ChannelScreen(
     onBack: () -> Unit,
     onOpenThread: (threadId: String) -> Unit,
     onOpenMembers: () -> Unit = {},
+    onOpenDm: ((peerJid: String, name: String) -> Unit)? = null,
 ) {
     val graph = LocalAppGraph.current
     val viewModel: ChannelViewModel = viewModel(
@@ -164,6 +165,7 @@ fun ChannelScreen(
         onBack = onBack,
         onOpenThread = onOpenThread,
         searchTarget = MessageSearchTarget(roomJid, isGroupchat = true),
+        onOpenDm = onOpenDm,
         selfBareJid = session?.jid?.let(::bareJidOf),
         trustedMediaOrigin = trustedPreviewOriginOf(session, graph.serverUrl),
         slashCommandHost = SlashCommandHost(

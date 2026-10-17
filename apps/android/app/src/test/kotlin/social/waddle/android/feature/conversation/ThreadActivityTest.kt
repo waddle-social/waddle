@@ -5,22 +5,34 @@ import androidx.compose.ui.text.font.FontWeight
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
+import social.waddle.android.client.store.MessageTombstone
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.testMessage
 import social.waddle.android.feature.search.highlighted
+import social.waddle.client.ffi.WaddleSharedFile
 import java.time.Instant
 import java.time.ZoneOffset
 
-/** The thread chip's faces, count and recency, and the search match highlight. */
+/** The reply card's faces, count, recency and latest reply, and the search match highlight. */
 class ThreadActivityTest {
     private val room = "room@muc.waddle.test"
 
-    private fun item(id: String, nick: String, at: String, thread: String? = null, jid: String? = null) = TimelineItem(
+    private fun item(
+        id: String,
+        nick: String,
+        at: String,
+        thread: String? = null,
+        jid: String? = null,
+        body: String = "hi",
+        files: List<WaddleSharedFile> = emptyList(),
+        isSticker: Boolean = false,
+        tombstone: MessageTombstone? = null,
+    ) = TimelineItem(
         id = id,
         conversationJid = room,
         from = "$room/$nick",
-        body = "hi",
+        body = body,
         timestamp = at,
         isMine = false,
         source = TimelineSource.Live(
@@ -29,14 +41,34 @@ class ThreadActivityTest {
                 stanzaId = id,
                 stanzaIdBy = room,
                 from = "$room/$nick",
+                body = body,
                 messageType = "groupchat",
                 isMuc = true,
                 thread = thread,
                 timestamp = at,
+                isSticker = isSticker,
+                sharedFiles = files,
             ),
         ),
+        tombstone = tombstone,
         authorJid = jid,
     )
+
+    private fun file(mediaType: String, url: String = "https://upload.waddle.test/f") = WaddleSharedFile(
+        url = url,
+        name = null,
+        mediaType = mediaType,
+        size = null,
+        width = null,
+        height = null,
+        desc = null,
+        hashes = emptyList(),
+        disposition = "attachment",
+        encrypted = null,
+    )
+
+    private fun reply(body: String = "hi", files: List<WaddleSharedFile> = emptyList(), isSticker: Boolean = false) =
+        item("r", "bob", "2026-10-16T09:01:00Z", thread = "root", body = body, files = files, isSticker = isSticker)
 
     @Test
     fun `repliers are deduped, most recent first, with the last reply time`() {
@@ -53,16 +85,71 @@ class ThreadActivityTest {
         assertEquals(listOf("bob", "carol"), activity.participants.map { it.name })
         assertEquals(0, activity.moreParticipants)
         assertEquals(Instant.parse("2026-10-16T09:03:00Z"), activity.lastReplyAt)
+        assertEquals(
+            LatestReply("bob", ReplySnippet.Text("hi"), Instant.parse("2026-10-16T09:03:00Z")),
+            activity.latestReply,
+        )
     }
 
     @Test
-    fun `more than five repliers collapse into a count`() {
+    fun `the latest reply is the newest by wire time, not arrival`() {
+        val items = listOf(
+            item("root", "alice", "2026-10-16T09:00:00Z"),
+            item("r1", "bob", "2026-10-16T09:05:00Z", thread = "root", body = "late page, newer"),
+            // An older archive page landing after a newer live reply.
+            item("r2", "carol", "2026-10-16T09:02:00Z", thread = "root", body = "older"),
+        )
+        val latest = threadActivityOf(items, selfBareJid = null).getValue("root").latestReply
+
+        assertEquals("bob", latest?.author)
+        assertEquals(ReplySnippet.Text("late page, newer"), latest?.snippet)
+    }
+
+    @Test
+    fun `a snippet is one plain line`() {
+        assertEquals(
+            ReplySnippet.Text("Love this, watching now"),
+            replySnippetOf(reply(body = "  Love this,\n\n\twatching   now \n")),
+        )
+    }
+
+    @Test
+    fun `media-only replies read as a photo or an attachment`() {
+        val image = file("image/png")
+        val csv = file("text/csv", url = "https://upload.waddle.test/c")
+        assertEquals(ReplySnippet.Photo, replySnippetOf(reply(body = "", files = listOf(image))))
+        assertEquals(ReplySnippet.Photo, replySnippetOf(reply(body = image.url, files = listOf(image))))
+        assertEquals(ReplySnippet.Photo, replySnippetOf(reply(body = "https://media.giphy.com/media/x/giphy.gif")))
+        val sticker = reply(body = "waving penguin", files = listOf(image), isSticker = true)
+        assertEquals(ReplySnippet.Photo, replySnippetOf(sticker))
+        assertEquals(
+            ReplySnippet.Attachment,
+            replySnippetOf(reply(body = "", files = listOf(image, csv))),
+        )
+    }
+
+    @Test
+    fun `a captioned file quotes its caption`() {
+        assertEquals(
+            ReplySnippet.Text("the export"),
+            replySnippetOf(reply(body = "the export", files = listOf(file("text/csv")))),
+        )
+    }
+
+    @Test
+    fun `a retracted reply reads as deleted`() {
+        val retracted = item("r", "bob", "2026-10-16T09:01:00Z", tombstone = MessageTombstone.Retracted)
+        assertEquals(ReplySnippet.Deleted, replySnippetOf(retracted))
+    }
+
+    @Test
+    fun `more than three repliers collapse into a count`() {
         val replies = (1..7).map { n -> item("r$n", "p$n", "2026-10-16T09:0$n:00Z", thread = "root") }
         val activity = threadActivityOf(listOf(item("root", "alice", "2026-10-16T09:00:00Z")) + replies, null)
             .getValue("root")
 
         assertEquals(MAX_THREAD_FACES, activity.participants.size)
-        assertEquals(2, activity.moreParticipants)
+        assertEquals(4, activity.moreParticipants)
         assertEquals("p7", activity.participants.first().name)
     }
 

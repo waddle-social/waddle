@@ -5,18 +5,22 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.IntrinsicSize
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.outlined.KeyboardArrowRight
 import androidx.compose.material.icons.outlined.DeleteOutline
 import androidx.compose.material.icons.outlined.ErrorOutline
 import androidx.compose.material.icons.outlined.PushPin
@@ -31,7 +35,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawBehind
-import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
@@ -42,6 +45,7 @@ import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.pluralStringResource
 import androidx.compose.ui.res.stringResource
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
@@ -50,6 +54,7 @@ import androidx.compose.ui.text.font.FontStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.text.withStyle
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.unit.dp
 import social.waddle.android.R
 import social.waddle.android.avatar.PeerAvatar
@@ -284,35 +289,97 @@ private fun warmthOf(count: Int): Float = when {
 }
 
 /**
- * "N replies" under a thread root (web `.chat-thread-chip`): the
- * repliers' faces, the count in teal and when the last reply came. A
- * short teal elbow in the avatar column ties it to the message.
+ * The attached reply card under a thread root: the repliers' faces, the
+ * count in teal and how long ago the last reply came, then the newest
+ * reply as one muted line. One button, at least 48dp tall; a teal rail
+ * from the avatar gutter ties it to the post.
  */
 @Composable
-internal fun ThreadChip(count: Int, activity: ThreadActivity?, onClick: () -> Unit) {
+internal fun ReplyCard(count: Int, activity: ThreadActivity?, onClick: () -> Unit) {
     val colors = Waddle.colors
     val clock = rememberConversationClock()
-    val elbow = colors.action.copy(alpha = ELBOW_ALPHA)
+    val shape = RoundedCornerShape(Waddle.radius.card)
+    val countText = pluralStringResource(R.plurals.thread_card_replies, count, count)
+    val age = activity?.lastReplyAt?.let { clock.ageText(it) }
+    val latest = activity?.latestReply
+    val snippet = latest?.let { snippetText(it.snippet) }
+    val description = if (latest != null && snippet != null) {
+        val latestAge = clock.ageText(latest.sentAt)
+        pluralStringResource(R.plurals.thread_card_description_latest, count, count, latest.author, snippet, latestAge)
+    } else {
+        pluralStringResource(R.plurals.thread_card_description, count, count, age.orEmpty())
+    }
     Row(
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
         modifier = Modifier
             .padding(top = Waddle.space.xxs)
-            .threadElbow(elbow)
-            .clip(RoundedCornerShape(Waddle.radius.tag))
-            .clickable(role = Role.Button, onClick = onClick)
-            .padding(vertical = Waddle.space.xxs),
+            .threadRail(colors.action.copy(alpha = RAIL_ALPHA))
+            .fillMaxWidth()
+            .heightIn(min = REPLY_CARD_MIN_HEIGHT)
+            .clip(shape)
+            .background(colors.surface, shape)
+            .border(1.dp, colors.border, shape)
+            .clickable(
+                onClickLabel = stringResource(R.string.action_open_thread),
+                role = Role.Button,
+                onClick = onClick,
+            )
+            .clearAndSetSemantics { contentDescription = description }
+            .padding(horizontal = Waddle.space.sm, vertical = Waddle.space.xs),
     ) {
-        activity?.let { ThreadFaces(it) }
-        Text(
-            text = pluralStringResource(R.plurals.thread_replies_chip, count, count),
-            style = MetaStyle.copy(fontWeight = FontWeight.SemiBold),
-            color = colors.actionText.copy(alpha = THREAD_TEXT_ALPHA),
-        )
-        activity?.lastReplyAt?.let { last ->
-            Text(text = clock.stamp(last), style = Waddle.type.time, color = colors.fgMuted, maxLines = 1)
+        Column(
+            verticalArrangement = Arrangement.spacedBy(Waddle.space.xxs),
+            modifier = Modifier.weight(1f),
+        ) {
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.spacedBy(Waddle.space.xs),
+            ) {
+                activity?.let { ThreadFaces(it) }
+                Text(
+                    text = countText,
+                    style = MetaStyle.copy(fontWeight = FontWeight.SemiBold),
+                    color = colors.actionText,
+                    maxLines = 1,
+                )
+                age?.let {
+                    Text(text = "· $it", style = Waddle.type.time, color = colors.fgMuted, maxLines = 1)
+                }
+            }
+            if (latest != null && snippet != null) {
+                val line = stringResource(R.string.thread_card_latest, latest.author, snippet)
+                val authorStart = line.indexOf(latest.author)
+                val authorEnd = authorStart + latest.author.length
+                Text(
+                    text = buildAnnotatedString {
+                        append(line)
+                        val bold = SpanStyle(fontWeight = FontWeight.SemiBold)
+                        if (authorStart >= 0) addStyle(bold, authorStart, authorEnd)
+                    },
+                    style = MetaStyle,
+                    color = colors.fgMuted,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
+        Icon(
+            Icons.AutoMirrored.Outlined.KeyboardArrowRight,
+            contentDescription = null,
+            tint = colors.fgMuted,
+            modifier = Modifier.size(CHEVRON),
+        )
     }
+}
+
+/** The words a reply snippet stands for. */
+@Composable
+private fun snippetText(snippet: ReplySnippet): String = when (snippet) {
+    is ReplySnippet.Text -> snippet.text
+    ReplySnippet.Photo -> stringResource(R.string.thread_reply_photo)
+    ReplySnippet.Attachment -> stringResource(R.string.message_attachment)
+    ReplySnippet.Deleted -> stringResource(R.string.thread_reply_deleted)
 }
 
 @Composable
@@ -327,7 +394,7 @@ private fun ThreadFaces(activity: ThreadActivity) {
                 jid = person.jid,
                 displayName = person.name,
                 size = THREAD_FACE,
-                modifier = Modifier.border(FACE_RING, colors.bg, CircleShape),
+                modifier = Modifier.border(FACE_RING, colors.surface, CircleShape),
             )
         }
     }
@@ -340,18 +407,26 @@ private fun ThreadFaces(activity: ThreadActivity) {
     }
 }
 
-/** A 16dp teal elbow in the avatar column, drawn outside the chip's bounds. */
-private fun Modifier.threadElbow(color: Color): Modifier = drawBehind {
-    val column = (AvatarSize.MESSAGE.dp / 2 + COLUMN_GAP).toPx()
-    val x = -column
+/**
+ * The teal rail in the avatar gutter: down from the card's top, round
+ * the corner and across to the card's edge, drawn outside its bounds.
+ */
+private fun Modifier.threadRail(color: Color): Modifier = drawBehind {
+    val mirrored = layoutDirection == LayoutDirection.Rtl
+
+    // Horizontal positions measured from the card's start edge.
+    fun x(fromStart: Float): Float = if (mirrored) size.width - fromStart else fromStart
+
+    val gutter = -(AvatarSize.MESSAGE.dp / 2 + COLUMN_GAP).toPx()
     val y = size.height / 2f
     val reach = ELBOW_REACH.toPx()
     val path = Path().apply {
-        moveTo(x, y - reach)
-        quadraticTo(x, y, x + reach, y)
+        moveTo(x(gutter), 0f)
+        lineTo(x(gutter), y - reach)
+        quadraticTo(x(gutter), y, x(gutter + reach), y)
+        lineTo(x(0f), y)
     }
     drawPath(path, color, style = Stroke(width = ELBOW_STROKE.toPx(), cap = StrokeCap.Round))
-    drawCircle(color, radius = ELBOW_STROKE.toPx(), center = Offset(x + reach, y))
 }
 
 /** Meta and chip text: Outfit 12. */
@@ -370,12 +445,15 @@ private val FACE_RING = 1.5.dp
 private val COLUMN_GAP = WaddleTokens.Space.sm
 private val ELBOW_REACH = 8.dp
 private val ELBOW_STROKE = 1.5.dp
+private val CHEVRON = 18.dp
+
+/** The card is one button: a full touch target even on one line. */
+private val REPLY_CARD_MIN_HEIGHT = 48.dp
 private const val TOMBSTONE_ALPHA = 0.55f
 private const val QUOTE_BAR_ALPHA = 0.55f
 private const val OWN_FILL_ALPHA = 0.14f
 private const val OWN_BORDER_ALPHA = 0.4f
-private const val ELBOW_ALPHA = 0.55f
-private const val THREAD_TEXT_ALPHA = 0.85f
+private const val RAIL_ALPHA = 0.55f
 private const val WARM_LOW = 2
 private const val WARM_MID = 3
 private const val WARM_HIGH = 5

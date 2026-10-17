@@ -18,6 +18,7 @@ import org.robolectric.annotation.Config
 import org.robolectric.annotation.GraphicsMode
 import social.waddle.android.client.MentionCandidate
 import social.waddle.android.client.store.PresenceShow
+import social.waddle.android.client.testPresence
 import social.waddle.android.feature.conversation.ConversationKind
 import social.waddle.android.feature.conversation.ConversationScreen
 import social.waddle.android.feature.conversation.DmHeaderAvatar
@@ -26,6 +27,7 @@ import social.waddle.android.feature.conversation.FeedContext
 import social.waddle.android.feature.conversation.HeaderHuddle
 import social.waddle.android.feature.conversation.MentionPopover
 import social.waddle.android.feature.conversation.MessageActionList
+import social.waddle.android.feature.conversation.MessageAuthor
 import social.waddle.android.feature.conversation.MessageComposer
 import social.waddle.android.feature.conversation.MessageRowActions
 import social.waddle.android.feature.conversation.MessageRowContext
@@ -33,9 +35,13 @@ import social.waddle.android.feature.conversation.MessageSheetActions
 import social.waddle.android.feature.conversation.RoomHeaderSubline
 import social.waddle.android.feature.conversation.SheetHandle
 import social.waddle.android.feature.conversation.TimelineList
+import social.waddle.android.feature.conversation.authorProfileOf
 import social.waddle.android.feature.conversation.feedEntriesOf
+import social.waddle.android.feature.conversation.presenceWordOf
+import social.waddle.android.feature.members.PeerProfileContent
 import social.waddle.android.feature.search.MessageSearchTarget
 import social.waddle.android.theme.Waddle
+import social.waddle.client.ffi.WaddleMucAffiliation
 import java.util.Locale
 import java.util.TimeZone
 
@@ -43,9 +49,9 @@ import java.util.TimeZone
  * The real conversation screen ([ConversationScreen] over a real
  * [social.waddle.android.feature.conversation.ConversationViewModel] with a
  * fake transport): a busy room, an empty room, a DM with its presence
- * header, a thread; plus the message action sheet and the mention
- * popover. Locale, zone, clock, the 24-hour setting and reduced motion
- * are pinned. Re-record after an intended change:
+ * header, a thread; plus the message action sheet, the profile a
+ * message author opens and the mention popover. Locale, zone, clock,
+ * the 24-hour setting and reduced motion are pinned. Re-record after an intended change:
  * `./gradlew :app:recordRoborazziFossDebug`.
  */
 @RunWith(AndroidJUnit4::class)
@@ -199,6 +205,49 @@ class ConversationScreenshotTest {
                             onSetPinned = {},
                             onModerate = {},
                         ),
+                    )
+                }
+            }
+        }
+    }
+
+    @Test
+    @Config(qualifiers = "w411dp-h760dp-xxhdpi")
+    fun authorProfileSheet() = captureThemed("conversation_author_profile") {
+        ConversationFixtures.Pinned {
+            // Carol's avatar tapped in #general: her room role from the
+            // occupant presence, her presence and status, and "Message".
+            val profile = authorProfileOf(
+                author = MessageAuthor(name = "carol", jid = "carol@waddle.test", nick = "carol"),
+                occupant = testPresence(
+                    from = "${ConversationFixtures.ROOM}/carol",
+                    mucAffiliation = WaddleMucAffiliation.ADMIN,
+                    mucJid = "carol@waddle.test/laptop",
+                ).copy(status = "Benchmarking MAM cold reads"),
+                person = null,
+                contact = null,
+            )
+            val colors = Waddle.colors
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(colors.bg),
+            ) {
+                Column(
+                    modifier = Modifier
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .background(
+                            colors.surface,
+                            RoundedCornerShape(topStart = Waddle.radius.card, topEnd = Waddle.radius.card),
+                        )
+                        .padding(bottom = Waddle.space.md),
+                ) {
+                    SheetHandle()
+                    PeerProfileContent(
+                        profile = profile,
+                        presenceLine = profile.presence?.let { presenceWordOf(it, idleAge = null) },
+                        onMessage = {},
                     )
                 }
             }

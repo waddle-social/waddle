@@ -207,6 +207,9 @@ open class ConversationViewModel(
     /** True on thread screens: a thread inherits its parent conversation's settings. */
     val isThread: Boolean get() = threadId != null
 
+    /** The peer of a 1:1 conversation (or of its thread); `null` in rooms. */
+    val dmPeerJid: String? get() = conversationJid.takeIf { !isGroupchat }
+
     private val _actionFailures = MutableSharedFlow<VerbResult.Failure>(extraBufferCapacity = 4)
 
     /** Fired when a conversation action (reaction, retraction, pin/unpin) is refused. */

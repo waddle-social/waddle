@@ -49,9 +49,11 @@ internal object ConversationFixtures {
         use24Hour = true,
         zone = ZoneOffset.UTC,
         today = ScreenshotFixtures.TODAY,
+        now = { NOW },
     )
 
-    private val OPENED_AT: Long = Instant.parse("2026-10-16T09:20:00Z").toEpochMilli()
+    private val NOW: Instant = Instant.parse("2026-10-16T09:20:00Z")
+    private val OPENED_AT: Long = NOW.toEpochMilli()
 
     /** A transport whose newest page answers at once and holds nothing more. */
     private object SettledIo : ConversationIo {

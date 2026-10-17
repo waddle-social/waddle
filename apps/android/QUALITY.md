@@ -45,6 +45,8 @@ other session of the account is online.
 | Channels, DMs, group DMs | ✅ | `XmppSessionManagerTest` | `timeline`, `dms`, `home` | — |
 | Grouped rows, day separators, unread divider, mentions | ✅ | `FeedEntriesTest` | `timeline` | — |
 | Replies, threads, reactions, corrections, retraction | ✅ | `XmppSessionManagerVerbsTest` | `timeline`, `message_actions` | — |
+| Attached reply card under thread roots (faces, count, age, latest reply); tapping a post with replies opens its thread | 🟡 | `ThreadActivityTest`, `ConversationTimeTest` | `conversation_mention_popover` | — |
+| Message avatar or author name opens the author's profile, with "Message" to their DM (timeline and thread) | 🟡 | `MessageAuthorTest` | `conversation_author_profile` | — |
 | Composer (formatting, mentions, slash commands, attachments) | ✅ | — | `composer` | — |
 | Read markers and sync (0333, 0490) | ✅ | `XmppSessionManagerReadStateTest` | — | — |
 | Search (MAM full text) | ✅ | — | — | — |
