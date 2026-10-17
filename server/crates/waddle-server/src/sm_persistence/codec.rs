@@ -449,6 +449,41 @@ fn decode_ingress_receipts(
         .collect()
 }
 
+/// Decode metadata for broad maintenance scans without letting one poison row
+/// hide healthy streams. Exact-key and exact-JID lookups stay fail closed.
+pub(crate) async fn decode_session_scan(
+    mut rows: crate::db::Rows,
+    scan: &'static str,
+) -> Result<Vec<PersistedSession>, SmPersistenceError> {
+    let mut sessions = Vec::new();
+    let mut poison_sessions = 0usize;
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| SmPersistenceError::Other(error.to_string()))?
+    {
+        match decode_session(&row) {
+            Ok(session) => sessions.push(session),
+            Err(error) => {
+                let stream_id = row
+                    .get::<String>(0)
+                    .unwrap_or_else(|_| "<unreadable>".to_owned());
+                tracing::debug!(%stream_id, %error, scan,
+                    "skipping session whose row failed to decode (poison pill)");
+                poison_sessions += 1;
+            }
+        }
+    }
+    if poison_sessions > 0 {
+        tracing::warn!(
+            count = poison_sessions,
+            scan,
+            "skipped poison-pill session(s); listing proceeds with remaining sessions"
+        );
+    }
+    Ok(sessions)
+}
+
 #[cfg(test)]
 mod presence_payloads_tests {
     use super::{parse_presence_payloads, serialize_presence_payloads};
@@ -501,39 +536,4 @@ mod presence_payloads_tests {
             r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='n' ver='v'/>"#;
         assert!(parse_presence_payloads(Some(lone_caps.to_string())).is_err());
     }
-}
-
-/// Decode metadata for broad maintenance scans without letting one poison row
-/// hide healthy streams. Exact-key and exact-JID lookups stay fail closed.
-pub(crate) async fn decode_session_scan(
-    mut rows: crate::db::Rows,
-    scan: &'static str,
-) -> Result<Vec<PersistedSession>, SmPersistenceError> {
-    let mut sessions = Vec::new();
-    let mut poison_sessions = 0usize;
-    while let Some(row) = rows
-        .next()
-        .await
-        .map_err(|error| SmPersistenceError::Other(error.to_string()))?
-    {
-        match decode_session(&row) {
-            Ok(session) => sessions.push(session),
-            Err(error) => {
-                let stream_id = row
-                    .get::<String>(0)
-                    .unwrap_or_else(|_| "<unreadable>".to_owned());
-                tracing::debug!(%stream_id, %error, scan,
-                    "skipping session whose row failed to decode (poison pill)");
-                poison_sessions += 1;
-            }
-        }
-    }
-    if poison_sessions > 0 {
-        tracing::warn!(
-            count = poison_sessions,
-            scan,
-            "skipped poison-pill session(s); listing proceeds with remaining sessions"
-        );
-    }
-    Ok(sessions)
 }

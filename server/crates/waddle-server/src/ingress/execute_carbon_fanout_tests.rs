@@ -789,6 +789,8 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
                 extra.stream_id = "remote-carbon-extra-stream".into();
                 extra.jid = extra_target.clone();
                 extra.occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
+                extra.promotion_custody =
+                    waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
                 sm.store_session(extra).await.expect("store extra sibling");
             }
         },
