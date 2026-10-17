@@ -67,8 +67,18 @@ enum MessageThreadCardText {
         return true
     }
 
-    /// "3 replies, latest from guzzle: Love this, 2 hr. ago".
-    static func summary(_ thread: ThreadSummary) -> String {
+    /// "11:11" today, else "Oct 16, 2026 at 11:11": for labels that are
+    /// not re-rendered as time passes.
+    static func absoluteTime(_ date: Date, calendar: Calendar = .current) -> String {
+        if calendar.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(date: .abbreviated, time: .shortened)
+    }
+
+    /// "3 replies, latest from guzzle: Love this, 2 hr. ago", with the
+    /// time written by `time`.
+    static func summary(_ thread: ThreadSummary, time: (Date) -> String) -> String {
         var text = count(thread.replyCount)
         if let latest = thread.latestReply {
             text += ", latest from \(author(latest)): \(snippet(latest.snippet)), \(time(latest.sentAt))"
@@ -76,8 +86,15 @@ enum MessageThreadCardText {
         return text
     }
 
-    /// The card's VoiceOver label.
+    /// The card's VoiceOver label, with a relative time; the card
+    /// re-renders each minute.
     static func accessibilityLabel(_ thread: ThreadSummary) -> String {
-        "\(summary(thread)). Open thread"
+        "\(summary(thread, time: time)). Open thread"
+    }
+
+    /// The thread part of the row's VoiceOver label. The row is not
+    /// re-rendered as time passes, so its time is absolute.
+    static func rowSummary(_ thread: ThreadSummary) -> String {
+        summary(thread, time: { absoluteTime($0) })
     }
 }

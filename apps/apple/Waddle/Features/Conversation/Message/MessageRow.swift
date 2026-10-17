@@ -55,12 +55,16 @@ private struct MessageRowContent: View {
         HStack(alignment: .top, spacing: isCompact ? Theme.Spacing.s : Theme.Spacing.m) {
             gutter(author: author)
                 .frame(width: avatarSize, alignment: .trailing)
-            VStack(alignment: .leading, spacing: isCompact ? Theme.Spacing.xxs : Theme.Spacing.xs) {
+            VStack(alignment: .leading, spacing: contentSpacing) {
                 if entry.startsGroup {
-                    // Above the body, so the name's grown hit area wins
-                    // where the two overlap.
-                    MessageRowHeader(author: author, item: item) { openProfile(author) }
-                        .zIndex(1)
+                    MessageRowHeader(
+                        author: author,
+                        item: item,
+                        topSlop: topPadding,
+                        bottomSlop: contentSpacing
+                    ) {
+                        openProfile(author)
+                    }
                 }
                 MessageRowBody(
                     entry: entry,
@@ -76,6 +80,15 @@ private struct MessageRowContent: View {
                     actions.showSafetyScores(for: item)
                 }
             }
+        }
+        .overlayPreferenceValue(MessageThreadCardBoundsKey.self, alignment: .topLeading) { card in
+            MessageThreadRail(
+                card: card,
+                gutterX: avatarSize / 2,
+                // Under the avatar, or under the time the gutter shows on
+                // hover in a continued row.
+                top: entry.startsGroup ? avatarSize + Theme.Spacing.xs : Theme.Spacing.xl - Theme.Spacing.xs
+            )
         }
         .padding(.horizontal, Theme.Spacing.l)
         .padding(.top, topPadding)
@@ -142,6 +155,11 @@ private struct MessageRowContent: View {
         #endif
     }
 
+    /// Between the header and the body's parts.
+    private var contentSpacing: CGFloat {
+        isCompact ? Theme.Spacing.xxs : Theme.Spacing.xs
+    }
+
     private var topPadding: CGFloat {
         guard entry.startsGroup else { return Theme.Spacing.xxs }
         return isCompact ? Theme.Spacing.xs : Theme.Spacing.m
@@ -150,9 +168,16 @@ private struct MessageRowContent: View {
     @ViewBuilder
     private func gutter(author: MessageAuthor) -> some View {
         if entry.startsGroup {
+            // Up only into the row's own top padding; below the avatar the
+            // gutter is empty.
             let slop = max(0, (Theme.Size.minHitTarget - avatarSize) / 2)
             MessageAvatar(author: author, size: avatarSize)
-                .authorProfileButton(name: author.name, horizontalSlop: slop, verticalSlop: slop) {
+                .authorProfileButton(
+                    name: author.name,
+                    horizontalSlop: slop,
+                    topSlop: min(slop, topPadding),
+                    bottomSlop: slop
+                ) {
                     openProfile(author)
                 }
         } else if isHovering {

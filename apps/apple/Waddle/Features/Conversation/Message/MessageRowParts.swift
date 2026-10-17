@@ -124,22 +124,16 @@ struct MessageDeliveryView: View {
 
 /// The attached reply card under a thread root: reply faces, "N replies ·
 /// time", then the newest loaded reply as "author: snippet". The whole
-/// card is one button that opens the thread; an elbow rail joins it to
-/// the post above.
+/// card is one button that opens the thread, as wide as the content
+/// column. It publishes its bounds so the row can draw the thread rail
+/// from the avatar gutter into it (`MessageThreadRail`). Re-rendered each
+/// minute so the relative time stays current.
 struct MessageThreadCard: View {
     let summary: ThreadSummary
     let action: () -> Void
 
-    private static let elbowWidth: CGFloat = 12
-    /// Down to the middle of the card's first line.
-    private static let elbowHeight: CGFloat = 20
-
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            MessageThreadElbow()
-                .stroke(Color.cardBorder, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
-                .frame(width: Self.elbowWidth, height: Self.elbowHeight)
-                .accessibilityHidden(true)
+        TimelineView(.everyMinute) { _ in
             Button(action: action) {
                 label
             }
@@ -148,6 +142,7 @@ struct MessageThreadCard: View {
             .accessibilityLabel(Text(MessageThreadCardText.accessibilityLabel(summary)))
             .accessibilityAddTraits(.isButton)
         }
+        .anchorPreference(key: MessageThreadCardBoundsKey.self, value: .bounds) { $0 }
         .padding(.top, Theme.Spacing.xxs)
     }
 
@@ -225,19 +220,60 @@ private struct MessageThreadCardSurface: View {
     }
 }
 
-/// The thread rail: down from the post, then across into the card.
+/// The reply card's bounds, for the row's thread rail.
+struct MessageThreadCardBoundsKey: PreferenceKey {
+    static var defaultValue: Anchor<CGRect>? { nil }
+
+    static func reduce(value: inout Anchor<CGRect>?, nextValue: () -> Anchor<CGRect>?) {
+        value = value ?? nextValue()
+    }
+}
+
+/// The thread rail in the avatar gutter: down from under the avatar,
+/// then across into the reply card's leading edge. Overlaid on the row's
+/// content (gutter and column), so `gutterX` and `top` are in that space.
+struct MessageThreadRail: View {
+    let card: Anchor<CGRect>?
+    /// Horizontal center of the avatar gutter.
+    let gutterX: CGFloat
+    /// Where the rail starts, below whatever the gutter shows.
+    let top: CGFloat
+
+    /// Down to the middle of the card's first line.
+    private static let joinDepth: CGFloat = 20
+
+    var body: some View {
+        GeometryReader { proxy in
+            if let card {
+                let rect = proxy[card]
+                MessageThreadElbow(
+                    start: CGPoint(x: gutterX, y: top),
+                    end: CGPoint(x: rect.minX, y: rect.minY + min(Self.joinDepth, rect.height / 2))
+                )
+                .stroke(Color.cardBorder, style: StrokeStyle(lineWidth: 1.5, lineCap: .round, lineJoin: .round))
+            }
+        }
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
+    }
+}
+
+/// Down from `start`, then a rounded corner across to `end`.
 private struct MessageThreadElbow: Shape {
+    let start: CGPoint
+    let end: CGPoint
+
     func path(in rect: CGRect) -> Path {
-        let x = rect.minX + 1
-        let radius = min(rect.width - 1, rect.height) * 0.75
         var path = Path()
-        path.move(to: CGPoint(x: x, y: rect.minY))
-        path.addLine(to: CGPoint(x: x, y: rect.maxY - radius))
+        guard end.x > start.x, end.y > start.y else { return path }
+        let radius = min(8, end.x - start.x, end.y - start.y)
+        path.move(to: start)
+        path.addLine(to: CGPoint(x: start.x, y: end.y - radius))
         path.addQuadCurve(
-            to: CGPoint(x: x + radius, y: rect.maxY),
-            control: CGPoint(x: x, y: rect.maxY)
+            to: CGPoint(x: start.x + radius, y: end.y),
+            control: CGPoint(x: start.x, y: end.y)
         )
-        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY))
+        path.addLine(to: end)
         return path
     }
 }
@@ -281,23 +317,28 @@ private struct MessageThreadFaces: View {
 
 extension View {
     /// Wraps this view in a plain button that opens `name`'s profile. The
-    /// hit area grows by `horizontalSlop` and `verticalSlop` on each side,
-    /// toward the minimum tap target, without moving the layout.
+    /// hit area grows by `horizontalSlop` on each side and by `topSlop`
+    /// and `bottomSlop`, toward the minimum tap target, without moving the
+    /// layout. Callers keep the slop inside empty space they own, so the
+    /// grown area never covers a neighbouring control.
     func authorProfileButton(
         name: String,
         horizontalSlop: CGFloat,
-        verticalSlop: CGFloat,
+        topSlop: CGFloat,
+        bottomSlop: CGFloat,
         action: @escaping () -> Void
     ) -> some View {
         Button(action: action) {
             self
                 .padding(.horizontal, horizontalSlop)
-                .padding(.vertical, verticalSlop)
+                .padding(.top, topSlop)
+                .padding(.bottom, bottomSlop)
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .padding(.horizontal, -horizontalSlop)
-        .padding(.vertical, -verticalSlop)
+        .padding(.top, -topSlop)
+        .padding(.bottom, -bottomSlop)
         .accessibilityLabel(Text("\(name), open profile"))
         .help(Text("Open profile"))
     }

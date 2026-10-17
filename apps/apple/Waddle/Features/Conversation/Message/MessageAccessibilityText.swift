@@ -15,7 +15,7 @@ enum MessageAccessibilityText {
             parts.append(reactionCount == 1 ? "1 reaction" : "\(reactionCount) reactions")
         }
         if let thread, thread.replyCount > 0 {
-            parts.append(MessageThreadCardText.summary(thread))
+            parts.append(MessageThreadCardText.rowSummary(thread))
         }
         if item.safetyScores?.notableSignalRows.contains(where: { $0.category == .isQuestion }) == true {
             parts.append("Question signal")
