@@ -43,9 +43,12 @@ spec:
     cutoverGuard:
       enabled: true
     updateStrategy:
-      # #1976: all replicas must understand durable resume ACK settlement
-      # before rolling upgrades can safely consume the retained SM sources.
-      type: Recreate
+      # #1976: the ACK-journal cutover reached both replicas via Recreate.
+      # Keep the publisher-derived live cutover guard enabled for rolling upgrades.
+      type: RollingUpdate
+      rollingUpdate:
+        maxSurge: 1
+        maxUnavailable: 0
     image:
       repository: ghcr.io/waddle-social/waddle
       tag: main
