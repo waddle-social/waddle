@@ -766,7 +766,7 @@ async fn promotion_inventory_stale_missing_source_does_not_block_healthy_drain()
 }
 
 #[tokio::test]
-async fn promotion_inventory_owned_missing_source_keeps_reconciliation_failure() {
+async fn promotion_inventory_owned_missing_source_retains_custody_without_blocking_healthy_work() {
     for shutdown in [false, true] {
         let storage = Arc::new(BlockingFirstAtomicStore::new());
         storage.release_first_store();
@@ -785,24 +785,30 @@ async fn promotion_inventory_owned_missing_source_keeps_reconciliation_failure()
             .await
             .expect("uncertain source deletion");
 
-        let error = if shutdown {
-            registry
+        let mut healthy = detached_session("healthy-next-to-unresolved", "bob@example.com/web");
+        healthy.max_resume_time = Some(0);
+        registry
+            .store_session(healthy)
+            .await
+            .expect("store healthy neighbour");
+        let drained = if shutdown {
+            let batch = registry
                 .drain_all_for_shutdown()
                 .await
-                .expect_err("owned source cannot be abandoned")
+                .expect("healthy shutdown continues");
+            assert!(
+                batch.lost_claims.is_empty(),
+                "unresolved source is not proven claim loss"
+            );
+            batch.sessions
         } else {
             registry
                 .drain_expired()
                 .await
-                .expect_err("owned source cannot be skipped")
+                .expect("healthy expiry continues")
         };
-        assert!(
-            matches!(
-                error,
-                waddle_xmpp::stream_management::SmRegistryError::Internal(_)
-            ),
-            "owned-source reconciliation failure must not become a proven claim loss"
-        );
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].stream_id, "healthy-next-to-unresolved");
         assert!(registry
             .live_session_ids()
             .expect("retained source")
