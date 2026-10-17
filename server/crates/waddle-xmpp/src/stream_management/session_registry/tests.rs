@@ -1946,6 +1946,7 @@ async fn shutdown_drained_session_is_not_a_terminal_release_retry() {
             .drain_all_for_shutdown()
             .await
             .expect("drain")
+            .sessions
             .len(),
         1
     );
@@ -4859,7 +4860,10 @@ async fn assert_ambiguous_claim_survives_displacement(
         let drained = registry.drain_expired().await;
         if rotate_identity {
             assert!(
-                drained.is_err(),
+                drained
+                    .expect("skip predecessor custody")
+                    .iter()
+                    .all(|session| session.stream_id != old_stream),
                 "a new incarnation cannot promote the previous owner's queue"
             );
             assert!(
@@ -5250,7 +5254,8 @@ async fn pending_promotion_is_live_until_durable_confirmation() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("begin promotion");
+        .expect("begin promotion")
+        .sessions;
     assert_eq!(drained.len(), 1);
     assert_eq!(
         registry.live_session_ids().expect("live inventory"),
@@ -5287,7 +5292,8 @@ async fn reclaimed_hydration_does_not_publish_over_a_pending_promotion() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("begin promotion");
+        .expect("begin promotion")
+        .sessions;
     assert_eq!(drained.len(), 1);
     let reservation = registry
         .reserve_reclaimed_claim_capacity(&entity)
@@ -5328,6 +5334,7 @@ async fn concurrent_retry_drains_lease_a_promotion_exactly_once() {
         .drain_all_for_shutdown()
         .await
         .expect("begin promotion")
+        .sessions
         .into_iter()
         .next()
         .expect("drained session");
@@ -5621,7 +5628,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
 
     // Simulate mid-promotion: the stream leaves memory (janitor drain /
     // displacement) but its durable rows survive un-confirmed.
-    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
 
     // Retraction arrives during the window.
@@ -5781,7 +5788,7 @@ async fn reinsert_for_retry_makes_session_drainable_but_never_resumable() {
     let session = realistic_test_session("stream-reinsert");
     registry.store_session(session).await.unwrap();
 
-    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
     assert!(registry.drain_expired().await.unwrap().is_empty());
 
@@ -6069,7 +6076,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
     registry.store_session(session).await.unwrap();
 
     // Janitor drains the session off both maps (mid-promotion).
-    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
 
     // Retraction lands during the window: the off-map durable sweep

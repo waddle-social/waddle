@@ -46,10 +46,10 @@ pub use session_registry::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, DetachedPresenceState, DetachedSession,
     DetachedUnackedStanza, InMemorySmSessionRegistry, PendingPromotionRetryRetention,
     RecentTombstoneRecord, ReclaimedClaimReservation, ReclaimedHydrationOutcome,
-    RemoteResumeAskOutcome, RemoteResumeAsker, ResumableSessionProbe, SmClaimCompletion,
-    SmRegistryError, SmSessionRegistry, StealTicket, StoredDetachedSession,
-    TombstoneScrubbedSmEntries, TombstoneScrubbedSmEntry, DEFAULT_MAX_SESSIONS,
-    TOMBSTONE_CLOCK_SKEW_SLACK,
+    RemoteResumeAskOutcome, RemoteResumeAsker, ResumableSessionProbe, ShutdownSmClaimLoss,
+    ShutdownSmDrainBatch, SmClaimCompletion, SmRegistryError, SmSessionRegistry, StealTicket,
+    StoredDetachedSession, TombstoneScrubbedSmEntries, TombstoneScrubbedSmEntry,
+    DEFAULT_MAX_SESSIONS, TOMBSTONE_CLOCK_SKEW_SLACK,
 };
 pub use stanzas::{SmAck, SmEnable, SmEnabled, SmFailed, SmRequest, SmResume, SmResumed, SmStanza};
 pub use state::{DetachedSessionSnapshot, StreamManagementState};

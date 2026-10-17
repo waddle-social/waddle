@@ -550,6 +550,260 @@ async fn promotion_inventory_nested_cancelled_captures_preserve_an_earlier_faile
     assert_eq!(recovered[0].outbound_count, 13);
 }
 
+#[tokio::test]
+async fn promotion_inventory_expiry_skips_a_lost_claim_without_blocking_healthy_work() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let claims = Arc::new(InProcessClaimStore::new());
+    let owner = NodeIdentity::new("inventory-node", "local");
+    let successor = NodeIdentity::new("inventory-node", "successor");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage.clone())
+        .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+    for (stream, jid) in [
+        ("stale-expiry", "alice@example.com/web"),
+        ("healthy-expiry", "bob@example.com/web"),
+    ] {
+        let mut session = detached_session(stream, jid);
+        session.max_resume_time = Some(0);
+        registry
+            .store_session(session)
+            .await
+            .expect("store expired session");
+    }
+    let entity = Entity::new(EntityType::SmSession, "stale-expiry");
+    let epoch = claims
+        .current_claim(&entity)
+        .await
+        .expect("claim")
+        .expect("local owner")
+        .claim_epoch;
+    claims
+        .release(&entity, &owner, epoch)
+        .await
+        .expect("release predecessor");
+    let successor_epoch = claims
+        .acquire(&entity, &successor)
+        .await
+        .expect("successor ownership");
+
+    let drained = registry
+        .drain_expired()
+        .await
+        .expect("continue healthy expiry");
+    assert_eq!(
+        drained
+            .iter()
+            .map(|session| session.stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["healthy-expiry"]
+    );
+    assert!(registry.confirm_drained("healthy-expiry").await);
+    assert!(storage
+        .get_session(&SmSessionId::new("stale-expiry"))
+        .await
+        .expect("source read")
+        .is_some());
+    assert!(claims
+        .fence(&entity, &successor, successor_epoch)
+        .await
+        .expect("successor fence"));
+}
+
+#[tokio::test]
+async fn promotion_inventory_stale_abandonment_preserves_a_newer_local_fence() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    let claims = Arc::new(InProcessClaimStore::new());
+    let owner = NodeIdentity::new("inventory-node", "local");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+    let original = detached_session("abandon-exact-fence", "alice@example.com/web");
+    registry
+        .store_session(original.clone())
+        .await
+        .expect("store original");
+    let prior = registry
+        .current_sm_claim_fence(&original.stream_id)
+        .expect("original fence");
+    registry.forget_claim_locally(&original.stream_id).await;
+    let entity = Entity::new(EntityType::SmSession, original.stream_id.clone());
+    claims
+        .release_exact(&entity, &owner, prior.epoch())
+        .await
+        .expect("retire original claim");
+    registry
+        .store_session(original.clone())
+        .await
+        .expect("adopt replacement");
+    let replacement = registry
+        .current_sm_claim_fence(&original.stream_id)
+        .expect("new fence");
+    assert_ne!(replacement.epoch(), prior.epoch());
+    registry
+        .reinsert_for_retry(original.clone())
+        .await
+        .expect("retain replacement custody");
+
+    assert!(!registry
+        .forget_promotion_claim_if_matches(
+            &original,
+            &waddle_xmpp::stream_management::ShutdownSmClaimLoss::Recorded(prior)
+        )
+        .await
+        .expect("exact abandonment"));
+    assert_eq!(
+        registry.current_sm_claim_fence(&original.stream_id),
+        Some(replacement)
+    );
+    let recovered = registry
+        .drain_expired()
+        .await
+        .expect("replacement remains drainable");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].occupancy_session, original.occupancy_session);
+}
+
+#[tokio::test]
+async fn promotion_inventory_stale_missing_source_does_not_block_healthy_drain() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    for shutdown in [false, true] {
+        let storage = Arc::new(BlockingFirstAtomicStore::new());
+        storage.release_first_store();
+        let claims = Arc::new(InProcessClaimStore::new());
+        let owner = NodeIdentity::new("stale-drain-node", "local");
+        let successor = NodeIdentity::new("stale-drain-node", "successor");
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(storage.clone())
+            .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+        let mut stale = detached_session("stale-deleted-source", "alice@example.com/web");
+        stale.detached_at = Instant::now() - Duration::from_secs(400);
+        registry
+            .store_session(stale.clone())
+            .await
+            .expect("store source");
+        storage.reject_metadata.store(true, Ordering::SeqCst);
+        assert!(registry.register_promotion_session(&stale).await.is_err());
+        storage.reject_metadata.store(false, Ordering::SeqCst);
+        let prior = registry
+            .current_sm_claim_fence(&stale.stream_id)
+            .expect("original fence");
+        let entity = Entity::new(EntityType::SmSession, stale.stream_id.clone());
+        claims
+            .release_exact(&entity, &owner, prior.epoch())
+            .await
+            .expect("retire predecessor");
+        let successor_epoch = claims
+            .acquire(&entity, &successor)
+            .await
+            .expect("successor ownership");
+        storage
+            .delete_session(&SmSessionId::new(&stale.stream_id))
+            .await
+            .expect("successor consumes source");
+
+        let mut healthy = detached_session("healthy-after-deletion", "bob@example.com/web");
+        healthy.max_resume_time = Some(0);
+        registry
+            .store_session(healthy)
+            .await
+            .expect("store healthy peer");
+        if shutdown {
+            let drained = registry
+                .drain_all_for_shutdown()
+                .await
+                .expect("continue shutdown drain");
+            assert_eq!(drained.sessions.len(), 2);
+            assert_eq!(drained.lost_claims.len(), 1);
+            let loss = drained
+                .lost_claims
+                .get(&SmSessionId::new(&stale.stream_id))
+                .expect("immutable loss proof");
+            assert!(registry
+                .forget_promotion_claim_if_matches(&stale, loss)
+                .await
+                .expect("retire stale local custody"));
+        } else {
+            let drained = registry
+                .drain_expired()
+                .await
+                .expect("continue healthy expiry");
+            assert_eq!(
+                drained
+                    .iter()
+                    .map(|session| session.stream_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["healthy-after-deletion"]
+            );
+        }
+        assert!(registry.confirm_drained("healthy-after-deletion").await);
+        assert!(storage
+            .get_session(&SmSessionId::new(&stale.stream_id))
+            .await
+            .expect("source stays consumed")
+            .is_none());
+        assert!(claims
+            .fence(&entity, &successor, successor_epoch)
+            .await
+            .expect("successor authority retained"));
+    }
+}
+
+#[tokio::test]
+async fn promotion_inventory_owned_missing_source_keeps_reconciliation_failure() {
+    for shutdown in [false, true] {
+        let storage = Arc::new(BlockingFirstAtomicStore::new());
+        storage.release_first_store();
+        let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+        let mut source = detached_session("owned-stale-source", "alice@example.com/web");
+        source.detached_at = Instant::now() - Duration::from_secs(400);
+        registry
+            .store_session(source.clone())
+            .await
+            .expect("store source");
+        storage.reject_metadata.store(true, Ordering::SeqCst);
+        assert!(registry.register_promotion_session(&source).await.is_err());
+        storage.reject_metadata.store(false, Ordering::SeqCst);
+        storage
+            .delete_session(&SmSessionId::new(&source.stream_id))
+            .await
+            .expect("uncertain source deletion");
+
+        let error = if shutdown {
+            registry
+                .drain_all_for_shutdown()
+                .await
+                .expect_err("owned source cannot be abandoned")
+        } else {
+            registry
+                .drain_expired()
+                .await
+                .expect_err("owned source cannot be skipped")
+        };
+        assert!(
+            matches!(
+                error,
+                waddle_xmpp::stream_management::SmRegistryError::Internal(_)
+            ),
+            "owned-source reconciliation failure must not become a proven claim loss"
+        );
+        assert!(registry
+            .live_session_ids()
+            .expect("retained source")
+            .contains(&source.stream_id));
+        assert!(storage
+            .get_session(&SmSessionId::new(&source.stream_id))
+            .await
+            .expect("source remains unresolved")
+            .is_none());
+    }
+}
+
 #[async_trait]
 impl SmPersistenceStorage for BlockingFirstAtomicStore {
     async fn append_promotion_stanza(
@@ -2003,7 +2257,8 @@ async fn xep0198_drain_all_for_shutdown_does_not_delete_durable_row_until_confir
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("drain_all_for_shutdown succeeds");
+        .expect("drain_all_for_shutdown succeeds")
+        .sessions;
     assert_eq!(drained.len(), 1, "one live session drained");
 
     // Durable row preserved — restart-recovery path.
@@ -2110,7 +2365,8 @@ async fn xep0198_drain_all_for_shutdown_skips_claimed_sessions() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("drain_all_for_shutdown");
+        .expect("drain_all_for_shutdown")
+        .sessions;
     let drained_ids: Vec<_> = drained.iter().map(|s| s.stream_id.as_str()).collect();
     assert!(
         drained_ids.contains(&"stream-detached"),
@@ -2401,7 +2657,8 @@ async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("shutdown drain");
+        .expect("shutdown drain")
+        .sessions;
     assert_eq!(
         drained.len(),
         1,

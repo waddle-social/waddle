@@ -3549,6 +3549,11 @@ mod tests {
         .await;
         let jid: jid::FullJid = "romeo@example.com/phone".parse().expect("full jid");
         let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
+        message.from = Some(
+            "juliet@example.com/balcony"
+                .parse()
+                .expect("peer sender JID"),
+        );
         message.type_ = xmpp_parsers::message::MessageType::Chat;
         message.bodies.insert(
             xmpp_parsers::message::Lang::new(),

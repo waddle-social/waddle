@@ -2065,7 +2065,7 @@ async fn retraction_racing_in_flight_promotion_does_not_deliver_retracted_conten
         .unwrap();
 
     // Step 1: drain (session now off both maps, held in a local).
-    let drained = sm_registry.drain_all_for_shutdown().await.unwrap();
+    let drained = sm_registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
 
     // Step 2: retraction scrub lands mid-promotion.
@@ -3447,6 +3447,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         .drain_all_for_shutdown()
         .await
         .expect("drain detached session for promotion")
+        .sessions
         .pop()
         .expect("detached promotion session exists");
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(

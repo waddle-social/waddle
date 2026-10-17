@@ -25,6 +25,11 @@ pub enum SmRegistryError {
     #[error("Storage-backed dependency unavailable ({0})")]
     StorageUnavailable(StorageOutageCause),
 
+    /// Exact source-fence rejection or terminal identity loss. Capacity,
+    /// timeouts, and backend uncertainty must never be converted to this.
+    #[error("Promotion inventory claim lost")]
+    PromotionClaimLost(super::ShutdownSmClaimLoss),
+
     #[error("Internal error: {0}")]
     Internal(String),
 }

@@ -26,6 +26,11 @@ Keep #1198 and #1807 bounded. Inventory lifecycle and quota handling must agree 
 - Portable pending storage can use a database separate from SM storage. Record an origin/sequence handoff receipt in the same transaction as pending insertion; quota rejection rolls back both. Keep receipts after delivery until the canonical SM source is confirmed deleted.
 - Bulk metadata scans skip and count corrupt rows. Exact-JID probes remain fail closed, and retraction sweeps use strict ID enumeration so corrupt metadata cannot hide readable message payloads.
 - Public detached append APIs accept typed stanzas; existing immutable replay bytes retain their established contract. Senderless server frames can use alternate live delivery but do not enter offline promotion or bounce retry loops. Existing MAM filtering and pending-retention expiry remain in place with added coverage.
+- Shutdown carries immutable evidence of an exact lost claim with each capture. It abandons only matching local custody without deleting durable state or repeating an unavailable authority lookup. Uncertain ownership retains custody without sink effects; expiry skips proven-lost sources and continues healthy work. A successor consuming a stale source row does not prevent unrelated recovery.
+
+## Final lifecycle verification
+
+The final lifecycle repair passed 234 focused registry, shutdown, expiry, self-fence, and PostgreSQL promotion regressions on the default stack. Formatting and diff checks passed, and independent adversarial review found no remaining actionable findings. Full all-feature workspace checks run in PR CI because the local disk cannot hold the complete test archive.
 
 ## Remaining limits
 

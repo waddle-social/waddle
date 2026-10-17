@@ -9,7 +9,7 @@ use super::claims::PendingPromotionRetryLease;
 use super::persistence_codec::{
     detached_to_persisted, parse_xml_to_persisted_unacked, persisted_to_detached,
 };
-use super::{DetachedSession, InMemorySmSessionRegistry, SmRegistryError};
+use super::{DetachedSession, InMemorySmSessionRegistry, ShutdownSmClaimLoss, SmRegistryError};
 
 fn lock_error<T>(_: std::sync::PoisonError<T>) -> SmRegistryError {
     SmRegistryError::Internal("Promotion inventory lock poisoned".to_owned())
@@ -80,30 +80,45 @@ impl InMemorySmSessionRegistry {
     ) -> Result<DetachedSession, SmRegistryError> {
         // A recorded fence must still authorize this exact incarnation. Never
         // replace a lost fence by reacquiring a newer claim for stale work.
-        if self.current_sm_claim_fence(&session.stream_id).is_some() {
+        if let Some(fence) = self.current_sm_claim_fence(&session.stream_id) {
             let Some(authority) = self
                 .retirement_identity_locked(&SmSessionId::new(&session.stream_id))
                 .await?
             else {
-                return Err(SmRegistryError::Internal(
-                    "Promotion inventory claim lost".to_owned(),
+                return Err(SmRegistryError::PromotionClaimLost(
+                    ShutdownSmClaimLoss::Recorded(fence),
                 ));
             };
             drop(authority);
         } else {
+            let identity = self.node_identity.current();
+            if !identity.is_active() {
+                return Err(SmRegistryError::PromotionClaimLost(
+                    ShutdownSmClaimLoss::Disabled(identity),
+                ));
+            }
             let Some(authority) = self.ensure_session_claim(&session.stream_id).await else {
-                return Err(SmRegistryError::Internal(
-                    "Promotion inventory claim unavailable".to_owned(),
+                return Err(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Backend,
                 ));
             };
             drop(authority);
         }
+        let fence = self
+            .current_sm_claim_fence(&session.stream_id)
+            .ok_or_else(|| {
+                SmRegistryError::Internal(
+                    "Promotion claim fence missing after acquisition".to_owned(),
+                )
+            })?;
         let stream = SmSessionId::new(&session.stream_id);
         let mut inventory = session.clone();
         inventory.max_resume_time = Some(0);
         if let Some(storage) = &self.persistence {
-            if let Some(mut persisted) =
-                storage.get_session(&stream).await.map_err(storage_error)?
+            if let Some(mut persisted) = storage
+                .get_session(&stream)
+                .await
+                .map_err(|error| storage_error(error, &fence))?
             {
                 let resumable = persisted.max_resume_time != Some(0)
                     || persisted.max_resume_duration != std::time::Duration::ZERO;
@@ -115,7 +130,7 @@ impl InMemorySmSessionRegistry {
                     storage
                         .upsert_session(persisted.clone())
                         .await
-                        .map_err(storage_error)?;
+                        .map_err(|error| storage_error(error, &fence))?;
                 }
                 // A terminal capture can extend the last durable snapshot.
                 // Only genuinely newer sequences may be merged: an absent
@@ -138,16 +153,19 @@ impl InMemorySmSessionRegistry {
                     storage
                         .append_promotion_stanza(stanza)
                         .await
-                        .map_err(storage_error)?;
+                        .map_err(|error| storage_error(error, &fence))?;
                 }
                 persisted = storage
                     .get_session(&stream)
                     .await
-                    .map_err(storage_error)?
+                    .map_err(|error| storage_error(error, &fence))?
                     .ok_or_else(|| {
                         SmRegistryError::Internal("Promotion inventory disappeared".to_owned())
                     })?;
-                let rows = storage.list_unacked(&stream).await.map_err(storage_error)?;
+                let rows = storage
+                    .list_unacked(&stream)
+                    .await
+                    .map_err(|error| storage_error(error, &fence))?;
                 inventory = persisted_to_detached(&persisted, &rows)?;
                 inventory.detached_at = session.detached_at;
                 inventory.pending_subscribes_flushed = session.pending_subscribes_flushed;
@@ -172,7 +190,7 @@ impl InMemorySmSessionRegistry {
                 storage
                     .store_session_atomic(detached_to_persisted(&inventory)?, rows)
                     .await
-                    .map_err(storage_error)?;
+                    .map_err(|error| storage_error(error, &fence))?;
             }
         }
         Ok(inventory)
@@ -190,9 +208,14 @@ impl InMemorySmSessionRegistry {
         let stream_lock = self.stream_lock(stream_id)?;
         let _stream_guard = stream_lock.lock().await;
         let stream = SmSessionId::new(stream_id);
+        let fence =
+            self.current_sm_claim_fence(stream_id)
+                .ok_or(SmRegistryError::StorageUnavailable(
+                    super::traits::StorageOutageCause::Backend,
+                ))?;
         let Some(authority) = self.retirement_identity_locked(&stream).await? else {
-            return Err(SmRegistryError::Internal(
-                "Promotion inventory claim lost".to_owned(),
+            return Err(SmRegistryError::PromotionClaimLost(
+                ShutdownSmClaimLoss::Recorded(fence),
             ));
         };
         drop(authority);
@@ -216,7 +239,7 @@ impl InMemorySmSessionRegistry {
                     ingress_receipts: Vec::new(),
                 })
                 .await
-                .map_err(storage_error)?;
+                .map_err(|error| storage_error(error, &fence))?;
         }
         Ok(())
     }
@@ -224,6 +247,12 @@ impl InMemorySmSessionRegistry {
 
 fn storage_error(
     error: crate::stream_management::persistence::SmPersistenceError,
+    fence: &crate::stream_management::persistence::SmClaimFence,
 ) -> SmRegistryError {
-    SmRegistryError::Internal(error.to_string())
+    match error {
+        crate::stream_management::persistence::SmPersistenceError::NotOwner { .. } => {
+            SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(fence.clone()))
+        }
+        other => SmRegistryError::Internal(other.to_string()),
+    }
 }

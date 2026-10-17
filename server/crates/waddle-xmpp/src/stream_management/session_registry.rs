@@ -20,7 +20,7 @@ mod tombstones;
 mod trait_impl;
 mod traits;
 
-pub use claims::PendingPromotionRetryRetention;
+pub use claims::{PendingPromotionRetryRetention, ShutdownSmClaimLoss, ShutdownSmDrainBatch};
 pub use core::{InMemorySmSessionRegistry, ReclaimedClaimReservation, ReclaimedHydrationOutcome};
 pub use cross_node_resume::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, RemoteResumeAskOutcome, RemoteResumeAsker,

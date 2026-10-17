@@ -3738,6 +3738,12 @@ mod tests {
         conn.begin_terminal_sm_recovery();
         for sequence in 0..TERMINAL_RECOVERY_QUEUE_CAP {
             let mut prefix = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
+            prefix.from = Some("bob@example.com/phone".parse().expect("peer sender"));
+            prefix.type_ = xmpp_parsers::message::MessageType::Chat;
+            prefix.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                "recorded peer prefix".to_owned(),
+            );
             prefix.id = Some(xmpp_parsers::message::Id(format!(
                 "terminal-cap-{sequence}"
             )));

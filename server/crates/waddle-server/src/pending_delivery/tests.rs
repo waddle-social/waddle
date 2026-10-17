@@ -4017,6 +4017,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     .await
     .expect("seed durable session");
     let mut replay_message = Message::new(Some(jid::Jid::from(bare(&recipient))));
+    replay_message.from = Some("bob@example.com/phone".parse().expect("peer sender"));
     replay_message.type_ = MessageType::Chat;
     replay_message.bodies.insert(
         xmpp_parsers::message::Lang::new(),
