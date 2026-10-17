@@ -858,6 +858,40 @@ impl PostgresFencedSmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for PostgresFencedSmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _owned_authority = if let Some(authority) = authority {
+            self.assert_fenced_with_authority(&mut tx, stream_id, expected_fence, authority)
+                .await?;
+            None
+        } else {
+            Some(
+                self.assert_fenced(&mut tx, stream_id, expected_fence)
+                    .await?,
+            )
+        };
+        crate::sm_persistence::promotion_inventory::mark_nonresumable(
+            &mut tx,
+            stream_id,
+            acknowledged_h,
+            crate::db::DatabaseDriver::Postgres,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         let fence = self.claim_fence_for(&session.stream_id).await?;
         self.upsert_promotion_session_inner(session, &fence).await

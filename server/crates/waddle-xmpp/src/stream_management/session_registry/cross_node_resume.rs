@@ -1443,6 +1443,18 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SmPersistenceStorage for DelayedGetSessionPersistence {
+        async fn mark_session_nonresumable(
+            &self,
+            stream_id: &crate::pending_delivery::SmSessionId,
+            acknowledged_h: u32,
+            expected_fence: &crate::stream_management::persistence::SmClaimFence,
+            authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+        ) -> Result<(), crate::stream_management::persistence::SmPersistenceError> {
+            self.inner
+                .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
+                .await
+        }
+
         async fn append_promotion_stanza(
             &self,
             stanza: PersistedUnackedStanza,

@@ -53,6 +53,7 @@ struct HangingEnsureClaimStore {
 struct FailFirstPendingStorage {
     inner: waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage,
     fail_next_insert: std::sync::atomic::AtomicBool,
+    fail_next_ack: std::sync::atomic::AtomicBool,
 }
 
 impl FailFirstPendingStorage {
@@ -61,6 +62,7 @@ impl FailFirstPendingStorage {
             inner:
                 waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::unlimited(),
             fail_next_insert: std::sync::atomic::AtomicBool::new(true),
+            fail_next_ack: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -268,6 +270,16 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirs
         from_exclusive: u32,
         to_inclusive: u32,
     ) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+        if self
+            .fail_next_ack
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                waddle_xmpp::pending_delivery::storage::PendingStorageError::Other(
+                    "injected pending ACK failure".to_owned(),
+                ),
+            );
+        }
         self.inner
             .delete_acked_in_window(session, from_exclusive, to_inclusive)
             .await
@@ -366,6 +378,18 @@ impl FailDeleteSmPersistence {
 
 #[async_trait::async_trait]
 impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailDeleteSmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
+            .await
+    }
+
     async fn upsert_session(
         &self,
         session: waddle_xmpp::stream_management::persistence::PersistedSession,
@@ -8197,6 +8221,189 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
         !conn.phase.is_closing(),
         "failed resume keeps the stream open for a fresh session"
     );
+}
+
+#[tokio::test]
+async fn sm_resume_settles_pending_ack_before_expired_completion_and_reconnect() {
+    use super::super::stream_management::{
+        finalize_sm_after_registry_registration, SmRegistrationFinalization,
+    };
+    use waddle_xmpp::{
+        pending_delivery::{
+            storage::PendingDeliveryStorage, PendingPayload, PendingRow, PendingRowId, SmSessionId,
+        },
+        stream_management::{
+            persistence::{InMemorySmPersistence, SmPersistenceStorage},
+            DetachedSessionSnapshot, PromotionCaptureCustody, StreamManagementState,
+        },
+    };
+
+    let source = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(source.clone()));
+    let pending = Arc::new(FailFirstPendingStorage::new());
+    pending
+        .fail_next_insert
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        pending.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/pending-expired-resume"
+        .parse()
+        .expect("recipient");
+    let stream = SmSessionId::new("pending-acked-before-expiry");
+    let mut sm = StreamManagementState::new();
+    sm.enable(stream.as_str().to_owned(), true, Some(1));
+    sm.increment_inbound();
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id(
+        "already-handled-offline-message".to_owned(),
+    ));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "offline delivery".to_owned(),
+    );
+    let row_id = PendingRowId::fresh();
+    pending
+        .insert(PendingRow {
+            id: row_id.clone(),
+            recipient: jid.to_bare(),
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message.clone())),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("offline source");
+    assert_eq!(
+        pending
+            .claim_for_session(&jid.to_bare(), &stream)
+            .await
+            .expect("original session flush")
+            .len(),
+        1
+    );
+    pending
+        .record_pushed_at(&row_id, 1)
+        .await
+        .expect("original outbound sequence");
+    let _ = sm.record_outbound(
+        stanza_to_xml(&Stanza::Message(message)),
+        SmEvictionPath::DirectOutbound,
+    );
+    let mut detached = sm
+        .to_detached_session(DetachedSessionSnapshot {
+            user_id: "alice".to_owned(),
+            jid: jid.clone(),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+            pending_subscribes_flushed: false,
+        })
+        .expect("detached queue");
+    detached.promotion_custody = PromotionCaptureCustody::never_claimed();
+    let _session = store_resumable_test_session(state.as_ref(), detached).await;
+
+    // Failure must preserve the old ACK window so the same resume can retry.
+    pending
+        .fail_next_ack
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::authenticated(&jid);
+    let frame = resume_frame_xml(stream.as_str(), 1);
+    let failed = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+    assert!(
+        failed
+            .iter()
+            .any(|frame| frame.contains("<failed") && frame.contains("internal-server-error")),
+        "{failed:?}"
+    );
+    assert!(conn.pending_resume_stream_id.is_none());
+    assert_eq!(
+        registry
+            .peek_session(stream.as_str())
+            .await
+            .expect("retryable source")
+            .expect("source retained")
+            .last_acked,
+        0
+    );
+    assert_eq!(
+        pending
+            .list(&jid.to_bare())
+            .await
+            .expect("ACK deletion retained")
+            .len(),
+        1
+    );
+
+    let responses = handle_xmpp_frame(&frame, "example.com", state.as_ref(), &mut conn).await;
+    assert!(
+        responses.iter().any(|frame| frame.contains("<resumed")),
+        "{responses:?}"
+    );
+    assert_eq!(
+        conn.pending_resume_stream_id.as_deref(),
+        Some(stream.as_str())
+    );
+    assert!(pending
+        .list(&jid.to_bare())
+        .await
+        .expect("settled before publication")
+        .is_empty());
+
+    // Pause the claimed resume before registration completes, then expire it.
+    tokio::time::sleep(std::time::Duration::from_millis(1100)).await;
+    let (sender, _receiver) = mpsc::channel(8);
+    let owner = register_test_connection(state.as_ref(), &jid, sender).await;
+    conn.registry_owner = Some(owner.clone());
+    let report =
+        finalize_sm_after_registry_registration(state.as_ref(), &mut conn, &jid, &owner).await;
+    let SmRegistrationFinalization::ReplaceWithFailed(failed) = report.finalization else {
+        panic!("completion must discover expiry");
+    };
+    assert_eq!(failed.to_element().attr("h"), Some("1"));
+    assert!(source
+        .list_unacked(&stream)
+        .await
+        .expect("canonical ACK pruning")
+        .is_empty());
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
+    assert!(source
+        .get_session(&stream)
+        .await
+        .expect("canonical retirement")
+        .is_none());
+    assert_eq!(
+        pending
+            .release_claim(&stream)
+            .await
+            .expect("old claim release"),
+        0
+    );
+    assert!(
+        pending
+            .claim_for_session(&jid.to_bare(), &SmSessionId::new("fresh-reconnect"))
+            .await
+            .expect("reconnect offline flush")
+            .is_empty(),
+        "acknowledged offline stanza must not replay"
+    );
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
+    assert!(pending
+        .list(&jid.to_bare())
+        .await
+        .expect("no repeated promotion")
+        .is_empty());
 }
 
 #[tokio::test]

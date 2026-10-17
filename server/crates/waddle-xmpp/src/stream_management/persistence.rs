@@ -294,6 +294,22 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// detaches and the session is moved into the resumable pool.
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError>;
 
+    /// Atomically retire resume eligibility, advance the acknowledgement floor,
+    /// and remove exactly the wrapping interval `(last_acked, acknowledged_h]`,
+    /// discharging that interval's pending ingress allocations as acknowledged.
+    /// Validate that interval against the canonical outbound count before any
+    /// writes. A missing source is an error, never admission or recreation.
+    /// Clustered stores check the immutable fence in this transaction and reuse
+    /// supplied identity authority through commit without reacquiring its gate.
+    /// Portable stores rely on the registry's claim checks and stream gate.
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &SmClaimFence,
+        authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError>;
+
     /// Promotion writes carry the captured owner/epoch through the actual
     /// transaction. Clustered stores must never replace it from a claim cache.
     async fn upsert_promotion_session(
@@ -782,6 +798,54 @@ impl InMemorySmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for InMemorySmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        _expected_fence: &SmClaimFence,
+        _authority: Option<&CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let session = guard.sessions.get(stream_id).ok_or_else(|| {
+            SmPersistenceError::Other("Expired SM promotion source is missing".to_owned())
+        })?;
+        let last_acked = session.last_acked;
+        let acknowledged = acknowledged_h.wrapping_sub(last_acked);
+        if acknowledged >= 0x8000_0000
+            || acknowledged > session.outbound_count.wrapping_sub(last_acked)
+        {
+            return Err(SmPersistenceError::Other(
+                "Expired SM acknowledgement exceeds canonical outbound count".to_owned(),
+            ));
+        }
+        for append in &mut guard.ingress_appends {
+            let distance = append.sequence.wrapping_sub(last_acked);
+            if &append.accepting_stream == stream_id
+                && distance > 0
+                && distance <= acknowledged
+                && append.disposition == IngressCustodyDisposition::Pending
+            {
+                append.disposition = IngressCustodyDisposition::Acknowledged;
+            }
+        }
+        if let Some(queue) = guard.unacked.get_mut(stream_id) {
+            queue.retain(|entry| {
+                let distance = entry.sequence.wrapping_sub(last_acked);
+                distance == 0 || distance > acknowledged
+            });
+        }
+        let session = guard.sessions.get_mut(stream_id).ok_or_else(|| {
+            SmPersistenceError::Other("Expired SM promotion source is missing".to_owned())
+        })?;
+        session.last_acked = acknowledged_h;
+        session.max_resume_time = Some(0);
+        session.max_resume_duration = Duration::ZERO;
+        Ok(())
+    }
+
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,

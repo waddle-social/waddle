@@ -112,6 +112,15 @@ impl InMemorySmSessionRegistry {
         let mut inventory = session.clone();
         inventory.max_resume_time = Some(0);
         if let Some(storage) = &self.persistence {
+            if session.promotion_custody.requires_existing_source() {
+                // last_acked retains the expiry completion's ACK intent across
+                // cancellation. Apply it atomically before loading the queue;
+                // otherwise a failed conversion could reload acknowledged rows.
+                storage
+                    .mark_session_nonresumable(&stream, session.last_acked, &fence, None)
+                    .await
+                    .map_err(|error| storage_error(error, &fence))?;
+            }
             if let Some(mut persisted) = storage
                 .get_session(&stream)
                 .await
@@ -173,7 +182,10 @@ impl InMemorySmSessionRegistry {
                 inventory.detached_at = session.detached_at;
                 inventory.pending_subscribes_flushed = session.pending_subscribes_flushed;
             } else {
-                if require_existing {
+                // Expiry-conversion retries may still find resumable metadata
+                // after cancellation, but unlike fresh terminal admissions
+                // they must never reconstruct a vanished canonical source.
+                if require_existing || session.promotion_custody.requires_existing_source() {
                     return Err(SmRegistryError::Internal(
                         "Registered promotion inventory disappeared".to_owned(),
                     ));

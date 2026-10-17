@@ -609,7 +609,7 @@ async fn settle_pending_ack_window(
     sm_state: &StreamManagementState,
     acked_from_exclusive: u32,
     h: u32,
-) {
+) -> bool {
     if let Some(stream_id) = sm_state.stream_id.clone() {
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(stream_id);
         match state
@@ -635,9 +635,11 @@ async fn settle_pending_ack_window(
                     failure = "storage",
                     "pending_delivery ACK deletion retained; claim release must settle it"
                 );
+                return false;
             }
         }
     }
+    true
 }
 
 async fn handle_sm_enable(
@@ -1297,12 +1299,14 @@ async fn handle_sm_resume_terminal(
         );
     }
 
-    // Receipt settlement can fail or be cancelled. Keep the live connection
-    // untouched until the detached prefix's completion proof is durable.
+    // Receipt and pending-row settlement can fail or be cancelled. Keep the
+    // old ACK window until both independent queues have durably retired it;
+    // completion may discover expiry and hand the remainder to promotion.
     let mut staged_sm_state = StreamManagementState::new();
     staged_sm_state.restore_from_session(&detached);
     if !complete_acknowledged_ingress_custody(state, &staged_sm_state, resume.h).await
         || !complete_acknowledged_ingress_receipts(state, &staged_sm_state, resume.h).await
+        || !settle_pending_ack_window(state, &staged_sm_state, detached.last_acked, resume.h).await
     {
         claim_guard.release().await;
         return SmResumeTerminal::failed(

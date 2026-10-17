@@ -189,6 +189,32 @@ impl DatabaseSmPersistence {
 
 #[async_trait]
 impl SmPersistenceStorage for DatabaseSmPersistence {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &SmSessionId,
+        acknowledged_h: u32,
+        _expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        _authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), SmPersistenceError> {
+        let lock = self.lock_for(stream_id);
+        let _guard = lock.lock().await;
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        promotion_inventory::mark_nonresumable(
+            &mut tx,
+            stream_id,
+            acknowledged_h,
+            self.db.driver(),
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
+    }
+
     #[instrument(skip(self, session), fields(stream_id = %session.stream_id))]
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         let lock = self.lock_for(&session.stream_id);

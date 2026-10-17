@@ -1,11 +1,72 @@
 //! Atomic suffix allocation for non-resumable promotion custody.
 use crate::db::{DatabaseDriver, Transaction};
+use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     PersistedUnackedStanza, PromotionAppendOutcome, SmPersistenceError,
 };
 
 fn storage_error(error: impl std::fmt::Display) -> SmPersistenceError {
     SmPersistenceError::Other(error.to_string())
+}
+
+/// Retire only an existing canonical source, preserving its unacknowledged
+/// suffix. The caller owns the transaction and any required ownership fence.
+pub(crate) async fn mark_nonresumable(
+    tx: &mut Transaction<'_>,
+    stream_id: &SmSessionId,
+    acknowledged_h: u32,
+    driver: DatabaseDriver,
+) -> Result<(), SmPersistenceError> {
+    let sql = match driver {
+        DatabaseDriver::Postgres => {
+            "SELECT outbound_count, last_acked FROM sm_sessions WHERE stream_id = ? FOR UPDATE"
+        }
+        DatabaseDriver::Sqlite => {
+            "SELECT outbound_count, last_acked FROM sm_sessions WHERE stream_id = ?"
+        }
+    };
+    let mut rows = tx
+        .query(sql, crate::db_params![stream_id.as_str()])
+        .await
+        .map_err(storage_error)?;
+    let row = rows
+        .next()
+        .await
+        .map_err(storage_error)?
+        .ok_or_else(|| storage_error("Expired SM promotion source is missing"))?;
+    let outbound =
+        u32::try_from(row.get::<i64>(0).map_err(storage_error)?).map_err(storage_error)?;
+    let last_acked =
+        u32::try_from(row.get::<i64>(1).map_err(storage_error)?).map_err(storage_error)?;
+    let acknowledged = acknowledged_h.wrapping_sub(last_acked);
+    if acknowledged > outbound.wrapping_sub(last_acked) {
+        return Err(storage_error(
+            "Expired SM acknowledgement exceeds canonical outbound count",
+        ));
+    }
+    drop(rows);
+    super::ingress_append::complete_through(tx, stream_id, last_acked, acknowledged_h).await?;
+    tx.execute(
+        "DELETE FROM sm_unacked WHERE stream_id = ? \
+         AND ((sequence - ? + 4294967296) % 4294967296) > 0 \
+         AND ((sequence - ? + 4294967296) % 4294967296) <= ?",
+        crate::db_params![
+            stream_id.as_str(),
+            i64::from(last_acked),
+            i64::from(last_acked),
+            i64::from(acknowledged),
+        ],
+    )
+    .await
+    .map_err(storage_error)?;
+    tx.execute(
+        "UPDATE sm_sessions SET last_acked = ?, max_resume_secs = 0, max_resume_duration_ms = 0 \
+         WHERE stream_id = ?",
+        crate::db_params![i64::from(acknowledged_h), stream_id.as_str()],
+    )
+    .await
+    .map_err(storage_error)?;
+    Ok(())
 }
 
 /// The fenced caller asserts the exact SM claim before entering this helper.

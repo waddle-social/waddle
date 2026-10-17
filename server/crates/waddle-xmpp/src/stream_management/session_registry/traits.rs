@@ -172,6 +172,9 @@ pub trait SmSessionRegistry: Send + Sync {
 #[derive(Debug, Clone)]
 pub enum SmClaimCompletion {
     Resumed(DetachedSession),
+    /// Cleanup-only snapshot. The registry retains the recorded queue in
+    /// durable non-resumable promotion custody for the janitor; callers must
+    /// not discard its source, release its claim, or promote this clone.
     Expired(DetachedSession),
     ReplayWindowTruncated(DetachedSession),
     HandledCountTooHigh(DetachedSession),
