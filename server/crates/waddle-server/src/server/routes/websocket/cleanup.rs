@@ -5234,15 +5234,19 @@ mod local_departure_cleanup_tests {
             ))
             .await
             .expect("enroll the healthy detachable stream");
-        drop(
-            state
-                .deps
-                .protocol
-                .sm_session_registry
-                .ensure_session_claim("healthy-muc-detach")
-                .await
-                .expect("establish the healthy stream session claim"),
-        );
+        let authority = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .ensure_session_claim("healthy-muc-detach")
+            .await
+            .expect("establish the healthy stream session claim");
+        conn.sm_ingress_fence = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .current_sm_claim_fence("healthy-muc-detach");
+        drop(authority);
         let actor = state
             .deps
             .protocol
@@ -5299,15 +5303,19 @@ mod local_departure_cleanup_tests {
                 ))
                 .await
                 .expect("enroll the stream for the detach ownership race");
-            drop(
-                state
-                    .deps
-                    .protocol
-                    .sm_session_registry
-                    .ensure_session_claim("detach-ownership-race")
-                    .await
-                    .expect("establish the detach race session claim"),
-            );
+            let authority = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .ensure_session_claim("detach-ownership-race")
+                .await
+                .expect("establish the detach race session claim");
+            conn.sm_ingress_fence = state
+                .deps
+                .protocol
+                .sm_session_registry
+                .current_sm_claim_fence("detach-ownership-race");
+            drop(authority);
             let actor = state
                 .deps
                 .protocol
