@@ -787,6 +787,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
         &state,
         &session,
         DetachedSession {
+            promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.to_owned(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -1119,6 +1120,8 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
         state.as_ref(),
         &session,
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -1266,6 +1269,8 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
         state.as_ref(),
         &session,
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -1384,6 +1389,8 @@ async fn replay_gap_during_resume_finalization_resets_fresh_bind_session_and_res
         state.as_ref(),
         &session,
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),

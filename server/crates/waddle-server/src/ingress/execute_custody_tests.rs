@@ -66,6 +66,7 @@ async fn custody_survives_transition(fixture: IngressFixture, transition: Custod
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
     let stream = SmSessionId::new(target.to_string());
     sm.store_session(DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream.as_str().to_owned(),
         user_id: target.to_bare().to_string(),
         jid: target.clone(),

@@ -339,6 +339,7 @@ fn detached_dm_session(
     jid: &jid::FullJid,
 ) -> waddle_xmpp::stream_management::DetachedSession {
     waddle_xmpp::stream_management::DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),

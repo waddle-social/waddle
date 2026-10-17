@@ -41,6 +41,7 @@ pub async fn registry(fixture: &IngressFixture) -> Arc<InMemorySmSessionRegistry
 
 pub async fn attach(sm: &InMemorySmSessionRegistry, jid: &FullJid) {
     sm.store_session(DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: jid.to_string(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),

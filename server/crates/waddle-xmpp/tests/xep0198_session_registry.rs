@@ -23,6 +23,7 @@ use xmpp_parsers::message::Message;
 
 fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
     DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: jid.to_string(),
         jid: jid.parse().expect("valid full jid"),
@@ -75,8 +76,261 @@ fn queued_stanza_xml(id: &str, body: &str) -> String {
     String::from_utf8(buffer).expect("queued stanza xml is utf-8")
 }
 
+#[tokio::test]
+async fn promotion_inventory_survives_restart_without_allowing_resume() {
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let mut session = detached_session("terminal-inventory", "alice@example.com/web");
+    session
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 11,
+            stanza_xml: queued_stanza_xml("durable", "survive restart"),
+            original_receipt_at: chrono::Utc::now(),
+        });
+    let registered = registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register inventory");
+    assert!(registered.is_expired());
+    drop(registry);
+
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage);
+    assert_eq!(
+        restarted.restore_from_persistence().await.expect("restore"),
+        1
+    );
+    assert!(restarted
+        .claim_session("terminal-inventory")
+        .await
+        .expect("claim")
+        .is_none());
+    let recovered = restarted.drain_expired().await.expect("drain inventory");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].unacked_stanzas.len(), 1);
+    assert!(recovered[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("survive restart"));
+    assert!(restarted.confirm_drained("terminal-inventory").await);
+}
+
+#[tokio::test]
+async fn promotion_inventory_registration_never_restores_settled_sequences() {
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
+    let mut session = detached_session("inventory-idempotent", "alice@example.com/web");
+    session
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 11,
+            stanza_xml: queued_stanza_xml("settled", "settled payload"),
+            original_receipt_at: chrono::Utc::now(),
+        });
+    registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register");
+    registry
+        .delete_unacked_sequences(&session.stream_id, &[11])
+        .await
+        .expect("settle prefix");
+    let retried = registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register stale copy");
+    assert!(
+        retried.unacked_stanzas.is_empty(),
+        "settled payload must not return"
+    );
+    assert!(registry.confirm_drained(&session.stream_id).await);
+}
+
+#[tokio::test]
+async fn promotion_inventory_late_append_prevents_old_snapshot_confirmation() {
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let session = detached_session("inventory-late-append", "alice@example.com/web");
+    registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register");
+    let receipt = chrono::Utc::now();
+    registry
+        .append_promotion_stanza(
+            &session,
+            &chat_stanza(&session.jid, "late suffix"),
+            12,
+            receipt,
+        )
+        .await
+        .expect("append suffix");
+    assert!(
+        !registry.confirm_drained(&session.stream_id).await,
+        "old snapshot cannot erase new work"
+    );
+    drop(registry);
+
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage);
+    restarted.restore_from_persistence().await.expect("restore");
+    let recovered = restarted.drain_expired().await.expect("drain");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].outbound_count, 12);
+    assert_eq!(recovered[0].unacked_stanzas.len(), 1);
+    assert_eq!(recovered[0].unacked_stanzas[0].original_receipt_at, receipt);
+    assert!(recovered[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("late suffix"));
+}
+
+#[tokio::test]
+async fn displaced_promotion_inventory_is_not_resumable_after_restart() {
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    registry
+        .store_session(detached_session("inventory-old", "alice@example.com/web"))
+        .await
+        .expect("store original");
+    let displaced = registry
+        .store_session(detached_session("inventory-new", "alice@example.com/web"))
+        .await
+        .expect("replace");
+    assert_eq!(displaced.len(), 1);
+    drop(registry);
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage);
+    restarted.restore_from_persistence().await.expect("restore");
+    assert!(restarted
+        .claim_session("inventory-old")
+        .await
+        .expect("old claim")
+        .is_none());
+    assert!(restarted
+        .peek_session("inventory-new")
+        .await
+        .expect("new session")
+        .is_some());
+    let recovered = restarted.drain_expired().await.expect("drain inventory");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].stream_id, "inventory-old");
+}
+
+#[tokio::test]
+async fn promotion_inventory_rejects_a_lost_exact_claim() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let claims = Arc::new(InProcessClaimStore::new());
+    let owner = NodeIdentity::new("inventory-node", "first");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage.clone())
+        .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+    let session = detached_session("inventory-lost-claim", "alice@example.com/web");
+    registry
+        .store_session(session.clone())
+        .await
+        .expect("store original");
+    let fence = registry
+        .current_sm_claim_fence(&session.stream_id)
+        .expect("claim fence");
+    let entity = Entity::new(EntityType::SmSession, session.stream_id.clone());
+    claims
+        .release_exact(&entity, &owner, fence.epoch())
+        .await
+        .expect("retire claim");
+    claims
+        .ensure_claimed(&entity, &NodeIdentity::new("inventory-node", "successor"))
+        .await
+        .expect("successor claim");
+
+    assert!(registry.register_promotion_session(&session).await.is_err());
+    let persisted = storage
+        .get_session(&SmSessionId::new(&session.stream_id))
+        .await
+        .expect("read source")
+        .expect("source retained");
+    assert_eq!(
+        persisted.max_resume_time,
+        Some(300),
+        "lost owner must not invalidate source state"
+    );
+}
+
+#[tokio::test]
+async fn promotion_inventory_registration_recovers_a_newer_captured_suffix() {
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let mut capture = detached_session("inventory-captured-tail", "alice@example.com/web");
+    registry
+        .register_promotion_session(&capture)
+        .await
+        .expect("register prefix");
+    capture.outbound_count = 12;
+    capture
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 12,
+            stanza_xml: queued_stanza_xml("captured-tail", "tail after failed append"),
+            original_receipt_at: chrono::Utc::now(),
+        });
+    let merged = registry
+        .register_promotion_session(&capture)
+        .await
+        .expect("recover captured tail");
+    assert_eq!(merged.outbound_count, 12);
+    assert_eq!(merged.unacked_stanzas.len(), 1);
+    drop(registry);
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(storage);
+    restarted.restore_from_persistence().await.expect("restore");
+    let recovered = restarted.drain_expired().await.expect("drain");
+    assert_eq!(recovered[0].unacked_stanzas.len(), 1);
+    assert!(recovered[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("tail after failed append"));
+}
+
+#[tokio::test]
+async fn promotion_inventory_append_advances_a_wrapped_sequence_once() {
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage);
+    let mut session = detached_session("inventory-wrap", "alice@example.com/web");
+    session.last_acked = u32::MAX - 1;
+    session.outbound_count = u32::MAX;
+    registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register");
+    let stanza = chat_stanza(&session.jid, "wrapped suffix");
+    let receipt = chrono::Utc::now();
+    for expected in [
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::Appended,
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::AlreadyRecorded,
+    ] {
+        assert_eq!(
+            registry
+                .append_promotion_stanza(&session, &stanza, 0, receipt)
+                .await
+                .expect("append"),
+            expected
+        );
+    }
+    let recovered = registry
+        .register_promotion_session(&session)
+        .await
+        .expect("reconcile");
+    assert_eq!(recovered.outbound_count, 0);
+    assert_eq!(recovered.unacked_stanzas.len(), 1);
+    assert_eq!(recovered.unacked_stanzas[0].sequence, 0);
+}
+
 struct BlockingFirstAtomicStore {
     inner: InMemorySmPersistence,
+    reject_metadata: AtomicBool,
+    reject_snapshot: AtomicBool,
+    reject_append: AtomicBool,
     first_store_seen: AtomicBool,
     first_store_started: tokio::sync::Notify,
     allow_first_store: tokio::sync::Notify,
@@ -86,6 +340,9 @@ impl BlockingFirstAtomicStore {
     fn new() -> Self {
         Self {
             inner: InMemorySmPersistence::new(),
+            reject_metadata: AtomicBool::new(false),
+            reject_snapshot: AtomicBool::new(false),
+            reject_append: AtomicBool::new(false),
             first_store_seen: AtomicBool::new(false),
             first_store_started: tokio::sync::Notify::new(),
             allow_first_store: tokio::sync::Notify::new(),
@@ -101,9 +358,486 @@ impl BlockingFirstAtomicStore {
     }
 }
 
+#[tokio::test]
+async fn promotion_inventory_registration_failure_preserves_the_detached_source() {
+    let storage = Arc::new(BlockingFirstAtomicStore::new());
+    storage.release_first_store();
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let session = detached_session("inventory-register-failure", "alice@example.com/web");
+    registry
+        .store_session(session.clone())
+        .await
+        .expect("store source");
+    storage.reject_metadata.store(true, Ordering::SeqCst);
+    assert!(registry
+        .displace_stored_session_if_unclaimed(&session.stream_id)
+        .await
+        .is_err());
+    storage.reject_metadata.store(false, Ordering::SeqCst);
+    assert!(registry
+        .peek_session(&session.stream_id)
+        .await
+        .expect("inspect source")
+        .is_some());
+    let displaced = registry
+        .displace_stored_session_if_unclaimed(&session.stream_id)
+        .await
+        .expect("retry displacement")
+        .expect("source retained");
+    assert_eq!(displaced.stream_id, session.stream_id);
+    assert!(displaced.is_expired());
+}
+
+#[tokio::test]
+async fn promotion_inventory_failed_initial_write_can_retry_without_a_durable_row() {
+    let storage = Arc::new(BlockingFirstAtomicStore::new());
+    storage.release_first_store();
+    storage.reject_snapshot.store(true, Ordering::SeqCst);
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let mut session = detached_session("inventory-first-write-failure", "alice@example.com/web");
+    session
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 11,
+            stanza_xml: queued_stanza_xml("first-write", "retained initial payload"),
+            original_receipt_at: chrono::Utc::now(),
+        });
+    assert!(registry.register_promotion_session(&session).await.is_err());
+    registry
+        .reinsert_for_retry(session)
+        .await
+        .expect("retain rejected registration");
+    storage.reject_snapshot.store(false, Ordering::SeqCst);
+    let recovered = registry.drain_expired().await.expect("retry registration");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].unacked_stanzas.len(), 1);
+    assert!(recovered[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("retained initial payload"));
+}
+
+#[tokio::test]
+async fn promotion_inventory_failed_suffix_survives_registration_and_reinsertion_failure() {
+    let storage = Arc::new(BlockingFirstAtomicStore::new());
+    storage.release_first_store();
+    let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+    let mut capture = detached_session("inventory-failed-tail", "alice@example.com/web");
+    registry
+        .register_promotion_session(&capture)
+        .await
+        .expect("register prefix");
+    let stanza = chat_stanza(&capture.jid, "retained failed suffix");
+    storage.reject_append.store(true, Ordering::SeqCst);
+    assert!(registry
+        .append_promotion_stanza(&capture, &stanza, 12, chrono::Utc::now())
+        .await
+        .is_err());
+    capture.outbound_count = 12;
+    capture
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 12,
+            stanza_xml: queued_stanza_xml("failed-tail", "retained failed suffix"),
+            original_receipt_at: chrono::Utc::now(),
+        });
+    assert!(registry.register_promotion_session(&capture).await.is_err());
+    registry
+        .reinsert_for_retry(capture)
+        .await
+        .expect("retain suffix");
+    storage.reject_append.store(false, Ordering::SeqCst);
+    let recovered = registry.drain_expired().await.expect("recover suffix");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].unacked_stanzas.len(), 1);
+    assert!(recovered[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("retained failed suffix"));
+}
+
+#[tokio::test]
+async fn promotion_inventory_cancelled_initial_registration_keeps_its_payload() {
+    let storage = Arc::new(BlockingFirstAtomicStore::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage.clone()));
+    let mut session = detached_session("inventory-cancelled-create", "alice@example.com/web");
+    session
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 11,
+            stanza_xml: queued_stanza_xml("cancelled-create", "cancelled registration payload"),
+            original_receipt_at: chrono::Utc::now(),
+        });
+    let registering = {
+        let registry = registry.clone();
+        tokio::spawn(async move { registry.register_promotion_session(&session).await })
+    };
+    storage.wait_for_first_store().await;
+    registering.abort();
+    assert!(registering
+        .await
+        .expect_err("registration cancelled")
+        .is_cancelled());
+    let recovered = registry
+        .drain_expired()
+        .await
+        .expect("retry cancelled registration");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].unacked_stanzas.len(), 1);
+    assert!(recovered[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("cancelled registration payload"));
+}
+
+#[tokio::test]
+async fn promotion_inventory_nested_cancelled_captures_preserve_an_earlier_failed_tail() {
+    use std::future::Future;
+    use std::task::Poll;
+
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(storage));
+    let base = detached_session("inventory-nested-cancellation", "alice@example.com/web");
+    registry
+        .register_promotion_session(&base)
+        .await
+        .expect("register durable prefix");
+    let shard = registry
+        .lock_session_operation(&base.stream_id)
+        .await
+        .expect("hold source shard");
+    let mut captures = Vec::new();
+    for (sequence, body) in [(13, "newer captured tail"), (12, "earlier failed tail")] {
+        let mut capture = base.clone();
+        capture.outbound_count = sequence;
+        capture
+            .unacked_stanzas
+            .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
+                sequence,
+                stanza_xml: queued_stanza_xml(&format!("capture-{sequence}"), body),
+                original_receipt_at: chrono::Utc::now(),
+            });
+        let started = Arc::new(tokio::sync::Notify::new());
+        let task = {
+            let registry = registry.clone();
+            let started = started.clone();
+            tokio::spawn(async move {
+                let mut registration = Box::pin(registry.register_promotion_session(&capture));
+                std::future::poll_fn(|context| {
+                    assert!(registration.as_mut().poll(context).is_pending());
+                    Poll::Ready(())
+                })
+                .await;
+                started.notify_one();
+                registration.await
+            })
+        };
+        started.notified().await;
+        captures.push(task);
+    }
+    for capture in captures {
+        capture.abort();
+        assert!(capture.await.expect_err("capture cancelled").is_cancelled());
+    }
+    drop(shard);
+
+    let recovered = registry
+        .drain_expired()
+        .await
+        .expect("recover both captured tails");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(
+        recovered[0]
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>(),
+        vec![12, 13]
+    );
+    assert_eq!(recovered[0].outbound_count, 13);
+}
+
+#[tokio::test]
+async fn promotion_inventory_expiry_skips_a_lost_claim_without_blocking_healthy_work() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    let storage = Arc::new(InMemorySmPersistence::new());
+    let claims = Arc::new(InProcessClaimStore::new());
+    let owner = NodeIdentity::new("inventory-node", "local");
+    let successor = NodeIdentity::new("inventory-node", "successor");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage.clone())
+        .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+    for (stream, jid) in [
+        ("stale-expiry", "alice@example.com/web"),
+        ("healthy-expiry", "bob@example.com/web"),
+    ] {
+        let mut session = detached_session(stream, jid);
+        session.max_resume_time = Some(0);
+        registry
+            .store_session(session)
+            .await
+            .expect("store expired session");
+    }
+    let entity = Entity::new(EntityType::SmSession, "stale-expiry");
+    let epoch = claims
+        .current_claim(&entity)
+        .await
+        .expect("claim")
+        .expect("local owner")
+        .claim_epoch;
+    claims
+        .release(&entity, &owner, epoch)
+        .await
+        .expect("release predecessor");
+    let successor_epoch = claims
+        .acquire(&entity, &successor)
+        .await
+        .expect("successor ownership");
+
+    let drained = registry
+        .drain_expired()
+        .await
+        .expect("continue healthy expiry");
+    assert_eq!(
+        drained
+            .iter()
+            .map(|session| session.stream_id.as_str())
+            .collect::<Vec<_>>(),
+        vec!["healthy-expiry"]
+    );
+    assert!(registry.confirm_drained("healthy-expiry").await);
+    assert!(storage
+        .get_session(&SmSessionId::new("stale-expiry"))
+        .await
+        .expect("source read")
+        .is_some());
+    assert!(claims
+        .fence(&entity, &successor, successor_epoch)
+        .await
+        .expect("successor fence"));
+}
+
+#[tokio::test]
+async fn promotion_inventory_stale_abandonment_preserves_a_newer_local_fence() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    let claims = Arc::new(InProcessClaimStore::new());
+    let owner = NodeIdentity::new("inventory-node", "local");
+    let registry = InMemorySmSessionRegistry::new()
+        .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+    let original = detached_session("abandon-exact-fence", "alice@example.com/web");
+    registry
+        .store_session(original.clone())
+        .await
+        .expect("store original");
+    let prior = registry
+        .current_sm_claim_fence(&original.stream_id)
+        .expect("original fence");
+    registry.forget_claim_locally(&original.stream_id).await;
+    let entity = Entity::new(EntityType::SmSession, original.stream_id.clone());
+    claims
+        .release_exact(&entity, &owner, prior.epoch())
+        .await
+        .expect("retire original claim");
+    let mut replacement_capture = original.clone();
+    replacement_capture.promotion_custody =
+        waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
+    registry
+        .store_session(replacement_capture.clone())
+        .await
+        .expect("adopt replacement");
+    let replacement = registry
+        .current_sm_claim_fence(&original.stream_id)
+        .expect("new fence");
+    assert_ne!(replacement.epoch(), prior.epoch());
+    registry
+        .reinsert_for_retry(replacement_capture.clone())
+        .await
+        .expect("retain replacement custody");
+
+    assert!(!registry
+        .forget_promotion_claim_if_matches(
+            &original,
+            &waddle_xmpp::stream_management::ShutdownSmClaimLoss::Recorded(prior)
+        )
+        .await
+        .expect("exact abandonment"));
+    assert_eq!(
+        registry.current_sm_claim_fence(&original.stream_id),
+        Some(replacement)
+    );
+    let recovered = registry
+        .drain_expired()
+        .await
+        .expect("replacement remains drainable");
+    assert_eq!(recovered.len(), 1);
+    assert_eq!(recovered[0].occupancy_session, original.occupancy_session);
+}
+
+#[tokio::test]
+async fn promotion_inventory_stale_missing_source_does_not_block_healthy_drain() {
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    for shutdown in [false, true] {
+        let storage = Arc::new(BlockingFirstAtomicStore::new());
+        storage.release_first_store();
+        let claims = Arc::new(InProcessClaimStore::new());
+        let owner = NodeIdentity::new("stale-drain-node", "local");
+        let successor = NodeIdentity::new("stale-drain-node", "successor");
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(storage.clone())
+            .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+        let mut stale = detached_session("stale-deleted-source", "alice@example.com/web");
+        stale.detached_at = Instant::now() - Duration::from_secs(400);
+        registry
+            .store_session(stale.clone())
+            .await
+            .expect("store source");
+        storage.reject_metadata.store(true, Ordering::SeqCst);
+        assert!(registry.register_promotion_session(&stale).await.is_err());
+        storage.reject_metadata.store(false, Ordering::SeqCst);
+        let prior = registry
+            .current_sm_claim_fence(&stale.stream_id)
+            .expect("original fence");
+        let entity = Entity::new(EntityType::SmSession, stale.stream_id.clone());
+        claims
+            .release_exact(&entity, &owner, prior.epoch())
+            .await
+            .expect("retire predecessor");
+        let successor_epoch = claims
+            .acquire(&entity, &successor)
+            .await
+            .expect("successor ownership");
+        storage
+            .delete_session(&SmSessionId::new(&stale.stream_id))
+            .await
+            .expect("successor consumes source");
+
+        let mut healthy = detached_session("healthy-after-deletion", "bob@example.com/web");
+        healthy.max_resume_time = Some(0);
+        registry
+            .store_session(healthy)
+            .await
+            .expect("store healthy peer");
+        if shutdown {
+            let drained = registry
+                .drain_all_for_shutdown()
+                .await
+                .expect("continue shutdown drain");
+            assert_eq!(drained.sessions.len(), 2);
+            assert_eq!(drained.lost_claims.len(), 1);
+            let loss = drained
+                .lost_claims
+                .get(&SmSessionId::new(&stale.stream_id))
+                .expect("immutable loss proof");
+            assert!(registry
+                .forget_promotion_claim_if_matches(&stale, loss)
+                .await
+                .expect("retire stale local custody"));
+        } else {
+            let drained = registry
+                .drain_expired()
+                .await
+                .expect("continue healthy expiry");
+            assert_eq!(
+                drained
+                    .iter()
+                    .map(|session| session.stream_id.as_str())
+                    .collect::<Vec<_>>(),
+                vec!["healthy-after-deletion"]
+            );
+        }
+        assert!(registry.confirm_drained("healthy-after-deletion").await);
+        assert!(storage
+            .get_session(&SmSessionId::new(&stale.stream_id))
+            .await
+            .expect("source stays consumed")
+            .is_none());
+        assert!(claims
+            .fence(&entity, &successor, successor_epoch)
+            .await
+            .expect("successor authority retained"));
+    }
+}
+
+#[tokio::test]
+async fn promotion_inventory_owned_missing_source_keeps_reconciliation_failure() {
+    for shutdown in [false, true] {
+        let storage = Arc::new(BlockingFirstAtomicStore::new());
+        storage.release_first_store();
+        let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+        let mut source = detached_session("owned-stale-source", "alice@example.com/web");
+        source.detached_at = Instant::now() - Duration::from_secs(400);
+        registry
+            .store_session(source.clone())
+            .await
+            .expect("store source");
+        storage.reject_metadata.store(true, Ordering::SeqCst);
+        assert!(registry.register_promotion_session(&source).await.is_err());
+        storage.reject_metadata.store(false, Ordering::SeqCst);
+        storage
+            .delete_session(&SmSessionId::new(&source.stream_id))
+            .await
+            .expect("uncertain source deletion");
+
+        let error = if shutdown {
+            registry
+                .drain_all_for_shutdown()
+                .await
+                .expect_err("owned source cannot be abandoned")
+        } else {
+            registry
+                .drain_expired()
+                .await
+                .expect_err("owned source cannot be skipped")
+        };
+        assert!(
+            matches!(
+                error,
+                waddle_xmpp::stream_management::SmRegistryError::Internal(_)
+            ),
+            "owned-source reconciliation failure must not become a proven claim loss"
+        );
+        assert!(registry
+            .live_session_ids()
+            .expect("retained source")
+            .contains(&source.stream_id));
+        assert!(storage
+            .get_session(&SmSessionId::new(&source.stream_id))
+            .await
+            .expect("source remains unresolved")
+            .is_none());
+    }
+}
+
 #[async_trait]
 impl SmPersistenceStorage for BlockingFirstAtomicStore {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome,
+        SmPersistenceError,
+    > {
+        if self.reject_append.load(Ordering::SeqCst) {
+            return Err(SmPersistenceError::Other(
+                "inventory append unavailable".to_owned(),
+            ));
+        }
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
+        if self.reject_metadata.load(Ordering::SeqCst) {
+            return Err(SmPersistenceError::Other(
+                "metadata write unavailable".to_owned(),
+            ));
+        }
         self.inner.upsert_session(session).await
     }
 
@@ -164,6 +898,11 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
         session: PersistedSession,
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
+        if self.reject_snapshot.load(Ordering::SeqCst) {
+            return Err(SmPersistenceError::Other(
+                "snapshot write unavailable".to_owned(),
+            ));
+        }
         if !self.first_store_seen.swap(true, Ordering::SeqCst) {
             self.first_store_started.notify_waiters();
             self.allow_first_store.notified().await;
@@ -320,6 +1059,16 @@ struct MislabelingStore {
 
 #[async_trait]
 impl SmPersistenceStorage for MislabelingStore {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome,
+        SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         self.inner.upsert_session(session).await
     }
@@ -1532,7 +2281,8 @@ async fn xep0198_drain_all_for_shutdown_does_not_delete_durable_row_until_confir
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("drain_all_for_shutdown succeeds");
+        .expect("drain_all_for_shutdown succeeds")
+        .sessions;
     assert_eq!(drained.len(), 1, "one live session drained");
 
     // Durable row preserved — restart-recovery path.
@@ -1639,7 +2389,8 @@ async fn xep0198_drain_all_for_shutdown_skips_claimed_sessions() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("drain_all_for_shutdown");
+        .expect("drain_all_for_shutdown")
+        .sessions;
     let drained_ids: Vec<_> = drained.iter().map(|s| s.stream_id.as_str()).collect();
     assert!(
         drained_ids.contains(&"stream-detached"),
@@ -1663,21 +2414,15 @@ async fn xep0198_drain_all_for_shutdown_skips_claimed_sessions() {
     );
 }
 
-/// Build a typed `<message/>` stanza and return its on-the-wire XML.
+/// Build a typed `<message/>` stanza for the detached registry boundary.
 ///
-/// AGENTS.md PR Compliance ID 14: tests must construct XMPP XML via
-/// structured builders (`xmpp_parsers` / `minidom`) rather than raw
-/// string literals — string XML is brittle to escaping bugs and
-/// drifts from the production serialization path. `message_to_string`
-/// is the same helper the production write loop uses, so this test
-/// exercises the same wire shape.
-fn late_drain_message_xml(id: &str, body: &str) -> String {
+fn late_drain_message(id: &str, body: &str) -> Stanza {
     let mut message = Message::new(None);
     message.id = Some(xmpp_parsers::message::Id(id.to_string()));
     message
         .bodies
         .insert(xmpp_parsers::message::Lang::new(), body.to_string());
-    waddle_xmpp::parser::message_to_string(&message).expect("serialize <message/>")
+    Stanza::Message(message)
 }
 
 /// Issue #209 finding #8: stanzas appended via
@@ -1708,7 +2453,7 @@ async fn xep0198_record_outbound_for_detached_stream_at_persists_durably() {
         .record_outbound_for_detached_stream_at(
             "stream-late-drain",
             42,
-            late_drain_message_xml("late", "late drain"),
+            &late_drain_message("late", "late drain"),
             t1,
         )
         .await
@@ -1730,6 +2475,81 @@ async fn xep0198_record_outbound_for_detached_stream_at_persists_durably() {
     );
     assert_eq!(unacked[0].sequence, 42);
     assert_eq!(unacked[0].original_receipt_at, t1);
+}
+
+/// Typed detached appends keep the previously queued wire payload immutable
+/// and survive hydration with the same replay bytes and receipt timestamps.
+#[tokio::test]
+async fn xep0198_typed_unkeyed_appends_preserve_replay_bytes() {
+    let persistence = Arc::new(InMemorySmPersistence::new());
+    let registry = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+    let mut session = detached_session("typed-unkeyed", "alice@example.com/laptop");
+    let original_xml = queued_stanza_xml("original", "already queued <&> café 🦆");
+    let receipt = chrono::Utc::now();
+    session
+        .unacked_stanzas
+        .push(waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 11,
+            stanza_xml: original_xml.clone(),
+            original_receipt_at: receipt,
+        });
+    registry
+        .store_session(session)
+        .await
+        .expect("store original");
+
+    let mut message = Message::new(None);
+    message.id = Some(xmpp_parsers::message::Id("typed-<&>".into()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "escaped <&> café 🦆".into(),
+    );
+    message.payloads.push(
+        minidom::Element::builder("metadata", "urn:waddle:test:replay:0")
+            .append("<&> extension")
+            .build(),
+    );
+    let stanza = Stanza::Message(message);
+    let wire = waddle_xmpp::parser::element_to_string(&stanza.to_element())
+        .expect("production wire bytes");
+    assert!(registry
+        .record_outbound_for_detached_stream("typed-unkeyed", &stanza, receipt)
+        .await
+        .expect("allocate typed stanza"));
+    assert!(registry
+        .record_outbound_for_detached_stream_at("typed-unkeyed", 13, &stanza, receipt)
+        .await
+        .expect("append explicit sequence"));
+
+    drop(registry);
+    let restored = InMemorySmSessionRegistry::new().with_persistence(persistence);
+    restored
+        .restore_from_persistence()
+        .await
+        .expect("hydrate replay");
+    let resumed = restored
+        .claim_session("typed-unkeyed")
+        .await
+        .expect("claim")
+        .expect("session");
+    assert_eq!(resumed.outbound_count, 13);
+    assert_eq!(
+        resumed
+            .unacked_stanzas
+            .iter()
+            .map(|entry| (
+                entry.sequence,
+                entry.stanza_xml.as_str(),
+                entry.original_receipt_at
+            ))
+            .collect::<Vec<_>>(),
+        vec![
+            (11, original_xml.as_str(), receipt),
+            (12, wire.as_str(), receipt),
+            (13, wire.as_str(), receipt)
+        ]
+    );
 }
 
 /// Presence replay for available detached resources is also part of the
@@ -1797,7 +2617,7 @@ async fn xep0198_record_outbound_for_unknown_stream_does_not_persist_orphan_row(
         .record_outbound_for_detached_stream_at(
             "stream-does-not-exist",
             7,
-            late_drain_message_xml("orphan", "orphan"),
+            &late_drain_message("orphan", "orphan"),
             chrono::Utc::now(),
         )
         .await
@@ -1861,7 +2681,8 @@ async fn xep0198_shutdown_drain_leases_expired_claimed_promotion_payload() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("shutdown drain");
+        .expect("shutdown drain")
+        .sessions;
     assert_eq!(
         drained.len(),
         1,
@@ -2150,4 +2971,52 @@ async fn xep0198_drained_custody_survives_eviction_before_snapshot() {
             .len(),
         1
     );
+}
+
+#[test]
+fn xep0198_public_detached_appends_preserve_thread_parent_and_replay_bytes() {
+    let mut session = detached_session("typed-thread-replay", "user@example.com/web");
+    let receipt_at = chrono::Utc::now();
+    let mut message = Message::new(Some(Jid::from(session.jid.clone())));
+    message.thread = Some(xmpp_parsers::message::Thread {
+        id: "conversation".to_owned(),
+        parent: Some("parent-conversation".to_owned()),
+    });
+    message.payloads.push(
+        minidom::Element::builder("thread", "urn:example:extension")
+            .append("extension-thread")
+            .build(),
+    );
+    let stanza = Stanza::Message(message);
+
+    session.record_detached_outbound(&stanza, receipt_at);
+    let first_replay = session.unacked_stanzas[0].stanza_xml.clone();
+    assert!(session.record_detached_outbound_at(13, &stanza, receipt_at));
+    assert!(!session.record_detached_outbound_at(13, &stanza, receipt_at));
+    assert_eq!(session.outbound_count, 13);
+    assert_eq!(session.unacked_stanzas.len(), 2);
+    assert_eq!(session.unacked_stanzas[0].stanza_xml, first_replay);
+    assert_eq!(session.stanzas_to_resend(11), vec![first_replay; 2]);
+
+    for entry in session.unacked_stanzas {
+        assert_eq!(entry.original_receipt_at, receipt_at);
+        let element = entry
+            .stanza_xml
+            .parse::<minidom::Element>()
+            .expect("valid replay XML");
+        let threads: Vec<_> = element
+            .children()
+            .filter(|child| child.name() == "thread" && child.ns() == "jabber:client")
+            .collect();
+        assert_eq!(threads.len(), 1, "canonical thread must not be duplicated");
+        assert_eq!(threads[0].text(), "conversation");
+        assert_eq!(threads[0].attr("parent"), Some("parent-conversation"));
+        assert_eq!(
+            element
+                .get_child("thread", "urn:example:extension")
+                .expect("unrelated thread extension survives")
+                .text(),
+            "extension-thread"
+        );
+    }
 }

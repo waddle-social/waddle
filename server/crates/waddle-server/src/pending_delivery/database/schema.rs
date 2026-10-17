@@ -42,6 +42,7 @@ pub(super) async fn initialize(
             (),
         )
         .await?;
+    initialize_promotion_receipts(storage).await?;
     // Online migration for existing Postgres tables that were created
     // with the pre-fix `INTEGER` (i32) shape. Widening to BIGINT is
     // lossless — every value that actually made it in fits in i32
@@ -747,5 +748,134 @@ mod ingress_v1014_claim_reset_tests {
         );
         assert_eq!(row.get::<Option<i64>>(1).expect("sequence"), Some(8));
         assert_eq!(row.get::<Option<i64>>(2).expect("claimed at"), Some(10));
+    }
+}
+
+/// Bootstrap receipts independently of the ingress ledger. Serialize both table
+/// creation and additive migration: `IF NOT EXISTS` alone races in PostgreSQL's
+/// type catalog when replicas start together.
+pub(super) async fn initialize_promotion_receipts(
+    storage: &DatabasePendingDeliveryStorage,
+) -> Result<(), PendingStorageError> {
+    const RECEIPT_SCHEMA_ADVISORY_LOCK_KEY: i64 = 7_305_784_319_670_198;
+    let mut tx = storage
+        .db
+        .begin_immediate()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    if matches!(storage.db.driver(), DatabaseDriver::Postgres) {
+        tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        tx.query(
+            "SELECT pg_advisory_xact_lock(?)",
+            crate::db_params![RECEIPT_SCHEMA_ADVISORY_LOCK_KEY],
+        )
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    }
+    tx.execute(
+        "CREATE TABLE IF NOT EXISTS pending_delivery_sm_promotions (\
+            origin_stream_id TEXT NOT NULL, \
+            sequence BIGINT NOT NULL, \
+            created_at_ms BIGINT NOT NULL DEFAULT 0, \
+            PRIMARY KEY (origin_stream_id, sequence)\
+        )",
+        (),
+    )
+    .await
+    .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    // Existing receipts predate this stamp. Zero means unknown age and only
+    // selects them for source verification; age never authorizes deletion.
+    let alter_sql = match storage.db.driver() {
+        DatabaseDriver::Postgres => "ALTER TABLE pending_delivery_sm_promotions ADD COLUMN IF NOT EXISTS created_at_ms BIGINT NOT NULL DEFAULT 0",
+        DatabaseDriver::Sqlite => "ALTER TABLE pending_delivery_sm_promotions ADD COLUMN created_at_ms BIGINT NOT NULL DEFAULT 0",
+    };
+    if matches!(storage.db.driver(), DatabaseDriver::Sqlite) {
+        let mut columns = tx
+            .query("PRAGMA table_info(pending_delivery_sm_promotions)", ())
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        let mut has_timestamp = false;
+        while let Some(column) = columns
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        {
+            let name: String = column
+                .get(1)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            has_timestamp |= name == "created_at_ms";
+        }
+        if !has_timestamp {
+            tx.execute(alter_sql, ())
+                .await
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+        }
+    } else {
+        tx.execute(alter_sql, ())
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+    }
+    tx.commit()
+        .await
+        .map_err(|error| PendingStorageError::Other(error.to_string()))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn postgres_concurrent_receipt_bootstrap_is_serialized() {
+        let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let schema = format!("receipt_bootstrap_{}", uuid::Uuid::new_v4().simple());
+        let admin = Database::from_config(
+            "receipt_bootstrap_admin",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, database_url.clone()),
+        )
+        .await
+        .expect("admin database");
+        admin
+            .guard()
+            .await
+            .expect("guard")
+            .execute(&format!("CREATE SCHEMA {schema}"), ())
+            .await
+            .expect("create schema");
+        let mut scoped_url = url::Url::parse(&database_url).expect("database URL");
+        scoped_url
+            .query_pairs_mut()
+            .append_pair("options", &format!("-csearch_path={schema}"));
+        let first =
+            DatabasePendingDeliveryStorage::open(Some(scoped_url.as_str()), QuotaPolicy::Unlimited)
+                .await
+                .expect("initial storage");
+        let second =
+            DatabasePendingDeliveryStorage::open(Some(scoped_url.as_str()), QuotaPolicy::Unlimited)
+                .await
+                .expect("second database pool");
+        first
+            .execute("DROP TABLE pending_delivery_sm_promotions", ())
+            .await
+            .expect("reset receipt bootstrap only");
+        // Existing neighbouring tables deliberately remain, isolating the new
+        // receipt DDL from their independent legacy initialization paths.
+        let (left, right) = tokio::join!(
+            initialize_promotion_receipts(&first),
+            initialize_promotion_receipts(&second)
+        );
+        left.expect("first concurrent bootstrap");
+        right.expect("second concurrent bootstrap");
+        first.execute("INSERT INTO pending_delivery_sm_promotions (origin_stream_id, sequence, created_at_ms) VALUES ('source', 1, 1)", ()).await.expect("initialized receipt table usable");
+        admin
+            .guard()
+            .await
+            .expect("guard")
+            .execute(&format!("DROP SCHEMA {schema} CASCADE"), ())
+            .await
+            .expect("drop schema");
     }
 }

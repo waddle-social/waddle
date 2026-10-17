@@ -160,6 +160,8 @@ async fn xep0319_idle_payload_survives_sm_detach_snapshot() {
     let idle_element = build_idle_element(test_time());
     registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "xep0319-detached".to_string(),
             user_id: "juliet@capulet.com".to_string(),
             jid: jid.clone(),

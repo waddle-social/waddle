@@ -1,4 +1,6 @@
 mod keyed_append;
+pub(super) mod promotion_custody;
+mod promotion_receipt_gc;
 
 use super::core::PendingClaimAcquisitionDisposition;
 use super::*;
@@ -99,13 +101,10 @@ fn groupchat_target(stanza_id: &str, room: &str) -> crate::tombstone::TombstoneT
     }
 }
 
-fn message_stanza_xml_with_id(id: String) -> String {
+fn message_stanza_with_id(id: String) -> Stanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message.id = Some(xmpp_parsers::message::Id(id));
-    let element = Stanza::Message(message).to_element();
-    let mut buffer = Vec::new();
-    element.write_to(&mut buffer).expect("serialize message");
-    String::from_utf8(buffer).expect("message stanza xml is utf-8")
+    Stanza::Message(message)
 }
 
 fn make_test_session(stream_id: &str) -> DetachedSession {
@@ -114,6 +113,7 @@ fn make_test_session(stream_id: &str) -> DetachedSession {
 
 fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
     DetachedSession {
+        promotion_custody: crate::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: "user@example.com".to_string(),
         jid,
@@ -1025,6 +1025,15 @@ async fn pending_claim_retry_limit_is_shared_across_acquisitions_and_releases() 
         crate::ownership::SharedNodeIdentity::new(me.clone()),
     );
     let acquisition_id = "budgeted-acquisition";
+    // The retry resolves a committed acquisition whose response was lost;
+    // it must never create a new claim merely to reconcile the budget slot.
+    store
+        .acquire(
+            &crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, acquisition_id),
+            &me,
+        )
+        .await
+        .expect("committed ambiguous acquisition");
     assert!(registry.reserve_claim_fence_capacity(acquisition_id));
     registry.sessions.write().expect("sessions").insert(
         acquisition_id.to_string(),
@@ -1946,6 +1955,7 @@ async fn shutdown_drained_session_is_not_a_terminal_release_retry() {
             .drain_all_for_shutdown()
             .await
             .expect("drain")
+            .sessions
             .len(),
         1
     );
@@ -2507,7 +2517,7 @@ fn detached_session_overflow_blocks_resume_for_older_client_h() {
     for sequence in 1..=(crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1) {
         session.record_detached_outbound_at(
             sequence,
-            message_stanza_xml_with_id(format!("m{sequence}")),
+            &message_stanza_with_id(format!("m{sequence}")),
             Utc::now(),
         );
     }
@@ -3216,7 +3226,11 @@ async fn complete_claim_releases_when_handoff_creates_replay_gap() {
             .record_outbound_for_detached_stream_at(
                 "stream-handoff-gap",
                 sequence,
-                message_stanza_xml_with_id(format!("m{sequence}")),
+                &{
+                    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+                    message.id = Some(xmpp_parsers::message::Id(format!("m{sequence}")));
+                    Stanza::Message(message)
+                },
                 Utc::now(),
             )
             .await
@@ -3440,6 +3454,7 @@ fn realistic_test_session(stream_id: &str) -> DetachedSession {
 
 fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
     DetachedSession {
+        promotion_custody: crate::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: "user@example.com".to_string(),
         jid,
@@ -4440,6 +4455,16 @@ impl GatedSnapshotPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,
@@ -4852,10 +4877,29 @@ async fn assert_ambiguous_claim_survives_displacement(
             .read()
             .expect("pending promotions")
             .contains_key(old_stream));
-        let drained = registry.drain_expired().await.expect("drain retry session");
-        assert!(drained
-            .iter()
-            .any(|session| session.stream_id == old_stream));
+        let drained = registry.drain_expired().await;
+        if rotate_identity {
+            assert!(
+                drained
+                    .expect("skip predecessor custody")
+                    .iter()
+                    .all(|session| session.stream_id != old_stream),
+                "a new incarnation cannot promote the previous owner's queue"
+            );
+            assert!(
+                registry
+                    .pending_promotion_retries
+                    .read()
+                    .expect("retained retries")
+                    .contains_key(old_stream),
+                "fence rejection must retain the displaced payload for recovery"
+            );
+        } else {
+            assert!(drained
+                .expect("drain retry session")
+                .iter()
+                .any(|session| session.stream_id == old_stream));
+        }
     } else {
         let displaced = replacement.expect("replacement snapshot");
         assert!(displaced
@@ -4873,6 +4917,44 @@ async fn assert_ambiguous_claim_survives_displacement(
             .expect("claim lookup")
             .is_some()
     );
+
+    if rotate_identity {
+        // Identity rotation alone grants no authority over the old queue.
+        // Production demotion/reclamation supplies the subsequent handoff;
+        // this regression proves ambiguous reconciliation never releases or
+        // discards the prior incarnation's still-durable responsibility.
+        assert!(
+            !registry.confirm_drained(old_stream).await,
+            "a rejected stale promotion cannot confirm deletion of the old queue"
+        );
+        let retained_claim = crate::ownership::ClaimStore::current_claim(store.as_ref(), &entity)
+            .await
+            .expect("retained exact claim")
+            .expect("prior claim remains held");
+        assert_eq!(retained_claim.owner, me);
+        assert!(storage
+            .get_session(&crate::pending_delivery::SmSessionId::new(old_stream))
+            .await
+            .expect("retained durable source")
+            .is_some());
+        assert_eq!(
+            storage
+                .list_unacked(&crate::pending_delivery::SmSessionId::new(old_stream))
+                .await
+                .expect("retained durable queue")
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            vec![6, 7]
+        );
+        assert!(registry
+            .pending_claim_releases
+            .read()
+            .expect("pending releases")
+            .iter()
+            .all(|(stream_id, _)| stream_id != old_stream));
+        return;
+    }
 
     assert!(registry.confirm_drained(old_stream).await);
     assert!(
@@ -5192,7 +5274,8 @@ async fn pending_promotion_is_live_until_durable_confirmation() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("begin promotion");
+        .expect("begin promotion")
+        .sessions;
     assert_eq!(drained.len(), 1);
     assert_eq!(
         registry.live_session_ids().expect("live inventory"),
@@ -5229,7 +5312,8 @@ async fn reclaimed_hydration_does_not_publish_over_a_pending_promotion() {
     let drained = registry
         .drain_all_for_shutdown()
         .await
-        .expect("begin promotion");
+        .expect("begin promotion")
+        .sessions;
     assert_eq!(drained.len(), 1);
     let reservation = registry
         .reserve_reclaimed_claim_capacity(&entity)
@@ -5270,6 +5354,7 @@ async fn concurrent_retry_drains_lease_a_promotion_exactly_once() {
         .drain_all_for_shutdown()
         .await
         .expect("begin promotion")
+        .sessions
         .into_iter()
         .next()
         .expect("drained session");
@@ -5464,7 +5549,7 @@ async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
                 |_| true,
                 |session| {
                     session.record_detached_outbound(
-                        message_stanza_xml_with_id("race-append".to_string()),
+                        &message_stanza_with_id("race-append".to_string()),
                         Utc::now(),
                     );
                     true
@@ -5563,7 +5648,7 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
 
     // Simulate mid-promotion: the stream leaves memory (janitor drain /
     // displacement) but its durable rows survive un-confirmed.
-    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
 
     // Retraction arrives during the window.
@@ -5584,11 +5669,20 @@ async fn tombstone_scrub_reaches_durable_rows_of_off_map_streams() {
     // non-matching one preserved.
     let restarted = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
     assert_eq!(restarted.restore_from_persistence().await.unwrap(), 1);
-    let hydrated = restarted
-        .peek_session("stream-offmap")
+    assert!(
+        restarted
+            .peek_session("stream-offmap")
+            .await
+            .unwrap()
+            .is_none(),
+        "promotion inventory must never reappear as a resumable stream"
+    );
+    let mut recovered = restarted
+        .drain_expired()
         .await
-        .unwrap()
-        .expect("session rehydrates");
+        .expect("recover promotion inventory");
+    assert_eq!(recovered.len(), 1);
+    let hydrated = recovered.remove(0);
     assert_eq!(hydrated.unacked_stanzas.len(), 1);
     assert!(
         !hydrated
@@ -5714,7 +5808,7 @@ async fn reinsert_for_retry_makes_session_drainable_but_never_resumable() {
     let session = realistic_test_session("stream-reinsert");
     registry.store_session(session).await.unwrap();
 
-    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
     assert!(registry.drain_expired().await.unwrap().is_empty());
 
@@ -5916,6 +6010,15 @@ async fn reinsert_for_retry_preserves_detached_at_for_eviction_ordering() {
     let mut failing =
         make_test_session_for_jid("stream-failing", "alice@example.com/web".parse().unwrap());
     failing.detached_at = Instant::now() - Duration::from_secs(100);
+    let original_detached_at = failing.detached_at;
+    // A real retry inherits its enabled stream's exact claim. Establish that
+    // source authority before filling the bounded registry with other streams.
+    drop(
+        registry
+            .ensure_session_claim(&failing.stream_id)
+            .await
+            .expect("enabled retry source claim"),
+    );
     registry.reinsert_for_retry(failing).await.unwrap();
 
     let mut healthy =
@@ -5939,6 +6042,7 @@ async fn reinsert_for_retry_preserves_detached_at_for_eviction_ordering() {
         "the reinserted session must keep its original detached_at and \
          be evicted before a fresher healthy session"
     );
+    assert_eq!(displaced[0].detached_at, original_detached_at);
     assert!(
         registry
             .peek_session("stream-healthy")
@@ -5992,7 +6096,7 @@ async fn reinsert_for_retry_drops_entries_whose_durable_rows_were_scrubbed() {
     registry.store_session(session).await.unwrap();
 
     // Janitor drains the session off both maps (mid-promotion).
-    let drained = registry.drain_all_for_shutdown().await.unwrap();
+    let drained = registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
 
     // Retraction lands during the window: the off-map durable sweep
@@ -6089,6 +6193,8 @@ struct FailingSnapshotPersistence {
     inner: super::super::persistence::InMemorySmPersistence,
     fail_snapshots: std::sync::atomic::AtomicBool,
     fail_reads: std::sync::atomic::AtomicBool,
+    get_session_calls: std::sync::atomic::AtomicUsize,
+    list_unacked_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FailingSnapshotPersistence {
@@ -6097,12 +6203,24 @@ impl FailingSnapshotPersistence {
             inner: super::super::persistence::InMemorySmPersistence::new(),
             fail_snapshots: std::sync::atomic::AtomicBool::new(false),
             fail_reads: std::sync::atomic::AtomicBool::new(false),
+            get_session_calls: std::sync::atomic::AtomicUsize::new(0),
+            list_unacked_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,
@@ -6117,6 +6235,8 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         Option<super::super::persistence::PersistedSession>,
         super::super::persistence::SmPersistenceError,
     > {
+        self.get_session_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.get_session(stream_id).await
     }
 
@@ -6157,6 +6277,8 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         Vec<super::super::persistence::PersistedUnackedStanza>,
         super::super::persistence::SmPersistenceError,
     > {
+        self.list_unacked_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.list_unacked(stream_id).await
     }
 
@@ -6880,6 +7002,16 @@ impl GatedGetSessionPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,
@@ -7721,6 +7853,16 @@ impl ScopedProbePersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for ScopedProbePersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,

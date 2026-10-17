@@ -1,3 +1,6 @@
+mod receipt_completion;
+mod stale_batch;
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -81,6 +84,7 @@ fn detached_session_with_unacked(
 ) -> DetachedSession {
     let now = Utc::now();
     DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: "alice".to_string(),
         jid,
@@ -298,6 +302,27 @@ fn dm_xml(from: &str, to: &str, body: &str) -> String {
     String::from_utf8(buf).unwrap()
 }
 
+fn senderless_server_message_xml(recipient: &str) -> String {
+    let entry = waddle_xmpp::inbox::InboxEntry::new(
+        bare("bob@example.com"),
+        waddle_xmpp::inbox::ConversationKind::Direct,
+        "last-message",
+        Utc::now().timestamp(),
+    );
+    let message = waddle_xmpp::xep::xep0430::build_inbox_entry_message(
+        recipient.parse().expect("recipient"),
+        "inbox-query",
+        &entry,
+        None,
+    );
+    let mut xml = Vec::new();
+    Stanza::Message(message)
+        .to_element()
+        .write_to(&mut xml)
+        .expect("serialize inbox entry");
+    String::from_utf8(xml).expect("UTF-8 stanza")
+}
+
 fn mam_replay_xml(child_name: &str) -> String {
     let mut m = xmpp_parsers::message::Message::new(Some(
         "alice@example.com/web".parse::<jid::Jid>().unwrap(),
@@ -476,6 +501,87 @@ async fn mam_fin_frame_is_not_promoted_to_pending_delivery() {
 }
 
 #[tokio::test]
+async fn senderless_server_messages_do_not_accumulate_or_bounce_at_quota() {
+    let _guard = sm_promotion_metric_test_lock().lock().await;
+    for allow_unfenced_effects in [true, false] {
+        for quota in [
+            QuotaPolicy::Unlimited,
+            QuotaPolicy::CountCap { max_rows: 0 },
+        ] {
+            let storage: Arc<dyn PendingDeliveryStorage> =
+                Arc::new(InMemoryPendingDeliveryStorage::new(quota));
+            let registry = ConnectionRegistry::new();
+            let user_registry = test_user_registry();
+            let session = detached_session_with_unacked(
+                "senderless-server-message",
+                full("alice@example.com/web"),
+                vec![senderless_server_message_xml("alice@example.com/web")],
+            );
+
+            let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new();
+            let session = sm_registry
+                .register_promotion_session(&session)
+                .await
+                .expect("register audited inbox projection custody");
+            let summary = promote_session_with_custody(
+                &session,
+                TerminalOverflowPromotionDeps {
+                    sm_registry: &sm_registry,
+                    registry: &registry,
+                    user_registry: &user_registry,
+                    pending_storage: &storage,
+                    blocklist: &Blocklist::empty(),
+                    server_domain: "example.com",
+                    recent_tombstones: &[],
+                    allow_unfenced_effects,
+                },
+            )
+            .await;
+
+            assert_eq!(summary.not_promotable, 1);
+            assert_eq!(summary.queued, 0);
+            assert_eq!(summary.bounced, 0);
+            assert_eq!(summary.storage_failed, 0, "no retry or warning storm");
+            assert_eq!(summary.promoted_sequences, vec![1]);
+            assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+        }
+    }
+}
+
+#[tokio::test]
+async fn senderless_server_messages_can_still_reach_an_alternate_resource() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let registry = ConnectionRegistry::new();
+    let user_registry = test_user_registry();
+    let alternate = full("alice@example.com/web");
+    let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
+    dual_register(&registry, &user_registry, alternate.clone(), sender).await;
+    registry.update_presence(&alternate, true, 1);
+    let session = detached_session_with_unacked(
+        "senderless-live-notification",
+        full("alice@example.com/phone"),
+        vec![senderless_server_message_xml("alice@example.com")],
+    );
+
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &user_registry,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+
+    assert_eq!(summary.redelivered, 1);
+    assert_eq!(summary.not_promotable, 0);
+    assert!(receiver.try_recv().is_ok());
+    assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 0);
+}
+
+#[tokio::test]
 async fn promotes_to_alt_resource_when_one_is_online() {
     // Locked Q6 = B step 1: another resource of the same user
     // is online with non-negative priority — re-route there
@@ -516,8 +622,7 @@ async fn promotes_to_alt_resource_when_one_is_online() {
     assert!(rx.try_recv().is_ok(), "stanza pushed to alt resource");
 }
 
-#[tokio::test]
-async fn bounces_service_unavailable_when_quota_exceeded() {
+async fn assert_quota_bounce_reaches_sender(sender_address: &str) {
     // Locked Q6 = B step 3: pending_delivery quota refused →
     // <service-unavailable/> bounced to sender per XEP-0160 §3
     // step 3 + RFC 6120 §8.3.
@@ -536,11 +641,7 @@ async fn bounces_service_unavailable_when_quota_exceeded() {
     let session = detached_session_with_unacked(
         "stream-1",
         full("alice@example.com/laptop"),
-        vec![dm_xml(
-            "bob@example.com/x",
-            "alice@example.com",
-            "queue full",
-        )],
+        vec![dm_xml(sender_address, "alice@example.com", "queue full")],
     );
 
     let summary = promote_session_unacked(
@@ -560,9 +661,34 @@ async fn bounces_service_unavailable_when_quota_exceeded() {
     match &bounce.stanza {
         Stanza::Message(m) => {
             assert_eq!(m.type_, xmpp_parsers::message::MessageType::Error);
+            assert_eq!(
+                m.to.as_ref(),
+                Some(&sender_address.parse().expect("sender"))
+            );
+            let error = m
+                .payloads
+                .iter()
+                .find(|payload| payload.name() == "error")
+                .expect("error payload");
+            let error = xmpp_parsers::stanza_error::StanzaError::try_from(error.clone())
+                .expect("typed stanza error");
+            assert_eq!(
+                error.defined_condition,
+                xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+            );
         }
         _ => panic!("expected Message bounce"),
     }
+}
+
+#[tokio::test]
+async fn bounces_service_unavailable_when_quota_exceeded() {
+    assert_quota_bounce_reaches_sender("bob@example.com/x").await;
+}
+
+#[tokio::test]
+async fn bounces_service_unavailable_to_bare_sender_resource_when_quota_exceeded() {
+    assert_quota_bounce_reaches_sender("bob@example.com").await;
 }
 
 #[tokio::test]
@@ -825,6 +951,7 @@ async fn promoted_pending_row_carries_per_stanza_original_receipt_at() {
     let receipt_time =
         chrono::DateTime::<Utc>::from_timestamp_millis(1_700_000_000_000).expect("valid millis");
     let session = waddle_xmpp::stream_management::DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "stream-receipt-test".to_string(),
         user_id: "alice".to_string(),
         jid: full("alice@example.com/laptop"),
@@ -1953,7 +2080,7 @@ async fn retraction_racing_in_flight_promotion_does_not_deliver_retracted_conten
         .unwrap();
 
     // Step 1: drain (session now off both maps, held in a local).
-    let drained = sm_registry.drain_all_for_shutdown().await.unwrap();
+    let drained = sm_registry.drain_all_for_shutdown().await.unwrap().sessions;
     assert_eq!(drained.len(), 1);
 
     // Step 2: retraction scrub lands mid-promotion.
@@ -2436,6 +2563,16 @@ impl PendingDeliveryStorage for FlakyPending {
         waddle_xmpp::pending_delivery::InsertOutcome,
         waddle_xmpp::pending_delivery::storage::PendingStorageError,
     > {
+        // This fixture models recipient capacity recovering while the
+        // sender's queue remains full. The return error cannot settle the
+        // source, so shutdown must retry the original rather than succeed by
+        // durably returning a rejection. Count original admissions only.
+        if self.quota_on_failure
+            && matches!(&row.payload, waddle_xmpp::pending_delivery::PendingPayload::Transient(message)
+                if message.type_ == xmpp_parsers::message::MessageType::Error)
+        {
+            return Ok(waddle_xmpp::pending_delivery::InsertOutcome::QuotaExceeded);
+        }
         let call = self
             .insert_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
@@ -2745,6 +2882,16 @@ async fn clustered_shutdown_retries_when_quota_capacity_becomes_available() {
     );
     assert!(persistence.get_session(&stream).await.unwrap().is_none());
     assert_eq!(storage.count(&bare("alice@example.com")).await.unwrap(), 1);
+    assert_eq!(
+        storage.count(&bare("bob@example.com")).await.unwrap(),
+        0,
+        "full sender queue cannot replace original custody with a bounce"
+    );
+    assert_eq!(
+        transient_bodies(&storage.list(&bare("alice@example.com")).await.unwrap()),
+        vec!["capacity recovered".to_owned()],
+        "retry delivers the original message"
+    );
 }
 
 #[tokio::test]
@@ -3335,6 +3482,7 @@ async fn ordinary_sm_promotion_completes_independent_ingress_custody() {
         .drain_all_for_shutdown()
         .await
         .expect("drain detached session for promotion")
+        .sessions
         .pop()
         .expect("detached promotion session exists");
     let pending: Arc<dyn PendingDeliveryStorage> = Arc::new(
@@ -3432,6 +3580,10 @@ async fn clustered_shutdown_queues_before_live_delivery() {
             iq_xml,
         ],
     );
+    let session = sm_registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register exact promotion custody");
     let summary = promote_session_with_custody(
         &session,
         TerminalOverflowPromotionDeps {
@@ -3484,6 +3636,10 @@ async fn clustered_shutdown_keeps_replay_when_pending_quota_is_full() {
             "retry later",
         )],
     );
+    let session = sm_registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register exact promotion custody");
     let summary = promote_session_with_custody(
         &session,
         TerminalOverflowPromotionDeps {
@@ -3539,6 +3695,10 @@ async fn clustered_shutdown_defers_no_store_message_without_a_direct_send() {
         full("alice@example.com/phone"),
         vec![String::from_utf8(buffer).expect("UTF-8 message")],
     );
+    let session = sm_registry
+        .register_promotion_session(&session)
+        .await
+        .expect("register exact promotion custody");
     let summary = promote_session_with_custody(
         &session,
         TerminalOverflowPromotionDeps {
@@ -3601,4 +3761,479 @@ async fn committed_custody_key(
         semantic_identity_hash: receipt.semantic_identity_hash,
         resource,
     }
+}
+
+#[tokio::test]
+async fn senderless_body_message_remains_offline_deliverable() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::unlimited());
+    let mut message = xmpp_parsers::message::Message::new(Some(bare("alice@example.com").into()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "account notification".to_owned(),
+    );
+    assert!(!is_senderless_inbox_projection(&message));
+    let mut xml = Vec::new();
+    Stanza::Message(message)
+        .to_element()
+        .write_to(&mut xml)
+        .expect("serialize notification");
+    let session = detached_session_with_unacked(
+        "senderless-body",
+        full("alice@example.com/phone"),
+        vec![String::from_utf8(xml).expect("UTF-8")],
+    );
+    let summary = promote_session_unacked(
+        &session,
+        &ConnectionRegistry::new(),
+        &test_user_registry(),
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+    assert_eq!(summary.queued, 1);
+    assert_eq!(summary.not_promotable, 0);
+    assert_eq!(
+        storage
+            .count(&bare("alice@example.com"))
+            .await
+            .expect("count"),
+        1
+    );
+}
+
+#[test]
+fn senderless_filter_matches_real_inbox_producers_and_preserves_extra_content() {
+    use waddle_xmpp::xep::xep0430::{
+        build_inbox_entry_message, build_inbox_push, InboxLastMessage,
+    };
+    let entry = waddle_xmpp::inbox::InboxEntry::new(
+        bare("bob@example.com"),
+        waddle_xmpp::inbox::ConversationKind::Direct,
+        "last-message",
+        123,
+    );
+    let mut inner = xmpp_parsers::message::Message::new(Some(bare("alice@example.com").into()));
+    inner.from = Some(bare("bob@example.com").into());
+    for last in [
+        None,
+        Some(InboxLastMessage {
+            mam_id: "last-message",
+            forwarded_inner: inner.into(),
+            delay_stamp: None,
+        }),
+    ] {
+        let mut response =
+            build_inbox_entry_message(full("alice@example.com/web").into(), "query", &entry, last);
+        assert!(is_senderless_inbox_projection(&response));
+        response.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "preserve body".to_owned(),
+        );
+        assert!(!is_senderless_inbox_projection(&response));
+    }
+    let mut push = build_inbox_push(full("alice@example.com/web").into(), &entry);
+    assert!(is_senderless_inbox_projection(&push));
+    push.from = Some(bare("bob@example.com").into());
+    assert!(
+        !is_senderless_inbox_projection(&push),
+        "peer messages cannot impersonate disposable projections"
+    );
+}
+
+#[tokio::test]
+async fn offline_local_sender_quota_bounce_commits_once_and_survives_restart() {
+    let _guard = sm_promotion_metric_test_lock().lock().await;
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    use waddle_xmpp::pending_delivery::{InsertOutcome, PendingPayload, PendingRow, PendingRowId};
+    let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::CountCap { max_rows: 1 },
+        )
+        .await
+        .expect("pending store"),
+    );
+    assert_eq!(
+        storage
+            .insert(PendingRow {
+                id: PendingRowId::fresh(),
+                recipient: bare("alice@example.com"),
+                original_receipt_at: Utc::now(),
+                payload: PendingPayload::Transient(Box::new(xmpp_parsers::message::Message::new(
+                    None
+                ))),
+                flushed_in_session: None,
+                outbound_sequence: None,
+            })
+            .await
+            .expect("fill recipient quota"),
+        InsertOutcome::Inserted
+    );
+    let session = detached_session_with_unacked(
+        "offline-sender-bounce",
+        full("alice@example.com/phone"),
+        vec![dm_xml(
+            "bob@example.com/offline",
+            "alice@example.com",
+            "queue full",
+        )],
+    );
+    let registry = ConnectionRegistry::new();
+    let users = test_user_registry();
+    let summary = promote_session_unacked(
+        &session,
+        &registry,
+        &users,
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+    assert_eq!(summary.bounced, 1);
+    assert_eq!(summary.storage_failed, 0);
+    assert_eq!(summary.promoted_sequences, vec![1]);
+    let restarted: Arc<dyn PendingDeliveryStorage> = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::CountCap { max_rows: 1 },
+        )
+        .await
+        .expect("reopen pending store"),
+    );
+    let retry = promote_session_unacked(
+        &session,
+        &registry,
+        &users,
+        &restarted,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+    assert!(!retry.has_storage_failure());
+    assert_eq!(
+        metrics.counter_sum("xmpp.pending_delivery.quota_exceeded", &[]),
+        Some(1),
+        "restart retry must not increment the rejection again"
+    );
+    let rows = restarted
+        .list(&bare("bob@example.com"))
+        .await
+        .expect("durable bounce");
+    assert_eq!(
+        rows.len(),
+        1,
+        "source receipt deduplicates retries after restart"
+    );
+    let PendingPayload::Transient(bounce) = &rows[0].payload else {
+        panic!("typed bounce")
+    };
+    assert_eq!(bounce.type_, xmpp_parsers::message::MessageType::Error);
+    assert_eq!(bounce.to, Some(full("bob@example.com/offline").into()));
+    let error = bounce
+        .payloads
+        .iter()
+        .find(|payload| payload.name() == "error")
+        .expect("stanza error");
+    let error =
+        xmpp_parsers::stanza_error::StanzaError::try_from(error.clone()).expect("typed error");
+    assert_eq!(
+        error.defined_condition,
+        xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable
+    );
+}
+
+#[tokio::test]
+async fn senderless_body_at_quota_is_nonbounceable_without_retries() {
+    let storage: Arc<dyn PendingDeliveryStorage> =
+        Arc::new(InMemoryPendingDeliveryStorage::new(QuotaPolicy::CountCap {
+            max_rows: 0,
+        }));
+    let mut message = xmpp_parsers::message::Message::new(Some(bare("alice@example.com").into()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "account notification".to_owned(),
+    );
+    let mut xml = Vec::new();
+    Stanza::Message(message)
+        .to_element()
+        .write_to(&mut xml)
+        .expect("serialize notification");
+    let session = detached_session_with_unacked(
+        "senderless-full",
+        full("alice@example.com/phone"),
+        vec![String::from_utf8(xml).expect("UTF-8")],
+    );
+    let summary = promote_session_unacked(
+        &session,
+        &ConnectionRegistry::new(),
+        &test_user_registry(),
+        &storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+    assert_eq!(summary.not_promotable, 1);
+    assert_eq!(summary.bounced, 0);
+    assert!(!summary.has_storage_failure());
+    assert_eq!(summary.promoted_sequences, vec![1]);
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn postgres_fenced_offline_sender_bounce_retires_exact_source_once() {
+    use crate::clustering::claims::{clustering_control_plane_table_lock, PostgresClaimStore};
+    use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, SmSessionId};
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry};
+    let Ok(base_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let _guard = clustering_control_plane_table_lock().lock().await;
+    let admin = Database::from_config(
+        "quota-bounce-admin",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, base_url.clone()),
+    )
+    .await
+    .expect("open admin");
+    let schema = format!("quota_bounce_{}", uuid::Uuid::new_v4().simple());
+    admin
+        .guard()
+        .await
+        .expect("admin connection")
+        .execute(&format!("CREATE SCHEMA {schema}"), ())
+        .await
+        .expect("create schema");
+    let mut scoped_url = url::Url::parse(&base_url).expect("postgres URL");
+    scoped_url
+        .query_pairs_mut()
+        .append_pair("options", &format!("-csearch_path={schema}"));
+    let scoped_url = scoped_url.to_string();
+    let db = Database::from_config(
+        "quota-bounce-fenced",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, scoped_url.clone())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("fenced database");
+    let claims = Arc::new(PostgresClaimStore::new(db.clone()));
+    claims.ensure_schema().await.expect("claim schema");
+    let node = NodeIdentity::new("quota-bounce", uuid::Uuid::new_v4().to_string());
+    let stream = SmSessionId::new("fenced-offline-bounce");
+    let epoch = claims
+        .acquire(
+            &Entity::new(EntityType::SmSession, stream.as_str().to_owned()),
+            &node,
+        )
+        .await
+        .expect("claim stream");
+    let persistence = Arc::new(
+        crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+            .await
+            .expect("SM persistence"),
+    );
+    let sm_registry = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+    let mut session = detached_session_with_unacked(
+        stream.as_str(),
+        full("alice@example.com/phone"),
+        vec![dm_xml(
+            "bob@example.com/offline",
+            "alice@example.com",
+            "full recipient queue",
+        )],
+    );
+    let captured_fence =
+        waddle_xmpp::stream_management::persistence::SmClaimFence::new(node.clone(), epoch);
+    sm_registry
+        .store_session(session.clone())
+        .await
+        .expect("persist source");
+    session.promotion_custody =
+        waddle_xmpp::stream_management::PromotionCaptureCustody::claimed(captured_fence.clone());
+    let live_identity = SharedNodeIdentity::new(node.clone());
+    let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(
+        crate::pending_delivery::open_for_cluster_mode(
+            Some(&scoped_url),
+            QuotaPolicy::CountCap { max_rows: 1 },
+            true,
+            Some((claims.clone() as Arc<dyn ClaimStore>, live_identity.clone())),
+            &db,
+        )
+        .await
+        .expect("fenced pending storage"),
+    );
+    storage
+        .insert(PendingRow {
+            id: PendingRowId::fresh(),
+            recipient: bare("alice@example.com"),
+            original_receipt_at: Utc::now(),
+            payload: PendingPayload::Transient(Box::new(xmpp_parsers::message::Message::new(None))),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        })
+        .await
+        .expect("fill recipient queue");
+    let live = ConnectionRegistry::new();
+    let users = test_user_registry();
+    for attempt in 0..2 {
+        let summary = promote_session_unacked_with_policy(
+            &session,
+            StreamPromotionDeps {
+                registry: &live,
+                user_registry: &users,
+                pending_storage: &storage,
+                blocklist: &Blocklist::empty(),
+                server_domain: "example.com",
+                recent_tombstones: &[],
+                allow_unfenced_effects: false,
+            },
+        )
+        .await;
+        assert!(!summary.has_storage_failure());
+        if attempt == 0 {
+            assert_eq!(summary.bounced, 1);
+        }
+    }
+    assert!(persistence
+        .list_unacked(&stream)
+        .await
+        .expect("remaining source")
+        .is_empty());
+    assert!(
+        persistence
+            .get_session(&stream)
+            .await
+            .expect("source metadata")
+            .is_some(),
+        "only exact source entry retires"
+    );
+    let bounces = storage
+        .list(&bare("bob@example.com"))
+        .await
+        .expect("sender queue");
+    assert_eq!(bounces.len(), 1);
+    let PendingPayload::Transient(bounce) = &bounces[0].payload else {
+        panic!("typed error")
+    };
+    assert_eq!(bounce.type_, xmpp_parsers::message::MessageType::Error);
+    // The same process incarnation may legitimately regain the same stream
+    // at a newer epoch. A paused captured operation must not borrow that claim.
+    let entity = Entity::new(EntityType::SmSession, stream.as_str().to_owned());
+    claims
+        .release(&entity, &node, epoch)
+        .await
+        .expect("release old epoch");
+    let newer_epoch = claims
+        .acquire(&entity, &node)
+        .await
+        .expect("same owner newer epoch");
+    assert_ne!(newer_epoch, epoch);
+    let replacement = detached_session_with_unacked(
+        stream.as_str(),
+        full("alice@example.com/phone"),
+        vec![dm_xml(
+            "bob@example.com/offline",
+            "alice@example.com",
+            "replacement source",
+        )],
+    );
+    sm_registry
+        .store_session(replacement)
+        .await
+        .expect("persist replacement source");
+    let stale_row = PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: bare("carol@example.com"),
+        original_receipt_at: Utc::now(),
+        payload: PendingPayload::Transient(Box::new(xmpp_parsers::message::Message::new(None))),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    assert!(matches!(
+        storage
+            .insert_promotion(stale_row.clone(), stream.as_str(), 1, Some(&captured_fence))
+            .await,
+        Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { .. })
+    ));
+    assert_eq!(
+        storage
+            .count(&bare("carol@example.com"))
+            .await
+            .expect("no stale insertion"),
+        0
+    );
+    assert_eq!(
+        persistence
+            .list_unacked(&stream)
+            .await
+            .expect("replacement source")
+            .len(),
+        1
+    );
+
+    // Rotation must reject the captured owner before a transaction effect,
+    // never ensure/acquire using the now-current process identity.
+    let newer_fence =
+        waddle_xmpp::stream_management::persistence::SmClaimFence::new(node.clone(), newer_epoch);
+    let recovered = NodeIdentity::new("quota-bounce", uuid::Uuid::new_v4().to_string());
+    live_identity.rotate(recovered.clone()).await;
+    claims
+        .release(&entity, &node, newer_epoch)
+        .await
+        .expect("successor retirement");
+    let recovered_epoch = claims
+        .acquire(&entity, &recovered)
+        .await
+        .expect("recovered claim");
+    for expected in [Some(&newer_fence), None] {
+        assert!(matches!(
+            storage
+                .insert_promotion(stale_row.clone(), stream.as_str(), 1, expected)
+                .await,
+            Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { .. })
+        ));
+    }
+    let claim = claims
+        .current_claim(&entity)
+        .await
+        .expect("current claim")
+        .expect("recovered claim survives");
+    assert_eq!(claim.owner, recovered);
+    assert_eq!(claim.claim_epoch, recovered_epoch);
+    assert_eq!(
+        storage
+            .count(&bare("carol@example.com"))
+            .await
+            .expect("no rotated insertion"),
+        0
+    );
+    assert_eq!(
+        persistence
+            .list_unacked(&stream)
+            .await
+            .expect("replacement source preserved")
+            .len(),
+        1
+    );
+    drop(storage);
+    drop(sm_registry);
+    drop(persistence);
+    drop(db);
+    admin
+        .guard()
+        .await
+        .expect("cleanup connection")
+        .execute(&format!("DROP SCHEMA {schema} CASCADE"), ())
+        .await
+        .expect("drop schema");
 }

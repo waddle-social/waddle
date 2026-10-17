@@ -1229,7 +1229,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     .deps
                     .protocol
                     .sm_session_registry
-                    .record_promotion_failure(&session.stream_id)
+                    .record_promotion_session_failure(&session)
                     .await
                 {
                     Ok(n) => n,
@@ -1261,7 +1261,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                         "SM janitor: row reconciliation has repeatedly failed; \
                          dead-lettering the durable row to break the retry loop"
                     );
-                    if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
+                    if confirm_expired_ingress_stream(state, &session).await
                     {
                         promotion_guard.complete();
                         // Dead-lettering discards the replay queue, but the
@@ -1340,7 +1340,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                         .deps
                         .protocol
                         .sm_session_registry
-                        .record_promotion_failure(&session.stream_id)
+                        .record_promotion_session_failure(&session)
                         .await
                     {
                         Ok(n) => n,
@@ -1374,7 +1374,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                             "SM janitor: blocklist load has repeatedly failed; \
                              dead-lettering the durable row to break the retry loop"
                         );
-                        if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
+                        if confirm_expired_ingress_stream(state, &session).await
                         {
                             promotion_guard.complete();
                         }
@@ -1473,7 +1473,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     .deps
                     .protocol
                     .sm_session_registry
-                    .record_promotion_failure(&session.stream_id)
+                    .record_promotion_session_failure(&session)
                     .await
                 {
                     Ok(n) => n,
@@ -1506,7 +1506,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                         "SM janitor: Q6 promotion repeatedly failed; \
                          dead-lettering the durable row to break the retry loop"
                     );
-                    if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
+                    if confirm_expired_ingress_stream(state, &session).await
                     {
                         promotion_guard.complete();
                     }
@@ -1530,7 +1530,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 }
                 continue;
             }
-            if confirm_expired_ingress_stream(state, &waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone())).await
+            if confirm_expired_ingress_stream(state, &session).await
             {
                 promotion_guard.complete();
             } else {
@@ -1836,17 +1836,23 @@ mod sm_retry_budget_tests {
 
 async fn confirm_expired_ingress_stream(
     state: &routes::websocket::WebSocketState,
-    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+    session: &waddle_xmpp::stream_management::DetachedSession,
 ) -> bool {
+    let stream_id = &waddle_xmpp::pending_delivery::SmSessionId::new(&session.stream_id);
     if !state
         .deps
         .protocol
         .sm_session_registry
-        .confirm_drained(stream_id.as_str())
+        .confirm_promotion_session(session)
         .await
     {
         return false;
     }
+    crate::sm_promotion::confirm_pending_promotion(
+        &state.deps.protocol.pending_delivery_storage,
+        stream_id,
+    )
+    .await;
     // The SM claim must be released before the ingress retirement's absence fence.
     if let Err(error) = state.deps.protocol.ingress.forget_stream(stream_id).await {
         warn!(%stream_id, %error, "SM janitor: ingress stream retirement failed");
@@ -1885,6 +1891,8 @@ mod sm_expiry_tests {
         occupancy_session: OccupancySessionGeneration,
     ) -> DetachedSession {
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.to_string(),
             user_id: jid.to_bare().to_string(),
             jid,
@@ -4538,6 +4546,16 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
         stanza: waddle_xmpp::stream_management::persistence::PersistedUnackedStanza,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
         self.inner.append_unacked(stanza).await
+    }
+
+    async fn append_promotion_stanza(
+        &self,
+        stanza: waddle_xmpp::stream_management::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
     }
 
     async fn ack_through(
@@ -7292,32 +7310,20 @@ pub(crate) async fn run_pending_delivery_claim_sweep(
 
         let max_age_days = i64::from(pending_delivery_max_age_days_from_env());
         let cutoff = chrono::Utc::now() - chrono::Duration::days(max_age_days);
-        match state
-            .deps
-            .protocol
-            .pending_delivery_storage
-            .delete_older_than(cutoff)
-            .await
-        {
-            Ok(0) => {}
-            Ok(removed) => {
-                waddle_xmpp::telemetry::reliability::add_pending_delivery_aged_out(removed);
-                info!(
-                    removed,
-                    cutoff = %cutoff,
-                    max_age_days,
-                    "pending_delivery aging janitor: dropped expired rows"
-                );
-            }
-            Err(error) => {
-                sweep_failed = true;
-                warn!(
-                    %error,
-                    "pending_delivery aging janitor: delete_older_than failed; \
-                     will retry on next sweep"
-                );
-            }
+        if let Err(error) = run_pending_ageout_sweep(state, cutoff).await {
+            sweep_failed = true;
+            warn!(
+                %error,
+                "pending_delivery aging janitor: delete_older_than failed; \
+                 will retry on next sweep"
+            );
         }
+        sweep_failed |= run_pending_promotion_receipt_sweep(
+            state,
+            claimed_before_ms,
+            &mut recovery.promotion_receipt_cursor,
+        )
+        .await;
         waddle_xmpp::telemetry::reliability::record_janitor_sweep(
             Janitor::PendingDeliveryClaim,
             if sweep_failed {
@@ -7329,6 +7335,241 @@ pub(crate) async fn run_pending_delivery_claim_sweep(
     }
     .instrument(janitor_sweep_span(Janitor::PendingDeliveryClaim))
     .await;
+}
+
+/// Run the same retention policy used by the periodic pending-delivery janitor.
+async fn run_pending_ageout_sweep(
+    state: &WebSocketState,
+    cutoff: chrono::DateTime<chrono::Utc>,
+) -> Result<u64, waddle_xmpp::pending_delivery::storage::PendingStorageError> {
+    let removed = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .delete_older_than(cutoff)
+        .await?;
+    if removed > 0 {
+        waddle_xmpp::telemetry::reliability::add_pending_delivery_aged_out(removed);
+        info!(removed, %cutoff, "pending_delivery aging janitor: dropped expired rows");
+    }
+    Ok(removed)
+}
+
+/// Receipt age schedules a bounded scan; only proven source absence permits deletion.
+/// Advance past live sources and individual failures so they cannot starve later IDs.
+async fn run_pending_promotion_receipt_sweep(
+    state: &WebSocketState,
+    created_before_ms: i64,
+    cursor: &mut Option<waddle_xmpp::pending_delivery::SmSessionId>,
+) -> bool {
+    const PAGE_SIZE: u32 = 128;
+    let storage = &state.deps.protocol.pending_delivery_storage;
+    let sources = match storage
+        .promotion_receipt_sources_before(created_before_ms, cursor.as_ref(), PAGE_SIZE)
+        .await
+    {
+        Ok(sources) => sources,
+        Err(error) => {
+            warn!(%error, "pending promotion receipt janitor: candidate scan failed; will retry next sweep");
+            return true;
+        }
+    };
+    *cursor = if sources.len() == PAGE_SIZE as usize {
+        sources.last().cloned()
+    } else {
+        None
+    };
+    let mut failed = false;
+    for source in sources {
+        if let Err(error) = state
+            .deps
+            .protocol
+            .sm_session_registry
+            .retire_orphaned_promotion_receipts(&source, storage.as_ref())
+            .await
+        {
+            failed = true;
+            warn!(stream_id = %source, %error, "pending promotion receipt janitor: source verification failed; preserving receipts until a later scan");
+        }
+    }
+    failed
+}
+
+#[cfg(test)]
+mod pending_delivery_retention_tests {
+    use super::{run_pending_delivery_claim_sweep, run_pending_promotion_receipt_sweep};
+    use crate::pending_delivery::DatabasePendingDeliveryStorage;
+    use crate::server::routes::websocket::tests::create_test_websocket_state_with_sm_registry_and_pending_storage;
+    use std::sync::Arc;
+    use waddle_xmpp::pending_delivery::{
+        InsertOutcome, PendingPayload, PendingRow, PendingRowId, QuotaPolicy, SmSessionId,
+    };
+    use waddle_xmpp::stream_management::persistence::{
+        InMemorySmPersistence, PersistedSession, SmPersistenceStorage,
+    };
+    use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
+
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+
+    fn pending_row() -> PendingRow {
+        let recipient: jid::BareJid = "offline@example.com".parse().expect("recipient");
+        let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
+        message.from = Some("sender@example.com/web".parse().expect("sender"));
+        message.bodies.insert(
+            xmpp_parsers::message::Lang::new(),
+            "pending message".to_owned(),
+        );
+        PendingRow {
+            id: PendingRowId::fresh(),
+            recipient,
+            original_receipt_at: chrono::Utc::now(),
+            payload: PendingPayload::Transient(Box::new(message)),
+            flushed_in_session: None,
+            outbound_sequence: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn real_pending_claim_janitor_ages_out_rows_restores_quota_and_exports_metric() {
+        let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+        let storage = Arc::new(
+            DatabasePendingDeliveryStorage::open(None, QuotaPolicy::CountCap { max_rows: 1 })
+                .await
+                .expect("database pending storage"),
+        );
+        let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+            Arc::new(InMemorySmSessionRegistry::new()),
+            storage.clone(),
+        )
+        .await;
+        let mut expired = pending_row();
+        expired.original_receipt_at -= chrono::Duration::days(366);
+        assert_eq!(
+            storage.insert(expired).await.expect("old row"),
+            InsertOutcome::Inserted
+        );
+        let new_row = pending_row();
+        assert_eq!(
+            storage.insert(new_row.clone()).await.expect("full quota"),
+            InsertOutcome::QuotaExceeded
+        );
+
+        let mut recovery = crate::pending_delivery::PendingRecovery::default();
+        run_pending_delivery_claim_sweep(&state, 60, &mut recovery).await;
+
+        assert_eq!(
+            metrics.counter_sum("xmpp.pending_delivery.aged_out", &[]),
+            Some(1)
+        );
+        assert_eq!(
+            storage
+                .insert(new_row.clone())
+                .await
+                .expect("capacity after real sweep"),
+            InsertOutcome::Inserted
+        );
+        let retained = storage.list(&new_row.recipient).await.expect("new queue");
+        assert_eq!(retained.len(), 1);
+        assert_eq!(retained[0].id, new_row.id);
+        assert_eq!(
+            metrics.counter_sum(
+                "waddle.janitor.sweeps",
+                &[
+                    ("janitor", "pending_delivery_claim"),
+                    ("outcome", "completed")
+                ]
+            ),
+            Some(1)
+        );
+    }
+
+    fn live_source(stream_id: &str) -> PersistedSession {
+        PersistedSession {
+            stream_id: SmSessionId::new(stream_id),
+            user_id: "offline@example.com".to_owned(),
+            jid: "offline@example.com/web".parse().expect("source JID"),
+            occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+            inbound_count: 0,
+            outbound_count: 1,
+            last_acked: 0,
+            replay_gap_through: None,
+            max_resume_time: Some(0),
+            detached_at: chrono::Utc::now(),
+            max_resume_duration: std::time::Duration::ZERO,
+            carbons_enabled: false,
+            roster_interested: false,
+            blocklist_interested: false,
+            presence_available: false,
+            presence_show: None,
+            presence_status: None,
+            presence_priority: 0,
+            presence_payloads: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn orphan_receipt_scan_advances_past_a_full_page_of_live_sources() {
+        let storage = Arc::new(
+            DatabasePendingDeliveryStorage::open(None, QuotaPolicy::Unlimited)
+                .await
+                .expect("receipt database"),
+        );
+        let sources = Arc::new(InMemorySmPersistence::new());
+        let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(sources.clone()));
+        let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+            registry,
+            storage.clone(),
+        )
+        .await;
+        for index in 0..129 {
+            let source = format!("source-{index:03}");
+            if index < 128 {
+                sources
+                    .upsert_session(live_source(&source))
+                    .await
+                    .expect("live canonical source");
+            }
+            assert_eq!(
+                storage
+                    .insert_fenced_and_prune_unacked(pending_row(), &source, 1)
+                    .await
+                    .expect("portable receipt"),
+                InsertOutcome::Inserted
+            );
+        }
+        let mut cursor = None;
+        assert!(!run_pending_promotion_receipt_sweep(&state, i64::MAX, &mut cursor).await);
+        assert_eq!(cursor.as_ref().map(SmSessionId::as_str), Some("source-127"));
+        assert_eq!(
+            storage
+                .promotion_receipt_sources_before(i64::MAX, None, 200)
+                .await
+                .expect("receipts retained")
+                .len(),
+            129
+        );
+
+        assert!(!run_pending_promotion_receipt_sweep(&state, i64::MAX, &mut cursor).await);
+        assert!(cursor.is_none(), "short final page wraps the next tick");
+        let remaining = storage
+            .promotion_receipt_sources_before(i64::MAX, None, 200)
+            .await
+            .expect("verified receipt cleanup");
+        assert_eq!(
+            remaining.len(),
+            128,
+            "live sources survive while the later orphan is retired"
+        );
+        assert!(!remaining.contains(&SmSessionId::new("source-128")));
+        assert_eq!(
+            storage
+                .count(&pending_row().recipient)
+                .await
+                .expect("pending custody"),
+            129,
+            "receipt GC does not delete delivered-custody rows"
+        );
+    }
 }
 
 pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSocketState>) {
@@ -7963,35 +8204,65 @@ impl Drop for RemainingSmDrainOutcomes<'_> {
     }
 }
 
-async fn abandon_shutdown_session_if_claim_lost(
+async fn abandon_shutdown_session_with_loss(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
-) -> bool {
+    loss: &waddle_xmpp::stream_management::ShutdownSmClaimLoss,
+) {
     let session = promotion_guard.session();
     let stream_id = session.stream_id.clone();
     let jid = session.jid.clone();
-    let lost = match registry.shutdown_drain_claim_lost(&stream_id).await {
-        Ok(lost) => lost,
-        Err(waddle_xmpp::ownership::ClaimError::AuthorityDisabled) => true,
-        Err(error) => {
-            debug!(%stream_id, %error, "Graceful shutdown: SM claim lookup is uncertain; retaining session for retry");
-            false
+    match registry
+        .forget_promotion_claim_if_matches(session, loss)
+        .await
+    {
+        Ok(true) => {}
+        Ok(false) => {
+            debug!(%stream_id, "Graceful shutdown: stale abandonment leaves replacement bookkeeping untouched")
         }
-    };
-    if !lost {
-        return false;
-    }
-    if !registry.forget_claim_locally(&stream_id).await {
-        // `false` means the session was not in a pooled view when checked;
-        // another demotion may already have removed it. Even if local
-        // bookkeeping is uncertain, a proven lost claim must never proceed
-        // into promotion or arm another retry of this payload.
-        debug!(%stream_id, "Graceful shutdown: lost SM claim has no pooled local session to retire");
+        Err(error) => {
+            debug!(%stream_id, %error, "Graceful shutdown: proven loss could not retire local bookkeeping")
+        }
     }
     promotion_guard.complete();
     record_sm_drain_outcome(false);
     warn!(%jid, %stream_id, "Graceful shutdown: abandoning SM session after loss of claim authority");
-    true
+}
+
+async fn abandon_shutdown_session_if_claim_lost(
+    registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
+    let stream_id = promotion_guard.session().stream_id.clone();
+    let loss = match registry.shutdown_drain_claim_lost(&stream_id).await {
+        Ok(loss) => loss,
+        Err(error) => {
+            debug!(%stream_id, %error, "Graceful shutdown: SM claim lookup is uncertain; retaining session without promotion");
+            return Err(error);
+        }
+    };
+    let Some(loss) = loss else {
+        return Ok(false);
+    };
+    abandon_shutdown_session_with_loss(registry, promotion_guard, &loss).await;
+    Ok(true)
+}
+
+/// Stop on proven loss or uncertainty; only proven loss is accounted as
+/// abandoned. Keep this policy identical at every shutdown await boundary.
+async fn shutdown_promotion_should_stop(
+    registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
+    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    remaining: &mut RemainingSmDrainOutcomes<'_>,
+) -> bool {
+    match abandon_shutdown_session_if_claim_lost(registry, promotion_guard).await {
+        Ok(false) => false,
+        Ok(true) => {
+            remaining.account(&promotion_guard.session().stream_id);
+            true
+        }
+        Err(_) => true,
+    }
 }
 
 pub(crate) fn spawn_graceful_shutdown_drain(
@@ -8165,7 +8436,14 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 continue;
             }
         };
+        let lost_claims = drained.lost_claims;
+        let drained = drained.sessions;
         remaining_outcomes.observe_drained(&drained);
+        let drained_count = drained.len();
+        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+            &websocket_state.deps.protocol.sm_session_registry,
+            drained,
+        );
         let release_retry_budget =
             drain_deadline.saturating_duration_since(std::time::Instant::now());
         if tokio::select! {
@@ -8182,7 +8460,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
             // abandonment accounting stay centralized above.
             continue;
         }
-        if drained.is_empty() {
+        if drained_count == 0 {
             empty_passes += 1;
             if empty_passes >= QUIET_WINDOW_PASSES {
                 break;
@@ -8197,14 +8475,10 @@ pub(crate) async fn run_graceful_shutdown_drain(
             continue;
         }
         empty_passes = 0;
-        total_drained += drained.len();
+        total_drained += drained_count;
         info!(
-            count = drained.len(),
+            count = drained_count,
             "Graceful shutdown: promoting unacked queues for detached SM sessions"
-        );
-        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
-            &websocket_state.deps.protocol.sm_session_registry,
-            drained,
         );
         while let Some(session) = promotion_batch.pop() {
             let promotion_budget =
@@ -8226,18 +8500,30 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     session,
                 );
                 let metric_stream_id = promotion_guard.session().stream_id.clone();
+                if let Some(loss) = lost_claims.get(
+                    &waddle_xmpp::pending_delivery::SmSessionId::new(&metric_stream_id),
+                ) {
+                    abandon_shutdown_session_with_loss(
+                        &websocket_state.deps.protocol.sm_session_registry,
+                        &mut promotion_guard,
+                        loss,
+                    )
+                    .await;
+                    remaining_outcomes.account(&metric_stream_id);
+                    return;
+                }
                 // One read-only fence check avoids reconciling a session
                 // that a successor already owns. Keep it adjacent to this
                 // session's work: row-backed pending releases and their
                 // independently custodied re-drive precede the final SM
                 // delete, and a batch-wide ownership snapshot can stale.
-                if abandon_shutdown_session_if_claim_lost(
+                if shutdown_promotion_should_stop(
                     &websocket_state.deps.protocol.sm_session_registry,
                     &mut promotion_guard,
+                    &mut remaining_outcomes,
                 )
                 .await
                 {
-                    remaining_outcomes.account(&metric_stream_id);
                     return;
                 }
                 let row_release = crate::sm_promotion::release_row_backed_replay_copies(
@@ -8273,13 +8559,13 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     || row_release.release_failed_known_rows
                     || released_redrive_aborted
                 {
-                    if abandon_shutdown_session_if_claim_lost(
+                    if shutdown_promotion_should_stop(
                         &websocket_state.deps.protocol.sm_session_registry,
                         &mut promotion_guard,
+                        &mut remaining_outcomes,
                     )
                     .await
                     {
-                        remaining_outcomes.account(&metric_stream_id);
                         return;
                     }
                     warn!(
@@ -8302,13 +8588,13 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 {
                     Ok(jids) => waddle_xmpp::protocol::session_state::Blocklist::new(jids),
                     Err(error) => {
-                        if abandon_shutdown_session_if_claim_lost(
+                        if shutdown_promotion_should_stop(
                             &websocket_state.deps.protocol.sm_session_registry,
                             &mut promotion_guard,
+                            &mut remaining_outcomes,
                         )
                         .await
                         {
-                            remaining_outcomes.account(&metric_stream_id);
                             return;
                         }
                         warn!(
@@ -8388,13 +8674,13 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     "Graceful shutdown: Q6 promotion completed for session"
                 );
                 if summary.has_storage_failure() || redrive_blocked {
-                    if abandon_shutdown_session_if_claim_lost(
+                    if shutdown_promotion_should_stop(
                         &websocket_state.deps.protocol.sm_session_registry,
                         &mut promotion_guard,
+                        &mut remaining_outcomes,
                     )
                     .await
                     {
-                        remaining_outcomes.account(&metric_stream_id);
                         return;
                     }
                     warn!(
@@ -8446,7 +8732,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     .deps
                     .protocol
                     .sm_session_registry
-                    .confirm_drained(&session.stream_id)
+                    .confirm_promotion_session(&session)
                     .await;
                 // ADR-0017 Phase 3 Slice 10: this session's own "final
                 // fenced write, then release" sequence — `confirm_drained`
@@ -8454,13 +8740,13 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // claim only on success (see that method's own doc
                 // comment).
                 if !confirmed {
-                    if abandon_shutdown_session_if_claim_lost(
+                    if shutdown_promotion_should_stop(
                         &websocket_state.deps.protocol.sm_session_registry,
                         &mut promotion_guard,
+                        &mut remaining_outcomes,
                     )
                     .await
                     {
-                        remaining_outcomes.account(&metric_stream_id);
                         return;
                     }
                     warn!(
@@ -8492,6 +8778,11 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 remaining_outcomes.account(&metric_stream_id);
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+                crate::sm_promotion::confirm_pending_promotion(
+                    &websocket_state.deps.protocol.pending_delivery_storage,
+                    &session_id,
+                )
+                .await;
                 if let Err(error) = websocket_state
                     .deps
                     .protocol
@@ -12910,6 +13201,8 @@ mod remote_muc_reconciler_tests {
 
     fn detached_session(stream_id: &str, jid: jid::FullJid) -> DetachedSession {
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.to_string(),
             user_id: jid.to_bare().to_string(),
             jid,
@@ -13135,6 +13428,8 @@ mod graceful_shutdown_drain_tests {
 
     fn detached_session(stream_id: &str, jid: jid::FullJid) -> DetachedSession {
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.to_string(),
             user_id: jid.to_bare().to_string(),
             jid,
@@ -13167,11 +13462,211 @@ mod graceful_shutdown_drain_tests {
 
     fn transient_message(to: &jid::BareJid, body: &str) -> Message {
         let mut message = Message::new(Some(jid::Jid::from(to.clone())));
+        message.from = Some(
+            "juliet@example.com/balcony"
+                .parse()
+                .expect("peer sender JID"),
+        );
         message.type_ = MessageType::Chat;
         message
             .bodies
             .insert(xmpp_parsers::message::Lang::new(), body.to_string());
         message
+    }
+
+    struct UnavailableFenceAfterLoss {
+        inner: InProcessClaimStore,
+        lost_stream: SmSessionId,
+        lost_stream_fence_calls: std::sync::atomic::AtomicUsize,
+    }
+
+    #[async_trait::async_trait]
+    impl ClaimStore for UnavailableFenceAfterLoss {
+        async fn ensure_schema(&self) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+            self.inner.ensure_schema().await
+        }
+        async fn acquire(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.acquire(entity, me).await
+        }
+        async fn ensure_claimed(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.ensure_claimed(entity, me).await
+        }
+        async fn steal_stale(
+            &self,
+            entity: &Entity,
+            observed: waddle_xmpp::ownership::ClaimEpoch,
+            staleness: waddle_xmpp::ownership::StalePredicate,
+            me: &NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner
+                .steal_stale(entity, observed, staleness, me)
+                .await
+        }
+        async fn steal_for_resume(
+            &self,
+            entity: &Entity,
+            observed: waddle_xmpp::ownership::ClaimEpoch,
+            witness: waddle_xmpp::ownership::ResumeIdentityProof,
+            me: &NodeIdentity,
+        ) -> Result<waddle_xmpp::ownership::ClaimEpoch, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner
+                .steal_for_resume(entity, observed, witness, me)
+                .await
+        }
+        async fn current_claim(
+            &self,
+            entity: &Entity,
+        ) -> Result<Option<waddle_xmpp::ownership::ClaimSnapshot>, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.current_claim(entity).await
+        }
+        async fn fence(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: waddle_xmpp::ownership::ClaimEpoch,
+        ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
+            if entity.id == self.lost_stream.as_str() {
+                let call = self
+                    .lost_stream_fence_calls
+                    .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                if call == 0 {
+                    return Ok(false);
+                }
+                return Err(waddle_xmpp::ownership::ClaimError::Backend(
+                    "authority lookup unavailable after proven loss".to_owned(),
+                ));
+            }
+            self.inner.fence(entity, me, mine).await
+        }
+        async fn release(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: waddle_xmpp::ownership::ClaimEpoch,
+        ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+            self.inner.release(entity, me, mine).await
+        }
+        async fn release_exact(
+            &self,
+            entity: &Entity,
+            me: &NodeIdentity,
+            mine: waddle_xmpp::ownership::ClaimEpoch,
+        ) -> Result<waddle_xmpp::ownership::ExactReleaseOutcome, waddle_xmpp::ownership::ClaimError>
+        {
+            self.inner.release_exact(entity, me, mine).await
+        }
+        async fn release_many(
+            &self,
+            entities: &[Entity],
+            me: &NodeIdentity,
+        ) -> Result<(), waddle_xmpp::ownership::ClaimError> {
+            self.inner.release_many(entities, me).await
+        }
+    }
+
+    #[tokio::test]
+    async fn graceful_shutdown_preserves_proven_loss_when_later_authority_reads_fail() {
+        let persistence =
+            Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+        let lost_stream = SmSessionId::new("shutdown-proven-loss");
+        let claims = Arc::new(UnavailableFenceAfterLoss {
+            inner: InProcessClaimStore::new(),
+            lost_stream: lost_stream.clone(),
+            lost_stream_fence_calls: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let registry = Arc::new(
+            InMemorySmSessionRegistry::new()
+                .with_persistence(persistence.clone())
+                .with_claim_store(
+                    claims.clone(),
+                    SharedNodeIdentity::new(NodeIdentity::new("shutdown-node", "live")),
+                ),
+        );
+        let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+        for (stream, jid) in [
+            (lost_stream.as_str(), "romeo@example.com/phone"),
+            ("shutdown-proof-healthy", "benvolio@example.com/web"),
+        ] {
+            let mut session = detached_session(stream, jid.parse().unwrap());
+            session.outbound_count = 1;
+            session.unacked_stanzas.push(DetachedUnackedStanza {
+                ingress_receipts: Vec::new(),
+                sequence: 1,
+                stanza_xml: message_xml(&transient_message(
+                    &session.jid.to_bare(),
+                    "preserve custody",
+                )),
+                original_receipt_at: chrono::Utc::now(),
+            });
+            registry.store_session(session).await.expect("store source");
+        }
+        let stop = tokio_util::sync::CancellationToken::new();
+        stop.cancel();
+        run_graceful_shutdown_drain(
+            state.clone(),
+            stop,
+            Arc::new(Notify::new()),
+            tokio_util::sync::CancellationToken::new(),
+            Arc::new(std::sync::OnceLock::new()),
+            Duration::from_secs(5),
+        )
+        .await;
+        assert_eq!(
+            claims
+                .lost_stream_fence_calls
+                .load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "proven loss must not depend on a second successful lookup"
+        );
+        assert!(registry
+            .live_session_ids()
+            .expect("local inventory")
+            .is_empty());
+        assert!(persistence
+            .get_session(&lost_stream)
+            .await
+            .expect("lost durable source")
+            .is_some());
+        assert_eq!(
+            persistence
+                .list_unacked(&lost_stream)
+                .await
+                .expect("lost queue")
+                .len(),
+            1
+        );
+        assert!(state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&"romeo@example.com".parse().unwrap())
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(&"benvolio@example.com".parse().unwrap())
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[tokio::test]
@@ -13380,13 +13875,18 @@ mod graceful_shutdown_drain_tests {
             .drain_all_for_shutdown()
             .await
             .expect("drain session")
+            .sessions
             .pop()
             .expect("one session");
         let mut guard = crate::sm_promotion::PromotionSessionGuard::new(&registry, session);
         identity.disable().await;
         assert!(registry.forget_claim_locally(stream_id).await);
 
-        assert!(super::abandon_shutdown_session_if_claim_lost(&registry, &mut guard).await);
+        assert!(
+            super::abandon_shutdown_session_if_claim_lost(&registry, &mut guard)
+                .await
+                .expect("claim result")
+        );
         drop(guard);
         assert!(registry
             .live_session_ids()
@@ -13540,6 +14040,25 @@ mod graceful_shutdown_drain_tests {
             ))
             .await
             .expect("store detached session");
+        let healthy_jid: jid::FullJid =
+            "benvolio@example.com/healthy".parse().expect("healthy jid");
+        let healthy_recipient = healthy_jid.to_bare();
+        let healthy_stream = "shutdown-successor-healthy-peer";
+        let mut healthy = detached_session(healthy_stream, healthy_jid);
+        healthy.outbound_count = 1;
+        healthy.unacked_stanzas.push(DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 1,
+            stanza_xml: message_xml(&transient_message(
+                &healthy_recipient,
+                "healthy peer still drains",
+            )),
+            original_receipt_at: chrono::Utc::now(),
+        });
+        registry
+            .store_session(healthy)
+            .await
+            .expect("store healthy peer");
         let entity = Entity::new(EntityType::SmSession, stream_id);
         let local_epoch = claims
             .current_claim(&entity)
@@ -13559,7 +14078,7 @@ mod graceful_shutdown_drain_tests {
         let token = tokio_util::sync::CancellationToken::new();
         token.cancel();
         run_graceful_shutdown_drain(
-            state,
+            state.clone(),
             token,
             Arc::new(Notify::new()),
             tokio_util::sync::CancellationToken::new(),
@@ -13581,6 +14100,23 @@ mod graceful_shutdown_drain_tests {
             .fence(&entity, &successor, successor_epoch)
             .await
             .expect("successor fence"));
+        assert!(persistence
+            .get_session(&SmSessionId::new(healthy_stream))
+            .await
+            .expect("healthy durable row")
+            .is_none());
+        assert_eq!(
+            state
+                .deps
+                .protocol
+                .pending_delivery_storage
+                .list(&healthy_recipient)
+                .await
+                .expect("healthy pending queue")
+                .len(),
+            1,
+            "a successor-owned session must not prevent healthy shutdown promotion"
+        );
     }
 
     #[tokio::test]
@@ -13902,6 +14438,7 @@ mod graceful_shutdown_drain_tests {
             stream_id,
             "romeo@example.com/phone".parse().expect("full jid"),
         );
+        session.outbound_count = 1;
         session.unacked_stanzas.push(DetachedUnackedStanza {
             ingress_receipts: Vec::new(),
             sequence: 1,
@@ -13977,6 +14514,7 @@ mod graceful_shutdown_drain_tests {
             stream_id,
             "romeo@example.com/phone".parse().expect("full jid"),
         );
+        session.outbound_count = 1;
         session.unacked_stanzas.push(DetachedUnackedStanza {
             ingress_receipts: Vec::new(),
             sequence: 1,
@@ -14298,6 +14836,7 @@ mod graceful_shutdown_drain_tests {
             stream_id,
             "romeo@example.com/phone".parse().expect("full jid"),
         );
+        session.outbound_count = 11;
         session.unacked_stanzas.push(DetachedUnackedStanza {
             ingress_receipts: Vec::new(),
             sequence: 11,
@@ -14386,6 +14925,7 @@ mod graceful_shutdown_drain_tests {
             stream_id,
             "romeo@example.com/phone".parse().expect("full jid"),
         );
+        session.outbound_count = 11;
         session.unacked_stanzas.push(DetachedUnackedStanza {
             ingress_receipts: Vec::new(),
             sequence: 11,

@@ -203,6 +203,7 @@ async fn node_registry_with_claim_store(
 
 fn detached_session(stream_id: &str, jid: &FullJid) -> DetachedSession {
     DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),

@@ -592,6 +592,7 @@ impl StreamManagementState {
         self.clear_ack_request_tracking();
 
         Some(DetachedSession {
+            promotion_custody: crate::stream_management::PromotionCaptureCustody::unproven(),
             stream_id: self.stream_id.clone()?,
             user_id: snapshot.user_id,
             jid: snapshot.jid,
@@ -994,6 +995,7 @@ mod tests {
         // fired on stanza #1 we'd be re-requesting against the same
         // pre-resume backlog the resume itself already covered.
         let detached = DetachedSession {
+            promotion_custody: crate::stream_management::PromotionCaptureCustody::unproven(),
             stream_id: "previd".to_string(),
             user_id: "u@h".to_string(),
             jid: "u@h/r".parse().unwrap(),

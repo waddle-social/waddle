@@ -1726,6 +1726,7 @@ mod tests {
         let stream_id = "late-detached-proof";
         crate::server::routes::websocket::tests::store_resumable_detached_session(
             &state, &session, DetachedSession {
+                promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
                 stream_id: stream_id.to_owned(),
                 user_id: session.user_jid.clone(),
                 jid: jid.clone(),

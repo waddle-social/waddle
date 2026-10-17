@@ -30,6 +30,7 @@ package(waddle-server) & (
     binary(clustering_cluster_e2e)
     | binary(xep0198_cross_node_resume)
     | binary(xep0198_replay_bytes)
+    | binary(xep0198_promotion_inventory)
     | binary(ingress_schema_epoch0)
     | binary(ingress_commit)
     | binary(xep0280_carbons_integration)

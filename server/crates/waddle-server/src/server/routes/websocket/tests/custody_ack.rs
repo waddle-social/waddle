@@ -26,6 +26,8 @@ async fn wrapped_custody_session() -> (
     let stream = "custody-ack-wrap";
     registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream.to_owned(),
             user_id: "alice@example.com".to_owned(),
             jid: jid.clone(),

@@ -6,44 +6,9 @@ use super::*;
 /// — bodies, payloads (embeds), thread, etc. — is faithfully serialized
 /// without hand-rolled format strings.
 pub(crate) fn stanza_to_xml(stanza: &Stanza) -> String {
-    let mut element = stanza.to_element();
-    if let Stanza::Message(message) = stanza {
-        // xmpp_parsers drops RFC 6121 `<thread/>` during Message -> Element.
-        // Re-attach via the canonical XEP-0201 builder so the wire shape
-        // — including any optional `parent` attribute — round-trips.
-        // Note: post-`reattach_thread_parent` messages have
-        // `message.thread = None` (the typed field is cleared and the
-        // thread element lives in `msg.payloads` instead, which
-        // `to_element()` already serializes faithfully). This branch
-        // only re-attaches when the typed field is the only source —
-        // no parent context exists in that case.
-        if let Some(thread) = message.thread.as_ref() {
-            // RFC 6121 §5.2.5 scopes `<thread/>` to the enclosing
-            // message's namespace (`jabber:client` / `jabber:server`,
-            // sometimes serialized with empty ns). Match that — any
-            // `<thread>` element from a *different* namespace is an
-            // unrelated extension payload that must not suppress
-            // reattachment of the actual conversation thread
-            // (Copilot review on PR #305).
-            let stanza_ns = element.ns();
-            let has_thread = element.children().any(|child| {
-                child.name() == "thread" && (child.ns() == stanza_ns || child.ns().is_empty())
-            });
-            if !has_thread {
-                // Skip the reattach if the typed `Thread` body is
-                // empty: the wire shape requires a non-empty body
-                // (`<thread></thread>` is malformed per RFC 6121
-                // §5.2.5 / XEP-0201). `ThreadId::new` is the gate.
-                if let Some(id) = waddle_xmpp::mam::ThreadId::new(thread.id.clone()) {
-                    let info = waddle_xmpp::xep0201::ThreadInfo::root(id);
-                    element.append_child(waddle_xmpp::xep0201::build_thread_element(
-                        &info, &stanza_ns,
-                    ));
-                }
-            }
-        }
-    }
-    element_to_xml(element)
+    // The shared serializer preserves typed thread metadata, including parent,
+    // and keeps unrelated extension elements in their own namespaces.
+    element_to_xml(stanza.to_element())
 }
 
 pub(crate) fn element_to_xml(element: xmpp_parsers::minidom::Element) -> String {

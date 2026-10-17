@@ -207,6 +207,10 @@ pub struct InMemorySmSessionRegistry {
     /// durable row, preventing stale pre-tombstone queues from being
     /// republished directly from `Drop`.
     pub(super) pending_promotion_retries: RwLock<HashMap<String, DetachedSession>>,
+    /// Clone-shared results for reserved local resume acquisitions. This is
+    /// bounded by claim admission and carries no duplicate stanza payload.
+    pub(super) pending_resume_claim_custody:
+        RwLock<HashMap<String, super::PromotionCaptureCustody>>,
     /// Claimed sessions whose follow-up epoch lookup failed before the
     /// route could prove that the recorded exact fence still owns the backend
     /// row. Kept out of `sessions` until a read-only reconciliation proves
@@ -880,6 +884,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_promotions: RwLock::new(HashMap::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
+            pending_resume_claim_custody: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -908,6 +913,7 @@ impl InMemorySmSessionRegistry {
             pending_claim_acquisitions: RwLock::new(HashSet::new()),
             pending_promotions: RwLock::new(HashMap::new()),
             pending_promotion_retries: RwLock::new(HashMap::new()),
+            pending_resume_claim_custody: RwLock::new(HashMap::new()),
             pending_epoch_failure_reconciliations: RwLock::new(HashSet::new()),
             pending_reclaimed_hydrations: RwLock::new(HashMap::new()),
             pending_reclaimed_claim_lookups: RwLock::new(HashMap::new()),
@@ -1177,7 +1183,7 @@ impl InMemorySmSessionRegistry {
             if expires_at <= now {
                 expired += 1;
             }
-            let session = match persisted_to_detached(&persisted, &unacked) {
+            let mut session = match persisted_to_detached(&persisted, &unacked) {
                 Ok(session) => session,
                 Err(error) => {
                     debug!(
@@ -1199,6 +1205,9 @@ impl InMemorySmSessionRegistry {
                     continue;
                 }
             };
+            session.promotion_custody = super::PromotionCaptureCustody::claimed(
+                super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
+            );
             if self.node_identity.current() != identity {
                 self.release_claim_store_entry_under(
                     persisted.stream_id.as_str(),
@@ -1590,7 +1599,7 @@ impl InMemorySmSessionRegistry {
                 return Ok(ReclaimedHydrationOutcome::TransientFailure);
             }
         };
-        let session = match persisted_to_detached(&persisted, &unacked) {
+        let mut session = match persisted_to_detached(&persisted, &unacked) {
             Ok(session) => session,
             Err(error) => {
                 debug!(
@@ -1608,6 +1617,7 @@ impl InMemorySmSessionRegistry {
                     .await;
             }
         };
+        session.promotion_custody = super::PromotionCaptureCustody::claimed(caller_fence.clone());
         // Every persistence read above is an await point. Re-prove both the
         // node incarnation and exact claim epoch immediately before the
         // synchronous in-memory publication.
@@ -2008,6 +2018,23 @@ impl InMemorySmSessionRegistry {
         Ok(())
     }
 
+    pub(super) async fn persist_delete_promotion_session(
+        &self,
+        stream_id: &str,
+        expected_fence: &super::super::persistence::SmClaimFence,
+    ) -> Result<(), SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(());
+        };
+        let stream = crate::pending_delivery::SmSessionId::new(stream_id);
+        storage
+            .delete_promotion_session(&stream, expected_fence)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+        self.forget_snapshot_reconciliation(&stream);
+        Ok(())
+    }
+
     pub(super) async fn persist_delete_session_with_authority(
         &self,
         stream_id: &str,
@@ -2124,6 +2151,42 @@ impl InMemorySmSessionRegistry {
             )
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))
+    }
+
+    /// Prune an accepted prefix only under its immutable capture authority.
+    pub async fn delete_promotion_unacked_sequences(
+        &self,
+        session: &DetachedSession,
+        sequences: &[u32],
+    ) -> Result<u64, SmRegistryError> {
+        let lock = self.stream_lock(&session.stream_id)?;
+        let _guard = lock.lock().await;
+        let fence = self.registered_promotion_fence_locked(session).await?;
+        let Some(storage) = &self.persistence else {
+            return Ok(0);
+        };
+        if sequences.is_empty() {
+            return Ok(0);
+        }
+        storage
+            .delete_promotion_unacked(
+                &crate::pending_delivery::SmSessionId::new(&session.stream_id),
+                sequences,
+                &fence,
+            )
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))
+    }
+
+    /// Serialize effects with local demotion and claim replacement. No node
+    /// identity guard is retained: fenced storage acquires its own authority.
+    pub async fn lock_promotion_operation(
+        &self,
+        session: &DetachedSession,
+    ) -> Result<super::SmSessionOperationGuard, SmRegistryError> {
+        let operation = self.lock_session_operation(&session.stream_id).await?;
+        self.registered_promotion_fence_locked(session).await?;
+        Ok(operation)
     }
 
     pub(super) fn stream_lock(

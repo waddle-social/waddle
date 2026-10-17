@@ -311,14 +311,55 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage for FailFirs
     }
 }
 
+async fn claim_enabled_cleanup_fixture(
+    state: &super::super::state::WebSocketState,
+    conn: &mut WsConnState,
+) {
+    let stream_id = conn
+        .sm_state
+        .stream_id
+        .as_deref()
+        .expect("enabled fixture stream");
+    let authority = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .ensure_session_claim(stream_id)
+        .await
+        .expect("fresh enabled fixture claim");
+    conn.sm_ingress_fence = state
+        .deps
+        .protocol
+        .sm_session_registry
+        .current_sm_claim_fence(stream_id);
+    assert!(conn.sm_ingress_fence.is_some());
+    drop(authority);
+}
+
 struct FailDeleteSmPersistence {
     inner: waddle_xmpp::stream_management::persistence::InMemorySmPersistence,
+    gate_inventory_store: std::sync::atomic::AtomicBool,
+    fail_delete: std::sync::atomic::AtomicBool,
+    get_session_calls: std::sync::atomic::AtomicUsize,
+    inventory_store_calls: std::sync::atomic::AtomicUsize,
+    reject_next_principal_store: std::sync::atomic::AtomicBool,
+    reject_next_promotion_append: std::sync::atomic::AtomicBool,
+    append_started: Notify,
+    append_release: Semaphore,
 }
 
 impl FailDeleteSmPersistence {
     fn new() -> Self {
         Self {
             inner: waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new(),
+            gate_inventory_store: std::sync::atomic::AtomicBool::new(false),
+            fail_delete: std::sync::atomic::AtomicBool::new(true),
+            get_session_calls: std::sync::atomic::AtomicUsize::new(0),
+            inventory_store_calls: std::sync::atomic::AtomicUsize::new(0),
+            reject_next_principal_store: std::sync::atomic::AtomicBool::new(false),
+            reject_next_promotion_append: std::sync::atomic::AtomicBool::new(false),
+            append_started: Notify::new(),
+            append_release: Semaphore::new(0),
         }
     }
 }
@@ -339,13 +380,18 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
         Option<waddle_xmpp::stream_management::persistence::PersistedSession>,
         waddle_xmpp::stream_management::persistence::SmPersistenceError,
     > {
+        self.get_session_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.get_session(stream_id).await
     }
 
     async fn delete_session(
         &self,
-        _stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        if !self.fail_delete.load(std::sync::atomic::Ordering::SeqCst) {
+            return self.inner.delete_session(stream_id).await;
+        }
         Err(
             waddle_xmpp::stream_management::persistence::SmPersistenceError::Other(
                 "simulated delete failure".to_string(),
@@ -358,6 +404,26 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
         stanza: waddle_xmpp::stream_management::persistence::PersistedUnackedStanza,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
         self.inner.append_unacked(stanza).await
+    }
+
+    async fn append_promotion_stanza(
+        &self,
+        stanza: waddle_xmpp::stream_management::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        if self
+            .reject_next_promotion_append
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                waddle_xmpp::stream_management::persistence::SmPersistenceError::Other(
+                    "transient terminal suffix append failure".to_owned(),
+                ),
+            );
+        }
+        self.inner.append_promotion_stanza(stanza).await
     }
 
     async fn ack_through(
@@ -410,6 +476,19 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
         session: waddle_xmpp::stream_management::persistence::PersistedSession,
         unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inventory_store_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if self
+            .gate_inventory_store
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.append_started.notify_one();
+            self.append_release
+                .acquire()
+                .await
+                .expect("inventory gate")
+                .forget();
+        }
         self.inner.store_session_atomic(session, unacked).await
     }
 
@@ -419,6 +498,16 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailD
         session: waddle_xmpp::stream_management::persistence::PersistedSession,
         unacked: Vec<waddle_xmpp::stream_management::persistence::PersistedUnackedStanza>,
     ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        if self
+            .reject_next_principal_store
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                waddle_xmpp::stream_management::persistence::SmPersistenceError::Other(
+                    "simulated initial detach snapshot failure".to_owned(),
+                ),
+            );
+        }
         self.inner
             .store_session_atomic_with_principal(principal, session, unacked)
             .await
@@ -1300,6 +1389,7 @@ async fn timed_out_inbound_stanza_detaches_and_resumes_before_the_hole() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("timeout-detach".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     state
         .deps
         .protocol
@@ -1406,6 +1496,7 @@ async fn force_detach_cleanup_returns_not_persisted_when_unregister_retry_cannot
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("force-detach-ambiguous".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     // A production enabled stream always carries a live claim fence; without
     // one the fenceless force-detach teardown promotes terminally instead of
     // taking the detach path this test exercises.
@@ -1570,6 +1661,7 @@ async fn stale_actor_force_detach_cleanup_detaches_without_registry_reentry() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stale-force-detach-stream".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     // A production enabled stream always carries a live claim fence
     // (`ensure_session_claim` gates <enabled/>); without one the fenceless
     // force-detach teardown correctly promotes terminally instead of
@@ -1750,6 +1842,7 @@ async fn force_detach_busy_child_retries_and_converges_without_janitor() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("force-detach-busy".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     // A production enabled stream always carries a live claim fence; without
     // one the fenceless force-detach teardown promotes terminally instead of
     // taking the detach path this test exercises.
@@ -1876,6 +1969,7 @@ async fn queued_stale_force_detach_waiter_is_released_before_cross_node_cleanup(
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("queued-force-detach-stream".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     // See stale_actor_force_detach_cleanup_detaches_without_registry_reentry:
     // an enabled stream carries a live fence in production.
     drop(
@@ -2410,6 +2504,7 @@ async fn refused_detach_keeps_claim_fence_until_promotion_retry_settles() {
             .register(jid.clone(), tx),
     );
     conn.sm_state.enable(stream_id.to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
     message.from = Some("bob@example.com/phone".parse().expect("sender jid"));
     message.type_ = xmpp_parsers::message::MessageType::Chat;
@@ -2480,6 +2575,280 @@ async fn refused_detach_keeps_claim_fence_until_promotion_retry_settles() {
     );
 }
 
+async fn assert_promotion_failure_survives_restart(terminal_recovery: bool) {
+    let persistence =
+        Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let failures = Arc::new(FailCountedInsertsForMessageIdPendingStorage {
+        inner: waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage::unlimited(),
+        fail_id: "survives-restart",
+        remaining_failures: std::sync::atomic::AtomicU32::new(if terminal_recovery {
+            2
+        } else {
+            1
+        }),
+    });
+    let pending: Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage> =
+        failures.clone();
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        pending.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/durable-terminal".parse().expect("jid");
+    let stream_id = "durable-terminal-promotion";
+    assert!(registry.ensure_session_claim(stream_id).await.is_some());
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(3);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx.clone()),
+    );
+    conn.sm_state.enable(stream_id.to_owned(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id("survives-restart".to_owned()));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "keep this queue".to_owned(),
+    );
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(message).expect("serialize"),
+        SmEvictionPath::DirectOutbound,
+    );
+    if terminal_recovery {
+        conn.begin_terminal_sm_recovery();
+        for id in ["accepted-suffix-1", "accepted-suffix-2"] {
+            let mut suffix = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+            suffix.from = Some("bob@example.com/phone".parse().expect("sender"));
+            suffix.type_ = xmpp_parsers::message::MessageType::Chat;
+            suffix.id = Some(xmpp_parsers::message::Id(id.to_owned()));
+            suffix.bodies.insert(
+                xmpp_parsers::message::Lang::new(),
+                "accepted tail".to_owned(),
+            );
+            tx.send(OutboundStanza::new(Stanza::Message(suffix)))
+                .await
+                .expect("accepted suffix");
+        }
+    }
+    let expected = if terminal_recovery { 3 } else { 1 };
+    let _ = cleanup_connection_shutdown(&state, &mut rx, &mut conn, false).await;
+    assert!(
+        pending
+            .list(&jid.to_bare())
+            .await
+            .expect("failed prefix")
+            .is_empty(),
+        "later accepted work must remain behind the failed prefix"
+    );
+    failures
+        .remaining_failures
+        .store(0, std::sync::atomic::Ordering::SeqCst);
+
+    // Rebuild without consulting the old registry's in-memory retry map.
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+    assert_eq!(
+        restarted.restore_from_persistence().await.expect("restore"),
+        1,
+        "failed terminal promotion must have a durable non-resumable inventory"
+    );
+    assert!(restarted
+        .peek_session(stream_id)
+        .await
+        .expect("peek")
+        .is_none());
+    let retry = restarted.drain_expired().await.expect("janitor retry");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].unacked_stanzas.len(), expected);
+    let sequences: Vec<_> = retry[0]
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    assert_eq!(
+        sequences,
+        (1..=u32::try_from(expected).unwrap()).collect::<Vec<_>>(),
+        "accepted suffixes keep distinct FIFO sequence numbers across restart"
+    );
+    assert!(retry[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("survives-restart"));
+    let settled = crate::sm_promotion::promote_displaced_sessions(
+        retry,
+        crate::sm_promotion::DisplacedPromotionDeps {
+            sm_registry: &restarted,
+            connection_registry: &state.deps.protocol.connection_registry,
+            user_registry: &state.deps.protocol.user_registry,
+            pending_storage: &pending,
+            blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+    assert!(!settled.is_retrying(stream_id));
+    assert_eq!(
+        pending.list(&jid.to_bare()).await.expect("pending").len(),
+        expected
+    );
+    let final_restart = InMemorySmSessionRegistry::new().with_persistence(persistence);
+    assert_eq!(
+        final_restart
+            .restore_from_persistence()
+            .await
+            .expect("settled inventory"),
+        0
+    );
+}
+
+#[tokio::test]
+async fn terminal_promotion_failure_survives_registry_restart_without_becoming_resumable() {
+    assert_promotion_failure_survives_restart(false).await;
+}
+
+#[tokio::test]
+async fn terminal_prefix_and_accepted_overflow_survive_restart_in_fifo_order() {
+    assert_promotion_failure_survives_restart(true).await;
+}
+
+#[tokio::test]
+async fn cancelled_terminal_prefix_remains_available_to_the_live_janitor() {
+    let persistence =
+        Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let gate = Arc::new(GatedFirstInsertPendingStorage::new());
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        gate.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/cancelled-inventory".parse().unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
+    conn.sm_state
+        .enable("cancelled-inventory".to_owned(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().unwrap());
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "cancel safely".to_owned(),
+    );
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(message).unwrap(),
+        SmEvictionPath::DirectOutbound,
+    );
+    conn.begin_terminal_sm_recovery();
+    let cleanup_state = state.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_connection_shutdown(&cleanup_state, &mut rx, &mut conn, false).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        gate.wait_until_insert_blocks(),
+    )
+    .await
+    .expect("promotion reached gated sink");
+    cleanup.abort();
+    assert!(cleanup.await.unwrap_err().is_cancelled());
+    let retry = registry.drain_expired().await.expect("janitor custody");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].unacked_stanzas.len(), 1);
+    let outcome = crate::sm_promotion::promote_displaced_sessions(
+        retry,
+        crate::sm_promotion::DisplacedPromotionDeps {
+            sm_registry: &registry,
+            connection_registry: &state.deps.protocol.connection_registry,
+            user_registry: &state.deps.protocol.user_registry,
+            pending_storage: &state.deps.protocol.pending_delivery_storage,
+            blocking_storage: state.deps.protocol.blocking_storage.as_ref(),
+            server_domain: "example.com",
+        },
+    )
+    .await;
+    assert!(!outcome.is_retrying("cancelled-inventory"));
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&jid.to_bare())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn cancelled_initial_inventory_write_retains_the_entire_terminal_backlog() {
+    let persistence = Arc::new(FailDeleteSmPersistence::new());
+    persistence
+        .gate_inventory_store
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+    let jid: FullJid = "alice@example.com/cancelled-backlog".parse().unwrap();
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(state.deps.protocol.connection_registry.register(jid, tx));
+    conn.sm_state
+        .enable("cancelled-backlog".to_owned(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
+    let _ = conn.sm_state.record_outbound(
+        message_frame_xml_with_id("live-prefix".to_owned()),
+        SmEvictionPath::DirectOutbound,
+    );
+    conn.begin_terminal_sm_recovery();
+    for id in ["captured-first", "captured-second"] {
+        conn.record_terminal_recovery_outbound(message_frame_xml_with_id(id.to_owned()));
+    }
+    let cleanup_state = state.clone();
+    let cleanup = tokio::spawn(async move {
+        cleanup_connection_shutdown(&cleanup_state, &mut rx, &mut conn, false).await
+    });
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        persistence.append_started.notified(),
+    )
+    .await
+    .expect("initial inventory write blocked");
+    cleanup.abort();
+    assert!(cleanup.await.unwrap_err().is_cancelled());
+    let retry = registry
+        .drain_expired()
+        .await
+        .expect("janitor can retry the captured backlog");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(
+        retry[0].unacked_stanzas.len(),
+        3,
+        "cancellation before the initial write must retain every captured backlog entry"
+    );
+    let sequences: Vec<_> = retry[0]
+        .unacked_stanzas
+        .iter()
+        .map(|entry| entry.sequence)
+        .collect();
+    assert_eq!(sequences, vec![1, 2, 3]);
+}
+
 #[tokio::test]
 async fn terminal_incremental_overflow_rechecks_tombstones_per_item() {
     let sm_registry = Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
@@ -2508,6 +2877,7 @@ async fn terminal_incremental_overflow_rechecks_tombstones_per_item() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("terminal-tombstone-race".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     for sequence in 1..=8 {
         let _ = conn.sm_state.record_outbound(
             message_frame_xml_with_id(format!("recorded-{sequence}")),
@@ -2585,7 +2955,7 @@ async fn terminal_incremental_overflow_rechecks_tombstones_per_item() {
 }
 
 #[tokio::test]
-async fn refused_detach_confirm_failure_defers_claim_when_retry_is_untracked() {
+async fn refused_detach_confirm_failure_keeps_durable_promotion_custody() {
     let claim_store: Arc<dyn waddle_xmpp::ownership::ClaimStore> =
         Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
     let persistence = Arc::new(FailDeleteSmPersistence::new());
@@ -2627,6 +2997,7 @@ async fn refused_detach_confirm_failure_defers_claim_when_retry_is_untracked() {
             .register(jid.clone(), tx),
     );
     conn.sm_state.enable(stream_id.to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
     message.from = Some("bob@example.com/phone".parse().expect("sender jid"));
     message.type_ = xmpp_parsers::message::MessageType::Chat;
@@ -2645,24 +3016,26 @@ async fn refused_detach_confirm_failure_defers_claim_when_retry_is_untracked() {
     );
     assert_eq!(
         sm_registry.pending_claim_release_count(),
+        0,
+        "the registered inventory owns its claim until durable confirmation succeeds"
+    );
+    let retry = sm_registry
+        .drain_expired()
+        .await
+        .expect("drain registered inventory");
+    assert_eq!(
+        retry.len(),
         1,
-        "an untracked synthetic session must fall back to terminal claim defer"
+        "failed confirmation retains janitor custody"
     );
-    assert!(
-        sm_registry
-            .drain_expired()
-            .await
-            .expect("drain retry")
-            .is_empty(),
-        "cleanup must not report a retry unless the registry actually retained one"
-    );
+    assert_eq!(retry[0].stream_id, stream_id);
     assert!(
         sm_registry
             .locally_owned_claim_ids()
             .expect("owned claim inventory")
             .iter()
             .any(|owned| owned == stream_id),
-        "the deferred terminal-release inventory must still hold the exact claim"
+        "the promotion inventory must still hold the exact claim"
     );
 }
 
@@ -2700,6 +3073,12 @@ async fn ownership_moved_before_terminal_cleanup_still_promotes_without_touching
         .to_string();
     old_conn.publish_pending_sm_enable(state.as_ref());
     let mut prefix = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));
+    prefix.from = Some("bob@example.com/phone".parse().expect("sender jid"));
+    prefix.type_ = xmpp_parsers::message::MessageType::Chat;
+    prefix.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "recorded peer prefix".to_owned(),
+    );
     prefix.id = Some(xmpp_parsers::message::Id("superseded-prefix".to_string()));
     let _ = old_conn.sm_state.record_outbound(
         waddle_xmpp::parser::stanza_to_string(prefix).expect("serialize prefix"),
@@ -3860,6 +4239,94 @@ impl waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage
     }
 }
 
+#[tokio::test]
+async fn failed_pending_ownership_preflight_never_releases_a_durable_replay_copy() {
+    let persistence =
+        Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let pending = Arc::new(FailOnceListAndReleasePendingStorage::new());
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        pending.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/preflight-inventory".parse().unwrap();
+    let stream_id = "preflight-inventory";
+    seed_claimed_pending_row(&state, &jid.to_bare(), stream_id, 1).await;
+    handoff_expired_claimed_session(
+        &state,
+        stream_id,
+        &jid,
+        vec![waddle_xmpp::stream_management::DetachedUnackedStanza {
+            ingress_receipts: Vec::new(),
+            sequence: 1,
+            stanza_xml: message_frame_xml_with_id("terminal-release-replay-copy".to_owned()),
+            original_receipt_at: chrono::Utc::now(),
+        }],
+    )
+    .await;
+    let mut inventory = registry.drain_expired().await.unwrap().pop().unwrap();
+    pending
+        .fail_next_list
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let outcome = crate::sm_promotion::release_row_backed_replay_copies(
+        &registry,
+        &state.deps.protocol.pending_delivery_storage,
+        &mut inventory,
+    )
+    .await;
+    assert!(outcome.ownership_unknown);
+    assert!(!outcome.released_rows);
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]
+            .flushed_in_session
+            .as_ref()
+            .map(|session| session.as_str()),
+        Some(stream_id)
+    );
+    inventory = registry
+        .register_promotion_session(&inventory)
+        .await
+        .unwrap();
+    assert_eq!(inventory.unacked_stanzas.len(), 1);
+
+    let released = crate::sm_promotion::release_row_backed_replay_copies(
+        &registry,
+        &state.deps.protocol.pending_delivery_storage,
+        &mut inventory,
+    )
+    .await;
+    assert!(released.released_rows);
+    assert!(
+        registry
+            .register_promotion_session(&inventory)
+            .await
+            .unwrap()
+            .unacked_stanzas
+            .is_empty(),
+        "canonical hydration must not recreate the released pending replay copy"
+    );
+    assert_eq!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&jid.to_bare())
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
 /// PR #1669 round 8: when BOTH the ownership preflight (`list`) and the
 /// sequence release fail during terminal cleanup, row-backed replay copies
 /// cannot be told apart from fresh work. The whole queue must stay out of
@@ -3914,9 +4381,9 @@ async fn terminal_ownership_discovery_failure_defers_promotion_until_janitor_ret
         "the original row must stay claimed until the retry discovers ownership"
     );
 
-    // Storage has recovered (the failures were one-shot). The janitor's next
-    // sweep re-runs ownership discovery, releases the row, strips the replay
-    // copy, and settles the synthetic session without duplicating anything.
+    // Ownership discovery failed closed before attempting release. The next
+    // sweep consumes its one-shot release failure, and a final sweep settles.
+    crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
     crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
 
     let rows = state
@@ -5954,6 +6421,7 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
     assert_eq!(auth_responses, vec![sasl_success_xml()]);
 
     let mut detached = DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "stream-gap".to_string(),
         user_id: format!("alice@{domain}"),
         jid: format!("alice@{domain}/web").parse().expect("jid"),
@@ -5979,7 +6447,11 @@ async fn sm_resume_rejects_when_replay_window_has_gap() {
     {
         detached.record_detached_outbound_at(
             sequence,
-            message_frame_xml_with_id(format!("m{sequence}")),
+            &{
+                let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+                message.id = Some(xmpp_parsers::message::Id(format!("m{sequence}")));
+                Stanza::Message(message)
+            },
             chrono::Utc::now(),
         );
     }
@@ -6033,6 +6505,7 @@ async fn sm_resume_rejects_authenticated_identity_mismatch_and_preserves_session
     assert!(matches!(conn.phase, ConnectionPhase::Authenticated { .. }));
 
     let detached = DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "stream-auth-mismatch".to_string(),
         user_id: format!("alice@{domain}"),
         jid: format!("alice@{domain}/web").parse().expect("jid"),
@@ -6094,6 +6567,8 @@ async fn sm_resume_final_principal_recheck_rejects_without_committing_staged_sta
         state.as_ref(),
         &session,
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -6205,6 +6680,8 @@ async fn dropping_resume_after_claim_returns_the_snapshot_via_the_claim_guard() 
         state.as_ref(),
         &session,
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -6272,6 +6749,8 @@ async fn sm_resume_legacy_snapshot_without_a_principal_is_not_authorized() {
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-legacy-null-context".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -6324,6 +6803,8 @@ async fn sm_resume_storage_error_is_reported_as_internal_server_error() {
         state.as_ref(),
         &session,
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-storage-error".to_string(),
             user_id: session.user_jid.clone(),
             jid: jid.clone(),
@@ -6396,6 +6877,8 @@ async fn sm_resume_matching_authenticated_identity_restores_durable_principal_se
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-auth-match".to_string(),
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
@@ -6483,6 +6966,8 @@ async fn sm_resume_matching_authenticated_identity_restores_detached_principal_s
         .sm_session_registry
         .store_session_with_principal(
             DetachedSession {
+                promotion_custody:
+                    waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
                 stream_id: stream_id.to_string(),
                 user_id: format!("bob@{domain}"),
                 jid: detached_jid.clone(),
@@ -7202,6 +7687,8 @@ async fn handoff_expired_claimed_session(
     let registry = &state.deps.protocol.sm_session_registry;
     registry
         .store_session(waddle_xmpp::stream_management::DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.to_string(),
             user_id: jid.to_bare().to_string(),
             jid: jid.clone(),
@@ -7413,6 +7900,7 @@ async fn sm_live_ack_is_wrap_aware_past_u32_max() {
     // Restore counters as a wrapped session would carry them: the
     // server has sent 2^32 + 2 stanzas, the client acked u32::MAX - 1.
     let detached = waddle_xmpp::stream_management::DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.clone(),
         user_id: "alice@example.com".to_string(),
         jid: jid.clone(),
@@ -7599,6 +8087,8 @@ async fn sm_resume_at_half_window_distance_is_rejected_as_handled_count_too_high
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-half-window".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -7659,6 +8149,8 @@ async fn sm_resume_with_regressed_h_fails_resume_instead_of_stream_error() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-regressed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -7718,6 +8210,7 @@ async fn sm_resume_restores_session_and_replays_unacked() {
     let stream_id = "stream-xyz".to_string();
     let occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     let detached = DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.clone(),
         user_id: "alice@example.com".to_string(),
         jid: jid.clone(),
@@ -7830,6 +8323,8 @@ async fn sm_resume_rejects_impossible_client_handled_count() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-too-far".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -7916,6 +8411,8 @@ async fn sm_resume_replays_roster_push_recorded_while_detached() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -7992,6 +8489,8 @@ async fn direct_full_jid_message_records_for_detached_resource_replay() {
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -8064,6 +8563,8 @@ async fn bare_jid_message_records_for_detached_resource_replay() {
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -8148,6 +8649,8 @@ async fn message_carbons_record_for_detached_enabled_resources() {
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: sent_stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_laptop.clone(),
@@ -8215,6 +8718,8 @@ async fn message_carbons_record_for_detached_enabled_resources() {
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: received_stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_laptop,
@@ -8412,6 +8917,8 @@ async fn roster_set_records_push_for_detached_interested_resource() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
@@ -8477,6 +8984,8 @@ async fn blocking_set_records_push_for_detached_blocklist_interested_resource() 
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: detached_jid.clone(),
@@ -8577,6 +9086,8 @@ async fn subscription_approval_replays_current_presence_from_detached_available_
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id,
             user_id: "alice@example.com".to_string(),
             jid: alice_web_jid.clone(),
@@ -8671,6 +9182,8 @@ async fn presence_probe_returns_detached_available_resource_presence() {
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-detached-probe".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -8776,6 +9289,8 @@ async fn full_jid_presence_probe_returns_only_that_resources_availability() {
             .protocol
             .sm_session_registry
             .store_session(DetachedSession {
+                promotion_custody:
+                    waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
                 stream_id: stream_id.to_string(),
                 user_id: "alice@example.com".to_string(),
                 jid,
@@ -8851,6 +9366,8 @@ async fn presence_probe_without_subscription_does_not_reveal_detached_presence()
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-detached-probe-denied".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid,
@@ -9015,6 +9532,8 @@ async fn subscription_approval_records_roster_push_for_detached_interested_resou
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
@@ -9075,6 +9594,8 @@ async fn subscribe_to_detached_available_resource_replays_on_resume() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: alice_jid.clone(),
@@ -9156,6 +9677,8 @@ async fn presence_broadcast_to_detached_available_subscriber_replays_on_resume()
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "bob@example.com".to_string(),
             jid: bob_jid.clone(),
@@ -9253,6 +9776,7 @@ async fn sm_resume_signals_suppress_record_so_main_loop_skips_replay() {
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
     let stream_id = "stream-dup-check".to_string();
     let detached = DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.clone(),
         user_id: "alice@example.com".to_string(),
         jid: jid.clone(),
@@ -9353,6 +9877,7 @@ async fn cleanup_shutdown_detaches_resumable_session_on_transport_drop() {
     conn.roster_interested = true;
     conn.sm_state
         .enable("stream-detach".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     // A production enabled stream always carries a live claim fence;
     // without one the fenceless teardown promotes terminally instead of
     // taking the detach path this test exercises.
@@ -9464,6 +9989,7 @@ async fn cleanup_shutdown_detach_prunes_actor_tree_entry() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-actor".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     // A production enabled stream always carries a live claim fence;
     // without one the fenceless teardown promotes terminally instead of
     // taking the detach path this test exercises.
@@ -9539,6 +10065,7 @@ async fn cleanup_shutdown_does_not_detach_explicit_close() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-close".to_string(), false, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
 
     let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
 
@@ -9660,6 +10187,7 @@ async fn terminal_cleanup_skips_shared_fulljid_teardown_after_replacement_rejoin
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("terminal-replacement-stream".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
     message.from = Some("bob@example.com/phone".parse().expect("sender jid"));
     message.id = Some(xmpp_parsers::message::Id(
@@ -9778,6 +10306,7 @@ async fn terminal_cleanup_without_replacement_still_tears_down_room_membership()
         true,
         Some(300),
     );
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     let mut message = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.to_bare())));
     message.from = Some("bob@example.com/phone".parse().expect("sender jid"));
     message.id = Some(xmpp_parsers::message::Id(
@@ -9866,6 +10395,8 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
         .protocol
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.clone(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -9990,6 +10521,8 @@ async fn sm_resume_replay_stamps_xep0203_delay_with_original_receipt_time() {
         state.as_ref(),
         &session,
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-replay-delay".to_string(),
             user_id: format!("bob@{domain}"),
             jid: detached_jid.clone(),
@@ -10091,6 +10624,7 @@ async fn sm_detach_on_transport_drop_does_not_evict_sfu_call_session() {
     conn.registry_owner = Some(owner);
     conn.sm_state
         .enable("stream-detach-call".to_string(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
     // A production enabled stream always carries a live claim fence;
     // without one the fenceless teardown promotes terminally instead of
     // taking the detach path this test exercises.
@@ -10501,6 +11035,8 @@ mod fix_a_post_cas_shutdown {
 
         let jid: FullJid = "alice@example.com/phone".parse().expect("valid full jid");
         let owner_detached = DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-post-cas-shutdown".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -10661,6 +11197,8 @@ async fn sm_resume_accepts_handled_count_behind_wrapped_outbound() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-wrapped".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -10752,6 +11290,8 @@ async fn sm_resume_restores_presence_payloads_to_the_live_registry() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-idle".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -10823,6 +11363,8 @@ async fn sm_resume_adopts_the_detached_occupancy_generation_without_changing_res
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-occupancy-generation".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -10897,6 +11439,8 @@ async fn sm_resume_preserves_the_pending_subscribe_once_per_session_claim() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-claimed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -10976,6 +11520,8 @@ async fn sm_resume_preserves_consumed_claim_when_detached_unavailable() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-claimed-unavail".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -11052,6 +11598,8 @@ async fn sm_resume_keeps_unconsumed_claim_armed() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-unclaimed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -11194,6 +11742,8 @@ async fn sm_resume_rejects_handled_count_behind_last_acked() {
     let _detached_session = store_resumable_test_session(
         state.as_ref(),
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "stream-regressed".to_string(),
             user_id: "alice@example.com".to_string(),
             jid: jid.clone(),
@@ -12470,6 +13020,7 @@ async fn competing_live_resumes_have_one_winner_and_wait_for_old_socket_cleanup(
     ));
     old.sm_state
         .enable(stream_id.as_str().to_owned(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut old).await;
     state
         .deps
         .protocol
@@ -12794,4 +13345,384 @@ async fn intentional_close_wins_inflight_force_resume_without_persisting_a_snaps
         .expect("snapshot lookup")
         .is_none());
     assert!(!state.deps.protocol.connection_registry.is_connected(&jid));
+}
+
+#[tokio::test]
+async fn failed_detach_snapshot_keeps_its_claim_while_promotion_needs_retry() {
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+
+    let claim_store: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+    let persistence = Arc::new(FailDeleteSmPersistence::new());
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_persistence(persistence.clone())
+            .with_claim_store(
+                claim_store.clone(),
+                SharedNodeIdentity::new(NodeIdentity::new("failed-detach-node", "incarnation")),
+            ),
+    );
+    let pending = Arc::new(FailFirstPendingStorage::new());
+    let state = create_test_websocket_state_with_sm_registry_and_pending_storage(
+        registry.clone(),
+        pending.clone(),
+    )
+    .await;
+    let jid: FullJid = "alice@example.com/failed-snapshot".parse().expect("jid");
+    let (tx, mut rx) = mpsc::channel::<OutboundStanza>(1);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.authenticated_session = Some(create_test_session(state.as_ref(), "alice").await);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx),
+    );
+    let enabled = handle_xmpp_frame(
+        "<enable xmlns='urn:xmpp:sm:3' resume='true'/>",
+        "example.com",
+        state.as_ref(),
+        &mut conn,
+    )
+    .await;
+    let stream_id = Element::from_str(&enabled[0])
+        .expect("enabled XML")
+        .attr("id")
+        .expect("resumable stream id")
+        .to_owned();
+    conn.publish_pending_sm_enable(state.as_ref());
+    let original_fence = registry
+        .current_sm_claim_fence(&stream_id)
+        .expect("enabled stream owns its claim");
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.id = Some(xmpp_parsers::message::Id(
+        "failed-snapshot-retry".to_owned(),
+    ));
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "preserve this failed detach".to_owned(),
+    );
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(message).expect("queued message XML"),
+        SmEvictionPath::DirectOutbound,
+    );
+    persistence
+        .reject_next_principal_store
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    assert_eq!(
+        cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await,
+        super::super::cleanup::ConnectionShutdownOutcome::NotPersisted
+    );
+    assert!(
+        !persistence
+            .reject_next_principal_store
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the authenticated stream attempted its normal resumable snapshot"
+    );
+    assert_eq!(
+        registry.current_sm_claim_fence(&stream_id),
+        Some(original_fence.clone())
+    );
+    assert!(registry
+        .locally_owned_claim_ids()
+        .expect("locally owned claims")
+        .iter()
+        .any(|owned| owned == &stream_id));
+    let entity = waddle_xmpp::ownership::Entity::new(
+        waddle_xmpp::ownership::EntityType::SmSession,
+        stream_id.clone(),
+    );
+    let claim = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("claim lookup")
+        .expect("promotion retry still owns the claim");
+    assert_eq!(claim.claim_epoch, original_fence.epoch());
+    assert_eq!(registry.pending_claim_release_count(), 0);
+    assert!(state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("pending rows")
+        .is_empty());
+    let stream = waddle_xmpp::pending_delivery::SmSessionId::new(&stream_id);
+    let source = persistence
+        .get_session(&stream)
+        .await
+        .expect("durable retry inventory")
+        .expect("failed promotion preserves its durable source");
+    assert_eq!(source.max_resume_time, Some(0));
+    assert_eq!(source.max_resume_duration, std::time::Duration::ZERO);
+    assert_eq!(
+        persistence
+            .list_unacked(&stream)
+            .await
+            .expect("retained queue")
+            .len(),
+        1
+    );
+    let retry = registry.drain_expired().await.expect("janitor retry");
+    assert_eq!(retry.len(), 1);
+    assert_eq!(retry[0].stream_id, stream_id);
+    assert_eq!(retry[0].unacked_stanzas.len(), 1);
+    assert!(retry[0].unacked_stanzas[0]
+        .stanza_xml
+        .contains("failed-snapshot-retry"));
+}
+
+async fn assert_terminal_inventory_refresh_preserves_accepted_suffix(fail_first_append: bool) {
+    use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+    use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
+    let persistence = Arc::new(FailDeleteSmPersistence::new());
+    persistence
+        .fail_delete
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    persistence
+        .reject_next_promotion_append
+        .store(fail_first_append, std::sync::atomic::Ordering::SeqCst);
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence.clone()));
+    let directory = tempfile::tempdir().expect("pending custody database directory");
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("terminal-pending.db").display()
+    );
+    let pending = Arc::new(
+        crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+            Some(&database_url),
+            waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+        )
+        .await
+        .expect("durable pending custody"),
+    );
+    let state =
+        create_test_websocket_state_with_sm_registry_and_pending_storage(registry.clone(), pending)
+            .await;
+    let jid: FullJid = "alice@example.com/one-terminal-registration"
+        .parse()
+        .expect("jid");
+    let (tx, mut rx) = mpsc::channel(1);
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.registry_owner = Some(
+        state
+            .deps
+            .protocol
+            .connection_registry
+            .register(jid.clone(), tx.clone()),
+    );
+    conn.sm_state
+        .enable("one-terminal-registration".to_owned(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
+    let stanza = |id: &str| {
+        let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+        message.from = Some("bob@example.com/phone".parse().expect("sender"));
+        message.type_ = xmpp_parsers::message::MessageType::Chat;
+        message.id = Some(xmpp_parsers::message::Id(id.to_owned()));
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), id.to_owned());
+        message
+    };
+    let _ = conn.sm_state.record_outbound(
+        waddle_xmpp::parser::stanza_to_string(stanza("recorded-prefix")).expect("prefix XML"),
+        SmEvictionPath::DirectOutbound,
+    );
+    conn.begin_terminal_sm_recovery();
+    tx.send(OutboundStanza::new(Stanza::Message(stanza(
+        "accepted-suffix",
+    ))))
+    .await
+    .expect("accepted suffix");
+    let _ = cleanup_connection_shutdown(state.as_ref(), &mut rx, &mut conn, false).await;
+    assert!(
+        !persistence
+            .reject_next_promotion_append
+            .load(std::sync::atomic::Ordering::SeqCst),
+        "the accepted suffix reached the one-shot append fault"
+    );
+    assert_eq!(
+        persistence
+            .inventory_store_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    // Initial admission reads its source and reconciles once; final preparation
+    // refreshes the appended watermark, and confirmation verifies that snapshot.
+    // Re-registering at every terminal phase exceeds this metadata-read budget.
+    assert!(
+        persistence
+            .get_session_calls
+            .load(std::sync::atomic::Ordering::SeqCst)
+            <= 5
+    );
+    let rows = state
+        .deps
+        .protocol
+        .pending_delivery_storage
+        .list(&jid.to_bare())
+        .await
+        .expect("durable terminal rows");
+    assert_eq!(
+        rows.len(),
+        2,
+        "prefix and accepted suffix both transfer custody"
+    );
+    assert!(
+        persistence
+            .inner
+            .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(
+                "one-terminal-registration"
+            ))
+            .await
+            .expect("confirmed source read")
+            .is_none(),
+        "confirmation accepts the refreshed appended watermark and retires the source"
+    );
+
+    let restarted = InMemorySmSessionRegistry::new().with_persistence(persistence.clone());
+    assert_eq!(
+        restarted
+            .restore_from_persistence()
+            .await
+            .expect("restart source inventory"),
+        0
+    );
+    let reopened = crate::pending_delivery::DatabasePendingDeliveryStorage::open(
+        Some(&database_url),
+        waddle_xmpp::pending_delivery::QuotaPolicy::Unlimited,
+    )
+    .await
+    .expect("reopen durable pending custody");
+    let durable_rows = reopened
+        .list(&jid.to_bare())
+        .await
+        .expect("restart pending rows");
+    let ids: std::collections::BTreeSet<_> = durable_rows
+        .iter()
+        .filter_map(|row| match &row.payload {
+            waddle_xmpp::pending_delivery::PendingPayload::Transient(message) => {
+                message.id.as_ref().map(|id| id.0.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ids, std::collections::BTreeSet::from(["recorded-prefix", "accepted-suffix"]),
+        "confirmed source deletion must leave every accepted frame in durable pending custody across restart");
+}
+
+#[tokio::test]
+async fn terminal_inventory_registers_once_and_refreshes_after_accepted_suffix() {
+    assert_terminal_inventory_refresh_preserves_accepted_suffix(false).await;
+}
+
+#[tokio::test]
+async fn terminal_inventory_refresh_recovers_a_transient_accepted_suffix_append_failure() {
+    assert_terminal_inventory_refresh_preserves_accepted_suffix(true).await;
+}
+
+#[tokio::test]
+async fn terminal_drain_discards_retired_append_without_redelivery_or_retry() {
+    use super::super::replay::{
+        drain_outbound_into_terminal_recovery, PendingRowDrainPolicy, TerminalDrainContext,
+    };
+    use waddle_xmpp::stream_management::{DetachedSession, PromotionCaptureCustody};
+
+    let persistence =
+        Arc::new(waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new());
+    let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
+    let state = create_test_websocket_state_with_sm_registry(registry.clone()).await;
+    let jid: FullJid = "alice@example.com/retired-terminal-append"
+        .parse()
+        .expect("jid");
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    conn.sm_state
+        .enable("retired-terminal-append".to_owned(), true, Some(300));
+    claim_enabled_cleanup_fixture(&state, &mut conn).await;
+    let capture = DetachedSession {
+        promotion_custody: PromotionCaptureCustody::claimed(
+            conn.sm_ingress_fence.clone().expect("claim"),
+        ),
+        stream_id: "retired-terminal-append".to_owned(),
+        user_id: jid.to_bare().to_string(),
+        jid: jid.clone(),
+        occupancy_session: conn.occupancy_session,
+        inbound_count: 0,
+        outbound_count: 3,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(0),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: false,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    let mut stale = registry
+        .register_promotion_session(&capture)
+        .await
+        .expect("registered inventory");
+    // Another operation has already retired sequence 2 and advanced to 3;
+    // this surviving producer copy still tries to allocate that old sequence.
+    stale.outbound_count = 1;
+    let mut message = xmpp_parsers::message::Message::new(Some(jid.to_bare().into()));
+    message.from = Some("bob@example.com/phone".parse().expect("sender"));
+    message.type_ = xmpp_parsers::message::MessageType::Chat;
+    message.bodies.insert(
+        xmpp_parsers::message::Lang::new(),
+        "already settled".to_owned(),
+    );
+    let (tx, mut rx) = mpsc::channel(1);
+    tx.send(OutboundStanza::new(Stanza::Message(message)))
+        .await
+        .expect("accepted frame");
+    let blocklist = waddle_xmpp::protocol::session_state::Blocklist::empty();
+    let outcome = drain_outbound_into_terminal_recovery(
+        state.as_ref(),
+        &mut conn,
+        &mut rx,
+        PendingRowDrainPolicy::ReleaseForTerminalRecovery,
+        TerminalDrainContext {
+            session: &mut stale,
+            blocklist: Some(&blocklist),
+            recent_tombstones: &[],
+            promote_incrementally: true,
+            inventory_ready: true,
+        },
+    )
+    .await;
+    assert!(!outcome.queued_pending_rows);
+    assert!(
+        stale.unacked_stanzas.is_empty(),
+        "retired allocation cannot remain in retry custody"
+    );
+    assert!(
+        state
+            .deps
+            .protocol
+            .pending_delivery_storage
+            .list(&jid.to_bare())
+            .await
+            .expect("pending rows")
+            .is_empty(),
+        "retired allocation cannot be promoted a second time"
+    );
+    let refreshed = registry
+        .refresh_promotion_session(&stale)
+        .await
+        .expect("canonical source unchanged");
+    assert_eq!(refreshed.outbound_count, 3);
+    assert!(refreshed.unacked_stanzas.is_empty());
 }

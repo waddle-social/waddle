@@ -373,3 +373,89 @@ async fn postgres_extension_frozen_offline_notification_recovers() {
         extension_frozen_offline_notification_recovers(f).await;
     }
 }
+
+/// XEP-0160 §3: a full recipient queue becomes available after retention,
+/// without requiring the offline recipient to connect and acknowledge rows.
+async fn offline_quota_recovers_after_retention(f: IngressFixture) {
+    use waddle_xmpp::pending_delivery::InsertOutcome;
+
+    let env = environment(
+        &f,
+        Arc::new(ConnectionRegistry::new()),
+        QuotaPolicy::CountCap { max_rows: 2 },
+    )
+    .await;
+    let now = chrono::Utc::now();
+    let recipient: jid::BareJid = "juliet@example.com".parse().expect("recipient");
+    let mut message = xmpp_parsers::message::Message::new(Some(recipient.clone().into()));
+    message.from = Some("romeo@example.com/garden".parse().expect("sender"));
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), "offline message".into());
+    let expired = PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: recipient.clone(),
+        original_receipt_at: now - chrono::Duration::days(31),
+        payload: PendingPayload::Transient(Box::new(message)),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    let mut recent = expired.clone();
+    recent.id = PendingRowId::fresh();
+    recent.original_receipt_at = now;
+    let mut overflow = recent.clone();
+    overflow.id = PendingRowId::fresh();
+    assert_eq!(
+        env.storage.insert(expired).await.expect("expired row"),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        env.storage
+            .insert(recent.clone())
+            .await
+            .expect("recent row"),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        env.storage
+            .insert(overflow.clone())
+            .await
+            .expect("full queue"),
+        InsertOutcome::QuotaExceeded
+    );
+    assert_eq!(
+        env.storage
+            .delete_older_than(now - chrono::Duration::days(30))
+            .await
+            .expect("retention"),
+        1
+    );
+    let rows = env.storage.list(&recipient).await.expect("retained queue");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, recent.id);
+    assert_eq!(
+        env.storage
+            .insert(overflow)
+            .await
+            .expect("capacity restored"),
+        InsertOutcome::Inserted
+    );
+    assert_eq!(
+        env.storage.count(&recipient).await.expect("refilled queue"),
+        2
+    );
+    drop(env);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_offline_quota_recovers_after_retention() {
+    offline_quota_recovers_after_retention(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_offline_quota_recovers_after_retention() {
+    if let Some(f) = IngressFixture::postgres("q6age").await {
+        offline_quota_recovers_after_retention(f).await;
+    }
+}

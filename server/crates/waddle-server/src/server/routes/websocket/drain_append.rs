@@ -206,22 +206,15 @@ pub(super) fn bind_live(
     }
 }
 
-/// Bind an authorized obligation to the frame the recipient pass emitted.
-///
-/// That frame is wire XML, and the keyed registry boundary is typed, so it is parsed
-/// back exactly once. Only messages hold append obligations; a frame that is not one
-/// drains unkeyed, counted like every other degrade.
-pub(super) fn key_recipient_pass_frame(
-    xml: &str,
+/// Bind an authorized obligation to the typed stanza the recipient pass emitted.
+/// Only messages hold append obligations; other stanzas drain unkeyed.
+pub(super) fn key_recipient_pass_stanza(
+    stanza: &Stanza,
     obligation: SmRelayedAppendObligation,
-) -> Option<(SmIngressAppendKey, Stanza)> {
-    let message = xml
-        .parse::<minidom::Element>()
-        .ok()
-        .and_then(|element| xmpp_parsers::message::Message::try_from(element).ok());
-    match message {
-        Some(message) => Some((obligation.key, Stanza::Message(message))),
-        None => {
+) -> Option<SmIngressAppendKey> {
+    match stanza {
+        Stanza::Message(_) => Some(obligation.key),
+        _ => {
             crate::ingress::append_authority::record_authorization_failure(
                 &crate::ingress::append_authority::AppendAuthorityRejection::NotMessage,
                 &obligation.sender_bare,

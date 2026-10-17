@@ -34,6 +34,8 @@ pub(crate) async fn detach_target(services: &OrderedRelayDeliveryServices, targe
     services
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: target.to_string(),
             user_id: target.to_bare().to_string(),
             jid: target.clone(),

@@ -908,8 +908,17 @@ async fn fixture_bot_extension_manager() -> ExtensionManager {
 pub(crate) async fn store_resumable_detached_session(
     state: &WebSocketState,
     session: &Session,
-    detached: waddle_xmpp::stream_management::DetachedSession,
+    mut detached: waddle_xmpp::stream_management::DetachedSession,
 ) {
+    // This fixture explicitly admits new test sources. Production captures
+    // carry the connection's immutable enable/resume fence instead.
+    if matches!(
+        detached.promotion_custody,
+        waddle_xmpp::stream_management::PromotionCaptureCustody::Unproven
+    ) {
+        detached.promotion_custody =
+            waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
+    }
     crate::occupancy_authority::publish(
         state.deps.app_state.db_pool.global(),
         &detached.jid,

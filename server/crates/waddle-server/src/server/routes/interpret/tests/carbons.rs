@@ -315,6 +315,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
     // alice/phone: detached, carbons-enabled, resumable via SM.
     let sm = Arc::new(InMemorySmSessionRegistry::new());
     let detached = DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "phone-stream-id".to_string(),
         user_id: "alice".to_string(),
         jid: alice_phone.clone(),

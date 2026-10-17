@@ -66,7 +66,9 @@ async fn detaching_socket(fixture: IngressFixture) -> DetachingSocket {
         .enroll_stream(&waddle_xmpp::pending_delivery::SmSessionId::new(STREAM))
         .await
         .expect("enabled stream ingress enrollment");
-    drop(sm.ensure_session_claim(STREAM).await.expect("enable claim"));
+    let authority = sm.ensure_session_claim(STREAM).await.expect("enable claim");
+    conn.sm_ingress_fence = sm.current_sm_claim_fence(STREAM);
+    drop(authority);
     DetachingSocket {
         fixture,
         state,

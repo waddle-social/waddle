@@ -205,6 +205,7 @@ async fn promote_session_unacked_with_policy(
                     origin: PromotionOrigin::Stream {
                         stream_id: &session.stream_id,
                         sequence: entry.sequence,
+                        expected_fence: session.promotion_custody.captured_fence(),
                     },
                 };
                 promote_one(message, entry.sequence, ctx).await
@@ -274,8 +275,23 @@ pub(crate) async fn promote_terminal_overflow_entry(
     entry: DetachedUnackedStanza,
     deps: TerminalOverflowPromotionDeps<'_>,
 ) -> PromotionSummary {
+    let sequence = entry.sequence;
     let session = detached_session_for_terminal_entry(source, entry);
-    promote_session_with_custody(&session, deps).await
+    let mut summary = promote_session_with_custody(&session, deps).await;
+    if !summary.has_storage_failure() {
+        if let Err(error) = deps
+            .sm_registry
+            .delete_promotion_unacked_sequences(source, &summary.promoted_sequences)
+            .await
+        {
+            tracing::warn!(stream_id = %source.stream_id, sequence, %error,
+                "terminal promotion could not retire inventory entry; retaining for retry");
+            summary.storage_failed += 1;
+            summary.first_failure = Some((sequence, PromotionFailureReason::PendingStorage));
+            summary.promoted_sequences.clear();
+        }
+    }
+    summary
 }
 
 fn detached_session_for_terminal_entry(
@@ -283,6 +299,7 @@ fn detached_session_for_terminal_entry(
     entry: DetachedUnackedStanza,
 ) -> DetachedSession {
     DetachedSession {
+        promotion_custody: source.promotion_custody.clone(),
         stream_id: source.stream_id.clone(),
         user_id: source.user_id.clone(),
         jid: source.jid.clone(),
@@ -394,6 +411,14 @@ pub(crate) async fn release_row_backed_replay_copies(
             None
         }
     };
+    // Without the ownership preflight there is no safe prune-before-release
+    // order: canonical inventory hydration could revive a released replay copy.
+    if preflight.is_none() {
+        return RowBackedReleaseOutcome {
+            ownership_unknown: true,
+            ..RowBackedReleaseOutcome::default()
+        };
+    }
     if let Some(sequence_bound_rows) = preflight.as_ref() {
         if !sequence_bound_rows.is_empty() {
             // Crash-consistency ordering: durably prune the replay copies of
@@ -405,7 +430,7 @@ pub(crate) async fn release_row_backed_replay_copies(
             // the whole reconciliation retries on a later pass.
             let bound: Vec<u32> = sequence_bound_rows.iter().copied().collect();
             if let Err(error) = sm_registry
-                .delete_unacked_sequences(&detached.stream_id, &bound)
+                .delete_promotion_unacked_sequences(detached, &bound)
                 .await
             {
                 tracing::warn!(
@@ -586,10 +611,18 @@ impl Drop for PromotionBatchGuard<'_> {
     }
 }
 
+/// Proof that this exact lifecycle already entered canonical promotion custody.
+/// Kept with the sole cancellation guard as terminal prefix and suffix work runs.
+struct RegisteredPromotionInventory {
+    stream_id: waddle_xmpp::pending_delivery::SmSessionId,
+    occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
+}
+
 pub(crate) struct PromotionSessionGuard<'a> {
     registry: &'a waddle_xmpp::stream_management::InMemorySmSessionRegistry,
     session: DetachedSession,
     armed: bool,
+    registered_inventory: Option<RegisteredPromotionInventory>,
 }
 
 impl<'a> PromotionSessionGuard<'a> {
@@ -601,6 +634,7 @@ impl<'a> PromotionSessionGuard<'a> {
             registry,
             session,
             armed: true,
+            registered_inventory: None,
         }
     }
 
@@ -610,6 +644,46 @@ impl<'a> PromotionSessionGuard<'a> {
 
     pub(crate) fn session_mut(&mut self) -> &mut DetachedSession {
         &mut self.session
+    }
+
+    pub(crate) fn inventory_registered(&self) -> bool {
+        self.registered_inventory.as_ref().is_some_and(|proof| {
+            proof.stream_id.as_str() == self.session.stream_id
+                && proof.occupancy_session == self.session.occupancy_session
+        })
+    }
+
+    pub(crate) async fn register_inventory(
+        &mut self,
+    ) -> Result<(), waddle_xmpp::stream_management::SmRegistryError> {
+        if self.inventory_registered() {
+            return Ok(());
+        }
+        self.session = self
+            .registry
+            .register_promotion_session(&self.session)
+            .await?;
+        self.registered_inventory = Some(RegisteredPromotionInventory {
+            stream_id: waddle_xmpp::pending_delivery::SmSessionId::new(&self.session.stream_id),
+            occupancy_session: self.session.occupancy_session,
+        });
+        Ok(())
+    }
+
+    async fn prepare_inventory(
+        &mut self,
+    ) -> Result<(), waddle_xmpp::stream_management::SmRegistryError> {
+        if self.inventory_registered() {
+            // Suffix appends advance the durable watermark. Refresh the final
+            // confirmation baseline without admission, reacquisition or recreation.
+            self.session = self
+                .registry
+                .refresh_promotion_session(&self.session)
+                .await?;
+            Ok(())
+        } else {
+            self.register_inventory().await
+        }
     }
 
     pub(crate) fn complete(&mut self) {
@@ -747,7 +821,7 @@ pub(crate) async fn prune_promoted_sequences(
 ) {
     if !summary.promoted_sequences.is_empty() {
         match sm_registry
-            .delete_unacked_sequences(&session.stream_id, &summary.promoted_sequences)
+            .delete_promotion_unacked_sequences(session, &summary.promoted_sequences)
             .await
         {
             Ok(_) => {
@@ -878,14 +952,52 @@ pub async fn scrub_pending_for_tombstones_recorded_during_promotion(
     }
 }
 
+/// The canonical SM source has been deleted under its claim fence. Portable
+/// handoff receipts can now be retired without making a retry look like new work.
+pub(crate) async fn confirm_pending_promotion(
+    storage: &Arc<dyn PendingDeliveryStorage>,
+    stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+) {
+    if let Err(error) = storage.confirm_promotion(stream_id).await {
+        tracing::warn!(%stream_id, %error,
+            "confirmed SM promotion retained its content-free handoff receipts");
+    }
+}
+
 pub(crate) async fn promote_displaced_sessions(
     sessions: Vec<DetachedSession>,
     deps: DisplacedPromotionDeps<'_>,
 ) -> DisplacedPromotionOutcome {
+    let guarded = sessions
+        .into_iter()
+        .map(|session| PromotionSessionGuard::new(deps.sm_registry, session))
+        .collect();
+    promote_guarded_sessions(guarded, deps).await
+}
+
+pub(crate) async fn promote_guarded_sessions(
+    sessions: Vec<PromotionSessionGuard<'_>>,
+    deps: DisplacedPromotionDeps<'_>,
+) -> DisplacedPromotionOutcome {
     let mut outcome = DisplacedPromotionOutcome::default();
-    let mut batch_guard = PromotionBatchGuard::new(deps.sm_registry, sessions);
-    while let Some(pending_session) = batch_guard.pop() {
-        let mut promotion_guard = PromotionSessionGuard::new(deps.sm_registry, pending_session);
+    for mut promotion_guard in sessions {
+        let already_registered = promotion_guard.inventory_registered();
+        if let Err(error) = promotion_guard.prepare_inventory().await {
+            tracing::warn!(stream_id = %promotion_guard.session().stream_id, %error,
+                "displaced promotion could not establish durable custody; retaining for retry");
+            let session = promotion_guard.session().clone();
+            let retained = if already_registered {
+                // A registered refresh never falls back to admission: a missing
+                // canonical source cannot be recreated from this old capture.
+                promotion_guard.retain_for_retry()
+            } else {
+                reinsert_or_retain_for_retry(&mut promotion_guard, session.clone()).await
+            };
+            if retained {
+                outcome.retrying_stream_ids.insert(session.stream_id);
+            }
+            continue;
+        }
         let session = promotion_guard.session().clone();
         let blocklist = match deps
             .blocking_storage
@@ -897,7 +1009,7 @@ pub(crate) async fn promote_displaced_sessions(
                 waddle_xmpp::telemetry::reliability::increment_sm_promotion_blocklist_failed();
                 if let Err(record_error) = deps
                     .sm_registry
-                    .record_promotion_failure(&session.stream_id)
+                    .record_promotion_session_failure(&session)
                     .await
                 {
                     tracing::warn!(
@@ -974,7 +1086,7 @@ pub(crate) async fn promote_displaced_sessions(
             ));
             if let Err(error) = deps
                 .sm_registry
-                .record_promotion_failure(&session.stream_id)
+                .record_promotion_session_failure(&session)
                 .await
             {
                 tracing::warn!(
@@ -1005,7 +1117,7 @@ pub(crate) async fn promote_displaced_sessions(
             }
             continue;
         }
-        if !deps.sm_registry.confirm_drained(&session.stream_id).await {
+        if !deps.sm_registry.confirm_promotion_session(&session).await {
             if promotion_guard.retain_for_retry() {
                 outcome
                     .retrying_stream_ids
@@ -1018,6 +1130,7 @@ pub(crate) async fn promote_displaced_sessions(
             .completed_stream_ids
             .insert(session.stream_id.clone());
         let session_id = waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
+        confirm_pending_promotion(deps.pending_storage, &session_id).await;
         if let Err(error) = deps.pending_storage.release_claim(&session_id).await {
             tracing::warn!(
                 jid = %session.jid,
@@ -1152,6 +1265,15 @@ async fn promote_one(
         // socket buffer rejected). Fall through to offline storage.
     }
 
+    // Inbox query entries are request-scoped snapshots, and pushes are
+    // reconstructible account projections. Neither is a peer DM. Keep the
+    // live alternative above, then retire only these precise server shapes;
+    // a missing `from` alone does not make an arbitrary message disposable.
+    if is_senderless_inbox_projection(&message) {
+        waddle_xmpp::telemetry::reliability::increment_sm_promotion_not_promotable();
+        return PromotedOutcome::NotPromotable;
+    }
+
     // Step 2: offline storage — if the classifier marked the stanza
     // for `pending_delivery`, insert.
     if !ctx.allow_unfenced_effects && matches!(routing.pending, PendingDecision::None) {
@@ -1207,6 +1329,7 @@ async fn promote_one(
                                 registry: ctx.registry,
                                 user_registry: ctx.user_registry,
                                 allow_unfenced_effects: ctx.allow_unfenced_effects,
+                                server_domain: ctx.server_domain,
                             },
                             ctx.origin,
                         )
@@ -1237,8 +1360,39 @@ async fn promote_one(
             registry: ctx.registry,
             user_registry: ctx.user_registry,
             allow_unfenced_effects: ctx.allow_unfenced_effects,
+            server_domain: ctx.server_domain,
         },
         ctx.origin,
     )
     .await
+}
+
+/// Audited producers: archive_inbox_upload::handle_inbox_query_iq streams normal
+/// entry + optional MAM result + metadata; groupchat_archive::push_inbox_update_to
+/// sends headline push(entry, metadata). Query-scoped MAM alone is handled
+/// separately above (#460). Extra body/thread/payloads remain ordinary intake.
+fn is_senderless_inbox_projection(message: &xmpp_parsers::message::Message) -> bool {
+    use waddle_xmpp::xep::xep0430::{NS_INBOX, NS_MAM, NS_WADDLE_INBOX};
+    use xmpp_parsers::message::MessageType;
+    if message.from.is_some()
+        || !message.bodies.is_empty()
+        || !message.subjects.is_empty()
+        || message.thread.is_some()
+    {
+        return false;
+    }
+    match (&message.type_, message.payloads.as_slice()) {
+        (MessageType::Normal, [entry, metadata]) => {
+            entry.is("entry", NS_INBOX) && metadata.is("metadata", NS_WADDLE_INBOX)
+        }
+        (MessageType::Normal, [entry, result, metadata]) => {
+            entry.is("entry", NS_INBOX)
+                && result.is("result", NS_MAM)
+                && metadata.is("metadata", NS_WADDLE_INBOX)
+        }
+        (MessageType::Headline, [push]) => {
+            push.is("push", NS_WADDLE_INBOX) && push.get_child("entry", NS_INBOX).is_some()
+        }
+        _ => false,
+    }
 }

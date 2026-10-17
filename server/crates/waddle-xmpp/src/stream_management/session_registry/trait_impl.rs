@@ -112,6 +112,20 @@ impl InMemorySmSessionRegistry {
         let jid = session.jid.clone();
         let stream_lock = self.stream_lock(&stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        if self
+            .pending_resume_claim_custody
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?
+            .contains_key(&stream_id)
+        {
+            return Err(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Backend,
+            ));
+        }
+        if let Some(fence) = self.current_sm_claim_fence(&stream_id) {
+            session.promotion_custody.bind_first_claim(fence);
+        }
+        self.validate_promotion_capture_locked(&session)?;
         {
             let claimed = self
                 .claimed_sessions
@@ -749,15 +763,15 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
         // listing is acceptable here.
         if let Some(storage) = &self.persistence {
             let stored = storage
-                .list_all_sessions()
+                .list_all_session_ids()
                 .await
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-            for persisted in stored {
+            for persisted_id in stored {
                 let unacked = storage
-                    .list_unacked(&persisted.stream_id)
+                    .list_unacked(&persisted_id)
                     .await
                     .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
-                let stream_id = persisted.stream_id.as_str().to_string();
+                let stream_id = persisted_id.as_str().to_string();
                 // Stream lock first: serializes with store_session /
                 // reinsert_for_retry so the durable delete and the
                 // current local-inventory scrub are atomic with respect
@@ -766,8 +780,7 @@ impl SmSessionRegistry for InMemorySmSessionRegistry {
                 // currently in a map: it may have entered after phase 1.
                 let stream_lock = self.stream_lock(&stream_id)?;
                 let _stream_guard = stream_lock.lock().await;
-                self.reconcile_stale_session_locked(&persisted.stream_id)
-                    .await?;
+                self.reconcile_stale_session_locked(&persisted_id).await?;
                 let sequences: Vec<u32> = unacked
                     .iter()
                     .filter(|entry| {
@@ -873,19 +886,19 @@ impl InMemorySmSessionRegistry {
             }
         }
         if let Some(storage) = &self.persistence {
-            for session in storage
-                .list_all_sessions()
+            for stream_id in storage
+                .list_all_session_ids()
                 .await
                 .map_err(|e| SmRegistryError::Internal(e.to_string()))?
             {
                 for entry in storage
-                    .list_unacked(&session.stream_id)
+                    .list_unacked(&stream_id)
                     .await
                     .map_err(|e| SmRegistryError::Internal(e.to_string()))?
                 {
                     if target.matches_message_element(&entry.stanza.to_element()) {
                         let identity = TombstoneScrubbedSmEntry {
-                            stream_id: session.stream_id.clone(),
+                            stream_id: stream_id.clone(),
                             sequence: entry.sequence,
                         };
                         if !matched.contains(&identity) {

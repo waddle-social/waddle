@@ -153,6 +153,7 @@ pub(super) fn persisted_to_detached(
     unacked_stanzas.sort_by_key(|entry| entry.sequence.wrapping_sub(persisted.last_acked));
 
     Ok(DetachedSession {
+        promotion_custody: crate::stream_management::PromotionCaptureCustody::unproven(),
         stream_id: persisted.stream_id.as_str().to_string(),
         user_id: persisted.user_id.clone(),
         jid: persisted.jid.clone(),

@@ -11,7 +11,9 @@ mod claims;
 mod core;
 mod cross_node_resume;
 mod custody;
+mod inventory;
 mod persistence_codec;
+mod promotion_receipt_gc;
 mod reconciliation;
 mod resources;
 mod session;
@@ -19,14 +21,14 @@ mod tombstones;
 mod trait_impl;
 mod traits;
 
-pub use claims::PendingPromotionRetryRetention;
+pub use claims::{PendingPromotionRetryRetention, ShutdownSmClaimLoss, ShutdownSmDrainBatch};
 pub use core::{InMemorySmSessionRegistry, ReclaimedClaimReservation, ReclaimedHydrationOutcome};
 pub use cross_node_resume::{
     CrossNodeResumeOutcome, CrossNodeResumeStage, RemoteResumeAskOutcome, RemoteResumeAsker,
     StealTicket,
 };
 pub use resources::{DetachedPresenceState, ResumableSessionProbe};
-pub use session::{DetachedSession, DetachedUnackedStanza};
+pub use session::{DetachedSession, DetachedUnackedStanza, PromotionCaptureCustody};
 pub use tombstones::{RecentTombstoneRecord, TOMBSTONE_CLOCK_SKEW_SLACK};
 pub use trait_impl::StoredDetachedSession;
 pub use traits::{

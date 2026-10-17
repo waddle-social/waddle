@@ -18,7 +18,7 @@ use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, SmPersistenceError, SmPersistenceStorage,
+    PersistedUnackedStanza, PromotionAppendOutcome, SmPersistenceError, SmPersistenceStorage,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::presence::Show;
@@ -36,6 +36,7 @@ mod atomic_store;
 pub(crate) mod codec;
 pub(crate) mod ingress_append;
 mod joined_sessions;
+pub(crate) mod promotion_inventory;
 mod schema;
 
 use codec::{
@@ -408,6 +409,24 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         Ok(())
     }
 
+    async fn append_promotion_stanza(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<PromotionAppendOutcome, SmPersistenceError> {
+        let lock = self.lock_for(&stanza.stream_id);
+        let _guard = lock.lock().await;
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let outcome = promotion_inventory::append(&mut tx, stanza, self.db.driver()).await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(outcome)
+    }
+
     async fn ack_through(
         &self,
         stream_id: &SmSessionId,
@@ -504,7 +523,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         // Filter via SQL where possible (detached_at + duration <= now)
         // and double-check in Rust to handle clock-skew / partial-row
         // edge cases.
-        let mut rows = self
+        let rows = self
             .query(
                 "SELECT stream_id, user_id, full_jid, occupancy_session, inbound_count, \
                         outbound_count, \
@@ -516,19 +535,11 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 crate::db_params![now_ms],
             )
             .await?;
-        let mut out = Vec::new();
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
-        {
-            out.push(decode_session(&row)?);
-        }
-        Ok(out)
+        crate::sm_persistence::codec::decode_session_scan(rows, "list_expired_sessions").await
     }
 
     async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
-        let mut rows = self
+        let rows = self
             .query(
                 "SELECT stream_id, user_id, full_jid, occupancy_session, inbound_count, \
                         outbound_count, \
@@ -540,13 +551,21 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 (),
             )
             .await?;
+        crate::sm_persistence::codec::decode_session_scan(rows, "list_all_sessions").await
+    }
+
+    async fn list_all_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
+        let mut rows = self.query("SELECT stream_id FROM sm_sessions", ()).await?;
         let mut out = Vec::new();
         while let Some(row) = rows
             .next()
             .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?
         {
-            out.push(decode_session(&row)?);
+            let stream_id: String = row
+                .get(0)
+                .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+            out.push(SmSessionId::new(stream_id));
         }
         Ok(out)
     }
@@ -556,8 +575,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     /// probe no longer loads and decodes every row; an index on `full_jid`
     /// needs a versioned migration and is tracked in #1812.
     ///
-    /// Same decoder and same fail-closed decode policy as the unscoped
-    /// listing: a matching row this node cannot decode propagates as an error
+    /// Uses the same decoder as the unscoped listing, but fails closed:
+    /// a matching row this node cannot decode propagates as an error
     /// so the probe reports `Failed`, never `Absent`. The caller is an
     /// eviction guard deciding whether to permanently drop a durable copy, so
     /// skipping a poison row the way the best-effort cold-start listing does

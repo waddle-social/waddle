@@ -1,4 +1,5 @@
 mod fenced_cleanup;
+mod promotion_handoff;
 mod recovery_storage;
 
 use super::*;
@@ -3963,6 +3964,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
         uuid::Uuid::new_v4().to_string(),
         uuid::Uuid::new_v4().to_string(),
     );
+    let node_identity = SharedNodeIdentity::new(node.clone());
     let stream_id = format!("atomic-sm-{}", uuid::Uuid::new_v4());
     let other_stream_id = format!("atomic-sm-other-{}", uuid::Uuid::new_v4());
     claim_store
@@ -3981,8 +3983,8 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
         QuotaPolicy::CountCap { max_rows: 1 },
         true,
         Some((
-            claim_store as std::sync::Arc<dyn ClaimStore>,
-            SharedNodeIdentity::new(node),
+            claim_store.clone() as std::sync::Arc<dyn ClaimStore>,
+            node_identity.clone(),
         )),
         &db,
     )
@@ -4016,6 +4018,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     .await
     .expect("seed durable session");
     let mut replay_message = Message::new(Some(jid::Jid::from(bare(&recipient))));
+    replay_message.from = Some("bob@example.com/phone".parse().expect("peer sender"));
     replay_message.type_ = MessageType::Chat;
     replay_message.bodies.insert(
         xmpp_parsers::message::Lang::new(),
@@ -4063,7 +4066,14 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
             crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
                 .await
                 .expect("open promotion SM persistence"),
-        ));
+        ))
+        .with_claim_store(claim_store.clone(), node_identity);
+    {
+        let _authority = sm_registry
+            .ensure_session_claim(&stream_id)
+            .await
+            .expect("capture the actual PostgreSQL stream claim");
+    }
     let live_registry = waddle_xmpp::registry::ConnectionRegistry::new();
     let users = test_user_registry();
     let alternate = full(&format!("{recipient}/web"));
@@ -4081,6 +4091,11 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
         .expect("register alternate resource");
     live_registry.update_presence(&alternate, true, 1);
     let session = waddle_xmpp::stream_management::DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::claimed(
+            sm_registry
+                .current_sm_claim_fence(&stream_id)
+                .expect("captured source fence"),
+        ),
         stream_id: stream_id.clone(),
         user_id: recipient.clone(),
         jid: full(&format!("{recipient}/phone")),

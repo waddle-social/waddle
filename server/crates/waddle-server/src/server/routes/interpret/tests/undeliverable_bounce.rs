@@ -462,6 +462,7 @@ async fn detached_queued_session_initiate_counts_ok() {
     // it up on resume, so the alert must not read it as a failure.
     let sm = Arc::new(InMemorySmSessionRegistry::new());
     sm.store_session(DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "bob-phone-stream".to_string(),
         user_id: "bob".to_string(),
         jid: bob.clone(),

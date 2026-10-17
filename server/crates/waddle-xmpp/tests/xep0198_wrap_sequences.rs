@@ -17,6 +17,7 @@ use xmpp_parsers::message::{Id, Message};
 
 fn detached_session(last_acked: u32, outbound_count: u32) -> DetachedSession {
     DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "wrap-sequences".to_string(),
         user_id: "user@example.com".to_string(),
         jid: "user@example.com/resource".parse().expect("valid full JID"),
@@ -40,10 +41,14 @@ fn detached_session(last_acked: u32, outbound_count: u32) -> DetachedSession {
     }
 }
 
-fn message_xml(id: &str) -> String {
+fn message_stanza(id: &str) -> Stanza {
     let mut message = Message::new(None::<jid::Jid>);
     message.id = Some(Id(id.to_string()));
-    let element = Stanza::Message(message).to_element();
+    Stanza::Message(message)
+}
+
+fn message_xml(id: &str) -> String {
+    let element = message_stanza(id).to_element();
     let mut bytes = Vec::new();
     element
         .write_to(&mut bytes)
@@ -132,13 +137,13 @@ fn explicit_detached_sequences_advance_sort_deduplicate_and_reject_stale_inputs(
     let last_acked = u32::MAX - 2;
     let mut session = detached_session(last_acked, u32::MAX - 1);
 
-    session.record_detached_outbound_at(0, "zero".to_string(), Utc::now());
-    session.record_detached_outbound_at(u32::MAX, "max".to_string(), Utc::now());
+    session.record_detached_outbound_at(0, &message_stanza("zero"), Utc::now());
+    session.record_detached_outbound_at(u32::MAX, &message_stanza("max"), Utc::now());
     assert_eq!(session.outbound_count, 0);
     assert_eq!(sequence_numbers(&session), vec![u32::MAX, 0]);
 
     let before_duplicate = session.clone();
-    session.record_detached_outbound_at(0, "different duplicate".to_string(), Utc::now());
+    session.record_detached_outbound_at(0, &message_stanza("different duplicate"), Utc::now());
     assert_eq!(session.outbound_count, before_duplicate.outbound_count);
     assert_eq!(session.unacked_stanzas, before_duplicate.unacked_stanzas);
     assert_eq!(
@@ -147,10 +152,10 @@ fn explicit_detached_sequences_advance_sort_deduplicate_and_reject_stale_inputs(
     );
 
     let before_stale = session.clone();
-    session.record_detached_outbound_at(last_acked, "acked".to_string(), Utc::now());
+    session.record_detached_outbound_at(last_acked, &message_stanza("acked"), Utc::now());
     session.record_detached_outbound_at(
         last_acked.wrapping_sub(1),
-        "behind ack floor".to_string(),
+        &message_stanza("behind ack floor"),
         Utc::now(),
     );
     assert_eq!(session.outbound_count, before_stale.outbound_count);
@@ -222,7 +227,7 @@ async fn persistence_hydration_and_followup_eviction_stay_in_wrap_order() {
     );
 
     let newest = last_acked.wrapping_add(DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1);
-    restored.record_detached_outbound_at(newest, stanza_xml, Utc::now());
+    restored.record_detached_outbound_at(newest, &message_stanza("wrapped"), Utc::now());
     assert_eq!(
         restored.unacked_stanzas.len(),
         DEFAULT_MAX_UNACKED_QUEUE_SIZE

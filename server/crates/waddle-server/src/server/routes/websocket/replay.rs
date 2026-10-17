@@ -17,14 +17,15 @@ pub(super) enum PendingRowDrainPolicy {
 }
 
 pub(super) struct TerminalDrainContext<'a> {
-    pub(super) session: &'a waddle_xmpp::stream_management::DetachedSession,
+    pub(super) session: &'a mut waddle_xmpp::stream_management::DetachedSession,
     pub(super) blocklist: Option<&'a waddle_xmpp::protocol::session_state::Blocklist>,
     pub(super) recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
     pub(super) promote_incrementally: bool,
+    pub(super) inventory_ready: bool,
 }
 
 pub(super) struct TerminalDrainOutcome {
-    pub(super) retained_overflow: Vec<waddle_xmpp::stream_management::DetachedUnackedStanza>,
+    pub(super) outbound_count: u32,
     pub(super) released_pending_rows: bool,
     /// Incremental overflow promotion inserted fresh `pending_delivery`
     /// rows; the caller must recheck live routing afterwards in case a
@@ -38,6 +39,11 @@ pub(super) struct TerminalDrainOutcome {
     /// An inline re-drive during the drain aborted: later items were
     /// retained, and the FINAL promotion must defer behind the stuck row.
     pub(super) redrive_aborted: bool,
+}
+
+struct TerminalInventoryProgress {
+    outbound_count: u32,
+    ready: bool,
 }
 
 struct TerminalDrainedFrame {
@@ -69,15 +75,10 @@ pub(super) struct ReplayDrainSink<'a> {
 /// One frame on its way into the replay queue.
 struct DrainedFrame {
     xml: String,
+    stanza: Option<Stanza>,
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     pending_row_id: Option<waddle_xmpp::pending_delivery::PendingRowId>,
-    ingress_append: Option<KeyedFrame>,
-}
-
-/// A frame's authorized obligation and the typed stanza the keyed registry records.
-struct KeyedFrame {
-    key: waddle_xmpp::stream_management::SmIngressAppendKey,
-    stanza: Stanza,
+    ingress_append: Option<waddle_xmpp::stream_management::SmIngressAppendKey>,
 }
 
 /// Drain `outbound_rx` of all immediately-available
@@ -153,12 +154,10 @@ pub(super) async fn drain_outbound_into_replay(
                     &mut sink,
                     DrainedFrame {
                         xml,
+                        stanza: Some(outbound_stanza.stanza),
                         original_receipt_at: receipt_at,
                         pending_row_id,
-                        ingress_append: ingress_append.take().map(|obligation| KeyedFrame {
-                            key: obligation.key,
-                            stanza: outbound_stanza.stanza.clone(),
-                        }),
+                        ingress_append: ingress_append.take().map(|obligation| obligation.key),
                     },
                 )
                 .await;
@@ -181,11 +180,20 @@ pub(super) async fn drain_outbound_into_replay(
                 let mut row_id_for_first = pending_row_id.clone();
                 for xml in drive.frames {
                     let row_for_this = row_id_for_first.take();
-                    // The recipient pass emits wire frames; the keyed registry
-                    // boundary is typed, so the frame is parsed back exactly once.
+                    // Re-enter the typed domain exactly once at the recipient
+                    // pass's wire boundary, for both keyed and unkeyed appends.
+                    // Use the persistence stanza decoder rather than the inbound
+                    // frame parser: generated frames have no inbound size limit.
+                    let stanza = xml.parse::<Element>().ok().and_then(|element| {
+                        crate::sm_persistence::codec::parse_stanza(element).ok()
+                    });
+                    if stanza.is_none() {
+                        warn!("recipient pass emitted a non-stanza frame during detach; excluding it from SM replay");
+                    }
                     let keyed = ingress_append.take().and_then(|obligation| {
-                        super::drain_append::key_recipient_pass_frame(&xml, obligation)
-                            .map(|(key, stanza)| KeyedFrame { key, stanza })
+                        stanza.as_ref().and_then(|stanza| {
+                            super::drain_append::key_recipient_pass_stanza(stanza, obligation)
+                        })
                     });
                     record_drained_xml(
                         state,
@@ -193,6 +201,7 @@ pub(super) async fn drain_outbound_into_replay(
                         &mut sink,
                         DrainedFrame {
                             xml,
+                            stanza,
                             original_receipt_at: receipt_at,
                             pending_row_id: row_for_this,
                             ingress_append: keyed,
@@ -214,14 +223,17 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     conn: &mut WsConnState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     pending_row_policy: PendingRowDrainPolicy,
-    terminal: TerminalDrainContext<'_>,
+    mut terminal: TerminalDrainContext<'_>,
 ) -> TerminalDrainOutcome {
     let principal_session = conn.authenticated_session.clone();
     let principal = principal_session
         .as_ref()
         .map(super::ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal);
-    let mut retained_overflow = Vec::new();
+    let mut inventory = TerminalInventoryProgress {
+        outbound_count: terminal.session.outbound_count,
+        ready: terminal.inventory_ready,
+    };
     let mut retain_overflow_for_retry = false;
     let mut released_pending_rows = false;
     let mut queued_pending_rows = false;
@@ -244,8 +256,9 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         pending_row_id,
                     },
                     pending_row_policy,
-                    &terminal,
+                    &mut terminal,
                     retain_overflow_for_retry,
+                    &mut inventory,
                 )
                 .await;
                 released_pending_rows |= result.released_pending_row;
@@ -276,9 +289,8 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         redrive_aborted = true;
                     }
                 }
-                if let Some(entry) = result.retained {
+                if result.retained.is_some() {
                     retain_overflow_for_retry = true;
-                    retained_overflow.push(entry);
                 }
             }
             DeliveryKind::PeerStanza => {
@@ -305,8 +317,9 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                             pending_row_id: row_for_this,
                         },
                         pending_row_policy,
-                        &terminal,
+                        &mut terminal,
                         retain_overflow_for_retry,
+                        &mut inventory,
                     )
                     .await;
                     released_pending_rows |= result.released_pending_row;
@@ -327,9 +340,8 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                             redrive_aborted = true;
                         }
                     }
-                    if let Some(entry) = result.retained {
+                    if result.retained.is_some() {
                         retain_overflow_for_retry = true;
-                        retained_overflow.push(entry);
                     }
                 }
             }
@@ -337,7 +349,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     }
     conn.warn_terminal_recovery_drops_once();
     TerminalDrainOutcome {
-        retained_overflow,
+        outbound_count: inventory.outbound_count,
         released_pending_rows,
         queued_pending_rows,
         release_failed_pending_rows,
@@ -359,6 +371,7 @@ async fn record_drained_xml(
 ) {
     let DrainedFrame {
         xml,
+        stanza,
         original_receipt_at,
         pending_row_id,
         ingress_append,
@@ -409,7 +422,7 @@ async fn record_drained_xml(
             return;
         }
     }
-    if !sm_state.enabled || !is_countable_stanza(&xml) {
+    let Some(stanza) = stanza.filter(|_| sm_state.enabled) else {
         if let Some(row_id) = pending_row_id {
             if let Err(error) = state
                 .deps
@@ -426,7 +439,7 @@ async fn record_drained_xml(
             }
         }
         return;
-    }
+    };
     // Drain path: we're recording into the unacked queue for replay
     // on the next resume, NOT writing to a live wire. The SM cadence
     // signal is moot — there is no socket to follow up with `<r/>`.
@@ -443,9 +456,8 @@ async fn record_drained_xml(
     // already holds an allocation is dropped whole. Counting it and then
     // withholding the entry would leave a sequence the client can never
     // acknowledge (XEP-0198 §5).
-    let keyed_payload = ingress_append.as_ref().map(|frame| frame.stanza.clone());
     let keyed = match ingress_append {
-        Some(KeyedFrame { key, stanza }) => {
+        Some(key) => {
             let next_sequence = sm_state.outbound_count.wrapping_add(1);
             match super::drain_append::claim(
                 state,
@@ -467,7 +479,7 @@ async fn record_drained_xml(
     // This record runs while a live transport is detaching; it keeps the
     // connection-local replay queue aligned with the detached-session drain.
     let _ = sm_state.record_outbound_with_receipt_at(
-        xml.clone(),
+        xml,
         original_receipt_at,
         SmEvictionPath::DetachDrain,
     );
@@ -506,13 +518,11 @@ async fn record_drained_xml(
         // The keyed record already committed this entry with its proof.
         Some(super::drain_append::Claim::RecordedInDetachedStream) => return,
         Some(super::drain_append::Claim::Reserved(ticket)) => {
-            if let Some(payload) = keyed_payload {
-                drained_appends.push(DrainedAppend(ticket.at(
-                    sequence,
-                    payload,
-                    original_receipt_at,
-                )));
-            }
+            drained_appends.push(DrainedAppend(ticket.at(
+                sequence,
+                stanza.clone(),
+                original_receipt_at,
+            )));
         }
         Some(
             super::drain_append::Claim::Unkeyed | super::drain_append::Claim::AlreadyAllocated,
@@ -524,7 +534,12 @@ async fn record_drained_xml(
             .deps
             .protocol
             .sm_session_registry
-            .record_outbound_for_detached_stream_at(stream_id, sequence, xml, original_receipt_at)
+            .record_outbound_for_detached_stream_at(
+                stream_id,
+                sequence,
+                &stanza,
+                original_receipt_at,
+            )
             .await
         {
             warn!(stream_id = %stream_id, %error, "Failed to record drained outbound for detached SM session");
@@ -537,8 +552,9 @@ async fn record_drained_terminal_xml(
     conn: &mut WsConnState,
     frame: TerminalDrainedFrame,
     pending_row_policy: PendingRowDrainPolicy,
-    terminal: &TerminalDrainContext<'_>,
+    terminal: &mut TerminalDrainContext<'_>,
     retain_overflow_for_retry: bool,
+    inventory: &mut TerminalInventoryProgress,
 ) -> TerminalDrainedRecordResult {
     let TerminalDrainedFrame {
         xml,
@@ -607,16 +623,38 @@ async fn record_drained_terminal_xml(
             release_failed_pending_row: false,
         };
     }
+    inventory.outbound_count = inventory.outbound_count.wrapping_add(1);
     let entry = waddle_xmpp::stream_management::DetachedUnackedStanza {
         ingress_receipts: Vec::new(),
-        sequence: terminal.session.outbound_count.wrapping_add(1),
+        sequence: inventory.outbound_count,
         stanza_xml: xml,
         original_receipt_at,
     };
+    // Keep accepted work in cancellation custody before the append can await.
+    terminal.session.outbound_count = entry.sequence;
+    terminal.session.unacked_stanzas.push(entry.clone());
     // The queue was snapshotted before this drain. Never put another frame
     // back into it: success promotes incrementally, while a failed/blocked
     // prefix keeps the bounded receiver tail with the synthetic session.
-    if !terminal.promote_incrementally || retain_overflow_for_retry {
+    let persisted = if inventory.ready {
+        super::cleanup::persist_terminal_suffix_entry(state, terminal.session, &entry).await
+    } else {
+        None
+    };
+    inventory.ready = persisted.is_some();
+    if persisted
+        == Some(waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::Retired)
+    {
+        // The canonical watermark proves this allocation already settled.
+        // The helper removed its stale cache entry; do not dispatch it again.
+        return TerminalDrainedRecordResult {
+            retained: None,
+            released_pending_row: false,
+            queued_pending_row: false,
+            release_failed_pending_row: false,
+        };
+    }
+    if persisted.is_none() || !terminal.promote_incrementally || retain_overflow_for_retry {
         return TerminalDrainedRecordResult {
             retained: Some(entry),
             released_pending_row: false,
@@ -699,6 +737,10 @@ async fn record_drained_terminal_xml(
             release_failed_pending_row: false,
         };
     }
+    terminal
+        .session
+        .unacked_stanzas
+        .retain(|queued| queued.sequence != entry.sequence);
     TerminalDrainedRecordResult {
         retained: None,
         released_pending_row: false,

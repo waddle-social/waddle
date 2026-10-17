@@ -105,6 +105,8 @@ impl ReplayBytesFixture {
             .collect();
         Self {
             session: DetachedSession {
+                promotion_custody:
+                    waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
                 stream_id: stream.into(),
                 user_id: jid.to_bare().to_string(),
                 jid,

@@ -139,7 +139,7 @@ advertised_features = ["urn:xmpp:sm:3", "urn:xmpp:mam:2", "urn:xmpp:sid:0"]
 server_evidence = ["crates/waddle-server/tests/xep0198_cross_node_resume.rs", "crates/waddle-server/tests/xmpp_e2e_scenarios/xep_0313_reconnect_after_catchup.cue"]
 topologies = { local = "beta", federated = "unsupported" }
 [capability.protocol_evidence]
-XEP-0198 = ["crates/waddle-server/tests/xep0198_cross_node_resume.rs"]
+XEP-0198 = ["crates/waddle-server/tests/xep0198_cross_node_resume.rs", "crates/waddle-server/tests/xep0198_promotion_inventory.rs", "crates/waddle-server/tests/xep0198_replay_bytes.rs", "crates/waddle-xmpp/tests/xep0198_session_registry.rs"]
 XEP-0313 = ["crates/waddle-server/tests/xmpp_e2e_scenarios/xep_0313_reconnect_after_catchup.cue"]
 XEP-0359 = ["crates/waddle-server/tests/xep0359_stanza_ids_ws.rs"]
 

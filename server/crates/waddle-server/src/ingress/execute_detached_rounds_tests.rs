@@ -21,6 +21,8 @@ async fn sqlite_partial_detached_fanout_rechecks_preserve_accepted_resource() {
     let second: jid::FullJid = "juliet@example.com/laptop".parse().expect("second");
     for resource in [&first, &second] {
         sm.store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: resource.to_string(),
             user_id: resource.to_bare().to_string(),
             jid: resource.clone(),

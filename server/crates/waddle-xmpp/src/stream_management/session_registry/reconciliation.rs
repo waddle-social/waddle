@@ -127,7 +127,11 @@ impl InMemorySmSessionRegistry {
             .list_unacked(stream_id)
             .await
             .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
-        persisted_to_detached(&persisted, &unacked).map(Some)
+        let mut session = persisted_to_detached(&persisted, &unacked)?;
+        if let Some(fence) = self.current_sm_claim_fence(stream_id.as_str()) {
+            session.promotion_custody = super::PromotionCaptureCustody::claimed(fence);
+        }
+        Ok(Some(session))
     }
 
     /// A cancelled write leaves this mark behind. Read durable state before
@@ -154,6 +158,7 @@ impl InMemorySmSessionRegistry {
         if let Some(current) = self.detached_snapshot_matching(stream_id, |_| true)? {
             durable.detached_at = current.detached_at;
             durable.pending_subscribes_flushed = current.pending_subscribes_flushed;
+            durable.promotion_custody = current.promotion_custody;
         }
         self.publish_detached_snapshot(stream_id, durable)?;
         Ok(())
@@ -165,24 +170,19 @@ impl InMemorySmSessionRegistry {
         &self,
         session: &mut DetachedSession,
     ) -> Result<(), SmRegistryError> {
-        let stream_id = SmSessionId::new(session.stream_id.clone());
+        *session = self.persist_promotion_inventory_locked(session).await?;
+        self.record_promotion_snapshot_locked(session)
+    }
+
+    /// Record the authoritative snapshot returned by registration while the
+    /// caller still holds the same stream shard. No second registration or
+    /// backend read is needed before handing that capture to its owner.
+    pub(super) fn record_promotion_snapshot_locked(
+        &self,
+        session: &DetachedSession,
+    ) -> Result<(), SmRegistryError> {
+        let stream_id = SmSessionId::new(&session.stream_id);
         if self.persistence.is_some() {
-            if let Some(mut durable) = self.durable_snapshot_locked(&stream_id).await? {
-                durable.detached_at = session.detached_at;
-                durable.pending_subscribes_flushed = session.pending_subscribes_flushed;
-                *session = durable;
-            } else if self
-                .stale_snapshots
-                .read()
-                .map_err(lock_error)?
-                .contains(&stream_id)
-            {
-                return Err(SmRegistryError::Internal(
-                    "Stale promotion snapshot has no durable session".to_owned(),
-                ));
-            }
-            // Initial detach persistence can fail before a row exists. That
-            // non-stale captured queue still needs the ordinary promotion path.
             self.promotion_snapshots
                 .write()
                 .map_err(lock_error)?
@@ -190,6 +190,21 @@ impl InMemorySmSessionRegistry {
             self.clear_snapshot_stale(&stream_id)?;
         }
         Ok(())
+    }
+
+    /// Refresh inventory that was already registered, without admitting a
+    /// source, reacquiring a claim, or recreating a missing canonical row.
+    pub async fn refresh_promotion_session(
+        &self,
+        session: &DetachedSession,
+    ) -> Result<DetachedSession, SmRegistryError> {
+        let lock = self.stream_lock(&session.stream_id)?;
+        let _guard = lock.lock().await;
+        // Return a replacement capture only after every accepted newer suffix
+        // has durable custody; an error leaves the caller's original intact.
+        let durable = self.refresh_promotion_inventory_locked(session).await?;
+        self.record_promotion_snapshot_locked(&durable)?;
+        Ok(durable)
     }
 
     /// A caller confirms only a stream id. Check it against the queue handed

@@ -20,6 +20,7 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: boo
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let recipient: jid::FullJid = "juliet@example.com/phone".parse().expect("recipient");
     sm.store_session(DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: recipient.to_string(),
         user_id: recipient.to_bare().to_string(),
         jid: recipient.clone(),
@@ -447,6 +448,7 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
         .expect("remote occupant")
         .clone();
     sm.store_session(DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: target.to_string(),
         user_id: target.to_bare().to_string(),
         jid: target.clone(),
