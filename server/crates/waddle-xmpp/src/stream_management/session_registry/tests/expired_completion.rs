@@ -12,7 +12,7 @@ use crate::stream_management::persistence::{
 
 use super::{
     realistic_test_session, Duration, GatedSnapshotPersistence, InMemorySmSessionRegistry,
-    SmClaimCompletion, SmRegistryError,
+    SmClaimCompletion, SmRegistryError, SmSessionRegistry,
 };
 
 async fn claimed_registry(
