@@ -263,7 +263,7 @@ private struct MessageThreadElbow: Shape {
     let start: CGPoint
     let end: CGPoint
 
-    func path(in rect: CGRect) -> Path {
+    func path(in _: CGRect) -> Path {
         var path = Path()
         guard end.x > start.x, end.y > start.y else { return path }
         let radius = min(8, end.x - start.x, end.y - start.y)
