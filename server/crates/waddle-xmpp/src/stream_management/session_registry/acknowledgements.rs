@@ -113,27 +113,66 @@ impl InMemorySmSessionRegistry {
         session: &DetachedSession,
         pending: &dyn PendingDeliveryStorage,
     ) -> Result<(), SmRegistryError> {
-        let Some(storage) = &self.persistence else {
+        if self.persistence.is_none() {
             return Ok(());
-        };
+        }
         let stream = SmSessionId::new(&session.stream_id);
         let lock = self.stream_lock(stream.as_str())?;
         let _guard = lock.lock().await;
         let fence = self.acknowledgement_fence_locked(session)?;
-        if !self.exact_claim_is_current(&stream, &fence, None).await? {
+        self.settle_acknowledgements_locked(&stream, &fence, Some(pending))
+            .await
+    }
+
+    /// Caller holds the stream shard. This also works when corrupt durable
+    /// state prevents hydration, without weakening the captured ownership fence.
+    pub(super) async fn settle_acknowledgements_locked(
+        &self,
+        stream: &SmSessionId,
+        fence: &SmClaimFence,
+        pending: Option<&dyn PendingDeliveryStorage>,
+    ) -> Result<(), SmRegistryError> {
+        let Some(storage) = &self.persistence else {
+            return Ok(());
+        };
+        let authority = self
+            .node_identity
+            .guard_if_current(fence.owner())
+            .await
+            .ok_or_else(|| {
+                SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(fence.clone()))
+            })?;
+        if !self
+            .exact_claim_is_current(stream, fence, Some(&authority))
+            .await?
+        {
             return Err(SmRegistryError::PromotionClaimLost(
-                ShutdownSmClaimLoss::Recorded(fence),
+                ShutdownSmClaimLoss::Recorded(fence.clone()),
             ));
         }
         let windows = storage
-            .pending_acknowledgements(&stream)
+            .pending_acknowledgements(stream)
             .await
-            .map_err(|error| storage_error(error, &fence))?;
+            .map_err(|error| storage_error(error, fence))?;
+        drop(authority);
+        if windows.is_empty() {
+            return Ok(());
+        }
+        let pending = pending.ok_or(SmRegistryError::StorageUnavailable(
+            super::traits::StorageOutageCause::Backend,
+        ))?;
         for window in windows {
             pending
-                .delete_acked_in_window(&stream, window.from_exclusive, window.to_inclusive)
+                .delete_acked_in_window(stream, window.from_exclusive, window.to_inclusive)
                 .await
-                .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+                .map_err(|error| match error {
+                    crate::pending_delivery::storage::PendingStorageError::NotOwner { .. } => {
+                        SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(
+                            fence.clone(),
+                        ))
+                    }
+                    error => SmRegistryError::Internal(error.to_string()),
+                })?;
             let authority = self
                 .node_identity
                 .guard_if_current(fence.owner())
@@ -144,17 +183,17 @@ impl InMemorySmSessionRegistry {
                     ))
                 })?;
             if !self
-                .exact_claim_is_current(&stream, &fence, Some(&authority))
+                .exact_claim_is_current(stream, fence, Some(&authority))
                 .await?
             {
                 return Err(SmRegistryError::PromotionClaimLost(
-                    ShutdownSmClaimLoss::Recorded(fence),
+                    ShutdownSmClaimLoss::Recorded(fence.clone()),
                 ));
             }
             storage
-                .confirm_acknowledgement(&stream, window, &fence, Some(&authority))
+                .confirm_acknowledgement(stream, window, fence, Some(&authority))
                 .await
-                .map_err(|error| storage_error(error, &fence))?;
+                .map_err(|error| storage_error(error, fence))?;
         }
         Ok(())
     }

@@ -7202,6 +7202,7 @@ struct GatedGetSessionPersistence {
     fail_get_once: std::sync::atomic::AtomicBool,
     corrupt: std::sync::atomic::AtomicBool,
     quarantined: std::sync::atomic::AtomicBool,
+    corrupt_unacked: std::sync::atomic::AtomicBool,
 }
 
 impl GatedGetSessionPersistence {
@@ -7215,6 +7216,7 @@ impl GatedGetSessionPersistence {
             fail_get_once: std::sync::atomic::AtomicBool::new(false),
             corrupt: std::sync::atomic::AtomicBool::new(false),
             quarantined: std::sync::atomic::AtomicBool::new(false),
+            corrupt_unacked: std::sync::atomic::AtomicBool::new(false),
         }
     }
 }
@@ -7370,6 +7372,15 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         Vec<super::super::persistence::PersistedUnackedStanza>,
         super::super::persistence::SmPersistenceError,
     > {
+        if self
+            .corrupt_unacked
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(super::super::persistence::SmPersistenceError::Corrupt {
+                stream_id: stream_id.clone(),
+                detail: "injected corrupt unacked queue".to_owned(),
+            });
+        }
         self.inner.list_unacked(stream_id).await
     }
 

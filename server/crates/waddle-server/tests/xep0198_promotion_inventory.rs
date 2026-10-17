@@ -965,3 +965,248 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     drop(db);
     fixture.close().await;
 }
+
+async fn postgres_fenced_poison_settles_ack_before_quarantine(corrupt_header: bool) {
+    use waddle_server::{
+        clustering::claims::{NodeLeaseStore, PostgresClaimStore},
+        db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE},
+        sm_persistence_fenced::PostgresFencedSmPersistence,
+    };
+    use waddle_xmpp::{
+        ownership::{ExactReleaseOutcome, StalePredicate},
+        stream_management::{
+            persistence::{SmAckWindow, SmClaimFence, SmPersistenceError},
+            ReclaimedHydrationOutcome,
+        },
+    };
+
+    let Some(fixture) = IngressFixture::postgres("smackpoison").await else {
+        return;
+    };
+    let db = Database::from_config(
+        "fenced-poison-ack-settlement",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, fixture.db.database_url())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("isolated main and control-plane pools");
+    let claims = Arc::new(PostgresClaimStore::new(db.clone()));
+    claims.ensure_schema().await.expect("claim schema");
+    let owner = NodeIdentity::new("poison-resume-node", "original-incarnation");
+    claims.register(&owner, None).await.expect("original lease");
+    let identity = SharedNodeIdentity::new(owner.clone());
+    let storage = Arc::new(
+        PostgresFencedSmPersistence::open(db.clone(), claims.clone(), identity.clone())
+            .await
+            .expect("original canonical storage"),
+    );
+    let pending = Arc::new(
+        waddle_server::pending_delivery::open_for_cluster_mode(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::Unlimited,
+            true,
+            Some((claims.clone(), identity.clone())),
+            &db,
+        )
+        .await
+        .expect("fenced pending storage"),
+    );
+    let registry = InMemorySmSessionRegistry::new()
+        .with_persistence(storage.clone())
+        .with_claim_store(claims.clone(), identity);
+    let session = recorded_resume_session("fenced-poison-ack", 300);
+    let stream = SmSessionId::new(&session.stream_id);
+    let recipient = session.jid.to_bare();
+    registry
+        .store_session(session)
+        .await
+        .expect("canonical queue");
+    let original_fence = registry
+        .current_sm_claim_fence(stream.as_str())
+        .expect("original exact fence");
+    let mut pending_ids = Vec::new();
+    for id in ["first", "second"] {
+        let Stanza::Message(message) = message(id) else {
+            unreachable!();
+        };
+        let row_id = PendingRowId::fresh();
+        pending
+            .insert(PendingRow {
+                id: row_id.clone(),
+                recipient: recipient.clone(),
+                original_receipt_at: chrono::Utc::now(),
+                payload: PendingPayload::Transient(Box::new(message)),
+                flushed_in_session: None,
+                outbound_sequence: None,
+            })
+            .await
+            .expect("original pending row");
+        pending_ids.push(row_id);
+    }
+    assert_eq!(
+        pending
+            .claim_for_session(&recipient, &stream)
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+    for (id, sequence) in pending_ids.iter().zip([1, 2]) {
+        pending.record_pushed_at(id, sequence).await.unwrap();
+    }
+    storage
+        .acknowledge_claimed_session(&stream, 1, &original_fence, None)
+        .await
+        .expect("commit ACK before pending deletion");
+    let ack_window = SmAckWindow {
+        from_exclusive: 0,
+        to_inclusive: 1,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![ack_window]
+    );
+    let corruption = if corrupt_header {
+        "UPDATE sm_sessions SET occupancy_session = 'invalid' WHERE stream_id = ?"
+    } else {
+        "UPDATE sm_unacked SET stanza_xml = '<broken' WHERE stream_id = ? AND sequence = 2"
+    };
+    db.guard()
+        .await
+        .unwrap()
+        .execute(corruption, waddle_server::db_params![stream.as_str()])
+        .await
+        .expect("inject durable poison after ACK commit");
+    drop(registry);
+    drop(storage);
+    drop(pending);
+
+    // The node process restarts before it can settle pending ACKs. The
+    // reclaimed source cannot be decoded into a DetachedSession at all.
+    let successor = NodeIdentity::new("poison-resume-node", "successor-incarnation");
+    claims
+        .register(&successor, None)
+        .await
+        .expect("successor lease");
+    let entity = Entity::new(EntityType::SmSession, stream.as_str());
+    let epoch = claims
+        .steal_stale(
+            &entity,
+            original_fence.epoch(),
+            StalePredicate::OwnerStale,
+            &successor,
+        )
+        .await
+        .expect("reclaim crashed source");
+    assert!(epoch > original_fence.epoch());
+    let successor_fence = SmClaimFence::new(successor.clone(), epoch);
+    let identity = SharedNodeIdentity::new(successor);
+    let storage = Arc::new(
+        PostgresFencedSmPersistence::open(db.clone(), claims.clone(), identity.clone())
+            .await
+            .expect("reopened canonical storage"),
+    );
+    let pending = Arc::new(
+        waddle_server::pending_delivery::open_for_cluster_mode(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::Unlimited,
+            true,
+            Some((claims.clone(), identity.clone())),
+            &db,
+        )
+        .await
+        .expect("reopened pending storage"),
+    );
+    assert!(matches!(
+        storage
+            .confirm_acknowledgement(&stream, ack_window, &original_fence, None)
+            .await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert!(matches!(
+        storage.quarantine_session(&stream, &original_fence).await,
+        Err(SmPersistenceError::NotOwner { .. })
+    ));
+    assert_eq!(pending.list(&recipient).await.unwrap().len(), 2);
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![ack_window],
+        "stale cleanup cannot discard the successor's ACK evidence"
+    );
+    let registry = InMemorySmSessionRegistry::with_capacity(1)
+        .with_persistence(storage.clone())
+        .with_claim_store(claims.clone(), identity)
+        .with_pending_delivery_storage(pending.clone());
+    let reservation = registry
+        .reserve_reclaimed_claim_capacity(&entity)
+        .expect("reclaimed source consumes capacity");
+    assert_eq!(registry.claim_fence_capacity_used(), 1);
+    assert_eq!(
+        registry
+            .hydrate_reclaimed_typed(&entity, &successor_fence, reservation)
+            .await
+            .expect("poison hydration settles durable ACKs"),
+        ReclaimedHydrationOutcome::PoisonReleased
+    );
+    assert!(storage.get_session(&stream).await.unwrap().is_none());
+    assert!(storage.list_unacked(&stream).await.unwrap().is_empty());
+    assert!(storage
+        .pending_acknowledgements(&stream)
+        .await
+        .unwrap()
+        .is_empty());
+    let rows = pending
+        .list(&recipient)
+        .await
+        .expect("unacknowledged custody");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].id, pending_ids[1]);
+    assert_eq!(rows[0].outbound_sequence, Some(2));
+    assert_eq!(rows[0].flushed_in_session.as_ref(), Some(&stream));
+
+    assert_eq!(
+        registry
+            .release_reclaimed_claim(&entity, &successor_fence, reservation)
+            .await
+            .expect("terminal poison cleanup"),
+        ExactReleaseOutcome::Released
+    );
+    assert_eq!(registry.claim_fence_capacity_used(), 0);
+    assert!(claims.current_claim(&entity).await.unwrap().is_none());
+    let protected = registry.pending_claim_protected_streams().await.unwrap();
+    assert!(!protected.contains(&stream));
+    let orphaned = pending
+        .list_orphaned_claims(&protected, i64::MAX)
+        .await
+        .expect("remaining delivery becomes releasable");
+    assert_eq!(orphaned, vec![(pending_ids[1].clone(), stream.clone())]);
+    assert_eq!(
+        pending
+            .release_row_if_session(&pending_ids[1], &stream)
+            .await
+            .unwrap(),
+        1
+    );
+    let replay = pending
+        .claim_for_session(&recipient, &SmSessionId::new("reconnected-resource"))
+        .await
+        .expect("reconnect recovers only unacknowledged delivery");
+    assert_eq!(replay.len(), 1);
+    assert_eq!(replay[0].id, pending_ids[1]);
+    drop(registry);
+    drop(storage);
+    drop(pending);
+    drop(claims);
+    drop(db);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_fenced_poison_header_settles_ack_before_quarantine() {
+    postgres_fenced_poison_settles_ack_before_quarantine(true).await;
+}
+
+#[tokio::test]
+async fn postgres_fenced_poison_replay_settles_ack_before_quarantine() {
+    postgres_fenced_poison_settles_ack_before_quarantine(false).await;
+}
