@@ -25,52 +25,14 @@ tests alone does not establish recovery of historical queues.
 5. Record evidence and remaining access gaps on #1427. Propose any historical
    cleanup separately, beginning with aggregate dry-run counts.
 
-The #1972 implementation must keep an expired resume's recorded queue in durable
-non-resumable inventory before releasing custody. Regression coverage will
-exercise expiry during completion, restart before promotion, exact fencing,
-cancellation, successful resume, and portable receipt reclamation on SQLite and
-PostgreSQL.
+## Recorded evidence
 
-## Production observations, 2026-10-17
+The [2026-10-17 production observations on #1427](https://github.com/waddle-social/waddle/issues/1427#issuecomment-6233505522)
+record the rollout revision, image digest, configuration, database aggregates,
+equal telemetry windows, and acceptance gaps. Keep dated snapshots on the issue;
+this runbook describes how to repeat the verification.
 
-The server publishing job for revision
-`b69231b5d0ec4b39dac53cae69c4a862a334bc28` is
-[117384080586](https://github.com/waddle-social/waddle/actions/runs/39027511029/job/117384080586).
-The deployed server image digest is
-`sha256:c432221568573376a7f37312814ef3deacf3cd7229aa3ca346038f4877c5026a`.
-Read-only Kubernetes inspection verified that deployment generation 600 was
-observed, both replicas were ready with that image and `WADDLE_GIT_SHA`, and
-`NewReplicaSetAvailable` was reported at 11:28:25 UTC. The 11:11:40 UTC GitHub
-deployment record belongs to the chat client and is not server rollout evidence.
-
-At 11:29:49 UTC, a read-only transaction on the primary database found:
-
-| Aggregate | Rows |
-| --- | ---: |
-| All pending delivery | 0 |
-| Pending delivery for the affected recipient | 0 |
-| Pending delivery older than 30 days | 0 |
-| Canonical SM sessions, all recipients | 1 |
-| Canonical SM unacked entries, all recipients | 4 |
-
-A second aggregate at 11:32:50 UTC found zero canonical sessions and zero
-unacked rows for the affected recipient. The namespace has no managed Backup,
-ScheduledBackup, or VolumeSnapshot objects, and the database cluster reports no
-managed recovery point. This does not rule out externally retained dumps.
-
-No message contents or row identities were published. An empty current queue
-cannot establish which producer created the July rows, when they disappeared,
-or whether retention removed them. Historical attribution requires a snapshot
-from the affected period. Current counts justify no historical cleanup.
-
-The effective retention for this rollout is the 30-day source default, clamped
-to 1–365 days. The `WADDLE_PENDING_DELIVERY_MAX_AGE_DAYS` key is absent from
-explicit container environment, the imported ConfigMap, and each of the four
-imported Secrets. Only that exact non-sensitive key was inspected; unrelated
-Secret values were not included in output or artifacts. The observation has no rows eligible for
-retention, so zero age-outs is expected to be inconclusive.
-
-### Reproducing the comparison
+## Comparing telemetry windows
 
 Use the `grafanacloud-prom` datasource and evaluate these instant queries at the
 end of each equal window:
@@ -89,13 +51,10 @@ sum(
 
 Substitute `waddle_pending_delivery_aged_out_total` for age-out increments.
 The counters expose only `job` and `instance`, so `target_info` qualifies the
-observed instances as production. The baseline instances matched production;
-no counter instances lacked matching production metadata in that window.
-The metadata lookup extends to 30 minutes because a draining replica's final
-counter scrape can outlive its final `target_info` scrape. All four post-window
-counter instances matched production using that lookback; using only 15 minutes
-would omit one retiring instance. The unqualified job-wide increases were also
-zero in the post window.
+observed instances as production. Compare the qualified instance count against
+all counter instances so missing metadata cannot silently omit a replica. The
+metadata lookup extends to 30 minutes because a draining replica's final counter
+scrape can outlive its final `target_info` scrape.
 
 Use the `grafanacloud-logs` datasource for the missing-target warnings:
 
@@ -106,16 +65,8 @@ sum(count_over_time(
 ))
 ```
 
-The equal windows on 2026-10-17 returned:
-
-| Observation | Before, 11:12:30–11:27:30 UTC | After, 11:28:30–11:43:30 UTC |
-| --- | ---: | ---: |
-| Missing-target warnings | 0 | 0 |
-| Quota-rejection increase | 0 | 0 |
-| Age-out increase | 0 | 0 |
-| Server log lines in the window | 602 | 95 |
-
-The post window begins after verified rollout readiness. Prometheus increases are estimates;
+Start the post window after verified rollout readiness and use the same length
+for the baseline. Prometheus increases are estimates;
 pod churn and missing scrapes can hide increments. A quiet comparison with no
 quota pressure establishes observation, not a successful rejection or retention
 exercise. Repeat across equivalent busy rollout windows before attributing an

@@ -207,11 +207,16 @@ async fn complete_pending_resume_claim(
             // promotion inventory under its original claim. This snapshot
             // retires presence/occupancy only; the janitor owns promotion and
             // releases the claim after canonical source confirmation.
+            let handled = waddle_xmpp::stream_management::sequence::max_in_window(
+                detached.inbound_count,
+                conn.sm_state.get_inbound_count(),
+            );
             cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             close_registered_resume_attempt(state, conn, jid, owner).await;
             resume_outcome = Some(super::observe::SmResumeOutcome::NotFound);
-            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::with_condition(
+            SmRegistrationFinalization::ReplaceWithFailed(SmFailed::resume_failed(
                 "item-not-found",
+                handled,
             ))
         }
         Ok(None) => {
@@ -380,7 +385,7 @@ mod tests {
     };
 
     #[tokio::test]
-    async fn xep0198_expired_resume_finalization_fails_and_janitor_promotes_once() {
+    async fn xep0198_expired_resume_reports_handled_count_without_requeuing_acknowledged_stanza() {
         let source = Arc::new(InMemorySmPersistence::new());
         let registry = Arc::new(InMemorySmSessionRegistry::new().with_persistence(source.clone()));
         let pending = Arc::new(InMemoryPendingDeliveryStorage::unlimited());
@@ -395,6 +400,9 @@ mod tests {
         let stream = SmSessionId::new("websocket-expired-completion");
         let mut sm = StreamManagementState::new();
         sm.enable(stream.as_str().to_owned(), true, Some(1));
+        for _ in 0..3 {
+            sm.increment_inbound();
+        }
         let mut message = xmpp_parsers::message::Message::new(Some(jid.clone().into()));
         message.from = Some("bob@example.com/phone".parse().expect("sender"));
         message.type_ = xmpp_parsers::message::MessageType::Chat;
@@ -433,6 +441,10 @@ mod tests {
         let owner = register_test_connection(&state, &jid, sender).await;
         let mut conn = WsConnState::new();
         conn.sm_state = sm;
+        // Resume restoration can recover a newer durable ingress frontier
+        // than the claimed detached snapshot's count of three.
+        conn.sm_state.increment_inbound();
+        conn.sm_state.increment_inbound();
         conn.pending_resume_stream_id = Some(stream.as_str().to_owned());
         conn.pending_resume_h = Some(1);
         conn.pending_resume_claim = Some(super::super::SmResumeClaimGuard::new(
@@ -448,6 +460,7 @@ mod tests {
         };
         let failed = failed.to_element();
         assert!(failed.is("failed", waddle_xmpp::stream_management::SM_NS));
+        assert_eq!(failed.attr("h"), Some("5"));
         assert!(failed
             .get_child("item-not-found", xmpp_parsers::ns::XMPP_STANZAS)
             .is_some());
@@ -470,7 +483,7 @@ mod tests {
                 .await
                 .expect("unacked custody")
                 .len(),
-            1
+            0
         );
 
         crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
@@ -488,7 +501,7 @@ mod tests {
                 .await
                 .expect("offline handoff")
                 .len(),
-            1
+            0
         );
         crate::server::session_janitors::run_sm_expiry_sweep(&state).await;
         assert_eq!(
@@ -498,9 +511,9 @@ mod tests {
                 .pending_delivery_storage
                 .list(&jid.to_bare())
                 .await
-                .expect("single replay obligation")
+                .expect("acknowledged stanza stays retired")
                 .len(),
-            1
+            0
         );
     }
 }

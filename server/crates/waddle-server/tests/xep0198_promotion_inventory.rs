@@ -293,8 +293,8 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
     let recorded = storage.list_unacked(&stream).await.expect("recorded queue");
     assert_eq!(recorded.len(), 2);
 
-    // The resume is paused after reservation, rather than being attempted only
-    // after expiry. Completion must fail without interpreting h=1 as delivery.
+    // Pause after reservation. An expired completion still consumes valid
+    // h=1, retaining only the second stanza as an offline delivery obligation.
     tokio::time::sleep(Duration::from_millis(1100)).await;
     let Some(SmClaimCompletion::Expired(expired)) = registry
         .complete_claim_if_resumable(stream.as_str(), 1)
@@ -311,9 +311,10 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
         .expect("expiry cannot delete canonical source");
     assert_eq!(durable.max_resume_time, Some(0));
     assert_eq!(durable.max_resume_duration, Duration::ZERO);
+    assert_eq!(durable.last_acked, 1);
     let retained = storage.list_unacked(&stream).await.expect("retained queue");
-    assert_eq!(retained.len(), recorded.len());
-    for (retained, original) in retained.iter().zip(&recorded) {
+    assert_eq!(retained.len(), 1);
+    for (retained, original) in retained.iter().zip(&recorded[1..]) {
         assert_eq!(retained.sequence, original.sequence);
         assert_eq!(retained.original_receipt_at, original.original_receipt_at);
         assert_eq!(retained.stanza.to_element(), original.stanza.to_element());
@@ -355,10 +356,33 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
             .expect("first durable handoff"),
         InsertOutcome::Inserted
     );
+    // Lose every process-local cache and pool, including in-process claims.
+    // Reopening the durable backends must recover without the old incarnation.
     drop(registry);
+    drop(storage);
+    drop(pending);
+    drop(claims);
+    let storage = Arc::new(
+        DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+            .await
+            .expect("reopened canonical storage"),
+    );
+    let pending = Arc::new(
+        DatabasePendingDeliveryStorage::open(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::Unlimited,
+        )
+        .await
+        .expect("reopened portable pending storage"),
+    );
+    let claims = Arc::new(InProcessClaimStore::new());
+    let restarted_owner = NodeIdentity::new("resume-node", "restarted-incarnation");
     let restarted = InMemorySmSessionRegistry::new()
         .with_persistence(storage.clone())
-        .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner));
+        .with_claim_store(
+            claims.clone(),
+            SharedNodeIdentity::new(restarted_owner.clone()),
+        );
     assert!(!restarted
         .retire_orphaned_promotion_receipts(&stream, pending.as_ref())
         .await
@@ -378,8 +402,14 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
         .expect("recovered inventory");
     assert_eq!(recovered.len(), 1);
     let recovered = recovered.pop().expect("one source");
-    assert_eq!(recovered.promotion_custody.captured_fence(), Some(&fence));
-    assert_eq!(recovered.unacked_stanzas.len(), recorded.len());
+    let recovered_fence = recovered
+        .promotion_custody
+        .captured_fence()
+        .expect("fresh recovery authority");
+    assert_eq!(recovered_fence.owner(), &restarted_owner);
+    assert_ne!(recovered_fence, &fence);
+    assert_eq!(recovered.unacked_stanzas.len(), 1);
+    assert_eq!(recovered.unacked_stanzas[0].sequence, 2);
     let pending_storage: Arc<dyn PendingDeliveryStorage> = pending.clone();
     let summary = promote_session_unacked(
         &recovered,
@@ -392,7 +422,7 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
     )
     .await;
     assert!(!summary.has_storage_failure(), "{summary:?}");
-    assert_eq!(summary.queued, 2);
+    assert_eq!(summary.queued, 1);
     let rows = pending
         .list(&recovered.jid.to_bare())
         .await
@@ -409,8 +439,8 @@ async fn expired_resume_completion_survives_restart(fixture: IngressFixture) {
     message_ids.sort_unstable();
     assert_eq!(
         message_ids,
-        ["first", "second"],
-        "handoff retry must not duplicate either message"
+        ["second"],
+        "acknowledged first message must not return and handoff retry must not duplicate"
     );
     assert!(!restarted
         .retire_orphaned_promotion_receipts(&stream, pending.as_ref())
@@ -477,11 +507,15 @@ async fn postgres_expired_resume_completion_retains_exact_queue_until_promotion(
 #[tokio::test]
 async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_epoch() {
     use waddle_server::{
-        clustering::claims::PostgresClaimStore,
+        clustering::claims::{NodeLeaseStore, PostgresClaimStore},
         db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE},
         sm_persistence_fenced::PostgresFencedSmPersistence,
     };
-    use waddle_xmpp::stream_management::persistence::{SmClaimFence, SmPersistenceError};
+    use waddle_xmpp::{
+        ownership::StalePredicate,
+        pending_delivery::storage::PendingStorageError,
+        stream_management::persistence::{SmClaimFence, SmPersistenceError},
+    };
 
     let Some(fixture) = IngressFixture::postgres("smfencedexpiry").await else {
         return;
@@ -496,7 +530,22 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     let claims = Arc::new(PostgresClaimStore::new(db.clone()));
     claims.ensure_schema().await.expect("claim schema");
     let owner = NodeIdentity::new("fenced-resume-node", "expiry-incarnation");
+    claims
+        .register(&owner, None)
+        .await
+        .expect("original node lease");
     let identity = SharedNodeIdentity::new(owner.clone());
+    let pending = Arc::new(
+        waddle_server::pending_delivery::open_for_cluster_mode(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::Unlimited,
+            true,
+            Some((claims.clone(), identity.clone())),
+            &db,
+        )
+        .await
+        .expect("fenced pending storage"),
+    );
     let storage = Arc::new(
         PostgresFencedSmPersistence::open(db.clone(), claims.clone(), identity.clone())
             .await
@@ -590,7 +639,7 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
         .expect("current authority");
     assert!(matches!(
         storage
-            .mark_session_nonresumable(&stale_stream, &stale_fence, Some(&authority))
+            .mark_session_nonresumable(&stale_stream, 0, &stale_fence, Some(&authority))
             .await,
         Err(SmPersistenceError::NotOwner { .. })
     ));
@@ -600,7 +649,7 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     );
     assert!(matches!(
         storage
-            .mark_session_nonresumable(&stale_stream, &foreign, Some(&authority))
+            .mark_session_nonresumable(&stale_stream, 0, &foreign, Some(&authority))
             .await,
         Err(SmPersistenceError::NotOwner { .. })
     ));
@@ -622,7 +671,7 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     }
     let successor = SmClaimFence::new(owner.clone(), successor_epoch);
     storage
-        .mark_session_nonresumable(&stale_stream, &successor, Some(&authority))
+        .mark_session_nonresumable(&stale_stream, 0, &successor, Some(&authority))
         .await
         .expect("exact successor may retire resume eligibility");
     assert_eq!(
@@ -645,7 +694,8 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     assert!(storage
         .mark_session_nonresumable(
             &missing,
-            &SmClaimFence::new(owner, missing_epoch),
+            0,
+            &SmClaimFence::new(owner.clone(), missing_epoch),
             Some(&authority)
         )
         .await
@@ -656,8 +706,209 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
         .expect("missing stays absent")
         .is_none());
     drop(authority);
+
+    // Commit one atomic pending handoff, then lose all process-local state.
+    // Fenced handoffs prune their canonical row in the same transaction.
+    let first = &expired.unacked_stanzas[0];
+    let first_message = xmpp_parsers::message::Message::try_from(
+        first
+            .stanza_xml
+            .parse::<minidom::Element>()
+            .expect("recorded XML"),
+    )
+    .expect("recorded message");
+    let first_pending = PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: expired.jid.to_bare(),
+        original_receipt_at: first.original_receipt_at,
+        payload: PendingPayload::Transient(Box::new(first_message)),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    assert_eq!(
+        pending
+            .insert_promotion(first_pending, stream.as_str(), first.sequence, Some(&fence))
+            .await
+            .expect("first atomic fenced handoff"),
+        InsertOutcome::Inserted,
+    );
+    assert_eq!(
+        storage
+            .list_unacked(&stream)
+            .await
+            .expect("atomic prune")
+            .len(),
+        1
+    );
     drop(registry);
     drop(storage);
+    drop(pending);
+    drop(claims);
+    drop(identity);
+    drop(db);
+
+    let db = Database::from_config(
+        "restarted-fenced-expired-completion",
+        &DatabaseConfig::new(DatabaseDriver::Postgres, fixture.db.database_url())
+            .with_control_plane_pool(DEFAULT_CONTROL_PLANE_POOL_SIZE),
+    )
+    .await
+    .expect("reopened process pools");
+    let claims = Arc::new(PostgresClaimStore::new(db.clone()));
+    let restarted_owner = NodeIdentity::new("fenced-resume-node", "restarted-incarnation");
+    let identity = SharedNodeIdentity::new(restarted_owner.clone());
+    let storage = Arc::new(
+        PostgresFencedSmPersistence::open(db.clone(), claims.clone(), identity.clone())
+            .await
+            .expect("reopened fenced canonical storage"),
+    );
+    let pending = Arc::new(
+        waddle_server::pending_delivery::open_for_cluster_mode(
+            Some(fixture.db.database_url()),
+            QuotaPolicy::Unlimited,
+            true,
+            Some((claims.clone(), identity.clone())),
+            &db,
+        )
+        .await
+        .expect("reopened fenced pending storage"),
+    );
+    let restarted = InMemorySmSessionRegistry::new()
+        .with_persistence(storage.clone())
+        .with_claim_store(claims.clone(), identity);
+    assert_eq!(
+        restarted
+            .restore_from_persistence()
+            .await
+            .expect("startup before reclaim"),
+        0,
+        "a new incarnation cannot reuse the crashed owner's claim"
+    );
+    claims
+        .register(&restarted_owner, None)
+        .await
+        .expect("fresh node incarnation");
+    let entity = Entity::new(EntityType::SmSession, stream.as_str());
+    let recovered_epoch = claims
+        .steal_stale(
+            &entity,
+            fence.epoch(),
+            StalePredicate::OwnerStale,
+            &restarted_owner,
+        )
+        .await
+        .expect("recover crashed owner's claim");
+    assert!(recovered_epoch > fence.epoch());
+    assert_eq!(
+        restarted
+            .restore_from_persistence()
+            .await
+            .expect("startup after claim recovery"),
+        1
+    );
+    let mut recovered = restarted
+        .drain_expired()
+        .await
+        .expect("recovered inventory");
+    assert_eq!(recovered.len(), 1);
+    let recovered = recovered.pop().expect("recovered source");
+    let recovered_fence = SmClaimFence::new(restarted_owner, recovered_epoch);
+    assert_eq!(
+        recovered.promotion_custody.captured_fence(),
+        Some(&recovered_fence)
+    );
+    assert_eq!(recovered.unacked_stanzas.len(), 1);
+    assert_eq!(recovered.unacked_stanzas[0].sequence, 2);
+    // A pre-crash capture cannot write under the successor's new epoch.
+    let Stanza::Message(stale_message) = message("stale-capture") else {
+        unreachable!()
+    };
+    assert!(matches!(
+        pending
+            .insert_promotion(
+                PendingRow {
+                    id: PendingRowId::fresh(),
+                    recipient: recovered.jid.to_bare(),
+                    original_receipt_at: first.original_receipt_at,
+                    payload: PendingPayload::Transient(Box::new(stale_message)),
+                    flushed_in_session: None,
+                    outbound_sequence: None,
+                },
+                stream.as_str(),
+                2,
+                Some(&fence)
+            )
+            .await,
+        Err(PendingStorageError::NotOwner { .. })
+    ));
+    let pending_storage: Arc<dyn PendingDeliveryStorage> = pending.clone();
+    let summary = promote_session_unacked(
+        &recovered,
+        &ConnectionRegistry::new(),
+        &UserRegistryActor::spawn(UserRegistryActor::new()),
+        &pending_storage,
+        &Blocklist::empty(),
+        "example.com",
+        &[],
+    )
+    .await;
+    assert!(!summary.has_storage_failure(), "{summary:?}");
+    assert_eq!(summary.queued, 1);
+    let rows = pending
+        .list(&recovered.jid.to_bare())
+        .await
+        .expect("both durable handoffs");
+    let mut ids = rows
+        .iter()
+        .map(|row| {
+            let PendingPayload::Transient(message) = &row.payload else {
+                panic!("transient message")
+            };
+            message.id.as_ref().expect("message ID").0.as_str()
+        })
+        .collect::<Vec<_>>();
+    ids.sort_unstable();
+    assert_eq!(ids, ["first", "second"]);
+    assert!(storage
+        .list_unacked(&stream)
+        .await
+        .expect("recovered atomic handoff")
+        .is_empty());
+    assert!(storage
+        .get_session(&stream)
+        .await
+        .expect("source before confirmation")
+        .is_some());
+    assert!(pending
+        .promotion_receipt_sources_before(i64::MAX, None, 8)
+        .await
+        .expect("no portable fenced receipts")
+        .is_empty());
+    assert!(restarted.confirm_promotion_session(&recovered).await);
+    assert!(storage
+        .get_session(&stream)
+        .await
+        .expect("canonical source retired")
+        .is_none());
+    assert!(claims
+        .current_claim(&entity)
+        .await
+        .expect("claim retired")
+        .is_none());
+    assert!(pending
+        .promotion_receipt_sources_before(i64::MAX, None, 8)
+        .await
+        .expect("no leaked receipts")
+        .is_empty());
+    assert!(restarted
+        .drain_expired()
+        .await
+        .expect("no duplicate recovery")
+        .is_empty());
+    drop(restarted);
+    drop(storage);
+    drop(pending_storage);
+    drop(pending);
     drop(claims);
     drop(db);
     fixture.close().await;

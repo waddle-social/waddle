@@ -4444,6 +4444,8 @@ struct GatedSnapshotPersistence {
     block_new_delivery: std::sync::atomic::AtomicBool,
     gate_nonresumable: std::sync::atomic::AtomicBool,
     gate_delete: std::sync::atomic::AtomicBool,
+    fail_source_read: std::sync::atomic::AtomicBool,
+    fail_delete_after_commit: std::sync::atomic::AtomicBool,
     reached: tokio::sync::Notify,
     proceed: tokio::sync::Notify,
 }
@@ -4459,6 +4461,8 @@ impl GatedSnapshotPersistence {
             block_new_delivery: std::sync::atomic::AtomicBool::new(false),
             gate_nonresumable: std::sync::atomic::AtomicBool::new(false),
             gate_delete: std::sync::atomic::AtomicBool::new(false),
+            fail_source_read: std::sync::atomic::AtomicBool::new(false),
+            fail_delete_after_commit: std::sync::atomic::AtomicBool::new(false),
             reached: tokio::sync::Notify::new(),
             proceed: tokio::sync::Notify::new(),
         }
@@ -4470,6 +4474,7 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
         expected_fence: &super::super::persistence::SmClaimFence,
         authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<(), super::super::persistence::SmPersistenceError> {
@@ -4482,7 +4487,7 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
                 .load(std::sync::atomic::Ordering::SeqCst);
         if committed {
             self.inner
-                .mark_session_nonresumable(stream_id, expected_fence, authority)
+                .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
                 .await?;
         }
         if gate {
@@ -4499,7 +4504,7 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
         }
         if !committed {
             self.inner
-                .mark_session_nonresumable(stream_id, expected_fence, authority)
+                .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
                 .await?;
         }
         Ok(())
@@ -4529,6 +4534,15 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
         Option<super::super::persistence::PersistedSession>,
         super::super::persistence::SmPersistenceError,
     > {
+        if stream_id.as_str() == self.gate_stream
+            && self
+                .fail_source_read
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "injected source read failure".to_owned(),
+            ));
+        }
         self.inner.get_session(stream_id).await
     }
 
@@ -4540,7 +4554,16 @@ impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistenc
             self.reached.notify_one();
             self.proceed.notified().await;
         }
-        self.inner.delete_session(stream_id).await
+        self.inner.delete_session(stream_id).await?;
+        if self
+            .fail_delete_after_commit
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(super::super::persistence::SmPersistenceError::Other(
+                "injected lost delete acknowledgement".to_owned(),
+            ));
+        }
+        Ok(())
     }
 
     async fn append_unacked(
@@ -6268,11 +6291,12 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
         expected_fence: &super::super::persistence::SmClaimFence,
         authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<(), super::super::persistence::SmPersistenceError> {
         self.inner
-            .mark_session_nonresumable(stream_id, expected_fence, authority)
+            .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
             .await
     }
 
@@ -7070,11 +7094,12 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
         expected_fence: &super::super::persistence::SmClaimFence,
         authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<(), super::super::persistence::SmPersistenceError> {
         self.inner
-            .mark_session_nonresumable(stream_id, expected_fence, authority)
+            .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
             .await
     }
 
@@ -7932,11 +7957,12 @@ impl super::super::persistence::SmPersistenceStorage for ScopedProbePersistence 
     async fn mark_session_nonresumable(
         &self,
         stream_id: &crate::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
         expected_fence: &super::super::persistence::SmClaimFence,
         authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<(), super::super::persistence::SmPersistenceError> {
         self.inner
-            .mark_session_nonresumable(stream_id, expected_fence, authority)
+            .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
             .await
     }
 

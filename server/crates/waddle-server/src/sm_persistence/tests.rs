@@ -1649,3 +1649,182 @@ async fn postgres_promotion_append_distinguishes_retries_retirement_and_conflict
     )
     .await;
 }
+
+fn expiry_ingress_append(entry: &PersistedUnackedStanza) -> PersistedIngressAppend {
+    PersistedIngressAppend {
+        key: waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [7; 32],
+            resource: full("alice@example.com/web"),
+        },
+        accepting_stream: entry.stream_id.clone(),
+        sequence: entry.sequence,
+        appended_at: entry.original_receipt_at,
+        payload: *entry.stanza.clone(),
+        original_receipt_at: entry.original_receipt_at,
+        disposition: IngressCustodyDisposition::Pending,
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_atomically_trims_valid_wrapping_acknowledgements() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("database");
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, h, retained) in [
+        ("ordinary-expiry", 10_u32, 12_u32, 11_u32, vec![12]),
+        ("wrapping-expiry", u32::MAX - 1, 1, 0, vec![1]),
+        ("unchanged-ack", 10, 12, 10, vec![11, 12]),
+        ("fully-acknowledged", 10, 12, 12, vec![]),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let queue = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| fixture_unacked(name, floor.wrapping_add(distance)))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        for _ in 0..2 {
+            storage
+                .mark_session_nonresumable(&stream, h, &fence, None)
+                .await
+                .expect("retire existing source idempotently");
+            let source = storage
+                .get_session(&stream)
+                .await
+                .expect("read source")
+                .expect("retained source");
+            assert_eq!(source.last_acked, h);
+            assert_eq!(source.outbound_count, outbound);
+            assert_eq!(source.max_resume_time, Some(0));
+            assert_eq!(source.max_resume_duration, Duration::ZERO);
+            for append in &appends {
+                let allocation = storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read ingress allocation")
+                    .expect("retained allocation proof");
+                let expected = if retained.contains(&append.sequence) {
+                    IngressCustodyDisposition::Pending
+                } else {
+                    IngressCustodyDisposition::Acknowledged
+                };
+                assert_eq!(allocation.disposition, expected);
+            }
+            assert_eq!(
+                storage
+                    .list_unacked(&stream)
+                    .await
+                    .expect("retained suffix")
+                    .iter()
+                    .map(|entry| entry.sequence)
+                    .collect::<Vec<_>>(),
+                retained
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_writes() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("database");
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, invalid) in [
+        ("ack-ahead", 10_u32, 12_u32, 13_u32),
+        ("ack-behind", 10, 12, 9),
+        ("wrapping-ahead", u32::MAX - 1, 1, 2),
+        ("wrapping-behind", u32::MAX - 1, 1, u32::MAX - 2),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let resume_time = session.max_resume_time;
+        let resume_duration = session.max_resume_duration;
+        let sequences = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| floor.wrapping_add(distance))
+            .collect::<Vec<_>>();
+        let queue = sequences
+            .iter()
+            .map(|sequence| fixture_unacked(name, *sequence))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        assert!(storage
+            .mark_session_nonresumable(&stream, invalid, &fence, None)
+            .await
+            .is_err());
+        let source = storage
+            .get_session(&stream)
+            .await
+            .expect("read source")
+            .expect("unchanged source");
+        assert_eq!(source.last_acked, floor);
+        assert_eq!(source.outbound_count, outbound);
+        assert_eq!(source.max_resume_time, resume_time);
+        assert_eq!(source.max_resume_duration, resume_duration);
+        for append in &appends {
+            assert_eq!(
+                storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read untouched custody")
+                    .expect("allocation remains")
+                    .disposition,
+                IngressCustodyDisposition::Pending
+            );
+        }
+        assert_eq!(
+            storage
+                .list_unacked(&stream)
+                .await
+                .expect("unchanged queue")
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            sequences
+        );
+        storage
+            .delete_session(&stream)
+            .await
+            .expect("delete source");
+        assert!(storage
+            .mark_session_nonresumable(&stream, floor, &fence, None)
+            .await
+            .is_err());
+        assert!(storage
+            .get_session(&stream)
+            .await
+            .expect("missing source")
+            .is_none());
+        assert!(storage
+            .list_unacked(&stream)
+            .await
+            .expect("missing queue")
+            .is_empty());
+    }
+}

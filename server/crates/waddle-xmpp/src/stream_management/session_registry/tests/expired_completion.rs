@@ -113,8 +113,11 @@ async fn cancelled_expiry_conversion_retains_custody_before_and_after_commit() {
             .commit_then_gate
             .store(commit_first, Ordering::SeqCst);
         let completing_registry = registry.clone();
-        let completion =
-            tokio::spawn(async move { completing_registry.complete_claim(stream).await });
+        let completion = tokio::spawn(async move {
+            completing_registry
+                .complete_claim_if_resumable(stream, 6)
+                .await
+        });
         storage.reached.notified().await;
         completion.abort();
         assert!(completion.await.unwrap_err().is_cancelled());
@@ -128,11 +131,19 @@ async fn cancelled_expiry_conversion_retains_custody_before_and_after_commit() {
             assert_eq!(source.max_resume_time, Some(0));
             assert_eq!(source.max_resume_duration, Duration::ZERO);
         }
-        assert_queue_equal(&storage.inner.list_unacked(&id).await.unwrap(), &queue);
+        let expected = if commit_first {
+            &queue[1..]
+        } else {
+            &queue[..]
+        };
+        assert_queue_equal(&storage.inner.list_unacked(&id).await.unwrap(), expected);
         let drained = registry.drain_expired().await.unwrap();
         assert_eq!(drained.len(), 1);
         assert_eq!(drained[0].promotion_custody.captured_fence(), Some(&fence));
-        assert_eq!(drained[0].unacked_stanzas.len(), queue.len());
+        assert_eq!(drained[0].last_acked, 6);
+        assert_eq!(drained[0].unacked_stanzas.len(), 1);
+        assert_eq!(drained[0].unacked_stanzas[0].sequence, 7);
+        assert_queue_equal(&storage.inner.list_unacked(&id).await.unwrap(), &queue[1..]);
         assert!(registry.drain_expired().await.unwrap().is_empty());
     }
 }
@@ -140,17 +151,210 @@ async fn cancelled_expiry_conversion_retains_custody_before_and_after_commit() {
 #[tokio::test]
 async fn expiry_conversion_and_retry_never_recreate_missing_source() {
     let stream = "expiry-missing-source";
-    let (registry, storage, claims, _, fence) = claimed_registry(stream).await;
+    let (registry, storage, claims, _, _) = claimed_registry(stream).await;
     let id = SmSessionId::new(stream);
     expire_claim(&registry, stream);
     storage.inner.delete_session(&id).await.unwrap();
 
     assert!(registry.complete_claim(stream).await.is_err());
-    assert!(registry.drain_expired().await.is_err());
+    let healthy = healthy_expired_session("healthy-next-to-missing");
+    registry.store_session(healthy).await.unwrap();
+    let drained = registry.drain_expired().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].stream_id, "healthy-next-to-missing");
     assert!(storage.inner.get_session(&id).await.unwrap().is_none());
     assert!(storage.inner.list_unacked(&id).await.unwrap().is_empty());
-    assert_claim_held(&claims, stream, &fence).await;
+    assert!(claims
+        .current_claim(&Entity::new(EntityType::SmSession, stream))
+        .await
+        .unwrap()
+        .is_none());
     assert_eq!(registry.pending_claim_release_count(), 0);
+}
+
+fn healthy_expired_session(stream: &str) -> crate::stream_management::DetachedSession {
+    let mut session =
+        super::realistic_test_session_for_jid(stream, "healthy@example.com/web".parse().unwrap());
+    session.max_resume_time = Some(0);
+    session
+}
+
+#[tokio::test]
+async fn failed_conversion_retry_does_not_block_healthy_expiry_or_shutdown() {
+    for shutdown in [false, true] {
+        let stream = "failed-conversion-next-to-healthy";
+        let (registry, storage, claims, _, fence) = claimed_registry(stream).await;
+        registry
+            .store_session(healthy_expired_session("healthy-next-to-conversion-error"))
+            .await
+            .unwrap();
+        expire_claim(&registry, stream);
+        storage.fail_after_gate.store(true, Ordering::SeqCst);
+        assert!(registry.complete_claim(stream).await.is_err());
+        let drained = if shutdown {
+            registry.drain_all_for_shutdown().await.unwrap().sessions
+        } else {
+            registry.drain_expired().await.unwrap()
+        };
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].stream_id, "healthy-next-to-conversion-error");
+        assert_claim_held(&claims, stream, &fence).await;
+        storage.fail_after_gate.store(false, Ordering::SeqCst);
+        assert_eq!(registry.drain_expired().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn absent_retry_cannot_release_a_successor_claim() {
+    let stream = "absent-source-successor-claim";
+    let (registry, storage, claims, _, fence) = claimed_registry(stream).await;
+    expire_claim(&registry, stream);
+    registry.complete_claim(stream).await.unwrap();
+    storage
+        .inner
+        .delete_session(&SmSessionId::new(stream))
+        .await
+        .unwrap();
+    let entity = Entity::new(EntityType::SmSession, stream);
+    claims
+        .release(&entity, fence.owner(), fence.epoch())
+        .await
+        .unwrap();
+    let successor = NodeIdentity::new("node-b", "next-incarnation");
+    let epoch = claims.ensure_claimed(&entity, &successor).await.unwrap();
+    registry
+        .store_session(healthy_expired_session("healthy-next-to-successor"))
+        .await
+        .unwrap();
+    let drained = registry.drain_expired().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].stream_id, "healthy-next-to-successor");
+    assert_claim_held(&claims, stream, &SmClaimFence::new(successor, epoch)).await;
+}
+
+#[tokio::test]
+async fn unreadable_retry_does_not_block_healthy_expiry_or_shutdown() {
+    for shutdown in [false, true] {
+        let stream = "unreadable-expiry-retry";
+        let (registry, storage, claims, _, fence) = claimed_registry(stream).await;
+        expire_claim(&registry, stream);
+        let Some(SmClaimCompletion::Expired(_)) = registry.complete_claim(stream).await.unwrap()
+        else {
+            panic!("expired source");
+        };
+        storage.fail_source_read.store(true, Ordering::SeqCst);
+        registry
+            .store_session(healthy_expired_session("healthy-next-to-unreadable"))
+            .await
+            .unwrap();
+        let drained = if shutdown {
+            registry.drain_all_for_shutdown().await.unwrap().sessions
+        } else {
+            registry.drain_expired().await.unwrap()
+        };
+        assert_eq!(drained.len(), 1);
+        assert_eq!(drained[0].stream_id, "healthy-next-to-unreadable");
+        assert_claim_held(&claims, stream, &fence).await;
+        assert!(registry
+            .pending_promotions
+            .read()
+            .unwrap()
+            .contains_key(stream));
+        storage.fail_source_read.store(false, Ordering::SeqCst);
+        assert_eq!(registry.drain_expired().await.unwrap().len(), 1);
+    }
+}
+
+#[tokio::test]
+async fn uncertain_committed_confirmation_settles_without_blocking_healthy_expiry() {
+    let stream = "uncertain-expiry-confirmation";
+    let (registry, storage, claims, _, _) = claimed_registry(stream).await;
+    expire_claim(&registry, stream);
+    registry.complete_claim(stream).await.unwrap();
+    let session = registry.drain_expired().await.unwrap().pop().unwrap();
+    storage
+        .fail_delete_after_commit
+        .store(true, Ordering::SeqCst);
+    assert!(!registry.confirm_promotion_session(&session).await);
+    registry
+        .retain_pending_promotion_for_retry(session)
+        .unwrap();
+    registry
+        .store_session(healthy_expired_session("healthy-next-to-uncertain"))
+        .await
+        .unwrap();
+    let drained = registry.drain_expired().await.unwrap();
+    assert_eq!(drained.len(), 1);
+    assert_eq!(drained[0].stream_id, "healthy-next-to-uncertain");
+    assert!(storage
+        .inner
+        .get_session(&SmSessionId::new(stream))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(claims
+        .current_claim(&Entity::new(EntityType::SmSession, stream))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(!registry
+        .pending_promotions
+        .read()
+        .unwrap()
+        .contains_key(stream));
+    assert_eq!(registry.pending_claim_release_count(), 0);
+}
+
+#[tokio::test]
+async fn expired_resume_only_retires_valid_wrapping_acknowledgements() {
+    for (last, outbound, h, expected_sequences) in [
+        (5, 7, 6, vec![7]),
+        (5, 7, 5, vec![6, 7]),
+        (5, 7, 4, vec![6, 7]),
+        (5, 7, 8, vec![6, 7]),
+        (0, 0x8000_0000, 0x8000_0000, vec![1, 2]),
+        (u32::MAX - 1, 0, u32::MAX, vec![0]),
+        (u32::MAX - 1, 0, 0, vec![]),
+    ] {
+        let stream = "expired-ack-window";
+        let storage = Arc::new(crate::stream_management::persistence::InMemorySmPersistence::new());
+        let registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
+        let mut session = realistic_test_session(stream);
+        session.last_acked = last;
+        session.outbound_count = outbound;
+        session.unacked_stanzas[0].sequence = last.wrapping_add(1);
+        session.unacked_stanzas[1].sequence = last.wrapping_add(2);
+        registry.store_session(session).await.unwrap();
+        registry.claim_session(stream).await.unwrap().unwrap();
+        expire_claim(&registry, stream);
+        let Some(SmClaimCompletion::Expired(expired)) = registry
+            .complete_claim_if_resumable(stream, h)
+            .await
+            .unwrap()
+        else {
+            panic!("expired completion");
+        };
+        assert_eq!(
+            expired
+                .unacked_stanzas
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            expected_sequences
+        );
+        assert_eq!(
+            storage
+                .list_unacked(&SmSessionId::new(stream))
+                .await
+                .unwrap()
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            expected_sequences
+        );
+        let drained = registry.drain_expired().await.unwrap();
+        assert_eq!(drained[0].unacked_stanzas.len(), expected_sequences.len());
+    }
 }
 
 #[tokio::test]

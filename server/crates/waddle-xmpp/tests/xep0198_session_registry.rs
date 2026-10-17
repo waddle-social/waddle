@@ -817,6 +817,18 @@ async fn promotion_inventory_owned_missing_source_keeps_reconciliation_failure()
 
 #[async_trait]
 impl SmPersistenceStorage for BlockingFirstAtomicStore {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
+            .await
+    }
+
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,
@@ -1059,6 +1071,18 @@ struct MislabelingStore {
 
 #[async_trait]
 impl SmPersistenceStorage for MislabelingStore {
+    async fn mark_session_nonresumable(
+        &self,
+        stream_id: &waddle_xmpp::pending_delivery::SmSessionId,
+        acknowledged_h: u32,
+        expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
+        authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<(), waddle_xmpp::stream_management::persistence::SmPersistenceError> {
+        self.inner
+            .mark_session_nonresumable(stream_id, acknowledged_h, expected_fence, authority)
+            .await
+    }
+
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,

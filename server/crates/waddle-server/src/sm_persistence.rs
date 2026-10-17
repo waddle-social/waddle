@@ -192,24 +192,27 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
     async fn mark_session_nonresumable(
         &self,
         stream_id: &SmSessionId,
+        acknowledged_h: u32,
         _expected_fence: &waddle_xmpp::stream_management::persistence::SmClaimFence,
         _authority: Option<&waddle_xmpp::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<(), SmPersistenceError> {
         let lock = self.lock_for(stream_id);
         let _guard = lock.lock().await;
-        let updated = self
-            .execute(
-                "UPDATE sm_sessions SET max_resume_secs = 0, max_resume_duration_ms = 0 \
-                 WHERE stream_id = ?",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
-            .await?;
-        if updated == 0 {
-            return Err(SmPersistenceError::Other(
-                "Expired SM promotion source is missing".to_owned(),
-            ));
-        }
-        Ok(())
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        promotion_inventory::mark_nonresumable(
+            &mut tx,
+            stream_id,
+            acknowledged_h,
+            self.db.driver(),
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))
     }
 
     #[instrument(skip(self, session), fields(stream_id = %session.stream_id))]

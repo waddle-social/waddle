@@ -112,6 +112,15 @@ impl InMemorySmSessionRegistry {
         let mut inventory = session.clone();
         inventory.max_resume_time = Some(0);
         if let Some(storage) = &self.persistence {
+            if session.promotion_custody.requires_existing_source() {
+                // last_acked retains the expiry completion's ACK intent across
+                // cancellation. Apply it atomically before loading the queue;
+                // otherwise a failed conversion could reload acknowledged rows.
+                storage
+                    .mark_session_nonresumable(&stream, session.last_acked, &fence, None)
+                    .await
+                    .map_err(|error| storage_error(error, &fence))?;
+            }
             if let Some(mut persisted) = storage
                 .get_session(&stream)
                 .await
@@ -129,20 +138,10 @@ impl InMemorySmSessionRegistry {
                 if resumable {
                     self.mark_snapshot_stale(&stream)?;
                     // Metadata-only update preserves concurrent sink pruning.
-                    if session.promotion_custody.requires_existing_source() {
-                        // A cancelled expiry conversion can still encounter
-                        // resumable metadata. Preserve its source-required
-                        // contract inside the write, not only this prior read.
-                        storage
-                            .mark_session_nonresumable(&stream, &fence, None)
-                            .await
-                            .map_err(|error| storage_error(error, &fence))?;
-                    } else {
-                        storage
-                            .upsert_promotion_session(persisted.clone(), &fence)
-                            .await
-                            .map_err(|error| storage_error(error, &fence))?;
-                    }
+                    storage
+                        .upsert_promotion_session(persisted.clone(), &fence)
+                        .await
+                        .map_err(|error| storage_error(error, &fence))?;
                 }
                 // A terminal capture can extend the last durable snapshot.
                 // Only genuinely newer sequences may be merged: an absent

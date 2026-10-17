@@ -861,6 +861,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     async fn mark_session_nonresumable(
         &self,
         stream_id: &SmSessionId,
+        acknowledged_h: u32,
         expected_fence: &SmClaimFence,
         authority: Option<&CurrentNodeIdentityGuard>,
     ) -> Result<(), SmPersistenceError> {
@@ -879,19 +880,13 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                     .await?,
             )
         };
-        let updated = tx
-            .execute(
-                "UPDATE sm_sessions SET max_resume_secs = 0, max_resume_duration_ms = 0 \
-                 WHERE stream_id = ?",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
-            .await
-            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        if updated == 0 {
-            return Err(SmPersistenceError::Other(
-                "Expired SM promotion source is missing".to_owned(),
-            ));
-        }
+        crate::sm_persistence::promotion_inventory::mark_nonresumable(
+            &mut tx,
+            stream_id,
+            acknowledged_h,
+            crate::db::DatabaseDriver::Postgres,
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| SmPersistenceError::Other(error.to_string()))

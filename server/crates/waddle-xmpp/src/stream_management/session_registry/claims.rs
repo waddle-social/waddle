@@ -543,9 +543,16 @@ impl InMemorySmSessionRegistry {
         for stream_id in &stream_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
-            let mut claim_loss = self
+            let mut claim_loss = match self
                 .reconcile_stale_source_for_drain_locked(&SmSessionId::new(stream_id))
-                .await?;
+                .await
+            {
+                Ok(loss) => loss,
+                Err(error) => {
+                    tracing::warn!(%stream_id, %error, "SM shutdown reconciliation failed; preserving this stream");
+                    continue;
+                }
+            };
             let mut registered = None;
             if let Some(session) = self
                 .promotion_source_locked(stream_id, |_| true)?
@@ -554,7 +561,10 @@ impl InMemorySmSessionRegistry {
                 match self.persist_promotion_inventory_locked(&session).await {
                     Ok(inventory) => registered = Some(inventory),
                     Err(SmRegistryError::PromotionClaimLost(loss)) => claim_loss = Some(loss),
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        tracing::warn!(%stream_id, %error, "SM drain failed for one stream; preserving custody and continuing");
+                        continue;
+                    }
                 }
             }
             let removed = {
@@ -594,7 +604,10 @@ impl InMemorySmSessionRegistry {
                             Err(SmRegistryError::PromotionClaimLost(loss)) => {
                                 claim_loss = Some(loss)
                             }
-                            Err(error) => return Err(error),
+                            Err(error) => {
+                                tracing::warn!(%stream_id, %error, "SM drain failed for one stream; preserving custody and continuing");
+                                continue;
+                            }
                         }
                     }
                 }
@@ -1741,6 +1754,21 @@ impl InMemorySmSessionRegistry {
                 continue;
             };
             let mut retry = PendingPromotionRetryLease::new(self, session);
+            match self
+                .settle_absent_promotion_source_locked(retry.session_mut())
+                .await
+            {
+                Ok(true) => {
+                    retry.discard();
+                    continue;
+                }
+                Ok(false) => {}
+                Err(SmRegistryError::PromotionClaimLost(_)) => {}
+                Err(error) => {
+                    tracing::warn!(%stream_id, %error, "SM promotion source check failed; retaining this stream for retry");
+                    continue;
+                }
+            }
             let claim_loss = match self
                 .reconcile_promotion_session_locked(retry.session_mut())
                 .await
@@ -1748,7 +1776,10 @@ impl InMemorySmSessionRegistry {
                 Ok(()) => None,
                 Err(SmRegistryError::PromotionClaimLost(loss)) if include_lost_claims => Some(loss),
                 Err(SmRegistryError::PromotionClaimLost(_)) => continue,
-                Err(error) => return Err(error),
+                Err(error) => {
+                    tracing::warn!(%stream_id, %error, "SM promotion reconciliation failed; retaining this stream for retry");
+                    continue;
+                }
             };
             let still_pending = self
                 .pending_promotions
@@ -1796,8 +1827,29 @@ impl InMemorySmSessionRegistry {
         let Some(fence) = fence else {
             return Ok(None);
         };
-        if self.node_identity.current() != *fence.owner() {
-            return Ok(None);
+        if self.exact_claim_is_current(stream_id, &fence, None).await? {
+            Ok(self.node_identity.guard_if_current(fence.owner()).await)
+        } else {
+            Ok(None)
+        }
+    }
+
+    /// Reuse supplied authority rather than reacquiring the writer-preferring
+    /// identity gate. This check never acquires or replaces an SM claim.
+    async fn exact_claim_is_current(
+        &self,
+        stream_id: &SmSessionId,
+        fence: &super::super::persistence::SmClaimFence,
+        authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
+    ) -> Result<bool, SmRegistryError> {
+        let current = match authority {
+            Some(authority) => {
+                self.node_identity.owns_guard(authority) && authority.identity() == fence.owner()
+            }
+            None => self.node_identity.current() == *fence.owner(),
+        };
+        if !current {
+            return Ok(false);
         }
         match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
@@ -1809,20 +1861,67 @@ impl InMemorySmSessionRegistry {
         )
         .await
         {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => return Ok(None),
-            Ok(Err(_)) => {
-                return Err(SmRegistryError::StorageUnavailable(
-                    super::traits::StorageOutageCause::Backend,
-                ));
-            }
-            Err(_) => {
-                return Err(SmRegistryError::StorageUnavailable(
-                    super::traits::StorageOutageCause::Timeout,
-                ));
-            }
+            Ok(Ok(exact)) => Ok(exact),
+            Ok(Err(_)) => Err(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Backend,
+            )),
+            Err(_) => Err(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Timeout,
+            )),
         }
-        Ok(self.node_identity.guard_if_current(fence.owner()).await)
+    }
+
+    /// A lost commit acknowledgement can leave a retry after its source was
+    /// deleted. A proven absence under its recorded fence ends that lifecycle;
+    /// read failures retain custody and must not obstruct other streams.
+    async fn settle_absent_promotion_source_locked(
+        &self,
+        session: &DetachedSession,
+    ) -> Result<bool, SmRegistryError> {
+        if !session.promotion_custody.requires_existing_source() {
+            return Ok(false);
+        }
+        let Some(storage) = &self.persistence else {
+            return Ok(false);
+        };
+        self.validate_promotion_capture_locked(session)?;
+        let fence = session.promotion_custody.captured_fence().cloned().ok_or(
+            SmRegistryError::StorageUnavailable(super::traits::StorageOutageCause::Backend),
+        )?;
+        let authority = self
+            .node_identity
+            .guard_if_current(fence.owner())
+            .await
+            .ok_or_else(|| {
+                SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(fence.clone()))
+            })?;
+        let stream = SmSessionId::new(&session.stream_id);
+        if !self
+            .exact_claim_is_current(&stream, &fence, Some(&authority))
+            .await?
+        {
+            return Err(SmRegistryError::PromotionClaimLost(
+                ShutdownSmClaimLoss::Recorded(fence),
+            ));
+        }
+        if storage
+            .get_session(&stream)
+            .await
+            .map_err(|error| SmRegistryError::Internal(error.to_string()))?
+            .is_some()
+        {
+            return Ok(false);
+        }
+        if !self.try_record_terminal_claim_fence(&session.stream_id, fence.clone()) {
+            return Err(SmRegistryError::Internal(
+                "Absent promotion source could not retain exact release".to_owned(),
+            ));
+        }
+        self.forget_claim_locally_locked(&session.stream_id, Some(&fence));
+        drop(authority);
+        self.release_claim_store_entry_under(&session.stream_id, fence)
+            .await;
+        Ok(true)
     }
 
     /// Retire a discovered detached snapshot only while this node still owns
@@ -1901,12 +2000,16 @@ impl InMemorySmSessionRegistry {
         for stream_id in &expired_ids {
             let stream_lock = self.stream_lock(stream_id)?;
             let _stream_guard = stream_lock.lock().await;
-            if self
+            match self
                 .reconcile_stale_source_for_drain_locked(&SmSessionId::new(stream_id))
-                .await?
-                .is_some()
+                .await
             {
-                continue;
+                Ok(None) => {}
+                Ok(Some(_)) => continue,
+                Err(error) => {
+                    tracing::warn!(%stream_id, %error, "SM expiry reconciliation failed; preserving this stream");
+                    continue;
+                }
             }
             let mut registered = None;
             if let Some(session) =
@@ -1915,7 +2018,10 @@ impl InMemorySmSessionRegistry {
                 match self.persist_promotion_inventory_locked(&session).await {
                     Ok(inventory) => registered = Some(inventory),
                     Err(SmRegistryError::PromotionClaimLost(_)) => continue,
-                    Err(error) => return Err(error),
+                    Err(error) => {
+                        tracing::warn!(%stream_id, %error, "SM drain failed for one stream; preserving custody and continuing");
+                        continue;
+                    }
                 }
             }
             let removed = {
@@ -1952,7 +2058,10 @@ impl InMemorySmSessionRegistry {
                     {
                         Ok(()) => {}
                         Err(SmRegistryError::PromotionClaimLost(_)) => continue,
-                        Err(error) => return Err(error),
+                        Err(error) => {
+                            tracing::warn!(%stream_id, %error, "SM drain failed for one stream; preserving custody and continuing");
+                            continue;
+                        }
                     }
                 }
                 drained.push(retry.finish());
@@ -2982,7 +3091,7 @@ impl InMemorySmSessionRegistry {
         // if the resume window crossed during that await.
         if session.is_expired() {
             return self
-                .complete_expired_claim_locked(session, authority)
+                .complete_expired_claim_locked(session, client_h, authority)
                 .await
                 .map(|session| Some(SmClaimCompletion::Expired(session)));
         }
@@ -3085,6 +3194,7 @@ impl InMemorySmSessionRegistry {
     async fn complete_expired_claim_locked(
         &self,
         mut session: DetachedSession,
+        client_h: Option<u32>,
         authority: Option<&crate::ownership::CurrentNodeIdentityGuard>,
     ) -> Result<DetachedSession, SmRegistryError> {
         self.validate_promotion_capture_locked(&session)?;
@@ -3093,6 +3203,20 @@ impl InMemorySmSessionRegistry {
         )?;
         session.promotion_custody = super::PromotionCaptureCustody::existing_source(fence.clone());
         session.max_resume_time = Some(0);
+        if let Some(h) = client_h.filter(|h| {
+            !session.handled_count_exceeds_outbound(*h)
+                && h.wrapping_sub(session.last_acked) < 0x8000_0000
+        }) {
+            let previous = session.last_acked;
+            let acknowledged = h.wrapping_sub(previous);
+            session.unacked_stanzas.retain(|entry| {
+                let distance = entry.sequence.wrapping_sub(previous);
+                distance == 0 || distance > acknowledged
+            });
+            // This watermark is retry intent until the atomic storage
+            // transition commits. Reconciliation must apply it before reload.
+            session.last_acked = h;
+        }
         {
             // Match cancellation release and demotion's publication order.
             let _sessions = self
@@ -3128,37 +3252,23 @@ impl InMemorySmSessionRegistry {
                 SmRegistryError::PromotionClaimLost(ShutdownSmClaimLoss::Recorded(fence.clone()))
             })?
         };
-        match tokio::time::timeout(
-            CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
-            self.claim_store.fence(
-                &sm_session_entity(&session.stream_id),
-                fence.owner(),
-                fence.epoch(),
-            ),
-        )
-        .await
+        if !self
+            .exact_claim_is_current(
+                &SmSessionId::new(&session.stream_id),
+                &fence,
+                Some(authority),
+            )
+            .await?
         {
-            Ok(Ok(true)) => {}
-            Ok(Ok(false)) => {
-                return Err(SmRegistryError::PromotionClaimLost(
-                    ShutdownSmClaimLoss::Recorded(fence),
-                ));
-            }
-            Ok(Err(_)) => {
-                return Err(SmRegistryError::StorageUnavailable(
-                    super::traits::StorageOutageCause::Backend,
-                ));
-            }
-            Err(_) => {
-                return Err(SmRegistryError::StorageUnavailable(
-                    super::traits::StorageOutageCause::Timeout,
-                ));
-            }
+            return Err(SmRegistryError::PromotionClaimLost(
+                ShutdownSmClaimLoss::Recorded(fence),
+            ));
         }
         if let Some(storage) = &self.persistence {
             storage
                 .mark_session_nonresumable(
                     &SmSessionId::new(&session.stream_id),
+                    session.last_acked,
                     &fence,
                     Some(authority),
                 )
