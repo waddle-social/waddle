@@ -66,8 +66,8 @@ from the affected period. Current counts justify no historical cleanup.
 The effective retention for this rollout is the 30-day source default, clamped
 to 1–365 days. The `WADDLE_PENDING_DELIVERY_MAX_AGE_DAYS` key is absent from
 explicit container environment, the imported ConfigMap, and each of the four
-imported Secrets. Only that exact non-sensitive key was queried; unrelated
-Secret values were not retrieved. The observation has no rows eligible for
+imported Secrets. Only that exact non-sensitive key was inspected; unrelated
+Secret values were not included in output or artifacts. The observation has no rows eligible for
 retention, so zero age-outs is expected to be inconclusive.
 
 ### Reproducing the comparison
