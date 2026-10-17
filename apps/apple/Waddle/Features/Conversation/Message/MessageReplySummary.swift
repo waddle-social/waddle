@@ -33,3 +33,51 @@ enum MessageReplySummary {
         return "Message"
     }
 }
+
+/// Copy for the attached reply card under a thread root.
+enum MessageThreadCardText {
+    static func count(_ count: Int) -> String {
+        count == 1 ? "1 reply" : "\(count) replies"
+    }
+
+    /// "2 hr. ago", relative to now.
+    static func time(_ date: Date) -> String {
+        date.formatted(.relative(presentation: .named, unitsStyle: .abbreviated))
+    }
+
+    static func author(_ latest: ThreadSummary.LatestReply) -> String {
+        latest.authorName.isEmpty ? "Unknown" : latest.authorName
+    }
+
+    static func snippet(_ snippet: ThreadSummary.Snippet) -> String {
+        switch snippet {
+        case let .text(text): return text
+        case let .action(line): return line
+        case .photo: return "Photo"
+        case .attachment: return "Attachment"
+        case .deleted: return "Message deleted"
+        case .removed: return "Removed by a moderator"
+        }
+    }
+
+    /// Whether the card prefixes the snippet with its author; a `/me`
+    /// line already names them.
+    static func showsAuthor(_ latest: ThreadSummary.LatestReply) -> Bool {
+        if case .action = latest.snippet { return false }
+        return true
+    }
+
+    /// "3 replies, latest from guzzle: Love this, 2 hr. ago".
+    static func summary(_ thread: ThreadSummary) -> String {
+        var text = count(thread.replyCount)
+        if let latest = thread.latestReply {
+            text += ", latest from \(author(latest)): \(snippet(latest.snippet)), \(time(latest.sentAt))"
+        }
+        return text
+    }
+
+    /// The card's VoiceOver label.
+    static func accessibilityLabel(_ thread: ThreadSummary) -> String {
+        "\(summary(thread)). Open thread"
+    }
+}

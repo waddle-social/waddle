@@ -98,6 +98,15 @@ public struct TimelineItem: Hashable, Sendable, Identifiable {
         return from.bare.localpart ?? from.bare.domain
     }
 
+    /// The real bare JID behind the author: the sender in 1:1, only the
+    /// stamped real JID in a room (the archived `muc#user` item, our local
+    /// echo, or the occupant when an undelayed message arrived), since a
+    /// nick may have changed hands since.
+    public var authorJID: BareJID? {
+        guard conversation.isRoom else { return message.from?.bare }
+        return message.authorRealJID
+    }
+
     /// Display-only grouping key: occupant JID plus its captured real JID
     /// in rooms, bare sender JID in 1:1. A nick handover starts a new group;
     /// unstamped rows keep their occupant grouping without guessing identity.

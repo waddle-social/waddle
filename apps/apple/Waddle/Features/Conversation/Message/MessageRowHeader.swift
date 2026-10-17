@@ -2,9 +2,11 @@ import SwiftUI
 import WaddleKit
 
 /// Author name in its XEP-0392 color, role badge, time and edited mark.
+/// The name opens the author's profile.
 struct MessageRowHeader: View {
     let author: MessageAuthor
     let item: TimelineItem
+    let openProfile: () -> Void
 
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: Theme.Spacing.s - 2) {
@@ -12,6 +14,7 @@ struct MessageRowHeader: View {
                 .font(.subheadline.weight(.semibold))
                 .foregroundStyle(Color.consistent(for: author.colorKey))
                 .lineLimit(1)
+                .authorProfileButton(name: author.name, horizontalSlop: Theme.Spacing.xs, verticalSlop: Theme.Spacing.m, action: openProfile)
             if let badge = author.badge {
                 MessageRoleBadgeView(badge: badge)
             }

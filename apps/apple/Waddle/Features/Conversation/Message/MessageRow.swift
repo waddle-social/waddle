@@ -57,7 +57,10 @@ private struct MessageRowContent: View {
                 .frame(width: avatarSize, alignment: .trailing)
             VStack(alignment: .leading, spacing: isCompact ? Theme.Spacing.xxs : Theme.Spacing.xs) {
                 if entry.startsGroup {
-                    MessageRowHeader(author: author, item: item)
+                    // Above the body, so the name's grown hit area wins
+                    // where the two overlap.
+                    MessageRowHeader(author: author, item: item) { openProfile(author) }
+                        .zIndex(1)
                 }
                 MessageRowBody(
                     entry: entry,
@@ -82,6 +85,12 @@ private struct MessageRowContent: View {
         .contentShape(Rectangle())
         #if os(iOS)
         .contentShape(.contextMenuPreview, RoundedRectangle(cornerRadius: Theme.Radius.medium, style: .continuous))
+        // A tap on a post with replies opens its thread. Attached with
+        // `gesture`, not `simultaneousGesture`, so a child control (link,
+        // image, reaction, reply quote, link card, avatar, name, reply
+        // card) takes its own tap alone; scrolls and the context menu's
+        // long press never end a tap. Mac keeps clicks for selecting text.
+        .gesture(TapGesture().onEnded { openThread() }, including: opensThreadOnTap ? .all : .subviews)
         #endif
         .onHover { isHovering = $0 }
         .contextMenu {
@@ -91,13 +100,16 @@ private struct MessageRowContent: View {
         .accessibilityLabel(Text(MessageAccessibilityText.label(
             for: item,
             authorName: author.name,
-            replyCount: entry.replyCount,
+            thread: entry.thread,
             time: item.sentAt.formatted(date: .omitted, time: .shortened)
         )))
         .modifier(MessageAccessibilityActions(
             item: item,
             replyCount: entry.replyCount,
+            opensThreadOnActivate: opensThreadOnTap,
+            authorName: author.name,
             openThread: openThread,
+            openProfile: { openProfile(author) },
             openImage: openImage
         ))
         #if os(iOS)
@@ -120,6 +132,16 @@ private struct MessageRowContent: View {
         return session.presence.occupant(named: nick, in: item.conversation.jid)
     }
 
+    /// Touch only, and never inside the thread view, where threads do
+    /// not nest.
+    private var opensThreadOnTap: Bool {
+        #if os(iOS)
+        return showsThreadChip && entry.replyCount > 0
+        #else
+        return false
+        #endif
+    }
+
     private var topPadding: CGFloat {
         guard entry.startsGroup else { return Theme.Spacing.xxs }
         return isCompact ? Theme.Spacing.xs : Theme.Spacing.m
@@ -128,7 +150,11 @@ private struct MessageRowContent: View {
     @ViewBuilder
     private func gutter(author: MessageAuthor) -> some View {
         if entry.startsGroup {
+            let slop = max(0, (Theme.Size.minHitTarget - avatarSize) / 2)
             MessageAvatar(author: author, size: avatarSize)
+                .authorProfileButton(name: author.name, horizontalSlop: slop, verticalSlop: slop) {
+                    openProfile(author)
+                }
         } else if isHovering {
             Text(item.sentAt.formatted(date: .omitted, time: .shortened))
                 .font(.caption2.monospacedDigit())
@@ -153,6 +179,17 @@ private struct MessageRowContent: View {
         navigation.openThread(root, in: item.conversation, usesInspector: placement.usesInspector)
     }
 
+    private func openProfile(_ author: MessageAuthor) {
+        let nick = item.conversation.isRoom ? item.from?.resource : nil
+        navigation.showProfile(PeerProfileRoute(
+            name: author.name,
+            colorKey: author.colorKey,
+            jid: author.avatarJID,
+            room: nick == nil ? nil : item.conversation.jid,
+            nick: nick
+        ))
+    }
+
     private func openImage(_ file: SharedFile) {
         imagePreviewFile = file
         isImagePreviewPresented = true
@@ -160,7 +197,7 @@ private struct MessageRowContent: View {
 }
 
 /// Everything under the header: reply quote, body or tombstone, files,
-/// link cards, reactions, thread chip and delivery state.
+/// link cards, reactions, the attached reply card and delivery state.
 private struct MessageRowBody: View {
     @Environment(SessionCoordinator.self) private var session
     @Environment(MessageActionModel.self) private var actions
@@ -217,8 +254,8 @@ private struct MessageRowBody: View {
         if !item.reactions.isEmpty {
             MessageReactionsBar(item: item)
         }
-        if showsThreadChip, entry.replyCount > 0 {
-            MessageThreadChip(count: entry.replyCount, action: openThread)
+        if showsThreadChip, let thread = entry.thread, thread.replyCount > 0 {
+            MessageThreadCard(summary: thread, action: openThread)
         }
     }
 }

@@ -4,7 +4,7 @@ import WaddleKit
 /// The single VoiceOver label of a message row: author, time, content,
 /// then reactions and replies.
 enum MessageAccessibilityText {
-    static func label(for item: TimelineItem, authorName: String, replyCount: Int, time: String) -> String {
+    static func label(for item: TimelineItem, authorName: String, thread: ThreadSummary?, time: String) -> String {
         var parts = [authorName, time]
         parts.append(content(of: item))
         if item.isEdited, item.tombstone == nil {
@@ -14,8 +14,8 @@ enum MessageAccessibilityText {
         if reactionCount > 0 {
             parts.append(reactionCount == 1 ? "1 reaction" : "\(reactionCount) reactions")
         }
-        if replyCount > 0 {
-            parts.append(replyCount == 1 ? "1 reply" : "\(replyCount) replies")
+        if let thread, thread.replyCount > 0 {
+            parts.append(MessageThreadCardText.summary(thread))
         }
         if item.safetyScores?.notableSignalRows.contains(where: { $0.category == .isQuestion }) == true {
             parts.append("Question signal")

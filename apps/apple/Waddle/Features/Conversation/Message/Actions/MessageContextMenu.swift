@@ -110,18 +110,33 @@ struct MessageContextMenu: View {
     }
 }
 
-/// VoiceOver custom actions mirroring the context menu, since the row is
-/// one combined element.
+/// VoiceOver custom actions mirroring the context menu and the row's
+/// buttons, since the row is one combined element. With
+/// `opensThreadOnActivate` (a post with replies on touch), activating the
+/// row opens its thread, as a tap does.
 struct MessageAccessibilityActions: ViewModifier {
     @Environment(SessionCoordinator.self) private var session
     @Environment(MessageActionModel.self) private var actions
     @Environment(\.openURL) private var openURL
     let item: TimelineItem
     let replyCount: Int
+    let opensThreadOnActivate: Bool
+    let authorName: String
     let openThread: () -> Void
+    let openProfile: () -> Void
     let openImage: (SharedFile) -> Void
 
+    @ViewBuilder
     func body(content: Content) -> some View {
+        if opensThreadOnActivate {
+            customActions(content)
+                .accessibilityAction(.default) { openThread() }
+        } else {
+            customActions(content)
+        }
+    }
+
+    private func customActions(_ content: Content) -> some View {
         content.accessibilityActions {
             if item.tombstone == nil, item.actionTargetID != nil {
                 Button("Reply") { actions.reply(to: item) }
@@ -130,6 +145,7 @@ struct MessageAccessibilityActions: ViewModifier {
             if replyCount > 0 {
                 Button("Open thread", action: openThread)
             }
+            Button("\(authorName), open profile", action: openProfile)
             if let row = MessageSafetyScoresButton.markerRow(for: item.safetyScores) {
                 Button("Show \(row.title.lowercased()) content signal") { actions.showSafetyScores(for: item) }
             }
