@@ -190,6 +190,7 @@ fn make_detached_session(
     presence_available: bool,
 ) -> waddle_xmpp::stream_management::DetachedSession {
     waddle_xmpp::stream_management::DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "stale-stream".to_string(),
         user_id: jid.to_bare().to_string(),
         jid: jid.clone(),

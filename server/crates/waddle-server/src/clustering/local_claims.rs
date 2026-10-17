@@ -1262,6 +1262,8 @@ mod tests {
 
     fn test_session(stream_id: &str, jid: &str) -> DetachedSession {
         DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.to_string(),
             user_id: jid.to_string(),
             jid: jid.parse().expect("valid jid"),

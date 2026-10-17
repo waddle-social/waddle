@@ -10,8 +10,20 @@ impl PostgresFencedSmPersistence {
         append: Option<PersistedIngressAppend>,
         new_delivery: bool,
     ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        let fence = self.claim_fence_for(&session.stream_id).await?;
+        self.store_snapshot_under(session, unacked, append, new_delivery, &fence)
+            .await
+    }
+
+    pub(super) async fn store_snapshot_under(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        append: Option<PersistedIngressAppend>,
+        new_delivery: bool,
+        fence: &SmClaimFence,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
         let stream_id = session.stream_id.clone();
-        let fence = self.claim_fence_for(&stream_id).await?;
         let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
             .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
         let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
@@ -22,7 +34,7 @@ impl PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, fence).await?;
 
         if new_delivery {
             let append = append.as_ref().ok_or_else(|| {

@@ -77,6 +77,13 @@ pub enum SmPersistenceError {
     #[error("live ingress delivery prevents a new detached allocation")]
     IngressDeliveryBlocked,
 
+    /// An existing allocation disagrees with its durable sequence watermark or payload.
+    #[error("promotion inventory sequence conflict for '{stream_id}' at {sequence}")]
+    PromotionSequenceConflict {
+        stream_id: SmSessionId,
+        sequence: u32,
+    },
+
     /// A row for an exact typed stream id exists but cannot be decoded into
     /// the typed persistence model. Recovery may quarantine that stream's
     /// durable session and unacked queue; ordinary backend errors must never
@@ -210,6 +217,17 @@ pub struct PersistedUnackedStanza {
     pub original_receipt_at: chrono::DateTime<chrono::Utc>,
 }
 
+/// Result of an atomic promotion-inventory append.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PromotionAppendOutcome {
+    /// Payload and outbound watermark were committed together.
+    Appended,
+    /// The same payload is still present in the durable queue.
+    AlreadyRecorded,
+    /// The watermark covers this sequence and its payload was already retired.
+    Retired,
+}
+
 /// Durable proof that one ingress obligation allocated a queue entry.
 ///
 /// An immutable ingress allocation and the payload whose custody it proves.
@@ -276,6 +294,58 @@ pub trait SmPersistenceStorage: Send + Sync {
     /// detaches and the session is moved into the resumable pool.
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError>;
 
+    /// Promotion writes carry the captured owner/epoch through the actual
+    /// transaction. Clustered stores must never replace it from a claim cache.
+    async fn upsert_promotion_session(
+        &self,
+        session: PersistedSession,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.upsert_session(session).await
+    }
+
+    async fn store_promotion_session_atomic(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.store_session_atomic(session, unacked).await
+    }
+
+    async fn append_promotion_stanza_with_fence(
+        &self,
+        stanza: PersistedUnackedStanza,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<PromotionAppendOutcome, SmPersistenceError> {
+        self.append_promotion_stanza(stanza).await
+    }
+
+    async fn delete_promotion_session(
+        &self,
+        stream_id: &SmSessionId,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.delete_session(stream_id).await
+    }
+
+    async fn delete_promotion_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+        _expected_fence: &SmClaimFence,
+    ) -> Result<u64, SmPersistenceError> {
+        self.delete_unacked(stream_id, sequences).await
+    }
+
+    async fn record_promotion_failure_with_fence(
+        &self,
+        stream_id: &SmSessionId,
+        _expected_fence: &SmClaimFence,
+    ) -> Result<u32, SmPersistenceError> {
+        self.record_promotion_failure(stream_id).await
+    }
+
     /// Look up a session by stream-id. Used on `<resume/>` to verify
     /// the previd is recognized and to rebuild the in-memory session.
     async fn get_session(
@@ -320,17 +390,14 @@ pub trait SmPersistenceStorage: Send + Sync {
     ) -> Result<(), SmPersistenceError>;
 
     /// Append a sequence to non-resumable promotion custody and advance its
-    /// outbound watermark atomically. Already recorded or retired sequences
-    /// are idempotent no-ops; a missing or resumable inventory is an error.
+    /// outbound watermark atomically. Repeating the same recorded allocation
+    /// or a retired sequence is idempotent. A conflicting payload, a queue row
+    /// ahead of the watermark, or a missing/resumable inventory is an error.
     /// Implementations must fence this transaction like the source SM stream.
     async fn append_promotion_stanza(
         &self,
-        _stanza: PersistedUnackedStanza,
-    ) -> Result<(), SmPersistenceError> {
-        Err(SmPersistenceError::Other(
-            "Atomic promotion-inventory append is unsupported".to_owned(),
-        ))
-    }
+        stanza: PersistedUnackedStanza,
+    ) -> Result<PromotionAppendOutcome, SmPersistenceError>;
 
     /// Remove unacked entries up to and including `up_to_sequence`.
     ///
@@ -718,7 +785,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,
-    ) -> Result<(), SmPersistenceError> {
+    ) -> Result<PromotionAppendOutcome, SmPersistenceError> {
         let mut guard = self
             .inner
             .lock()
@@ -731,20 +798,32 @@ impl SmPersistenceStorage for InMemorySmPersistence {
                 "Promotion inventory is resumable".to_owned(),
             ));
         }
-        if !super::sequence::sequence_gt(stanza.sequence, session.outbound_count) {
-            return Ok(());
-        }
+        let is_new = super::sequence::sequence_gt(stanza.sequence, session.outbound_count);
         let stream = stanza.stream_id.clone();
         let sequence = stanza.sequence;
         let queue = guard.unacked.entry(stream.clone()).or_default();
-        if queue.iter().any(|entry| entry.sequence == sequence) {
-            return Ok(());
+        if let Some(existing) = queue.iter().find(|entry| entry.sequence == sequence) {
+            if is_new
+                || existing.stanza.to_element() != stanza.stanza.to_element()
+                || existing.original_receipt_at.timestamp_millis()
+                    != stanza.original_receipt_at.timestamp_millis()
+                || existing.ingress_receipts != stanza.ingress_receipts
+            {
+                return Err(SmPersistenceError::PromotionSequenceConflict {
+                    stream_id: stream,
+                    sequence,
+                });
+            }
+            return Ok(PromotionAppendOutcome::AlreadyRecorded);
+        }
+        if !is_new {
+            return Ok(PromotionAppendOutcome::Retired);
         }
         queue.push(stanza);
         if let Some(session) = guard.sessions.get_mut(&stream) {
             session.outbound_count = sequence;
         }
-        Ok(())
+        Ok(PromotionAppendOutcome::Appended)
     }
 
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {

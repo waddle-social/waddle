@@ -112,6 +112,20 @@ impl InMemorySmSessionRegistry {
         let jid = session.jid.clone();
         let stream_lock = self.stream_lock(&stream_id)?;
         let _stream_guard = stream_lock.lock().await;
+        if self
+            .pending_resume_claim_custody
+            .read()
+            .map_err(|_| SmRegistryError::Internal("Lock poisoned".to_owned()))?
+            .contains_key(&stream_id)
+        {
+            return Err(SmRegistryError::StorageUnavailable(
+                super::traits::StorageOutageCause::Backend,
+            ));
+        }
+        if let Some(fence) = self.current_sm_claim_fence(&stream_id) {
+            session.promotion_custody.bind_first_claim(fence);
+        }
+        self.validate_promotion_capture_locked(&session)?;
         {
             let claimed = self
                 .claimed_sessions

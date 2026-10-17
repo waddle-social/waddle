@@ -670,6 +670,7 @@ async fn detached_snapshot_refresh_preserves_principal_through_registry() {
     );
     let principal = fixture_principal();
     let session = DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "refresh-keeps-principal".to_string(),
         user_id: "u1".to_string(),
         jid: full("alice@example.com/phone"),
@@ -1545,3 +1546,106 @@ mod ingress_receipt_tests;
 
 #[path = "ingress_append_tests.rs"]
 mod ingress_append_tests;
+
+async fn promotion_append_outcomes(storage: &dyn SmPersistenceStorage, stream: &str) {
+    let mut inventory = fixture_session(stream);
+    inventory.max_resume_time = Some(0);
+    inventory.max_resume_duration = Duration::ZERO;
+    storage.upsert_session(inventory).await.expect("inventory");
+    let stanza = fixture_unacked(stream, 13);
+    assert_eq!(
+        storage
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("append"),
+        PromotionAppendOutcome::Appended
+    );
+    assert_eq!(
+        storage
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("retry"),
+        PromotionAppendOutcome::AlreadyRecorded
+    );
+    let mut conflict = stanza.clone();
+    conflict.original_receipt_at += chrono::Duration::milliseconds(1);
+    assert!(matches!(
+        storage.append_promotion_stanza(conflict).await,
+        Err(SmPersistenceError::PromotionSequenceConflict { sequence: 13, .. })
+    ));
+    let mut wrong_payload = fixture_unacked(stream, 99);
+    wrong_payload.sequence = 13;
+    assert!(matches!(
+        storage.append_promotion_stanza(wrong_payload).await,
+        Err(SmPersistenceError::PromotionSequenceConflict { sequence: 13, .. })
+    ));
+    storage
+        .delete_unacked(&stanza.stream_id, &[13])
+        .await
+        .expect("retire payload");
+    assert_eq!(
+        storage
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("retired retry"),
+        PromotionAppendOutcome::Retired
+    );
+    // Model a malformed queue with a row ahead of the source watermark. An
+    // INSERT DO NOTHING must not turn this inconsistent allocation into success.
+    let ahead = fixture_unacked(stream, 14);
+    storage
+        .append_unacked(ahead.clone())
+        .await
+        .expect("seed inconsistent row");
+    assert!(matches!(
+        storage.append_promotion_stanza(ahead).await,
+        Err(SmPersistenceError::PromotionSequenceConflict { sequence: 14, .. })
+    ));
+    assert_eq!(
+        storage
+            .get_session(&stanza.stream_id)
+            .await
+            .expect("header")
+            .expect("source")
+            .outbound_count,
+        13
+    );
+    let rows = storage
+        .list_unacked(&stanza.stream_id)
+        .await
+        .expect("queue unchanged");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sequence, 14);
+    storage
+        .delete_session(&stanza.stream_id)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+async fn sqlite_promotion_append_distinguishes_retries_retirement_and_conflicts() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("sqlite");
+    promotion_append_outcomes(&storage, "sqlite-promotion-outcomes").await;
+}
+
+#[tokio::test]
+async fn memory_promotion_append_distinguishes_retries_retirement_and_conflicts() {
+    let storage = waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new();
+    promotion_append_outcomes(&storage, "memory-promotion-outcomes").await;
+}
+
+#[tokio::test]
+async fn postgres_promotion_append_distinguishes_retries_retirement_and_conflicts() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (promotion append outcomes)");
+        return;
+    };
+    let storage = DatabaseSmPersistence::open(Some(&url))
+        .await
+        .expect("postgres");
+    promotion_append_outcomes(
+        &storage,
+        &format!("pg-promotion-outcomes-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}

@@ -17,7 +17,7 @@ pub(super) enum PendingRowDrainPolicy {
 }
 
 pub(super) struct TerminalDrainContext<'a> {
-    pub(super) session: &'a waddle_xmpp::stream_management::DetachedSession,
+    pub(super) session: &'a mut waddle_xmpp::stream_management::DetachedSession,
     pub(super) blocklist: Option<&'a waddle_xmpp::protocol::session_state::Blocklist>,
     pub(super) recent_tombstones: &'a [waddle_xmpp::stream_management::RecentTombstoneRecord],
     pub(super) promote_incrementally: bool,
@@ -25,7 +25,6 @@ pub(super) struct TerminalDrainContext<'a> {
 }
 
 pub(super) struct TerminalDrainOutcome {
-    pub(super) retained_overflow: Vec<waddle_xmpp::stream_management::DetachedUnackedStanza>,
     pub(super) outbound_count: u32,
     pub(super) released_pending_rows: bool,
     /// Incremental overflow promotion inserted fresh `pending_delivery`
@@ -42,10 +41,9 @@ pub(super) struct TerminalDrainOutcome {
     pub(super) redrive_aborted: bool,
 }
 
-struct TerminalInventoryProgress<'a> {
+struct TerminalInventoryProgress {
     outbound_count: u32,
     ready: bool,
-    custody: crate::sm_promotion::PromotionSessionGuard<'a>,
 }
 
 struct TerminalDrainedFrame {
@@ -225,21 +223,16 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
     conn: &mut WsConnState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     pending_row_policy: PendingRowDrainPolicy,
-    terminal: TerminalDrainContext<'_>,
+    mut terminal: TerminalDrainContext<'_>,
 ) -> TerminalDrainOutcome {
     let principal_session = conn.authenticated_session.clone();
     let principal = principal_session
         .as_ref()
         .map(super::ResolvedPrincipal::from_authenticated_session);
     let deps = build_interpret_deps(state, principal);
-    let mut retained_overflow = Vec::new();
     let mut inventory = TerminalInventoryProgress {
         outbound_count: terminal.session.outbound_count,
         ready: terminal.inventory_ready,
-        custody: crate::sm_promotion::PromotionSessionGuard::new(
-            &state.deps.protocol.sm_session_registry,
-            terminal.session.clone(),
-        ),
     };
     let mut retain_overflow_for_retry = false;
     let mut released_pending_rows = false;
@@ -263,7 +256,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         pending_row_id,
                     },
                     pending_row_policy,
-                    &terminal,
+                    &mut terminal,
                     retain_overflow_for_retry,
                     &mut inventory,
                 )
@@ -296,9 +289,8 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                         redrive_aborted = true;
                     }
                 }
-                if let Some(entry) = result.retained {
+                if result.retained.is_some() {
                     retain_overflow_for_retry = true;
-                    retained_overflow.push(entry);
                 }
             }
             DeliveryKind::PeerStanza => {
@@ -325,7 +317,7 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                             pending_row_id: row_for_this,
                         },
                         pending_row_policy,
-                        &terminal,
+                        &mut terminal,
                         retain_overflow_for_retry,
                         &mut inventory,
                     )
@@ -348,18 +340,15 @@ pub(super) async fn drain_outbound_into_terminal_recovery(
                             redrive_aborted = true;
                         }
                     }
-                    if let Some(entry) = result.retained {
+                    if result.retained.is_some() {
                         retain_overflow_for_retry = true;
-                        retained_overflow.push(entry);
                     }
                 }
             }
         }
     }
     conn.warn_terminal_recovery_drops_once();
-    inventory.custody.complete();
     TerminalDrainOutcome {
-        retained_overflow,
         outbound_count: inventory.outbound_count,
         released_pending_rows,
         queued_pending_rows,
@@ -563,9 +552,9 @@ async fn record_drained_terminal_xml(
     conn: &mut WsConnState,
     frame: TerminalDrainedFrame,
     pending_row_policy: PendingRowDrainPolicy,
-    terminal: &TerminalDrainContext<'_>,
+    terminal: &mut TerminalDrainContext<'_>,
     retain_overflow_for_retry: bool,
-    inventory: &mut TerminalInventoryProgress<'_>,
+    inventory: &mut TerminalInventoryProgress,
 ) -> TerminalDrainedRecordResult {
     let TerminalDrainedFrame {
         xml,
@@ -642,24 +631,30 @@ async fn record_drained_terminal_xml(
         original_receipt_at,
     };
     // Keep accepted work in cancellation custody before the append can await.
-    inventory.custody.session_mut().outbound_count = entry.sequence;
-    inventory
-        .custody
-        .session_mut()
-        .unacked_stanzas
-        .push(entry.clone());
+    terminal.session.outbound_count = entry.sequence;
+    terminal.session.unacked_stanzas.push(entry.clone());
     // The queue was snapshotted before this drain. Never put another frame
     // back into it: success promotes incrementally, while a failed/blocked
     // prefix keeps the bounded receiver tail with the synthetic session.
-    let persisted = inventory.ready
-        && super::cleanup::persist_terminal_suffix_entry(
-            state,
-            &terminal.session.stream_id,
-            &entry,
-        )
-        .await;
-    inventory.ready = persisted;
-    if !persisted || !terminal.promote_incrementally || retain_overflow_for_retry {
+    let persisted = if inventory.ready {
+        super::cleanup::persist_terminal_suffix_entry(state, terminal.session, &entry).await
+    } else {
+        None
+    };
+    inventory.ready = persisted.is_some();
+    if persisted
+        == Some(waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::Retired)
+    {
+        // The canonical watermark proves this allocation already settled.
+        // The helper removed its stale cache entry; do not dispatch it again.
+        return TerminalDrainedRecordResult {
+            retained: None,
+            released_pending_row: false,
+            queued_pending_row: false,
+            release_failed_pending_row: false,
+        };
+    }
+    if persisted.is_none() || !terminal.promote_incrementally || retain_overflow_for_retry {
         return TerminalDrainedRecordResult {
             retained: Some(entry),
             released_pending_row: false,
@@ -742,9 +737,8 @@ async fn record_drained_terminal_xml(
             release_failed_pending_row: false,
         };
     }
-    inventory
-        .custody
-        .session_mut()
+    terminal
+        .session
         .unacked_stanzas
         .retain(|queued| queued.sequence != entry.sequence);
     TerminalDrainedRecordResult {

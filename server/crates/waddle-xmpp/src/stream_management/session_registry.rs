@@ -13,6 +13,7 @@ mod cross_node_resume;
 mod custody;
 mod inventory;
 mod persistence_codec;
+mod promotion_receipt_gc;
 mod reconciliation;
 mod resources;
 mod session;
@@ -27,7 +28,7 @@ pub use cross_node_resume::{
     StealTicket,
 };
 pub use resources::{DetachedPresenceState, ResumableSessionProbe};
-pub use session::{DetachedSession, DetachedUnackedStanza};
+pub use session::{DetachedSession, DetachedUnackedStanza, PromotionCaptureCustody};
 pub use tombstones::{RecentTombstoneRecord, TOMBSTONE_CLOCK_SKEW_SLACK};
 pub use trait_impl::StoredDetachedSession;
 pub use traits::{

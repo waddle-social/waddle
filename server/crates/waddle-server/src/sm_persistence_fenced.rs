@@ -136,7 +136,8 @@ use waddle_xmpp::ownership::{
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
     IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, SmClaimFence, SmPersistenceError, SmPersistenceStorage,
+    PersistedUnackedStanza, PromotionAppendOutcome, SmClaimFence, SmPersistenceError,
+    SmPersistenceStorage,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
@@ -634,11 +635,13 @@ impl PostgresFencedSmPersistence {
     }
 }
 
-#[async_trait]
-impl SmPersistenceStorage for PostgresFencedSmPersistence {
-    async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
+impl PostgresFencedSmPersistence {
+    async fn upsert_promotion_session_inner(
+        &self,
+        session: PersistedSession,
+        fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
         let stream_id = session.stream_id.clone();
-        let fence = self.claim_fence_for(&stream_id).await?;
         let max_resume_duration_ms = i64::try_from(session.max_resume_duration.as_millis())
             .map_err(|_| SmPersistenceError::Other("max_resume_duration overflows i64".into()))?;
         let presence_show_str = session.presence_show.as_ref().map(show_wire_str);
@@ -649,7 +652,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .begin()
             .await
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, &fence).await?;
+        let _identity_guard = self.assert_fenced(&mut tx, &stream_id, fence).await?;
 
         // Divergence (a): ignore `session.detached_at`; stamp Postgres
         // `now()` in SQL instead (both the fresh-insert VALUES and the
@@ -723,6 +726,152 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         Ok(())
     }
 
+    async fn delete_promotion_session_inner(
+        &self,
+        stream_id: &SmSessionId,
+        fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, fence).await?;
+
+        // Two statements rather than ON DELETE CASCADE, matching the
+        // portable impl's observable lifecycle exactly.
+        tx.execute(
+            "DELETE FROM sm_unacked WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        tx.execute(
+            "DELETE FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+
+        tx.commit()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        self.remove_claim_fence_if(stream_id, fence);
+        Ok(())
+    }
+
+    async fn append_promotion_stanza_with_fence_inner(
+        &self,
+        stanza: PersistedUnackedStanza,
+        fence: &SmClaimFence,
+    ) -> Result<PromotionAppendOutcome, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        let _identity = self
+            .assert_fenced(&mut tx, &stanza.stream_id, fence)
+            .await?;
+        let outcome = crate::sm_persistence::promotion_inventory::append(
+            &mut tx,
+            stanza,
+            DatabaseDriver::Postgres,
+        )
+        .await?;
+        tx.commit()
+            .await
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        Ok(outcome)
+    }
+
+    async fn delete_promotion_unacked_inner(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+        fence: &SmClaimFence,
+    ) -> Result<u64, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, fence).await?;
+        let mut removed = 0u64;
+        for sequence in sequences {
+            removed += tx
+                .execute(
+                    "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+                    crate::db_params![stream_id.as_str().to_string(), i64::from(*sequence)],
+                )
+                .await
+                .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        Ok(removed)
+    }
+
+    async fn record_promotion_failure_with_fence_inner(
+        &self,
+        stream_id: &SmSessionId,
+        fence: &SmClaimFence,
+    ) -> Result<u32, SmPersistenceError> {
+        let mut tx = self
+            .db
+            .begin()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let _identity_guard = self.assert_fenced(&mut tx, stream_id, fence).await?;
+        let mut rows = tx
+            .query(
+                "UPDATE sm_sessions SET promotion_attempts = promotion_attempts + 1 \
+                 WHERE stream_id = ? RETURNING promotion_attempts",
+                crate::db_params![stream_id.as_str().to_string()],
+            )
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        let count = match rows
+            .next()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
+        {
+            Some(row) => row
+                .get::<i64>(0)
+                .map_err(|e| SmPersistenceError::Other(e.to_string()))?,
+            None => {
+                // No row for this stream_id: mirrors the portable impl's
+                // `updated == 0 => Ok(0)` short-circuit.
+                tx.commit()
+                    .await
+                    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+                return Ok(0);
+            }
+        };
+        tx.commit()
+            .await
+            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+        Ok(u32::try_from(count).unwrap_or(u32::MAX))
+    }
+}
+
+#[async_trait]
+impl SmPersistenceStorage for PostgresFencedSmPersistence {
+    async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
+        let fence = self.claim_fence_for(&session.stream_id).await?;
+        self.upsert_promotion_session_inner(session, &fence).await
+    }
+
+    async fn upsert_promotion_session(
+        &self,
+        session: PersistedSession,
+        expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.upsert_promotion_session_inner(session, expected_fence)
+            .await
+    }
+
     async fn get_session(
         &self,
         stream_id: &SmSessionId,
@@ -781,33 +930,16 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
 
     async fn delete_session(&self, stream_id: &SmSessionId) -> Result<(), SmPersistenceError> {
         let fence = self.claim_fence_for(stream_id).await?;
-        let mut tx = self
-            .db
-            .begin()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
+        self.delete_promotion_session_inner(stream_id, &fence).await
+    }
 
-        // Two statements rather than ON DELETE CASCADE, matching the
-        // portable impl's observable lifecycle exactly.
-        tx.execute(
-            "DELETE FROM sm_unacked WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        tx.execute(
-            "DELETE FROM sm_sessions WHERE stream_id = ?",
-            crate::db_params![stream_id.as_str().to_string()],
-        )
-        .await
-        .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-
-        tx.commit()
+    async fn delete_promotion_session(
+        &self,
+        stream_id: &SmSessionId,
+        expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.delete_promotion_session_inner(stream_id, expected_fence)
             .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        self.remove_claim_fence_if(stream_id, &fence);
-        Ok(())
     }
 
     async fn delete_session_with_authority(
@@ -911,25 +1043,19 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,
-    ) -> Result<(), SmPersistenceError> {
+    ) -> Result<PromotionAppendOutcome, SmPersistenceError> {
         let fence = self.claim_fence_for(&stanza.stream_id).await?;
-        let mut tx = self
-            .db
-            .begin()
+        self.append_promotion_stanza_with_fence_inner(stanza, &fence)
             .await
-            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        let _identity = self
-            .assert_fenced(&mut tx, &stanza.stream_id, &fence)
-            .await?;
-        crate::sm_persistence::promotion_inventory::append(
-            &mut tx,
-            stanza,
-            DatabaseDriver::Postgres,
-        )
-        .await?;
-        tx.commit()
+    }
+
+    async fn append_promotion_stanza_with_fence(
+        &self,
+        stanza: PersistedUnackedStanza,
+        expected_fence: &SmClaimFence,
+    ) -> Result<PromotionAppendOutcome, SmPersistenceError> {
+        self.append_promotion_stanza_with_fence_inner(stanza, expected_fence)
             .await
-            .map_err(|error| SmPersistenceError::Other(error.to_string()))
     }
 
     async fn ack_through(
@@ -963,26 +1089,18 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         sequences: &[u32],
     ) -> Result<u64, SmPersistenceError> {
         let fence = self.claim_fence_for(stream_id).await?;
-        let mut tx = self
-            .db
-            .begin()
+        self.delete_promotion_unacked_inner(stream_id, sequences, &fence)
             .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
-        let mut removed = 0u64;
-        for sequence in sequences {
-            removed += tx
-                .execute(
-                    "DELETE FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
-                    crate::db_params![stream_id.as_str().to_string(), i64::from(*sequence)],
-                )
-                .await
-                .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        }
-        tx.commit()
+    }
+
+    async fn delete_promotion_unacked(
+        &self,
+        stream_id: &SmSessionId,
+        sequences: &[u32],
+        expected_fence: &SmClaimFence,
+    ) -> Result<u64, SmPersistenceError> {
+        self.delete_promotion_unacked_inner(stream_id, sequences, expected_fence)
             .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        Ok(removed)
     }
 
     async fn delete_tombstoned_unacked(
@@ -1050,7 +1168,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         // every node's sessions, not just this node's claims), so it is
         // read-only and unfenced, same as the portable impl.
         let _ = now;
-        let mut rows = self
+        let rows = self
             .guard_query(
                 "SELECT stream_id, user_id, full_jid, occupancy_session, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
@@ -1062,39 +1180,11 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 (),
             )
             .await?;
-        let mut out = Vec::new();
-        let mut poison_sessions = 0usize;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
-        {
-            match decode_session(&row) {
-                Ok(session) => out.push(session),
-                Err(error) => {
-                    let stream_id = row
-                        .get::<String>(0)
-                        .unwrap_or_else(|_| "<unreadable>".to_string());
-                    tracing::debug!(
-                        %stream_id,
-                        %error,
-                        "list_expired_sessions: skipping session whose row failed to decode (poison pill)"
-                    );
-                    poison_sessions += 1;
-                }
-            }
-        }
-        if poison_sessions > 0 {
-            tracing::warn!(
-                count = poison_sessions,
-                "list_expired_sessions: skipped poison-pill session(s); listing proceeds with remaining sessions"
-            );
-        }
-        Ok(out)
+        crate::sm_persistence::codec::decode_session_scan(rows, "list_expired_sessions").await
     }
 
     async fn list_all_sessions(&self) -> Result<Vec<PersistedSession>, SmPersistenceError> {
-        let mut rows = self
+        let rows = self
             .guard_query(
                 "SELECT stream_id, user_id, full_jid, occupancy_session, inbound_count, outbound_count, \
                         last_acked, max_resume_secs, detached_at_ms, max_resume_duration_ms, \
@@ -1105,35 +1195,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 (),
             )
             .await?;
-        let mut out = Vec::new();
-        let mut poison_sessions = 0usize;
-        while let Some(row) = rows
-            .next()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
-        {
-            match decode_session(&row) {
-                Ok(session) => out.push(session),
-                Err(error) => {
-                    let stream_id = row
-                        .get::<String>(0)
-                        .unwrap_or_else(|_| "<unreadable>".to_string());
-                    tracing::debug!(
-                        %stream_id,
-                        %error,
-                        "list_all_sessions: skipping session whose row failed to decode (poison pill)"
-                    );
-                    poison_sessions += 1;
-                }
-            }
-        }
-        if poison_sessions > 0 {
-            tracing::warn!(
-                count = poison_sessions,
-                "list_all_sessions: skipped poison-pill session(s); listing proceeds with remaining sessions"
-            );
-        }
-        Ok(out)
+        crate::sm_persistence::codec::decode_session_scan(rows, "list_all_sessions").await
     }
 
     async fn list_all_session_ids(&self) -> Result<Vec<SmSessionId>, SmPersistenceError> {
@@ -1250,6 +1312,17 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         unacked: Vec<PersistedUnackedStanza>,
     ) -> Result<(), SmPersistenceError> {
         self.store_snapshot(session, unacked, None, false)
+            .await
+            .map(|_| ())
+    }
+
+    async fn store_promotion_session_atomic(
+        &self,
+        session: PersistedSession,
+        unacked: Vec<PersistedUnackedStanza>,
+        expected_fence: &SmClaimFence,
+    ) -> Result<(), SmPersistenceError> {
+        self.store_snapshot_under(session, unacked, None, false, expected_fence)
             .await
             .map(|_| ())
     }
@@ -1483,41 +1556,17 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
         stream_id: &SmSessionId,
     ) -> Result<u32, SmPersistenceError> {
         let fence = self.claim_fence_for(stream_id).await?;
-        let mut tx = self
-            .db
-            .begin()
+        self.record_promotion_failure_with_fence_inner(stream_id, &fence)
             .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let _identity_guard = self.assert_fenced(&mut tx, stream_id, &fence).await?;
-        let mut rows = tx
-            .query(
-                "UPDATE sm_sessions SET promotion_attempts = promotion_attempts + 1 \
-                 WHERE stream_id = ? RETURNING promotion_attempts",
-                crate::db_params![stream_id.as_str().to_string()],
-            )
+    }
+
+    async fn record_promotion_failure_with_fence(
+        &self,
+        stream_id: &SmSessionId,
+        expected_fence: &SmClaimFence,
+    ) -> Result<u32, SmPersistenceError> {
+        self.record_promotion_failure_with_fence_inner(stream_id, expected_fence)
             .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        let count = match rows
-            .next()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?
-        {
-            Some(row) => row
-                .get::<i64>(0)
-                .map_err(|e| SmPersistenceError::Other(e.to_string()))?,
-            None => {
-                // No row for this stream_id: mirrors the portable impl's
-                // `updated == 0 => Ok(0)` short-circuit.
-                tx.commit()
-                    .await
-                    .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-                return Ok(0);
-            }
-        };
-        tx.commit()
-            .await
-            .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        Ok(u32::try_from(count).unwrap_or(u32::MAX))
     }
 
     /// ADR-0017 Phase 3 Slice 5 debt (a): the module doc's "Epoch side

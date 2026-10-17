@@ -23,6 +23,7 @@ use xmpp_parsers::message::Message;
 
 fn detached_session(stream_id: &str, jid: &str) -> DetachedSession {
     DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: jid.to_string(),
         jid: jid.parse().expect("valid full jid"),
@@ -158,7 +159,7 @@ async fn promotion_inventory_late_append_prevents_old_snapshot_confirmation() {
     let receipt = chrono::Utc::now();
     registry
         .append_promotion_stanza(
-            &session.stream_id,
+            &session,
             &chat_stanza(&session.jid, "late suffix"),
             12,
             receipt,
@@ -303,11 +304,18 @@ async fn promotion_inventory_append_advances_a_wrapped_sequence_once() {
         .await
         .expect("register");
     let stanza = chat_stanza(&session.jid, "wrapped suffix");
-    for _ in 0..2 {
-        registry
-            .append_promotion_stanza(&session.stream_id, &stanza, 0, chrono::Utc::now())
-            .await
-            .expect("append");
+    let receipt = chrono::Utc::now();
+    for expected in [
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::Appended,
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::AlreadyRecorded,
+    ] {
+        assert_eq!(
+            registry
+                .append_promotion_stanza(&session, &stanza, 0, receipt)
+                .await
+                .expect("append"),
+            expected
+        );
     }
     let recovered = registry
         .register_promotion_session(&session)
@@ -422,7 +430,7 @@ async fn promotion_inventory_failed_suffix_survives_registration_and_reinsertion
     let stanza = chat_stanza(&capture.jid, "retained failed suffix");
     storage.reject_append.store(true, Ordering::SeqCst);
     assert!(registry
-        .append_promotion_stanza(&capture.stream_id, &stanza, 12, chrono::Utc::now())
+        .append_promotion_stanza(&capture, &stanza, 12, chrono::Utc::now())
         .await
         .is_err());
     capture.outbound_count = 12;
@@ -635,8 +643,11 @@ async fn promotion_inventory_stale_abandonment_preserves_a_newer_local_fence() {
         .release_exact(&entity, &owner, prior.epoch())
         .await
         .expect("retire original claim");
+    let mut replacement_capture = original.clone();
+    replacement_capture.promotion_custody =
+        waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
     registry
-        .store_session(original.clone())
+        .store_session(replacement_capture.clone())
         .await
         .expect("adopt replacement");
     let replacement = registry
@@ -644,7 +655,7 @@ async fn promotion_inventory_stale_abandonment_preserves_a_newer_local_fence() {
         .expect("new fence");
     assert_ne!(replacement.epoch(), prior.epoch());
     registry
-        .reinsert_for_retry(original.clone())
+        .reinsert_for_retry(replacement_capture.clone())
         .await
         .expect("retain replacement custody");
 
@@ -809,7 +820,10 @@ impl SmPersistenceStorage for BlockingFirstAtomicStore {
     async fn append_promotion_stanza(
         &self,
         stanza: PersistedUnackedStanza,
-    ) -> Result<(), SmPersistenceError> {
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome,
+        SmPersistenceError,
+    > {
         if self.reject_append.load(Ordering::SeqCst) {
             return Err(SmPersistenceError::Other(
                 "inventory append unavailable".to_owned(),
@@ -1045,6 +1059,16 @@ struct MislabelingStore {
 
 #[async_trait]
 impl SmPersistenceStorage for MislabelingStore {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: PersistedUnackedStanza,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::PromotionAppendOutcome,
+        SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError> {
         self.inner.upsert_session(session).await
     }
@@ -2947,4 +2971,52 @@ async fn xep0198_drained_custody_survives_eviction_before_snapshot() {
             .len(),
         1
     );
+}
+
+#[test]
+fn xep0198_public_detached_appends_preserve_thread_parent_and_replay_bytes() {
+    let mut session = detached_session("typed-thread-replay", "user@example.com/web");
+    let receipt_at = chrono::Utc::now();
+    let mut message = Message::new(Some(Jid::from(session.jid.clone())));
+    message.thread = Some(xmpp_parsers::message::Thread {
+        id: "conversation".to_owned(),
+        parent: Some("parent-conversation".to_owned()),
+    });
+    message.payloads.push(
+        minidom::Element::builder("thread", "urn:example:extension")
+            .append("extension-thread")
+            .build(),
+    );
+    let stanza = Stanza::Message(message);
+
+    session.record_detached_outbound(&stanza, receipt_at);
+    let first_replay = session.unacked_stanzas[0].stanza_xml.clone();
+    assert!(session.record_detached_outbound_at(13, &stanza, receipt_at));
+    assert!(!session.record_detached_outbound_at(13, &stanza, receipt_at));
+    assert_eq!(session.outbound_count, 13);
+    assert_eq!(session.unacked_stanzas.len(), 2);
+    assert_eq!(session.unacked_stanzas[0].stanza_xml, first_replay);
+    assert_eq!(session.stanzas_to_resend(11), vec![first_replay; 2]);
+
+    for entry in session.unacked_stanzas {
+        assert_eq!(entry.original_receipt_at, receipt_at);
+        let element = entry
+            .stanza_xml
+            .parse::<minidom::Element>()
+            .expect("valid replay XML");
+        let threads: Vec<_> = element
+            .children()
+            .filter(|child| child.name() == "thread" && child.ns() == "jabber:client")
+            .collect();
+        assert_eq!(threads.len(), 1, "canonical thread must not be duplicated");
+        assert_eq!(threads[0].text(), "conversation");
+        assert_eq!(threads[0].attr("parent"), Some("parent-conversation"));
+        assert_eq!(
+            element
+                .get_child("thread", "urn:example:extension")
+                .expect("unrelated thread extension survives")
+                .text(),
+            "extension-thread"
+        );
+    }
 }

@@ -1435,6 +1435,8 @@ mod tests {
             .protocol
             .sm_session_registry
             .store_session(waddle_xmpp::stream_management::DetachedSession {
+                promotion_custody:
+                    waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
                 stream_id: "preview-stream-1".to_string(),
                 user_id: requester.to_string(),
                 jid: requester.clone(),

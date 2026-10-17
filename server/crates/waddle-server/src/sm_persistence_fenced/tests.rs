@@ -788,10 +788,27 @@ async fn promotion_inventory_append_and_metadata_updates_reject_a_stolen_exact_c
         .upsert_session(inventory.clone())
         .await
         .expect("register non-resumable inventory under the original claim");
-    f.fenced
-        .append_promotion_stanza(fixture_unacked(stream_id.as_str(), 13))
-        .await
-        .expect("append inventory suffix under its exact claim");
+    let stanza = fixture_unacked(stream_id.as_str(), 13);
+    assert_eq!(
+        f.fenced
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("append inventory suffix under its exact claim"),
+        PromotionAppendOutcome::Appended
+    );
+    assert_eq!(
+        f.fenced
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("idempotent fenced retry"),
+        PromotionAppendOutcome::AlreadyRecorded
+    );
+    let mut conflict = stanza;
+    conflict.original_receipt_at += chrono::Duration::milliseconds(1);
+    assert!(matches!(
+        f.fenced.append_promotion_stanza(conflict).await,
+        Err(SmPersistenceError::PromotionSequenceConflict { sequence: 13, .. })
+    ));
     let before = f
         .fenced
         .get_session(&stream_id)
@@ -1624,3 +1641,96 @@ async fn restore_from_persistence_hydrates_only_unclaimed_or_self_claimed_rows()
 }
 
 mod ingress_append;
+
+#[tokio::test]
+async fn promotion_mutations_never_replace_captured_fence_from_new_cache() {
+    for rotate_identity in [false, true] {
+        let Some(f) = fixture().await else { return };
+        let stream = SmSessionId::new("promotion-exact-capture");
+        let entity = Entity::new(EntityType::SmSession, stream.as_str());
+        let mut source = fixture_session(stream.as_str());
+        source.max_resume_time = Some(0);
+        source.max_resume_duration = StdDuration::ZERO;
+        f.fenced
+            .store_session_atomic(source.clone(), vec![fixture_unacked(stream.as_str(), 11)])
+            .await
+            .unwrap();
+        let old = f.fenced.claim_fence_for(&stream).await.unwrap();
+        f.claims
+            .release_exact(&entity, old.owner(), old.epoch())
+            .await
+            .unwrap();
+        let replacement_owner = if rotate_identity {
+            node_identity()
+        } else {
+            f.identity.clone()
+        };
+        let replacement_epoch = f
+            .claims
+            .ensure_claimed(&entity, &replacement_owner)
+            .await
+            .unwrap();
+        if rotate_identity {
+            f.shared_identity.rotate(replacement_owner.clone()).await;
+        }
+        f.fenced.evict_claim_cache(&stream, &old);
+        f.fenced.upsert_session(source.clone()).await.unwrap();
+        let replacement = SmClaimFence::new(replacement_owner, replacement_epoch);
+        assert_eq!(
+            f.fenced.claim_fence_for(&stream).await.unwrap(),
+            replacement
+        );
+        let mut stale_metadata = source.clone();
+        stale_metadata.inbound_count = 99;
+
+        assert!(matches!(
+            f.fenced
+                .upsert_promotion_session(stale_metadata.clone(), &old)
+                .await,
+            Err(SmPersistenceError::NotOwner { .. })
+        ));
+        assert!(matches!(
+            f.fenced
+                .store_promotion_session_atomic(stale_metadata, Vec::new(), &old)
+                .await,
+            Err(SmPersistenceError::NotOwner { .. })
+        ));
+        assert!(matches!(
+            f.fenced
+                .append_promotion_stanza_with_fence(fixture_unacked(stream.as_str(), 13), &old)
+                .await,
+            Err(SmPersistenceError::NotOwner { .. })
+        ));
+        assert!(matches!(
+            f.fenced
+                .delete_promotion_unacked(&stream, &[11], &old)
+                .await,
+            Err(SmPersistenceError::NotOwner { .. })
+        ));
+        assert!(matches!(
+            f.fenced
+                .record_promotion_failure_with_fence(&stream, &old)
+                .await,
+            Err(SmPersistenceError::NotOwner { .. })
+        ));
+        assert!(matches!(
+            f.fenced.delete_promotion_session(&stream, &old).await,
+            Err(SmPersistenceError::NotOwner { .. })
+        ));
+        let preserved = f.fenced.get_session(&stream).await.unwrap().unwrap();
+        assert_eq!(preserved.inbound_count, source.inbound_count);
+        assert_eq!(preserved.outbound_count, source.outbound_count);
+        assert_eq!(f.fenced.list_unacked(&stream).await.unwrap().len(), 1);
+        assert_eq!(
+            f.fenced
+                .record_promotion_failure_with_fence(&stream, &replacement)
+                .await
+                .unwrap(),
+            1
+        );
+        assert_eq!(
+            f.fenced.claim_fence_for(&stream).await.unwrap(),
+            replacement
+        );
+    }
+}

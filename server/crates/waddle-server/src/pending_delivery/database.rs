@@ -71,6 +71,12 @@ struct PendingDeliveryFencing {
     node_identity: SharedNodeIdentity,
 }
 
+/// New admissions may acquire; captured queues must use their original fence.
+enum PendingOriginAuthority<'a> {
+    AcquireCurrent,
+    Captured(Option<&'a SmClaimFence>),
+}
+
 /// Column values for one `pending_delivery` INSERT — the shared output of
 /// [`DatabasePendingDeliveryStorage::prepare_insert_row`], named rather
 /// than a bare tuple (clippy `type_complexity`) since both `insert` and
@@ -269,6 +275,7 @@ impl DatabasePendingDeliveryStorage {
         row: PendingRow,
         origin_stream_id: &str,
         prune_sequence: Option<u32>,
+        authority: PendingOriginAuthority<'_>,
     ) -> Result<InsertOutcome, PendingStorageError> {
         // Without clustered fencing the SM source may be in another
         // database. Commit a transfer receipt with the pending row so a
@@ -283,13 +290,21 @@ impl DatabasePendingDeliveryStorage {
         };
 
         let entity = Entity::new(EntityType::SmSession, origin_stream_id.to_string());
-        let identity = fencing.node_identity.current();
-        let epoch = fencing
-            .claim_store
-            .ensure_claimed(&entity, &identity)
-            .await
-            .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
-        let claim_fence = SmClaimFence::new(identity, epoch);
+        let claim_fence = match authority {
+            PendingOriginAuthority::Captured(Some(expected)) => expected.clone(),
+            PendingOriginAuthority::Captured(None) => {
+                return Err(PendingStorageError::NotOwner { entity });
+            }
+            PendingOriginAuthority::AcquireCurrent => {
+                let identity = fencing.node_identity.current();
+                let epoch = fencing
+                    .claim_store
+                    .ensure_claimed(&entity, &identity)
+                    .await
+                    .map_err(|error| claim_error_to_pending_storage_error(error, entity.clone()))?;
+                SmClaimFence::new(identity, epoch)
+            }
+        };
         let mut tx = self
             .db
             .begin()
@@ -380,9 +395,9 @@ impl DatabasePendingDeliveryStorage {
         // takes its writer lock when beginning this transaction.
         let receipt_inserted = tx
             .execute(
-                "INSERT INTO pending_delivery_sm_promotions (origin_stream_id, sequence) \
-                 VALUES (?, ?) ON CONFLICT (origin_stream_id, sequence) DO NOTHING",
-                crate::db_params![origin_stream_id.to_string(), i64::from(sequence)],
+                "INSERT INTO pending_delivery_sm_promotions (origin_stream_id, sequence, created_at_ms) \
+                 VALUES (?, ?, ?) ON CONFLICT (origin_stream_id, sequence) DO NOTHING",
+                crate::db_params![origin_stream_id.to_string(), i64::from(sequence), crate::time::now_ms()],
             )
             .await
             .map_err(|error| PendingStorageError::Other(error.to_string()))?;
@@ -623,8 +638,13 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         row: PendingRow,
         origin_stream_id: &str,
     ) -> Result<InsertOutcome, PendingStorageError> {
-        self.insert_under_origin_fence(row, origin_stream_id, None)
-            .await
+        self.insert_under_origin_fence(
+            row,
+            origin_stream_id,
+            None,
+            PendingOriginAuthority::AcquireCurrent,
+        )
+        .await
     }
 
     #[instrument(
@@ -638,20 +658,84 @@ impl PendingDeliveryStorage for DatabasePendingDeliveryStorage {
         origin_stream_id: &str,
         sequence: u32,
     ) -> Result<InsertOutcome, PendingStorageError> {
-        self.insert_under_origin_fence(row, origin_stream_id, Some(sequence))
-            .await
+        self.insert_under_origin_fence(
+            row,
+            origin_stream_id,
+            Some(sequence),
+            PendingOriginAuthority::AcquireCurrent,
+        )
+        .await
+    }
+
+    async fn insert_promotion(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+        sequence: u32,
+        expected_fence: Option<&SmClaimFence>,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        self.insert_under_origin_fence(
+            row,
+            origin_stream_id,
+            Some(sequence),
+            PendingOriginAuthority::Captured(expected_fence),
+        )
+        .await
     }
 
     async fn confirm_promotion(
         &self,
         origin_stream_id: &SmSessionId,
     ) -> Result<(), PendingStorageError> {
+        // Fenced handoffs atomically prune SM rows and never create portable
+        // receipts. Avoid an extra round trip for every clustered completion.
+        if self.fencing.is_some() {
+            return Ok(());
+        }
         self.execute(
             "DELETE FROM pending_delivery_sm_promotions WHERE origin_stream_id = ?",
             crate::db_params![origin_stream_id.as_str().to_string()],
         )
         .await?;
         Ok(())
+    }
+
+    async fn promotion_receipt_sources_before(
+        &self,
+        created_before_ms: i64,
+        after: Option<&SmSessionId>,
+        limit: u32,
+    ) -> Result<Vec<SmSessionId>, PendingStorageError> {
+        if self.fencing.is_some() || limit == 0 {
+            return Ok(Vec::new());
+        }
+        let mut rows = self
+            .query(
+                "SELECT DISTINCT origin_stream_id FROM pending_delivery_sm_promotions \
+             WHERE created_at_ms <= ? AND origin_stream_id > ? \
+             ORDER BY origin_stream_id LIMIT ?",
+                crate::db_params![
+                    created_before_ms,
+                    after
+                        .map(SmSessionId::as_str)
+                        .unwrap_or_default()
+                        .to_owned(),
+                    i64::from(limit)
+                ],
+            )
+            .await?;
+        let mut sources = Vec::new();
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| PendingStorageError::Other(error.to_string()))?
+        {
+            let source: String = row
+                .get(0)
+                .map_err(|error| PendingStorageError::Other(error.to_string()))?;
+            sources.push(SmSessionId::new(source));
+        }
+        Ok(sources)
     }
 
     async fn insert_ingress_custody(

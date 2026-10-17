@@ -45,7 +45,7 @@ async fn durable_inventory(fixture: IngressFixture) {
         .unwrap(),
         SmEvictionPath::DirectOutbound,
     );
-    let session = sm
+    let mut session = sm
         .to_detached_session(DetachedSessionSnapshot {
             user_id: "alice".to_owned(),
             jid: "alice@example.com/web".parse().unwrap(),
@@ -61,15 +61,12 @@ async fn durable_inventory(fixture: IngressFixture) {
             pending_subscribes_flushed: false,
         })
         .unwrap();
+    session.promotion_custody =
+        waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
     let stream = SmSessionId::new(&session.stream_id);
     let inventory = registry.register_promotion_session(&session).await.unwrap();
     registry
-        .append_promotion_stanza(
-            &session.stream_id,
-            &message("suffix"),
-            2,
-            chrono::Utc::now(),
-        )
+        .append_promotion_stanza(&session, &message("suffix"), 2, chrono::Utc::now())
         .await
         .unwrap();
     let persisted = storage.get_session(&stream).await.unwrap().unwrap();
@@ -92,12 +89,7 @@ async fn durable_inventory(fixture: IngressFixture) {
         .await
         .unwrap();
     assert!(registry
-        .append_promotion_stanza(
-            &session.stream_id,
-            &message("rolled-back"),
-            3,
-            chrono::Utc::now()
-        )
+        .append_promotion_stanza(&session, &message("rolled-back"), 3, chrono::Utc::now())
         .await
         .is_err());
     assert_eq!(
@@ -121,12 +113,7 @@ async fn durable_inventory(fixture: IngressFixture) {
         .await
         .unwrap();
     registry
-        .append_promotion_stanza(
-            &session.stream_id,
-            &message("suffix"),
-            2,
-            chrono::Utc::now(),
-        )
+        .append_promotion_stanza(&session, &message("suffix"), 2, chrono::Utc::now())
         .await
         .unwrap();
     assert_eq!(
@@ -160,6 +147,8 @@ async fn durable_inventory(fixture: IngressFixture) {
     // from the strict durable retraction sweep.
     let mut poisoned = session.clone();
     poisoned.stream_id = "poisoned-promotion".to_owned();
+    poisoned.promotion_custody =
+        waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed();
     let poison_registry = InMemorySmSessionRegistry::new().with_persistence(storage.clone());
     poison_registry
         .register_promotion_session(&poisoned)

@@ -1,4 +1,6 @@
 mod keyed_append;
+pub(super) mod promotion_custody;
+mod promotion_receipt_gc;
 
 use super::core::PendingClaimAcquisitionDisposition;
 use super::*;
@@ -99,13 +101,10 @@ fn groupchat_target(stanza_id: &str, room: &str) -> crate::tombstone::TombstoneT
     }
 }
 
-fn message_stanza_xml_with_id(id: String) -> String {
+fn message_stanza_with_id(id: String) -> Stanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message.id = Some(xmpp_parsers::message::Id(id));
-    let element = Stanza::Message(message).to_element();
-    let mut buffer = Vec::new();
-    element.write_to(&mut buffer).expect("serialize message");
-    String::from_utf8(buffer).expect("message stanza xml is utf-8")
+    Stanza::Message(message)
 }
 
 fn make_test_session(stream_id: &str) -> DetachedSession {
@@ -114,6 +113,7 @@ fn make_test_session(stream_id: &str) -> DetachedSession {
 
 fn make_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
     DetachedSession {
+        promotion_custody: crate::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: "user@example.com".to_string(),
         jid,
@@ -1025,6 +1025,15 @@ async fn pending_claim_retry_limit_is_shared_across_acquisitions_and_releases() 
         crate::ownership::SharedNodeIdentity::new(me.clone()),
     );
     let acquisition_id = "budgeted-acquisition";
+    // The retry resolves a committed acquisition whose response was lost;
+    // it must never create a new claim merely to reconcile the budget slot.
+    store
+        .acquire(
+            &crate::ownership::Entity::new(crate::ownership::EntityType::SmSession, acquisition_id),
+            &me,
+        )
+        .await
+        .expect("committed ambiguous acquisition");
     assert!(registry.reserve_claim_fence_capacity(acquisition_id));
     registry.sessions.write().expect("sessions").insert(
         acquisition_id.to_string(),
@@ -2508,7 +2517,7 @@ fn detached_session_overflow_blocks_resume_for_older_client_h() {
     for sequence in 1..=(crate::stream_management::DEFAULT_MAX_UNACKED_QUEUE_SIZE as u32 + 1) {
         session.record_detached_outbound_at(
             sequence,
-            message_stanza_xml_with_id(format!("m{sequence}")),
+            &message_stanza_with_id(format!("m{sequence}")),
             Utc::now(),
         );
     }
@@ -3445,6 +3454,7 @@ fn realistic_test_session(stream_id: &str) -> DetachedSession {
 
 fn realistic_test_session_for_jid(stream_id: &str, jid: FullJid) -> DetachedSession {
     DetachedSession {
+        promotion_custody: crate::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: stream_id.to_string(),
         user_id: "user@example.com".to_string(),
         jid,
@@ -4445,6 +4455,16 @@ impl GatedSnapshotPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,
@@ -5529,7 +5549,7 @@ async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
                 |_| true,
                 |session| {
                     session.record_detached_outbound(
-                        message_stanza_xml_with_id("race-append".to_string()),
+                        &message_stanza_with_id("race-append".to_string()),
                         Utc::now(),
                     );
                     true
@@ -6173,6 +6193,8 @@ struct FailingSnapshotPersistence {
     inner: super::super::persistence::InMemorySmPersistence,
     fail_snapshots: std::sync::atomic::AtomicBool,
     fail_reads: std::sync::atomic::AtomicBool,
+    get_session_calls: std::sync::atomic::AtomicUsize,
+    list_unacked_calls: std::sync::atomic::AtomicUsize,
 }
 
 impl FailingSnapshotPersistence {
@@ -6181,12 +6203,24 @@ impl FailingSnapshotPersistence {
             inner: super::super::persistence::InMemorySmPersistence::new(),
             fail_snapshots: std::sync::atomic::AtomicBool::new(false),
             fail_reads: std::sync::atomic::AtomicBool::new(false),
+            get_session_calls: std::sync::atomic::AtomicUsize::new(0),
+            list_unacked_calls: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 }
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,
@@ -6201,6 +6235,8 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         Option<super::super::persistence::PersistedSession>,
         super::super::persistence::SmPersistenceError,
     > {
+        self.get_session_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.get_session(stream_id).await
     }
 
@@ -6241,6 +6277,8 @@ impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersiste
         Vec<super::super::persistence::PersistedUnackedStanza>,
         super::super::persistence::SmPersistenceError,
     > {
+        self.list_unacked_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.inner.list_unacked(stream_id).await
     }
 
@@ -6964,6 +7002,16 @@ impl GatedGetSessionPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,
@@ -7805,6 +7853,16 @@ impl ScopedProbePersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for ScopedProbePersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: super::super::persistence::PersistedUnackedStanza,
+    ) -> Result<
+        super::super::persistence::PromotionAppendOutcome,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: super::super::persistence::PersistedSession,

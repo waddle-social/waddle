@@ -205,6 +205,8 @@ async fn ingress_append_authority(
             Some(rx)
         } else {
             sm.store_session(DetachedSession {
+                promotion_custody:
+                    waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
                 stream_id: recipient.to_string(),
                 user_id: recipient.to_bare().to_string(),
                 jid: recipient.clone(),

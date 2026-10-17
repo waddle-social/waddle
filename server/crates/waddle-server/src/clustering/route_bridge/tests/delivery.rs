@@ -1220,6 +1220,8 @@ async fn bare_presence_direct_drops_blocked_sender_before_detached_replay() {
     services
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: detached_stream.to_string(),
             user_id: target_bare().to_string(),
             jid: target_full(),
@@ -1566,6 +1568,8 @@ async fn remote_full_jid_route_queues_detached_delivery() {
     services
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "remote-direct-detached-stream".to_string(),
             user_id: target_bare().to_string(),
             jid: target_full(),
@@ -1703,6 +1707,8 @@ pub(crate) async fn remote_carbon_owner_reply_with_ingress(
     services
         .sm_session_registry
         .store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: "remote-carbon-detached-stream".to_string(),
             user_id: owner.to_string(),
             jid: detached_target.clone(),

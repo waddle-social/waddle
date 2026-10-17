@@ -986,7 +986,8 @@ async fn cleanup_connection_shutdown_inner(
                 return promote_terminal_recovery(state, outbound_rx, &jid, conn).await;
             }
         }
-        if let Some(detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) {
+        if let Some(mut detached) = conn.sm_state.to_detached_session(detached_snapshot.clone()) {
+            detached.promotion_custody = promotion_capture_custody(conn);
             if conn.sm_recovery_required {
                 // The batch writer stopped before accepting the unwritten
                 // tail into the capped SM queue.  Persisting a resumable
@@ -1016,7 +1017,10 @@ async fn cleanup_connection_shutdown_inner(
                     outbound_rx,
                     &jid,
                     conn,
-                    vec![detached],
+                    vec![crate::sm_promotion::PromotionSessionGuard::new(
+                        &state.deps.protocol.sm_session_registry,
+                        detached,
+                    )],
                     TerminalRowRecovery::default(),
                     TerminalRouteRemoval::NotAttempted,
                 )
@@ -1031,7 +1035,10 @@ async fn cleanup_connection_shutdown_inner(
                         outbound_rx,
                         &jid,
                         conn,
-                        vec![detached],
+                        vec![crate::sm_promotion::PromotionSessionGuard::new(
+                            &state.deps.protocol.sm_session_registry,
+                            detached,
+                        )],
                         TerminalRowRecovery::default(),
                         TerminalRouteRemoval::NotAttempted,
                     )
@@ -1634,8 +1641,8 @@ enum TerminalRouteRemoval {
     Attempted(Option<(bool, std::sync::Arc<std::sync::atomic::AtomicBool>)>),
 }
 
-struct TerminalRecoverySessionResult {
-    session: waddle_xmpp::stream_management::DetachedSession,
+struct TerminalRecoverySessionResult<'a> {
+    custody: crate::sm_promotion::PromotionSessionGuard<'a>,
     released_pending_rows: bool,
     queued_pending_rows: bool,
     release_failed_pending_rows: bool,
@@ -1751,6 +1758,17 @@ async fn promote_terminal_recovery(
     .await
 }
 
+fn promotion_capture_custody(
+    conn: &WsConnState,
+) -> waddle_xmpp::stream_management::PromotionCaptureCustody {
+    match conn.sm_ingress_fence.as_ref() {
+        Some(fence) => {
+            waddle_xmpp::stream_management::PromotionCaptureCustody::claimed(fence.clone())
+        }
+        None => waddle_xmpp::stream_management::PromotionCaptureCustody::unproven(),
+    }
+}
+
 async fn promote_terminal_recovery_inner(
     state: &WebSocketState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
@@ -1763,23 +1781,15 @@ async fn promote_terminal_recovery_inner(
         super::stream_management::defer_superseded_sm_claim(state, &conn.sm_state);
         return ConnectionShutdownOutcome::NotPersisted;
     };
+    detached.promotion_custody = promotion_capture_custody(conn);
     // Capture every already-recorded terminal frame before any backend await.
     capture_terminal_recovery_backlog(conn, &mut detached, detached_snapshot);
     let mut custody = crate::sm_promotion::PromotionSessionGuard::new(
         &state.deps.protocol.sm_session_registry,
         detached,
     );
-    let inventory_ready = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .register_promotion_session(custody.session())
-        .await
-    {
-        Ok(inventory) => {
-            *custody.session_mut() = inventory;
-            true
-        }
+    let inventory_ready = match custody.register_inventory().await {
+        Ok(()) => true,
         Err(error) => {
             warn!(stream_id = %custody.session().stream_id, %error,
                 "terminal cleanup could not establish durable custody; deferring source release");
@@ -1833,7 +1843,7 @@ async fn promote_terminal_recovery_inner(
         state,
         outbound_rx,
         conn,
-        custody.session().clone(),
+        custody,
         terminal_route_removed.is_some()
             && !row_release.ownership_unknown
             && !released_redrive_aborted
@@ -1844,13 +1854,12 @@ async fn promote_terminal_recovery_inner(
             && !row_release.release_failed_known_rows,
     )
     .await;
-    custody.complete();
     refuse_detach_without_principal(
         state,
         outbound_rx,
         jid,
         conn,
-        vec![recovery.session],
+        vec![recovery.custody],
         TerminalRowRecovery {
             released_rows: row_release.released_rows || recovery.released_pending_rows,
             release_failed_known_rows: row_release.release_failed_known_rows
@@ -2270,37 +2279,17 @@ fn terminal_recovery_snapshot(
 /// keeping the recorded prefix and dropping later replayable stanzas once the
 /// terminal cap is full. Keeping one session per stream preserves the
 /// promotion helper's retry identity invariant.
-async fn terminal_recovery_session(
+async fn terminal_recovery_session<'a>(
     state: &WebSocketState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     conn: &mut WsConnState,
-    detached: waddle_xmpp::stream_management::DetachedSession,
+    mut custody: crate::sm_promotion::PromotionSessionGuard<'a>,
     can_promote_incrementally: bool,
-) -> TerminalRecoverySessionResult {
+) -> TerminalRecoverySessionResult<'a> {
     outbound_rx.close();
     conn.ensure_terminal_sm_recovery();
-    let mut custody = crate::sm_promotion::PromotionSessionGuard::new(
-        &state.deps.protocol.sm_session_registry,
-        detached,
-    );
+    let inventory_ready = custody.inventory_registered();
     let detached = custody.session_mut();
-    let inventory_ready = match state
-        .deps
-        .protocol
-        .sm_session_registry
-        .register_promotion_session(detached)
-        .await
-    {
-        Ok(inventory) => {
-            *detached = inventory;
-            true
-        }
-        Err(error) => {
-            warn!(stream_id = %detached.stream_id, %error,
-                "terminal recovery could not register durable inventory; deferring promotion");
-            false
-        }
-    };
     let blocklist = match super::replay::load_terminal_recovery_blocklist(
         state,
         &detached.jid.to_bare(),
@@ -2357,15 +2346,10 @@ async fn terminal_recovery_session(
         },
     )
     .await;
-    detached
-        .unacked_stanzas
-        .extend(drain_outcome.retained_overflow);
     detached.outbound_count = drain_outcome.outbound_count;
     queued_pending_rows |= drain_outcome.queued_pending_rows;
-    let session = detached.clone();
-    custody.complete();
     TerminalRecoverySessionResult {
-        session,
+        custody,
         released_pending_rows: drain_outcome.released_pending_rows,
         queued_pending_rows,
         release_failed_pending_rows: drain_outcome.release_failed_pending_rows,
@@ -2381,9 +2365,10 @@ async fn terminal_recovery_session(
 /// terminal backlog and accepted channel tail before the janitor's retry.
 pub(super) async fn persist_terminal_suffix_entry(
     state: &WebSocketState,
-    stream_id: &str,
+    capture: &mut waddle_xmpp::stream_management::DetachedSession,
     stanza: &waddle_xmpp::stream_management::DetachedUnackedStanza,
-) -> bool {
+) -> Option<waddle_xmpp::stream_management::persistence::PromotionAppendOutcome> {
+    let stream_id = &capture.stream_id;
     let Some(typed) = stanza
         .stanza_xml
         .parse::<xmpp_parsers::minidom::Element>()
@@ -2392,25 +2377,29 @@ pub(super) async fn persist_terminal_suffix_entry(
     else {
         warn!(%stream_id, sequence = stanza.sequence,
             "terminal inventory entry is not a valid stanza");
-        return false;
+        return None;
     };
     match state
         .deps
         .protocol
         .sm_session_registry
-        .append_promotion_stanza(
-            stream_id,
-            &typed,
-            stanza.sequence,
-            stanza.original_receipt_at,
-        )
+        .append_promotion_stanza(capture, &typed, stanza.sequence, stanza.original_receipt_at)
         .await
     {
-        Ok(()) => true,
+        Ok(outcome) => {
+            if outcome
+                == waddle_xmpp::stream_management::persistence::PromotionAppendOutcome::Retired
+            {
+                capture
+                    .unacked_stanzas
+                    .retain(|entry| entry.sequence != stanza.sequence);
+            }
+            Some(outcome)
+        }
         Err(error) => {
             warn!(%stream_id, sequence = stanza.sequence, %error,
                 "terminal recovery could not persist its suffix; retaining for retry");
-            false
+            None
         }
     }
 }
@@ -2468,15 +2457,15 @@ async fn promote_terminal_recovery_prefix(
             redrive_aborted: false,
         };
     }
-    let entries = std::mem::take(&mut detached.unacked_stanzas);
-    let mut retained = Vec::new();
+    // The sole outer guard keeps every unstarted entry through backend awaits.
+    // Remove a prefix entry only once its canonical source row is retired.
+    let entries = detached.unacked_stanzas.clone();
     let mut queued_rows = false;
     let mut halted = false;
     let mut redrive_aborted = false;
     for entry in entries {
         if halted {
-            retained.push(entry);
-            continue;
+            break;
         }
         let blocklist =
             match super::replay::load_terminal_recovery_blocklist(state, &detached.jid.to_bare())
@@ -2491,7 +2480,6 @@ async fn promote_terminal_recovery_prefix(
                         "terminal recovery prefix could not refresh blocklist; retaining the \
                          remaining prefix for retry"
                     );
-                    retained.push(entry);
                     halted = true;
                     continue;
                 }
@@ -2516,6 +2504,11 @@ async fn promote_terminal_recovery_prefix(
             },
         )
         .await;
+        if !summary.has_storage_failure() {
+            detached
+                .unacked_stanzas
+                .retain(|queued| queued.sequence != entry.sequence);
+        }
         crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
             &state.deps.protocol.sm_session_registry,
             &state.deps.protocol.pending_delivery_storage,
@@ -2524,7 +2517,6 @@ async fn promote_terminal_recovery_prefix(
         )
         .await;
         if summary.has_storage_failure() {
-            retained.push(entry);
             halted = true;
             continue;
         }
@@ -2542,7 +2534,6 @@ async fn promote_terminal_recovery_prefix(
             }
         }
     }
-    detached.unacked_stanzas = retained;
     TerminalPrefixPromotion {
         settled: !halted && detached.unacked_stanzas.is_empty(),
         queued_rows,
@@ -2591,38 +2582,18 @@ async fn refuse_detach_without_principal(
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     jid: &FullJid,
     conn: &mut WsConnState,
-    detached_sessions: Vec<waddle_xmpp::stream_management::DetachedSession>,
+    mut detached_sessions: Vec<crate::sm_promotion::PromotionSessionGuard<'_>>,
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
-    let mut custody = crate::sm_promotion::PromotionBatchGuard::new(
-        &state.deps.protocol.sm_session_registry,
-        Vec::new(),
-    );
-    let mut registered = Vec::with_capacity(detached_sessions.len());
     let mut inventory_failed = false;
-    for session in detached_sessions {
-        match state
-            .deps
-            .protocol
-            .sm_session_registry
-            .register_promotion_session(&session)
-            .await
-        {
-            Ok(inventory) => {
-                custody.push(inventory.clone());
-                registered.push(inventory);
-            }
-            Err(error) => {
-                warn!(stream_id = %session.stream_id, %error,
-                    "terminal detach could not register promotion inventory; retaining source");
-                inventory_failed = true;
-                custody.push(session.clone());
-                registered.push(session);
-            }
+    for custody in &mut detached_sessions {
+        if let Err(error) = custody.register_inventory().await {
+            warn!(stream_id = %custody.session().stream_id, %error,
+                "terminal detach could not register promotion inventory; retaining source");
+            inventory_failed = true;
         }
     }
-    let detached_sessions = registered;
     if !inventory_failed {
         let _ = forget_terminal_ingress_stream_and_wait(state, &conn.sm_state).await;
     }
@@ -2673,16 +2644,13 @@ async fn refuse_detach_without_principal(
         // of promotion and hand it to the SM-expiry janitor, whose retry
         // pass re-runs discovery and the re-drive before promoting.
         let mut conn_stream_retrying = false;
-        for session in detached_sessions {
+        for mut retry_guard in detached_sessions {
+            let session = retry_guard.session().clone();
             let is_conn_stream = conn
                 .sm_state
                 .stream_id
                 .as_deref()
                 .is_some_and(|stream_id| stream_id == session.stream_id);
-            let mut retry_guard = crate::sm_promotion::PromotionSessionGuard::new(
-                &state.deps.protocol.sm_session_registry,
-                session.clone(),
-            );
             let retained = if crate::sm_promotion::reinsert_failed_session_for_retry(
                 &state.deps.protocol.sm_session_registry,
                 session,
@@ -2698,7 +2666,7 @@ async fn refuse_detach_without_principal(
         }
         (conn_stream_retrying, false)
     } else {
-        let outcome = crate::sm_promotion::promote_displaced_sessions(
+        let outcome = crate::sm_promotion::promote_guarded_sessions(
             detached_sessions,
             crate::sm_promotion::DisplacedPromotionDeps {
                 sm_registry: &state.deps.protocol.sm_session_registry,
@@ -2725,8 +2693,6 @@ async fn refuse_detach_without_principal(
             outcome.queued_pending_rows(),
         )
     };
-    // Each session has transferred into confirmed or retry custody.
-    while custody.pop().is_some() {}
     if row_recovery.queued_pending_rows || promotion_queued_rows {
         // Rows promotion freshly queued while a replacement bound mid-await
         // (spending its once-only offline flush) are already durable and are

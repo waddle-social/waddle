@@ -1443,6 +1443,14 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SmPersistenceStorage for DelayedGetSessionPersistence {
+        async fn append_promotion_stanza(
+            &self,
+            stanza: PersistedUnackedStanza,
+        ) -> Result<crate::stream_management::persistence::PromotionAppendOutcome, SmPersistenceError>
+        {
+            self.inner.append_promotion_stanza(stanza).await
+        }
+
         async fn upsert_session(
             &self,
             session: PersistedSession,
@@ -1678,6 +1686,7 @@ mod tests {
     /// — its field values are otherwise unused by that test.
     fn make_test_placeholder_session(stream_id: &str, jid: &jid::FullJid) -> DetachedSession {
         DetachedSession {
+            promotion_custody: crate::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: stream_id.to_string(),
             user_id: jid.to_bare().to_string(),
             jid: jid.clone(),

@@ -34,6 +34,21 @@ The final lifecycle repair passed 234 focused registry, shutdown, expiry, self-f
 
 ## Remaining limits
 
-A crash after canonical source deletion but before portable receipt cleanup can retain content-free origin/sequence receipts. This affects storage housekeeping, not payload durability. Historical production row contents and post-deploy quota telemetry cannot be established by local tests.
+A crash or transient receipt-delete failure retains content-free origin/sequence receipts until the bounded janitor proves both canonical source absence and absence of local custody. Source-read errors preserve the receipts. Historical production row contents and post-deploy quota telemetry remain tracked in #1971 and cannot be established by local tests; #1427 stays open.
 
-Review also identified a pre-existing, separate expired-during-resume completion path that deletes its source without promotion. This change covers promotion custody transitions; expired-resume completion remains a follow-up rather than expanding the current four issues.
+Review also identified a pre-existing, separate expired-during-resume completion path that deletes its source without promotion. This change covers promotion custody transitions; expired-resume completion is tracked in #1972.
+
+## PR review repair plan
+
+1. Bind every captured queue and clone to its original claim; reject stale captures after demotion, successor completion, and identity rotation. Keep explicit fresh-source admission cancellation-safe and single-use.
+2. Complete the public typed append boundary and preserve canonical thread/replay serialization. Make atomic append outcomes explicit and reject conflicting sequence reuse.
+3. Add timestamped portable receipts, serialized/additive bootstrap, source-proven orphan cleanup, and completion-path coverage. Never expire receipts solely by age.
+4. Narrow senderless exclusions to audited server projection classes, durably hand quota errors to offline local senders, and exercise the production age-out sweep and exported metric.
+5. Simplify repeated registration and claim-loss handling under the existing regression coverage. Reuse canonical session and receipt APIs; add no dependencies.
+6. Keep #1427 open for historical production-row classification and post-deploy telemetry. Track expired-resume completion separately. Reply to each addressed review item with its implementation and evidence.
+
+Capture authority travels with every queue and clone. Ordinary captures retain an immutable fence; only captures installed on the registry-owned source before a specific resume acquisition share that attempt's result. Unknown results are reconciled read-only, without replaying acquisition. Cancellation can retain a matching handoff without granting it permission to perform effects.
+
+Every fenced promotion mutation receives the captured owner and epoch directly. Terminal recovery carries one registered inventory guard through prefix and suffix handling; its final existing-source refresh must persist accepted suffixes newer than the durable watermark before replacing the guard's payload. It never admits a missing source.
+
+The frozen review repair passes 459 focused tests, including native PostgreSQL and SQLite, the actual stale-batch demotion/successor/recovery path, cancellation before an ambiguous resume result is published, all three receipt completion paths, and suffix-write failure followed by reopening pending storage. Formatting and independent adversarial review pass. Final workspace Clippy and CI run against the resulting commit.

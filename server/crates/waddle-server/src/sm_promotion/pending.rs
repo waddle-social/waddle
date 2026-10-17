@@ -20,12 +20,17 @@ pub(super) struct DeliveryHandles<'a> {
     pub registry: &'a ConnectionRegistry,
     pub user_registry: &'a ActorRef<UserRegistryActor>,
     pub allow_unfenced_effects: bool,
+    pub server_domain: &'a str,
 }
 
 /// Select the durable authority that must commit with a pending insertion.
 #[derive(Clone, Copy)]
 pub(super) enum PromotionOrigin<'a> {
-    Stream { stream_id: &'a str, sequence: u32 },
+    Stream {
+        stream_id: &'a str,
+        sequence: u32,
+        expected_fence: Option<&'a waddle_xmpp::stream_management::persistence::SmClaimFence>,
+    },
     IngressCustody(&'a waddle_xmpp::stream_management::persistence::PersistedIngressAppend),
 }
 
@@ -84,9 +89,10 @@ pub(super) async fn insert_pending(
         PromotionOrigin::Stream {
             stream_id,
             sequence,
+            expected_fence,
         } => {
             pending_storage
-                .insert_fenced_and_prune_unacked(row, stream_id, sequence)
+                .insert_promotion(row, stream_id, sequence, expected_fence)
                 .await
         }
         PromotionOrigin::IngressCustody(append) => {
@@ -110,29 +116,30 @@ pub(super) async fn insert_pending(
     match result {
         Ok(InsertOutcome::Inserted) => PromotedOutcome::Queued,
         Ok(InsertOutcome::QuotaExceeded) => {
-            if !delivery.allow_unfenced_effects {
-                // The SM replay row remains durable after quota rejection.
-                // A direct bounce cannot be committed with its retirement,
-                // so leave it for successor/retry instead of contradicting a
-                // later successful delivery.
-                return PromotedOutcome::StorageFailure(
-                    PromotionFailureReason::ClusteredQuotaExceeded,
-                );
+            if original_message.from.is_none() {
+                // No peer return target exists. Retire this nonbounceable
+                // account/server frame at admission failure, without a
+                // quota-bounce metric or a per-pass warning.
+                waddle_xmpp::telemetry::reliability::increment_sm_promotion_not_promotable();
+                return PromotedOutcome::NotPromotable;
             }
-            // XEP-0160 §3 step 3 + RFC 6120 §8.3 — bounce
-            // <service-unavailable/> to the sender. We use the same
-            // typed StanzaError builder the routing layer uses for
-            // intake-time quota overflow so the wire shape is
-            // identical.
-            waddle_xmpp::telemetry::reliability::increment_pending_delivery_quota_exceeded();
-            if send_quota_bounce(original_message, &recipient, delivery).await {
-                PromotedOutcome::Bounced
-            } else {
-                // The error never reached an accepted sink. Keep custody so
-                // a later pass can queue the message when quota is available.
-                PromotedOutcome::StorageFailure(PromotionFailureReason::QuotaBounceUnavailable)
+            // A return error is a replacement custody sink only once a live
+            // sender accepted it or its local offline queue committed it.
+            // Count the completed rejection once, not every failed retry.
+            let outcome = return_quota_bounce(
+                original_message,
+                pending_storage,
+                original_receipt_at,
+                delivery,
+                origin,
+            )
+            .await;
+            if matches!(outcome, PromotedOutcome::Bounced) {
+                waddle_xmpp::telemetry::reliability::increment_pending_delivery_quota_exceeded();
             }
+            outcome
         }
+
         Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { entity }) => {
             // FIX 3: this node's claim on the origin SM session was lost
             // (or never held) by the time the fenced write ran — another
@@ -165,11 +172,13 @@ pub(super) async fn insert_pending(
     }
 }
 
-async fn send_quota_bounce(
+async fn return_quota_bounce(
     original_message: &xmpp_parsers::message::Message,
-    recipient: &BareJid,
+    pending_storage: &Arc<dyn PendingDeliveryStorage>,
+    original_receipt_at: DateTime<Utc>,
     delivery: DeliveryHandles<'_>,
-) -> bool {
+    origin: PromotionOrigin<'_>,
+) -> PromotedOutcome {
     let error = xmpp_parsers::stanza_error::StanzaError::new(
         xmpp_parsers::stanza_error::ErrorType::Cancel,
         xmpp_parsers::stanza_error::DefinedCondition::ServiceUnavailable,
@@ -179,41 +188,72 @@ async fn send_quota_bounce(
     let bounce =
         waddle_xmpp::protocol::handlers::errors::message_error_reply(original_message, error);
     let Some(sender_jid) = bounce.to.clone() else {
-        return false;
+        return PromotedOutcome::StorageFailure(PromotionFailureReason::QuotaBounceUnavailable);
     };
-    let stanza = Stanza::Message(bounce);
-    let mut delivered = false;
-    match sender_jid.clone().try_into_full() {
-        Ok(full) => {
+    if delivery.allow_unfenced_effects {
+        let stanza = Stanza::Message(bounce.clone());
+        let targets = match sender_jid.clone().try_into_full() {
+            Ok(full) => vec![full],
+            Err(bare) => {
+                waddle_xmpp::registry::get_resources_for_user(delivery.user_registry, &bare).await
+            }
+        };
+        let mut delivered = false;
+        for full in targets {
             if matches!(
-                delivery.registry.send_to(&full, stanza).await,
+                delivery.registry.send_to(&full, stanza.clone()).await,
                 SendResult::Sent
             ) {
                 delivered = true;
             }
         }
-        Err(bare) => {
-            let resources =
-                waddle_xmpp::registry::get_resources_for_user(delivery.user_registry, &bare).await;
-            for full in resources {
-                if matches!(
-                    delivery.registry.send_to(&full, stanza.clone()).await,
-                    SendResult::Sent
-                ) {
-                    delivered = true;
-                }
-            }
+        if delivered {
+            return PromotedOutcome::Bounced;
         }
     }
-    if !delivered {
-        warn!(
-            recipient = %recipient,
-            sender = %sender_jid,
-            message_id = original_message.id.as_ref().map_or("", |id| id.0.as_str()),
-            "Q6 promotion: <service-unavailable/> bounce was not deliverable \
-             (remote sender or no bound resource) — XEP-0160 §3 step 3 \
-             conformance gap until s2s lands"
-        );
+
+    // Remote error routing awaits S2S. A local sender can reconnect to any
+    // resource: pending delivery is addressed by bare JID, retaining the
+    // typed error's original `to` while flush routes to the reconnecting resource.
+    // Do not recurse through DM classification: errors are normally not
+    // stored offline (XEP-0160 §4); this retained rejection is deliberate
+    // custody for the original message's XEP-0198 terminal outcome.
+    if sender_jid.node().is_none() || sender_jid.domain().as_str() != delivery.server_domain {
+        return PromotedOutcome::StorageFailure(PromotionFailureReason::QuotaBounceUnavailable);
     }
-    delivered
+    let PromotionOrigin::Stream {
+        stream_id,
+        sequence,
+        expected_fence,
+    } = origin
+    else {
+        // Ingress transfer is bound to its original recipient; it cannot
+        // atomically transfer custody into the sender's queue.
+        return PromotedOutcome::StorageFailure(PromotionFailureReason::CustodyQuotaExceeded);
+    };
+    let row = PendingRow {
+        id: PendingRowId::fresh(),
+        recipient: sender_jid.to_bare(),
+        original_receipt_at,
+        payload: PendingPayload::Transient(Box::new(bounce)),
+        flushed_in_session: None,
+        outbound_sequence: None,
+    };
+    match pending_storage
+        .insert_promotion(row, stream_id, sequence, expected_fence)
+        .await
+    {
+        Ok(InsertOutcome::Inserted) => PromotedOutcome::Bounced,
+        Ok(InsertOutcome::QuotaExceeded) => {
+            PromotedOutcome::StorageFailure(if delivery.allow_unfenced_effects {
+                PromotionFailureReason::QuotaBounceUnavailable
+            } else {
+                PromotionFailureReason::ClusteredQuotaExceeded
+            })
+        }
+        Err(waddle_xmpp::pending_delivery::storage::PendingStorageError::NotOwner { .. }) => {
+            PromotedOutcome::StorageFailure(PromotionFailureReason::ClaimLost)
+        }
+        Err(_) => PromotedOutcome::StorageFailure(PromotionFailureReason::PendingStorage),
+    }
 }

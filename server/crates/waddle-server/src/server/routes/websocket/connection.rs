@@ -3735,6 +3735,14 @@ mod tests {
         conn.registry_owner = Some(owner);
         conn.sm_state
             .enable("terminal-cap".to_string(), true, Some(300));
+        {
+            let registry = &state.deps.protocol.sm_session_registry;
+            let _authority = registry
+                .ensure_session_claim("terminal-cap")
+                .await
+                .expect("enabled stream claim");
+            conn.sm_ingress_fence = registry.current_sm_claim_fence("terminal-cap");
+        }
         conn.begin_terminal_sm_recovery();
         for sequence in 0..TERMINAL_RECOVERY_QUEUE_CAP {
             let mut prefix = xmpp_parsers::message::Message::new(Some(jid::Jid::from(jid.clone())));

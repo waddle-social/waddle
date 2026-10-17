@@ -279,6 +279,22 @@ pub trait PendingDeliveryStorage: Send + Sync {
         self.insert_fenced(row, origin_stream_id).await
     }
 
+    /// Transfer a captured promotion under its immutable source authority.
+    /// Fenced backends MUST assert the supplied exact owner and epoch in the
+    /// insertion transaction, rejecting missing authority without acquiring
+    /// a claim. The default is for portable/in-memory adapters only.
+    async fn insert_promotion(
+        &self,
+        row: PendingRow,
+        origin_stream_id: &str,
+        sequence: u32,
+        expected_fence: Option<&crate::stream_management::persistence::SmClaimFence>,
+    ) -> Result<InsertOutcome, PendingStorageError> {
+        let _ = expected_fence;
+        self.insert_fenced_and_prune_unacked(row, origin_stream_id, sequence)
+            .await
+    }
+
     /// Release transfer receipts after the canonical SM source has been
     /// durably retired. The caller must exclude further promotion attempts
     /// for this stream before confirming; pending delivery completion alone
@@ -289,6 +305,22 @@ pub trait PendingDeliveryStorage: Send + Sync {
     ) -> Result<(), PendingStorageError> {
         let _ = origin_stream_id;
         Ok(())
+    }
+
+    /// Enumerate a bounded page of portable receipt source IDs for orphan
+    /// recovery, before checking their independent canonical SM database.
+    /// `created_before_ms` only schedules work: it is never a TTL. The caller
+    /// must prove each source absent AND exclude retained/in-flight captures
+    /// before `confirm_promotion`. A failed source read must preserve receipts.
+    /// IDs are immutable and must never be reused for a new source lifecycle.
+    async fn promotion_receipt_sources_before(
+        &self,
+        created_before_ms: i64,
+        after: Option<&SmSessionId>,
+        limit: u32,
+    ) -> Result<Vec<SmSessionId>, PendingStorageError> {
+        let _ = (created_before_ms, after, limit);
+        Ok(Vec::new())
     }
 
     /// Atomically insert the pending row and mark its exact ingress allocation

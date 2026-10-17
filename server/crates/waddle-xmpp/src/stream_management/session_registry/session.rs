@@ -6,6 +6,7 @@ use xmpp_parsers::presence::Show;
 
 use super::super::sequence::sequence_gt;
 use super::DEFAULT_SESSION_TIMEOUT_SECS;
+use crate::Stanza;
 
 /// One unacknowledged stanza retained on a detached SM session.
 ///
@@ -34,11 +35,119 @@ pub struct DetachedUnackedStanza {
     pub original_receipt_at: DateTime<Utc>,
 }
 
+/// Immutable authority captured with an off-map queue. Fresh synthetic queues
+/// share the first acquired fence across clones, so an old clone cannot admit
+/// itself again after another copy has completed its source.
+#[derive(Debug, Clone)]
+pub enum PromotionCaptureCustody {
+    /// Existing stream captured under this exact owner and claim epoch.
+    Claimed(super::super::persistence::SmClaimFence),
+    /// A newly created source which has never held a claim.
+    NeverClaimed(std::sync::Arc<FreshPromotionAdmission>),
+    /// A reserved resume attempt may have obtained a new exact fence. Only
+    /// that operation can resolve this clone-shared result, never a cache lookup.
+    Acquiring(std::sync::Arc<FreshPromotionAdmission>),
+    /// Raw wire/storage snapshots do not themselves prove ownership.
+    Unproven,
+}
+
+impl PromotionCaptureCustody {
+    pub fn claimed(fence: super::super::persistence::SmClaimFence) -> Self {
+        Self::Claimed(fence)
+    }
+
+    pub fn never_claimed() -> Self {
+        Self::NeverClaimed(std::sync::Arc::new(FreshPromotionAdmission {
+            fence: std::sync::OnceLock::new(),
+            first_owner: std::sync::OnceLock::new(),
+            predecessor_fence: None,
+        }))
+    }
+
+    pub(super) fn acquiring(
+        owner: crate::ownership::NodeIdentity,
+        predecessor_fence: Option<super::super::persistence::SmClaimFence>,
+    ) -> Self {
+        Self::Acquiring(std::sync::Arc::new(FreshPromotionAdmission {
+            fence: std::sync::OnceLock::new(),
+            first_owner: std::sync::OnceLock::from(owner),
+            predecessor_fence,
+        }))
+    }
+
+    pub(super) fn same_acquisition(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Acquiring(left), Self::Acquiring(right)) => std::sync::Arc::ptr_eq(left, right),
+            _ => false,
+        }
+    }
+
+    pub(super) fn retains_predecessor_fence(
+        &self,
+        cached: Option<&super::super::persistence::SmClaimFence>,
+    ) -> bool {
+        matches!(self, Self::Acquiring(admission) if admission.predecessor_fence.as_ref() == cached)
+    }
+
+    pub fn unproven() -> Self {
+        Self::Unproven
+    }
+
+    /// The immutable claim that was captured with this queue, if established.
+    pub fn captured_fence(&self) -> Option<&super::super::persistence::SmClaimFence> {
+        self.fence()
+    }
+
+    pub(super) fn fence(&self) -> Option<&super::super::persistence::SmClaimFence> {
+        match self {
+            Self::Claimed(fence) => Some(fence),
+            Self::NeverClaimed(admission) | Self::Acquiring(admission) => admission.fence.get(),
+            Self::Unproven => None,
+        }
+    }
+
+    pub(super) fn bind_first_claim(&self, fence: super::super::persistence::SmClaimFence) {
+        if let Self::NeverClaimed(admission) | Self::Acquiring(admission) = self {
+            // The stream shard serializes fresh admission; a pre-existing
+            // value deliberately wins over a later incarnation.
+            let _ = admission.fence.set(fence);
+        }
+    }
+
+    pub(super) fn begin_first_claim(&self, owner: &crate::ownership::NodeIdentity) -> bool {
+        match self {
+            Self::NeverClaimed(admission) => admission.first_owner.set(owner.clone()).is_ok(),
+            Self::Claimed(_) | Self::Acquiring(_) | Self::Unproven => false,
+        }
+    }
+
+    pub(super) fn first_claim_owner(&self) -> Option<&crate::ownership::NodeIdentity> {
+        match self {
+            Self::NeverClaimed(admission) | Self::Acquiring(admission) => {
+                admission.first_owner.get()
+            }
+            Self::Claimed(_) | Self::Unproven => None,
+        }
+    }
+}
+
+/// Clone-shared admission state. An ambiguous first acquisition is reconciled
+/// read-only: retrying admission after an absent claim could resurrect a source
+/// already completed by a successor.
+#[derive(Debug)]
+pub struct FreshPromotionAdmission {
+    fence: std::sync::OnceLock<super::super::persistence::SmClaimFence>,
+    first_owner: std::sync::OnceLock<crate::ownership::NodeIdentity>,
+    predecessor_fence: Option<super::super::persistence::SmClaimFence>,
+}
+
 /// A detached stream management session.
 ///
 /// Contains all the state needed to resume a stream after disconnection.
 #[derive(Debug, Clone)]
 pub struct DetachedSession {
+    /// Authority bound to this capture, independent of mutable registry caches.
+    pub promotion_custody: PromotionCaptureCustody,
     /// The unique stream ID
     pub stream_id: String,
     /// Authenticated user identifier.
@@ -189,7 +298,7 @@ impl DetachedSession {
     /// promotion path for the XEP-0203 `<delay/>` stamp.
     pub fn record_detached_outbound(
         &mut self,
-        stanza_xml: String,
+        stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) {
         self.outbound_count = self.outbound_count.wrapping_add(1);
@@ -201,7 +310,7 @@ impl DetachedSession {
         self.unacked_stanzas.push(DetachedUnackedStanza {
             ingress_receipts: Vec::new(),
             sequence: self.outbound_count,
-            stanza_xml,
+            stanza_xml: stanza_to_replay_xml(stanza),
             original_receipt_at,
         });
     }
@@ -219,7 +328,7 @@ impl DetachedSession {
     pub fn record_detached_outbound_at(
         &mut self,
         sequence: u32,
-        stanza_xml: String,
+        stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> bool {
         if !sequence_gt(sequence, self.last_acked) {
@@ -238,7 +347,7 @@ impl DetachedSession {
         self.unacked_stanzas.push(DetachedUnackedStanza {
             ingress_receipts: Vec::new(),
             sequence,
-            stanza_xml,
+            stanza_xml: stanza_to_replay_xml(stanza),
             original_receipt_at,
         });
         self.unacked_stanzas
@@ -276,4 +385,14 @@ impl DetachedSession {
             self.replay_gap_through = Some(sequence);
         }
     }
+}
+
+/// Serialize only at the replay log boundary; previously captured entries stay byte-exact.
+fn stanza_to_replay_xml(stanza: &Stanza) -> String {
+    let mut buffer = Vec::new();
+    stanza
+        .to_element()
+        .write_to(&mut buffer)
+        .expect("serializing typed stanza should not fail");
+    String::from_utf8(buffer).expect("serialized typed stanza is UTF-8")
 }

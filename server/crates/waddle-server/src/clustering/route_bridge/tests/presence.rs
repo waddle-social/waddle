@@ -276,6 +276,7 @@ async fn resource_presence_local_never_touches_the_claim_store() {
 
 fn detached_session(resource: &jid::FullJid) -> DetachedSession {
     DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: resource.to_string(),
         user_id: resource.to_bare().to_string(),
         jid: resource.clone(),
@@ -311,6 +312,13 @@ type SmResult<T> = Result<T, waddle_xmpp::stream_management::persistence::SmPers
 
 #[async_trait::async_trait]
 impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for UnreadableSmPersistence {
+    async fn append_promotion_stanza(
+        &self,
+        stanza: waddle_xmpp::stream_management::persistence::PersistedUnackedStanza,
+    ) -> SmResult<waddle_xmpp::stream_management::persistence::PromotionAppendOutcome> {
+        self.inner.append_promotion_stanza(stanza).await
+    }
+
     async fn upsert_session(
         &self,
         session: waddle_xmpp::stream_management::persistence::PersistedSession,

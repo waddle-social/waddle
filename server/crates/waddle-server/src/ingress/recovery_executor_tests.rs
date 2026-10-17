@@ -126,6 +126,7 @@ async fn persistent_sm(f: &IngressFixture) -> Arc<InMemorySmSessionRegistry> {
 }
 async fn store_detached(sm: &InMemorySmSessionRegistry, resource: &jid::FullJid) {
     sm.store_session(DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: resource.to_string(),
         user_id: resource.to_bare().to_string(),
         jid: resource.clone(),

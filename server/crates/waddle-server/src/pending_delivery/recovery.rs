@@ -129,6 +129,8 @@ impl RecoveryWork {
 /// even when its original resource disappears.
 #[derive(Default)]
 pub(crate) struct PendingRecovery {
+    /// Round-robin scan position, independent of recipient delivery recovery.
+    pub(crate) promotion_receipt_cursor: Option<SmSessionId>,
     recipient_cursor: Option<BareJid>,
     row_cursors: BTreeMap<BareJid, PendingRowId>,
     running: BTreeMap<BareJid, JoinHandle<RecoveryWork>>,

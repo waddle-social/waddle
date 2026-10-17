@@ -19,6 +19,23 @@ pub(crate) async fn promote_session_with_custody(
     use waddle_xmpp::stream_management::persistence::IngressCustodyDisposition;
     let stream = SmSessionId::new(session.stream_id.clone());
     let mut summary = PromotionSummary::default();
+    // The payload's immutable custody, rather than a newer cached claim for
+    // this stream ID, authorizes this pass. Keep local replacement out while
+    // its effects run; each backend mutation also checks the captured fence.
+    let _operation = match deps.sm_registry.lock_promotion_operation(session).await {
+        Ok(operation) => operation,
+        Err(error) => {
+            tracing::debug!(%error, %stream, "SM promotion: capture no longer authorizes effects");
+            summary.record(
+                session
+                    .unacked_stanzas
+                    .first()
+                    .map_or(0, |entry| entry.sequence),
+                &PromotedOutcome::StorageFailure(PromotionFailureReason::ClaimLost),
+            );
+            return summary;
+        }
+    };
     for entry in &session.unacked_stanzas {
         let candidates = match deps
             .sm_registry

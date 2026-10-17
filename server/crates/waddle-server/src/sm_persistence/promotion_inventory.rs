@@ -1,6 +1,8 @@
 //! Atomic suffix allocation for non-resumable promotion custody.
 use crate::db::{DatabaseDriver, Transaction};
-use waddle_xmpp::stream_management::persistence::{PersistedUnackedStanza, SmPersistenceError};
+use waddle_xmpp::stream_management::persistence::{
+    PersistedUnackedStanza, PromotionAppendOutcome, SmPersistenceError,
+};
 
 fn storage_error(error: impl std::fmt::Display) -> SmPersistenceError {
     SmPersistenceError::Other(error.to_string())
@@ -13,7 +15,7 @@ pub(crate) async fn append(
     tx: &mut Transaction<'_>,
     stanza: PersistedUnackedStanza,
     driver: DatabaseDriver,
-) -> Result<(), SmPersistenceError> {
+) -> Result<PromotionAppendOutcome, SmPersistenceError> {
     let sql = match driver {
         DatabaseDriver::Postgres => {
             "SELECT outbound_count, max_resume_secs, max_resume_duration_ms \
@@ -43,21 +45,49 @@ pub(crate) async fn append(
     drop(rows);
     let distance = stanza.sequence.wrapping_sub(outbound);
     if distance == 0 || distance >= (1_u32 << 31) {
-        return Ok(());
+        let mut rows = tx
+            .query(
+                "SELECT stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts \
+             FROM sm_unacked WHERE stream_id = ? AND sequence = ?",
+                crate::db_params![stanza.stream_id.as_str(), i64::from(stanza.sequence)],
+            )
+            .await
+            .map_err(storage_error)?;
+        let Some(row) = rows.next().await.map_err(storage_error)? else {
+            return Ok(PromotionAppendOutcome::Retired);
+        };
+        let existing = super::codec::decode_unacked(&row)?;
+        if existing.stanza.to_element() != stanza.stanza.to_element()
+            || existing.original_receipt_at.timestamp_millis()
+                != stanza.original_receipt_at.timestamp_millis()
+            || existing.ingress_receipts != stanza.ingress_receipts
+        {
+            return Err(SmPersistenceError::PromotionSequenceConflict {
+                stream_id: stanza.stream_id,
+                sequence: stanza.sequence,
+            });
+        }
+        return Ok(PromotionAppendOutcome::AlreadyRecorded);
     }
     let xml = super::codec::serialize_stanza(&stanza.stanza)?;
-    tx.execute(
+    let inserted = tx.execute(
         "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms, ingress_receipts) \
          VALUES (?, ?, ?, ?, ?) ON CONFLICT (stream_id, sequence) DO NOTHING",
         crate::db_params![stanza.stream_id.as_str(), i64::from(stanza.sequence), xml,
             stanza.original_receipt_at.timestamp_millis(),
             super::codec::encode_ingress_receipts(&stanza.ingress_receipts)],
     ).await.map_err(storage_error)?;
+    if inserted != 1 {
+        return Err(SmPersistenceError::PromotionSequenceConflict {
+            stream_id: stanza.stream_id,
+            sequence: stanza.sequence,
+        });
+    }
     tx.execute(
         "UPDATE sm_sessions SET outbound_count = ? WHERE stream_id = ?",
         crate::db_params![i64::from(stanza.sequence), stanza.stream_id.as_str()],
     )
     .await
     .map_err(storage_error)?;
-    Ok(())
+    Ok(PromotionAppendOutcome::Appended)
 }

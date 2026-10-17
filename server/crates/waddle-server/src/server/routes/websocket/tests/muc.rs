@@ -7614,6 +7614,7 @@ async fn detached_invalidation_is_generation_safe_with_a_live_replacement() {
     .await;
 
     let detached = waddle_xmpp::stream_management::DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "stale-stream".to_string(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),
@@ -7753,6 +7754,7 @@ async fn fresh_bind_invalidation_cleans_the_dead_sessions_room_occupancy() {
         .register(alice.clone(), fresh_tx);
 
     let detached = waddle_xmpp::stream_management::DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: "stale-stream-fresh-bind".to_string(),
         user_id: "alice@example.com".to_string(),
         jid: alice.clone(),

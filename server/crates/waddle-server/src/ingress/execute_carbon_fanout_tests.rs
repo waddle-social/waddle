@@ -398,6 +398,8 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
     if detached {
         use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
         sm.store_session(DetachedSession {
+            promotion_custody:
+                waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
             stream_id: target.to_string(),
             user_id: owner.to_string(),
             jid: target.clone(),
