@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed (2026-10-18). Revised twice after independent architecture
+Proposed (2026-10-18). Revised three times after independent architecture
 reviews: the first returned 3 blockers and 7 required changes, the second
-1 blocker and 6 required changes. All are addressed below. ADR-0018 is
+1 blocker and 6, the third 1 blocker and 4. All are addressed below. ADR-0018 is
 reserved for the multi-tenancy decision.
 
 ## Context
@@ -81,8 +81,12 @@ in wasm.
   - the driver calls `handle_timeout(now)` when it passes.
 
   This replaces the 250 ms stream-management pulse (`client.rs:255`).
-- Time is an injected monotonic clock, never `chrono` wall time, which the
-  stream-management clock uses today (`runtime.rs:84`).
+- Time is a core-owned monotonic type, `MonoMillis(u64)`: milliseconds from
+  an arbitrary per-process origin, supplied by the driver. `poll_timeout()`
+  and `handle_timeout(now)` take it. It is not `std::time::Instant`, which
+  panics on `wasm32-unknown-unknown` and is not UniFFI-exportable, and not
+  `chrono` wall time, which the stream-management clock uses today
+  (`runtime.rs:84`).
 - The 5 s host-suspension heuristic (`runtime.rs:242`) goes. The platform
   reports suspend and resume as lifecycle signals.
 - Inputs: transport events, the current time, a seeded RNG, lifecycle and
@@ -165,7 +169,8 @@ Platforms keep:
   - Stream `<conflict/>` is terminal only when it arrives on the current
     transport generation. A reconnect that reuses the resource replaces the
     old stream, and the server then writes `<conflict/>` to the stale one
-    (`connection.rs:2629`). That must not end the new session.
+    (shown by the test at `connection.rs:2629`). That must not end the new
+    session.
   - Terminal states are surfaced to the UI, not fed to backoff. Android
     already treats them as terminal (`ConnectionLoop.kt:232`).
 - **Tokens never print.** They stay in `AccessToken`, which redacts in
@@ -214,9 +219,19 @@ These resolve the divergences above. The scenario fixtures encode them.
 | Ready pipeline | Self-presence, rooms with queued sends, drain them, topology, remaining joins, drain the rest, inbox, bounded catch-up. |
 | Presence ranking | ADR-010: DND > available/chat > away > xa > offline. |
 | Mentions | Live mentions are counted with one matcher: the bare JID, broadcast mentions, and the user's own room nick. On a fresh stream, mentions are recomputed from catch-up MAM pages with the same matcher, not reset. XEP-0430 carries no mention count (`inbox.rs:28-41`). |
-| Outbox | Capped at 500 per sending account. A full outbox refuses new sends with a visible state; it never evicts. A rejected send moves to failed. Retry is user-initiated only, with the same origin-id. The server dedupes origin-ids for MUC (`muc_direct.rs:225`) and for DMs (`direct_archive.rs:85-133`, via `ArchiveIdRewrite`). A bounce for a full recipient queue (`pending_delivery/mod.rs:239`, 1,000 rows per recipient) is not a failed send. The message is already archived (`offline_delivery.rs:126-134`), so it is shown as "archived, live delivery refused" and never retried. |
+| Outbox | Capped at 500 per sending account, and entries expire after 8 days. A full outbox refuses new sends with a visible state; it never evicts. Queued content is frozen: editing a queued message discards it and queues a new one. Origin-ids are deduplicated by the server's ingress alias, keyed on sender bare JID, target and origin-id, for DMs and MUC alike (`ingress/commit.rs:164-213`); the alias lives 8 days (`ingress_substrate/mod.rs:51`), which sets the expiry. Same-origin resend is automatic only for sends whose outcome is unknown, such as a connection lost before the ack. A committed denial owns its origin-id (`commit.rs:159-161`), so a user retry of a **rejected** send mints a new origin-id; reusing it would replay the recorded rejection. A changed body under the same origin-id is rejected as `AliasConflict` (`commit.rs:206-209`), which frozen content prevents. |
 | Catch-up | Visible conversation first, then rooms with unread or mentions, then the rest. MAM queries 4 in flight; inbox queries stay single-flight, as the wasm driver already does (`driver.rs:866`). |
 | Grouping | Same author within 5 minutes inclusive. Break on day change, unread divider, tombstone and call rows. |
+
+**Dependency: a distinguishable quota bounce.** A message bounced because
+the recipient's offline queue is full is already archived
+(`offline_delivery.rs:126-134`), so it must not be offered for retry. On the
+wire it is a plain `cancel`/`service-unavailable` (`offline_delivery.rs:731-737`),
+the same condition as the nonexistent-account bounce
+(`route_to_connection_plan.rs:101-110`) and the bot PM refusal
+(`muc_direct.rs:172-178`), neither of which is archived. The server must add
+an application-specific condition (`urn:waddle:*`) to the quota bounce before
+the client classifies it. Until then it is treated as an ordinary failed send.
 
 ### Resumption
 
@@ -232,16 +247,29 @@ These resolve the divergences above. The scenario fixtures encode them.
   `waddle-xmpp-client/src/config.rs:204`).
 - **Backgrounding while a push transport is registered.** The client
   closes cleanly, in this order:
-  1. It sends a final `<a h='…'/>`. The clean-close path
-     (`cleanup.rs:1491-1546`) does not promote the server's unacked queue,
-     unlike the drop and detach paths. Anything the server wrote but the
-     client had not acknowledged would otherwise reach the user only
-     through MAM, with no push.
+  1. It sends a final `<a h='…'/>`. Frames are handled in order, and the
+     ack is applied before `<close/>` reaches cleanup (`frame.rs:375-413`,
+     `stream_management.rs:532`; during a write pause, acks are applied
+     ahead of deferred frames, `batch_write.rs:1016-1047`). The clean-close
+     path (`cleanup.rs:1489-1546`) does not promote the server's unacked
+     queue; only the resumable detach paths do (`cleanup.rs:923`, `1210`).
+     A non-resumable drop, today's native configuration, skips them too
+     (`cleanup.rs:866-868`).
+
+     A window remains: stanzas the server writes after the final ack, and
+     anything still in the connection's outbound queue, are neither
+     acknowledged nor promoted. They are archived, so MAM catch-up on the
+     next foreground shows them, but they get no push. That window is
+     accepted.
   2. It posts local notifications for anything received during shutdown.
   3. It sends `<close/>`. The server moves the connection to `Closing`,
      which is never detached for resume (`frame.rs:448-454`,
-     `cleanup.rs:866-867`). Later messages go to offline storage and push
-     (`tests/stream_management.rs:10487`).
+     `cleanup.rs:866-867`); the test
+     `waddle-server/src/server/routes/websocket/tests/stream_management.rs:10487`
+     asserts that no detached session remains and that the user leaves
+     their rooms. Later messages are routed as for an offline user, to
+     offline storage and push. A server test asserting that route must land
+     with this rule.
 
   The consequence is accepted. The clean close broadcasts unavailable
   presence and leaves every room (`cleanup.rs:1513-1527`), so each
