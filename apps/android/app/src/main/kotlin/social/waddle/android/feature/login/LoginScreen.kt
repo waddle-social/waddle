@@ -45,7 +45,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import social.waddle.android.LocalAppGraph
 import social.waddle.android.R
 import social.waddle.android.client.auth.AuthProvider
-import social.waddle.android.theme.JetBrainsMonoFamily
+import social.waddle.android.theme.MonoFamily
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.Wordmark
 import social.waddle.android.ui.huddle.PillButton
@@ -238,7 +238,7 @@ private fun Verifying(userCode: String, onCancel: () -> Unit) {
         Text(
             text = userCode,
             style = MaterialTheme.typography.headlineMedium.copy(
-                fontFamily = JetBrainsMonoFamily,
+                fontFamily = MonoFamily,
                 letterSpacing = 0.12.em,
             ),
             color = colors.actionText,

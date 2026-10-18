@@ -445,7 +445,7 @@ private fun SpeakingLine(speaking: Boolean) {
 /**
  * One participant: the avatar with the huddle ring (ember and glowing
  * while they speak), a gold hand when raised, a muted mark, the name in
- * Space Grotesk, and speaking bars under it. Read as one item: "bob,
+ * the display style, and speaking bars under it. Read as one item: "bob,
  * speaking, hand raised, muted".
  */
 @Composable

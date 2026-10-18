@@ -25,11 +25,11 @@ Three rules:
 | Element | Decision |
 | --- | --- |
 | Mark | Keep the speech-bubble penguin. It already sits on a night ground and its beak is the ember. If the mark should change too, the huddle mark from the earlier Hearth exploration (three pills pressed together) is in git history at `68adfbe`. |
-| Wordmark | `waddle` in Space Grotesk 700 with an ember full stop. |
+| Wordmark | `waddle` in the system font, 700, with an ember full stop. |
 | App icon | Night ground with the penguin; teal and daylight variants on the brand board. |
-| Display type | Space Grotesk 700/600. Headlines, room and community names, big numbers. |
-| Body type | Outfit, already shipped. Geometric enough to sit next to Space Grotesk. |
-| Mono | JetBrains Mono, already shipped. Kickers, timestamps, counts, code. |
+| Display type | System font, 700/600. Headlines, room and community names, big numbers. |
+| Body type | System font. Waddle ships no font files on any platform (decided 2026-10-18). |
+| Mono | System monospace. Kickers, timestamps, counts, code. |
 | Shape | Radii 10 / 16 / pill. 1px `ink.600` borders on cards. One overlay shadow. Glow only on live. |
 | Presence | Colour dot: green here, amber away, red do not disturb, hollow offline. A teal ring means in a huddle; a glow on the ring means speaking; three animated bars beside the name mean speaking in a list. |
 | Motion | 160ms ease-out for state, 400ms for a card entering. Speaking bars animate; nothing else loops. Reduced motion turns off the glow pulse. |
@@ -57,7 +57,7 @@ Three rules:
 
 ### Type scale (text styles in the config)
 
-`hero` 52 / `display` 38 / `headline` 30 / `title` 18 (Space Grotesk) · `lead` 17 / `body` 15 / `control` 14 (Outfit) · `kicker` 11 mono uppercase tracked 0.08em · `time` 12 mono · `stat` 30 Space Grotesk for big numbers.
+`hero` 52 / `display` 38 / `headline` 30 / `title` 18 · `lead` 17 / `body` 15 / `control` 14 · `kicker` 11 mono uppercase tracked 0.08em · `time` 12 mono · `stat` 30 bold for big numbers.
 
 ## 3. Screens (the artboards)
 
@@ -88,7 +88,7 @@ Everything on the boards is backed by an existing store in `chat/src` (MUC, MAM,
 
 - `@ark-ui/vue` 5.39.x, Vue ≥ 3.5. Primitives in use: Tooltip, Menu, Popover, Dialog (dialogs, drawers, confirms), Avatar, Toast. Candidates for later: Tabs, SegmentGroup, Combobox for the DM and member search dialogs (composer mentions and slash commands are Tiptap-driven and stay that way), Collapsible, Splitter.
 - `@pandacss/dev` **1.12.1 stable**, not the v2 beta, wired through `@pandacss/postcss` inside the Astro Vite config (there is no `@pandacss/vite` on the 1.x line). The beta (2.0.0-beta.18) compiles this config with zero diagnostics but leaves every conditional semantic token unresolved in the output (`background: action.subtle` instead of `var(--colors-action-subtle)`), in `css()` and recipes alike, with or without custom conditions. The same config on 1.12.1 resolves everything. The authoring API is identical, so moving to v2 later is a version bump.
-- Fonts: `@fontsource-variable/space-grotesk` added; Outfit and JetBrains Mono are already self-hosted.
+- Fonts: none shipped. Every family token is a system stack (`system-ui` for display and body, `ui-monospace` for mono).
 - Integration: Panda runs as a PostCSS plugin registered in `chat/astro.config.mjs` (`vite.css.postcss`), next to `@tailwindcss/vite`, during migration. Panda's cascade layers are renamed `pd_*` so they never merge with Tailwind's `base` and `utilities`; because they are declared after Tailwind's, a recipe class beats a plain utility on the same element. Drop the rename when Tailwind goes.
 - Theme: night is the default (no attribute), daylight is `[data-theme=light]`. The three-way light/system/dark switch became a two-way Night/Daylight switch; a stored "system" preference reads as night.
 - Knip: `styled-system/` is generated and gitignored; it sits outside Knip's project globs, so no ignore entry is needed. CI runs `panda codegen` as its own task before typecheck, build and Knip.
@@ -96,7 +96,7 @@ Everything on the boards is backed by an existing store in `chat/src` (MUC, MAM,
 
 ## 5. Migration
 
-1. **Tokens.** Install Panda 1.12, land `panda.config.ts`, generate. Point the token codegen at Panda. Ship Space Grotesk. Nothing visible changes.
+1. **Tokens.** Install Panda 1.12, land `panda.config.ts`, generate. Point the token codegen at Panda. Nothing visible changes.
 2. **Primitives.** Add Ark. Replace tooltips (about 154 `title=` sites), menus (6), dialogs and drawers, toasts (new generic toaster; move the three call toasts onto it), tabs.
 3. **People rail and shell.** `CommunityShell` replaces the rail-and-sidebar chrome outright (there is no feature-flag mechanism in the app): header navigation, people rail from `contacts/roster.ts`, `dms/conversations.ts`, the focused room's presence and the call stores, context column. The existing timeline, composer and calls are reused inside Rooms.
 4. **Rooms.** Activity-sorted tiles (call participants, mentions, unread, recency) over `waddles/directory.ts`; occupancy is only known for the focused room, so tiles never claim a head count they do not have. The huddle panel is `CurrentCallPanel` and `CallActivityDock` in the context column.
