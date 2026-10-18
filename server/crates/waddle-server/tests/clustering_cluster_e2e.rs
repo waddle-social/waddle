@@ -1783,6 +1783,53 @@ async fn lone_survivor_and_isolation_fencing() {
     }
 }
 
+/// Establish the relay path before a test whose one-second SM handshake
+/// budget measures live-owner detachment rather than cold mesh discovery.
+async fn wait_for_cross_node_registration(
+    db: &Database,
+    server_a: &TestServer,
+    server_b: &TestServer,
+    peer_a: &str,
+) {
+    use waddle_xmpp::ownership::ClaimStore as _;
+
+    let store = PostgresClaimStore::new(db.clone());
+    let account = Entity::new(EntityType::UserActor, "cluster-peer@localhost");
+    let mut last_error = "remote probe has not bound".to_string();
+    let mut last_claim = None;
+    let setup = tokio::time::timeout(Duration::from_secs(30), async {
+        let probe_a = WsXmppClient::connect_and_auth(
+            &server_a.ws_url(), "localhost", CLUSTER_PEER_USERNAME,
+            CLUSTER_PEER_PASSWORD, &format!("relay-probe-a-{}", uuid::Uuid::new_v4()),
+        ).await.expect("local relay probe binds on A without SM");
+        let resource_b = format!("relay-probe-b-{}", uuid::Uuid::new_v4());
+        loop {
+            match WsXmppClient::connect_and_auth(
+                &server_b.ws_url(), "localhost", CLUSTER_PEER_USERNAME,
+                CLUSTER_PEER_PASSWORD, &resource_b,
+            ).await {
+                Ok(probe_b) => {
+                    let claim = store.current_claim(&account).await.expect("probe account claim")
+                        .expect("bound probe account retains a claim");
+                    let owner_peer = store.peer_id_for_node(&claim.owner).await.expect("probe owner binding");
+                    assert_eq!(owner_peer.as_deref(), Some(peer_a),
+                        "probe B must register through A's exact peer, not local takeover: {claim:?}");
+                    probe_b.close().await.expect("close remote relay probe");
+                    probe_a.close().await.expect("close local relay probe");
+                    return;
+                }
+                Err(error) => {
+                    last_error = error;
+                    last_claim = store.current_claim(&account).await.expect("probe account claim after bind failure");
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+    }).await;
+    assert!(setup.is_ok(),
+        "cross-node relay setup did not become ready: last bind error={last_error}; claim={last_claim:?}");
+}
+
 /// ADR-0017 Phase 3 Slice 6: the cross-node XEP-0198 resume live-steal
 /// handshake, end to end, against two real `waddle-server` processes
 /// sharing one Postgres control plane (co-located clustering claims + SM
@@ -1813,10 +1860,11 @@ async fn cross_node_resume_live_steal_handshake() {
 
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (server_a, _node_a, _peer_a) =
+    let (server_a, _node_a, peer_a) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
     let (server_b, _node_b, _peer_b) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    wait_for_cross_node_registration(&db, &server_a, &server_b, &peer_a).await;
 
     const DOMAIN: &str = "localhost";
     const USERNAME: &str = "admin";
