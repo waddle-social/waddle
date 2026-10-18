@@ -42,6 +42,7 @@ async fn detached_append_preserves_envelope_and_untouched_replay_entries() {
     update.replay_gap_through = Some(1);
     update.detached_at += chrono::Duration::seconds(30);
     update.max_resume_duration = Duration::from_secs(900);
+    update.occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
     update.user_id = "untrusted replacement".into();
     update.carbons_enabled = false;
     update.presence_status = Some("must not replace the detach envelope".into());
@@ -80,6 +81,7 @@ async fn detached_append_preserves_envelope_and_untouched_replay_entries() {
     assert_eq!(loaded.detached_at, original.detached_at);
     assert_eq!(loaded.max_resume_duration, original.max_resume_duration);
     assert_eq!(loaded.user_id, original.user_id);
+    assert_eq!(loaded.occupancy_session, original.occupancy_session);
     assert_eq!(loaded.carbons_enabled, original.carbons_enabled);
     assert_eq!(loaded.presence_status, original.presence_status);
     assert_eq!(

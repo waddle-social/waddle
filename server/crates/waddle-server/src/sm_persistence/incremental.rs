@@ -30,13 +30,15 @@ pub(super) async fn append(
 
     // Never upsert here: a deleted source must stay deleted, and the first
     // detach timestamp, principal, presence and expiry window stay untouched.
+    // Materialize a decoded legacy NULL generation without replacing a concrete one.
     let updated = tx.execute(
-            "UPDATE sm_sessions SET inbound_count = ?, outbound_count = ?, last_acked = ?, replay_gap_through = ? WHERE stream_id = ?",
+            "UPDATE sm_sessions SET inbound_count = ?, outbound_count = ?, last_acked = ?, replay_gap_through = ?, occupancy_session = COALESCE(occupancy_session, ?) WHERE stream_id = ?",
             crate::db_params![
                 i64::from(append.session.inbound_count),
                 i64::from(append.session.outbound_count),
                 i64::from(append.session.last_acked),
                 append.session.replay_gap_through.map(i64::from),
+                append.session.occupancy_session.to_string(),
                 stream_id.as_str().to_string(),
             ],
         ).await.map_err(|error| SmPersistenceError::Other(error.to_string()))?;
