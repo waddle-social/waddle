@@ -33,6 +33,7 @@ let _ffiInputs = [
 	"../../server/.cargo/**",
 	"../../server/Cargo.toml",
 	"../../server/Cargo.lock",
+	"../../server/vendor/**",
 	"../../server/rust-toolchain.toml",
 	"../../server/crates/**",
 	"../../server/crates/**/.cargo/**",

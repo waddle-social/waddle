@@ -14,3 +14,8 @@ cluster departure. Remove vendoring when upstream provides these APIs.
 The messaging eviction method uses a scoped `#[expect(deprecated)]` because
 libp2p 0.56 exposes its retained request-response address cache's eviction only
 through `remove_address`; there is no replacement API in this pinned version.
+
+The unused `otel` feature, its optional SDK hooks, and the development subscriber
+dependency are removed to keep the native client's local dependency closure
+free of remote telemetry capabilities. Waddle never enabled this feature;
+normal actor tracing spans and the server's own telemetry remain unchanged.
