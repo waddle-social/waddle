@@ -2,9 +2,10 @@
 
 ## Status
 
-Proposed (2026-10-18). Revised three times after independent architecture
+Proposed (2026-10-18). Revised four times after independent architecture
 reviews: the first returned 3 blockers and 7 required changes, the second
-1 blocker and 6, the third 1 blocker and 4. All are addressed below. ADR-0018 is
+1 blocker and 6, the third 1 blocker and 4, the fourth 2. All are
+addressed below. ADR-0018 is
 reserved for the multi-tenancy decision.
 
 ## Context
@@ -219,7 +220,7 @@ These resolve the divergences above. The scenario fixtures encode them.
 | Ready pipeline | Self-presence, rooms with queued sends, drain them, topology, remaining joins, drain the rest, inbox, bounded catch-up. |
 | Presence ranking | ADR-010: DND > available/chat > away > xa > offline. |
 | Mentions | Live mentions are counted with one matcher: the bare JID, broadcast mentions, and the user's own room nick. On a fresh stream, mentions are recomputed from catch-up MAM pages with the same matcher, not reset. XEP-0430 carries no mention count (`inbox.rs:28-41`). |
-| Outbox | Capped at 500 per sending account, and entries expire after 8 days. A full outbox refuses new sends with a visible state; it never evicts. Queued content is frozen: editing a queued message discards it and queues a new one. Origin-ids are deduplicated by the server's ingress alias, keyed on sender bare JID, target and origin-id, for DMs and MUC alike (`ingress/commit.rs:164-213`); the alias lives 8 days (`ingress_substrate/mod.rs:51`), which sets the expiry. Same-origin resend is automatic only for sends whose outcome is unknown, such as a connection lost before the ack. A committed denial owns its origin-id (`commit.rs:159-161`), so a user retry of a **rejected** send mints a new origin-id; reusing it would replay the recorded rejection. A changed body under the same origin-id is rejected as `AliasConflict` (`commit.rs:206-209`), which frozen content prevents. |
+| Outbox | Capped at 500 per sending account, and entries expire 7 days after they were queued. A full outbox refuses new sends with a visible state; it never evicts. Queued content is frozen: editing a queued message discards it and queues a new one. Origin-ids are deduplicated by the server's ingress alias, keyed on sender bare JID, target and origin-id, for DMs and MUC alike (`ingress/commit.rs:164-213`); the alias lives 8 days (`ingress_substrate/mod.rs:51`), which bounds the expiry. Entries outlive the process, so `MonoMillis` cannot age them: the durable store records the platform's wall-clock enqueue time, and the 1-day margin under the alias lifetime absorbs client clock error. An entry whose enqueue time lies in the future (the clock moved backwards) is treated as expired, since its real age is unknown. Same-origin resend is automatic only for sends whose outcome is unknown, such as a connection lost before the ack. A committed denial owns its origin-id (`commit.rs:159-161`), so a user retry of a **rejected** send mints a new origin-id; reusing it would replay the recorded rejection. A changed body under the same origin-id is rejected as `AliasConflict` (`commit.rs:206-209`), which frozen content prevents. |
 | Catch-up | Visible conversation first, then rooms with unread or mentions, then the rest. MAM queries 4 in flight; inbox queries stay single-flight, as the wasm driver already does (`driver.rs:866`). |
 | Grouping | Same author within 5 minutes inclusive. Break on day change, unread divider, tombstone and call rows. |
 
@@ -264,10 +265,11 @@ the client classifies it. Until then it is treated as an ordinary failed send.
   2. It posts local notifications for anything received during shutdown.
   3. It sends `<close/>`. The server moves the connection to `Closing`,
      which is never detached for resume (`frame.rs:448-454`,
-     `cleanup.rs:866-867`); the test
-     `waddle-server/src/server/routes/websocket/tests/stream_management.rs:10487`
-     asserts that no detached session remains and that the user leaves
-     their rooms. Later messages are routed as for an offline user, to
+     `cleanup.rs:866-867`). The test
+     `intentional_close_wins_inflight_force_resume_without_persisting_a_snapshot`
+     (`waddle-server/src/server/routes/websocket/tests/stream_management.rs:13684`)
+     enables resumption, sends a real `<close/>` and asserts that no
+     session is kept for resume. Later messages are routed as for an offline user, to
      offline storage and push. A server test asserting that route must land
      with this rule.
 
