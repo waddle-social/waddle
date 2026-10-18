@@ -353,7 +353,12 @@ final class ActiveSession {
             serverUrl: webSocket.absoluteString,
             jid: jid.description,
             accessToken: auth.sessionID,
-            resource: ServerSettings.resource
+            resource: ServerSettings.resource,
+            // The FFI never hands resume state back, so this app never
+            // resumes. Asking the server to park the session would only make
+            // it count messages as delivered to a stream nobody resumes and
+            // skip the push for them.
+            resumable: false
         )
         let outbox: any OutboxStore
         if let file = FileOutboxStore.applicationSupport(for: jid) {
