@@ -378,6 +378,19 @@ impl FailDeleteSmPersistence {
 
 #[async_trait::async_trait]
 impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for FailDeleteSmPersistence {
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: waddle_xmpp::stream_management::persistence::PersistedDetachedAppend,
+        fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::KeyedSnapshotOutcome,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .append_detached_stanza_atomic(append, fence)
+            .await
+    }
+
     async fn acknowledge_claimed_session(
         &self,
         stream_id: &waddle_xmpp::pending_delivery::SmSessionId,

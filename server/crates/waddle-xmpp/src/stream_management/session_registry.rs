@@ -8,6 +8,7 @@
 //! a resume request, the server can restore the session.
 
 mod acknowledgements;
+mod append;
 mod claims;
 mod core;
 mod cross_node_resume;
@@ -37,7 +38,7 @@ pub use traits::{
     TombstoneScrubbedSmEntry,
 };
 
-/// Exclusive authority for one fixed SM stream-lock shard.
+/// Exclusive authority for one SM stream operation.
 ///
 /// Callers that must establish node-incarnation authority after serializing
 /// stream state use this guard to preserve the global shard-before-identity

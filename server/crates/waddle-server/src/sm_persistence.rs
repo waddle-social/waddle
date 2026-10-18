@@ -17,9 +17,9 @@ use tracing::{debug, info, instrument};
 use waddle_xmpp::auth::AuthenticatedPrincipalRef;
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, PromotionAppendOutcome, SmAckWindow, SmPersistenceError,
-    SmPersistenceStorage,
+    IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedDetachedAppend,
+    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, PromotionAppendOutcome,
+    SmAckWindow, SmClaimFence, SmPersistenceError, SmPersistenceStorage,
 };
 use waddle_xmpp::Stanza;
 use xmpp_parsers::presence::Show;
@@ -35,6 +35,7 @@ mod atomic_store;
 /// `sm_sessions`/`sm_unacked` schema, instead of forking a second copy
 /// that could silently drift from this one.
 pub(crate) mod codec;
+mod incremental;
 pub(crate) mod ingress_append;
 mod joined_sessions;
 pub(crate) mod promotion_inventory;
@@ -299,7 +300,8 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         let presence_payloads_xml = serialize_presence_payloads(&session.presence_payloads)?;
 
         // Portable upsert: SQLite and Postgres both support
-        // INSERT ... ON CONFLICT (col) DO UPDATE SET ...
+        // INSERT ... ON CONFLICT (col) DO UPDATE SET ... . The original
+        // detach timestamp remains the expiry anchor until this source is deleted.
         self.execute(
             r#"
             INSERT INTO sm_sessions (
@@ -318,7 +320,6 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
                 outbound_count = excluded.outbound_count,
                 last_acked = excluded.last_acked,
                 max_resume_secs = excluded.max_resume_secs,
-                detached_at_ms = excluded.detached_at_ms,
                 max_resume_duration_ms = excluded.max_resume_duration_ms,
                 carbons_enabled = excluded.carbons_enabled,
                 roster_interested = excluded.roster_interested,
@@ -727,6 +728,14 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
         atomic_store::store_session_atomic(self, session, unacked).await
     }
 
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: PersistedDetachedAppend,
+        _expected_fence: Option<&SmClaimFence>,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        incremental::append(self, append).await
+    }
+
     async fn store_session_atomic_with_ingress_append(
         &self,
         session: PersistedSession,
@@ -907,3 +916,6 @@ pub async fn open_for_cluster_mode_with_lineage(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod startup_poison_tests;

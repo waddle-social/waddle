@@ -17,6 +17,10 @@
 //! trait's `now` parameter as advisory in the fenced impl. The portable
 //! impl and schema remain byte-identical for SQLite."*
 //!
+//! The database-clock detach stamp is captured on the initial insert. Refreshes
+//! retain that first stamp until the source is deleted, so outbound traffic
+//! cannot renew its resume window (issue #1138).
+//!
 //! This is a **sibling** module to [`crate::sm_persistence`], not a
 //! submodule of it — "not a decorator" extends to file layout too. It
 //! implements `waddle_xmpp::stream_management::persistence::
@@ -135,9 +139,9 @@ use waddle_xmpp::ownership::{
 };
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::persistence::{
-    IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedIngressAppend, PersistedSession,
-    PersistedUnackedStanza, PromotionAppendOutcome, SmAckWindow, SmClaimFence, SmPersistenceError,
-    SmPersistenceStorage,
+    IngressCustodyDisposition, KeyedSnapshotOutcome, PersistedDetachedAppend,
+    PersistedIngressAppend, PersistedSession, PersistedUnackedStanza, PromotionAppendOutcome,
+    SmAckWindow, SmClaimFence, SmPersistenceError, SmPersistenceStorage,
 };
 
 use crate::db::{Database, DatabaseDriver, Transaction};
@@ -147,6 +151,7 @@ use crate::sm_persistence::codec::{
 };
 
 mod atomic_store;
+mod incremental;
 
 const STALE_CLAIM_RELEASE_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -665,10 +670,9 @@ impl PostgresFencedSmPersistence {
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
         let _identity_guard = self.assert_fenced(&mut tx, &stream_id, fence).await?;
 
-        // Divergence (a): ignore `session.detached_at`; stamp Postgres
-        // `now()` in SQL instead (both the fresh-insert VALUES and the
-        // ON CONFLICT UPDATE's `excluded.detached_at_ms` read the same
-        // server-computed literal, so both paths agree).
+        // The initial detach uses Postgres now(), independent of the caller's
+        // clock. An existing source keeps its original database-clock stamp so
+        // refreshes never renew its resume window (issue #1138).
         tx.execute(
             r#"
             INSERT INTO sm_sessions (
@@ -687,7 +691,6 @@ impl PostgresFencedSmPersistence {
                 outbound_count = excluded.outbound_count,
                 last_acked = excluded.last_acked,
                 max_resume_secs = excluded.max_resume_secs,
-                detached_at_ms = excluded.detached_at_ms,
                 max_resume_duration_ms = excluded.max_resume_duration_ms,
                 carbons_enabled = excluded.carbons_enabled,
                 roster_interested = excluded.roster_interested,
@@ -1512,6 +1515,17 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             .map(|_| ())
     }
 
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: PersistedDetachedAppend,
+        expected_fence: Option<&SmClaimFence>,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        let fence = expected_fence.ok_or_else(|| SmPersistenceError::NotOwner {
+            entity: Entity::new(EntityType::SmSession, append.session.stream_id.as_str()),
+        })?;
+        self.append_detached_under(append, fence).await
+    }
+
     async fn store_session_atomic_with_ingress_append(
         &self,
         session: PersistedSession,
@@ -1669,7 +1683,6 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
                 outbound_count = excluded.outbound_count,
                 last_acked = excluded.last_acked,
                 max_resume_secs = excluded.max_resume_secs,
-                detached_at_ms = excluded.detached_at_ms,
                 max_resume_duration_ms = excluded.max_resume_duration_ms,
                 carbons_enabled = excluded.carbons_enabled,
                 roster_interested = excluded.roster_interested,

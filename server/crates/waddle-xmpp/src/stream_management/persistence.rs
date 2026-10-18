@@ -173,6 +173,8 @@ pub struct PersistedSession {
     pub last_acked: u32,
     pub replay_gap_through: Option<u32>,
     pub max_resume_time: Option<u32>,
+    /// First durable detach time; refreshes preserve it until source deletion.
+    /// Clustered Postgres stamps its own clock on the initial insert.
     pub detached_at: chrono::DateTime<chrono::Utc>,
     pub max_resume_duration: Duration,
     pub carbons_enabled: bool,
@@ -215,6 +217,49 @@ pub struct PersistedUnackedStanza {
     /// promotion path can stamp the `<delay/>` per XEP-0203 §4.1 +
     /// XEP-0198 §5 line 364 with the correct timestamp.
     pub original_receipt_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One bounded mutation of an existing detached replay queue.
+///
+/// Only the session's counters and replay-gap watermark are updated. The first
+/// durable detach timestamp, resume window, presence and principal remain intact.
+/// The new stanza is inserted before explicit evictions, so an entry immediately
+/// evicted by the buffer still commits its ingress custody without a replay copy.
+#[derive(Debug, Clone)]
+pub struct PersistedDetachedAppend {
+    pub session: PersistedSession,
+    pub stanza: PersistedUnackedStanza,
+    pub evicted_sequences: Vec<u32>,
+    pub ingress_append: Option<PersistedIngressAppend>,
+    /// Check canonical live-attempt/completion authority for a new delivery.
+    pub new_delivery: bool,
+}
+
+impl PersistedDetachedAppend {
+    /// Reject inconsistent queue/custody identities before any durable mutation.
+    pub fn validate(&self) -> Result<(), SmPersistenceError> {
+        if self.stanza.stream_id != self.session.stream_id {
+            return Err(SmPersistenceError::Other(
+                "detached append stanza belongs to another stream".into(),
+            ));
+        }
+        if self.new_delivery && self.ingress_append.is_none() {
+            return Err(SmPersistenceError::Other(
+                "new delivery requires an ingress append".into(),
+            ));
+        }
+        if let Some(append) = &self.ingress_append {
+            if append.accepting_stream != self.session.stream_id
+                || append.sequence != self.stanza.sequence
+                || append.disposition != IngressCustodyDisposition::Pending
+            {
+                return Err(SmPersistenceError::Other(
+                    "detached append custody does not match its pending queue entry".into(),
+                ));
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Result of an atomic promotion-inventory append.
@@ -299,6 +344,7 @@ pub enum KeyedSnapshotOutcome {
 pub trait SmPersistenceStorage: Send + Sync {
     /// Insert or replace a session record. Called when a stream
     /// detaches and the session is moved into the resumable pool.
+    /// Refreshes retain an existing source's first durable `detached_at` stamp.
     async fn upsert_session(&self, session: PersistedSession) -> Result<(), SmPersistenceError>;
 
     /// Atomically retire resume eligibility, advance the acknowledgement floor,
@@ -622,6 +668,24 @@ pub trait SmPersistenceStorage: Send + Sync {
         Ok(())
     }
 
+    /// Atomically append one stanza, remove only explicit buffer evictions, update
+    /// counters/replay-gap state and optionally claim its ingress obligation.
+    ///
+    /// The source must already exist: this operation must never recreate a
+    /// deleted session or extend its original resume window. A ledger conflict
+    /// rolls back every mutation and returns the winning allocation. Clustered
+    /// backends require the caller's captured fence, checked in this transaction.
+    /// Unsupported adapters fail closed rather than rewriting a full snapshot.
+    async fn append_detached_stanza_atomic(
+        &self,
+        _append: PersistedDetachedAppend,
+        _expected_fence: Option<&SmClaimFence>,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        Err(SmPersistenceError::Other(
+            "incremental detached append is unsupported by this backend".into(),
+        ))
+    }
+
     /// Atomically persist a detached SM snapshot, complete unacked queue, and
     /// the authenticated principal reference that authorizes its later resume.
     ///
@@ -832,6 +896,13 @@ struct InMemoryState {
 }
 
 impl InMemoryState {
+    fn store_session(&mut self, mut session: PersistedSession) {
+        if let Some(existing) = self.sessions.get(&session.stream_id) {
+            session.detached_at = existing.detached_at;
+        }
+        self.sessions.insert(session.stream_id.clone(), session);
+    }
+
     fn acknowledge(
         &mut self,
         stream_id: &SmSessionId,
@@ -1029,7 +1100,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .inner
             .lock()
             .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
-        guard.sessions.insert(session.stream_id.clone(), session);
+        guard.store_session(session);
         Ok(())
     }
 
@@ -1200,9 +1271,62 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .inner
             .lock()
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        guard.sessions.insert(stream_id.clone(), session);
+        guard.store_session(session);
         guard.unacked.insert(stream_id, unacked);
         Ok(())
+    }
+
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: PersistedDetachedAppend,
+        _expected_fence: Option<&SmClaimFence>,
+    ) -> Result<KeyedSnapshotOutcome, SmPersistenceError> {
+        append.validate()?;
+        let stream_id = &append.session.stream_id;
+        let mut guard = self
+            .inner
+            .lock()
+            .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
+        if !guard.sessions.contains_key(stream_id) {
+            return Err(SmPersistenceError::Other(
+                "detached append source is missing".into(),
+            ));
+        }
+        if let Some(proof) = &append.ingress_append {
+            if let Some(existing) = guard
+                .ingress_appends
+                .iter()
+                .find(|entry| entry.key == proof.key)
+            {
+                return Ok(KeyedSnapshotOutcome::ObligationAlreadyAllocated {
+                    accepting_stream: existing.accepting_stream.clone(),
+                });
+            }
+        }
+        if guard.unacked.get(stream_id).is_some_and(|queue| {
+            queue
+                .iter()
+                .any(|entry| entry.sequence == append.stanza.sequence)
+        }) {
+            return Err(SmPersistenceError::Other(
+                "detached append sequence already exists".into(),
+            ));
+        }
+        let session = guard
+            .sessions
+            .get_mut(stream_id)
+            .ok_or_else(|| SmPersistenceError::Other("detached append source is missing".into()))?;
+        session.inbound_count = append.session.inbound_count;
+        session.outbound_count = append.session.outbound_count;
+        session.last_acked = append.session.last_acked;
+        session.replay_gap_through = append.session.replay_gap_through;
+        let queue = guard.unacked.entry(stream_id.clone()).or_default();
+        queue.push(append.stanza);
+        queue.retain(|entry| !append.evicted_sequences.contains(&entry.sequence));
+        if let Some(proof) = append.ingress_append {
+            guard.ingress_appends.push(proof);
+        }
+        Ok(KeyedSnapshotOutcome::Committed)
     }
 
     async fn store_session_atomic_with_principal(
@@ -1252,7 +1376,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
                 Some(_) => withheld.push(append.key),
             }
         }
-        guard.sessions.insert(stream_id.clone(), session);
+        guard.store_session(session);
         guard.unacked.insert(stream_id.clone(), unacked);
         guard.principals.insert(stream_id, principal.clone());
         Ok(withheld)
@@ -1298,7 +1422,7 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             });
         }
         guard.ingress_appends.push(append);
-        guard.sessions.insert(stream_id.clone(), session);
+        guard.store_session(session);
         guard.unacked.insert(stream_id, unacked);
         Ok(KeyedSnapshotOutcome::Committed)
     }

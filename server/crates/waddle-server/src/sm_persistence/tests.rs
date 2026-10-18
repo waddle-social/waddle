@@ -2033,3 +2033,6 @@ async fn sqlite_ack_journal_survives_reopen_before_pending_settlement() {
         .unwrap();
     storage.delete_session(&stream).await.unwrap();
 }
+
+#[path = "incremental_tests.rs"]
+mod incremental_tests;

@@ -283,13 +283,12 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(false);
         };
-        self.update_detached_session_snapshot(
+        self.append_detached_stanza(
             &stream_id,
             |session| !session.is_expired() && session.roster_interested && session.jid == *jid,
-            |session| {
-                session.record_detached_outbound(stanza, original_receipt_at);
-                true
-            },
+            None,
+            stanza,
+            original_receipt_at,
         )
         .await
     }
@@ -306,13 +305,12 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(false);
         };
-        self.update_detached_session_snapshot(
+        self.append_detached_stanza(
             &stream_id,
             |session| !session.is_expired() && session.blocklist_interested && session.jid == *jid,
-            |session| {
-                session.record_detached_outbound(stanza, original_receipt_at);
-                true
-            },
+            None,
+            stanza,
+            original_receipt_at,
         )
         .await
     }
@@ -328,13 +326,12 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(false);
         };
-        self.update_detached_session_snapshot(
+        self.append_detached_stanza(
             &stream_id,
             |session| !session.is_expired() && session.jid == *jid,
-            |session| {
-                session.record_detached_outbound(stanza, original_receipt_at);
-                true
-            },
+            None,
+            stanza,
+            original_receipt_at,
         )
         .await
     }
@@ -389,13 +386,12 @@ impl InMemorySmSessionRegistry {
             return Ok(None);
         };
         let recorded = self
-            .update_detached_session_snapshot(
+            .append_detached_stanza(
                 &stream_id,
                 |session| !session.is_expired() && session.jid == *jid,
-                |session| {
-                    session.record_detached_outbound(stanza, original_receipt_at);
-                    true
-                },
+                None,
+                stanza,
+                original_receipt_at,
             )
             .await?;
         Ok(recorded.then(|| SmSessionId::new(stream_id)))
@@ -437,10 +433,17 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
-        self.commit_keyed_detached_entry(stream_id, key, true, move |session| {
-            session.record_detached_outbound(stanza, original_receipt_at);
-            session.unacked_stanzas.last().map(|entry| entry.sequence)
-        })
+        self.commit_keyed_detached_entry(
+            stream_id,
+            key,
+            true,
+            stanza,
+            original_receipt_at,
+            move |session| {
+                session.record_detached_outbound(stanza, original_receipt_at);
+                session.unacked_stanzas.last().map(|entry| entry.sequence)
+            },
+        )
         .await
     }
 
@@ -468,11 +471,18 @@ impl InMemorySmSessionRegistry {
             }
             LedgerDecision::Unallocated => {}
         };
-        self.commit_keyed_detached_entry(stream_id.to_owned(), key, false, move |session| {
-            session
-                .record_detached_outbound_at(sequence, stanza, original_receipt_at)
-                .then_some(sequence)
-        })
+        self.commit_keyed_detached_entry(
+            stream_id.to_owned(),
+            key,
+            false,
+            stanza,
+            original_receipt_at,
+            move |session| {
+                session
+                    .record_detached_outbound_at(sequence, stanza, original_receipt_at)
+                    .then_some(sequence)
+            },
+        )
         .await
     }
 
@@ -526,6 +536,8 @@ impl InMemorySmSessionRegistry {
         stream_id: String,
         key: crate::stream_management::SmIngressAppendKey,
         new_delivery: bool,
+        stanza: &Stanza,
+        original_receipt_at: DateTime<Utc>,
         record: impl FnOnce(&mut super::super::DetachedSession) -> Option<u32>,
     ) -> Result<crate::stream_management::SmKeyedAppendOutcome, SmRegistryError> {
         use crate::stream_management::{
@@ -543,12 +555,18 @@ impl InMemorySmSessionRegistry {
         let guard = shard.lock_owned().await;
         self.reconcile_stale_session_locked(&accepting_stream)
             .await?;
-        let Some(mut updated) = self.detached_snapshot_matching(&accepting_stream, |session| {
+        let Some(previous) = self.detached_snapshot_matching(&accepting_stream, |session| {
             !session.is_expired() && session.jid == key.resource
         })?
         else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
+        let previous_sequences: Vec<_> = previous
+            .unacked_stanzas
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect();
+        let mut updated = previous;
         if [
             crate::ingress::IngressEffectKind::Carbons,
             crate::ingress::IngressEffectKind::RelayCarbons,
@@ -564,52 +582,35 @@ impl InMemorySmSessionRegistry {
         let Some(sequence) = record(&mut updated) else {
             return Ok(SmKeyedAppendOutcome::NoSession);
         };
-        let persisted = super::persistence_codec::detached_to_persisted(&updated)?;
-        let rows = updated
-            .unacked_stanzas
-            .iter()
-            .map(|entry| {
-                super::persistence_codec::parse_xml_to_persisted_unacked(
-                    accepting_stream.as_str(),
-                    entry.sequence,
-                    &entry.stanza_xml,
-                    entry.original_receipt_at,
-                    entry.ingress_receipts.clone(),
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
-        self.mark_snapshot_stale(&accepting_stream)?;
-        let registry = Arc::clone(self);
-        let storage = Arc::clone(storage);
-        let entry = rows
-            .iter()
-            .find(|entry| entry.sequence == sequence)
-            .ok_or_else(|| {
-                SmRegistryError::Internal("allocated payload missing from snapshot".into())
-            })?;
-        let append = PersistedIngressAppend {
+        let mut delta = super::append::prepare_detached_append(
+            &previous_sequences,
+            &updated,
+            sequence,
+            stanza,
+            original_receipt_at,
+        )?;
+        delta.ingress_append = Some(PersistedIngressAppend {
             key,
             accepting_stream: accepting_stream.clone(),
             sequence,
             appended_at: Utc::now(),
-            payload: *entry.stanza.clone(),
-            original_receipt_at: entry.original_receipt_at,
+            payload: stanza.clone(),
+            original_receipt_at,
             disposition: crate::stream_management::persistence::IngressCustodyDisposition::Pending,
-        };
+        });
+        delta.new_delivery = new_delivery;
+        let fence = updated.promotion_custody.captured_fence().cloned();
+        self.mark_snapshot_stale(&accepting_stream)?;
+        let registry = Arc::clone(self);
+        let storage = Arc::clone(storage);
         // `guard` moves into the task: the shard stays locked until the write
         // resolves, even if this future is dropped first.
         let settle = tokio::spawn(async move {
             let _guard = guard;
-            let outcome = if new_delivery {
-                storage
-                    .store_session_atomic_with_ingress_delivery(persisted, rows, append)
-                    .await
-            } else {
-                storage
-                    .store_session_atomic_with_ingress_append(persisted, rows, append)
-                    .await
-            }
-            .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
+            let outcome = storage
+                .append_detached_stanza_atomic(delta, fence.as_ref())
+                .await
+                .map_err(|error| SmRegistryError::Internal(error.to_string()))?;
             match outcome {
                 KeyedSnapshotOutcome::ObligationAlreadyResolved => {
                     // Discard the speculative clone: another sink or policy
@@ -642,13 +643,12 @@ impl InMemorySmSessionRegistry {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        self.update_detached_session_snapshot(
+        self.append_detached_stanza(
             stream_id,
             |session| !session.is_expired(),
-            |session| {
-                session.record_detached_outbound(stanza, original_receipt_at);
-                true
-            },
+            None,
+            stanza,
+            original_receipt_at,
         )
         .await
     }
@@ -660,10 +660,12 @@ impl InMemorySmSessionRegistry {
         stanza: &Stanza,
         original_receipt_at: DateTime<Utc>,
     ) -> Result<bool, SmRegistryError> {
-        self.update_detached_session_snapshot(
+        self.append_detached_stanza(
             stream_id,
             |session| !session.is_expired(),
-            |session| session.record_detached_outbound_at(sequence, stanza, original_receipt_at),
+            Some(sequence),
+            stanza,
+            original_receipt_at,
         )
         .await
     }
@@ -891,13 +893,12 @@ impl InMemorySmSessionRegistry {
         else {
             return Ok(false);
         };
-        self.update_detached_session_snapshot(
+        self.append_detached_stanza(
             &stream_id,
             |session| !session.is_expired() && session.presence_available && session.jid == *jid,
-            |session| {
-                session.record_detached_outbound(stanza, original_receipt_at);
-                true
-            },
+            None,
+            stanza,
+            original_receipt_at,
         )
         .await
     }
