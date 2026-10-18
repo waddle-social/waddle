@@ -187,51 +187,97 @@ template $WaddleWindow: Adw.ApplicationWindow {
               content: ScrolledWindow {
                 hscrollbar-policy: never;
 
-                child: ListBox sidebar_list {
+                child: ListBox room_list {
+                  row-activated => $on_room_activated() swapped;
+
                   styles [
                     "navigation-sidebar",
                   ]
-
-                  Adw.ActionRow {
-                    title: _("Home");
-                    activatable: true;
-                  }
-
-                  Adw.ActionRow {
-                    title: _("Rooms");
-                    activatable: true;
-                  }
-
-                  Adw.ActionRow {
-                    title: _("People");
-                    activatable: true;
-                  }
-
-                  Adw.ActionRow {
-                    title: _("Direct Messages");
-                    activatable: true;
-                  }
-
-                  Adw.ActionRow {
-                    title: _("You");
-                    activatable: true;
-                  }
                 };
               };
+
+              [bottom]
+              Label account_label {
+                xalign: 0;
+                ellipsize: end;
+                margin-start: 12;
+                margin-end: 12;
+                margin-top: 6;
+                margin-bottom: 6;
+
+                styles [
+                  "dim-label",
+                  "caption",
+                ]
+              }
             };
           };
 
-          content: Adw.NavigationPage {
-            title: _("Home");
+          content: Adw.NavigationPage room_page {
+            title: _("Waddle");
 
             child: Adw.ToolbarView {
               [top]
-              Adw.HeaderBar {}
+              Adw.HeaderBar {
+                title-widget: Adw.WindowTitle room_title {
+                  title: _("Waddle");
+                };
+              }
 
-              content: Adw.StatusPage account_status {
-                icon-name: "user-available-symbolic";
-                description: _("Rooms, direct messages and calls arrive with the shared client core.");
+              content: Stack content_stack {
+                StackPage {
+                  name: "empty";
+
+                  child: Adw.StatusPage account_status {
+                    icon-name: "chat-bubbles-text-symbolic";
+                    title: _("Connecting…");
+                  };
+                }
+
+                StackPage {
+                  name: "timeline";
+
+                  child: ScrolledWindow timeline_scroller {
+                    hscrollbar-policy: never;
+                    vexpand: true;
+
+                    child: ListView timeline_view {
+                      single-click-activate: false;
+
+                      styles [
+                        "timeline",
+                      ]
+                    };
+                  };
+                }
               };
+
+              [bottom]
+              Box composer {
+                spacing: 6;
+                margin-start: 12;
+                margin-end: 12;
+                margin-top: 6;
+                margin-bottom: 12;
+                sensitive: false;
+
+                Entry composer_entry {
+                  hexpand: true;
+                  placeholder-text: _("Message");
+                  activate => $on_send() swapped;
+                }
+
+                Button {
+                  icon-name: "paper-plane-symbolic";
+                  tooltip-text: _("Send");
+                  clicked => $on_send() swapped;
+
+                  styles [
+                    "suggested-action",
+                    "circular",
+                  ]
+                }
+              }
             };
           };
         };

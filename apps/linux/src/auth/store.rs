@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 use super::device::{ServerUrl, SignedInSession};
@@ -32,6 +33,28 @@ impl From<oo7::Error> for StoreError {
 pub struct StoredAccount {
     pub server: ServerUrl,
     pub session: SignedInSession,
+    /// This install's XMPP resource for the account, kept so every
+    /// reconnect binds the same full JID (no ghost room occupants).
+    pub resource: String,
+}
+
+impl StoredAccount {
+    /// A freshly signed-in account with a new random resource.
+    pub fn new(server: ServerUrl, session: SignedInSession) -> Self {
+        let suffix = uuid::Uuid::new_v4().simple().to_string();
+        Self {
+            server,
+            session,
+            resource: format!("waddle-linux-{}", &suffix[..8]),
+        }
+    }
+}
+
+/// What the keyring item's secret holds.
+#[derive(Serialize, Deserialize)]
+struct StoredSecret {
+    session: SignedInSession,
+    resource: String,
 }
 
 pub struct CredentialStore {
@@ -45,14 +68,14 @@ impl CredentialStore {
         })
     }
 
-    pub async fn save(
-        &self,
-        server: &ServerUrl,
-        session: &SignedInSession,
-    ) -> Result<(), StoreError> {
-        let server_key = server.to_string();
-        let jid = session.jid.to_string();
-        let secret = serde_json::to_vec(session).map_err(|_| StoreError::Corrupt)?;
+    pub async fn save(&self, account: &StoredAccount) -> Result<(), StoreError> {
+        let server_key = account.server.to_string();
+        let jid = account.session.jid.to_string();
+        let secret = serde_json::to_vec(&StoredSecret {
+            session: account.session.clone(),
+            resource: account.resource.clone(),
+        })
+        .map_err(|_| StoreError::Corrupt)?;
         self.keyring
             .create_item(
                 &format!("Waddle: {jid}"),
@@ -77,9 +100,13 @@ impl CredentialStore {
                 .and_then(|raw| ServerUrl::parse(raw).ok())
                 .ok_or(StoreError::Corrupt)?;
             let secret = item.secret().await?;
-            let session: SignedInSession =
+            let stored: StoredSecret =
                 serde_json::from_slice(&secret).map_err(|_| StoreError::Corrupt)?;
-            accounts.push(StoredAccount { server, session });
+            accounts.push(StoredAccount {
+                server,
+                session: stored.session,
+                resource: stored.resource,
+            });
         }
         Ok(accounts)
     }

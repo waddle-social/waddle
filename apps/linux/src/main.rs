@@ -8,6 +8,7 @@
 mod application;
 mod auth;
 mod runtime;
+mod session;
 mod ui;
 
 use gtk::glib;

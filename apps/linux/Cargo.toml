@@ -28,6 +28,12 @@ thiserror = "2"
 jid = { version = "0.12", features = ["serde"] }
 url = { version = "2.5", features = ["serde"] }
 tracing = "0.1"
+async-channel = "2.5"
+chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
+uuid = { version = "1", features = ["v4"] }
+# The shared client core (ADR-0019) and the protocol facade the phones use.
+waddle-client-session = { path = "../../server/crates/waddle-client-session" }
+waddle-xmpp-client-ffi = { path = "../../server/crates/waddle-xmpp-client-ffi" }
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
 [dev-dependencies]

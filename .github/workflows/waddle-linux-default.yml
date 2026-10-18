@@ -23,6 +23,12 @@ on:
     - flake.lock/**
     - flake.nix
     - flake.nix/**
+    - server/Cargo.toml
+    - server/Cargo.toml/**
+    - server/crates/waddle-client-session/**
+    - server/crates/waddle-xmpp-client-ffi/**
+    - server/crates/waddle-xmpp-client/**
+    - server/crates/waddle-xmpp-core/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}

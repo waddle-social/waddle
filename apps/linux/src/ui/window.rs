@@ -1,4 +1,5 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
+use std::collections::HashMap;
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -7,6 +8,8 @@ use gtk::{gio, glib};
 use crate::auth::device::{DeviceAuthClient, DeviceAuthorization, Provider, ServerUrl};
 use crate::auth::store::{CredentialStore, StoredAccount};
 use crate::runtime;
+use crate::session::{Room, Session};
+use waddle_client_session::Timeline;
 
 mod imp {
     use super::*;
@@ -30,6 +33,26 @@ mod imp {
         pub user_code_label: TemplateChild<gtk::Label>,
         #[template_child]
         pub account_status: TemplateChild<adw::StatusPage>,
+        #[template_child]
+        pub account_label: TemplateChild<gtk::Label>,
+        #[template_child]
+        pub split_view: TemplateChild<adw::NavigationSplitView>,
+        #[template_child]
+        pub room_list: TemplateChild<gtk::ListBox>,
+        #[template_child]
+        pub room_page: TemplateChild<adw::NavigationPage>,
+        #[template_child]
+        pub room_title: TemplateChild<adw::WindowTitle>,
+        #[template_child]
+        pub content_stack: TemplateChild<gtk::Stack>,
+        #[template_child]
+        pub timeline_scroller: TemplateChild<gtk::ScrolledWindow>,
+        #[template_child]
+        pub timeline_view: TemplateChild<gtk::ListView>,
+        #[template_child]
+        pub composer: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub composer_entry: TemplateChild<gtk::Entry>,
 
         pub auth_client: RefCell<Option<DeviceAuthClient>>,
         pub providers: RefCell<Vec<Provider>>,
@@ -37,7 +60,20 @@ mod imp {
         pub account: RefCell<Option<StoredAccount>>,
         /// Bumped whenever a sign-in attempt is abandoned, so a poll that
         /// completes late cannot sign in a flow the user cancelled.
-        pub attempt: std::cell::Cell<u64>,
+        pub attempt: Cell<u64>,
+
+        // The signed-in session (see ui/conversation.rs).
+        pub session: RefCell<Option<Session>>,
+        /// Bumped on sign-out so events from an old session are ignored.
+        pub generation: Cell<u64>,
+        pub connected: Cell<bool>,
+        pub reconnect_attempt: Cell<u32>,
+        pub rooms: RefCell<Vec<Room>>,
+        pub unread: RefCell<HashMap<String, u32>>,
+        pub timelines: RefCell<HashMap<String, Timeline>>,
+        pub current_room: RefCell<Option<String>>,
+        pub loading_history: Cell<bool>,
+        pub rows: RefCell<Option<gio::ListStore>>,
     }
 
     #[glib::object_subclass]
@@ -63,6 +99,7 @@ mod imp {
         fn constructed(&self) {
             self.parent_constructed();
             let window = self.obj().clone();
+            window.setup_timeline();
             glib::spawn_future_local(async move { window.restore().await });
         }
     }
@@ -160,10 +197,7 @@ impl WaddleWindow {
             }
             match approved {
                 Ok(Ok(session)) => {
-                    let account = StoredAccount {
-                        server: client.server().clone(),
-                        session,
-                    };
+                    let account = StoredAccount::new(client.server().clone(), session);
                     window.save_and_enter(account).await;
                 }
                 Ok(Err(error)) => {
@@ -173,6 +207,18 @@ impl WaddleWindow {
                 Err(_) => window.toast("Sign-in stopped unexpectedly."),
             }
         });
+    }
+
+    #[template_callback]
+    fn on_room_activated(&self, row: &gtk::ListBoxRow) {
+        if let Some(room) = self.room_at(row.index()) {
+            self.open_room(&room.jid);
+        }
+    }
+
+    #[template_callback]
+    fn on_send(&self) {
+        self.send_current();
     }
 
     #[template_callback]
@@ -251,7 +297,7 @@ impl WaddleWindow {
         let to_store = account.clone();
         let saved = runtime::spawn(async move {
             let store = CredentialStore::open().await?;
-            store.save(&to_store.server, &to_store.session).await
+            store.save(&to_store).await
         })
         .await;
         if let Ok(Err(error)) = saved {
@@ -264,16 +310,18 @@ impl WaddleWindow {
 
     fn enter(&self, account: StoredAccount) {
         let imp = self.imp();
-        imp.account_status
-            .set_title(&format!("Signed in as {}", account.session.jid));
-        imp.account.replace(Some(account));
+        imp.account_label
+            .set_label(&format!("{} · {}", account.session.jid, account.server));
+        imp.account.replace(Some(account.clone()));
         imp.stack.set_visible_child_name("shell");
+        self.start_session(&account);
     }
 
     async fn sign_out(&self) {
         let Some(account) = self.imp().account.take() else {
             return;
         };
+        self.stop_session().await;
         let removed = runtime::spawn(async move {
             let store = CredentialStore::open().await?;
             store.remove(&account).await
@@ -286,7 +334,7 @@ impl WaddleWindow {
         self.imp().stack.set_visible_child_name("server");
     }
 
-    fn toast(&self, message: &str) {
+    pub(super) fn toast(&self, message: &str) {
         self.imp().toast_overlay.add_toast(adw::Toast::new(message));
     }
 }

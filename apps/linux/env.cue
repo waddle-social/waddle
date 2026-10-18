@@ -16,6 +16,12 @@ let _rustInputs = [
 	"data/**",
 	"../../flake.nix",
 	"../../flake.lock",
+	// The shared core and the protocol facade, by path.
+	"../../server/Cargo.toml",
+	"../../server/crates/waddle-client-session/**",
+	"../../server/crates/waddle-xmpp-client-ffi/**",
+	"../../server/crates/waddle-xmpp-client/**",
+	"../../server/crates/waddle-xmpp-core/**",
 ]
 
 schema.#Project & {
