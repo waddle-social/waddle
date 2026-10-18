@@ -3163,12 +3163,14 @@ name = "waddle-linux"
 version = "0.1.0"
 dependencies = [
  "async-channel",
+ "base64 0.22.1",
  "chrono",
  "gtk4",
  "jid",
  "libadwaita",
  "oo7",
  "reqwest",
+ "ring",
  "rustls",
  "serde",
  "serde_json",
