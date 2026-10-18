@@ -80,7 +80,7 @@ use waddle_server::clustering::NodeId;
 use waddle_server::config::{ClusteringBootstrapConfig, ClusteringConfig, ClusteringLeaseConfig};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_ws_test_support::{extract_attr_after, TestServer, WsXmppClient};
-use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
+use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType};
 use waddle_xmpp::Stanza;
 
 const POOL_SIZE: usize = 4;
@@ -151,6 +151,47 @@ async fn open_control_db(url: &str) -> Database {
     )
     .await
     .expect("open harness postgres")
+}
+
+/// A standalone swarm does not run `start_if_enabled`'s node-lease setup.
+/// Register the same identity its relay advertises and keep that row fresh
+/// until this test-process node leaves the mesh.
+async fn register_test_swarm_node(
+    db: &Database,
+    handle: &swarm::SwarmHandle,
+    config: &ClusteringConfig,
+    stop: CancellationToken,
+) -> tokio::task::JoinHandle<()> {
+    let store = PostgresClaimStore::new(db.clone());
+    let identity = handle.node_identity.current();
+    store
+        .register_with_peer_id(&identity, None, Some(handle.local_peer_id.to_string()))
+        .await
+        .expect("register standalone test-process node");
+    handle.refresh_membership();
+    let interval = config.node_lease.heartbeat_interval;
+    let ttl = config.node_lease.lease_ttl;
+    tokio::spawn(async move {
+        let mut heartbeat = tokio::time::interval(interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                biased;
+                _ = stop.cancelled() => break,
+                _ = heartbeat.tick() => {
+                    assert!(store.heartbeat(&identity, ttl).await.expect("renew test-process node"),
+                        "standalone test-process node lost its lease");
+                }
+            }
+        }
+        // This process has no XMPP sockets and all test asks have settled.
+        // Commit departure after stopping its mesh scope rather than leaving
+        // a fresh-looking harness row.
+        store
+            .retire(&identity)
+            .await
+            .expect("retire test-process node");
+    })
 }
 
 /// Reset the clustering control-plane tables and enroll every pool PeerId.
@@ -496,6 +537,42 @@ async fn ping_until(
     Err(format!("relay ping never succeeded: {last_error}"))
 }
 
+/// Startup node-id files precede lease recovery. Once this harness has three
+/// registered nodes, startup/restart isolation can rotate a peer's node id
+/// before its first connection. Discover its current relay through the same
+/// committed registry binding that effective swarm admission uses.
+async fn relay_for_live_peer(
+    db: &Database,
+    peer_id: &str,
+    stop: CancellationToken,
+    budget: Duration,
+) -> (String, RelayHandle) {
+    tokio::time::timeout(budget, async {
+        loop {
+            let node = {
+                let conn = db.control_plane_guard().await.expect("control plane");
+                let mut rows = conn.query(
+                    "SELECT node_id FROM clustering_nodes WHERE peer_id = ? AND NOT expired AND NOT draining LIMIT 2",
+                    waddle_server::db_params![peer_id.to_string()],
+                ).await.expect("current peer node identity");
+                let node = rows.next().await.expect("node row")
+                    .map(|row| row.get::<String>(0).expect("node id"));
+                assert!(rows.next().await.expect("second node row").is_none(),
+                    "multiple live node identities for peer {peer_id}");
+                node
+            };
+            // Release control-plane rows and connection before network I/O.
+            if let Some(node) = node {
+                let mut relay = RelayHandle::new(NodeId::new(node.clone()), stop.clone());
+                if relay.ping().await.is_ok_and(|pong| pong.node_id.as_str() == node) {
+                    return (node, relay);
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }).await.unwrap_or_else(|_| panic!("no current relay for peer {peer_id} within {budget:?}"))
+}
+
 fn thread_message(id: &str, body_size: usize) -> RemoteStanza {
     let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
     message.thread = Some(xmpp_parsers::message::Thread {
@@ -610,9 +687,9 @@ async fn cluster_exit_criteria_end_to_end() {
     // loopback seed per node.
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (mut server_a, node_a, peer_a) =
+    let (mut server_a, _startup_node_a, peer_a) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
-    let (server_b, node_b, _peer_b) =
+    let (server_b, _startup_node_b, peer_b) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
 
     // --- The test process joins as node C.
@@ -654,10 +731,12 @@ async fn cluster_exit_criteria_end_to_end() {
         },
         fault_injection: false,
         node_id_file: None,
+        // Match the subprocess node-lease timings: their watchdog expires
+        // every stale node using the same cluster-wide TTL.
         node_lease: waddle_server::config::ClusteringNodeLeaseConfig {
-            heartbeat_interval: Duration::from_secs(1),
-            lease_ttl: Duration::from_secs(10),
-            claim_release_budget: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_millis(300),
+            lease_ttl: Duration::from_millis(1200),
+            claim_release_budget: Duration::from_millis(300),
         },
         self_fence: waddle_server::config::ClusteringSelfFenceConfig::default(),
         steal_intent: waddle_server::config::ClusteringStealIntentConfig::default(),
@@ -683,24 +762,21 @@ async fn cluster_exit_criteria_end_to_end() {
     .await
     .expect("test-process swarm joins the mesh");
     assert!(!handle.node_id.as_str().is_empty());
+    let node_lease = register_test_swarm_node(&db, &handle, &config, stop.clone()).await;
 
     // --- Exit criterion: cross-node ask round-trip (real network, two other
     // processes), including discovery of B through the mesh (the test only
     // bootstraps toward A).
     // Exercise the configured receiver-side ask timeouts (ADR element 5)
     // through the handle's wiring, not just config validation.
-    let mut relay_a = RelayHandle::new(NodeId::new(node_a.clone()), stop.clone())
-        .with_ask_timeouts(
-            config.messaging.mailbox_timeout,
-            config.messaging.reply_timeout,
-        );
-    ping_until(&mut relay_a, &node_a, Duration::from_secs(30))
-        .await
-        .expect("cross-node ping to A");
-    let mut relay_b = RelayHandle::new(NodeId::new(node_b.clone()), stop.clone());
-    ping_until(&mut relay_b, &node_b, Duration::from_secs(30))
-        .await
-        .expect("cross-node ping to B");
+    let (node_a, relay_a) =
+        relay_for_live_peer(&db, &peer_a, stop.clone(), Duration::from_secs(45)).await;
+    let mut relay_a = relay_a.with_ask_timeouts(
+        config.messaging.mailbox_timeout,
+        config.messaging.reply_timeout,
+    );
+    let (node_b, mut relay_b) =
+        relay_for_live_peer(&db, &peer_b, stop.clone(), Duration::from_secs(45)).await;
 
     // --- Exit criterion: the bounded XML codec on the wire — a
     // thread-carrying stanza survives the round-trip to another process.
@@ -739,18 +815,7 @@ async fn cluster_exit_criteria_end_to_end() {
 
     let claim_store = PostgresClaimStore::new(db.clone());
     let ordered_stream_id = "ordered-e2e-stream";
-    let origin_identity = NodeIdentity::new(
-        handle.node_id.as_str().to_string(),
-        uuid::Uuid::new_v4().to_string(),
-    );
-    claim_store
-        .register_with_peer_id(
-            &origin_identity,
-            None,
-            Some(handle.local_peer_id.to_string()),
-        )
-        .await
-        .expect("register test-process origin node");
+    let origin_identity = handle.node_identity.current();
     let origin_entity = Entity::new(EntityType::SmSession, ordered_stream_id);
     let origin_epoch = claim_store
         .acquire(&origin_entity, &origin_identity)
@@ -1353,10 +1418,9 @@ async fn cluster_exit_criteria_end_to_end() {
             "revoked peer A still reachable after the containment window"
         );
     }
-    // Expire A while disconnected so its real heartbeat loses the lease CAS.
-    // The test-process origin lease is not renewed, so isolation alone cannot
-    // reliably bypass the two-node lone-survivor carve-out. Recovery remains
-    // blocked on connectivity until re-enrollment below.
+    // Explicitly expire A's original incarnation while disconnected so the
+    // identity-rotation assertion does not depend on isolation-heuristic
+    // timing. Recovery remains blocked on connectivity until re-enrollment.
     conn.execute(
         "UPDATE clustering_nodes SET expired = TRUE WHERE node_id = ?",
         waddle_server::db_params![node_a.clone()],
@@ -1410,13 +1474,11 @@ async fn cluster_exit_criteria_end_to_end() {
     // name, new leased slot. The mesh's periodic re-dial reconnects and the
     // newcomer's periodic re-registration makes its relay resolvable.
     drop(server_b);
-    let (server_b2, node_b2, _peer_b2) =
+    let (server_b2, _startup_node_b2, peer_b2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
+    let (node_b2, mut relay_b2) =
+        relay_for_live_peer(&db, &peer_b2, stop.clone(), Duration::from_secs(45)).await;
     assert_ne!(node_b2, node_b, "restarted node must mint a fresh node_id");
-    let mut relay_b2 = RelayHandle::new(NodeId::new(node_b2.clone()), stop.clone());
-    ping_until(&mut relay_b2, &node_b2, Duration::from_secs(45))
-        .await
-        .expect("restarted node re-discovered via kademlia");
 
     // Leg 2: with B's replacement verified live, cycle A too — the graceful
     // path this time (SIGTERM is what a real rolling restart sends), which
@@ -1430,13 +1492,11 @@ async fn cluster_exit_criteria_end_to_end() {
         "node A did not exit after SIGTERM"
     );
     drop(server_a);
-    let (server_a2, node_a2, _peer_a2) =
+    let (server_a2, _startup_node_a2, peer_a2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
+    let (node_a2, _relay_a2) =
+        relay_for_live_peer(&db, &peer_a2, stop.clone(), Duration::from_secs(45)).await;
     assert_ne!(node_a2, node_a, "restarted node must mint a fresh node_id");
-    let mut relay_a2 = RelayHandle::new(NodeId::new(node_a2.clone()), stop.clone());
-    ping_until(&mut relay_a2, &node_a2, Duration::from_secs(45))
-        .await
-        .expect("A's replacement re-discovered via kademlia after the full rolling restart");
     // Full cross-node discovery holds with zero original peers left: B's
     // replacement must still answer alongside A's.
     ping_until(&mut relay_b2, &node_b2, Duration::from_secs(30))
@@ -1445,6 +1505,7 @@ async fn cluster_exit_criteria_end_to_end() {
 
     // --- Shutdown.
     stop.cancel();
+    node_lease.await.expect("test-process node lease stops");
     drop(server_b2);
     drop(server_a2);
 }

@@ -42,9 +42,9 @@ async fn local_copy_precedes_blocked_remote_and_recovery_terminalizes() {
     reset_and_enroll(&db, &pool).await;
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
-    let (server_a, node_a, _) =
+    let (server_a, _startup_node_a, peer_a) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
-    let (server_b, node_b, _) =
+    let (server_b, _startup_node_b, peer_b) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a]).await;
 
     let stop = CancellationToken::new();
@@ -71,14 +71,16 @@ async fn local_copy_precedes_blocked_remote_and_recovery_terminalizes() {
             mailbox_timeout: Duration::from_millis(500),
             ..Default::default()
         },
+        // Match the subprocess node-lease timings: their watchdog expires
+        // every stale node using the same cluster-wide TTL.
         node_lease: waddle_server::config::ClusteringNodeLeaseConfig {
-            heartbeat_interval: Duration::from_secs(1),
-            lease_ttl: Duration::from_secs(10),
-            claim_release_budget: Duration::from_secs(5),
+            heartbeat_interval: Duration::from_millis(300),
+            lease_ttl: Duration::from_millis(1200),
+            claim_release_budget: Duration::from_millis(300),
         },
         ..Default::default()
     };
-    let _handle = swarm::spawn(
+    let handle = swarm::spawn(
         &config,
         &db,
         stop.clone(),
@@ -94,14 +96,11 @@ async fn local_copy_precedes_blocked_remote_and_recovery_terminalizes() {
     )
     .await
     .expect("isolated test swarm joins mesh");
-    let mut relay_a = RelayHandle::new(NodeId::new(node_a.clone()), stop.clone());
-    ping_until(&mut relay_a, &node_a, Duration::from_secs(30))
-        .await
-        .expect("room owner A reachable");
-    let mut relay_b = RelayHandle::new(NodeId::new(node_b.clone()), stop.clone());
-    ping_until(&mut relay_b, &node_b, Duration::from_secs(30))
-        .await
-        .expect("remote occupant owner B reachable");
+    let node_lease = register_test_swarm_node(&db, &handle, &config, stop.clone()).await;
+    let (node_a, _relay_a) =
+        relay_for_live_peer(&db, &peer_a, stop.clone(), Duration::from_secs(45)).await;
+    let (node_b, mut relay_b) =
+        relay_for_live_peer(&db, &peer_b, stop.clone(), Duration::from_secs(45)).await;
     partial_room_fanout_completes_on_retransmission_after_relay_recovery(
         &db,
         &server_a,
@@ -112,4 +111,5 @@ async fn local_copy_precedes_blocked_remote_and_recovery_terminalizes() {
     )
     .await;
     stop.cancel();
+    node_lease.await.expect("test-process node lease stops");
 }
