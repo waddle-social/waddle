@@ -1585,6 +1585,28 @@ async fn node_expired_flag(db: &Database, node_id: &str) -> Option<bool> {
         .map(|row| row.get::<bool>(0).expect("expired column"))
 }
 
+/// Capture the incarnation that is serving this peer immediately before a
+/// controlled fault, rather than a possibly superseded startup-file identity.
+async fn current_live_node_for_peer(db: &Database, peer_id: &str) -> String {
+    let conn = db.control_plane_guard().await.expect("control plane");
+    let mut rows = conn.query(
+        "SELECT node_id FROM clustering_nodes WHERE peer_id = ? AND NOT expired AND NOT draining LIMIT 2",
+        waddle_server::db_params![peer_id.to_string()],
+    ).await.expect("current peer node identity");
+    let node = rows
+        .next()
+        .await
+        .expect("node row")
+        .expect("peer has a live node")
+        .get::<String>(0)
+        .expect("node id");
+    assert!(
+        rows.next().await.expect("second node row").is_none(),
+        "multiple live node identities for peer {peer_id}"
+    );
+    node
+}
+
 async fn seed_detached_sm_session_row(
     db: &Database,
     stream_id: &str,
@@ -1740,17 +1762,26 @@ async fn lone_survivor_and_isolation_fencing() {
         let port_a = free_tcp_port();
         let port_b = free_tcp_port();
         let port_d = free_tcp_port();
-        let (server_a, _node_a, _peer_a) =
+        let (server_a, _node_a, peer_a) =
             spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b, port_d]).await;
         let (server_b, _node_b, _peer_b) =
             spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a, port_d]).await;
+        wait_for_cross_node_registration(&db, &server_a, &server_b, &peer_a).await;
         let (server_d, _node_d, peer_d) =
             spawn_cluster_server(&postgres_url, &pool.pool_env, port_d, &[port_a, port_b]).await;
 
+        wait_for_cross_node_registration(&db, &server_a, &server_d, &peer_a).await;
+        wait_for_cross_node_registration(&db, &server_a, &server_b, &peer_a).await;
         wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
         wait_for_readiness(&server_d, true, Duration::from_secs(15)).await;
 
+        let node_d = current_live_node_for_peer(&db, &peer_d).await;
+        assert_eq!(
+            node_expired_flag(&db, &node_d).await,
+            Some(false),
+            "D must be live before the isolation fault"
+        );
         let conn = db.guard().await.expect("guard");
         conn.execute(
             "DELETE FROM clustering_peer_allowlist WHERE peer_id = ?",
@@ -1783,8 +1814,8 @@ async fn lone_survivor_and_isolation_fencing() {
     }
 }
 
-/// Establish the relay path before a test whose one-second SM handshake
-/// budget measures live-owner detachment rather than cold mesh discovery.
+/// Prove authoritative registration across a healthy relay path before a
+/// controlled isolation fault or a bounded live-owner SM handshake.
 async fn wait_for_cross_node_registration(
     db: &Database,
     server_a: &TestServer,
@@ -4183,16 +4214,26 @@ async fn whole_node_isolation_fences_then_self_heals_without_operator_interventi
     let port_a = free_tcp_port();
     let port_b = free_tcp_port();
     let port_c = free_tcp_port();
-    let (server_a, _node_a, _peer_a) =
+    let (server_a, _node_a, peer_a) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b, port_c]).await;
     let (server_b, _node_b, _peer_b) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_b, &[port_a, port_c]).await;
-    let (server_c, node_c, peer_c) =
+    wait_for_cross_node_registration(&db, &server_a, &server_b, &peer_a).await;
+    let (server_c, _startup_node_c, peer_c) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_c, &[port_a, port_b]).await;
 
+    wait_for_cross_node_registration(&db, &server_a, &server_c, &peer_a).await;
+    wait_for_cross_node_registration(&db, &server_a, &server_b, &peer_a).await;
     wait_for_readiness(&server_a, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_b, true, Duration::from_secs(15)).await;
     wait_for_readiness(&server_c, true, Duration::from_secs(15)).await;
+
+    let node_c = current_live_node_for_peer(&db, &peer_c).await;
+    assert_eq!(
+        node_expired_flag(&db, &node_c).await,
+        Some(false),
+        "C must be live before the isolation fault"
+    );
 
     // --- Induce (closest available primitive, see deviation 107): revoke
     // C's peer_id cluster-wide.
@@ -4244,7 +4285,7 @@ async fn whole_node_isolation_fences_then_self_heals_without_operator_interventi
     wait_for_readiness(&server_c, true, Duration::from_secs(30)).await;
 
     // Prove the recovery is REAL re-registration (a fresh `NodeIdentity`),
-    // not a stale readiness flag: C's ORIGINAL `clustering_nodes` row must
+    // not a stale readiness flag: C's pre-fault `clustering_nodes` row must
     // now be committed-expired (`self_fence.rs`'s successful-recovery path
     // explicitly calls `expire_bounded` on the just-superseded identity),
     // and exactly three live (not expired, not draining) rows must exist
@@ -4252,7 +4293,7 @@ async fn whole_node_isolation_fences_then_self_heals_without_operator_interventi
     assert_eq!(
         node_expired_flag(&db, &node_c).await,
         Some(true),
-        "C's ORIGINAL clustering_nodes row must be committed-expired after self-healing \
+        "C's pre-fault clustering_nodes row must be committed-expired after self-healing \
          re-registration under a fresh identity"
     );
     let mut rows = conn
