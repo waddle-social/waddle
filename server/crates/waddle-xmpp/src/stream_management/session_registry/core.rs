@@ -97,24 +97,10 @@ fn occupied_claim_fence_capacity(
         .saturating_add(unrepresented_reservations)
 }
 
-/// Bound on any `ClaimStore` acquire/`ensure_claimed` call made while this
-/// registry holds one of its [`STREAM_LOCK_SHARDS`] stream-shard locks (FIX
-/// 5, council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda:
-/// `claim_session`, `claims.rs::acquire_claim_store_entry_for_detach`, and
-/// [`InMemorySmSessionRegistry::hydrate_reclaimed`] below).
-///
-/// **Shard-fan-in rationale**: `stream_lock` hashes a stream id down to one
-/// of a fixed, small number of shard mutexes — many unrelated stream ids
-/// share the same shard. A hung `ClaimStore` call while holding one shard's
-/// lock therefore does not just stall the one stream id it was issued for;
-/// it stalls every OTHER live stream id that happens to hash to the same
-/// shard too (store/take/claim/release, all of which take the same shard
-/// lock before touching `sessions`/`claimed_sessions`). This is a strictly
-/// wider blast radius than a genuinely per-entity lock would have, which is
-/// why every `ClaimStore` call issued under a shard lock is bounded here —
-/// mirrors `self_fence.rs::expire_bounded`'s bounded/best-effort/logged
-/// pattern one level down (a per-entity claim call instead of a per-node
-/// lease call).
+/// Bound on a `ClaimStore` acquire or lookup made while holding a stream's
+/// operation lock. A stalled backend must not indefinitely block resumption,
+/// fanout or cleanup for that stream. Only synchronous mutex lookup is sharded;
+/// unrelated streams have independent operation locks.
 pub(super) const CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// In-memory implementation of the SM session registry, optionally
@@ -2235,10 +2221,10 @@ impl InMemorySmSessionRegistry {
     /// Ordering is crash-safe: the pending row commits BEFORE its
     /// `sm_unacked` row is deleted here, preserving at-least-once.
     ///
-    /// Takes the stream lock so the delete serializes with
-    /// detached-append full snapshots that could otherwise resurrect
-    /// the rows. No in-memory mutation happens here — the caller owns
-    /// the drained session and drops the entries from its local copy.
+    /// Takes the stream lock so deletion serializes with incremental
+    /// detached appends and initial snapshots that could otherwise race it.
+    /// No in-memory mutation happens here — the caller owns the drained session
+    /// and drops the entries from its local copy.
     pub async fn delete_unacked_sequences(
         &self,
         stream_id: &str,

@@ -1049,7 +1049,7 @@ impl InMemorySmSessionRegistry {
             .await;
     }
 
-    async fn reconcile_uncertain_claim_acquisition_locked(
+    pub(super) async fn reconcile_uncertain_claim_acquisition_locked(
         &self,
         stream_id: &str,
         identity: crate::ownership::NodeIdentity,
@@ -2362,13 +2362,17 @@ impl InMemorySmSessionRegistry {
             }
             let fence =
                 super::super::persistence::SmClaimFence::new(snapshot.owner, snapshot.claim_epoch);
-            capture.bind_first_claim(fence.clone());
             let guard = self.node_identity.guard_if_current(&identity).await?;
-            if !self.reserve_claim_fence_capacity(stream_id)
-                || !self.try_record_claim_fence(stream_id, fence)
-            {
+            if !self.reserve_claim_fence_capacity(stream_id) {
                 return None;
             }
+            if !self.try_record_claim_fence(stream_id, fence.clone()) {
+                self.cancel_claim_fence_reservation(stream_id);
+                return None;
+            }
+            // Publish authority only after its bounded ownership inventory is
+            // retained. There is no await between recording and binding.
+            capture.bind_first_claim(fence);
             return Some(guard);
         }
         self.ensure_session_claim_inner(stream_id, Some(capture))
@@ -2821,15 +2825,9 @@ impl InMemorySmSessionRegistry {
             identity.clone(),
             PendingClaimAcquisitionDisposition::RetainDetachedSession,
         );
-        // FIX 5: bounded — this call runs under `stream_id`'s shard lock
-        // (`store_session` holds it for the whole function, including this
-        // call), shared by every other stream id hashing to the same shard
-        // (see `CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT`'s doc comment). Best
-        // effort by design (see this function's doc comment above): a
-        // timeout is logged and treated exactly like any other
-        // `ensure_claimed` failure here — proceed without a durable claim
-        // record rather than block every other stream id sharing this
-        // shard.
+        // This call is bounded while store_session holds this stream's
+        // operation lock. Detach remains best effort on failure; an uncertain
+        // acquisition retains its reservation for bounded reconciliation.
         match tokio::time::timeout(
             CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
             self.claim_store.ensure_claimed(&entity, &identity),
@@ -2874,7 +2872,7 @@ impl InMemorySmSessionRegistry {
                     stream_id = %stream_id,
                     timeout = ?CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT,
                     "store_session: ClaimStore ensure_claimed timed out while holding this \
-                     stream's shard lock (FIX 5); proceeding without a durable claim record \
+                     stream's operation lock; proceeding without a durable claim record \
                      (best-effort — see this function's doc comment)"
                 );
                 if acquisition_reserved {

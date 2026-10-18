@@ -599,7 +599,7 @@ impl InMemorySmSessionRegistry {
             disposition: crate::stream_management::persistence::IngressCustodyDisposition::Pending,
         });
         delta.new_delivery = new_delivery;
-        let fence = updated.promotion_custody.captured_fence().cloned();
+        let fence = self.detached_append_fence_locked(&updated).await;
         self.mark_snapshot_stale(&accepting_stream)?;
         let registry = Arc::clone(self);
         let storage = Arc::clone(storage);

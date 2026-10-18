@@ -1,5 +1,106 @@
 use super::*;
 
+#[tokio::test]
+async fn fresh_detached_append_recovers_only_an_existing_claim_without_acquiring() {
+    use crate::ownership::{
+        ClaimStore as _, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use crate::pending_delivery::SmSessionId;
+    use crate::stream_management::persistence::{InMemorySmPersistence, SmPersistenceStorage as _};
+    use std::sync::{atomic::AtomicBool, Arc, Mutex};
+
+    for existing_claim in [true, false] {
+        let stream = "cancelled-before-detach-acquire";
+        let entity = Entity::new(EntityType::SmSession, stream);
+        let owner = NodeIdentity::new("detach-node", "incarnation");
+        let claims = Arc::new(HangingReleaseClaimStore {
+            inner: InProcessClaimStore::new(),
+            hang_release: AtomicBool::new(false),
+            hang_ensure: AtomicBool::new(false),
+            commit_then_hang_ensure_once: AtomicBool::new(false),
+            poison_fence_cache_after_ensure: Mutex::new(None),
+        });
+        let storage = Arc::new(InMemorySmPersistence::new());
+        let registry = InMemorySmSessionRegistry::new()
+            .with_persistence(storage.clone())
+            .with_claim_store(claims.clone(), SharedNodeIdentity::new(owner.clone()));
+        registry
+            .store_session(realistic_test_session(stream))
+            .await
+            .unwrap();
+        let original_fence = registry.current_sm_claim_fence(stream).unwrap();
+        // A cancelled initial snapshot can leave a published fresh capture
+        // before acquire-on-detach records its first attempted owner.
+        registry
+            .sessions
+            .write()
+            .unwrap()
+            .get_mut(stream)
+            .unwrap()
+            .promotion_custody = PromotionCaptureCustody::never_claimed();
+        registry.claim_fences.write().unwrap().remove(stream);
+        if !existing_claim {
+            claims
+                .inner
+                .release_exact(&entity, &owner, original_fence.epoch())
+                .await
+                .unwrap();
+        }
+        let claim_before = claims.current_claim(&entity).await.unwrap();
+        let reached = Arc::new(tokio::sync::Notify::new());
+        *claims.poison_fence_cache_after_ensure.lock().unwrap() =
+            Some(EnsureClaimTestAction::Pause {
+                reached: reached.clone(),
+                proceed: Arc::new(tokio::sync::Notify::new()),
+            });
+        let stanza = message_stanza_with_id("readonly-detach-recovery".into());
+        let appended = tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::select! {
+                biased;
+                () = reached.notified() => {
+                    panic!("append recovery must never call ensure_claimed for a fresh capture")
+                }
+                outcome = registry.record_outbound_for_detached_stream(stream, &stanza, Utc::now()) => outcome,
+            }
+        })
+        .await
+        .expect("read-only append recovery must complete")
+        .expect("portable append can retain a source without a claim");
+        assert!(appended);
+        assert_eq!(claims.current_claim(&entity).await.unwrap(), claim_before);
+        let session = registry.peek_session(stream).await.unwrap().unwrap();
+        if existing_claim {
+            assert_eq!(
+                session.promotion_custody.captured_fence(),
+                Some(&original_fence)
+            );
+            assert_eq!(
+                registry.current_sm_claim_fence(stream),
+                Some(original_fence)
+            );
+        } else {
+            assert!(session.promotion_custody.captured_fence().is_none());
+            assert!(session.promotion_custody.first_claim_owner().is_none());
+            assert_eq!(registry.current_sm_claim_fence(stream), None);
+        }
+        let stored = storage
+            .get_session(&SmSessionId::new(stream))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(stored.outbound_count, 8);
+        let queue = storage
+            .list_unacked(&SmSessionId::new(stream))
+            .await
+            .unwrap();
+        assert_eq!(queue.last().unwrap().sequence, 8);
+        assert_eq!(
+            queue.last().unwrap().stanza.to_element(),
+            stanza.to_element()
+        );
+    }
+}
+
 /// Two historical shard colliders must serialize only their own stream.
 #[tokio::test]
 async fn a_busy_detached_stream_does_not_block_an_unrelated_stream_operation() {

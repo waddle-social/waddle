@@ -1,6 +1,387 @@
 //! Rewrites must not renew the original database-clock resume window.
 
 use super::*;
+use std::sync::atomic::{AtomicBool, Ordering};
+use waddle_xmpp::ownership::{ClaimSnapshot, ExactReleaseOutcome, ResumeIdentityProof};
+use waddle_xmpp::stream_management::{
+    DetachedSession, InMemorySmSessionRegistry, PromotionCaptureCustody, SmIngressAppendKey,
+    SmIngressReceiptKind, SmKeyedAppendOutcome,
+};
+
+/// Only the registry-side detach acquisition fails. The persistence backend
+/// already committed its real Postgres claim with the initial snapshot.
+struct FailFirstDetachClaim {
+    inner: PostgresClaimStore,
+    first: AtomicBool,
+    timeout_first: bool,
+}
+
+#[async_trait]
+impl ClaimStore for FailFirstDetachClaim {
+    async fn ensure_schema(&self) -> Result<(), ClaimError> {
+        self.inner.ensure_schema().await
+    }
+
+    async fn acquire(&self, entity: &Entity, me: &NodeIdentity) -> Result<ClaimEpoch, ClaimError> {
+        self.inner.acquire(entity, me).await
+    }
+
+    async fn ensure_claimed(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        if self.first.swap(false, Ordering::SeqCst) {
+            if self.timeout_first {
+                return std::future::pending().await;
+            }
+            return Err(ClaimError::Backend("injected detach claim failure".into()));
+        }
+        self.inner.ensure_claimed(entity, me).await
+    }
+
+    async fn steal_stale(
+        &self,
+        entity: &Entity,
+        observed: ClaimEpoch,
+        staleness: StalePredicate,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        self.inner
+            .steal_stale(entity, observed, staleness, me)
+            .await
+    }
+
+    async fn steal_for_resume(
+        &self,
+        entity: &Entity,
+        observed: ClaimEpoch,
+        witness: ResumeIdentityProof,
+        me: &NodeIdentity,
+    ) -> Result<ClaimEpoch, ClaimError> {
+        self.inner
+            .steal_for_resume(entity, observed, witness, me)
+            .await
+    }
+
+    async fn current_claim(&self, entity: &Entity) -> Result<Option<ClaimSnapshot>, ClaimError> {
+        self.inner.current_claim(entity).await
+    }
+
+    async fn current_claim_after_pending_writes(
+        &self,
+        entity: &Entity,
+    ) -> Result<Option<ClaimSnapshot>, ClaimError> {
+        self.inner.current_claim_after_pending_writes(entity).await
+    }
+
+    async fn fence(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<bool, ClaimError> {
+        self.inner.fence(entity, me, mine).await
+    }
+
+    async fn release(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<(), ClaimError> {
+        self.inner.release(entity, me, mine).await
+    }
+
+    async fn release_exact(
+        &self,
+        entity: &Entity,
+        me: &NodeIdentity,
+        mine: ClaimEpoch,
+    ) -> Result<ExactReleaseOutcome, ClaimError> {
+        self.inner.release_exact(entity, me, mine).await
+    }
+
+    async fn release_many(&self, entities: &[Entity], me: &NodeIdentity) -> Result<(), ClaimError> {
+        self.inner.release_many(entities, me).await
+    }
+}
+
+fn fresh_detached_session(stream: &str) -> DetachedSession {
+    DetachedSession {
+        promotion_custody: PromotionCaptureCustody::never_claimed(),
+        stream_id: stream.into(),
+        user_id: "alice".into(),
+        jid: full("alice@example.com/web"),
+        occupancy_session: fixed_occupancy_session(),
+        inbound_count: 7,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(60),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: true,
+        roster_interested: true,
+        blocklist_interested: true,
+        presence_available: true,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    }
+}
+
+async fn registry_with_failed_detach_claim(
+    f: &Fixture,
+    stream: &str,
+    timeout_first: bool,
+) -> Arc<InMemorySmSessionRegistry> {
+    let persistence = PostgresFencedSmPersistence::open(
+        f.claims_db.clone(),
+        Arc::new(PostgresClaimStore::new(f.claims_db.clone())),
+        f.shared_identity.clone(),
+    )
+    .await
+    .expect("open registry persistence");
+    let registry = Arc::new(
+        InMemorySmSessionRegistry::new()
+            .with_persistence(Arc::new(persistence))
+            .with_claim_store(
+                Arc::new(FailFirstDetachClaim {
+                    inner: PostgresClaimStore::new(f.claims_db.clone()),
+                    first: AtomicBool::new(true),
+                    timeout_first,
+                }),
+                f.shared_identity.clone(),
+            ),
+    );
+    registry
+        .store_session_with_principal(fresh_detached_session(stream), fixture_principal())
+        .await
+        .expect("best-effort detach must preserve the session");
+    assert_eq!(registry.current_sm_claim_fence(stream), None);
+    assert!(registry
+        .peek_session(stream)
+        .await
+        .expect("peek session")
+        .expect("detached session")
+        .promotion_custody
+        .captured_fence()
+        .is_none());
+    registry
+}
+
+async fn assert_registry_append_recovers_detach_claim(keyed: bool, timeout_first: bool) {
+    let Some(f) = fixture().await else { return };
+    let stream = SmSessionId::new("recover-fenceless-detach");
+    let registry = registry_with_failed_detach_claim(&f, stream.as_str(), timeout_first).await;
+    let initial = f.fenced.get_session(&stream).await.unwrap().unwrap();
+    let entity = sm_session_entity(&stream);
+    let epoch = current_claim_epoch(&f, &entity).await;
+    let entry = fixture_unacked(stream.as_str(), 1);
+    let receipt = DateTime::from_timestamp_millis(Utc::now().timestamp_millis()).unwrap();
+    let key = SmIngressAppendKey {
+        message_key: waddle_xmpp::ingress::MessageKey::new(),
+        kind: SmIngressReceiptKind::from_storage(3),
+        semantic_identity_hash: [9; 32],
+        resource: initial.jid.clone(),
+    };
+    if keyed {
+        assert_eq!(
+            registry
+                .record_keyed_outbound_for_detached_stream_at(
+                    stream.as_str(),
+                    1,
+                    &entry.stanza,
+                    receipt,
+                    key.clone(),
+                )
+                .await
+                .expect("keyed append recovers the initial durable claim"),
+            SmKeyedAppendOutcome::Appended {
+                accepting_stream: stream.clone()
+            }
+        );
+        let proof = f.fenced.get_ingress_append(&key).await.unwrap().unwrap();
+        assert_eq!(proof.accepting_stream, stream);
+        assert_eq!(proof.sequence, 1);
+        assert_eq!(proof.payload.to_element(), entry.stanza.to_element());
+        assert_eq!(proof.original_receipt_at, receipt);
+        assert_eq!(proof.disposition, IngressCustodyDisposition::Pending);
+    } else {
+        assert!(registry
+            .record_outbound_for_detached_stream(stream.as_str(), &entry.stanza, receipt)
+            .await
+            .expect("ordinary append recovers the initial durable claim"));
+    }
+    let stored = f.fenced.get_session(&stream).await.unwrap().unwrap();
+    assert_eq!(stored.outbound_count, 1);
+    assert_eq!(stored.inbound_count, initial.inbound_count);
+    assert_eq!(stored.detached_at, initial.detached_at);
+    let queue = f.fenced.list_unacked(&stream).await.unwrap();
+    assert_eq!(queue.len(), 1);
+    assert_eq!(queue[0].sequence, 1);
+    assert_eq!(queue[0].stanza.to_element(), entry.stanza.to_element());
+    assert_eq!(queue[0].original_receipt_at, receipt);
+    let expected = SmClaimFence::new(f.identity.clone(), epoch);
+    assert_eq!(
+        registry.current_sm_claim_fence(stream.as_str()),
+        Some(expected.clone())
+    );
+    assert_eq!(
+        registry
+            .peek_session(stream.as_str())
+            .await
+            .unwrap()
+            .unwrap()
+            .promotion_custody
+            .captured_fence(),
+        Some(&expected)
+    );
+    assert_eq!(current_claim_epoch(&f, &entity).await, epoch);
+}
+
+#[tokio::test]
+async fn registry_unkeyed_append_recovers_fence_after_detach_claim_failure_postgres() {
+    assert_registry_append_recovers_detach_claim(false, false).await;
+}
+
+#[tokio::test]
+async fn registry_keyed_append_recovers_fence_after_detach_claim_failure_postgres() {
+    assert_registry_append_recovers_detach_claim(true, false).await;
+}
+
+#[tokio::test]
+async fn registry_unkeyed_append_recovers_fence_after_detach_claim_timeout_postgres() {
+    assert_registry_append_recovers_detach_claim(false, true).await;
+}
+
+#[tokio::test]
+async fn registry_keyed_append_recovers_fence_after_detach_claim_timeout_postgres() {
+    assert_registry_append_recovers_detach_claim(true, true).await;
+}
+
+#[derive(Clone, Copy)]
+enum LostDetachAuthority {
+    ReleasedClaim,
+    ForeignOwner,
+    RotatedIdentity,
+    DeletedSource,
+}
+
+async fn assert_fenceless_append_cannot_recreate_or_adopt_source(keyed: bool) {
+    for lost in [
+        LostDetachAuthority::ReleasedClaim,
+        LostDetachAuthority::ForeignOwner,
+        LostDetachAuthority::RotatedIdentity,
+        LostDetachAuthority::DeletedSource,
+    ] {
+        let Some(f) = fixture().await else { return };
+        let stream = SmSessionId::new("reject-fenceless-detach");
+        let registry = registry_with_failed_detach_claim(&f, stream.as_str(), false).await;
+        let entity = sm_session_entity(&stream);
+        let epoch = current_claim_epoch(&f, &entity).await;
+        let initial = f.fenced.get_session(&stream).await.unwrap().unwrap();
+        match lost {
+            LostDetachAuthority::ReleasedClaim | LostDetachAuthority::ForeignOwner => {
+                f.claims
+                    .release_exact(&entity, &f.identity, epoch)
+                    .await
+                    .unwrap();
+                if matches!(lost, LostDetachAuthority::ForeignOwner) {
+                    f.claims
+                        .ensure_claimed(&entity, &node_identity())
+                        .await
+                        .unwrap();
+                }
+            }
+            LostDetachAuthority::RotatedIdentity => {
+                f.shared_identity.rotate(node_identity()).await;
+            }
+            LostDetachAuthority::DeletedSource => {
+                f.claims_db
+                    .guard()
+                    .await
+                    .unwrap()
+                    .execute(
+                        "DELETE FROM sm_sessions WHERE stream_id = ?",
+                        crate::db_params![stream.as_str().to_owned()],
+                    )
+                    .await
+                    .unwrap();
+            }
+        }
+        let claim_before = f.claims.current_claim(&entity).await.unwrap();
+        let entry = fixture_unacked(stream.as_str(), 1);
+        let key = SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [10; 32],
+            resource: initial.jid.clone(),
+        };
+        if keyed {
+            assert!(
+                registry
+                    .record_keyed_outbound_for_detached_stream_at(
+                        stream.as_str(),
+                        1,
+                        &entry.stanza,
+                        Utc::now(),
+                        key.clone(),
+                    )
+                    .await
+                    .is_err(),
+                "missing original authority must reject a keyed append"
+            );
+            assert!(f.fenced.get_ingress_append(&key).await.unwrap().is_none());
+        } else {
+            assert!(
+                registry
+                    .record_outbound_for_detached_stream(stream.as_str(), &entry.stanza, Utc::now())
+                    .await
+                    .is_err(),
+                "missing original authority must reject an ordinary append"
+            );
+        }
+        assert_eq!(
+            f.claims.current_claim(&entity).await.unwrap(),
+            claim_before,
+            "append recovery must not create or steal a claim"
+        );
+        assert!(f.fenced.list_unacked(&stream).await.unwrap().is_empty());
+        let after = f.fenced.get_session(&stream).await.unwrap();
+        if matches!(lost, LostDetachAuthority::DeletedSource) {
+            assert!(
+                after.is_none(),
+                "append recovery must not recreate a completed source"
+            );
+        } else {
+            let after = after.unwrap();
+            assert_eq!(after.outbound_count, initial.outbound_count);
+            assert_eq!(after.detached_at, initial.detached_at);
+            assert!(registry
+                .peek_session(stream.as_str())
+                .await
+                .unwrap()
+                .unwrap()
+                .promotion_custody
+                .captured_fence()
+                .is_none());
+        }
+    }
+}
+
+#[tokio::test]
+async fn registry_unkeyed_append_rejects_lost_fenceless_detach_authority_postgres() {
+    assert_fenceless_append_cannot_recreate_or_adopt_source(false).await;
+}
+
+#[tokio::test]
+async fn registry_keyed_append_rejects_lost_fenceless_detach_authority_postgres() {
+    assert_fenceless_append_cannot_recreate_or_adopt_source(true).await;
+}
 
 #[tokio::test]
 async fn first_database_detach_timestamp_survives_every_fenced_snapshot_refresh() {
