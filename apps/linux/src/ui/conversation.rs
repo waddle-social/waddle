@@ -1116,6 +1116,8 @@ impl WaddleWindow {
         let Some(rows) = self.imp().rows.borrow().clone() else {
             return;
         };
+        // An image landing at the bottom grows its row: stay at the end.
+        let stick = self.near_bottom();
         for position in 0..rows.n_items() {
             let Some(object) = rows.item(position).and_downcast::<glib::BoxedAnyObject>() else {
                 continue;
@@ -1129,6 +1131,9 @@ impl WaddleWindow {
             {
                 rows.splice(position, 1, &[glib::BoxedAnyObject::new(row)]);
             }
+        }
+        if stick {
+            self.scroll_to_end();
         }
     }
 

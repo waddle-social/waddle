@@ -80,6 +80,17 @@ impl WaddleWindow {
         self.imp().content_stack.add_controller(drop);
     }
 
+    /// Why files cannot be attached right now, if they cannot.
+    fn cannot_attach(&self) -> Option<&'static str> {
+        let imp = self.imp();
+        if imp.uploading.get() {
+            return Some("Wait for the current upload to finish.");
+        }
+        // The entry holds the message being edited; it is not a caption.
+        matches!(*imp.compose.borrow(), Compose::Edit { .. })
+            .then_some("Finish editing the message first.")
+    }
+
     /// The composer is usable when connected, in a conversation, and not
     /// waiting on an upload.
     pub(super) fn update_composer(&self) {
@@ -90,6 +101,10 @@ impl WaddleWindow {
     }
 
     pub(super) fn pick_files(&self) {
+        // Say so before the chooser, not after a file is picked.
+        if let Some(reason) = self.cannot_attach() {
+            return self.toast(reason);
+        }
         let dialog = gtk::FileDialog::builder().title("Attach Files").build();
         let window = self.clone();
         glib::spawn_future_local(async move {
@@ -113,12 +128,8 @@ impl WaddleWindow {
         if files.is_empty() {
             return;
         }
-        if imp.uploading.get() {
-            return self.toast("Wait for the current upload to finish.");
-        }
-        // The entry holds the message being edited; it is not a caption.
-        if matches!(*imp.compose.borrow(), Compose::Edit { .. }) {
-            return self.toast("Finish editing the message first.");
+        if let Some(reason) = self.cannot_attach() {
+            return self.toast(reason);
         }
         imp.uploading.set(true);
         let generation = imp.generation.get();
