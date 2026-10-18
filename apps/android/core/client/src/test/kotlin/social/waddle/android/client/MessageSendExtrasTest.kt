@@ -106,6 +106,23 @@ class MessageSendExtrasTest {
     }
 
     @Test
+    fun `fallback quote yields the parent's first quoted line`() {
+        val prefix = buildReplyFallbackPrefix("\nhello 🎉 world\nsecond line")
+        val wire = prefix + "Same"
+        val end = prefix.codePointCount(0, prefix.length).toUInt()
+
+        assertEquals("hello 🎉 world", replyFallbackQuoteOf(wire, 0u, end))
+    }
+
+    @Test
+    fun `fallback quote is null without a usable range`() {
+        assertNull(replyFallbackQuoteOf("Same", null, null))
+        assertNull(replyFallbackQuoteOf("abc", 2u, 1u))
+        assertNull(replyFallbackQuoteOf("abc", 0u, 99u))
+        assertNull(replyFallbackQuoteOf(">  \n\nSame", 0u, 5u))
+    }
+
+    @Test
     fun `mentions become typed mention references on the send options`() {
         val (body, options) = preparedSend(
             stanzaId = "sid-1",

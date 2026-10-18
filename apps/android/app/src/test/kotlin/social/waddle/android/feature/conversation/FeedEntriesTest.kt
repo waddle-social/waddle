@@ -407,4 +407,60 @@ class FeedEntriesTest {
         assertEquals(false, entries[1].startsGroup)
         assertTrue(entries[2].startsGroup)
     }
+
+    private fun groupchatItem(
+        id: String,
+        nick: String,
+        body: String,
+        thread: String? = null,
+        replyToId: String? = null,
+        fallbackEnd: UInt? = null,
+    ): TimelineItem {
+        val wire = testMessage(
+            id = id, from = "$room/$nick", body = body, messageType = "groupchat", isMuc = true,
+            stanzaId = id, stanzaIdBy = room, thread = thread,
+            replyFallbackStart = fallbackEnd?.let { 0u }, replyFallbackEnd = fallbackEnd,
+        ).copy(replyToId = replyToId, replyToSender = replyToId?.let { "$room/sam" })
+        return TimelineItem(
+            id = id,
+            conversationJid = room,
+            from = "$room/$nick",
+            body = body,
+            timestamp = "2026-07-15T10:00:00Z",
+            isMine = false,
+            source = TimelineSource.Live(wire),
+        )
+    }
+
+    private fun feed(items: List<TimelineItem>) = feedEntriesOf(
+        items = items,
+        pending = emptyList(),
+        context = FeedContext(null, self, emptySet(), unreadAtOpen = 0, zone = ZoneOffset.UTC),
+    )
+
+    @Test
+    fun `a feed reply resolves a loaded parent the feed hides`() {
+        val root = groupchatItem("root", "sam", "root post")
+        val inThread = groupchatItem("in-thread", "sam", "thread reply", thread = "root")
+        val reply = groupchatItem("reply", "alex", "Same", replyToId = "in-thread")
+
+        val entry = feed(listOf(root, inThread, reply)).single { it.key == "s:${reply.presentationId}" }
+
+        assertEquals(inThread, entry.replyParent)
+        assertNull(entry.replyFallbackQuote)
+    }
+
+    @Test
+    fun `an unloaded parent falls back to the reply's quote`() {
+        val prefix = "> the original\n\n"
+        val reply = groupchatItem(
+            "reply", "alex", prefix + "Same",
+            replyToId = "gone", fallbackEnd = prefix.codePointCount(0, prefix.length).toUInt(),
+        )
+
+        val entry = feed(listOf(reply)).single()
+
+        assertNull(entry.replyParent)
+        assertEquals("the original", entry.replyFallbackQuote)
+    }
 }
