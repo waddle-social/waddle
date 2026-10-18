@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use tokio::sync::Mutex;
-use tracing::{error, instrument, warn};
+use tracing::{instrument, warn};
 use uuid::Uuid;
 use waddle_xmpp::telemetry::attributes::AuthStage;
 
@@ -174,14 +174,6 @@ pub struct StartQuery {
     pub next: Option<String>,
     #[serde(default = "default_session_transport")]
     pub session_transport: String,
-
-    // XMPP fields
-    #[serde(default)]
-    pub redirect_uri: Option<String>,
-    #[serde(default)]
-    pub client_state: Option<String>,
-    #[serde(default)]
-    pub code_challenge: Option<String>,
 
     // Device field
     #[serde(default)]
@@ -406,6 +398,16 @@ pub async fn start_handler(
                         return auth_error_response(&provider.id, AuthStage::OidcAuthorization, err)
                     }
                 };
+            // Refuse an untrusted return URL before the provider round
+            // trip; the callback checks it again before minting a session.
+            if let Err(err) = state
+                .trusted_web_origins
+                .resolve_return_url(query.next.as_deref())
+            {
+                record_auth_failure(&provider.id, None, AuthFailure::AuthorizationMalformed);
+                return auth_error_to_response(AuthError::InvalidRequest(err.to_string()))
+                    .into_response();
+            }
             PendingFlow::Browser {
                 next: query.next,
                 session_transport,
@@ -421,25 +423,13 @@ pub async fn start_handler(
             };
             PendingFlow::Device { device_code }
         }
-        "xmpp" => {
-            let Some(client_redirect_uri) = query.redirect_uri else {
-                return auth_error_response(
-                    &provider.id,
-                    AuthStage::OidcAuthorization,
-                    AuthError::InvalidRequest("xmpp flow requires redirect_uri".to_string()),
-                );
-            };
-            PendingFlow::Xmpp {
-                client_redirect_uri,
-                client_state: query.client_state,
-                client_code_challenge: query.code_challenge,
-            }
-        }
+        // XEP-0493 clients start at `/api/auth/xmpp/authorize`, which
+        // validates the redirect URI and PKCE challenge.
         _ => {
             return auth_error_response(
                 &provider.id,
                 AuthStage::OidcAuthorization,
-                AuthError::InvalidRequest("flow must be browser|device|xmpp".to_string()),
+                AuthError::InvalidRequest("flow must be browser|device".to_string()),
             );
         }
     };

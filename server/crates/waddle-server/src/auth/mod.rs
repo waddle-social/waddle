@@ -13,6 +13,7 @@ pub mod native;
 pub mod oauth2;
 pub mod oidc;
 pub mod providers;
+pub mod redirect;
 pub mod session;
 
 use thiserror::Error;
