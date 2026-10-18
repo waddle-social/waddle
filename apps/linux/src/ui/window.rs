@@ -87,6 +87,10 @@ mod imp {
         /// Conversations to mark read on the server shortly.
         pub read_pending: RefCell<HashSet<String>>,
         pub compose: RefCell<Compose>,
+        /// Shared images by URL: loading (`None`), shown, or failed.
+        pub images: RefCell<HashMap<String, Option<Result<gtk::gdk::Texture, ()>>>>,
+        /// Files are uploading; the composer waits.
+        pub uploading: Cell<bool>,
         /// Conversations with a history page in flight.
         pub loading_history: RefCell<HashSet<String>>,
         pub rows: RefCell<Option<gio::ListStore>>,
@@ -238,6 +242,11 @@ impl WaddleWindow {
     }
 
     #[template_callback]
+    fn on_attach(&self) {
+        self.pick_files();
+    }
+
+    #[template_callback]
     fn on_send(&self) {
         self.send_current();
     }
@@ -360,7 +369,7 @@ impl WaddleWindow {
     }
 }
 
-fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+pub(super) fn http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .user_agent(concat!("Waddle-Linux/", env!("CARGO_PKG_VERSION")))
         .build()

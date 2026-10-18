@@ -6,12 +6,13 @@
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
-use gtk::{gdk, glib};
+use gtk::{gdk, gio, glib};
 use waddle_client_session::{Delivery, IncomingMessage, LocalEcho, ReplyTo, TimelineItem};
 
 use super::conversation::Row;
 use super::WaddleWindow;
-use crate::session::{Kind, Quote};
+use crate::attachments::MAX_UPLOAD_BYTES;
+use crate::session::{Kind, Outgoing, Quote};
 
 /// One tap away in the message menu.
 const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "🎉", "😮", "😢"];
@@ -65,6 +66,145 @@ impl WaddleWindow {
             glib::Propagation::Proceed
         });
         self.imp().composer_entry.add_controller(keys);
+
+        // Files dropped on the conversation are sent to it.
+        let drop = gtk::DropTarget::new(gdk::FileList::static_type(), gdk::DragAction::COPY);
+        let window = self.downgrade();
+        drop.connect_drop(move |_, value, _, _| {
+            let (Some(window), Ok(files)) = (window.upgrade(), value.get::<gdk::FileList>()) else {
+                return false;
+            };
+            window.send_files(files.files());
+            true
+        });
+        self.imp().content_stack.add_controller(drop);
+    }
+
+    pub(super) fn pick_files(&self) {
+        let dialog = gtk::FileDialog::builder().title("Attach Files").build();
+        let window = self.clone();
+        glib::spawn_future_local(async move {
+            let Ok(files) = dialog.open_multiple_future(Some(&window)).await else {
+                return;
+            };
+            let files: Vec<gio::File> = files.iter::<gio::File>().filter_map(Result::ok).collect();
+            window.send_files(files);
+        });
+    }
+
+    /// Upload these files and send them in one message, with the
+    /// composer's text as the caption.
+    fn send_files(&self, files: Vec<gio::File>) {
+        let imp = self.imp();
+        let (Some(conversation), Some(session)) =
+            (self.current_conversation(), imp.session.borrow().clone())
+        else {
+            return;
+        };
+        if files.is_empty() || imp.uploading.replace(true) {
+            return;
+        }
+        let caption = imp.composer_entry.text().trim().to_string();
+        let quote = match imp.compose.replace(Compose::Message) {
+            Compose::Reply(quote) => Some(quote),
+            Compose::Message | Compose::Edit { .. } => None,
+        };
+        imp.composer_entry.set_text("");
+        imp.composer_context_label.set_label(&match files.len() {
+            1 => "Uploading 1 file…".to_string(),
+            count => format!("Uploading {count} files…"),
+        });
+        imp.composer_context.set_visible(true);
+        imp.composer.set_sensitive(false);
+
+        let window = self.clone();
+        glib::spawn_future_local(async move {
+            let result = window.upload_all(&session, files).await;
+            let imp = window.imp();
+            imp.uploading.set(false);
+            imp.composer_context.set_visible(false);
+            imp.composer.set_sensitive(imp.connected.get());
+            let uploaded = match result {
+                Ok(uploaded) => uploaded,
+                Err(message) => {
+                    imp.composer_entry.set_text(&caption);
+                    return window.toast(&message);
+                }
+            };
+            let origin = uuid::Uuid::new_v4().to_string();
+            let nick = session.me.nick.clone();
+            let echo = LocalEcho {
+                origin_id: origin.clone(),
+                sender: nick,
+                body: caption.clone(),
+                timestamp_ms: chrono::Utc::now().timestamp_millis(),
+                reference_id: (conversation.kind == Kind::Direct).then(|| origin.clone()),
+                reply_to: quote.as_ref().map(|quote| ReplyTo {
+                    id: quote.id.clone(),
+                    sender: Some(quote.sender.clone()),
+                }),
+                attachments: uploaded
+                    .iter()
+                    .map(|file| file.attachment.clone())
+                    .collect(),
+            };
+            window.edit_conversation(&conversation.jid, |timeline| timeline.add_local_echo(echo));
+            window.scroll_to_end();
+            let wire = uploaded.into_iter().map(|file| file.wire).collect();
+            let sent = session
+                .send(
+                    &conversation.jid,
+                    conversation.kind,
+                    caption,
+                    origin.clone(),
+                    quote,
+                    wire,
+                )
+                .await;
+            if !sent {
+                window.edit_conversation(&conversation.jid, |timeline| {
+                    timeline.set_delivery(&origin, Delivery::Failed)
+                });
+                window.toast("The message could not be sent.");
+            }
+        });
+    }
+
+    async fn upload_all(
+        &self,
+        session: &crate::session::Session,
+        files: Vec<gio::File>,
+    ) -> Result<Vec<crate::session::Uploaded>, String> {
+        let mut uploaded = Vec::with_capacity(files.len());
+        for file in files {
+            let name = file
+                .basename()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "file".to_string());
+            let (bytes, _) = file
+                .load_contents_future()
+                .await
+                .map_err(|_| format!("{name} could not be read."))?;
+            if bytes.len() as u64 > MAX_UPLOAD_BYTES {
+                return Err(format!("{name} is larger than 10 MB."));
+            }
+            let (guess, _) = gio::content_type_guess(Some(name.as_str()), Some(&bytes[..]));
+            let media_type = gio::content_type_get_mime_type(&guess)
+                .map(|mime| mime.to_string())
+                .unwrap_or_else(|| "application/octet-stream".to_string());
+            let outgoing = Outgoing {
+                name: name.clone(),
+                media_type,
+                bytes: bytes.to_vec(),
+            };
+            uploaded.push(
+                session
+                    .upload(outgoing)
+                    .await
+                    .map_err(|error| format!("{name} could not be uploaded: {error}"))?,
+            );
+        }
+        Ok(uploaded)
     }
 
     pub(super) fn cancel_compose(&self) {
@@ -161,6 +301,7 @@ impl WaddleWindow {
                 id: quote.id.clone(),
                 sender: Some(quote.sender.clone()),
             }),
+            attachments: Vec::new(),
         };
         self.edit_conversation(&conversation.jid, |timeline| timeline.add_local_echo(echo));
         self.scroll_to_end();
@@ -174,6 +315,7 @@ impl WaddleWindow {
                     body,
                     origin.clone(),
                     quote,
+                    Vec::new(),
                 )
                 .await;
             if !sent {

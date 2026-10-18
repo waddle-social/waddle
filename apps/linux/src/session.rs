@@ -19,13 +19,18 @@ use std::time::Duration;
 
 use chrono::DateTime;
 use jid::{BareJid, Jid};
-use waddle_client_session::{strip_fallback, IncomingMessage, ReactionUpdate, ReplyTo};
+use waddle_client_session::{
+    strip_fallback, Attachment, Encryption, IncomingMessage, ReactionUpdate, ReplyTo,
+};
 use waddle_xmpp_client_ffi::{
     WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
-    WaddleConfig, WaddleEventListener, WaddleFallbackRange, WaddleInboxEntry, WaddleMessage,
-    WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions, WaddleStanzaId, WaddleTopology,
+    WaddleConfig, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
+    WaddleFallbackRange, WaddleInboxEntry, WaddleMessage, WaddleReplyTarget,
+    WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile, WaddleStanzaId,
+    WaddleStickerHash, WaddleTopology,
 };
 
+use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
 use crate::runtime;
 
@@ -85,6 +90,21 @@ pub struct Arrival {
     pub delayed: bool,
 }
 
+/// A file the user is sending.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Outgoing {
+    pub name: String,
+    pub media_type: String,
+    pub bytes: Vec<u8>,
+}
+
+/// An uploaded file: what the message carries, and the core's view of it.
+#[derive(Clone)]
+pub struct Uploaded {
+    pub wire: WaddleSharedFile,
+    pub attachment: Attachment,
+}
+
 /// Quoting a message in a reply (XEP-0461).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Quote {
@@ -129,12 +149,17 @@ impl WaddleEventListener for Forwarder {
 #[derive(Clone)]
 pub struct Session {
     client: Arc<WaddleClient>,
+    /// For XEP-0363 uploads and fetching shared files.
+    http: reqwest::Client,
     pub me: Me,
 }
 
 impl Session {
     /// Start a session and return it with its event stream.
-    pub fn start(account: &StoredAccount) -> (Self, async_channel::Receiver<SessionEvent>) {
+    pub fn start(
+        account: &StoredAccount,
+        http: reqwest::Client,
+    ) -> (Self, async_channel::Receiver<SessionEvent>) {
         let (sender, receiver) = async_channel::unbounded();
         let config = WaddleConfig {
             server_url: account.session.websocket_url.to_string(),
@@ -148,6 +173,7 @@ impl Session {
         let client = WaddleClient::new(config, Box::new(Forwarder(sender)));
         let session = Self {
             client,
+            http,
             me: Me {
                 bare: account.session.jid.clone(),
                 nick: account.session.username.clone(),
@@ -236,8 +262,8 @@ impl Session {
         (messages, page.first_id, page.is_complete)
     }
 
-    /// Send under `origin_id`, optionally as a reply. True when the stanza
-    /// was written.
+    /// Send under `origin_id`, optionally as a reply and with uploaded
+    /// files. True when the stanza was written.
     pub async fn send(
         &self,
         jid: &str,
@@ -245,9 +271,11 @@ impl Session {
         body: String,
         origin_id: String,
         quote: Option<Quote>,
+        files: Vec<WaddleSharedFile>,
     ) -> bool {
         let mut options = WaddleSendOptions {
             stanza_id: Some(origin_id),
+            shared_files: files,
             ..WaddleSendOptions::default()
         };
         let mut body = body;
@@ -275,6 +303,74 @@ impl Session {
         })
         .await;
         matches!(outcome, Ok(WaddleSendMessageOutcome::Sent { .. }))
+    }
+
+    /// Encrypt and upload a file as the web client does (XEP-0448 over
+    /// XEP-0363), ready to share in a message (XEP-0447).
+    pub async fn upload(&self, file: Outgoing) -> Result<Uploaded, TransferError> {
+        let client = Arc::clone(&self.client);
+        let http = self.http.clone();
+        runtime::spawn(async move {
+            let sealed = attachments::seal(&file.bytes)?;
+            let size =
+                u64::try_from(sealed.ciphertext.len()).map_err(|_| TransferError::TooLarge)?;
+            let service = client
+                .discover_upload_service()
+                .await
+                .ok_or(TransferError::NoUploadService)?;
+            let slot = client
+                .request_upload_slot(
+                    service,
+                    attachments::upload_name(&file.name),
+                    size,
+                    "application/octet-stream".to_string(),
+                )
+                .await
+                .ok_or(TransferError::SlotRefused)?;
+            // The GET address must be fetchable by this client too.
+            attachments::transfer_url(&slot.get_url)?;
+            let headers: Vec<(String, String)> = slot
+                .put_headers
+                .iter()
+                .map(|header| (header.name.clone(), header.value.clone()))
+                .collect();
+            attachments::put(&http, &slot.put_url, &headers, sealed.ciphertext.clone()).await?;
+            Ok(shared_file(&file, &sealed, slot.get_url))
+        })
+        .await
+        .map_err(|_| TransferError::Interrupted)?
+    }
+
+    /// Fetch a shared file, check it, and decrypt it if it is encrypted.
+    pub async fn fetch(&self, attachment: Attachment) -> Result<Vec<u8>, TransferError> {
+        let http = self.http.clone();
+        runtime::spawn(async move {
+            let sources = match &attachment.encryption {
+                Some(encryption) => encryption.sources.clone(),
+                None => vec![attachment.url.clone()],
+            };
+            let mut last = TransferError::InsecureUrl;
+            for source in sources {
+                match attachments::fetch(&http, &source).await {
+                    Ok(bytes) => {
+                        return match &attachment.encryption {
+                            Some(encryption) => Ok(attachments::open(
+                                &bytes,
+                                &encryption.cipher,
+                                &encryption.key_b64,
+                                &encryption.iv_b64,
+                                &encryption.sha256_b64,
+                            )?),
+                            None => Ok(bytes),
+                        };
+                    }
+                    Err(error) => last = error,
+                }
+            }
+            Err(last)
+        })
+        .await
+        .map_err(|_| TransferError::Interrupted)?
     }
 
     /// XEP-0444: replace this account's reactions on `target`.
@@ -320,6 +416,63 @@ impl Session {
         })
         .await
         .unwrap_or(false)
+    }
+}
+
+/// The XEP-0447 file for an upload, and the core's view of it.
+fn shared_file(file: &Outgoing, sealed: &attachments::Sealed, get_url: String) -> Uploaded {
+    let wire = WaddleSharedFile {
+        url: get_url.clone(),
+        name: Some(file.name.clone()),
+        media_type: Some(file.media_type.clone()),
+        size: u64::try_from(file.bytes.len()).ok(),
+        width: None,
+        height: None,
+        desc: None,
+        hashes: vec![WaddleStickerHash {
+            algo: attachments::SHA_256.to_string(),
+            value_b64: sealed.plaintext_sha256_b64.clone(),
+        }],
+        disposition: attachments::disposition(&file.media_type).to_string(),
+        encrypted: Some(WaddleEncryptedFile {
+            cipher: attachments::AES_256_GCM.to_string(),
+            key_b64: sealed.key_b64.clone(),
+            iv_b64: sealed.iv_b64.clone(),
+            hashes: vec![WaddleEncryptedFileHash {
+                algo: attachments::SHA_256.to_string(),
+                value_b64: sealed.ciphertext_sha256_b64.clone(),
+            }],
+            sources: vec![get_url],
+        }),
+    };
+    let attachment = attachment_from(&wire);
+    Uploaded { wire, attachment }
+}
+
+/// The core's view of a shared file.
+pub fn attachment_from(file: &WaddleSharedFile) -> Attachment {
+    Attachment {
+        url: file.url.clone(),
+        name: file.name.clone(),
+        media_type: file.media_type.clone(),
+        size: file.size,
+        inline: file.disposition == "inline",
+        encryption: file.encrypted.as_ref().map(|encrypted| Encryption {
+            cipher: encrypted.cipher.clone(),
+            key_b64: encrypted.key_b64.clone(),
+            iv_b64: encrypted.iv_b64.clone(),
+            sha256_b64: encrypted
+                .hashes
+                .iter()
+                .filter(|hash| hash.algo.eq_ignore_ascii_case(attachments::SHA_256))
+                .map(|hash| hash.value_b64.clone())
+                .collect(),
+            sources: if encrypted.sources.is_empty() {
+                vec![file.url.clone()]
+            } else {
+                encrypted.sources.clone()
+            },
+        }),
     }
 }
 
@@ -459,6 +612,7 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
             sender: message.reply_to_sender.as_deref().and_then(occupant_nick),
         }),
         reaction: reaction(message.reaction_target_id, message.reaction_emojis),
+        attachments: message.shared_files.iter().map(attachment_from).collect(),
         sender: nick,
         // A live room message does not expose the occupant's real JID.
         author_id: None,
@@ -513,6 +667,7 @@ fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival>
         tombstone: message.is_retracted,
         reply_to: message.reply_to_id.map(|id| ReplyTo { id, sender: None }),
         reaction: reaction(message.reaction_target_id, message.reaction_emojis),
+        attachments: message.shared_files.iter().map(attachment_from).collect(),
     };
     Some(Arrival {
         conversation: peer.to_string(),
@@ -595,6 +750,7 @@ pub fn archived_from(
             },
         }),
         reaction: reaction(message.reaction_target_id, message.reaction_emojis),
+        attachments: message.shared_files.iter().map(attachment_from).collect(),
     })
 }
 
