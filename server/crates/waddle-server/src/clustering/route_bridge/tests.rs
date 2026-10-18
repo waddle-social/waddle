@@ -111,6 +111,10 @@ impl NodeLeaseStore for StaticNodeLease {
         Ok(())
     }
 
+    async fn retire(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+        Ok(())
+    }
+
     async fn count_other_live_nodes(
         &self,
         _me: &NodeIdentity,
@@ -400,6 +404,7 @@ async fn services_with_claims_and_blocking(
             origin: origin_owner,
             peer_id: origin_peer_id,
         }),
+        node_lease_ttl: crate::config::ClusteringNodeLeaseConfig::default().lease_ttl,
         node_identity: SharedNodeIdentity::new(receiver),
         connection_registry: Arc::new(ConnectionRegistry::new()),
         user_registry: UserRegistryActor::spawn(UserRegistryActor::new()),

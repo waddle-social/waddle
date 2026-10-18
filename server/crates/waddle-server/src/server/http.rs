@@ -1270,7 +1270,10 @@ async fn create_websocket_state(
         &state.clustering_claims.ordered_relay_delivery_bridge,
         state.clustering_claims.claim_pair(),
     ) {
-        if let Some(node_lease) = &state.clustering_claims.node_lease {
+        if let (Some(node_lease), Some(node_lease_ttl)) = (
+            &state.clustering_claims.node_lease,
+            state.clustering_claims.lease_ttl,
+        ) {
             bridge.wire(Arc::new(
                 crate::clustering::route_bridge::OrderedRelayDeliveryServices {
                     occupancy_database: state.db_pool.global().clone(),
@@ -1281,6 +1284,7 @@ async fn create_websocket_state(
                         ),
                     ),
                     node_lease: Arc::clone(node_lease),
+                    node_lease_ttl,
                     node_identity,
                     connection_registry: Arc::clone(
                         &websocket_state.deps.protocol.connection_registry,
@@ -1294,7 +1298,7 @@ async fn create_websocket_state(
                 },
             ));
         } else {
-            warn!("ordered relay delivery bridge not wired: clustering node lease handle missing");
+            warn!("ordered relay delivery bridge not wired: clustering node lease handle or TTL missing");
         }
     }
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(

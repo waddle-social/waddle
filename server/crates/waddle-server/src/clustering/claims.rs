@@ -1365,9 +1365,7 @@ pub trait NodeLeaseStore: Send + Sync {
     /// sockets have drained and local authority has been disabled/demoted.
     /// A stale epoch cannot retire a replacement. Failed retirement safely
     /// leaves the row for the normal stale-heartbeat expiry watchdog.
-    async fn retire(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
-        Ok(())
-    }
+    async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError>;
 
     /// Count other (not `me`) live rows in `clustering_nodes` right now —
     /// feeds the isolation rule's "`clustering_nodes` shows two or more

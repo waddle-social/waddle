@@ -20,12 +20,13 @@ use core::convert::Infallible;
 use futures::StreamExt;
 use kameo::remote::{self, registry};
 use libp2p::identity::Keypair;
-use libp2p::swarm::{dial_opts::DialOpts, ConnectionId, DialError, SwarmEvent};
+use libp2p::swarm::{dial_opts::DialOpts, ConnectionId, DialError, ListenError, SwarmEvent};
 use libp2p::{noise, tcp, yamux, Multiaddr, PeerId, Swarm, SwarmBuilder};
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::task::JoinSet;
 use tokio::time::MissedTickBehavior;
 use tokio_util::sync::CancellationToken;
 
@@ -33,10 +34,9 @@ use tokio_util::sync::CancellationToken;
 /// back to the event loop for dialing.
 const DIAL_CHANNEL_CAPACITY: usize = 64;
 
-/// Buffer for enrolled-peer sets flowing from the off-loop allowlist reader
-/// back to the event loop. Single-flight refreshes mean at most one set is
-/// ever in flight; a small buffer keeps the sender from awaiting.
-const ALLOWLIST_CHANNEL_CAPACITY: usize = 4;
+/// Bound authenticated denial hints globally per node. The refresh remains
+/// single-flight, including hints that arrive while a read is outstanding.
+const MEMBERSHIP_REFRESH_COOLDOWN: Duration = Duration::from_millis(100);
 
 /// Idle timeout for swarm connections: a cluster mesh wants long-lived peer
 /// connections, and libp2p's ~10s default would close them between discovery
@@ -647,7 +647,8 @@ async fn release_slot_bounded<L>(
 /// permanently to a pod IP. A DNS removal forgets backoff and self detection.
 struct BootstrapDials {
     addresses: HashMap<Multiaddr, BootstrapDial>,
-    pending: HashMap<ConnectionId, Multiaddr>,
+    pending: HashMap<ConnectionId, (Multiaddr, u64)>,
+    membership_generation: u64,
     base: Duration,
     cap: Duration,
 }
@@ -663,6 +664,7 @@ impl BootstrapDials {
         Self {
             addresses: HashMap::new(),
             pending: HashMap::new(),
+            membership_generation: 0,
             base,
             cap: Duration::from_secs(300).max(base),
         }
@@ -686,19 +688,21 @@ impl BootstrapDials {
     fn begin(&mut self, address: &Multiaddr) -> Option<DialOpts> {
         let state = self.addresses.get_mut(address)?;
         if state.local
-            || self.pending.values().any(|pending| pending == address)
+            || self.pending.values().any(|(pending, _)| pending == address)
             || tokio::time::Instant::now() < state.retry_at
         {
             return None;
         }
         let options = DialOpts::unknown_peer_id().address(address.clone()).build();
-        self.pending
-            .insert(options.connection_id(), address.clone());
+        self.pending.insert(
+            options.connection_id(),
+            (address.clone(), self.membership_generation),
+        );
         Some(options)
     }
 
     fn succeeded(&mut self, connection: ConnectionId) {
-        let Some(address) = self.pending.remove(&connection) else {
+        let Some((address, _)) = self.pending.remove(&connection) else {
             return;
         };
         if let Some(state) = self.addresses.get_mut(&address) {
@@ -707,12 +711,12 @@ impl BootstrapDials {
         }
     }
 
-    fn failed(&mut self, connection: ConnectionId, error: &DialError, local_peer: PeerId) {
-        let Some(address) = self.pending.remove(&connection) else {
-            return;
+    fn failed(&mut self, connection: ConnectionId, error: &DialError, local_peer: PeerId) -> bool {
+        let Some((address, generation)) = self.pending.remove(&connection) else {
+            return false;
         };
         let Some(state) = self.addresses.get_mut(&address) else {
-            return;
+            return false;
         };
         // Headless DNS includes this pod. A completed handshake proving it
         // is our own PeerId must stop self dials until that address leaves DNS.
@@ -720,12 +724,28 @@ impl BootstrapDials {
             || matches!(error, DialError::WrongPeerId { obtained, .. } if *obtained == local_peer)
         {
             state.local = true;
-            return;
+            return false;
+        }
+        if generation != self.membership_generation {
+            // This dial began before admission changed. Its late rejection
+            // must not restore the old backoff after peers became admissible.
+            state.failures = 0;
+            state.retry_at = tokio::time::Instant::now();
+            return true;
         }
         state.failures = state.failures.saturating_add(1).min(32);
         let multiplier = 1u32 << (state.failures - 1);
         let delay = self.base.saturating_mul(multiplier).min(self.cap);
         state.retry_at = tokio::time::Instant::now() + delay;
+        false
+    }
+
+    fn membership_changed(&mut self) {
+        self.membership_generation = self.membership_generation.wrapping_add(1);
+        for state in self.addresses.values_mut().filter(|state| !state.local) {
+            state.failures = 0;
+            state.retry_at = tokio::time::Instant::now();
+        }
     }
 }
 
@@ -791,16 +811,14 @@ async fn run_event_loop(
     // while one is in flight and resume once it returns.
     let dns_in_flight = Arc::new(AtomicBool::new(false));
 
-    // Allowlist refreshes follow the same off-loop + single-flight shape: the
-    // DB read runs in a spawned task and the fresh enrolled set comes back
-    // over a channel, so a slow query never stalls swarm polling.
-    let (allowlist_tx, mut allowlist_rx) =
-        tokio::sync::mpsc::channel::<HashSet<PeerId>>(ALLOWLIST_CHANNEL_CAPACITY);
-    let allowlist_in_flight = Arc::new(AtomicBool::new(false));
+    // Own the off-loop read so failures and panics both release the single
+    // flight. A hint received during a read remains pending for one followup.
+    let mut membership_reads = JoinSet::<Result<HashSet<PeerId>, AllowlistError>>::new();
+    let mut refresh_requested = false;
+    let mut next_membership_read = tokio::time::Instant::now();
 
     // Resets its single-flight flag on drop, so a panic in a guarded task can
-    // never permanently wedge that background operation (for the allowlist
-    // that would mean this node stops applying peer revocations).
+    // never permanently wedge DNS resolution.
     struct InFlightGuard(Arc<AtomicBool>);
 
     impl InFlightGuard {
@@ -836,33 +854,27 @@ async fn run_event_loop(
                     }
                 }
             }
-            _ = async {
-                tokio::select! {
-                    _ = allowlist_timer.tick() => {}
-                    _ = membership_refresh.notified() => {}
-                }
-            } => {
-                if let Some(guard) = InFlightGuard::try_claim(&allowlist_in_flight) {
-                    let store = Arc::clone(&allowlist.store);
-                    let allowlist_tx = allowlist_tx.clone();
-                    tokio::spawn(async move {
-                        let _guard = guard;
-                        match store.effective_peers().await {
-                            Ok(enrolled) => {
-                                let _ = allowlist_tx.send(enrolled).await;
-                            }
-                            Err(error) => {
-                                // Keep the last-known set on a read failure —
-                                // never fail open, never mass-revoke on a
-                                // transient DB error.
-                                tracing::warn!(%error, "clustering allowlist refresh failed; keeping current set");
-                            }
-                        }
-                    });
-                }
+            _ = allowlist_timer.tick() => refresh_requested = true,
+            _ = membership_refresh.notified() => refresh_requested = true,
+            _ = tokio::time::sleep_until(next_membership_read), if refresh_requested && membership_reads.is_empty() => {
+                refresh_requested = false;
+                next_membership_read = tokio::time::Instant::now() + MEMBERSHIP_REFRESH_COOLDOWN;
+                let store = Arc::clone(&allowlist.store);
+                membership_reads.spawn(async move { store.effective_peers().await });
             }
-            Some(enrolled) = allowlist_rx.recv() => {
-                apply_allowlist(&mut swarm, &mut allowlist, enrolled, &mut routing_peers, &mut addr_owners);
+            Some(result) = membership_reads.join_next(), if !membership_reads.is_empty() => {
+                match result {
+                    Ok(Ok(effective)) => {
+                        if apply_allowlist(&mut swarm, &mut allowlist, effective, &mut routing_peers, &mut addr_owners) {
+                            bootstrap_dials.membership_changed();
+                            dial_timer.reset_immediately();
+                        }
+                    }
+                    Ok(Err(error)) => tracing::warn!(%error, "clustering membership refresh failed; keeping current snapshot"),
+                    Err(error) => tracing::warn!(%error, "clustering membership reader failed; keeping current snapshot"),
+                }
+                // Do not manufacture a request on failure: only a newer
+                // hint or the periodic timer can ask for another read.
             }
             Some(addresses) = dial_rx.recv() => {
                 bootstrap_dials.resolved(&addresses);
@@ -892,9 +904,17 @@ async fn run_event_loop(
                 }
             }
             event = swarm.select_next_some() => {
+                if let Some(peer) = admission_denied_peer(&event) {
+                    tracing::debug!(%peer,
+                        "clustering admission denial requested an authoritative membership refresh");
+                    refresh_requested = true;
+                }
                 match &event {
                     SwarmEvent::ConnectionEstablished { connection_id, .. } => bootstrap_dials.succeeded(*connection_id),
-                    SwarmEvent::OutgoingConnectionError { connection_id, error, .. } => bootstrap_dials.failed(*connection_id, error, *swarm.local_peer_id()),
+                    SwarmEvent::OutgoingConnectionError { connection_id, error, .. }
+                        if bootstrap_dials.failed(*connection_id, error, *swarm.local_peer_id()) => {
+                        dial_timer.reset_immediately();
+                    }
                     _ => {}
                 }
                 handle_swarm_event(
@@ -915,6 +935,30 @@ async fn run_event_loop(
     }
 }
 
+/// Only a completed Noise identity rejected by our admission behaviour is a
+/// hint. Unknown enrollment may have been provisioned since the last read;
+/// even then the capped authoritative snapshot must admit it before a retry.
+fn admission_denied_peer(event: &SwarmEvent<WaddleBehaviourEvent>) -> Option<PeerId> {
+    match event {
+        SwarmEvent::IncomingConnectionError {
+            peer_id: Some(peer),
+            error: ListenError::Denied { cause },
+            ..
+        }
+        | SwarmEvent::OutgoingConnectionError {
+            peer_id: Some(peer),
+            error: DialError::Denied { cause },
+            ..
+        } if cause
+            .downcast_ref::<libp2p::allow_block_list::NotAllowed>()
+            .is_some() =>
+        {
+            Some(*peer)
+        }
+        _ => None,
+    }
+}
+
 /// Apply effective membership to admission and remove departed peers from
 /// actual routing and messaging state, as well as closing live connections.
 /// Static enrollment rows remain owned by the deployment pipeline.
@@ -924,10 +968,10 @@ fn apply_allowlist(
     enrolled: HashSet<PeerId>,
     routing_peers: &mut HashSet<PeerId>,
     addr_owners: &mut HashMap<Multiaddr, PeerId>,
-) {
+) -> bool {
     let diff = diff_allowlist(&allowlist.current, &enrolled);
     if diff.added.is_empty() && diff.removed.is_empty() {
-        return;
+        return false;
     }
     for peer in &diff.added {
         swarm.behaviour_mut().kameo.registry.allow_peer(peer);
@@ -957,6 +1001,7 @@ fn apply_allowlist(
         "clustering effective peer membership refreshed"
     );
     allowlist.current = enrolled;
+    !diff.added.is_empty()
 }
 
 /// Record a newly connected peer, updating the connected-peer gauge (and the
@@ -1122,6 +1167,136 @@ mod tests {
     use crate::db::{DatabaseConfig, DatabaseDriver};
     use base64::Engine as _;
 
+    struct BlockedMembershipRead {
+        reads: std::sync::atomic::AtomicUsize,
+        started: tokio::sync::Notify,
+        release: tokio::sync::Notify,
+        panic_first: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl AllowlistStore for BlockedMembershipRead {
+        async fn ensure_schema(&self) -> Result<(), AllowlistError> {
+            Ok(())
+        }
+        async fn enrolled_peers(&self) -> Result<HashSet<PeerId>, AllowlistError> {
+            Ok(HashSet::new())
+        }
+        async fn effective_peers(&self) -> Result<HashSet<PeerId>, AllowlistError> {
+            if self.reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                self.started.notify_one();
+                self.release.notified().await;
+                assert!(!self.panic_first, "injected membership reader panic");
+            }
+            Err(AllowlistError::AllRowsInvalid { rows: 1 })
+        }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn membership_hints_coalesce_during_reads_and_failures_do_not_spin() {
+        for panic_first in [false, true] {
+            let store = Arc::new(BlockedMembershipRead {
+                reads: std::sync::atomic::AtomicUsize::new(0),
+                started: tokio::sync::Notify::new(),
+                release: tokio::sync::Notify::new(),
+                panic_first,
+            });
+            let notify = Arc::new(tokio::sync::Notify::new());
+            let swarm = SwarmBuilder::with_new_identity()
+                .with_tokio()
+                .with_tcp(
+                    tcp::Config::default(),
+                    noise::Config::new,
+                    yamux::Config::default,
+                )
+                .expect("transport")
+                .with_behaviour(|key| {
+                    WaddleBehaviour::new(
+                        key.public().to_peer_id(),
+                        remote::messaging::Config::default(),
+                        &HashSet::new(),
+                    )
+                })
+                .expect("behaviour")
+                .build();
+            // A canceled supervisor supplies the real trigger without ever
+            // registering an actor or initializing kameo's process singleton.
+            let relay_stop = CancellationToken::new();
+            relay_stop.cancel();
+            let trigger = relay::spawn_supervised(
+                waddle_xmpp::ownership::SharedNodeIdentity::new(
+                    waddle_xmpp::ownership::NodeIdentity::new("membership-reader-test", "epoch"),
+                ),
+                false,
+                relay_stop.clone(),
+                super::super::resume_bridge::ResumeStealBridge::new(),
+                super::super::local_claims::RoomLocalClaims::new(),
+                super::super::route_bridge::OrderedRelayDeliveryBridge::new(
+                    relay_stop,
+                    &ClusteringConfig::default().messaging,
+                ),
+            );
+            let stop = CancellationToken::new();
+            let task = tokio::spawn(run_event_loop(
+                swarm,
+                Vec::new(),
+                Duration::from_secs(15),
+                AllowlistRefresh {
+                    store: store.clone(),
+                    notify: notify.clone(),
+                    current: HashSet::new(),
+                    interval: Duration::from_secs(30),
+                },
+                trigger,
+                ConnectedPeerCount::new(),
+                stop.clone(),
+            ));
+            notify.notify_one();
+            store.started.notified().await;
+            for _ in 0..100 {
+                notify.notify_one();
+            }
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                store.reads.load(Ordering::SeqCst),
+                1,
+                "only one DB read may run at a time"
+            );
+            store.release.notify_one();
+            tokio::time::advance(Duration::from_millis(99)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                store.reads.load(Ordering::SeqCst),
+                1,
+                "hint bursts respect the global cooldown"
+            );
+            tokio::time::advance(Duration::from_millis(1)).await;
+            for _ in 0..20 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                store.reads.load(Ordering::SeqCst),
+                2,
+                "a hint during the first read must survive error or panic for one followup"
+            );
+            tokio::time::advance(Duration::from_secs(5)).await;
+            for _ in 0..10 {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(
+                store.reads.load(Ordering::SeqCst),
+                2,
+                "a failed read never manufactures an outage retry loop"
+            );
+            stop.cancel();
+            task.await.expect("swarm reader stops");
+        }
+    }
+
     #[tokio::test]
     async fn departure_prunes_real_routing_and_messaging_addresses_and_rejoin_readmits() {
         let peer = PeerId::random();
@@ -1228,6 +1403,41 @@ mod tests {
         assert!(
             dials.begin(&address).is_none(),
             "DNS churn cannot overlap a still-pending transport dial"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn membership_addition_retries_failed_and_old_pending_bootstrap_dials() {
+        let address: Multiaddr = "/ip4/127.0.0.1/tcp/4242".parse().expect("address");
+        let mut dials = BootstrapDials::new(Duration::from_secs(15));
+        let local = PeerId::random();
+        dials.resolved(std::slice::from_ref(&address));
+        let failed = dials.begin(&address).expect("first dial");
+        assert!(!dials.failed(failed.connection_id(), &DialError::Aborted, local));
+        assert!(
+            dials.begin(&address).is_none(),
+            "normal transport failures back off"
+        );
+        dials.membership_changed();
+        let pending = dials
+            .begin(&address)
+            .expect("admission permits an immediate retry");
+        dials.membership_changed();
+        assert!(
+            dials.begin(&address).is_none(),
+            "admission never overlaps pending dials"
+        );
+        assert!(
+            dials.failed(pending.connection_id(), &DialError::Aborted, local),
+            "a pre-admission dial failure requests one prompt retry"
+        );
+        let current = dials
+            .begin(&address)
+            .expect("late failure cannot restore old backoff");
+        assert!(!dials.failed(current.connection_id(), &DialError::Aborted, local));
+        assert!(
+            dials.begin(&address).is_none(),
+            "current-generation failures still back off normally"
         );
     }
 

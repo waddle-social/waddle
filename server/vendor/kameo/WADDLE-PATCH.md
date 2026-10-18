@@ -11,6 +11,12 @@ Local patch exposes registry peer eviction (Kademlia routing, pending peers,
 provider and metadata records) and messaging address eviction for committed
 cluster departure. Remove vendoring when upstream provides these APIs.
 
+Evicting a peer cancels outstanding messaging requests with `ConnectionClosed`,
+because the remote handler may already have executed while its reply is still
+in flight. A synthetic `DialFailure` would incorrectly authorize no-effect
+fallback or ordered-sequence rollback. Genuine dial failures retain their
+upstream classification, and excluded peers still reject late address events.
+
 The messaging eviction method uses a scoped `#[expect(deprecated)]` because
 libp2p 0.56 exposes its retained request-response address cache's eviction only
 through `remove_address`; there is no replacement API in this pinned version.

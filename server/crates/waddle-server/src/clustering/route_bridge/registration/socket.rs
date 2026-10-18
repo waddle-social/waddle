@@ -268,11 +268,18 @@ impl OrderedRelayDeliveryBridge {
                 return match error {
                     RelayAskError::NotFound { .. }
                     | RelayAskError::Send {
-                        failure:
-                            RelaySendFailure::Transport
-                            | RelaySendFailure::StaleRef
-                            | RelaySendFailure::ReplyTimeout
-                            | RelaySendFailure::MailboxFull,
+                        failure: RelaySendFailure::Transport | RelaySendFailure::StaleRef,
+                        ..
+                    } => {
+                        self.registration_after_remote_owner_unreachable(
+                            &services,
+                            jid,
+                            &target_snapshot,
+                        )
+                        .await
+                    }
+                    RelayAskError::Send {
+                        failure: RelaySendFailure::ReplyTimeout | RelaySendFailure::MailboxFull,
                         ..
                     } => Self::registration_after_remote_owner_failure(&services, jid).await,
                     RelayAskError::Cancelled
@@ -338,6 +345,76 @@ impl OrderedRelayDeliveryBridge {
                 Self::registration_after_remote_owner_failure(&services, jid).await
             }
             RelayRemoteResourceRegistrationStatus::Unavailable => {
+                RemoteResourceRegisterOutcome::Failed
+            }
+        }
+    }
+
+    /// Accelerate the watchdog only for the exact claim whose relay failed.
+    /// A transport failure is never takeover proof: the normal node expiry
+    /// CAS must commit first, followed by a new authoritative claim read.
+    async fn registration_after_remote_owner_unreachable(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        jid: &jid::FullJid,
+        attempted_claim: &ClaimSnapshot,
+    ) -> RemoteResourceRegisterOutcome {
+        let recovery = async {
+            let Some(snapshot) = services
+                .claim_store
+                .current_claim(&user_entity(&jid.to_bare()))
+                .await?
+            else {
+                return Ok(RemoteResourceRegisterOutcome::NotRemote);
+            };
+            let local_identity = services.node_identity.current();
+            if !snapshot.owner_lease_fresh || snapshot.owner == local_identity {
+                return Ok(RemoteResourceRegisterOutcome::NotRemote);
+            }
+            if snapshot.owner != attempted_claim.owner
+                || snapshot.claim_epoch != attempted_claim.claim_epoch
+            {
+                return Ok(RemoteResourceRegisterOutcome::Retryable);
+            }
+            if !local_identity.is_active()
+                || !services
+                    .node_lease
+                    .is_fresh(&local_identity, services.node_lease_ttl)
+                    .await?
+                || services.node_identity.current() != local_identity
+            {
+                return Ok(RemoteResourceRegisterOutcome::Retryable);
+            }
+            // Do not hold a publication/rotation guard across backend I/O:
+            // expiry grants no local ownership, and the registry still has
+            // to win its guarded OwnerStale CAS before publishing an actor.
+            services
+                .node_lease
+                .expire(&attempted_claim.owner, services.node_lease_ttl)
+                .await?;
+            Ok::<_, waddle_xmpp::ownership::ClaimError>(
+                Self::registration_after_remote_owner_failure(services, jid).await,
+            )
+        };
+        match tokio::time::timeout(self.reply_timeout, recovery).await {
+            Ok(Ok(outcome)) => outcome,
+            Ok(Err(error)) => {
+                tracing::warn!(
+                    jid = %jid,
+                    owner_node = %attempted_claim.owner.node_id,
+                    owner_epoch = %attempted_claim.owner.node_epoch,
+                    %error,
+                    "clustered remote-resource demand expiry failed; refusing local registration"
+                );
+                RemoteResourceRegisterOutcome::Failed
+            }
+            Err(_) => {
+                tracing::warn!(
+                    jid = %jid,
+                    owner_node = %attempted_claim.owner.node_id,
+                    owner_epoch = %attempted_claim.owner.node_epoch,
+                    "clustered remote-resource demand expiry timed out; refusing local registration"
+                );
                 RemoteResourceRegisterOutcome::Failed
             }
         }

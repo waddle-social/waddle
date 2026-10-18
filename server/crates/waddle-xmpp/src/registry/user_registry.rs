@@ -520,6 +520,10 @@ impl UserRegistryActor {
         if !current_identity.is_active() {
             debug!(
                 jid = %bare_jid,
+                claim_owner_epoch = %entry.claim.owner.node_epoch,
+                claim_owner_active = entry.claim.owner.is_active(),
+                current_owner_epoch = %current_identity.node_epoch,
+                current_owner_active = current_identity.is_active(),
                 "local publication authority is revoked; refusing reuse without retiring the same-incarnation UserActor"
             );
             return UserEntryClaimStatus::ValidationUnavailable;

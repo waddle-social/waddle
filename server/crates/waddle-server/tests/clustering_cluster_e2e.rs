@@ -537,10 +537,9 @@ async fn ping_until(
     Err(format!("relay ping never succeeded: {last_error}"))
 }
 
-/// Startup node-id files precede lease recovery. Once this harness has three
-/// registered nodes, startup/restart isolation can rotate a peer's node id
-/// before its first connection. Discover its current relay through the same
-/// committed registry binding that effective swarm admission uses.
+/// Resolve the committed runtime identity for a stable PeerId, including
+/// after explicit fault-driven recovery. Separate cold-start and surge tests
+/// require exact startup identities, so this helper cannot mask startup churn.
 async fn relay_for_live_peer(
     db: &Database,
     peer_id: &str,
@@ -1663,6 +1662,143 @@ async fn sm_session_claim_owner(db: &Database, stream_id: &str) -> Option<(Strin
             Some((node_id, claim_epoch))
         }
         None => None,
+    }
+}
+
+const DEFAULT_MESH_TIMING: [(&str, &str); 6] = [
+    ("WADDLE_CLUSTERING_ALLOWLIST_REFRESH_MS", "30000"),
+    ("WADDLE_CLUSTERING_DIAL_INTERVAL_MS", "15000"),
+    (
+        "WADDLE_CLUSTERING_NODE_LEASE_HEARTBEAT_INTERVAL_MS",
+        "10000",
+    ),
+    ("WADDLE_CLUSTERING_NODE_LEASE_TTL_MS", "30000"),
+    ("WADDLE_CLUSTERING_CLAIM_RELEASE_BUDGET_MS", "5000"),
+    ("WADDLE_CLUSTERING_ISOLATION_INTERVALS", "3"),
+];
+
+/// A cold mesh must form before the default isolation window, without
+/// treating startup admission lag as a partition and rotating its identities.
+#[tokio::test(flavor = "multi_thread")]
+async fn cold_mesh_admits_registered_peers_before_default_isolation_window() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    let ports = [free_tcp_port(), free_tcp_port(), free_tcp_port()];
+    // Do not wait for a healthy mesh between starts: that would hide the
+    // initial admission/refresh race this regression needs to exercise.
+    let (server_a, node_a, peer_a) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        ports[0],
+        &ports[1..],
+        &DEFAULT_MESH_TIMING,
+    )
+    .await;
+    let (server_b, node_b, peer_b) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        ports[1],
+        &[ports[0], ports[2]],
+        &DEFAULT_MESH_TIMING,
+    )
+    .await;
+    let (server_c, node_c, peer_c) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        ports[2],
+        &ports[..2],
+        &DEFAULT_MESH_TIMING,
+    )
+    .await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        wait_for_cross_node_registration(&db, &server_a, &server_b, &peer_a).await;
+        wait_for_cross_node_registration(&db, &server_a, &server_c, &peer_a).await;
+    })
+    .await
+    .expect("cold mesh must connect before the three default heartbeat ticks can fence it");
+    for (server, node, peer) in [
+        (&server_a, &node_a, &peer_a),
+        (&server_b, &node_b, &peer_b),
+        (&server_c, &node_c, &peer_c),
+    ] {
+        assert_eq!(
+            current_live_node_for_peer(&db, peer).await,
+            *node,
+            "startup must preserve the exact original node identity"
+        );
+        assert_eq!(node_expired_flag(&db, node).await, Some(false));
+        assert_eq!(readiness_status(server).await, Some(true));
+    }
+}
+
+/// A registered surge node must join two already-connected survivors even
+/// when their periodic enrollment refresh will not run for thirty seconds.
+#[tokio::test(flavor = "multi_thread")]
+async fn surge_node_joins_default_mesh_without_rotating_startup_identity() {
+    let Ok(postgres_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    let _serial = cluster_e2e_serial_lock().lock().await;
+    let db = open_control_db(&postgres_url).await;
+    let pool = generate_pool();
+    reset_and_enroll(&db, &pool).await;
+    let ports = [free_tcp_port(), free_tcp_port(), free_tcp_port()];
+    let (server_a, node_a, peer_a) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        ports[0],
+        &ports[1..],
+        &DEFAULT_MESH_TIMING,
+    )
+    .await;
+    let (server_b, node_b, peer_b) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        ports[1],
+        &[ports[0], ports[2]],
+        &DEFAULT_MESH_TIMING,
+    )
+    .await;
+    wait_for_cross_node_registration(&db, &server_a, &server_b, &peer_a).await;
+    for (server, node, peer) in [(&server_a, &node_a, &peer_a), (&server_b, &node_b, &peer_b)] {
+        assert_eq!(current_live_node_for_peer(&db, peer).await, *node);
+        assert_eq!(node_expired_flag(&db, node).await, Some(false));
+        assert_eq!(readiness_status(server).await, Some(true));
+    }
+
+    // The survivors' fresh membership snapshots do not include C. Do not
+    // normalize its startup identity through recovery while waiting to join.
+    let (server_c, node_c, peer_c) = spawn_cluster_server_with_envs(
+        &postgres_url,
+        &pool.pool_env,
+        ports[2],
+        &ports[..2],
+        &DEFAULT_MESH_TIMING,
+    )
+    .await;
+    tokio::time::timeout(
+        Duration::from_secs(20),
+        wait_for_cross_node_registration(&db, &server_a, &server_c, &peer_a),
+    )
+    .await
+    .expect("surge node must join before the default isolation window");
+    for (server, node, peer) in [
+        (&server_a, &node_a, &peer_a),
+        (&server_b, &node_b, &peer_b),
+        (&server_c, &node_c, &peer_c),
+    ] {
+        assert_eq!(
+            current_live_node_for_peer(&db, peer).await,
+            *node,
+            "surge admission must preserve the exact startup identity"
+        );
+        assert_eq!(node_expired_flag(&db, node).await, Some(false));
+        assert_eq!(readiness_status(server).await, Some(true));
     }
 }
 

@@ -469,7 +469,10 @@ impl Behaviour {
             .extract_if(|_, (candidate, _)| candidate == peer)
         {
             if let Some(reply) = reply {
-                let _ = reply.send(SwarmResponse::OutboundFailure(RemoteSendError::DialFailure));
+                // Eviction cannot prove an in-flight request was never executed.
+                let _ = reply.send(SwarmResponse::OutboundFailure(
+                    RemoteSendError::ConnectionClosed,
+                ));
             }
         }
         addresses.len()
