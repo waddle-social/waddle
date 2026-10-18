@@ -16,7 +16,7 @@ use waddle_xmpp_client::{
         thread::ThreadRef,
     },
     ClientEvent, ConnectionEvent, InboundMessage, LifecycleEvent, MessageDeliveryEvent,
-    MessagingEvent,
+    MessagingEvent, SessionPhase,
 };
 
 use crate::safety_scores::safety_scores_fastening_to_ffi;
@@ -37,6 +37,17 @@ use crate::{
 
 // ── Event dispatch ───────────────────────────────────────────────────────────
 
+/// The runtime reached `Disconnected`: the transport closed (either end)
+/// or failed. The handle the FFI keeps holds the event channel's sender,
+/// so the channel never closes on its own; this is the session's end.
+pub(super) fn ends_session(event: &ClientEvent) -> bool {
+    matches!(
+        event,
+        ClientEvent::Lifecycle(LifecycleEvent::StateChanged(snapshot))
+            if snapshot.phase == SessionPhase::Disconnected
+    )
+}
+
 pub(super) fn dispatch_event(
     event: ClientEvent,
     account_bare_jid: &str,
@@ -45,6 +56,9 @@ pub(super) fn dispatch_event(
     match event {
         ClientEvent::Lifecycle(LifecycleEvent::SessionReady(_)) => {
             listener.on_event(WaddleClientEvent::Connected);
+        }
+        event if ends_session(&event) => {
+            listener.on_event(WaddleClientEvent::Disconnected);
         }
         ClientEvent::Messaging(MessagingEvent::Message(msg)) => {
             listener.on_event(WaddleClientEvent::Message {
@@ -2508,6 +2522,36 @@ mod tests {
                 .expect("test capture mutex poisoned")
                 .push(event);
         }
+    }
+
+    #[test]
+    fn reaching_disconnected_ends_the_session_once() {
+        use waddle_xmpp_client::SessionSnapshot;
+
+        let listener = CapturingListener::default();
+        let account = "alice@waddle.test";
+        let snapshot = |phase| {
+            let mut snapshot = SessionSnapshot::new();
+            snapshot.phase = phase;
+            ClientEvent::Lifecycle(LifecycleEvent::StateChanged(snapshot))
+        };
+        for phase in [
+            SessionPhase::Connecting,
+            SessionPhase::Established,
+            SessionPhase::Disconnecting,
+        ] {
+            let event = snapshot(phase);
+            assert!(!ends_session(&event), "{phase:?} is not the end");
+            dispatch_event(event, account, &listener);
+        }
+        assert!(listener.events().is_empty());
+
+        let closed = snapshot(SessionPhase::Disconnected);
+        assert!(ends_session(&closed));
+        dispatch_event(closed, account, &listener);
+        let events = listener.events();
+        assert_eq!(events.len(), 1);
+        assert!(matches!(events[0], WaddleClientEvent::Disconnected));
     }
 
     #[test]
