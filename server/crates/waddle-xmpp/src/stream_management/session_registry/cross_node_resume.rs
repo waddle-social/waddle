@@ -1443,6 +1443,19 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SmPersistenceStorage for DelayedGetSessionPersistence {
+        async fn append_detached_stanza_atomic(
+            &self,
+            append: crate::stream_management::persistence::PersistedDetachedAppend,
+            fence: Option<&crate::stream_management::persistence::SmClaimFence>,
+        ) -> Result<
+            crate::stream_management::persistence::KeyedSnapshotOutcome,
+            crate::stream_management::persistence::SmPersistenceError,
+        > {
+            self.inner
+                .append_detached_stanza_atomic(append, fence)
+                .await
+        }
+
         async fn acknowledge_claimed_session(
             &self,
             stream: &crate::pending_delivery::SmSessionId,

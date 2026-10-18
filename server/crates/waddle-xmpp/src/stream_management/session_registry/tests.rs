@@ -1,8 +1,10 @@
 mod acknowledgements;
 mod expired_completion;
+mod incremental_append;
 mod keyed_append;
 pub(super) mod promotion_custody;
 mod promotion_receipt_gc;
+mod startup_poison;
 
 use super::core::PendingClaimAcquisitionDisposition;
 use super::*;
@@ -2488,7 +2490,7 @@ fn timed_out_release_generations_cannot_outgrow_claim_capacity() {
 }
 
 #[test]
-fn stream_locks_are_fixed_shards_not_per_stream_entries() {
+fn historical_stream_ids_do_not_accumulate_operation_locks() {
     let registry = InMemorySmSessionRegistry::new();
     let shard_count = registry.stream_locks.len();
 
@@ -2503,10 +2505,19 @@ fn stream_locks_are_fixed_shards_not_per_stream_entries() {
             .expect("stream lock");
     }
 
-    assert_eq!(
-        registry.stream_locks.len(),
-        shard_count,
-        "unique SM stream ids must not grow an unbounded lock map"
+    let retained_entries: usize = registry
+        .stream_locks
+        .iter()
+        .map(|bucket| bucket.lock().expect("stream lock bucket").len())
+        .sum();
+    assert!(
+        retained_entries <= shard_count,
+        "historical IDs retain at most one dead lookup per bucket"
+    );
+    let held = registry.stream_lock("held-stream").unwrap();
+    assert!(
+        std::sync::Arc::ptr_eq(&held, &registry.stream_lock("held-stream").unwrap(),),
+        "concurrent operations on the same stream share a mutex"
     );
 }
 
@@ -4476,6 +4487,53 @@ impl GatedSnapshotPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedSnapshotPersistence {
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: crate::stream_management::persistence::PersistedDetachedAppend,
+        fence: Option<&crate::stream_management::persistence::SmClaimFence>,
+    ) -> Result<
+        crate::stream_management::persistence::KeyedSnapshotOutcome,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        if append.new_delivery
+            && self
+                .block_new_delivery
+                .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                crate::stream_management::persistence::SmPersistenceError::IngressDeliveryBlocked,
+            );
+        }
+        let gated = append.session.stream_id.as_str() == self.gate_stream
+            && self.armed.load(std::sync::atomic::Ordering::SeqCst);
+        let gate_after_commit = self
+            .commit_then_gate
+            .load(std::sync::atomic::Ordering::SeqCst);
+        if gated && !gate_after_commit {
+            self.reached.notify_one();
+            self.proceed.notified().await;
+        }
+        if self
+            .fail_after_gate
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(
+                crate::stream_management::persistence::SmPersistenceError::Other(
+                    "injected failure after detached append gate".into(),
+                ),
+            );
+        }
+        let outcome = self
+            .inner
+            .append_detached_stanza_atomic(append, fence)
+            .await;
+        if gated && gate_after_commit {
+            self.reached.notify_one();
+            self.proceed.notified().await;
+        }
+        outcome
+    }
+
     async fn acknowledge_claimed_session(
         &self,
         stream: &crate::pending_delivery::SmSessionId,
@@ -5708,16 +5766,10 @@ async fn detached_append_losing_race_to_displacement_preserves_durable_rows() {
     let append_registry = std::sync::Arc::clone(&registry);
     let append = tokio::spawn(async move {
         append_registry
-            .update_detached_session_snapshot(
+            .record_outbound_for_detached_stream(
                 "stream-race-victim",
-                |_| true,
-                |session| {
-                    session.record_detached_outbound(
-                        &message_stanza_with_id("race-append".to_string()),
-                        Utc::now(),
-                    );
-                    true
-                },
+                &message_stanza_with_id("race-append".to_string()),
+                Utc::now(),
             )
             .await
     });
@@ -6375,6 +6427,19 @@ impl FailingSnapshotPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for FailingSnapshotPersistence {
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: crate::stream_management::persistence::PersistedDetachedAppend,
+        fence: Option<&crate::stream_management::persistence::SmClaimFence>,
+    ) -> Result<
+        crate::stream_management::persistence::KeyedSnapshotOutcome,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .append_detached_stanza_atomic(append, fence)
+            .await
+    }
+
     async fn acknowledge_claimed_session(
         &self,
         stream: &crate::pending_delivery::SmSessionId,
@@ -7223,6 +7288,19 @@ impl GatedGetSessionPersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersistence {
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: crate::stream_management::persistence::PersistedDetachedAppend,
+        fence: Option<&crate::stream_management::persistence::SmClaimFence>,
+    ) -> Result<
+        crate::stream_management::persistence::KeyedSnapshotOutcome,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .append_detached_stanza_atomic(append, fence)
+            .await
+    }
+
     async fn acknowledge_claimed_session(
         &self,
         stream: &crate::pending_delivery::SmSessionId,
@@ -7400,7 +7478,19 @@ impl super::super::persistence::SmPersistenceStorage for GatedGetSessionPersiste
         Vec<super::super::persistence::PersistedSession>,
         super::super::persistence::SmPersistenceError,
     > {
+        if self.corrupt.load(std::sync::atomic::Ordering::SeqCst) {
+            return Ok(Vec::new());
+        }
         self.inner.list_all_sessions().await
+    }
+
+    async fn list_all_session_ids(
+        &self,
+    ) -> Result<
+        Vec<crate::pending_delivery::SmSessionId>,
+        super::super::persistence::SmPersistenceError,
+    > {
+        self.inner.list_all_session_ids().await
     }
 
     async fn store_session_atomic_with_principal(
@@ -8138,6 +8228,19 @@ impl ScopedProbePersistence {
 
 #[async_trait::async_trait]
 impl super::super::persistence::SmPersistenceStorage for ScopedProbePersistence {
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: crate::stream_management::persistence::PersistedDetachedAppend,
+        fence: Option<&crate::stream_management::persistence::SmClaimFence>,
+    ) -> Result<
+        crate::stream_management::persistence::KeyedSnapshotOutcome,
+        crate::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .append_detached_stanza_atomic(append, fence)
+            .await
+    }
+
     async fn acknowledge_claimed_session(
         &self,
         stream: &crate::pending_delivery::SmSessionId,

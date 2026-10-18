@@ -38,6 +38,10 @@ impl DetachClaimFenceReservation {
 
 const STREAM_LOCK_SHARDS: usize = 256;
 
+// Buckets protect only lookup, never a database await. Weak entries retain no
+// operation mutex once its last caller finishes; each lookup prunes dead keys.
+type StreamLockBucket = std::sync::Mutex<HashMap<String, std::sync::Weak<tokio::sync::Mutex<()>>>>;
+
 /// Operation-owned capacity marker for a reclaimed SM claim mutation.
 /// Only the operation holding this token may consume, cancel, or defer its
 /// reservation, so an older same-stream lifecycle cannot erase a newer
@@ -93,24 +97,10 @@ fn occupied_claim_fence_capacity(
         .saturating_add(unrepresented_reservations)
 }
 
-/// Bound on any `ClaimStore` acquire/`ensure_claimed` call made while this
-/// registry holds one of its [`STREAM_LOCK_SHARDS`] stream-shard locks (FIX
-/// 5, council-adjudicated ADR-0017 Phase 3 Slice 5 corrigenda:
-/// `claim_session`, `claims.rs::acquire_claim_store_entry_for_detach`, and
-/// [`InMemorySmSessionRegistry::hydrate_reclaimed`] below).
-///
-/// **Shard-fan-in rationale**: `stream_lock` hashes a stream id down to one
-/// of a fixed, small number of shard mutexes — many unrelated stream ids
-/// share the same shard. A hung `ClaimStore` call while holding one shard's
-/// lock therefore does not just stall the one stream id it was issued for;
-/// it stalls every OTHER live stream id that happens to hash to the same
-/// shard too (store/take/claim/release, all of which take the same shard
-/// lock before touching `sessions`/`claimed_sessions`). This is a strictly
-/// wider blast radius than a genuinely per-entity lock would have, which is
-/// why every `ClaimStore` call issued under a shard lock is bounded here —
-/// mirrors `self_fence.rs::expire_bounded`'s bounded/best-effort/logged
-/// pattern one level down (a per-entity claim call instead of a per-node
-/// lease call).
+/// Bound on a `ClaimStore` acquire or lookup made while holding a stream's
+/// operation lock. A stalled backend must not indefinitely block resumption,
+/// fanout or cleanup for that stream. Only synchronous mutex lookup is sharded;
+/// unrelated streams have independent operation locks.
 pub(super) const CLAIM_CALL_UNDER_SHARD_LOCK_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// In-memory implementation of the SM session registry, optionally
@@ -133,7 +123,7 @@ pub struct InMemorySmSessionRegistry {
     pub(super) promotion_snapshots: RwLock<
         HashMap<crate::pending_delivery::SmSessionId, super::reconciliation::PromotionSnapshot>,
     >,
-    pub(super) stream_locks: Vec<Arc<tokio::sync::Mutex<()>>>,
+    pub(super) stream_locks: Vec<StreamLockBucket>,
     pub(super) max_sessions: usize,
     /// Recently applied XEP-0424/0425 tombstones, kept for the
     /// promotion-time re-check (round-2 review R2). Bounded by
@@ -1099,8 +1089,8 @@ impl InMemorySmSessionRegistry {
     /// node's claim, the (now itself claim-scoped, see
     /// `server::session_janitors::spawn_sm_expiry_janitor`) SM-expiry
     /// janitor's `drain_expired`/promote/`confirm_drained` chain is the
-    /// sole deletion path, and its writes already run under the row-locked
-    /// fenced epoch via `PostgresFencedSmPersistence`. Recorded as
+    /// deletion path for decodable expired sessions; its writes already run
+    /// under the row-locked fenced epoch via `PostgresFencedSmPersistence`. Recorded as
     /// deviation 28 (plan doc; corrected from an earlier "deviation 27"
     /// citation — see the plan's Slice 5 "Design addition (major fix 6)"
     /// paragraph, amended in place to point at 28) — the plan's
@@ -1140,6 +1130,20 @@ impl InMemorySmSessionRegistry {
             .list_all_sessions_with_unacked()
             .await
             .map_err(|e| SmRegistryError::Internal(e.to_string()))?;
+        // Bulk readers deliberately omit corrupt headers and queues. Discover
+        // those IDs independently so poison cannot survive every cold start,
+        // while healthy sessions retain the bulk read's constant round trips.
+        let bulk_ids = stored
+            .iter()
+            .map(|(session, _)| session.stream_id.clone())
+            .collect::<HashSet<_>>();
+        let mut targeted = storage
+            .list_all_session_ids()
+            .await
+            .map_err(|e| SmRegistryError::Internal(e.to_string()))?
+            .into_iter()
+            .filter(|id| !bulk_ids.contains(id))
+            .collect::<Vec<_>>();
         let mut hydrated = 0usize;
         let mut expired = 0usize;
         let mut bad_rows = 0usize;
@@ -1151,7 +1155,86 @@ impl InMemorySmSessionRegistry {
         // through `.current()` here (rather than caching a snapshot for the
         // whole call) keeps this consistent with every other call site's
         // discipline of never holding a stale identity across an `.await`.
+        let mut prepared = Vec::with_capacity(stored.len());
         for (persisted, unacked) in stored {
+            let session = match persisted_to_detached(&persisted, &unacked) {
+                Ok(session) => session,
+                Err(error) => {
+                    debug!(
+                        stream_id = %persisted.stream_id,
+                        %error,
+                        "restore_from_persistence: row decode failed; scheduling fenced quarantine"
+                    );
+                    targeted.push(persisted.stream_id.clone());
+                    continue;
+                }
+            };
+            prepared.push((persisted, session));
+        }
+        // Clean omitted poison before healthy rows fill the ownership inventory.
+        // Omitted or undecodable rows use the existing reclaimed lifecycle:
+        // reserve before acquiring ownership, retain transient failures for the
+        // maintenance retry, and settle ACK custody before exact quarantine.
+        for session_id in targeted {
+            let entity = Entity::new(EntityType::SmSession, session_id.as_str().to_string());
+            let Some(reservation) = self.reserve_reclaimed_claim_capacity(&entity) else {
+                debug!(stream_id = %session_id, "restore_from_persistence: no capacity for omitted session");
+                continue;
+            };
+            let identity = self.node_identity.current();
+            // Record intent before the ownership await so cancellation can be
+            // repaired by the same read-only lookup as an uncertain backend error.
+            self.defer_uncertain_reclaimed_claim(&entity, &identity, reservation);
+            let claimed = self.claim_store.ensure_claimed(&entity, &identity).await;
+            if matches!(
+                &claimed,
+                Ok(_)
+                    | Err(ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining)
+            ) {
+                if let Ok(mut pending) = self.pending_reclaimed_claim_lookups.write() {
+                    pending.remove(&(entity.id.clone(), identity.clone(), reservation));
+                }
+            }
+            let epoch = match claimed {
+                Ok(epoch) => epoch,
+                Err(ClaimError::AlreadyClaimed | ClaimError::Conflict | ClaimError::Draining) => {
+                    self.cancel_reclaimed_claim_capacity(&entity, reservation);
+                    foreign_claims += 1;
+                    continue;
+                }
+                Err(error) => {
+                    // A backend error can arrive after ownership committed.
+                    // Keep admission until the read-only claim lookup resolves it.
+                    debug!(stream_id = %session_id, %error, "restore_from_persistence: retaining uncertain omitted-session claim");
+                    continue;
+                }
+            };
+            let fence = super::super::persistence::SmClaimFence::new(identity, epoch);
+            let outcome = self
+                .hydrate_reclaimed_typed(&entity, &fence, reservation)
+                .await?;
+            match outcome {
+                ReclaimedHydrationOutcome::Hydrated => hydrated += 1,
+                ReclaimedHydrationOutcome::AlreadyPresent => already_present += 1,
+                ReclaimedHydrationOutcome::PoisonReleased => bad_rows += 1,
+                ReclaimedHydrationOutcome::LostClaim => foreign_claims += 1,
+                ReclaimedHydrationOutcome::MissingDurable
+                | ReclaimedHydrationOutcome::StaleIdentity
+                | ReclaimedHydrationOutcome::TransientFailure => {}
+            }
+            if matches!(
+                outcome,
+                ReclaimedHydrationOutcome::PoisonReleased
+                    | ReclaimedHydrationOutcome::MissingDurable
+                    | ReclaimedHydrationOutcome::StaleIdentity
+            ) {
+                // Failed release retains the exact fence for the normal retry.
+                let _ = self
+                    .release_reclaimed_claim(&entity, &fence, reservation)
+                    .await;
+            }
+        }
+        for (persisted, mut session) in prepared {
             let identity = self.node_identity.current();
             let entity = Entity::new(
                 EntityType::SmSession,
@@ -1198,28 +1281,6 @@ impl InMemorySmSessionRegistry {
             if expires_at <= now {
                 expired += 1;
             }
-            let mut session = match persisted_to_detached(&persisted, &unacked) {
-                Ok(session) => session,
-                Err(error) => {
-                    debug!(
-                        stream_id = %persisted.stream_id,
-                        error = %error,
-                        "skipping persisted session: row decode failed (poison pill)"
-                    );
-                    // Claimed above but never hydrated (a genuine
-                    // poison-pill row, not a claim conflict) — release the
-                    // now-unused claim rather than leak it, so a future
-                    // pass (or the orphan reaper, once this identity is
-                    // stale) can act on the row again.
-                    self.release_claim_store_entry_under(
-                        persisted.stream_id.as_str(),
-                        super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
-                    )
-                    .await;
-                    bad_rows += 1;
-                    continue;
-                }
-            };
             session.promotion_custody = super::PromotionCaptureCustody::claimed(
                 super::super::persistence::SmClaimFence::new(identity.clone(), epoch),
             );
@@ -2160,10 +2221,10 @@ impl InMemorySmSessionRegistry {
     /// Ordering is crash-safe: the pending row commits BEFORE its
     /// `sm_unacked` row is deleted here, preserving at-least-once.
     ///
-    /// Takes the stream lock so the delete serializes with
-    /// detached-append full snapshots that could otherwise resurrect
-    /// the rows. No in-memory mutation happens here — the caller owns
-    /// the drained session and drops the entries from its local copy.
+    /// Takes the stream lock so deletion serializes with incremental
+    /// detached appends and initial snapshots that could otherwise race it.
+    /// No in-memory mutation happens here — the caller owns the drained session
+    /// and drops the entries from its local copy.
     pub async fn delete_unacked_sequences(
         &self,
         stream_id: &str,
@@ -2229,7 +2290,16 @@ impl InMemorySmSessionRegistry {
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         stream_id.hash(&mut hasher);
         let shard = (hasher.finish() as usize) % self.stream_locks.len();
-        Ok(Arc::clone(&self.stream_locks[shard]))
+        let mut locks = self.stream_locks[shard]
+            .lock()
+            .map_err(|_| SmRegistryError::Internal("Stream lock lookup poisoned".into()))?;
+        locks.retain(|_, lock| lock.strong_count() > 0);
+        if let Some(lock) = locks.get(stream_id).and_then(std::sync::Weak::upgrade) {
+            return Ok(lock);
+        }
+        let lock = Arc::new(tokio::sync::Mutex::new(()));
+        locks.insert(stream_id.to_owned(), Arc::downgrade(&lock));
+        Ok(lock)
     }
 
     pub async fn lock_session_operation(
@@ -2267,44 +2337,10 @@ impl InMemorySmSessionRegistry {
             .find(|(_, session)| predicate(session))
             .map(|(stream_id, _)| stream_id.clone()))
     }
-
-    pub(super) async fn update_detached_session_snapshot(
-        &self,
-        stream_id: &str,
-        predicate: impl Fn(&DetachedSession) -> bool,
-        mutate: impl FnOnce(&mut DetachedSession) -> bool,
-    ) -> Result<bool, SmRegistryError> {
-        let stream_lock = self.stream_lock(stream_id)?;
-        let _stream_guard = stream_lock.lock().await;
-
-        let session_id = crate::pending_delivery::SmSessionId::new(stream_id);
-        self.reconcile_stale_session_locked(&session_id).await?;
-        let current = self.detached_snapshot_matching(&session_id, predicate)?;
-
-        let Some(mut updated) = current else {
-            return Ok(false);
-        };
-        if !mutate(&mut updated) {
-            // No-op mutation (stale or duplicate input): skip the durable
-            // snapshot entirely. Persistence restamps `detached_at`, so a
-            // persisted no-op would silently extend the session's resume
-            // window on every retry.
-            return Ok(true);
-        }
-
-        // Durable snapshot first, then publish the same typed state in memory.
-        // The stream lock serializes this full-snapshot write with other appends
-        // and with claim completion/deletion so an older clone cannot overwrite
-        // a newer replay window.
-        self.mark_snapshot_stale(&session_id)?;
-        self.persist_detached_session_snapshot(&updated, None, Vec::new())
-            .await?;
-        self.publish_detached_snapshot(&session_id, updated)
-    }
 }
 
-fn new_stream_locks() -> Vec<Arc<tokio::sync::Mutex<()>>> {
+fn new_stream_locks() -> Vec<StreamLockBucket> {
     (0..STREAM_LOCK_SHARDS)
-        .map(|_| Arc::new(tokio::sync::Mutex::new(())))
+        .map(|_| std::sync::Mutex::new(HashMap::new()))
         .collect()
 }

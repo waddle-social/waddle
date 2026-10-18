@@ -823,6 +823,19 @@ async fn promotion_inventory_owned_missing_source_retains_custody_without_blocki
 
 #[async_trait]
 impl SmPersistenceStorage for BlockingFirstAtomicStore {
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: waddle_xmpp::stream_management::persistence::PersistedDetachedAppend,
+        fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::KeyedSnapshotOutcome,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .append_detached_stanza_atomic(append, fence)
+            .await
+    }
+
     async fn acknowledge_claimed_session(
         &self,
         stream: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -1120,6 +1133,19 @@ struct MislabelingStore {
 
 #[async_trait]
 impl SmPersistenceStorage for MislabelingStore {
+    async fn append_detached_stanza_atomic(
+        &self,
+        append: waddle_xmpp::stream_management::persistence::PersistedDetachedAppend,
+        fence: Option<&waddle_xmpp::stream_management::persistence::SmClaimFence>,
+    ) -> Result<
+        waddle_xmpp::stream_management::persistence::KeyedSnapshotOutcome,
+        waddle_xmpp::stream_management::persistence::SmPersistenceError,
+    > {
+        self.inner
+            .append_detached_stanza_atomic(append, fence)
+            .await
+    }
+
     async fn acknowledge_claimed_session(
         &self,
         stream: &waddle_xmpp::pending_delivery::SmSessionId,

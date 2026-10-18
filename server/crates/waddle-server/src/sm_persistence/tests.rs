@@ -1080,12 +1080,20 @@ async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
         .await
         .unwrap();
     storage
+        .append_unacked(fixture_unacked("beta", 1))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 3))
+        .await
+        .unwrap();
+    storage
         .execute(
             "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
              VALUES (?, ?, ?, ?)",
             crate::db_params![
                 "beta".to_string(),
-                1i64,
+                2i64,
                 "not valid xml <<<".to_string(),
                 0i64
             ],
@@ -1094,21 +1102,18 @@ async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
         .expect("insert poison row");
 
     let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
-    // Healthy sessions present; poison-pill session's unacked
-    // row was skipped, so beta appears with an empty queue
-    // (since the only row failed to decode).
+    // Returning any part of beta would leave an unmarked replay hole. Its
+    // healthy prefix and suffix must not be published or leak to its neighbors.
     let stream_ids: Vec<_> = grouped
         .iter()
-        .map(|(s, _)| s.stream_id.as_str().to_string())
+        .map(|(session, _)| session.stream_id.as_str())
         .collect();
-    assert!(stream_ids.contains(&"alpha".to_string()));
-    assert!(stream_ids.contains(&"gamma".to_string()));
-    assert!(stream_ids.contains(&"beta".to_string()));
-    let beta_unacked = grouped
-        .iter()
-        .find(|(s, _)| s.stream_id.as_str() == "beta")
-        .map(|(_, u)| u);
-    assert_eq!(beta_unacked.map(Vec::len), Some(0));
+    assert_eq!(stream_ids, vec!["alpha", "gamma"]);
+    for (session, unacked) in grouped {
+        assert_eq!(unacked.len(), 1);
+        assert_eq!(unacked[0].sequence, 1);
+        assert_eq!(unacked[0].stream_id, session.stream_id);
+    }
 }
 
 /// Regression for #1157: a session row that fails to decode while
@@ -2033,3 +2038,6 @@ async fn sqlite_ack_journal_survives_reopen_before_pending_settlement() {
         .unwrap();
     storage.delete_session(&stream).await.unwrap();
 }
+
+#[path = "incremental_tests.rs"]
+mod incremental_tests;

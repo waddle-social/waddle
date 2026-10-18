@@ -177,6 +177,9 @@ async fn store_session_atomic_inner(
     .await
     .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
 
+    // Refreshes preserve the first durable detach timestamp: traffic cannot
+    // renew the existing session's resume window. A later detach after source
+    // deletion inserts its own timestamp.
     tx.execute(
         r#"
         INSERT INTO sm_sessions (
@@ -195,7 +198,6 @@ async fn store_session_atomic_inner(
             outbound_count = excluded.outbound_count,
             last_acked = excluded.last_acked,
             max_resume_secs = excluded.max_resume_secs,
-            detached_at_ms = excluded.detached_at_ms,
             max_resume_duration_ms = excluded.max_resume_duration_ms,
             carbons_enabled = excluded.carbons_enabled,
             roster_interested = excluded.roster_interested,

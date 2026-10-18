@@ -591,6 +591,45 @@ async fn poison_quarantine_settles_ack_without_decoding_header_or_queue() {
 }
 
 #[tokio::test]
+async fn startup_poison_quarantine_settles_ack_and_preserves_pending_custody() {
+    for corrupt_queue in [false, true] {
+        let fixture = PoisonAckFixture::new("startup-poison-ack", corrupt_queue, true).await;
+        fixture
+            .registry
+            .cancel_reclaimed_claim_capacity(&fixture.entity, fixture.reservation);
+
+        assert_eq!(
+            fixture.registry.restore_from_persistence().await.unwrap(),
+            0
+        );
+        let stream = SmSessionId::new(&fixture.entity.id);
+        assert!(fixture
+            .storage
+            .inner
+            .get_session(&stream)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(fixture
+            .storage
+            .inner
+            .pending_acknowledgements(&stream)
+            .await
+            .unwrap()
+            .is_empty());
+        let pending = fixture.pending.list(&fixture.recipient).await.unwrap();
+        assert_eq!(pending.len(), 1);
+        assert_eq!(pending[0].outbound_sequence, Some(7));
+        assert!(fixture
+            .claims
+            .current_claim(&fixture.entity)
+            .await
+            .unwrap()
+            .is_none());
+    }
+}
+
+#[tokio::test]
 async fn poison_quarantine_without_pending_dependency_retains_ack_and_claim() {
     let fixture = PoisonAckFixture::new("poison-ack-no-pending", false, false).await;
     assert_eq!(

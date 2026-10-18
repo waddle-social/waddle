@@ -51,7 +51,8 @@ impl PostgresFencedSmPersistence {
         // Drop any pre-existing unacked rows first (see the portable
         // impl's identical comment on this statement's ordering
         // rationale), then upsert the session row (divergence (a):
-        // Postgres `now()`, not `session.detached_at`), then append every
+        // Postgres `now()` on the initial insert, retaining the first stamp
+        // on refresh instead of `session.detached_at`), then append every
         // supplied unacked stanza.
         tx.execute(
             "DELETE FROM sm_unacked WHERE stream_id = ?",
@@ -78,7 +79,6 @@ impl PostgresFencedSmPersistence {
                 outbound_count = excluded.outbound_count,
                 last_acked = excluded.last_acked,
                 max_resume_secs = excluded.max_resume_secs,
-                detached_at_ms = excluded.detached_at_ms,
                 max_resume_duration_ms = excluded.max_resume_duration_ms,
                 carbons_enabled = excluded.carbons_enabled,
                 roster_interested = excluded.roster_interested,

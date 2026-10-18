@@ -335,9 +335,8 @@ impl DetachedSession {
     /// would either restore obsolete state or evict a still-valid entry.
     ///
     /// Returns whether the session mutated. Stale and duplicate sequences
-    /// are no-ops; callers that persist snapshots must skip the durable
-    /// write for them, because persistence restamps `detached_at` and a
-    /// no-op retry must not extend the session's resume window.
+    /// are no-ops; callers must skip the durable write for them so retries
+    /// cannot change counters, replay gaps, or the original detach deadline.
     pub fn record_detached_outbound_at(
         &mut self,
         sequence: u32,

@@ -221,6 +221,8 @@ pub(crate) fn decode_unacked(
     let sequence: i64 = row
         .get(1)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
+    let sequence =
+        u32::try_from(sequence).map_err(|error| SmPersistenceError::Other(error.to_string()))?;
     let stanza_xml: String = row
         .get(2)
         .map_err(|e| SmPersistenceError::Other(e.to_string()))?;
@@ -241,7 +243,7 @@ pub(crate) fn decode_unacked(
                 .map_err(|error| SmPersistenceError::Other(error.to_string()))?,
         )?,
         stream_id: SmSessionId::new(stream_id),
-        sequence: sequence.max(0) as u32,
+        sequence,
         stanza: Box::new(stanza),
         original_receipt_at,
     })
