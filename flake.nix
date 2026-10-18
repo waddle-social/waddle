@@ -900,6 +900,22 @@
               echo "  node: $(node --version)"
             '';
           };
+
+          # Linux desktop client (apps/linux): its own shell so GTK never
+          # enters the server's CI closure.
+          linux = pkgs.mkShell {
+            packages = [
+              rustToolchain
+              pkgs.pkg-config
+              pkgs.blueprint-compiler
+              pkgs.desktop-file-utils
+              pkgs.appstream
+            ];
+            buildInputs = [
+              pkgs.gtk4
+              pkgs.libadwaita
+            ];
+          };
         }
       );
     };
