@@ -25,7 +25,7 @@ pub(super) async fn list_all_sessions_with_unacked(
     // row in the same session was undercutting the cold-start
     // perf goal for large queues).
     let mut current_stream_id: Option<String> = None;
-    // Explicit "the current group's session failed to decode" flag.
+    // Explicit "the current group has an undecodable header or replay row" flag.
     // Inferring this from `out.last().is_none()` is wrong once any
     // valid session precedes the poison one: `out` is non-empty, so
     // the poison group's unacked rows would be appended to the
@@ -83,44 +83,42 @@ pub(super) async fn list_all_sessions_with_unacked(
             skipping_current_group = false;
             out.push((session, Vec::new()));
         } else if skipping_current_group {
-            // Same stream_id as a previously-skipped poison
-            // session; drop this unacked row too.
+            // This group was already rejected; none of its remaining replay
+            // entries may be published or appended to a neighboring stream.
             continue;
         }
         // Unacked columns: sequence (19), stanza_xml (20),
         // original_receipt_at_ms (21) — shifted by `occupancy_session`
         // (session column 3) and
         // `presence_payloads` (session column 18).
-        // NULL when LEFT JOIN had no match. Per-row decode failure
-        // skips that row but keeps the rest of the session's queue.
-        let sequence_opt: Option<i64> = match row.get(19) {
-            Ok(v) => v,
-            Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    "list_all_sessions_with_unacked: skipping row with unreadable sequence"
-                );
-                continue;
+        // NULL only means an empty LEFT JOIN queue. Any decode failure must
+        // reject the entire stream: publishing a prefix/suffix would silently
+        // omit a required retransmission without marking a replay gap. Leaving
+        // its raw ID out of this bulk result routes startup through exact
+        // hydration and the existing guarded quarantine path.
+        let entry = match row.get::<Option<i64>>(19) {
+            Ok(Some(sequence)) => decode_unacked_join_row(&row, sequence).map(Some),
+            Ok(None) => Ok(None),
+            Err(error) => Err(SmPersistenceError::Other(error.to_string())),
+        };
+        match entry {
+            Ok(Some(entry)) => {
+                if let Some(group) = out.last_mut() {
+                    group.1.push(entry);
+                }
             }
-        };
-        let Some(sequence_i64) = sequence_opt else {
-            continue;
-        };
-        let entry = match decode_unacked_join_row(&row, sequence_i64) {
-            Ok(entry) => entry,
+            Ok(None) => {}
             Err(error) => {
                 tracing::debug!(
                     stream_id = %current_stream_id.as_deref().unwrap_or("<unknown>"),
-                    sequence = sequence_i64,
-                    error = %error,
-                    "list_all_sessions_with_unacked: skipping unacked row with \
-                     decode failure (poison pill)"
+                    %error,
+                    "list_all_sessions_with_unacked: skipping entire session with \
+                     an undecodable replay row (poison pill)"
                 );
-                continue;
+                out.pop();
+                skipping_current_group = true;
+                poison_sessions += 1;
             }
-        };
-        if let Some(group) = out.last_mut() {
-            group.1.push(entry);
         }
     }
     if poison_sessions > 0 {
