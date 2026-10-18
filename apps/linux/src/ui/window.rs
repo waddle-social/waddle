@@ -87,7 +87,8 @@ mod imp {
         /// Conversations to mark read on the server shortly.
         pub read_pending: RefCell<HashSet<String>>,
         pub compose: RefCell<Compose>,
-        pub loading_history: Cell<bool>,
+        /// Conversations with a history page in flight.
+        pub loading_history: RefCell<HashSet<String>>,
         pub rows: RefCell<Option<gio::ListStore>>,
     }
 

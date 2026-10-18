@@ -43,7 +43,8 @@ pub enum Compose {
     Reply(Quote),
     Edit {
         correction_id: String,
-        original: String,
+        /// The row as it was, to restore if the correction fails.
+        original: Box<TimelineItem>,
     },
 }
 
@@ -82,7 +83,7 @@ impl WaddleWindow {
             Compose::Message => None,
             Compose::Reply(quote) => Some(format!("Replying to {}", quote.sender)),
             Compose::Edit { original, .. } => {
-                imp.composer_entry.set_text(original);
+                imp.composer_entry.set_text(&original.body);
                 Some("Editing message".to_string())
             }
         };
@@ -114,10 +115,11 @@ impl WaddleWindow {
             original,
         } = compose
         {
-            if body.is_empty() || body == original {
+            if body.is_empty() || body == original.body {
                 return;
             }
-            self.edit_current(|timeline| {
+            let jid = conversation.jid.clone();
+            self.edit_conversation(&jid, |timeline| {
                 timeline.apply_live(IncomingMessage {
                     replaces_id: Some(correction_id.clone()),
                     sender: nick,
@@ -133,6 +135,7 @@ impl WaddleWindow {
                     .correct(&conversation.jid, conversation.kind, correction_id, body)
                     .await
                 {
+                    window.edit_conversation(&jid, |timeline| timeline.restore(&original));
                     window.toast("The edit could not be sent.");
                 }
             });
@@ -159,7 +162,7 @@ impl WaddleWindow {
                 sender: Some(quote.sender.clone()),
             }),
         };
-        self.edit_current(|timeline| timeline.add_local_echo(echo));
+        self.edit_conversation(&conversation.jid, |timeline| timeline.add_local_echo(echo));
         self.scroll_to_end();
 
         let window = self.clone();
@@ -174,7 +177,9 @@ impl WaddleWindow {
                 )
                 .await;
             if !sent {
-                window.edit_current(|timeline| timeline.set_delivery(&origin, Delivery::Failed));
+                window.edit_conversation(&conversation.jid, |timeline| {
+                    timeline.set_delivery(&origin, Delivery::Failed)
+                });
                 window.toast("The message could not be sent.");
             }
         });
@@ -203,7 +208,9 @@ impl WaddleWindow {
         }
         let now = chrono::Utc::now().timestamp_millis();
         let nick = session.me.nick.clone();
-        self.edit_current(|timeline| timeline.apply_own_reaction(target, &nick, &next, now));
+        self.edit_conversation(&conversation.jid, |timeline| {
+            timeline.apply_own_reaction(target, &nick, &next, now)
+        });
 
         let (window, target) = (self.clone(), target.to_string());
         glib::spawn_future_local(async move {
@@ -214,11 +221,9 @@ impl WaddleWindow {
                 return;
             }
             // Roll back, stamped after the optimistic set so it wins.
-            if window.imp().current.borrow().as_deref() == Some(conversation.jid.as_str()) {
-                window.edit_current(|timeline| {
-                    timeline.apply_own_reaction(&target, &nick, &previous, now + 1)
-                });
-            }
+            window.edit_conversation(&conversation.jid, |timeline| {
+                timeline.apply_own_reaction(&target, &nick, &previous, now + 1)
+            });
             window.toast("The reaction could not be sent.");
         });
     }
@@ -230,6 +235,7 @@ impl WaddleWindow {
         self.set_compose(Compose::Reply(Quote {
             id,
             sender: item.sender.clone(),
+            own: item.own,
             text: item.body.clone(),
         }));
     }
@@ -240,14 +246,15 @@ impl WaddleWindow {
         };
         self.set_compose(Compose::Edit {
             correction_id,
-            original: item.body.clone(),
+            original: Box::new(item.clone()),
         });
     }
 
     fn confirm_delete(&self, item: &TimelineItem) {
-        let Some(reference) = item.reference_id.clone() else {
+        if item.reference_id.is_none() {
             return;
-        };
+        }
+        let item = item.clone();
         let dialog = adw::AlertDialog::new(
             Some("Delete Message?"),
             Some("It is removed for everyone in the conversation."),
@@ -257,19 +264,22 @@ impl WaddleWindow {
         dialog.set_default_response(Some("cancel"));
         dialog.set_close_response("cancel");
         let window = self.clone();
-        dialog.connect_response(Some("delete"), move |_, _| window.delete(reference.clone()));
+        dialog.connect_response(Some("delete"), move |_, _| window.delete(&item));
         dialog.present(Some(self));
     }
 
-    fn delete(&self, reference: String) {
+    fn delete(&self, item: &TimelineItem) {
         let imp = self.imp();
-        let (Some(conversation), Some(session)) =
-            (self.current_conversation(), imp.session.borrow().clone())
-        else {
+        let (Some(conversation), Some(session), Some(reference)) = (
+            self.current_conversation(),
+            imp.session.borrow().clone(),
+            item.reference_id.clone(),
+        ) else {
             return;
         };
         let nick = session.me.nick.clone();
-        self.edit_current(|timeline| {
+        let original = item.clone();
+        self.edit_conversation(&conversation.jid, |timeline| {
             timeline.apply_live(IncomingMessage {
                 retracts_id: Some(reference.clone()),
                 sender: nick,
@@ -284,6 +294,7 @@ impl WaddleWindow {
                 .retract(&conversation.jid, conversation.kind, reference)
                 .await
             {
+                window.edit_conversation(&conversation.jid, |timeline| timeline.restore(&original));
                 window.toast("The message could not be deleted.");
             }
         });

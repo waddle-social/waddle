@@ -88,6 +88,8 @@ pub struct Quote {
     /// The quoted message's reference id.
     pub id: String,
     pub sender: String,
+    /// The quoted message is the user's own.
+    pub own: bool,
     pub text: String,
 }
 
@@ -245,10 +247,7 @@ impl Session {
             body = quoted;
             options.fallback = Some(WaddleFallbackRange { start, end });
             options.reply = Some(WaddleReplyTarget {
-                author_jid: match kind {
-                    Kind::Room => format!("{jid}/{}", quote.sender),
-                    Kind::Direct => jid.to_string(),
-                },
+                author_jid: reply_author(kind, jid, &quote, &self.me),
                 message_id: quote.id,
             });
         }
@@ -311,6 +310,16 @@ impl Session {
         })
         .await
         .unwrap_or(false)
+    }
+}
+
+/// XEP-0461 `to`: the quoted message's author. In a room, its occupant
+/// JID; in a DM, whichever side wrote it.
+fn reply_author(kind: Kind, conversation: &str, quote: &Quote, me: &Me) -> String {
+    match kind {
+        Kind::Room => format!("{conversation}/{}", quote.sender),
+        Kind::Direct if quote.own => me.bare.to_string(),
+        Kind::Direct => conversation.to_string(),
     }
 }
 
@@ -439,6 +448,8 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
         }),
         reaction: reaction(message.reaction_target_id, message.reaction_emojis),
         sender: nick,
+        // A live room message does not expose the occupant's real JID.
+        author_id: None,
     };
     Some(Arrival {
         conversation: room.to_string(),
@@ -470,6 +481,11 @@ fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival>
         } else {
             display_name(&peer)
         },
+        author_id: Some(if own {
+            me.bare.to_string()
+        } else {
+            peer.to_string()
+        }),
         own,
         body: reply_body(
             message.body,
@@ -501,7 +517,7 @@ pub fn archived_from(
 ) -> Option<IncomingMessage> {
     let from: Jid = message.from.as_deref()?.parse().ok()?;
     let timestamp = timestamp_ms(message.timestamp.as_deref());
-    let (sender, own, reference_id) = match kind {
+    let (sender, own, reference_id, author_id) = match kind {
         Kind::Room => {
             let Some(nick) = from
                 .resource()
@@ -514,14 +530,18 @@ pub fn archived_from(
                     ..IncomingMessage::default()
                 });
             };
-            let own = match message.author_real_jid.as_deref() {
-                Some(real) => real
-                    .parse::<Jid>()
-                    .is_ok_and(|real| real.to_bare() == me.bare),
+            // The real JID, when the archive exposes it, outlasts the nick.
+            let author_id = message
+                .author_real_jid
+                .as_deref()
+                .and_then(|real| real.parse::<Jid>().ok())
+                .map(|real| real.to_bare().to_string());
+            let own = match author_id.as_deref() {
+                Some(real) => real == me.bare.as_str(),
                 None => nick == me.nick,
             };
             // The room archive's id is the room's stanza id (XEP-0313).
-            (nick, own, Some(message.mam_id.clone()))
+            (nick, own, Some(message.mam_id.clone()), author_id)
         }
         Kind::Direct => {
             let own = from.to_bare() == me.bare;
@@ -531,7 +551,7 @@ pub fn archived_from(
                 display_name(conversation)
             };
             let reference = message.origin_id.clone().or_else(|| message.id.clone());
-            (sender, own, reference)
+            (sender, own, reference, Some(from.to_bare().to_string()))
         }
     };
     Some(IncomingMessage {
@@ -540,6 +560,7 @@ pub fn archived_from(
         message_id: message.id,
         reference_id,
         sender,
+        author_id,
         own,
         body: reply_body(
             message.body,
@@ -809,6 +830,103 @@ mod tests {
         ]);
         let names: Vec<&str> = direct.iter().map(|dm| dm.name.as_str()).collect();
         assert_eq!(names, ["bob", "ann"]);
+    }
+
+    #[test]
+    fn replies_name_the_quoted_author() {
+        let quote = |own: bool, sender: &str| Quote {
+            id: "q".into(),
+            sender: sender.into(),
+            own,
+            text: "hi".into(),
+        };
+        let room = "general@muc.waddle.social";
+        assert_eq!(
+            reply_author(Kind::Room, room, &quote(false, "ann"), &me()),
+            "general@muc.waddle.social/ann"
+        );
+        let peer = "ann@waddle.social";
+        assert_eq!(
+            reply_author(Kind::Direct, peer, &quote(false, "ann"), &me()),
+            peer
+        );
+        assert_eq!(
+            reply_author(Kind::Direct, peer, &quote(true, "david"), &me()),
+            "david@waddle.social"
+        );
+    }
+
+    #[test]
+    fn archived_room_messages_carry_the_real_author_when_exposed() {
+        let archived = |real: Option<&str>| WaddleArchivedMessage {
+            mam_id: "s1".into(),
+            query_id: None,
+            id: Some("m1".into()),
+            stanza_id: None,
+            stanza_id_by: None,
+            stanza_ids: Vec::new(),
+            origin_id: Some("o1".into()),
+            timestamp: Some("2026-10-18T12:00:00Z".into()),
+            from: Some("general@muc.waddle.social/david".into()),
+            to: None,
+            message_type: "groupchat".into(),
+            body: Some("hi".into()),
+            subject: None,
+            replaces_id: None,
+            retracts_id: None,
+            retraction_id: None,
+            is_retracted: false,
+            moderation_target_id: None,
+            moderated_by: None,
+            moderation_reason: None,
+            reaction_target_id: None,
+            reaction_emojis: Vec::new(),
+            thread: None,
+            parent_thread_id: None,
+            reply_to_id: None,
+            reply_to_sender: None,
+            reply_fallback_start: None,
+            reply_fallback_end: None,
+            markup_spans: Vec::new(),
+            broadcast_mention: None,
+            mention_uris: Vec::new(),
+            references: Vec::new(),
+            forum_post_kind: None,
+            forum_title: None,
+            is_sticker: false,
+            muc_user: false,
+            author_real_jid: real.map(str::to_string),
+            call_thread: None,
+            call_thread_ended: None,
+            safety_scores: None,
+            shared_files: Vec::new(),
+            link_previews: Vec::new(),
+            call_event: None,
+        };
+        let room: BareJid = "general@muc.waddle.social".parse().expect("jid");
+        // Someone else now holding the nick "david" is not the user.
+        let other = archived_from(
+            archived(Some("mallory@waddle.social/x")),
+            &room,
+            Kind::Room,
+            &me(),
+        )
+        .expect("a message");
+        assert!(!other.own);
+        assert_eq!(other.author_id.as_deref(), Some("mallory@waddle.social"));
+        assert_eq!(other.reference_id.as_deref(), Some("s1"));
+
+        let mine = archived_from(
+            archived(Some("david@waddle.social/linux")),
+            &room,
+            Kind::Room,
+            &me(),
+        )
+        .expect("a message");
+        assert!(mine.own);
+        let anonymous = archived_from(archived(None), &room, Kind::Room, &me()).expect("a message");
+        assert!(anonymous.own, "falls back to the nick");
+        assert_eq!(anonymous.author_id, None);
     }
 
     #[test]

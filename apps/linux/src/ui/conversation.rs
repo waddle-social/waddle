@@ -115,6 +115,7 @@ impl WaddleWindow {
         imp.unread.replace(Default::default());
         imp.current.replace(None);
         imp.read_pending.replace(Default::default());
+        imp.loading_history.replace(Default::default());
         self.cancel_compose();
         if let Some(rows) = imp.rows.borrow().as_ref() {
             rows.remove_all();
@@ -240,13 +241,13 @@ impl WaddleWindow {
             self.queue_read(&conversation);
             return;
         }
-        if imp.current.borrow().as_deref() != Some(conversation.as_str()) {
-            *imp.unread
-                .borrow_mut()
-                .entry(conversation.clone())
-                .or_default() += 1;
-            self.render_conversations();
-        }
+        // Unread even when open, if the user is not looking: coming back
+        // then marks it read on the server too.
+        *imp.unread
+            .borrow_mut()
+            .entry(conversation.clone())
+            .or_default() += 1;
+        self.render_conversations();
         if kind == Kind::Direct || mentions_me {
             self.notify(&conversation, kind, &sender, &body);
         }
@@ -501,11 +502,15 @@ impl WaddleWindow {
 
     fn load_history(&self, conversation: Conversation, before: Option<String>) {
         let imp = self.imp();
-        if imp.loading_history.replace(true) {
+        if !imp
+            .loading_history
+            .borrow_mut()
+            .insert(conversation.jid.clone())
+        {
             return;
         }
         let Some(session) = imp.session.borrow().clone() else {
-            imp.loading_history.set(false);
+            imp.loading_history.borrow_mut().remove(&conversation.jid);
             return;
         };
         let initial = before.is_none();
@@ -515,7 +520,7 @@ impl WaddleWindow {
                 .history(&conversation.jid, conversation.kind, before)
                 .await;
             let imp = window.imp();
-            imp.loading_history.set(false);
+            imp.loading_history.borrow_mut().remove(&conversation.jid);
             let diffs = imp
                 .timelines
                 .borrow_mut()
@@ -558,14 +563,24 @@ impl WaddleWindow {
         }
     }
 
-    /// Run `edit` on the open conversation's timeline and show its diffs.
-    pub(super) fn edit_current(&self, edit: impl FnOnce(&mut Timeline) -> Vec<TimelineDiff>) {
+    /// Run `edit` on this conversation's timeline, and show its diffs if
+    /// the conversation is open. Async results name the conversation they
+    /// started in, so a switch meanwhile cannot misdirect them.
+    pub(super) fn edit_conversation(
+        &self,
+        jid: &str,
+        edit: impl FnOnce(&mut Timeline) -> Vec<TimelineDiff>,
+    ) {
         let imp = self.imp();
-        let Some(jid) = imp.current.borrow().clone() else {
-            return;
-        };
-        let diffs = edit(imp.timelines.borrow_mut().entry(jid).or_default());
-        self.apply(&diffs);
+        let diffs = edit(
+            imp.timelines
+                .borrow_mut()
+                .entry(jid.to_string())
+                .or_default(),
+        );
+        if imp.current.borrow().as_deref() == Some(jid) {
+            self.apply(&diffs);
+        }
     }
 
     /// Bring the list store in step with the open conversation's timeline.
