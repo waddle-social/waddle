@@ -2007,9 +2007,12 @@ mod tests {
         /// #1295: every `retire_after_shutdown` call, with whether
         /// `retire_probe` (when set) still reported the identity active at
         /// that moment.
-        retirements: Arc<std::sync::Mutex<Vec<(NodeIdentity, Option<bool>)>>>,
+        retirements: RetirementLog,
         retire_probe: Option<SharedNodeIdentity>,
     }
+
+    /// Each retired identity, with whether the probe saw it still active.
+    type RetirementLog = Arc<std::sync::Mutex<Vec<(NodeIdentity, Option<bool>)>>>;
 
     impl FakeLease {
         fn new(heartbeat_result: Box<dyn FnMut() -> Result<bool, ClaimError> + Send>) -> Self {

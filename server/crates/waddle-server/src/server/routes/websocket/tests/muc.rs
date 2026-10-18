@@ -9555,7 +9555,10 @@ mod remote_owner_admin_list {
         );
         let asked = asked.lock().expect("asked");
         assert_eq!(asked.len(), 1, "forwarded exactly once");
-        assert_eq!(asked[0].requester, bob_jid, "the origin stamps the requester");
+        assert_eq!(
+            asked[0].requester, bob_jid,
+            "the origin stamps the requester"
+        );
         assert_eq!(asked[0].room, room_jid);
     }
 
@@ -9675,9 +9678,9 @@ mod remote_owner_admin_list {
             RelayMucAdminQuery {
                 room: room_jid,
                 requester: bob,
-                query: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(
-                    Box::new(request),
-                )),
+                query: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
+                    request,
+                ))),
                 trace: Default::default(),
             },
         )
@@ -9710,9 +9713,9 @@ mod remote_owner_admin_list {
             RelayMucAdminQuery {
                 room: room_jid,
                 requester: bob_jid,
-                query: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(
-                    Box::new(request),
-                )),
+                query: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
+                    request,
+                ))),
                 trace: Default::default(),
             },
         )
