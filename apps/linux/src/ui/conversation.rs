@@ -10,7 +10,11 @@ use adw::subclass::prelude::*;
 use gtk::{gdk, gio, glib};
 use waddle_client_session::{Attachment, Delivery, Reaction, Timeline, TimelineDiff, TimelineItem};
 
+use std::time::Instant;
+
+use super::images::{self, ImageState};
 use super::WaddleWindow;
+use crate::attachments;
 use crate::auth::store::StoredAccount;
 use crate::session::{self, Arrival, Conversation, Kind, Session, SessionEvent};
 
@@ -107,14 +111,14 @@ impl WaddleWindow {
         imp.account_status.set_title("Connecting…");
         imp.content_stack.set_visible_child_name("empty");
 
-        let http = match super::window::http_client() {
-            Ok(http) => http,
+        let transfers = match attachments::Transfers::new(account.server.as_url()) {
+            Ok(transfers) => transfers,
             Err(error) => {
                 tracing::warn!(%error, "could not set up HTTP for file sharing");
                 return self.toast("Could not start the session.");
             }
         };
-        let (session, events) = Session::start(account, http);
+        let (session, events) = Session::start(account, transfers);
         imp.session.replace(Some(session));
         self.watch_connect(generation);
 
@@ -142,6 +146,7 @@ impl WaddleWindow {
         imp.current.replace(None);
         imp.read_pending.replace(Default::default());
         imp.images.replace(Default::default());
+        imp.uploading.set(false);
         imp.loading_history.replace(Default::default());
         self.cancel_compose();
         if let Some(rows) = imp.rows.borrow().as_ref() {
@@ -324,7 +329,7 @@ impl WaddleWindow {
             }
         }
         self.render_conversations();
-        imp.composer.set_sensitive(imp.current.borrow().is_some());
+        self.update_composer();
 
         // Reopen what was on screen (or asked for from a notification), or
         // the first room on first connect.
@@ -425,7 +430,7 @@ impl WaddleWindow {
         imp.composer_entry
             .set_placeholder_text(Some(&format!("Message {title}")));
         imp.content_stack.set_visible_child_name("timeline");
-        imp.composer.set_sensitive(imp.connected.get());
+        self.update_composer();
         imp.split_view.set_show_content(true);
         self.read_current();
         self.render_conversations();
@@ -1000,8 +1005,8 @@ fn is_inline_image(attachment: &Attachment) -> bool {
 
 fn image_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
     match window.image(attachment) {
-        Some(Ok(texture)) => {
-            let (width, height) = fit(texture.width(), texture.height(), IMAGE_MAX);
+        ImageState::Ready(texture) => {
+            let (width, height) = images::fit(texture.width(), texture.height(), IMAGE_MAX);
             let picture = gtk::Picture::for_paintable(&texture);
             picture.set_content_fit(gtk::ContentFit::Contain);
             picture.set_size_request(width, height);
@@ -1010,8 +1015,8 @@ fn image_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
             picture.set_tooltip_text(attachment.name.as_deref());
             picture.upcast()
         }
-        Some(Err(())) => file_widget(window, attachment),
-        None => {
+        ImageState::Failed { .. } => file_widget(window, attachment),
+        ImageState::Loading => {
             let spinner = adw::Spinner::builder()
                 .width_request(IMAGE_MAX.0 / 2)
                 .height_request(IMAGE_MAX.1 / 3)
@@ -1023,10 +1028,7 @@ fn image_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
 }
 
 fn file_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
-    let name = attachment
-        .name
-        .clone()
-        .unwrap_or_else(|| "File".to_string());
+    let name = attachments::safe_file_name(attachment.name.as_deref().unwrap_or("File"));
     let label = match attachment.size {
         Some(size) => format!("{name} · {}", crate::attachments::format_size(size)),
         None => name,
@@ -1050,56 +1052,59 @@ fn file_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
     button.upcast()
 }
 
-/// Scale `width`×`height` down to fit `max`, keeping the aspect ratio.
-fn fit(width: i32, height: i32, max: (i32, i32)) -> (i32, i32) {
-    if width <= 0 || height <= 0 {
-        return max;
-    }
-    let scale = f64::min(
-        1.0,
-        f64::min(
-            f64::from(max.0) / f64::from(width),
-            f64::from(max.1) / f64::from(height),
-        ),
-    );
-    (
-        (f64::from(width) * scale).round() as i32,
-        (f64::from(height) * scale).round() as i32,
-    )
-}
-
 impl WaddleWindow {
-    /// A shared image: ready, failed, or `None` while it loads (started
-    /// here on first ask).
-    fn image(&self, attachment: &Attachment) -> Option<Result<gtk::gdk::Texture, ()>> {
+    /// A shared image's state, starting its load on first ask (or a retry
+    /// once a transient failure has waited long enough).
+    fn image(&self, attachment: &Attachment) -> ImageState {
         let imp = self.imp();
-        if let Some(state) = imp.images.borrow().get(&attachment.url) {
-            return state.clone();
+        let key = attachments::cache_key(attachment);
+        let now = Instant::now();
+        if let Some(state) = imp.images.borrow_mut().lookup(&key, now) {
+            return state;
         }
-        imp.images.borrow_mut().insert(attachment.url.clone(), None);
-        let session = imp.session.borrow().clone()?;
-        let (window, attachment) = (self.clone(), attachment.clone());
+        let Some(session) = imp.session.borrow().clone() else {
+            return ImageState::Failed { retry_at: None };
+        };
+        imp.images.borrow_mut().loading(key.clone());
+        let (window, attachment, generation) =
+            (self.clone(), attachment.clone(), imp.generation.get());
         glib::spawn_future_local(async move {
-            let loaded = match session.fetch(attachment.clone()).await {
-                Ok(bytes) => gtk::gdk::Texture::from_bytes(&glib::Bytes::from_owned(bytes))
-                    .map_err(|error| tracing::warn!(%error, "could not decode an image")),
+            let decoded = match session.fetch(attachment).await {
+                Ok(bytes) => gio::spawn_blocking(move || images::decode(&bytes))
+                    .await
+                    .unwrap_or(Err(images::DecodeError::Invalid))
+                    .map_err(|error| {
+                        tracing::warn!(%error, "could not show an image");
+                        false
+                    }),
                 Err(error) => {
                     tracing::warn!(%error, "could not fetch an image");
-                    Err(())
+                    Err(error.is_transient())
                 }
             };
-            window
-                .imp()
-                .images
-                .borrow_mut()
-                .insert(attachment.url.clone(), Some(loaded));
-            window.rebind_rows_with(&attachment.url);
+            let imp = window.imp();
+            // Signed out (or into another account) meanwhile.
+            if imp.generation.get() != generation {
+                return;
+            }
+            match decoded {
+                Ok(decoded) => imp
+                    .images
+                    .borrow_mut()
+                    .ready(key.clone(), decoded.texture()),
+                Err(transient) => {
+                    imp.images
+                        .borrow_mut()
+                        .failed(key.clone(), transient, Instant::now())
+                }
+            }
+            window.rebind_rows_with(&key);
         });
-        None
+        ImageState::Loading
     }
 
     /// Bind again the rows showing this file, so they pick up its state.
-    fn rebind_rows_with(&self, url: &str) {
+    fn rebind_rows_with(&self, key: &str) {
         let Some(rows) = self.imp().rows.borrow().clone() else {
             return;
         };
@@ -1108,7 +1113,12 @@ impl WaddleWindow {
                 continue;
             };
             let row = object.borrow::<Row>().clone();
-            if row.item.attachments.iter().any(|file| file.url == url) {
+            if row
+                .item
+                .attachments
+                .iter()
+                .any(|file| attachments::cache_key(file) == key)
+            {
                 rows.splice(position, 1, &[glib::BoxedAnyObject::new(row)]);
             }
         }
@@ -1121,12 +1131,10 @@ impl WaddleWindow {
         };
         let dialog = gtk::FileDialog::builder()
             .title("Save File")
-            .initial_name(
-                attachment
-                    .name
-                    .clone()
-                    .unwrap_or_else(|| "file".to_string()),
-            )
+            // The sender chose this name: no folders, no control characters.
+            .initial_name(attachments::safe_file_name(
+                attachment.name.as_deref().unwrap_or("file"),
+            ))
             .build();
         let window = self.clone();
         glib::spawn_future_local(async move {

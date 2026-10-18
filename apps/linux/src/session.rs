@@ -150,7 +150,7 @@ impl WaddleEventListener for Forwarder {
 pub struct Session {
     client: Arc<WaddleClient>,
     /// For XEP-0363 uploads and fetching shared files.
-    http: reqwest::Client,
+    transfers: attachments::Transfers,
     pub me: Me,
 }
 
@@ -158,7 +158,7 @@ impl Session {
     /// Start a session and return it with its event stream.
     pub fn start(
         account: &StoredAccount,
-        http: reqwest::Client,
+        transfers: attachments::Transfers,
     ) -> (Self, async_channel::Receiver<SessionEvent>) {
         let (sender, receiver) = async_channel::unbounded();
         let config = WaddleConfig {
@@ -173,7 +173,7 @@ impl Session {
         let client = WaddleClient::new(config, Box::new(Forwarder(sender)));
         let session = Self {
             client,
-            http,
+            transfers,
             me: Me {
                 bare: account.session.jid.clone(),
                 nick: account.session.username.clone(),
@@ -309,7 +309,7 @@ impl Session {
     /// XEP-0363), ready to share in a message (XEP-0447).
     pub async fn upload(&self, file: Outgoing) -> Result<Uploaded, TransferError> {
         let client = Arc::clone(&self.client);
-        let http = self.http.clone();
+        let transfers = self.transfers.clone();
         runtime::spawn(async move {
             let sealed = attachments::seal(&file.bytes)?;
             let size =
@@ -328,13 +328,15 @@ impl Session {
                 .await
                 .ok_or(TransferError::SlotRefused)?;
             // The GET address must be fetchable by this client too.
-            attachments::transfer_url(&slot.get_url)?;
+            transfers.check(&slot.get_url)?;
             let headers: Vec<(String, String)> = slot
                 .put_headers
                 .iter()
                 .map(|header| (header.name.clone(), header.value.clone()))
                 .collect();
-            attachments::put(&http, &slot.put_url, &headers, sealed.ciphertext.clone()).await?;
+            transfers
+                .put(&slot.put_url, &headers, sealed.ciphertext.clone())
+                .await?;
             Ok(shared_file(&file, &sealed, slot.get_url))
         })
         .await
@@ -343,7 +345,7 @@ impl Session {
 
     /// Fetch a shared file, check it, and decrypt it if it is encrypted.
     pub async fn fetch(&self, attachment: Attachment) -> Result<Vec<u8>, TransferError> {
-        let http = self.http.clone();
+        let transfers = self.transfers.clone();
         runtime::spawn(async move {
             let sources = match &attachment.encryption {
                 Some(encryption) => encryption.sources.clone(),
@@ -351,7 +353,7 @@ impl Session {
             };
             let mut last = TransferError::InsecureUrl;
             for source in sources {
-                match attachments::fetch(&http, &source).await {
+                match transfers.fetch(&source).await {
                     Ok(bytes) => {
                         return match &attachment.encryption {
                             Some(encryption) => Ok(attachments::open(

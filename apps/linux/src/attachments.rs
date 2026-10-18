@@ -16,6 +16,7 @@ use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use thiserror::Error;
 use url::{Host, Url};
+use waddle_client_session::Attachment;
 
 /// The web client's cap; the upload service may set a lower one.
 pub const MAX_UPLOAD_BYTES: u64 = 10 * 1024 * 1024;
@@ -28,6 +29,10 @@ const IV_BYTES: usize = 12;
 pub const MAX_DOWNLOAD_BYTES: usize = 50 * 1024 * 1024;
 /// XEP-0363 §5: the only headers a client may pass on from a slot.
 const SLOT_HEADERS: [&str; 3] = ["authorization", "cookie", "expires"];
+const MAX_REDIRECTS: usize = 5;
+const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
+const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AttachmentError {
@@ -180,19 +185,25 @@ pub enum TransferError {
     Interrupted,
 }
 
-/// An upload or download address: HTTPS, or HTTP on loopback for a local
-/// server. XEP-0363 requires HTTPS.
-pub fn transfer_url(raw: &str) -> Result<Url, TransferError> {
-    let url = Url::parse(raw).map_err(|_| TransferError::InsecureUrl)?;
-    let loopback = match url.host() {
+/// Whether a URL's host is this machine.
+fn is_loopback(url: &Url) -> bool {
+    match url.host() {
         Some(Host::Domain(domain)) => domain == "localhost",
         Some(Host::Ipv4(ip)) => IpAddr::V4(ip).is_loopback(),
         Some(Host::Ipv6(ip)) => IpAddr::V6(ip).is_loopback(),
         None => false,
-    };
+    }
+}
+
+/// An upload or download address: HTTPS (XEP-0363 requires it), or HTTP
+/// on loopback when the account's own server is on loopback (a local
+/// server). Remote senders choose these URLs, so loopback is never open
+/// to them otherwise.
+pub fn transfer_url(raw: &str, allow_loopback: bool) -> Result<Url, TransferError> {
+    let url = Url::parse(raw).map_err(|_| TransferError::InsecureUrl)?;
     match url.scheme() {
         "https" => Ok(url),
-        "http" if loopback => Ok(url),
+        "http" if allow_loopback && is_loopback(&url) => Ok(url),
         _ => Err(TransferError::InsecureUrl),
     }
 }
@@ -209,46 +220,124 @@ pub fn slot_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
         .collect()
 }
 
-/// PUT the ciphertext to an XEP-0363 slot.
-pub async fn put(
-    http: &reqwest::Client,
-    put_url: &str,
-    headers: &[(String, String)],
-    body: Vec<u8>,
-) -> Result<(), TransferError> {
-    let mut request = http
-        .put(transfer_url(put_url)?)
-        .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
-    for (name, value) in slot_headers(headers) {
-        request = request.header(name, value);
-    }
-    let response = request.body(body).send().await?;
-    if !response.status().is_success() {
-        return Err(TransferError::Status(response.status()));
-    }
-    Ok(())
+/// HTTP for file sharing. Every redirect hop is held to the same rule as
+/// the first request, and a stalled server cannot hang a transfer.
+#[derive(Clone)]
+pub struct Transfers {
+    http: reqwest::Client,
+    allow_loopback: bool,
 }
 
-/// GET a file, refusing anything larger than [`MAX_DOWNLOAD_BYTES`].
-pub async fn fetch(http: &reqwest::Client, url: &str) -> Result<Vec<u8>, TransferError> {
-    let mut response = http.get(transfer_url(url)?).send().await?;
-    if !response.status().is_success() {
-        return Err(TransferError::Status(response.status()));
+impl Transfers {
+    /// `server` is the account's own server; loopback HTTP is allowed only
+    /// when it is itself on loopback.
+    pub fn new(server: &Url) -> Result<Self, reqwest::Error> {
+        let allow_loopback = is_loopback(server);
+        let policy = reqwest::redirect::Policy::custom(move |attempt| {
+            if attempt.previous().len() >= MAX_REDIRECTS {
+                attempt.error(TransferError::InsecureUrl)
+            } else if transfer_url(attempt.url().as_str(), allow_loopback).is_ok() {
+                attempt.follow()
+            } else {
+                attempt.stop()
+            }
+        });
+        let http = reqwest::Client::builder()
+            .user_agent(concat!("Waddle-Linux/", env!("CARGO_PKG_VERSION")))
+            .redirect(policy)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
+            .timeout(TRANSFER_TIMEOUT)
+            .build()?;
+        Ok(Self {
+            http,
+            allow_loopback,
+        })
     }
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAX_DOWNLOAD_BYTES as u64)
-    {
-        return Err(TransferError::TooLarge);
+
+    pub fn check(&self, raw: &str) -> Result<Url, TransferError> {
+        transfer_url(raw, self.allow_loopback)
     }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response.chunk().await? {
-        if bytes.len() + chunk.len() > MAX_DOWNLOAD_BYTES {
+
+    /// PUT the ciphertext to an XEP-0363 slot.
+    pub async fn put(
+        &self,
+        put_url: &str,
+        headers: &[(String, String)],
+        body: Vec<u8>,
+    ) -> Result<(), TransferError> {
+        let mut request = self
+            .http
+            .put(self.check(put_url)?)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
+        for (name, value) in slot_headers(headers) {
+            request = request.header(name, value);
+        }
+        let response = request.body(body).send().await?;
+        if !response.status().is_success() {
+            return Err(TransferError::Status(response.status()));
+        }
+        Ok(())
+    }
+
+    /// GET a file, refusing anything larger than [`MAX_DOWNLOAD_BYTES`].
+    pub async fn fetch(&self, url: &str) -> Result<Vec<u8>, TransferError> {
+        let mut response = self.http.get(self.check(url)?).send().await?;
+        if !response.status().is_success() {
+            return Err(TransferError::Status(response.status()));
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > MAX_DOWNLOAD_BYTES as u64)
+        {
             return Err(TransferError::TooLarge);
         }
-        bytes.extend_from_slice(&chunk);
+        let mut bytes = Vec::new();
+        while let Some(chunk) = response.chunk().await? {
+            if bytes.len() + chunk.len() > MAX_DOWNLOAD_BYTES {
+                return Err(TransferError::TooLarge);
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     }
-    Ok(bytes)
+}
+
+impl TransferError {
+    /// Worth trying again later: the network or the server, not the file.
+    pub fn is_transient(&self) -> bool {
+        matches!(self, Self::Network(_) | Self::Status(_) | Self::Interrupted)
+    }
+}
+
+/// What identifies a shared file's content: its address and everything
+/// needed to decrypt it. Two messages naming one URL with different keys
+/// are different files.
+pub fn cache_key(attachment: &Attachment) -> String {
+    let mut parts: Vec<&str> = vec![attachment.url.as_str()];
+    if let Some(encryption) = &attachment.encryption {
+        parts.extend([
+            encryption.cipher.as_str(),
+            encryption.key_b64.as_str(),
+            encryption.iv_b64.as_str(),
+        ]);
+        parts.extend(encryption.sha256_b64.iter().map(String::as_str));
+        parts.extend(encryption.sources.iter().map(String::as_str));
+    }
+    sha256_b64(parts.join("\u{0}").as_bytes())
+}
+
+/// A sender-chosen file name made safe to propose for saving: its last
+/// path component, without control characters.
+pub fn safe_file_name(name: &str) -> String {
+    let last = name.rsplit(['/', '\\']).next().unwrap_or_default();
+    let cleaned: String = last.chars().filter(|c| !c.is_control()).collect();
+    let cleaned = cleaned.trim().trim_start_matches('.');
+    if cleaned.is_empty() {
+        "file".to_string()
+    } else {
+        cleaned.to_string()
+    }
 }
 
 /// Human file size: "512 B", "1.4 MB".
@@ -391,19 +480,87 @@ mod tests {
     }
 
     #[test]
-    fn transfers_need_https_except_on_loopback() {
-        assert!(transfer_url("https://up.waddle.social/f").is_ok());
-        assert!(transfer_url("http://127.0.0.1:5280/f").is_ok());
-        assert!(transfer_url("http://localhost/f").is_ok());
-        assert!(transfer_url("http://[::1]/f").is_ok());
-        assert!(matches!(
-            transfer_url("http://up.waddle.social/f"),
-            Err(TransferError::InsecureUrl)
-        ));
-        assert!(matches!(
-            transfer_url("file:///etc/passwd"),
-            Err(TransferError::InsecureUrl)
-        ));
+    fn transfers_need_https_and_loopback_only_for_a_local_server() {
+        assert!(transfer_url("https://up.waddle.social/f", false).is_ok());
+        for local in [
+            "http://127.0.0.1:5280/f",
+            "http://localhost/f",
+            "http://[::1]/f",
+        ] {
+            assert!(transfer_url(local, true).is_ok(), "{local}");
+            assert!(
+                matches!(transfer_url(local, false), Err(TransferError::InsecureUrl)),
+                "a remote sender's {local} must not reach this machine"
+            );
+        }
+        for insecure in [
+            "http://up.waddle.social/f",
+            "file:///etc/passwd",
+            "ftp://x/y",
+        ] {
+            assert!(matches!(
+                transfer_url(insecure, true),
+                Err(TransferError::InsecureUrl)
+            ));
+        }
+    }
+
+    #[test]
+    fn the_same_url_with_another_key_is_another_file() {
+        let attachment = |key: &str| Attachment {
+            url: "https://up.example/a".into(),
+            name: None,
+            media_type: None,
+            size: None,
+            inline: true,
+            encryption: Some(waddle_client_session::Encryption {
+                cipher: AES_256_GCM.into(),
+                key_b64: key.into(),
+                iv_b64: "iv".into(),
+                sha256_b64: vec!["h".into()],
+                sources: vec!["https://up.example/a".into()],
+            }),
+        };
+        assert_eq!(cache_key(&attachment("k1")), cache_key(&attachment("k1")));
+        assert_ne!(cache_key(&attachment("k1")), cache_key(&attachment("k2")));
+    }
+
+    #[test]
+    fn sender_file_names_cannot_choose_a_folder() {
+        assert_eq!(
+            safe_file_name("../../.config/autostart/cat.png.desktop"),
+            "cat.png.desktop"
+        );
+        assert_eq!(safe_file_name("C:\\Windows\\evil.exe"), "evil.exe");
+        assert_eq!(safe_file_name(".bashrc"), "bashrc");
+        assert_eq!(safe_file_name("a\u{0}b\nc.txt"), "abc.txt");
+        assert_eq!(safe_file_name("../"), "file");
+        assert_eq!(safe_file_name("photo.jpg"), "photo.jpg");
+    }
+
+    #[tokio::test]
+    async fn redirects_are_held_to_the_same_rule() {
+        use std::io::{Read, Write};
+        // A server that redirects to plain http on another host.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let address = listener.local_addr().expect("address");
+        std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = [0u8; 1024];
+                let _ = stream.read(&mut request);
+                let _ = stream.write_all(
+                    b"HTTP/1.1 302 Found\r\nLocation: http://192.0.2.1/x\r\nContent-Length: 0\r\n\r\n",
+                );
+            }
+        });
+        crate::install_crypto_provider();
+        let server = Url::parse(&format!("http://{address}/")).expect("url");
+        let transfers = Transfers::new(&server).expect("client");
+        let result = transfers.fetch(&format!("http://{address}/file")).await;
+        assert!(
+            matches!(result, Err(TransferError::Status(status)) if status.as_u16() == 302),
+            "the insecure hop was followed: {result:?}"
+        );
     }
 
     #[test]

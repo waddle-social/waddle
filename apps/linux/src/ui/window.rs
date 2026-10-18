@@ -88,7 +88,7 @@ mod imp {
         pub read_pending: RefCell<HashSet<String>>,
         pub compose: RefCell<Compose>,
         /// Shared images by URL: loading (`None`), shown, or failed.
-        pub images: RefCell<HashMap<String, Option<Result<gtk::gdk::Texture, ()>>>>,
+        pub images: RefCell<crate::ui::images::ImageCache>,
         /// Files are uploading; the composer waits.
         pub uploading: Cell<bool>,
         /// Conversations with a history page in flight.
@@ -369,7 +369,7 @@ impl WaddleWindow {
     }
 }
 
-pub(super) fn http_client() -> Result<reqwest::Client, reqwest::Error> {
+fn http_client() -> Result<reqwest::Client, reqwest::Error> {
     reqwest::Client::builder()
         .user_agent(concat!("Waddle-Linux/", env!("CARGO_PKG_VERSION")))
         .build()

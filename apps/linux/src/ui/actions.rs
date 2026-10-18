@@ -80,6 +80,15 @@ impl WaddleWindow {
         self.imp().content_stack.add_controller(drop);
     }
 
+    /// The composer is usable when connected, in a conversation, and not
+    /// waiting on an upload.
+    pub(super) fn update_composer(&self) {
+        let imp = self.imp();
+        imp.composer.set_sensitive(
+            imp.connected.get() && !imp.uploading.get() && imp.current.borrow().is_some(),
+        );
+    }
+
     pub(super) fn pick_files(&self) {
         let dialog = gtk::FileDialog::builder().title("Attach Files").build();
         let window = self.clone();
@@ -101,9 +110,18 @@ impl WaddleWindow {
         else {
             return;
         };
-        if files.is_empty() || imp.uploading.replace(true) {
+        if files.is_empty() {
             return;
         }
+        if imp.uploading.get() {
+            return self.toast("Wait for the current upload to finish.");
+        }
+        // The entry holds the message being edited; it is not a caption.
+        if matches!(*imp.compose.borrow(), Compose::Edit { .. }) {
+            return self.toast("Finish editing the message first.");
+        }
+        imp.uploading.set(true);
+        let generation = imp.generation.get();
         let caption = imp.composer_entry.text().trim().to_string();
         let quote = match imp.compose.replace(Compose::Message) {
             Compose::Reply(quote) => Some(quote),
@@ -121,13 +139,27 @@ impl WaddleWindow {
         glib::spawn_future_local(async move {
             let result = window.upload_all(&session, files).await;
             let imp = window.imp();
+            // Signed out meanwhile: this belongs to a session that is gone.
+            if imp.generation.get() != generation {
+                return;
+            }
             imp.uploading.set(false);
-            imp.composer_context.set_visible(false);
-            imp.composer.set_sensitive(imp.connected.get());
+            if matches!(*imp.compose.borrow(), Compose::Message) {
+                imp.composer_context.set_visible(false);
+            }
+            window.update_composer();
             let uploaded = match result {
                 Ok(uploaded) => uploaded,
                 Err(message) => {
-                    imp.composer_entry.set_text(&caption);
+                    // Give the caption and reply back, unless the user has
+                    // moved on to another conversation or started typing.
+                    let same = imp.current.borrow().as_deref() == Some(conversation.jid.as_str());
+                    if same && imp.composer_entry.text().is_empty() {
+                        imp.composer_entry.set_text(&caption);
+                        if let Some(quote) = quote {
+                            window.set_compose(Compose::Reply(quote));
+                        }
+                    }
                     return window.toast(&message);
                 }
             };
@@ -181,6 +213,20 @@ impl WaddleWindow {
                 .basename()
                 .map(|name| name.to_string_lossy().into_owned())
                 .unwrap_or_else(|| "file".to_string());
+            // Check the size before reading: a dropped multi-gigabyte file
+            // must not be read into memory first.
+            let size = file
+                .query_info_future(
+                    gio::FILE_ATTRIBUTE_STANDARD_SIZE,
+                    gio::FileQueryInfoFlags::NONE,
+                    glib::Priority::DEFAULT,
+                )
+                .await
+                .map_err(|_| format!("{name} could not be read."))?
+                .size();
+            if u64::try_from(size).map_or(true, |size| size > MAX_UPLOAD_BYTES) {
+                return Err(format!("{name} is larger than 10 MB."));
+            }
             let (bytes, _) = file
                 .load_contents_future()
                 .await
@@ -219,6 +265,9 @@ impl WaddleWindow {
 
     fn set_compose(&self, compose: Compose) {
         let imp = self.imp();
+        if imp.uploading.get() {
+            return self.toast("Wait for the current upload to finish.");
+        }
         let label = match &compose {
             Compose::Message => None,
             Compose::Reply(quote) => Some(format!("Replying to {}", quote.sender)),
