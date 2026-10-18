@@ -31,6 +31,10 @@ tracing = "0.1"
 async-channel = "2.5"
 chrono = { version = "0.4", default-features = false, features = ["std", "clock"] }
 uuid = { version = "1", features = ["v4"] }
+# Attachment encryption (XEP-0448 AES-GCM) and hashes; ring is already
+# rustls's provider.
+ring = "0.17"
+base64 = "0.22"
 # The shared client core (ADR-0019) and the protocol facade the phones use.
 waddle-client-session = { path = "../../server/crates/waddle-client-session" }
 waddle-xmpp-client-ffi = { path = "../../server/crates/waddle-xmpp-client-ffi" }
