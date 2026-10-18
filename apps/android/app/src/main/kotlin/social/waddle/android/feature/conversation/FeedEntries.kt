@@ -3,6 +3,7 @@ package social.waddle.android.feature.conversation
 import androidx.compose.runtime.Immutable
 import social.waddle.android.client.messageMentionsBareJid
 import social.waddle.android.client.normalizedBareJid
+import social.waddle.android.client.replyFallbackQuoteOf
 import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.TimelineSource
 import social.waddle.android.client.store.authorBareJidOf
@@ -39,9 +40,14 @@ data class FeedEntry(
     val isPinned: Boolean,
     /** Feed roots: replies loaded for this message's thread. */
     val replyCount: Int,
-    /** XEP-0461 parent, when it is loaded. */
+    /**
+     * XEP-0461 parent, when it is loaded — including rows the feed hides
+     * (a thread reply quoted from the main feed).
+     */
     val replyParent: TimelineItem?,
     val replyParentAuthorJid: String?,
+    /** The reply's own fallback quote of its parent, when [replyParent] is not loaded. */
+    val replyFallbackQuote: String? = null,
     /** Feed roots: who replied in this message's thread, and when. */
     val threadActivity: ThreadActivity? = null,
 ) {
@@ -121,7 +127,9 @@ fun feedEntriesOf(
     val derived = Derived(
         replyCounts = if (context.threadId == null) replyCountsOf(items) else emptyMap(),
         threadActivity = if (context.threadId == null) threadActivityOf(items, context.selfBareJid) else emptyMap(),
-        byIdentity = quotedMessagesByIdentity(rows),
+        // Every loaded row, not just the visible ones: a feed reply can
+        // quote a message the feed hides (one inside a thread).
+        byIdentity = quotedMessagesByIdentity(items.map(ConversationRow::Stored)),
         dividerIndex = context.unreadAnchor?.dividerIndex(rows, context.newestHistoryLoaded)
             ?: unreadDividerIndex(rows, context.unreadAtOpen),
     )
@@ -183,11 +191,17 @@ private fun place(
         replyCount = item?.let { replyCountOf(it, derived.replyCounts) } ?: 0,
         replyParent = parent,
         replyParentAuthorJid = item?.let { quotedAuthorJidOf(it, parent, context.selfBareJid) },
+        replyFallbackQuote = item?.takeIf { parent == null }?.let(::fallbackQuoteOf),
         threadActivity = item?.let { root ->
             (listOfNotNull(root.threadId) + root.identityIds).firstNotNullOfOrNull { derived.threadActivity[it] }
         },
     )
     return Placed(entry, authorKey)
+}
+
+/** A reply's XEP-0461 fallback quote of its parent, from the wire body. */
+private fun fallbackQuoteOf(reply: TimelineItem): String? = reply.replyToId?.let {
+    replyFallbackQuoteOf(reply.source.body.orEmpty(), reply.source.replyFallbackStart, reply.source.replyFallbackEnd)
 }
 
 /** Same author, within [GROUP_WINDOW], and neither row is a call marker. */

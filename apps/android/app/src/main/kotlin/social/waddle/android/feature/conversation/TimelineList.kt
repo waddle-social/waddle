@@ -109,8 +109,12 @@ fun TimelineList(
             onRetry = actions.onRetry,
             onOpenProfile = actions.onOpenProfile,
             onQuoteClick = { parent ->
-                indexByKey["s:${parent.presentationId}"]?.let { index ->
+                val index = indexByKey["s:${parent.presentationId}"]
+                if (index != null) {
                     scope.launch { listState.animateScrollToItem(index) }
+                } else if (parent.threadId != null) {
+                    // Loaded but hidden from this feed: it lives in a thread.
+                    actions.onOpenThread?.invoke(parent)
                 }
             },
         )

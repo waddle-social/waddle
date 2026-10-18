@@ -239,3 +239,25 @@ fun stripReplyFallback(body: String, start: UInt?, end: UInt?): String {
     val endIndex = body.offsetByCodePoints(0, endCp.toInt())
     return body.removeRange(startIndex, endIndex)
 }
+
+/**
+ * The parent's first quoted line from an XEP-0461 reply fallback: the
+ * code-point range `[start, end)` of the WIRE body, with each line's
+ * `> ` quote marker removed. Lets a reply chip show what was quoted when
+ * the parent itself is not loaded. `null` when the range is absent,
+ * invalid (same Long-domain validation as [stripReplyFallback]) or holds
+ * no text.
+ */
+fun replyFallbackQuoteOf(body: String, start: UInt?, end: UInt?): String? {
+    if (start == null || end == null) return null
+    val startCp = start.toLong()
+    val endCp = end.toLong()
+    val total = body.codePointCount(0, body.length).toLong()
+    if (endCp <= startCp || endCp > total) return null
+    val startIndex = body.offsetByCodePoints(0, startCp.toInt())
+    val endIndex = body.offsetByCodePoints(0, endCp.toInt())
+    return body.substring(startIndex, endIndex)
+        .lineSequence()
+        .map { line -> line.trimStart().removePrefix(">").trim() }
+        .firstOrNull { it.isNotEmpty() }
+}

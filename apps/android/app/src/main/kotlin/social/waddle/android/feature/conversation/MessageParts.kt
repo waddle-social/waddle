@@ -175,16 +175,18 @@ internal fun TombstoneLine() {
 
 /**
  * XEP-0461 reply chip: a 3dp teal bar, "↳ @name" and one italic line of
- * the parent. Tap jumps to it when it is loaded.
+ * the parent. When the parent is not loaded the line comes from the
+ * reply's own fallback quote ([fallbackQuote]). Tap jumps to the parent
+ * when it is loaded.
  */
 @Composable
-internal fun ReplyChip(parent: TimelineItem?, fallbackSender: String?, onClick: () -> Unit) {
+internal fun ReplyChip(parent: TimelineItem?, fallbackSender: String?, fallbackQuote: String?, onClick: () -> Unit) {
     val colors = Waddle.colors
     // A MUC occupant JID's display name is its resource (nick).
     val author = parent?.let { authorNameOf(it) }
         ?: fallbackSender?.let { resourcepartOf(it) ?: localpartOf(it) }
     val quote = when {
-        parent == null -> stringResource(R.string.reply_original_unloaded)
+        parent == null -> fallbackQuote ?: stringResource(R.string.reply_original_unloaded)
         parent.tombstone != null -> stringResource(R.string.message_deleted)
         else -> parent.body.lineSequence().firstOrNull { it.isNotBlank() }.orEmpty()
     }

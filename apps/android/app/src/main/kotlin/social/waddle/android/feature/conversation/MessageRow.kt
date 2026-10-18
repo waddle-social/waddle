@@ -281,6 +281,7 @@ private fun StoredMessageRow(
             ReplyChip(
                 parent = entry.replyParent,
                 fallbackSender = item.replyToSender,
+                fallbackQuote = entry.replyFallbackQuote,
                 onClick = { entry.replyParent?.let(actions.onQuoteClick) },
             )
         }
