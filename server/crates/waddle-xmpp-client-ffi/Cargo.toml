@@ -8,7 +8,8 @@ repository.workspace = true
 description = "FFI scaffold for Waddle's native XMPP client"
 
 [lib]
-crate-type = ["cdylib", "staticlib"]
+# `lib`: the Linux client links this facade directly as Rust (ADR-0019).
+crate-type = ["lib", "cdylib", "staticlib"]
 
 [[bin]]
 name = "uniffi-bindgen"
