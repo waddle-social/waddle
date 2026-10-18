@@ -102,6 +102,9 @@ pub struct TimelineItem {
     /// Display name of the sender: the room nick, or the DM peer's local
     /// part.
     pub sender: String,
+    /// The sender's stable identity when the archive exposes it (a room's
+    /// real JID). A nick can pass to someone else; this cannot.
+    pub author_id: Option<String>,
     /// True for the user's own messages.
     pub own: bool,
     pub body: String,
@@ -140,6 +143,8 @@ pub struct IncomingMessage {
     /// See [`TimelineItem::reference_id`].
     pub reference_id: Option<String>,
     pub sender: String,
+    /// See [`TimelineItem::author_id`].
+    pub author_id: Option<String>,
     pub own: bool,
     /// With any XEP-0461 fallback quote already removed
     /// ([`strip_fallback`]).
@@ -182,10 +187,28 @@ pub enum TimelineDiff {
     Set { index: u32, item: Box<TimelineItem> },
 }
 
+/// Who sent something, as far as the conversation can tell: the room nick
+/// or DM display name, and whether it is the user.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-struct Reactor {
+struct Author {
     sender: String,
     own: bool,
+}
+
+impl Author {
+    fn of_item(item: &TimelineItem) -> Self {
+        Self {
+            sender: item.sender.clone(),
+            own: item.own,
+        }
+    }
+
+    fn of(message: &IncomingMessage) -> Self {
+        Self {
+            sender: message.sender.clone(),
+            own: message.own,
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -196,33 +219,50 @@ struct Reacted {
 
 #[derive(Debug, Clone)]
 struct Edit {
-    sender: String,
-    own: bool,
+    author_id: Option<String>,
     body: String,
     at: i64,
 }
 
-#[derive(Debug, Clone)]
-enum Removal {
-    BySender { sender: String, own: bool },
-    Moderated,
+/// The ids one row is known by, split by who chose them.
+#[derive(Debug, Clone, Default)]
+struct RowIds {
+    /// XEP-0359 stanza id, verified by the adapter.
+    stanza: Option<String>,
+    /// What replies, reactions and retractions reference. In a room this is
+    /// the room's stanza id; in a DM the sender's origin id or `@id`.
+    reference: Option<String>,
+    /// The sender's origin id and `@id`. Anyone can choose any value, so
+    /// these resolve only together with the sender.
+    chosen: Vec<String>,
 }
 
 #[derive(Debug, Default)]
 pub struct Timeline {
     items: Vec<TimelineItem>,
-    /// Every id each row is known by, parallel to `items`.
-    aliases: Vec<Vec<String>>,
-    /// Every alias to its row's current position.
-    index: HashMap<String, usize>,
-    /// Corrections whose target is not held yet, latest per target.
-    pending_edits: HashMap<String, Edit>,
-    /// Retractions and moderations whose target is not held yet.
-    pending_removals: HashMap<String, Removal>,
+    /// Ids of each row, parallel to `items`.
+    ids: Vec<RowIds>,
+    /// A serial per row, parallel to `items`, stable across prepends.
+    serials: Vec<u64>,
+    next_serial: u64,
+    by_serial: HashMap<u64, usize>,
+    by_stanza: HashMap<String, usize>,
+    by_reference: HashMap<String, usize>,
+    by_chosen: HashMap<(Author, String), usize>,
+    /// The user's own rows by origin id and `@id`, for delivery outcomes.
+    own_chosen: HashMap<String, usize>,
+    /// Corrections whose target is not held yet, latest per sender and
+    /// target.
+    pending_edits: HashMap<(Author, String), Edit>,
+    /// Retractions by their sender whose target is not held yet, with the
+    /// sender's stable identity when known.
+    pending_retractions: HashMap<(Author, String), Option<String>>,
+    /// Moderations whose target is not held yet.
+    pending_moderations: HashSet<String>,
     /// Every sender's latest reaction set, by target id.
-    reactions: HashMap<String, HashMap<Reactor, Reacted>>,
-    /// Target id to the keys of rows that reply to it.
-    replies: HashMap<String, Vec<String>>,
+    reactions: HashMap<String, HashMap<Author, Reacted>>,
+    /// Target id to the serials of rows that reply to it.
+    replies: HashMap<String, Vec<u64>>,
     /// Oldest archive id seen, the cursor for the next older page.
     oldest_archive_id: Option<String>,
     history_complete: bool,
@@ -237,9 +277,9 @@ impl Timeline {
         &self.items
     }
 
-    /// The row known by `id` (any of its ids).
+    /// The row a reply, reaction or retraction would reference by `id`.
     pub fn get(&self, id: &str) -> Option<&TimelineItem> {
-        self.index.get(id).and_then(|&at| self.items.get(at))
+        self.referenced(id).map(|at| &self.items[at])
     }
 
     /// The RSM `before` cursor for the next older page.
@@ -251,19 +291,16 @@ impl Timeline {
         self.history_complete
     }
 
-    /// The user's current reaction set on the row known by `id`, for
+    /// The user's current reaction set on the row referenced by `id`, for
     /// building the complete set XEP-0444 sends.
     pub fn own_reactions(&self, id: &str) -> Vec<String> {
-        let Some(&at) = self.index.get(id) else {
+        let Some(at) = self.referenced(id) else {
             return Vec::new();
         };
         let mut latest: Option<&Reacted> = None;
-        for alias in &self.aliases[at] {
-            let Some(by_sender) = self.reactions.get(alias) else {
-                continue;
-            };
-            for (reactor, reacted) in by_sender {
-                if reactor.own && latest.is_none_or(|seen| reacted.at >= seen.at) {
+        for target in self.reaction_targets(at) {
+            for (author, reacted) in self.reactions.get(target).into_iter().flatten() {
+                if author.own && latest.is_none_or(|seen| reacted.at >= seen.at) {
                     latest = Some(reacted);
                 }
             }
@@ -288,9 +325,8 @@ impl Timeline {
         }
         self.history_complete = complete;
 
-        let mut older = Vec::new();
-        let mut older_aliases: Vec<Vec<String>> = Vec::new();
-        let mut seen: HashSet<String> = HashSet::new();
+        let mut older: Vec<TimelineItem> = Vec::new();
+        let mut older_ids: Vec<RowIds> = Vec::new();
         let mut fastenings = Vec::new();
         for message in messages {
             if is_fastening(&message) {
@@ -298,26 +334,31 @@ impl Timeline {
                 continue;
             }
             let ids = ids_of(&message);
-            if ids
+            let author = Author::of(&message);
+            let in_page = older
                 .iter()
-                .any(|id| self.index.contains_key(id) || seen.contains(id))
-            {
+                .zip(&older_ids)
+                .any(|(item, held)| same_row(&ids, &author, held, &Author::of_item(item)));
+            if in_page || self.holds(&ids, &author) {
                 continue;
             }
             let Some(item) = content_item(&message) else {
                 continue;
             };
-            seen.extend(ids.iter().cloned());
             older.push(item);
-            older_aliases.push(ids);
+            older_ids.push(ids);
         }
 
         let pushed = older.len();
         if pushed > 0 {
+            let serials: Vec<u64> = (0..pushed).map(|_| self.serial()).collect();
             older.append(&mut self.items);
             self.items = older;
-            older_aliases.append(&mut self.aliases);
-            self.aliases = older_aliases;
+            older_ids.append(&mut self.ids);
+            self.ids = older_ids;
+            let mut all_serials = serials;
+            all_serials.append(&mut self.serials);
+            self.serials = all_serials;
             self.reindex();
         }
 
@@ -341,14 +382,18 @@ impl Timeline {
 
     /// The user sent a message: show it at once as `Sending`.
     pub fn add_local_echo(&mut self, echo: LocalEcho) -> Vec<TimelineDiff> {
-        if self.index.contains_key(&echo.origin_id) {
+        if self.own_chosen.contains_key(&echo.origin_id) {
             return Vec::new();
         }
-        let mut aliases = vec![echo.origin_id.clone()];
-        aliases.extend(echo.reference_id.iter().cloned());
+        let ids = RowIds {
+            stanza: None,
+            reference: echo.reference_id.clone(),
+            chosen: vec![echo.origin_id.clone()],
+        };
         let item = TimelineItem {
             key: ItemKey::Origin(echo.origin_id.clone()),
             sender: echo.sender,
+            author_id: None,
             own: true,
             body: echo.body,
             timestamp_ms: echo.timestamp_ms,
@@ -361,20 +406,51 @@ impl Timeline {
             reactions: Vec::new(),
             edited_at: None,
         };
-        self.append(item, aliases)
+        self.append(item, ids)
     }
 
-    /// The server acknowledged (or failed) the send with this id.
-    pub fn set_delivery(&mut self, id: &str, delivery: Delivery) -> Vec<TimelineDiff> {
-        let Some(&at) = self.index.get(id) else {
+    /// The server acknowledged (or failed) the user's send with this
+    /// origin id.
+    pub fn set_delivery(&mut self, origin_id: &str, delivery: Delivery) -> Vec<TimelineDiff> {
+        let Some(&at) = self.own_chosen.get(origin_id) else {
             return Vec::new();
         };
         let item = &mut self.items[at];
-        if !item.own || item.delivery == Delivery::Sent || item.delivery == delivery {
+        if item.delivery == Delivery::Sent || item.delivery == delivery {
             return Vec::new();
         }
         item.delivery = delivery;
         self.sets([at])
+    }
+
+    /// Put a row's content back as it was in `previous`, undoing an
+    /// optimistic edit or delete whose send failed.
+    pub fn restore(&mut self, previous: &TimelineItem) -> Vec<TimelineDiff> {
+        let at = match &previous.key {
+            ItemKey::Stanza(id) => self.by_stanza.get(id).copied(),
+            ItemKey::Origin(id) => self
+                .own_chosen
+                .get(id)
+                .or_else(|| self.by_chosen.get(&(Author::of_item(previous), id.clone())))
+                .copied(),
+        };
+        let Some(at) = at else {
+            return Vec::new();
+        };
+        let item = &mut self.items[at];
+        if item.body == previous.body
+            && item.edited == previous.edited
+            && item.retracted == previous.retracted
+        {
+            return Vec::new();
+        }
+        item.body.clone_from(&previous.body);
+        item.edited = previous.edited;
+        item.edited_at = previous.edited_at;
+        item.retracted = previous.retracted;
+        let mut touched = BTreeSet::from([at]);
+        self.refresh_replies_to(at, &mut touched);
+        self.sets(touched)
     }
 
     /// A message arrived live.
@@ -390,23 +466,39 @@ impl Timeline {
             if let Some(&at) = message
                 .origin_id
                 .as_deref()
-                .and_then(|origin| self.index.get(origin))
+                .and_then(|origin| self.own_chosen.get(origin))
             {
-                if self.items[at].own {
-                    self.take_reflection(at, &message, &mut touched);
-                    return self.sets(touched);
-                }
+                self.take_reflection(at, &message, &mut touched);
+                return self.sets(touched);
             }
         }
 
         let ids = ids_of(&message);
-        if ids.iter().any(|id| self.index.contains_key(id)) {
+        if self.holds(&ids, &Author::of(&message)) {
             return Vec::new();
         }
         let Some(item) = content_item(&message) else {
             return Vec::new();
         };
         self.append(item, ids)
+    }
+
+    /// Record the user's own reaction set before the server has it
+    /// (optimistic), or roll it back. See [`Timeline::own_reactions`].
+    pub fn apply_own_reaction(
+        &mut self,
+        target_id: &str,
+        sender: &str,
+        emojis: &[String],
+        timestamp_ms: i64,
+    ) -> Vec<TimelineDiff> {
+        let mut touched = BTreeSet::new();
+        let author = Author {
+            sender: sender.to_string(),
+            own: true,
+        };
+        self.react(target_id, author, timestamp_ms, emojis, &mut touched);
+        self.sets(touched)
     }
 
     /// Whether the item at `index` continues the group of the one before
@@ -431,13 +523,48 @@ impl Timeline {
             && day(previous.timestamp_ms) == day(item.timestamp_ms)
     }
 
-    fn append(&mut self, item: TimelineItem, aliases: Vec<String>) -> Vec<TimelineDiff> {
+    fn serial(&mut self) -> u64 {
+        self.next_serial += 1;
+        self.next_serial
+    }
+
+    /// A row referenced by a room-assigned or reference id.
+    fn referenced(&self, id: &str) -> Option<usize> {
+        self.by_reference
+            .get(id)
+            .or_else(|| self.by_stanza.get(id))
+            .copied()
+    }
+
+    /// A row its sender identifies by an id they chose, falling back to a
+    /// referenced row (some clients correct by stanza id).
+    fn by_sender(&self, author: &Author, id: &str) -> Option<usize> {
+        self.by_chosen
+            .get(&(author.clone(), id.to_string()))
+            .copied()
+            .or_else(|| self.referenced(id))
+    }
+
+    /// Whether a message with these ids from this author is already shown:
+    /// the same verified stanza id, or the same sender-chosen id from the
+    /// same sender.
+    fn holds(&self, ids: &RowIds, author: &Author) -> bool {
+        ids.stanza
+            .as_ref()
+            .is_some_and(|id| self.by_stanza.contains_key(id))
+            || ids
+                .chosen
+                .iter()
+                .any(|id| self.by_chosen.contains_key(&(author.clone(), id.clone())))
+    }
+
+    fn append(&mut self, item: TimelineItem, ids: RowIds) -> Vec<TimelineDiff> {
         let at = self.items.len();
-        for alias in &aliases {
-            self.index.insert(alias.clone(), at);
-        }
+        let serial = self.serial();
         self.items.push(item);
-        self.aliases.push(aliases);
+        self.ids.push(ids);
+        self.serials.push(serial);
+        self.index_row(at);
         let mut touched = BTreeSet::new();
         self.settle(at, &mut touched);
         let mut diffs = vec![TimelineDiff::Append {
@@ -453,6 +580,7 @@ impl Timeline {
         message: &IncomingMessage,
         touched: &mut BTreeSet<usize>,
     ) {
+        let reflected = ids_of(message);
         let item = &mut self.items[at];
         if let Some(stanza_id) = &message.stanza_id {
             item.key = ItemKey::Stanza(stanza_id.clone());
@@ -461,12 +589,19 @@ impl Timeline {
             item.reference_id.clone_from(&message.reference_id);
         }
         item.delivery = Delivery::Sent;
-        for id in ids_of(message) {
-            if !self.aliases[at].contains(&id) {
-                self.index.insert(id.clone(), at);
-                self.aliases[at].push(id);
+        let ids = &mut self.ids[at];
+        if ids.stanza.is_none() {
+            ids.stanza = reflected.stanza;
+        }
+        if ids.reference.is_none() {
+            ids.reference = reflected.reference;
+        }
+        for id in reflected.chosen {
+            if !ids.chosen.contains(&id) {
+                ids.chosen.push(id);
             }
         }
+        self.index_row(at);
         touched.insert(at);
         self.settle(at, touched);
     }
@@ -475,17 +610,30 @@ impl Timeline {
     /// for it, its reactions, its reply quote, and the quotes of rows that
     /// reply to it.
     fn settle(&mut self, at: usize, touched: &mut BTreeSet<usize>) {
-        let aliases = self.aliases[at].clone();
-        for alias in &aliases {
-            if let Some(edit) = self.pending_edits.remove(alias) {
-                if self.apply_edit_at(at, &edit) {
+        let author = Author::of_item(&self.items[at]);
+        let ids = self.ids[at].clone();
+        let all: Vec<&String> = ids
+            .chosen
+            .iter()
+            .chain(ids.stanza.iter())
+            .chain(ids.reference.iter())
+            .collect();
+        for id in &all {
+            let key = (author.clone(), (*id).clone());
+            if let Some(edit) = self.pending_edits.remove(&key) {
+                if self.apply_edit_at(at, &author, &edit) {
                     touched.insert(at);
                 }
             }
-            if let Some(removal) = self.pending_removals.remove(alias) {
-                if self.apply_removal_at(at, &removal) {
+            if let Some(author_id) = self.pending_retractions.remove(&key) {
+                if self.apply_removal_at(at, Some((&author, author_id.as_deref()))) {
                     touched.insert(at);
                 }
+            }
+        }
+        for id in ids.stanza.iter().chain(ids.reference.iter()) {
+            if self.pending_moderations.remove(id) && self.apply_removal_at(at, None) {
+                touched.insert(at);
             }
         }
         let reactions = self.tally(at);
@@ -498,10 +646,10 @@ impl Timeline {
             .as_ref()
             .map(|reply| reply.target_id.clone())
         {
-            let key = self.items[at].key.as_str().to_string();
+            let serial = self.serials[at];
             let replies = self.replies.entry(target).or_default();
-            if !replies.contains(&key) {
-                replies.push(key);
+            if !replies.contains(&serial) {
+                replies.push(serial);
             }
             if self.refresh_preview(at) {
                 touched.insert(at);
@@ -517,14 +665,11 @@ impl Timeline {
         message: &IncomingMessage,
         touched: &mut BTreeSet<usize>,
     ) -> bool {
+        let author = Author::of(message);
         if let Some(update) = &message.reaction {
-            let reactor = Reactor {
-                sender: message.sender.clone(),
-                own: message.own,
-            };
             self.react(
                 &update.target_id,
-                reactor,
+                author,
                 message.timestamp_ms,
                 &update.emojis,
                 touched,
@@ -532,15 +677,32 @@ impl Timeline {
             return true;
         }
         if let Some(target) = &message.moderates_id {
-            self.remove(target, Removal::Moderated, touched);
+            match self.referenced(target) {
+                Some(at) => {
+                    if self.apply_removal_at(at, None) {
+                        touched.insert(at);
+                        self.refresh_replies_to(at, touched);
+                    }
+                }
+                None => {
+                    self.pending_moderations.insert(target.clone());
+                }
+            }
             return true;
         }
         if let Some(target) = &message.retracts_id {
-            let removal = Removal::BySender {
-                sender: message.sender.clone(),
-                own: message.own,
-            };
-            self.remove(target, removal, touched);
+            match self.by_sender(&author, target) {
+                Some(at) => {
+                    if self.apply_removal_at(at, Some((&author, message.author_id.as_deref()))) {
+                        touched.insert(at);
+                        self.refresh_replies_to(at, touched);
+                    }
+                }
+                None => {
+                    self.pending_retractions
+                        .insert((author, target.clone()), message.author_id.clone());
+                }
+            }
             return true;
         }
         if let Some(target) = &message.replaces_id {
@@ -548,25 +710,25 @@ impl Timeline {
                 return true;
             };
             let edit = Edit {
-                sender: message.sender.clone(),
-                own: message.own,
+                author_id: message.author_id.clone(),
                 body,
                 at: message.timestamp_ms,
             };
-            match self.index.get(target).copied() {
+            match self.by_sender(&author, target) {
                 Some(at) => {
-                    if self.apply_edit_at(at, &edit) {
+                    if self.apply_edit_at(at, &author, &edit) {
                         touched.insert(at);
                         self.refresh_replies_to(at, touched);
                     }
                 }
                 None => {
+                    let key = (author, target.clone());
                     if self
                         .pending_edits
-                        .get(target)
+                        .get(&key)
                         .is_none_or(|held| edit.at >= held.at)
                     {
-                        self.pending_edits.insert(target.clone(), edit);
+                        self.pending_edits.insert(key, edit);
                     }
                 }
             }
@@ -575,34 +737,16 @@ impl Timeline {
         false
     }
 
-    /// Record the user's own reaction set before the server has it
-    /// (optimistic), or roll it back. See [`Timeline::own_reactions`].
-    pub fn apply_own_reaction(
-        &mut self,
-        target_id: &str,
-        sender: &str,
-        emojis: &[String],
-        timestamp_ms: i64,
-    ) -> Vec<TimelineDiff> {
-        let mut touched = BTreeSet::new();
-        let reactor = Reactor {
-            sender: sender.to_string(),
-            own: true,
-        };
-        self.react(target_id, reactor, timestamp_ms, emojis, &mut touched);
-        self.sets(touched)
-    }
-
     fn react(
         &mut self,
         target: &str,
-        reactor: Reactor,
+        author: Author,
         at: i64,
         emojis: &[String],
         touched: &mut BTreeSet<usize>,
     ) {
         let by_sender = self.reactions.entry(target.to_string()).or_default();
-        if by_sender.get(&reactor).is_some_and(|held| held.at > at) {
+        if by_sender.get(&author).is_some_and(|held| held.at > at) {
             return;
         }
         let mut unique: Vec<String> = Vec::new();
@@ -611,8 +755,8 @@ impl Timeline {
                 unique.push(emoji.clone());
             }
         }
-        by_sender.insert(reactor, Reacted { at, emojis: unique });
-        if let Some(&row) = self.index.get(target) {
+        by_sender.insert(author, Reacted { at, emojis: unique });
+        if let Some(row) = self.referenced(target) {
             let reactions = self.tally(row);
             if self.items[row].reactions != reactions {
                 self.items[row].reactions = reactions;
@@ -621,26 +765,37 @@ impl Timeline {
         }
     }
 
-    /// The row's reactions across every id it is known by, each sender's
-    /// latest set counted once.
+    /// The ids reactions to the row at `at` may target.
+    fn reaction_targets(&self, at: usize) -> Vec<&String> {
+        let ids = &self.ids[at];
+        let mut targets: Vec<&String> = ids.reference.iter().collect();
+        if let Some(stanza) = &ids.stanza {
+            if !targets.contains(&stanza) {
+                targets.push(stanza);
+            }
+        }
+        targets
+    }
+
+    /// The row's reactions, each sender's latest set counted once.
     fn tally(&self, at: usize) -> Vec<Reaction> {
-        let mut latest: HashMap<&Reactor, &Reacted> = HashMap::new();
-        for alias in &self.aliases[at] {
-            for (reactor, reacted) in self.reactions.get(alias).into_iter().flatten() {
-                let newer = latest.get(reactor).is_none_or(|seen| reacted.at >= seen.at);
+        let mut latest: HashMap<&Author, &Reacted> = HashMap::new();
+        for target in self.reaction_targets(at) {
+            for (author, reacted) in self.reactions.get(target).into_iter().flatten() {
+                let newer = latest.get(author).is_none_or(|seen| reacted.at >= seen.at);
                 if newer {
-                    latest.insert(reactor, reacted);
+                    latest.insert(author, reacted);
                 }
             }
         }
         // Count, whether the user is among them, and when the emoji was
         // first used, so chips keep their place as counts change.
         let mut counts: BTreeMap<&str, (u32, bool, i64)> = BTreeMap::new();
-        for (reactor, reacted) in latest {
+        for (author, reacted) in latest {
             for emoji in &reacted.emojis {
                 let entry = counts.entry(emoji).or_insert((0, false, reacted.at));
                 entry.0 += 1;
-                entry.1 |= reactor.own;
+                entry.1 |= author.own;
                 entry.2 = entry.2.min(reacted.at);
             }
         }
@@ -656,30 +811,9 @@ impl Timeline {
             .collect()
     }
 
-    fn remove(&mut self, target: &str, removal: Removal, touched: &mut BTreeSet<usize>) {
-        match self.index.get(target).copied() {
-            Some(at) => {
-                if self.apply_removal_at(at, &removal) {
-                    touched.insert(at);
-                    self.refresh_replies_to(at, touched);
-                }
-            }
-            None => {
-                // A moderation outranks a sender's own retraction.
-                let keep_held = matches!(
-                    (self.pending_removals.get(target), &removal),
-                    (Some(Removal::Moderated), Removal::BySender { .. })
-                );
-                if !keep_held {
-                    self.pending_removals.insert(target.to_string(), removal);
-                }
-            }
-        }
-    }
-
-    fn apply_edit_at(&mut self, at: usize, edit: &Edit) -> bool {
+    fn apply_edit_at(&mut self, at: usize, author: &Author, edit: &Edit) -> bool {
         let item = &mut self.items[at];
-        if item.retracted || item.sender != edit.sender || item.own != edit.own {
+        if item.retracted || !same_author(item, author, edit.author_id.as_deref()) {
             return false;
         }
         if item.edited_at.is_some_and(|applied| edit.at < applied) {
@@ -694,13 +828,14 @@ impl Timeline {
         true
     }
 
-    fn apply_removal_at(&mut self, at: usize, removal: &Removal) -> bool {
+    /// Retract the row: by its sender (`Some`), or by the room (`None`).
+    fn apply_removal_at(&mut self, at: usize, by: Option<(&Author, Option<&str>)>) -> bool {
         let item = &mut self.items[at];
         if item.retracted {
             return false;
         }
-        if let Removal::BySender { sender, own } = removal {
-            if &item.sender != sender || item.own != *own {
+        if let Some((author, author_id)) = by {
+            if !same_author(item, author, author_id) {
                 return false;
             }
         }
@@ -711,14 +846,15 @@ impl Timeline {
 
     /// Re-quote the rows replying to the row at `at`.
     fn refresh_replies_to(&mut self, at: usize, touched: &mut BTreeSet<usize>) {
-        let keys: Vec<String> = self.aliases[at]
-            .iter()
-            .filter_map(|alias| self.replies.get(alias))
+        let serials: Vec<u64> = self
+            .reaction_targets(at)
+            .into_iter()
+            .filter_map(|target| self.replies.get(target))
             .flatten()
-            .cloned()
+            .copied()
             .collect();
-        for key in keys {
-            if let Some(&row) = self.index.get(&key) {
+        for serial in serials {
+            if let Some(&row) = self.by_serial.get(&serial) {
                 if self.refresh_preview(row) {
                     touched.insert(row);
                 }
@@ -731,7 +867,7 @@ impl Timeline {
         let Some(reply) = self.items[at].reply.as_ref() else {
             return false;
         };
-        let Some(&target) = self.index.get(&reply.target_id) else {
+        let Some(target) = self.referenced(&reply.target_id) else {
             return false;
         };
         let quoted = &self.items[target];
@@ -741,8 +877,7 @@ impl Timeline {
             snippet: (!quoted.retracted).then(|| snippet(&quoted.body)),
             target_retracted: quoted.retracted,
         };
-        let reply = self.items[at].reply.as_mut();
-        match reply {
+        match self.items[at].reply.as_mut() {
             Some(reply) if *reply != next => {
                 *reply = next;
                 true
@@ -751,12 +886,36 @@ impl Timeline {
         }
     }
 
-    fn reindex(&mut self) {
-        self.index.clear();
-        for (at, aliases) in self.aliases.iter().enumerate() {
-            for alias in aliases {
-                self.index.insert(alias.clone(), at);
+    fn index_row(&mut self, at: usize) {
+        let item = &self.items[at];
+        let ids = &self.ids[at];
+        let author = Author::of_item(item);
+        self.by_serial.insert(self.serials[at], at);
+        if let Some(stanza) = &ids.stanza {
+            self.by_stanza.entry(stanza.clone()).or_insert(at);
+        }
+        if let Some(reference) = &ids.reference {
+            // First come keeps it: in a room this is the room's own id, so
+            // it never collides; in a DM a collision is the peer confusing
+            // their own conversation.
+            self.by_reference.entry(reference.clone()).or_insert(at);
+        }
+        for id in &ids.chosen {
+            self.by_chosen.insert((author.clone(), id.clone()), at);
+            if item.own {
+                self.own_chosen.insert(id.clone(), at);
             }
+        }
+    }
+
+    fn reindex(&mut self) {
+        self.by_serial.clear();
+        self.by_stanza.clear();
+        self.by_reference.clear();
+        self.by_chosen.clear();
+        self.own_chosen.clear();
+        for at in 0..self.items.len() {
+            self.index_row(at);
         }
     }
 
@@ -770,6 +929,26 @@ impl Timeline {
             })
             .collect()
     }
+}
+
+/// Whether a fastening from `author` may change `item`: the same side
+/// (user or not) and, when both carry a stable identity (a room's real
+/// JID), the same one; otherwise the same name.
+fn same_author(item: &TimelineItem, author: &Author, author_id: Option<&str>) -> bool {
+    if item.own != author.own {
+        return false;
+    }
+    match (item.author_id.as_deref(), author_id) {
+        (Some(held), Some(claimed)) => held == claimed,
+        _ => item.sender == author.sender,
+    }
+}
+
+/// Whether two messages in one page are the same row.
+fn same_row(ids: &RowIds, author: &Author, held: &RowIds, held_author: &Author) -> bool {
+    let same_stanza = ids.stanza.is_some() && ids.stanza == held.stanza;
+    let same_chosen = author == held_author && ids.chosen.iter().any(|id| held.chosen.contains(id));
+    same_stanza || same_chosen
 }
 
 /// Remove a XEP-0428 fallback range (Unicode scalar offsets, `end`
@@ -822,22 +1001,22 @@ fn is_fastening(message: &IncomingMessage) -> bool {
         || message.replaces_id.is_some()
 }
 
-fn ids_of(message: &IncomingMessage) -> Vec<String> {
-    let mut ids: Vec<String> = Vec::new();
-    for id in [
-        &message.stanza_id,
-        &message.origin_id,
-        &message.message_id,
-        &message.reference_id,
-    ]
-    .into_iter()
-    .flatten()
+fn ids_of(message: &IncomingMessage) -> RowIds {
+    let non_empty = |id: &Option<String>| id.clone().filter(|id| !id.is_empty());
+    let mut chosen: Vec<String> = Vec::new();
+    for id in [&message.origin_id, &message.message_id]
+        .into_iter()
+        .filter_map(non_empty)
     {
-        if !id.is_empty() && !ids.contains(id) {
-            ids.push(id.clone());
+        if !chosen.contains(&id) {
+            chosen.push(id);
         }
     }
-    ids
+    RowIds {
+        stanza: non_empty(&message.stanza_id),
+        reference: non_empty(&message.reference_id),
+        chosen,
+    }
 }
 
 fn content_item(message: &IncomingMessage) -> Option<TimelineItem> {
@@ -854,6 +1033,7 @@ fn content_item(message: &IncomingMessage) -> Option<TimelineItem> {
     Some(TimelineItem {
         key,
         sender: message.sender.clone(),
+        author_id: message.author_id.clone(),
         own: message.own,
         body,
         timestamp_ms: message.timestamp_ms,
@@ -1029,7 +1209,11 @@ mod tests {
         );
         assert!(diffs.is_empty());
         assert_eq!(bodies(&timeline), ["earlier", "hello"]);
-        assert!(timeline.get("o1").is_some());
+        assert!(timeline.get("s9").is_some());
+        assert!(
+            timeline.get("o1").is_none(),
+            "sender-chosen ids are not references"
+        );
     }
 
     #[test]
@@ -1041,7 +1225,8 @@ mod tests {
             ..message("s5", "mallory", "stolen", 11)
         });
         assert_eq!(timeline.items()[0].delivery, Delivery::Sending);
-        assert_eq!(bodies(&timeline), ["mine"]);
+        // Her message is hers: shown on its own, neither hidden nor merged.
+        assert_eq!(bodies(&timeline), ["mine", "stolen"]);
     }
 
     #[test]
@@ -1352,5 +1537,175 @@ mod tests {
         assert_eq!(strip_fallback("🎂🎂ok", 0, 2), "ok");
         assert_eq!(strip_fallback("short", 2, 99), "short");
         assert_eq!(strip_fallback("short", 3, 2), "short");
+    }
+
+    fn sent(stanza: &str, origin: &str, sender: &str, body: &str, at: i64) -> IncomingMessage {
+        IncomingMessage {
+            origin_id: Some(origin.into()),
+            message_id: Some(origin.into()),
+            ..message(stanza, sender, body, at)
+        }
+    }
+
+    fn senders(timeline: &Timeline) -> Vec<(&str, &str)> {
+        timeline
+            .items()
+            .iter()
+            .map(|item| (item.sender.as_str(), item.body.as_str()))
+            .collect()
+    }
+
+    /// Mallory reuses Bob's room stanza id as her origin id: it must not
+    /// hide Bob's message or take its reactions and replies.
+    #[test]
+    fn a_sender_chosen_id_cannot_hijack_someone_elses_message() {
+        let mut timeline = Timeline::new();
+        timeline.apply_history_page(
+            vec![
+                sent("S5", "S1", "mallory", "I agree to pay mallory $500", 5),
+                reaction("ann", "S1", &["👍"], 6),
+                IncomingMessage {
+                    reply_to: Some(ReplyTo {
+                        id: "S1".into(),
+                        sender: Some("bob".into()),
+                    }),
+                    ..sent("S7", "o7", "cat", "+1", 7)
+                },
+            ],
+            Some("S5".into()),
+            false,
+        );
+        timeline.apply_history_page(
+            vec![sent("S1", "ob1", "bob", "lunch at noon?", 1)],
+            Some("S1".into()),
+            true,
+        );
+        assert_eq!(
+            senders(&timeline),
+            [
+                ("bob", "lunch at noon?"),
+                ("mallory", "I agree to pay mallory $500"),
+                ("cat", "+1")
+            ]
+        );
+        assert_eq!(tallies(&timeline.items()[0]), [("👍", 1, false)]);
+        assert!(timeline.items()[1].reactions.is_empty());
+        let quote = timeline.items()[2].reply.as_ref().expect("a quote");
+        assert_eq!(quote.sender.as_deref(), Some("bob"));
+        assert_eq!(quote.snippet.as_deref(), Some("lunch at noon?"));
+    }
+
+    #[test]
+    fn two_senders_reusing_an_id_keep_both_messages() {
+        let mut timeline = Timeline::new();
+        let from = |stanza: &str, sender: &str, body: &str| IncomingMessage {
+            message_id: Some("1".into()),
+            ..message(stanza, sender, body, 1)
+        };
+        timeline.apply_history_page(
+            vec![from("S1", "ann", "hi"), from("S2", "bob", "hello")],
+            None,
+            true,
+        );
+        assert_eq!(timeline.items().len(), 2);
+        // The same sender's copy without a stanza id is still a duplicate.
+        assert!(timeline
+            .apply_live(IncomingMessage {
+                stanza_id: None,
+                reference_id: None,
+                ..from("x", "ann", "hi")
+            })
+            .is_empty());
+    }
+
+    #[test]
+    fn someone_elses_held_retraction_does_not_cancel_the_senders() {
+        let mut timeline = Timeline::new();
+        timeline.apply_history_page(
+            vec![
+                IncomingMessage {
+                    retracts_id: Some("ob1".into()),
+                    body: None,
+                    ..sent("S2", "o2", "bob", "", 2)
+                },
+                IncomingMessage {
+                    retracts_id: Some("ob1".into()),
+                    body: None,
+                    ..sent("S3", "o3", "mallory", "", 3)
+                },
+            ],
+            None,
+            false,
+        );
+        timeline.apply_history_page(
+            vec![sent("S1", "ob1", "bob", "my password is hunter2", 1)],
+            None,
+            true,
+        );
+        assert!(timeline.items()[0].retracted);
+        assert_eq!(timeline.items()[0].body, "");
+    }
+
+    #[test]
+    fn someone_elses_held_correction_does_not_cancel_the_senders() {
+        let mut timeline = Timeline::new();
+        timeline.apply_history_page(
+            vec![
+                IncomingMessage {
+                    replaces_id: Some("ob1".into()),
+                    ..sent("S2", "o2", "bob", "meet at 3pm", 2)
+                },
+                IncomingMessage {
+                    replaces_id: Some("ob1".into()),
+                    ..sent("S3", "o3", "mallory", "x", 3)
+                },
+            ],
+            None,
+            false,
+        );
+        timeline.apply_history_page(vec![sent("S1", "ob1", "bob", "meet at 1pm", 1)], None, true);
+        assert_eq!(timeline.items()[0].body, "meet at 3pm");
+    }
+
+    /// A nick can pass to someone else; a real JID cannot.
+    #[test]
+    fn a_later_holder_of_the_same_nick_cannot_edit_with_another_identity() {
+        let mut timeline = Timeline::new();
+        timeline.apply_history_page(
+            vec![
+                IncomingMessage {
+                    author_id: Some("bob@waddle.social".into()),
+                    ..sent("S1", "ob1", "bob", "original", 1)
+                },
+                IncomingMessage {
+                    author_id: Some("impostor@waddle.social".into()),
+                    replaces_id: Some("ob1".into()),
+                    ..sent("S2", "o2", "bob", "forged", 2)
+                },
+            ],
+            None,
+            true,
+        );
+        assert_eq!(timeline.items()[0].body, "original");
+    }
+
+    #[test]
+    fn a_failed_edit_or_delete_is_restored() {
+        let mut timeline = Timeline::new();
+        timeline.add_local_echo(echo("o1", "draft"));
+        let before = timeline.items()[0].clone();
+        timeline.apply_live(IncomingMessage {
+            replaces_id: Some("o1".into()),
+            sender: "me".into(),
+            own: true,
+            body: Some("final".into()),
+            timestamp_ms: 20,
+            ..IncomingMessage::default()
+        });
+        assert_eq!(bodies(&timeline), ["final"]);
+        let diffs = timeline.restore(&before);
+        assert!(
+            matches!(&diffs[0], TimelineDiff::Set { index: 0, item } if item.body == "draft" && !item.edited)
+        );
     }
 }
