@@ -302,7 +302,10 @@ async fn callback_refuses_browser_return_to_untrusted_origin() {
     for (state, next) in [
         ("fragment-offsite", "https://attacker.example/"),
         ("fragment-backslash", "/\\attacker.example/"),
-        ("fragment-userinfo", "http://localhost:3000@attacker.example/"),
+        (
+            "fragment-userinfo",
+            "http://localhost:3000@attacker.example/",
+        ),
     ] {
         insert_pending_flow(
             &auth_state,
@@ -317,7 +320,10 @@ async fn callback_refuses_browser_return_to_untrusted_origin() {
         let (status, body) = callback_error(auth_state.clone(), state).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{next}");
         assert!(body.contains("sign-in return URL"), "{next}: {body}");
-        assert!(!body.contains("invalid_client"), "{next} reached the provider");
+        assert!(
+            !body.contains("invalid_client"),
+            "{next} reached the provider"
+        );
     }
 }
 
@@ -347,7 +353,10 @@ async fn callback_refuses_xmpp_flow_without_safe_redirect_or_pkce() {
 
         let (status, body) = callback_error(auth_state.clone(), state).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{state}");
-        assert!(!body.contains("invalid_client"), "{state} reached the provider: {body}");
+        assert!(
+            !body.contains("invalid_client"),
+            "{state} reached the provider: {body}"
+        );
     }
 }
 
