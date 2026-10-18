@@ -14,6 +14,9 @@ use super::WaddleWindow;
 use crate::attachments::MAX_UPLOAD_BYTES;
 use crate::session::{Kind, Outgoing, Quote};
 
+/// Files in one message.
+const MAX_FILES_PER_MESSAGE: usize = 10;
+
 /// One tap away in the message menu.
 const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "🎉", "😮", "😢"];
 
@@ -127,6 +130,11 @@ impl WaddleWindow {
         };
         if files.is_empty() {
             return;
+        }
+        // Each encrypted file adds about 20 XML nodes; the server refuses a
+        // message past its ingress limit (about 50 files), so stay well under.
+        if files.len() > MAX_FILES_PER_MESSAGE {
+            return self.toast("Send up to 10 files at a time.");
         }
         if let Some(reason) = self.cannot_attach() {
             return self.toast(reason);
