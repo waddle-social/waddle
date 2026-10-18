@@ -251,12 +251,13 @@ pub struct Timeline {
     by_chosen: HashMap<(Author, String), usize>,
     /// The user's own rows by origin id and `@id`, for delivery outcomes.
     own_chosen: HashMap<String, usize>,
-    /// Corrections whose target is not held yet, latest per sender and
-    /// target.
-    pending_edits: HashMap<(Author, String), Edit>,
-    /// Retractions by their sender whose target is not held yet, with the
-    /// sender's stable identity when known.
-    pending_retractions: HashMap<(Author, String), Option<String>>,
+    /// Corrections whose target is not held yet, by sender name and
+    /// target. Every candidate is kept: one claiming the same name under
+    /// another identity must not displace the real sender's.
+    pending_edits: HashMap<(Author, String), Vec<Edit>>,
+    /// Retractions by their sender whose target is not held yet, each with
+    /// the sender's stable identity when known.
+    pending_retractions: HashMap<(Author, String), Vec<Option<String>>>,
     /// Moderations whose target is not held yet.
     pending_moderations: HashSet<String>,
     /// Every sender's latest reaction set, by target id.
@@ -350,7 +351,14 @@ impl Timeline {
         }
 
         let pushed = older.len();
+        let mut touched = BTreeSet::new();
         if pushed > 0 {
+            // References an older row may now take over from a newer one.
+            let previous: Vec<(String, usize)> = self
+                .by_reference
+                .iter()
+                .map(|(id, &at)| (id.clone(), at + pushed))
+                .collect();
             let serials: Vec<u64> = (0..pushed).map(|_| self.serial()).collect();
             older.append(&mut self.items);
             self.items = older;
@@ -360,9 +368,17 @@ impl Timeline {
             all_serials.append(&mut self.serials);
             self.serials = all_serials;
             self.reindex();
+            for (id, displaced) in previous {
+                if self.by_reference.get(&id) != Some(&displaced) {
+                    let reactions = self.tally(displaced);
+                    if self.items[displaced].reactions != reactions {
+                        self.items[displaced].reactions = reactions;
+                        touched.insert(displaced);
+                    }
+                }
+            }
         }
 
-        let mut touched = BTreeSet::new();
         for at in 0..pushed {
             self.settle(at, &mut touched);
         }
@@ -537,25 +553,33 @@ impl Timeline {
     }
 
     /// A row its sender identifies by an id they chose, falling back to a
-    /// referenced row (some clients correct by stanza id).
-    fn by_sender(&self, author: &Author, id: &str) -> Option<usize> {
+    /// referenced row of theirs (some clients correct by stanza id). A
+    /// referenced row by someone else is not the target: in a DM the
+    /// reference is sender-chosen, so the real target may still be paged in.
+    fn by_sender(&self, author: &Author, author_id: Option<&str>, id: &str) -> Option<usize> {
         self.by_chosen
             .get(&(author.clone(), id.to_string()))
             .copied()
-            .or_else(|| self.referenced(id))
+            .or_else(|| {
+                self.referenced(id)
+                    .filter(|&at| same_author(&self.items[at], author, author_id))
+            })
     }
 
     /// Whether a message with these ids from this author is already shown:
     /// the same verified stanza id, or the same sender-chosen id from the
     /// same sender.
     fn holds(&self, ids: &RowIds, author: &Author) -> bool {
+        // When both carry verified stanza ids, those decide: a sender may
+        // reuse an `@id` for different messages.
         ids.stanza
             .as_ref()
             .is_some_and(|id| self.by_stanza.contains_key(id))
-            || ids
-                .chosen
-                .iter()
-                .any(|id| self.by_chosen.contains_key(&(author.clone(), id.clone())))
+            || ids.chosen.iter().any(|id| {
+                self.by_chosen
+                    .get(&(author.clone(), id.clone()))
+                    .is_some_and(|&at| ids.stanza.is_none() || self.ids[at].stanza.is_none())
+            })
     }
 
     fn append(&mut self, item: TimelineItem, ids: RowIds) -> Vec<TimelineDiff> {
@@ -620,12 +644,21 @@ impl Timeline {
             .collect();
         for id in &all {
             let key = (author.clone(), (*id).clone());
-            if let Some(edit) = self.pending_edits.remove(&key) {
+            // The latest correction from the real sender, ignoring any that
+            // only share the name.
+            let edit = self
+                .pending_edits
+                .remove(&key)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|edit| same_author(&self.items[at], &author, edit.author_id.as_deref()))
+                .max_by_key(|edit| edit.at);
+            if let Some(edit) = edit {
                 if self.apply_edit_at(at, &author, &edit) {
                     touched.insert(at);
                 }
             }
-            if let Some(author_id) = self.pending_retractions.remove(&key) {
+            for author_id in self.pending_retractions.remove(&key).unwrap_or_default() {
                 if self.apply_removal_at(at, Some((&author, author_id.as_deref()))) {
                     touched.insert(at);
                 }
@@ -691,7 +724,7 @@ impl Timeline {
             return true;
         }
         if let Some(target) = &message.retracts_id {
-            match self.by_sender(&author, target) {
+            match self.by_sender(&author, message.author_id.as_deref(), target) {
                 Some(at) => {
                     if self.apply_removal_at(at, Some((&author, message.author_id.as_deref()))) {
                         touched.insert(at);
@@ -700,7 +733,9 @@ impl Timeline {
                 }
                 None => {
                     self.pending_retractions
-                        .insert((author, target.clone()), message.author_id.clone());
+                        .entry((author, target.clone()))
+                        .or_default()
+                        .push(message.author_id.clone());
                 }
             }
             return true;
@@ -714,7 +749,7 @@ impl Timeline {
                 body,
                 at: message.timestamp_ms,
             };
-            match self.by_sender(&author, target) {
+            match self.by_sender(&author, message.author_id.as_deref(), target) {
                 Some(at) => {
                     if self.apply_edit_at(at, &author, &edit) {
                         touched.insert(at);
@@ -722,14 +757,10 @@ impl Timeline {
                     }
                 }
                 None => {
-                    let key = (author, target.clone());
-                    if self
-                        .pending_edits
-                        .get(&key)
-                        .is_none_or(|held| edit.at >= held.at)
-                    {
-                        self.pending_edits.insert(key, edit);
-                    }
+                    self.pending_edits
+                        .entry((author, target.clone()))
+                        .or_default()
+                        .push(edit);
                 }
             }
             return true;
@@ -765,13 +796,15 @@ impl Timeline {
         }
     }
 
-    /// The ids reactions to the row at `at` may target.
+    /// The ids that reference the row at `at`: its reference and stanza
+    /// ids, where they resolve to it. When two rows share a DM reference,
+    /// the older holds it, so a later reuse cannot claim its reactions.
     fn reaction_targets(&self, at: usize) -> Vec<&String> {
         let ids = &self.ids[at];
-        let mut targets: Vec<&String> = ids.reference.iter().collect();
-        if let Some(stanza) = &ids.stanza {
-            if !targets.contains(&stanza) {
-                targets.push(stanza);
+        let mut targets: Vec<&String> = Vec::new();
+        for id in ids.reference.iter().chain(ids.stanza.iter()) {
+            if !targets.contains(&id) && self.referenced(id) == Some(at) {
+                targets.push(id);
             }
         }
         targets
@@ -947,7 +980,9 @@ fn same_author(item: &TimelineItem, author: &Author, author_id: Option<&str>) ->
 /// Whether two messages in one page are the same row.
 fn same_row(ids: &RowIds, author: &Author, held: &RowIds, held_author: &Author) -> bool {
     let same_stanza = ids.stanza.is_some() && ids.stanza == held.stanza;
-    let same_chosen = author == held_author && ids.chosen.iter().any(|id| held.chosen.contains(id));
+    let unverified = ids.stanza.is_none() || held.stanza.is_none();
+    let same_chosen =
+        unverified && author == held_author && ids.chosen.iter().any(|id| held.chosen.contains(id));
     same_stanza || same_chosen
 }
 
