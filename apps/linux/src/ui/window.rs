@@ -1,5 +1,5 @@
 use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use adw::prelude::*;
 use adw::subclass::prelude::*;
@@ -8,8 +8,10 @@ use gtk::{gio, glib};
 use crate::auth::device::{DeviceAuthClient, DeviceAuthorization, Provider, ServerUrl};
 use crate::auth::store::{CredentialStore, StoredAccount};
 use crate::runtime;
-use crate::session::{Room, Session};
+use crate::session::{Conversation, Session};
 use waddle_client_session::Timeline;
+
+use super::actions::Compose;
 
 mod imp {
     use super::*;
@@ -53,6 +55,10 @@ mod imp {
         pub composer: TemplateChild<gtk::Box>,
         #[template_child]
         pub composer_entry: TemplateChild<gtk::Entry>,
+        #[template_child]
+        pub composer_context: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub composer_context_label: TemplateChild<gtk::Label>,
 
         pub auth_client: RefCell<Option<DeviceAuthClient>>,
         pub providers: RefCell<Vec<Provider>>,
@@ -68,10 +74,19 @@ mod imp {
         pub generation: Cell<u64>,
         pub connected: Cell<bool>,
         pub reconnect_attempt: Cell<u32>,
-        pub rooms: RefCell<Vec<Room>>,
+        /// Rooms in catalogue order, then DMs.
+        pub conversations: RefCell<Vec<Conversation>>,
         pub unread: RefCell<HashMap<String, u32>>,
+        /// One timeline per conversation, by bare JID.
         pub timelines: RefCell<HashMap<String, Timeline>>,
-        pub current_room: RefCell<Option<String>>,
+        /// The open conversation's bare JID.
+        pub current: RefCell<Option<String>>,
+        /// A conversation asked for (from a notification) before the
+        /// session had loaded it.
+        pub pending_open: RefCell<Option<String>>,
+        /// Conversations to mark read on the server shortly.
+        pub read_pending: RefCell<HashSet<String>>,
+        pub compose: RefCell<Compose>,
         pub loading_history: Cell<bool>,
         pub rows: RefCell<Option<gio::ListStore>>,
     }
@@ -211,9 +226,14 @@ impl WaddleWindow {
 
     #[template_callback]
     fn on_room_activated(&self, row: &gtk::ListBoxRow) {
-        if let Some(room) = self.room_at(row.index()) {
-            self.open_room(&room.jid);
+        if let Some(conversation) = self.conversation_at(row.index()) {
+            self.open_conversation(&conversation.jid);
         }
+    }
+
+    #[template_callback]
+    fn on_cancel_compose(&self) {
+        self.cancel_compose();
     }
 
     #[template_callback]

@@ -26,11 +26,7 @@ mod imp {
 
     impl ApplicationImpl for WaddleApplication {
         fn activate(&self) {
-            let app = self.obj();
-            let window = app
-                .active_window()
-                .unwrap_or_else(|| WaddleWindow::new(&*app).upcast());
-            window.present();
+            self.obj().window().present();
         }
     }
 
@@ -59,8 +55,29 @@ impl WaddleApplication {
         let quit = gio::ActionEntry::builder("quit")
             .activate(|app: &Self, _, _| app.quit())
             .build();
-        self.add_action_entries([about, quit]);
+        // A notification's default action: show that conversation.
+        let open = gio::ActionEntry::builder("open-conversation")
+            .parameter_type(Some(glib::VariantTy::STRING))
+            .activate(|app: &Self, _, target| {
+                let Some(jid) = target.and_then(|target| target.get::<String>()) else {
+                    return;
+                };
+                let window = app.window();
+                window.present();
+                window.open_conversation(&jid);
+            })
+            .build();
+        self.add_action_entries([about, quit, open]);
         self.set_accels_for_action("app.quit", &["<Control>q"]);
+    }
+
+    /// The one window, made on first use. It hides on close, so it
+    /// outlives being closed.
+    fn window(&self) -> WaddleWindow {
+        self.windows()
+            .into_iter()
+            .find_map(|window| window.downcast::<WaddleWindow>().ok())
+            .unwrap_or_else(|| WaddleWindow::new(self))
     }
 
     fn show_about(&self) {

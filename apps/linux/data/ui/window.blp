@@ -7,6 +7,8 @@ template $WaddleWindow: Adw.ApplicationWindow {
   default-height: 720;
   width-request: 360;
   height-request: 294;
+  // Closing keeps the session running for notifications; Quit ends it.
+  hide-on-close: true;
 
   Adw.Breakpoint {
     condition ("max-width: 640sp")
@@ -253,6 +255,39 @@ template $WaddleWindow: Adw.ApplicationWindow {
               };
 
               [bottom]
+              Box {
+                orientation: vertical;
+
+                Box composer_context {
+                  visible: false;
+                  spacing: 6;
+                  margin-start: 12;
+                  margin-end: 12;
+                  margin-top: 6;
+
+                  Label composer_context_label {
+                    hexpand: true;
+                    xalign: 0;
+                    ellipsize: end;
+
+                    styles [
+                      "dim-label",
+                      "caption",
+                    ]
+                  }
+
+                  Button {
+                    icon-name: "window-close-symbolic";
+                    tooltip-text: _("Cancel");
+                    clicked => $on_cancel_compose() swapped;
+
+                    styles [
+                      "flat",
+                      "circular",
+                    ]
+                  }
+                }
+
               Box composer {
                 spacing: 6;
                 margin-start: 12;
@@ -278,6 +313,7 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   ]
                 }
               }
+              }
             };
           };
         };
@@ -296,6 +332,11 @@ menu primary_menu {
     item {
       label: _("About Waddle");
       action: "app.about";
+    }
+
+    item {
+      label: _("Quit");
+      action: "app.quit";
     }
   }
 }

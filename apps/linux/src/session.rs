@@ -4,7 +4,12 @@
 //! Apple apps call through UniFFI; Linux links it as Rust. Its events are
 //! forwarded to the GTK main loop over a channel. Conversations are kept in
 //! `waddle-client-session` stores (ADR-0019), so this module only adapts
-//! records; it keeps no client state of its own.
+//! wire records to the core's inputs; it keeps no client state of its own.
+//!
+//! Ids follow the web client's rules. In a room, replies, reactions and
+//! retractions reference the room's XEP-0359 stanza id, trusted only when
+//! its `by` is the room. In a DM they reference the sender's origin id or
+//! `@id`. Corrections reference the sender's origin id or `@id` in both.
 //!
 //! Reconnection here is a stopgap with the ADR-0019 backoff curve. The
 //! shared `ConnectionController` replaces it.
@@ -13,21 +18,38 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::DateTime;
-use waddle_client_session::{HistoryMessage, LiveMessage};
+use jid::{BareJid, Jid};
+use waddle_client_session::{strip_fallback, IncomingMessage, ReactionUpdate, ReplyTo};
 use waddle_xmpp_client_ffi::{
-    WaddleArchivedMessage, WaddleChannel, WaddleClient, WaddleClientEvent, WaddleConfig,
-    WaddleEventListener, WaddleMessage, WaddleSendMessageOutcome, WaddleSendOptions,
-    WaddleTopology,
+    WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
+    WaddleConfig, WaddleEventListener, WaddleFallbackRange, WaddleInboxEntry, WaddleMessage,
+    WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions, WaddleStanzaId, WaddleTopology,
 };
 
 use crate::auth::store::StoredAccount;
 use crate::runtime;
 
-/// A room in the sidebar.
+const PAGE_SIZE: u32 = 50;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Kind {
+    Room,
+    Direct,
+}
+
+impl Kind {
+    fn is_muc(self) -> bool {
+        self == Self::Room
+    }
+}
+
+/// A room or DM in the sidebar.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Room {
+pub struct Conversation {
+    /// Room bare JID, or the DM peer's bare JID.
     pub jid: String,
     pub name: String,
+    pub kind: Kind,
     pub autojoin: bool,
 }
 
@@ -37,8 +59,36 @@ pub enum SessionEvent {
     Disconnected,
     AuthenticationFailed,
     Message(Box<WaddleMessage>),
+    Inbox(WaddleInboxEntry),
     DeliveryAcked(String),
     DeliveryFailed(String),
+}
+
+/// Who this account is in conversations.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Me {
+    pub bare: BareJid,
+    /// Room nick and display name.
+    pub nick: String,
+}
+
+/// A live message placed in its conversation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Arrival {
+    pub conversation: String,
+    pub kind: Kind,
+    pub message: IncomingMessage,
+    /// XEP-0372 mention of this account or the whole room.
+    pub mentions_me: bool,
+}
+
+/// Quoting a message in a reply (XEP-0461).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Quote {
+    /// The quoted message's reference id.
+    pub id: String,
+    pub sender: String,
+    pub text: String,
 }
 
 struct Forwarder(async_channel::Sender<SessionEvent>);
@@ -50,6 +100,7 @@ impl WaddleEventListener for Forwarder {
             WaddleClientEvent::Disconnected => SessionEvent::Disconnected,
             WaddleClientEvent::AuthenticationFailed { .. } => SessionEvent::AuthenticationFailed,
             WaddleClientEvent::Message { message } => SessionEvent::Message(Box::new(message)),
+            WaddleClientEvent::InboxPush { entry } => SessionEvent::Inbox(entry),
             WaddleClientEvent::DeliveryAcked { stanza_id } => {
                 SessionEvent::DeliveryAcked(stanza_id)
             }
@@ -73,7 +124,7 @@ impl WaddleEventListener for Forwarder {
 #[derive(Clone)]
 pub struct Session {
     client: Arc<WaddleClient>,
-    pub nick: String,
+    pub me: Me,
 }
 
 impl Session {
@@ -92,7 +143,10 @@ impl Session {
         let client = WaddleClient::new(config, Box::new(Forwarder(sender)));
         let session = Self {
             client,
-            nick: account.session.username.clone(),
+            me: Me {
+                bare: account.session.jid.clone(),
+                nick: account.session.username.clone(),
+            },
         };
         session.connect();
         (session, receiver)
@@ -108,54 +162,155 @@ impl Session {
         let _ = runtime::spawn(async move { client.disconnect().await }).await;
     }
 
-    pub async fn rooms(&self) -> Vec<Room> {
+    pub async fn rooms(&self) -> Vec<Conversation> {
         let client = Arc::clone(&self.client);
         let topology = runtime::spawn(async move { client.discover_topology().await }).await;
         topology.map(rooms_from).unwrap_or_default()
     }
 
-    pub fn join(&self, room: &Room) {
+    /// XEP-0430 inbox: every conversation with its unread count.
+    pub async fn inbox(&self) -> Vec<WaddleInboxEntry> {
         let client = Arc::clone(&self.client);
-        let (jid, nick) = (room.jid.clone(), self.nick.clone());
+        match runtime::spawn(async move { client.fetch_inbox(false, true).await }).await {
+            Ok(Ok(inbox)) => inbox.conversations,
+            Ok(Err(error)) => {
+                tracing::warn!(?error, "could not fetch the inbox");
+                Vec::new()
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
+    pub fn mark_read(&self, jid: &str) {
+        let client = Arc::clone(&self.client);
+        let jid = jid.to_string();
+        runtime::spawn(async move {
+            if let Err(error) = client.mark_inbox_read(jid, None).await {
+                tracing::warn!(?error, "could not mark the conversation read");
+            }
+        });
+    }
+
+    pub fn join(&self, room: &Conversation) {
+        let client = Arc::clone(&self.client);
+        let (jid, nick) = (room.jid.clone(), self.me.nick.clone());
         runtime::spawn(async move { client.join_room(jid, nick).await });
     }
 
     /// The newest page before `before` (or the newest page), oldest first.
     pub async fn history(
         &self,
-        room: &str,
+        jid: &str,
+        kind: Kind,
         before: Option<String>,
-    ) -> (Vec<HistoryMessage>, Option<String>, bool) {
+    ) -> (Vec<IncomingMessage>, Option<String>, bool) {
         let client = Arc::clone(&self.client);
-        let room = room.to_string();
-        let page =
-            runtime::spawn(async move { client.fetch_room_history(room, 50, before).await }).await;
-        let Ok(page) = page else {
+        let peer = jid.to_string();
+        let page = runtime::spawn(async move {
+            match kind {
+                Kind::Room => client.fetch_room_history(peer, PAGE_SIZE, before).await,
+                Kind::Direct => client.fetch_dm_history(peer, PAGE_SIZE, before).await,
+            }
+        })
+        .await;
+        let (Ok(page), Ok(conversation)) = (page, jid.parse::<BareJid>()) else {
             return (Vec::new(), None, false);
         };
         let messages = page
             .messages
             .into_iter()
-            .map(|message| history_from(message, &self.nick))
+            .filter_map(|message| archived_from(message, &conversation, kind, &self.me))
             .collect();
         (messages, page.first_id, page.is_complete)
     }
 
-    /// Send to a room under `origin_id`. True when the stanza was written.
-    pub async fn send(&self, room: &str, body: String, origin_id: String) -> bool {
-        let client = Arc::clone(&self.client);
-        let room = room.to_string();
-        let options = WaddleSendOptions {
+    /// Send under `origin_id`, optionally as a reply. True when the stanza
+    /// was written.
+    pub async fn send(
+        &self,
+        jid: &str,
+        kind: Kind,
+        body: String,
+        origin_id: String,
+        quote: Option<Quote>,
+    ) -> bool {
+        let mut options = WaddleSendOptions {
             stanza_id: Some(origin_id),
             ..WaddleSendOptions::default()
         };
+        let mut body = body;
+        if let Some(quote) = quote {
+            let (quoted, start, end) =
+                waddle_client_session::with_reply_fallback(&quote.sender, &quote.text, &body);
+            body = quoted;
+            options.fallback = Some(WaddleFallbackRange { start, end });
+            options.reply = Some(WaddleReplyTarget {
+                author_jid: match kind {
+                    Kind::Room => format!("{jid}/{}", quote.sender),
+                    Kind::Direct => jid.to_string(),
+                },
+                message_id: quote.id,
+            });
+        }
+        let client = Arc::clone(&self.client);
+        let peer = jid.to_string();
+        let outcome = runtime::spawn(async move {
+            match kind {
+                Kind::Room => {
+                    client
+                        .send_groupchat_message(peer, body, Some(options))
+                        .await
+                }
+                Kind::Direct => client.send_chat_message(peer, body, Some(options)).await,
+            }
+        })
+        .await;
+        matches!(outcome, Ok(WaddleSendMessageOutcome::Sent { .. }))
+    }
+
+    /// XEP-0444: replace this account's reactions on `target`.
+    pub async fn react(&self, jid: &str, kind: Kind, target: String, emojis: Vec<String>) -> bool {
+        let client = Arc::clone(&self.client);
+        let peer = jid.to_string();
+        runtime::spawn(async move {
+            client
+                .send_reaction(peer, target, emojis, kind.is_muc())
+                .await
+        })
+        .await
+        .unwrap_or(false)
+    }
+
+    /// XEP-0308: replace the body of the message with `correction_id`.
+    pub async fn correct(
+        &self,
+        jid: &str,
+        kind: Kind,
+        correction_id: String,
+        body: String,
+    ) -> bool {
+        let client = Arc::clone(&self.client);
+        let peer = jid.to_string();
         let outcome = runtime::spawn(async move {
             client
-                .send_groupchat_message(room, body, Some(options))
+                .send_correction(peer, correction_id, body, kind.is_muc(), None)
                 .await
         })
         .await;
         matches!(outcome, Ok(WaddleSendMessageOutcome::Sent { .. }))
+    }
+
+    /// XEP-0424: retract the message with `reference_id`.
+    pub async fn retract(&self, jid: &str, kind: Kind, reference_id: String) -> bool {
+        let client = Arc::clone(&self.client);
+        let peer = jid.to_string();
+        runtime::spawn(async move {
+            client
+                .send_retraction(peer, reference_id, kind.is_muc())
+                .await
+        })
+        .await
+        .unwrap_or(false)
     }
 }
 
@@ -170,7 +325,7 @@ pub fn reconnect_delay(attempt: u32, unit_random: f64) -> Duration {
 }
 
 /// Rooms for the sidebar: channels, not group DMs, in catalogue order.
-pub fn rooms_from(topology: WaddleTopology) -> Vec<Room> {
+pub fn rooms_from(topology: WaddleTopology) -> Vec<Conversation> {
     let mut channels: Vec<WaddleChannel> = topology
         .channels
         .into_iter()
@@ -185,59 +340,252 @@ pub fn rooms_from(topology: WaddleTopology) -> Vec<Room> {
     });
     channels
         .into_iter()
-        .map(|channel| Room {
+        .map(|channel| Conversation {
             name: channel.bookmark_name.unwrap_or(channel.name),
             jid: channel.room_jid,
+            kind: Kind::Room,
             autojoin: channel.autojoin,
         })
         .collect()
 }
 
-/// The room a groupchat message belongs to, and the core's view of it.
-pub fn live_from(message: WaddleMessage, own_nick: &str) -> Option<(String, LiveMessage)> {
-    if message.message_type != "groupchat" {
-        return None;
-    }
-    let from = message.from?;
-    let (room, nick) = split_occupant(&from)?;
-    Some((
-        room.to_string(),
-        LiveMessage {
-            stanza_id: message.stanza_id,
-            origin_id: message.origin_id,
-            own: nick == own_nick,
-            sender: nick.to_string(),
-            body: message.body,
-            timestamp_ms: timestamp_ms(message.timestamp.as_deref()),
-            replaces_id: message.replaces_id,
-            retracts_id: message.retracts_id,
-        },
-    ))
+/// DMs for the sidebar from the inbox, most recent first.
+pub fn direct_from(inbox: &[WaddleInboxEntry]) -> Vec<Conversation> {
+    let mut entries: Vec<&WaddleInboxEntry> = inbox
+        .iter()
+        .filter(|entry| entry.kind == "direct" && entry.thread_id.is_none())
+        .collect();
+    entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_updated.unwrap_or(0)));
+    entries
+        .into_iter()
+        .filter_map(|entry| direct_conversation(&entry.partner))
+        .collect()
 }
 
-pub fn history_from(message: WaddleArchivedMessage, own_nick: &str) -> HistoryMessage {
-    let nick = message
-        .from
-        .as_deref()
-        .and_then(split_occupant)
-        .map(|(_, nick)| nick.to_string())
-        .unwrap_or_default();
-    HistoryMessage {
-        stanza_id: message.stanza_id.or(Some(message.mam_id)),
+/// A DM conversation with this peer, named by its local part.
+pub fn direct_conversation(peer: &str) -> Option<Conversation> {
+    let bare: BareJid = peer.parse().ok()?;
+    Some(Conversation {
+        name: display_name(&bare),
+        jid: bare.to_string(),
+        kind: Kind::Direct,
+        autojoin: false,
+    })
+}
+
+fn display_name(jid: &BareJid) -> String {
+    jid.node()
+        .map(|node| node.as_str().to_string())
+        .unwrap_or_else(|| jid.to_string())
+}
+
+/// Place a live message in its room or DM.
+pub fn arrival(message: WaddleMessage, me: &Me) -> Option<Arrival> {
+    let from: Jid = message.from.as_deref()?.parse().ok()?;
+    match message.message_type.as_str() {
+        "groupchat" => room_arrival(message, from, me),
+        "chat" if !message.muc_user && !message.is_muc => direct_arrival(message, from, me),
+        _ => None,
+    }
+}
+
+fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
+    let room = from.to_bare();
+    let Some(nick) = from
+        .resource()
+        .map(|resource| resource.as_str().to_string())
+    else {
+        // The room itself: only its XEP-0425 moderation broadcasts matter.
+        let target = message.moderation_target_id?;
+        return Some(Arrival {
+            conversation: room.to_string(),
+            kind: Kind::Room,
+            message: IncomingMessage {
+                moderates_id: Some(target),
+                timestamp_ms: timestamp_ms(message.timestamp.as_deref()),
+                ..IncomingMessage::default()
+            },
+            mentions_me: false,
+        });
+    };
+    let stanza_id = verified_stanza_id(&message.stanza_ids, &room);
+    let mentions_me = message.broadcast_mention.is_some()
+        || message
+            .mention_uris
+            .iter()
+            .any(|uri| uri.strip_prefix("xmpp:") == Some(me.bare.as_str()));
+    let own = nick == me.nick;
+    let incoming = IncomingMessage {
+        reference_id: stanza_id.clone(),
+        stanza_id,
         origin_id: message.origin_id,
-        own: nick == own_nick,
-        sender: nick,
-        body: message.body,
+        message_id: message.id,
+        own,
+        body: reply_body(
+            message.body,
+            message.reply_fallback_start,
+            message.reply_fallback_end,
+        ),
         timestamp_ms: timestamp_ms(message.timestamp.as_deref()),
         replaces_id: message.replaces_id,
-        retracted: message.is_retracted,
-    }
+        // A retraction relayed by the room on a moderator's behalf comes
+        // from the room itself (above), never from an occupant.
+        retracts_id: message.retracts_id,
+        moderates_id: None,
+        tombstone: message.is_retracted,
+        reply_to: message.reply_to_id.map(|id| ReplyTo {
+            id,
+            sender: message.reply_to_sender.as_deref().and_then(occupant_nick),
+        }),
+        reaction: reaction(message.reaction_target_id, message.reaction_emojis),
+        sender: nick,
+    };
+    Some(Arrival {
+        conversation: room.to_string(),
+        kind: Kind::Room,
+        message: incoming,
+        mentions_me: mentions_me && !own,
+    })
 }
 
-/// `room@muc.example/nick` → (`room@muc.example`, `nick`).
-fn split_occupant(full: &str) -> Option<(&str, &str)> {
-    let (room, nick) = full.split_once('/')?;
-    (!room.is_empty() && !nick.is_empty()).then_some((room, nick))
+fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
+    let from_me = from.to_bare() == me.bare;
+    let own = from_me || message.carbon == Some(WaddleCarbonDirection::Sent);
+    let peer = if own {
+        message.to.as_deref()?.parse::<Jid>().ok()?.to_bare()
+    } else {
+        from.to_bare()
+    };
+    if peer == me.bare {
+        return None;
+    }
+    let reference_id = message.origin_id.clone().or_else(|| message.id.clone());
+    let incoming = IncomingMessage {
+        stanza_id: verified_stanza_id(&message.stanza_ids, &me.bare),
+        origin_id: message.origin_id,
+        message_id: message.id,
+        reference_id,
+        sender: if own {
+            me.nick.clone()
+        } else {
+            display_name(&peer)
+        },
+        own,
+        body: reply_body(
+            message.body,
+            message.reply_fallback_start,
+            message.reply_fallback_end,
+        ),
+        timestamp_ms: timestamp_ms(message.timestamp.as_deref()),
+        replaces_id: message.replaces_id,
+        retracts_id: message.retracts_id,
+        moderates_id: None,
+        tombstone: message.is_retracted,
+        reply_to: message.reply_to_id.map(|id| ReplyTo { id, sender: None }),
+        reaction: reaction(message.reaction_target_id, message.reaction_emojis),
+    };
+    Some(Arrival {
+        conversation: peer.to_string(),
+        kind: Kind::Direct,
+        message: incoming,
+        mentions_me: false,
+    })
+}
+
+/// An archived message of `conversation` in the core's terms.
+pub fn archived_from(
+    message: WaddleArchivedMessage,
+    conversation: &BareJid,
+    kind: Kind,
+    me: &Me,
+) -> Option<IncomingMessage> {
+    let from: Jid = message.from.as_deref()?.parse().ok()?;
+    let timestamp = timestamp_ms(message.timestamp.as_deref());
+    let (sender, own, reference_id) = match kind {
+        Kind::Room => {
+            let Some(nick) = from
+                .resource()
+                .map(|resource| resource.as_str().to_string())
+            else {
+                let target = message.moderation_target_id?;
+                return Some(IncomingMessage {
+                    moderates_id: Some(target),
+                    timestamp_ms: timestamp,
+                    ..IncomingMessage::default()
+                });
+            };
+            let own = match message.author_real_jid.as_deref() {
+                Some(real) => real
+                    .parse::<Jid>()
+                    .is_ok_and(|real| real.to_bare() == me.bare),
+                None => nick == me.nick,
+            };
+            // The room archive's id is the room's stanza id (XEP-0313).
+            (nick, own, Some(message.mam_id.clone()))
+        }
+        Kind::Direct => {
+            let own = from.to_bare() == me.bare;
+            let sender = if own {
+                me.nick.clone()
+            } else {
+                display_name(conversation)
+            };
+            let reference = message.origin_id.clone().or_else(|| message.id.clone());
+            (sender, own, reference)
+        }
+    };
+    Some(IncomingMessage {
+        stanza_id: Some(message.mam_id),
+        origin_id: message.origin_id,
+        message_id: message.id,
+        reference_id,
+        sender,
+        own,
+        body: reply_body(
+            message.body,
+            message.reply_fallback_start,
+            message.reply_fallback_end,
+        ),
+        timestamp_ms: timestamp,
+        replaces_id: message.replaces_id,
+        retracts_id: message.retracts_id,
+        moderates_id: None,
+        tombstone: message.is_retracted,
+        reply_to: message.reply_to_id.map(|id| ReplyTo {
+            id,
+            sender: match kind {
+                Kind::Room => message.reply_to_sender.as_deref().and_then(occupant_nick),
+                Kind::Direct => None,
+            },
+        }),
+        reaction: reaction(message.reaction_target_id, message.reaction_emojis),
+    })
+}
+
+/// The stanza id `by` the expected archive (XEP-0359 §Security
+/// Considerations): anyone can put a `<stanza-id/>` on what they send.
+fn verified_stanza_id(ids: &[WaddleStanzaId], authority: &BareJid) -> Option<String> {
+    ids.iter()
+        .find(|id| id.by.parse::<BareJid>().is_ok_and(|by| &by == authority))
+        .map(|id| id.id.clone())
+}
+
+fn reaction(target: Option<String>, emojis: Vec<String>) -> Option<ReactionUpdate> {
+    target.map(|target_id| ReactionUpdate { target_id, emojis })
+}
+
+fn reply_body(body: Option<String>, start: Option<u32>, end: Option<u32>) -> Option<String> {
+    let body = body?;
+    Some(match (start, end) {
+        (Some(start), Some(end)) => strip_fallback(&body, start, end),
+        _ => body,
+    })
+}
+
+/// `room@muc.example/nick` → `nick`.
+fn occupant_nick(full: &str) -> Option<String> {
+    let jid: Jid = full.parse().ok()?;
+    jid.resource().map(|resource| resource.as_str().to_string())
 }
 
 fn timestamp_ms(raw: Option<&str>) -> i64 {
@@ -249,6 +597,13 @@ fn timestamp_ms(raw: Option<&str>) -> i64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn me() -> Me {
+        Me {
+            bare: "david@waddle.social".parse().expect("jid"),
+            nick: "david".into(),
+        }
+    }
 
     fn channel(name: &str, position: i32, group_dm: bool) -> WaddleChannel {
         WaddleChannel {
@@ -262,6 +617,64 @@ mod tests {
             autojoin: true,
             bookmark_name: None,
             is_group_dm: group_dm,
+        }
+    }
+
+    fn stanza_id(id: &str, by: &str) -> WaddleStanzaId {
+        WaddleStanzaId {
+            id: id.into(),
+            by: by.into(),
+        }
+    }
+
+    fn wire(from: &str, kind: &str, body: &str) -> WaddleMessage {
+        WaddleMessage {
+            id: Some("m1".into()),
+            from: Some(from.into()),
+            to: Some("david@waddle.social/linux".into()),
+            body: Some(body.into()),
+            subject: None,
+            message_type: kind.into(),
+            timestamp: Some("2026-10-18T12:00:00Z".into()),
+            stanza_id: None,
+            stanza_id_by: None,
+            stanza_ids: Vec::new(),
+            origin_id: Some("o1".into()),
+            replaces_id: None,
+            retracts_id: None,
+            retraction_id: None,
+            is_retracted: false,
+            moderation_target_id: None,
+            moderated_by: None,
+            moderation_reason: None,
+            reaction_target_id: None,
+            reaction_emojis: Vec::new(),
+            chat_state: None,
+            displayed_marker_requested: false,
+            displayed_marker_id: None,
+            is_muc: kind == "groupchat",
+            muc_user: false,
+            thread: None,
+            parent_thread_id: None,
+            markup_spans: Vec::new(),
+            broadcast_mention: None,
+            mention_uris: Vec::new(),
+            references: Vec::new(),
+            forum_post_kind: None,
+            forum_title: None,
+            is_sticker: false,
+            link_previews: Vec::new(),
+            pin_event: None,
+            call_thread_ended: None,
+            safety_scores: None,
+            carbon: None,
+            reply_to_id: None,
+            reply_to_sender: None,
+            reply_fallback_start: None,
+            reply_fallback_end: None,
+            call_thread: None,
+            shared_files: Vec::new(),
+            mds_displayed: None,
         }
     }
 
@@ -281,13 +694,121 @@ mod tests {
     }
 
     #[test]
-    fn occupant_jids_split_into_room_and_nick() {
-        assert_eq!(
-            split_occupant("general@muc.waddle.social/david"),
-            Some(("general@muc.waddle.social", "david"))
+    fn room_messages_trust_only_the_rooms_stanza_id() {
+        let mut message = wire("general@muc.waddle.social/ann", "groupchat", "hi");
+        message.stanza_ids = vec![
+            stanza_id("forged", "ann@waddle.social"),
+            stanza_id("s1", "general@muc.waddle.social"),
+        ];
+        let arrival = arrival(message.clone(), &me()).expect("a room message");
+        assert_eq!(arrival.conversation, "general@muc.waddle.social");
+        assert_eq!(arrival.kind, Kind::Room);
+        assert_eq!(arrival.message.stanza_id.as_deref(), Some("s1"));
+        assert_eq!(arrival.message.reference_id.as_deref(), Some("s1"));
+        assert_eq!(arrival.message.sender, "ann");
+        assert!(!arrival.message.own);
+
+        message.stanza_ids = vec![stanza_id("forged", "ann@waddle.social")];
+        let arrival = super::arrival(message, &me()).expect("a room message");
+        assert_eq!(arrival.message.stanza_id, None);
+        assert_eq!(arrival.message.reference_id, None);
+    }
+
+    #[test]
+    fn only_the_room_itself_can_moderate() {
+        let mut from_room = wire("general@muc.waddle.social", "groupchat", "");
+        from_room.moderation_target_id = Some("s1".into());
+        let arrival = arrival(from_room, &me()).expect("a moderation");
+        assert_eq!(arrival.message.moderates_id.as_deref(), Some("s1"));
+
+        let mut from_occupant = wire("general@muc.waddle.social/mallory", "groupchat", "x");
+        from_occupant.moderation_target_id = Some("s1".into());
+        let arrival = super::arrival(from_occupant, &me()).expect("a room message");
+        assert_eq!(arrival.message.moderates_id, None);
+    }
+
+    #[test]
+    fn mentions_of_me_or_the_room_count_but_not_my_own() {
+        let mut message = wire("general@muc.waddle.social/ann", "groupchat", "@david hi");
+        message.mention_uris = vec!["xmpp:david@waddle.social".into()];
+        assert!(arrival(message, &me()).expect("arrival").mentions_me);
+
+        let mut everyone = wire("general@muc.waddle.social/ann", "groupchat", "@here");
+        everyone.broadcast_mention = Some("here".into());
+        assert!(arrival(everyone, &me()).expect("arrival").mentions_me);
+
+        let mut own = wire("general@muc.waddle.social/david", "groupchat", "@here");
+        own.broadcast_mention = Some("here".into());
+        assert!(!arrival(own, &me()).expect("arrival").mentions_me);
+    }
+
+    #[test]
+    fn direct_messages_land_with_the_peer_both_ways() {
+        let incoming =
+            arrival(wire("ann@waddle.social/phone", "chat", "hey"), &me()).expect("a DM");
+        assert_eq!(incoming.conversation, "ann@waddle.social");
+        assert_eq!(incoming.kind, Kind::Direct);
+        assert_eq!(incoming.message.sender, "ann");
+        assert_eq!(incoming.message.reference_id.as_deref(), Some("o1"));
+
+        // A carbon of a send from another of my devices.
+        let mut sent = wire("david@waddle.social/desktop", "chat", "hey back");
+        sent.to = Some("ann@waddle.social".into());
+        sent.carbon = Some(WaddleCarbonDirection::Sent);
+        let sent = arrival(sent, &me()).expect("a DM");
+        assert_eq!(sent.conversation, "ann@waddle.social");
+        assert!(sent.message.own);
+        assert_eq!(sent.message.sender, "david");
+
+        // Room private messages are room traffic, not DMs.
+        let mut private = wire("general@muc.waddle.social/ann", "chat", "psst");
+        private.muc_user = true;
+        assert_eq!(arrival(private, &me()), None);
+    }
+
+    #[test]
+    fn replies_lose_their_fallback_quote() {
+        let mut message = wire(
+            "general@muc.waddle.social/ann",
+            "groupchat",
+            "> bob wrote:\n> hi\nhello",
         );
-        assert_eq!(split_occupant("general@muc.waddle.social"), None);
-        assert_eq!(split_occupant("general@muc.waddle.social/"), None);
+        message.reply_to_id = Some("s0".into());
+        message.reply_to_sender = Some("general@muc.waddle.social/bob".into());
+        message.reply_fallback_start = Some(0);
+        message.reply_fallback_end = Some(18);
+        let arrival = arrival(message, &me()).expect("arrival");
+        assert_eq!(arrival.message.body.as_deref(), Some("hello"));
+        assert_eq!(
+            arrival.message.reply_to,
+            Some(ReplyTo {
+                id: "s0".into(),
+                sender: Some("bob".into())
+            })
+        );
+    }
+
+    #[test]
+    fn dm_conversations_come_from_the_inbox_newest_first() {
+        let entry = |partner: &str, kind: &str, updated: i64| WaddleInboxEntry {
+            partner: partner.into(),
+            kind: kind.into(),
+            last_stanza_id: None,
+            last_updated: Some(updated),
+            unread: 0,
+            preview: None,
+            thread_id: None,
+            thread_title: None,
+            reply_count: None,
+            author: None,
+        };
+        let direct = direct_from(&[
+            entry("ann@waddle.social", "direct", 1),
+            entry("general@muc.waddle.social", "muc", 9),
+            entry("bob@waddle.social", "direct", 5),
+        ]);
+        let names: Vec<&str> = direct.iter().map(|dm| dm.name.as_str()).collect();
+        assert_eq!(names, ["bob", "ann"]);
     }
 
     #[test]
