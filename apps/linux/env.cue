@@ -2,7 +2,6 @@ package cuenv
 
 import (
 	"github.com/cuenv/cuenv/schema"
-	c "github.com/cuenv/cuenv/contrib/contributors"
 	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
@@ -33,7 +32,7 @@ schema.#Project & {
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
-		c.#CuenvRelease,
+		wc.#CuenvRelease,
 	]
 
 	ci: provider: github: {
