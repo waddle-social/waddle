@@ -9396,14 +9396,16 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
 mod remote_owner_admin_list {
     use super::*;
     use crate::clustering::relay::{
-        RelayAskError, RelayMucAdminQuery, RelayMucAdminQueryReply, RelaySendEffect,
-        RelaySendFailure,
+        RelayAskError, RelayMucAdminQuery, RelayMucAdminQueryItem, RelayMucAdminQueryReply,
+        RelaySendEffect, RelaySendFailure,
     };
     use crate::clustering::ClusteringHandles;
     use crate::server::routes::websocket::handlers::iq::muc_admin_relay::{
         TestMucAdminOwnerRelay, TEST_MUC_ADMIN_OWNER_RELAY,
     };
-    use crate::server::routes::websocket::relayed_muc_admin_query;
+    use crate::server::routes::websocket::{
+        relayed_muc_admin_query, AdminListAnswer, AdminListDenial,
+    };
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
@@ -9659,78 +9661,127 @@ mod remote_owner_admin_list {
         assert!(response.contains("item-not-found"), "{response}");
     }
 
+    fn member_list_request(room: BareJid, requester: FullJid) -> RelayMucAdminQuery {
+        RelayMucAdminQuery {
+            room,
+            requester,
+            items: vec![RelayMucAdminQueryItem {
+                affiliation: Some(Affiliation::Member),
+                role: None,
+            }],
+            trace: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn xep0045_forwarded_answer_has_the_local_wire_shape() {
+        let room_jid: BareJid = "remote-shape@muc.example.com".parse().expect("room");
+        let (owner, bob_jid) = owner_with_member(&room_jid).await;
+        let origin = origin(&room_jid, true).await;
+        let request = admin_list_get(&room_jid, "same-shape", "member");
+
+        let forwarded = get_from_origin(
+            origin.as_ref(),
+            relay_to(owner.clone(), Arc::new(std::sync::Mutex::new(Vec::new()))),
+            &request,
+            &bob_jid,
+        )
+        .await;
+        let local = handle_iq(
+            &request,
+            "example.com",
+            "muc.example.com",
+            owner.as_ref(),
+            &None,
+            &ready_phase(&bob_jid),
+        )
+        .await
+        .into_iter()
+        .next()
+        .expect("local response");
+
+        assert_eq!(
+            forwarded, local,
+            "a forwarded GET leaves exactly as the owner would answer it locally"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep0045_too_large_remote_list_is_a_definite_error() {
+        let room_jid: BareJid = "remote-huge@muc.example.com".parse().expect("room");
+        let origin = origin(&room_jid, true).await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+        let relay: TestMucAdminOwnerRelay =
+            Arc::new(|_node, _message| Box::pin(async { Ok(RelayMucAdminQueryReply::TooLarge) }));
+
+        let response = get_from_origin(
+            origin.as_ref(),
+            relay,
+            &admin_list_get(&room_jid, "remote-huge", "member"),
+            &bob,
+        )
+        .await;
+
+        assert!(response.contains("type='cancel'"), "{response}");
+        assert!(response.contains("<resource-constraint"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn xep0045_silent_remote_owner_is_bounded_by_the_origin_budget() {
+        let room_jid: BareJid = "remote-silent@muc.example.com".parse().expect("room");
+        let origin = origin(&room_jid, true).await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+        let relay: TestMucAdminOwnerRelay =
+            Arc::new(|_node, _message| Box::pin(std::future::pending()));
+        let request = admin_list_get(&room_jid, "remote-silent", "member");
+
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let response = get_from_origin(origin.as_ref(), relay, &request, &bob).await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "the origin answers inside the stanza-handler backstop"
+        );
+        assert!(response.contains("<resource-constraint"), "{response}");
+        assert!(response.contains("type='wait'"), "{response}");
+    }
+
     #[tokio::test]
     async fn relayed_query_for_a_room_without_a_local_actor_is_not_owner() {
         let room_jid: BareJid = "not-here@muc.example.com".parse().expect("room");
         let state = create_test_websocket_state().await;
         let bob: FullJid = "bob@example.com/web".parse().expect("bob");
-        let mut request: Iq = admin_list_get(&room_jid, "not-here", "member")
-            .parse::<Element>()
-            .ok()
-            .and_then(|element| Iq::try_from(element).ok())
-            .expect("typed GET");
-        if let Iq::Get { from, .. } = &mut request {
-            *from = Some(bob.clone().into());
-        }
 
-        let reply = relayed_muc_admin_query(
-            state.as_ref(),
-            RelayMucAdminQuery {
-                room: room_jid,
-                requester: bob,
-                query: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
-                    request,
-                ))),
-                trace: Default::default(),
-            },
-        )
-        .await;
+        let reply =
+            relayed_muc_admin_query(state.as_ref(), member_list_request(room_jid, bob)).await;
 
         assert_eq!(reply, RelayMucAdminQueryReply::NotOwner);
     }
 
     #[tokio::test]
-    async fn relayed_query_that_is_not_the_requesters_get_is_rejected() {
-        let room_jid: BareJid = "forged@muc.example.com".parse().expect("room");
+    async fn relayed_query_applies_the_owners_authorization() {
+        let room_jid: BareJid = "relayed-auth@muc.example.com".parse().expect("room");
         let (owner, bob_jid) = owner_with_member(&room_jid).await;
-        // `from` names someone other than the stamped requester.
-        let mut request: Iq = admin_list_get(&room_jid, "forged", "member")
-            .parse::<Element>()
-            .ok()
-            .and_then(|element| Iq::try_from(element).ok())
-            .expect("typed GET");
-        if let Iq::Get { from, .. } = &mut request {
-            *from = Some(
-                "mallory@example.com/web"
-                    .parse::<FullJid>()
-                    .expect("mallory")
-                    .into(),
-            );
-        }
+        let mallory: FullJid = "mallory@example.com/web".parse().expect("mallory");
 
-        let reply = relayed_muc_admin_query(
+        let member = relayed_muc_admin_query(
             owner.as_ref(),
-            RelayMucAdminQuery {
-                room: room_jid,
-                requester: bob_jid,
-                query: crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
-                    request,
-                ))),
-                trace: Default::default(),
-            },
+            member_list_request(room_jid.clone(), bob_jid.clone()),
         )
         .await;
-
-        let RelayMucAdminQueryReply::Answered(answer) = reply else {
-            panic!("a malformed forward is answered, not dropped: {reply:?}");
-        };
-        let crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(answer)) = *answer
+        let RelayMucAdminQueryReply::Answered(AdminListAnswer::Affiliations(members)) = member
         else {
-            panic!("the answer is an IQ");
+            panic!("a member gets the member list: {member:?}");
         };
-        assert!(
-            matches!(*answer, Iq::Error { .. }),
-            "a forward whose GET is not the requester's is refused"
+        assert!(members.contains(&(bob_jid.to_bare(), Affiliation::Member)));
+
+        let stranger =
+            relayed_muc_admin_query(owner.as_ref(), member_list_request(room_jid, mallory)).await;
+        assert_eq!(
+            stranger,
+            RelayMucAdminQueryReply::Answered(AdminListAnswer::Denied(AdminListDenial::Forbidden)),
+            "a non-member is refused on the owner exactly as locally"
         );
     }
 }

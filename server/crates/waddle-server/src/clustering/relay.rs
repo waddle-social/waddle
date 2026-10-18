@@ -1210,27 +1210,38 @@ impl Message<RelayExtensionRoomSend> for RelayActor {
 }
 
 /// #1298: a XEP-0045 muc#admin list GET for a room whose `RoomActor` the
-/// receiver owns. The origin forwards the requester's GET; the owner answers
-/// with exactly the authorization and list it gives a requester connected to
-/// it, from the live actor (durable grants plus permission-derived
-/// affiliations, which only the actor holds). Read-only, and never forwarded
-/// again. A peer that predates this id answers `UnknownMessage` before any
-/// handler runs, and the ordered-relay envelope is untouched.
+/// receiver owns. The origin forwards the requester's list request; the owner
+/// answers with exactly the authorization and list it gives a requester
+/// connected to it, from the live actor (durable grants plus
+/// permission-derived affiliations, which only the actor holds). Both
+/// directions are typed data, never stanza XML, so neither side's XML codec
+/// bound limits the list. Read-only, and never forwarded again. A peer that
+/// predates this id answers `UnknownMessage` before any handler runs, and the
+/// ordered-relay envelope is untouched.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RelayMucAdminQuery {
     pub room: jid::BareJid,
     /// The requester's bound full JID, stamped by the origin.
     pub requester: jid::FullJid,
-    /// The client's GET, with `from` stamped to `requester`.
-    pub query: RemoteStanza,
+    /// The GET's items, each an affiliation or role filter (XEP-0045 §8.5,
+    /// §9). Bounded by the origin.
+    pub items: Vec<RelayMucAdminQueryItem>,
     #[serde(default)]
     pub trace: RelayTraceContext,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RelayMucAdminQueryItem {
+    pub affiliation: Option<waddle_xmpp::Affiliation>,
+    pub role: Option<waddle_xmpp::Role>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reply)]
 pub enum RelayMucAdminQueryReply {
-    /// The owner's IQ response (result or error), addressed to the requester.
-    Answered(Box<RemoteStanza>),
+    /// The owner's answer; the origin builds the response stanza from it.
+    Answered(crate::server::routes::websocket::AdminListAnswer),
+    /// The answer would not fit one relay reply; nothing to retry.
+    TooLarge,
     /// The receiver has no live local `RoomActor` for the room; nothing ran.
     NotOwner,
 }

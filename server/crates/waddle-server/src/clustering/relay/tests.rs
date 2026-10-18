@@ -353,17 +353,13 @@ fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
     );
     let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
     let requester: jid::FullJid = "romeo@example.test/phone".parse().expect("requester");
-    let iq = xmpp_parsers::iq::Iq::Get {
-        from: Some(requester.clone().into()),
-        to: Some(room.clone().into()),
-        id: "admin-list".to_owned(),
-        payload: xmpp_parsers::minidom::Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
-            .build(),
-    };
     let message = RelayMucAdminQuery {
         room: room.clone(),
         requester: requester.clone(),
-        query: RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(iq))),
+        items: vec![RelayMucAdminQueryItem {
+            affiliation: Some(waddle_xmpp::Affiliation::Member),
+            role: None,
+        }],
         trace: RelayTraceContext::default(),
     };
     let decoded: RelayMucAdminQuery =
@@ -371,10 +367,22 @@ fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
             .expect("decode query");
     assert_eq!(decoded.room, room);
     assert_eq!(decoded.requester, requester);
-    assert_eq!(decoded.query, message.query);
+    assert_eq!(decoded.items, message.items);
 
+    use crate::server::routes::websocket::{AdminListAnswer, AdminListDenial, AdminRoleEntry};
     for reply in [
-        RelayMucAdminQueryReply::Answered(Box::new(message.query.clone())),
+        RelayMucAdminQueryReply::Answered(AdminListAnswer::Affiliations(vec![(
+            requester.to_bare(),
+            waddle_xmpp::Affiliation::Member,
+        )])),
+        RelayMucAdminQueryReply::Answered(AdminListAnswer::Roles(vec![AdminRoleEntry {
+            nick: "romeo".to_owned(),
+            role: waddle_xmpp::Role::Participant,
+            affiliation: waddle_xmpp::Affiliation::Member,
+            real_jid: requester.clone(),
+        }])),
+        RelayMucAdminQueryReply::Answered(AdminListAnswer::Denied(AdminListDenial::Forbidden)),
+        RelayMucAdminQueryReply::TooLarge,
         RelayMucAdminQueryReply::NotOwner,
     ] {
         let decoded: RelayMucAdminQueryReply =
