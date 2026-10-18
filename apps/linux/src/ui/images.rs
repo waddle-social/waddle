@@ -241,6 +241,10 @@ pub struct ImageCache {
     settled: Lru<ImageState>,
     in_flight: HashSet<String>,
     shown: HashMap<String, glib::WeakRef<gdk::Texture>>,
+    /// Failures, kept apart from the LRU like loads in flight: an evicted
+    /// failure would be fetched again on the next bind. `Some` is when a
+    /// transient one may be retried.
+    failed: HashMap<String, Option<Instant>>,
 }
 
 impl Default for ImageCache {
@@ -249,6 +253,7 @@ impl Default for ImageCache {
             settled: Lru::new(CAPACITY),
             in_flight: HashSet::new(),
             shown: HashMap::new(),
+            failed: HashMap::new(),
         }
     }
 }
@@ -259,12 +264,20 @@ impl ImageCache {
         if self.in_flight.contains(key) {
             return Some(ImageState::Loading);
         }
-        match self.settled.get(key) {
-            Some(ImageState::Failed {
-                retry_at: Some(retry_at),
-            }) if now >= *retry_at => return None,
-            Some(state) => return Some(state.clone()),
+        match self.failed.get(key) {
+            Some(Some(retry_at)) if now >= *retry_at => {
+                self.failed.remove(key);
+                return None;
+            }
+            Some(retry_at) => {
+                return Some(ImageState::Failed {
+                    retry_at: *retry_at,
+                })
+            }
             None => {}
+        }
+        if let Some(state) = self.settled.get(key) {
+            return Some(state.clone());
         }
         let texture = self.shown.get(key)?.upgrade()?;
         self.settled
@@ -287,8 +300,8 @@ impl ImageCache {
 
     pub fn failed(&mut self, key: String, transient: bool, now: Instant) {
         self.in_flight.remove(&key);
-        let retry_at = transient.then(|| now + RETRY_AFTER);
-        self.settled.insert(key, ImageState::Failed { retry_at });
+        self.failed
+            .insert(key, transient.then(|| now + RETRY_AFTER));
     }
 }
 
@@ -319,6 +332,22 @@ mod tests {
         assert!(cache.lookup("flaky", now + RETRY_AFTER).is_none());
         assert!(cache.lookup("bad", now + RETRY_AFTER * 10).is_some());
         assert!(cache.lookup("unknown", now).is_none());
+    }
+
+    #[test]
+    fn failures_are_never_evicted_so_never_refetched_in_a_cycle() {
+        let mut cache = ImageCache::default();
+        let now = Instant::now();
+        let keys: Vec<String> = (0..CAPACITY * 4).map(|at| format!("bad{at}")).collect();
+        for key in &keys {
+            cache.failed(key.clone(), false, now);
+        }
+        for key in &keys {
+            cache.ready(format!("{key}-other"), texture());
+        }
+        assert!(keys
+            .iter()
+            .all(|key| matches!(cache.lookup(key, now), Some(ImageState::Failed { .. }))));
     }
 
     #[test]

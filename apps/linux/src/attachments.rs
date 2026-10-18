@@ -196,14 +196,21 @@ fn is_loopback(url: &Url) -> bool {
     }
 }
 
+fn is_local_v4(ip: std::net::Ipv4Addr) -> bool {
+    let [first, second, ..] = ip.octets();
+    // 100.64.0.0/10: carrier-grade NAT, and Tailscale's tailnet addresses.
+    let shared = first == 100 && (second & 0xc0) == 64;
+    ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified() || shared
+}
+
 /// An address on this machine or its network, written as an IP literal.
 fn is_local_ip(url: &Url) -> bool {
     match url.host() {
-        Some(Host::Ipv4(ip)) => {
-            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
-        }
+        Some(Host::Ipv4(ip)) => is_local_v4(ip),
         Some(Host::Ipv6(ip)) => {
-            ip.is_loopback()
+            // `[::ffff:192.168.1.1]` reaches the IPv4 host.
+            ip.to_ipv4_mapped().is_some_and(is_local_v4)
+                || ip.is_loopback()
                 || ip.is_unspecified()
                 || ip.is_unique_local()
                 || ip.is_unicast_link_local()
@@ -243,11 +250,28 @@ pub fn slot_headers(headers: &[(String, String)]) -> Vec<(String, String)> {
         .collect()
 }
 
+/// Hold every redirect hop to [`transfer_url`]'s rule.
+fn policy_for(allow_loopback: bool) -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(move |attempt| {
+        if attempt.previous().len() >= MAX_REDIRECTS {
+            attempt.error(TransferError::InsecureUrl)
+        } else if transfer_url(attempt.url().as_str(), allow_loopback).is_ok() {
+            attempt.follow()
+        } else {
+            attempt.stop()
+        }
+    })
+}
+
 /// HTTP for file sharing. Every redirect hop is held to the same rule as
 /// the first request, and a stalled server cannot hang a transfer.
 #[derive(Clone)]
 pub struct Transfers {
     http: reqwest::Client,
+    /// Uploads: reqwest's read timeout runs from sending the request until
+    /// the response headers arrive, so it would cut off any upload slower
+    /// than it. Uploads get the overall limit alone.
+    uploads: reqwest::Client,
     allow_loopback: bool,
 }
 
@@ -256,24 +280,20 @@ impl Transfers {
     /// when it is itself on loopback.
     pub fn new(server: &Url) -> Result<Self, reqwest::Error> {
         let allow_loopback = is_loopback(server);
-        let policy = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= MAX_REDIRECTS {
-                attempt.error(TransferError::InsecureUrl)
-            } else if transfer_url(attempt.url().as_str(), allow_loopback).is_ok() {
-                attempt.follow()
-            } else {
-                attempt.stop()
-            }
-        });
-        let http = reqwest::Client::builder()
-            .user_agent(concat!("Waddle-Linux/", env!("CARGO_PKG_VERSION")))
-            .redirect(policy)
-            .connect_timeout(CONNECT_TIMEOUT)
+        let builder = || {
+            reqwest::Client::builder()
+                .user_agent(concat!("Waddle-Linux/", env!("CARGO_PKG_VERSION")))
+                .redirect(policy_for(allow_loopback))
+                .connect_timeout(CONNECT_TIMEOUT)
+        };
+        let http = builder()
             .read_timeout(READ_TIMEOUT)
             .timeout(TRANSFER_TIMEOUT)
             .build()?;
+        let uploads = builder().timeout(UPLOAD_TIMEOUT).build()?;
         Ok(Self {
             http,
+            uploads,
             allow_loopback,
         })
     }
@@ -290,11 +310,8 @@ impl Transfers {
         body: Vec<u8>,
     ) -> Result<(), TransferError> {
         let mut request = self
-            .http
+            .uploads
             .put(self.check(put_url)?)
-            // A large file on a slow link; the read timeout still catches a
-            // stall.
-            .timeout(UPLOAD_TIMEOUT)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
         for (name, value) in slot_headers(headers) {
             request = request.header(name, value);
@@ -540,6 +557,9 @@ mod tests {
             "https://10.0.0.1/f",
             "https://169.254.169.254/latest",
             "https://[fd00::1]/f",
+            "https://[::ffff:192.168.1.1]/f",
+            "https://[::ffff:127.0.0.1]/f",
+            "https://100.101.102.103/f",
             "https://localhost/f",
         ] {
             assert!(transfer_url(local, true).is_ok(), "{local}");
