@@ -35,7 +35,7 @@
   letter-spacing: 0;
 }
 
-/* Display roles — Space Grotesk carries headlines, room and community
+/* Display roles — the display weight carries headlines, room and community
  * names, dialog titles and big numbers. Tight tracking (-0.02em) is
  * what makes the geometric face read as a title rather than body. */
 .type-dialog-title,
@@ -84,7 +84,7 @@
   font-weight: 600;
 }
 
-/* Mono kicker — 11px JetBrains Mono, uppercase, tracked 0.08em. The
+/* Mono kicker — 11px system monospace, uppercase, tracked 0.08em. The
  * one voice for section labels, group headings and eyebrows. */
 .type-section-label {
   font-family: var(--font-code);

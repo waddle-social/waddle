@@ -36,10 +36,11 @@ export const tokens = {
     red: { 700: { value: "#b8353d" }, 500: { value: "#d1434b" }, 300: { value: "#ff8b90" } },
     avatarTints: { 1: { value: "#d6f3ef" }, 2: { value: "#ffe3cd" }, 3: { value: "#e3e8f7" }, 4: { value: "#c9d4dc" } },
   },
+  // System fonts only: Waddle ships no font files on any platform.
   fonts: {
-    display: { value: "'Space Grotesk Variable', system-ui, sans-serif" },
-    body: { value: "'Outfit Variable', system-ui, sans-serif" },
-    mono: { value: "'JetBrains Mono Variable', ui-monospace, monospace" },
+    display: { value: "system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif" },
+    body: { value: "system-ui, -apple-system, 'Segoe UI', Roboto, 'Noto Sans', Ubuntu, Cantarell, 'Helvetica Neue', Arial, sans-serif" },
+    mono: { value: "ui-monospace, 'SF Mono', SFMono-Regular, Menlo, Consolas, 'Liberation Mono', 'DejaVu Sans Mono', monospace" },
   },
   fontSizes: {
     kicker: { value: "0.6875rem" },

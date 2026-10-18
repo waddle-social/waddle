@@ -454,7 +454,7 @@ internal fun Modifier.swallowTaps(): Modifier = pointerInput(Unit) {
     }
 }
 
-/** Meta and chip text: Outfit 12. */
+/** Meta and chip text: body 12. */
 internal val MetaStyle
     @Composable get() = Waddle.type.control.copy(
         fontSize = WaddleTokens.Huddle.FontSize.caption,

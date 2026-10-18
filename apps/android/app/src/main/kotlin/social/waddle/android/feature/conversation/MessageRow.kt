@@ -479,7 +479,7 @@ internal fun authorNameOf(item: TimelineItem): String {
     return if (isGroupchatRow(item)) resourcepartOf(from) ?: localpartOf(from) else localpartOf(from)
 }
 
-/** Author line name: Outfit 13/600 (web `.chat-author`). */
+/** Author line name: body 13/600 (web `.chat-author`). */
 internal val AuthorStyle: TextStyle
     @Composable get() = Waddle.type.control.copy(
         fontSize = WaddleTokens.Huddle.FontSize.control,

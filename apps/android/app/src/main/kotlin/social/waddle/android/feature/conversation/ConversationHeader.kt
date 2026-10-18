@@ -23,7 +23,7 @@ import social.waddle.android.ui.huddle.Kicker
 
 /**
  * The conversation title block in the top bar: an optional leading face,
- * the name in Space Grotesk 16/600 (a heading), and a subline. One line
+ * the name in display 16/600 (a heading), and a subline. One line
  * each, so a long name ellipsises instead of clipping the bar.
  */
 @Composable

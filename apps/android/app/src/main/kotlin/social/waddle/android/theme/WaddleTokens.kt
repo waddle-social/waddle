@@ -392,13 +392,13 @@ object WaddleTokens {
 
 /** Huddle font roles (web `fonts` tokens). */
 enum class HuddleFont {
-    /** Space Grotesk Variable */
+    /** system-ui */
     Display,
 
-    /** Outfit Variable */
+    /** system-ui */
     Body,
 
-    /** JetBrains Mono Variable */
+    /** ui-monospace */
     Mono,
 }
 

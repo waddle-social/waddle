@@ -41,7 +41,7 @@ import social.waddle.android.R
 import social.waddle.android.theme.Waddle
 import social.waddle.android.ui.huddle.Kicker
 
-/** The `waddle.` wordmark: Space Grotesk, lowercase, an ember full stop. */
+/** The `waddle.` wordmark: display weight, lowercase, an ember full stop. */
 @Composable
 fun Wordmark(modifier: Modifier = Modifier) {
     val appName = stringResource(R.string.app_name)
@@ -62,7 +62,7 @@ fun Wordmark(modifier: Modifier = Modifier) {
 
 /**
  * A page's opening (web `community-page__header`): a mono kicker, the
- * page title in Space Grotesk and one lead line, with an optional action
+ * page title in the display style and one lead line, with an optional action
  * on the right. The title is the screen's heading.
  */
 @Composable
