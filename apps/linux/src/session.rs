@@ -193,6 +193,13 @@ impl Session {
         });
     }
 
+    /// RFC 6121 initial presence: without it the server treats this
+    /// resource as unavailable and does not deliver 1:1 messages to it.
+    pub fn announce(&self) {
+        let client = Arc::clone(&self.client);
+        runtime::spawn(async move { client.send_presence(None, None, None).await });
+    }
+
     pub fn join(&self, room: &Conversation) {
         let client = Arc::clone(&self.client);
         let (jid, nick) = (room.jid.clone(), self.me.nick.clone());

@@ -72,6 +72,25 @@ impl WaddleWindow {
                 }
             });
 
+        // "Rooms" and "Direct Messages" above the first row of each kind.
+        let window = self.downgrade();
+        imp.room_list.set_header_func(move |row, before| {
+            let Some(window) = window.upgrade() else {
+                return;
+            };
+            let kind_at = |row: &gtk::ListBoxRow| {
+                window
+                    .conversation_at(row.index())
+                    .map(|conversation| conversation.kind)
+            };
+            let kind = kind_at(row);
+            let starts_section = kind.is_some() && before.and_then(kind_at) != kind;
+            match kind.filter(|_| starts_section) {
+                Some(kind) => row.set_header(Some(&section_header(kind))),
+                None => row.set_header(None::<&gtk::Widget>),
+            }
+        });
+
         // Coming back to the window reads the open conversation.
         self.connect_is_active_notify(|window| {
             if window.is_active() {
@@ -259,6 +278,7 @@ impl WaddleWindow {
             return;
         };
         imp.account_status.set_title("Choose a conversation");
+        session.announce();
         let rooms = session.rooms().await;
         let inbox = session.inbox().await;
         for room in rooms.iter().filter(|room| room.autojoin) {
@@ -327,7 +347,6 @@ impl WaddleWindow {
         }
         let current = imp.current.borrow().clone();
         let unread = imp.unread.borrow();
-        let mut previous_kind = None;
         for conversation in imp.conversations.borrow().iter() {
             let row = adw::ActionRow::builder()
                 .title(sidebar_title(conversation))
@@ -339,10 +358,6 @@ impl WaddleWindow {
                 badge.add_css_class("dim-label");
                 row.add_suffix(&badge);
                 row.add_css_class("heading");
-            }
-            if previous_kind != Some(conversation.kind) {
-                row.set_header(Some(&section_header(conversation.kind)));
-                previous_kind = Some(conversation.kind);
             }
             imp.room_list.append(&row);
             if current.as_deref() == Some(conversation.jid.as_str()) {
@@ -750,8 +765,11 @@ fn attach_action_gestures(
     item: &gtk::ListItem,
     window: &glib::WeakRef<WaddleWindow>,
 ) {
+    // Capture phase: the selectable body label would otherwise claim a
+    // right-click for its own Cut/Copy/Paste menu.
     let click = gtk::GestureClick::builder()
         .button(gdk::BUTTON_SECONDARY)
+        .propagation_phase(gtk::PropagationPhase::Capture)
         .build();
     let (list_item, owner) = (item.downgrade(), window.clone());
     click.connect_pressed(move |gesture, _, x, y| {
@@ -762,7 +780,9 @@ fn attach_action_gestures(
     });
     widget.add_controller(click);
 
-    let press = gtk::GestureLongPress::new();
+    let press = gtk::GestureLongPress::builder()
+        .propagation_phase(gtk::PropagationPhase::Capture)
+        .build();
     let (list_item, owner) = (item.downgrade(), window.clone());
     press.connect_pressed(move |gesture, x, y| {
         gesture.set_state(gtk::EventSequenceState::Claimed);
