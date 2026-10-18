@@ -1429,6 +1429,14 @@ async fn cluster_exit_criteria_end_to_end() {
         server_a.wait_for_exit(Duration::from_secs(30)).await,
         "node A did not exit after SIGTERM"
     );
+    // #1295: a completed graceful shutdown retires its disabled identity, so
+    // survivors may reclaim every claim it still held without waiting for
+    // the orphan reaper.
+    assert_eq!(
+        node_expired_flag(&db, &recovered_a).await,
+        Some(true),
+        "a gracefully shut down node commits its own row expired before exit"
+    );
     drop(server_a);
     let (server_a2, node_a2, _peer_a2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;

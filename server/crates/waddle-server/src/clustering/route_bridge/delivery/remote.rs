@@ -511,11 +511,28 @@ impl OrderedRelayDeliveryBridge {
             return RemoteResourceOriginRefresh::Failed;
         };
         let target_entity = user_entity(&remote_origin.jid.to_bare());
-        let Some(snapshot) = current_claim(&services, &target_entity).await else {
-            return RemoteResourceOriginRefresh::Failed;
+        let snapshot = match services.claim_store.current_claim(&target_entity).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                tracing::warn!(
+                    entity = %target_entity,
+                    %error,
+                    "ordered relay: claim lookup failed"
+                );
+                return RemoteResourceOriginRefresh::Failed;
+            }
         };
         let me = services.node_identity.current();
-        if snapshot.owner_lease_fresh && snapshot.owner == me {
+        // #1295: this node hosts the socket, so it takes the user over when
+        // nobody owns the claim or its owner is committed-expired (crashed,
+        // or retired after a graceful shutdown). The registry's claim CAS
+        // decides: a fresh owner that wins first makes this ForeignOwner,
+        // and the next pass registers against it instead.
+        let promote = match &snapshot {
+            None => true,
+            Some(snapshot) => !snapshot.owner_lease_fresh || snapshot.owner == me,
+        };
+        if promote {
             match crate::server::dual_registration::mirror_register_outcome(
                 &services.user_registry,
                 remote_origin.jid.clone(),
@@ -533,9 +550,6 @@ impl OrderedRelayDeliveryBridge {
             self.remove_remote_socket_registration_if_snapshot(remote_origin, &owner)
                 .await;
             return RemoteResourceOriginRefresh::LocalOwner;
-        }
-        if !snapshot.owner_lease_fresh {
-            return RemoteResourceOriginRefresh::Failed;
         }
         match self
             .try_register_remote_user_resource(&remote_origin.jid, entry, owner.clone())

@@ -4653,6 +4653,33 @@ mod tests {
         );
     }
 
+    /// Retirement is pinned to the exact incarnation: a superseded epoch of
+    /// the same node id never expires the current one.
+    #[tokio::test]
+    async fn retire_after_shutdown_refuses_another_incarnation_of_the_node() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let current = node_identity();
+        store.register(&current, None).await.expect("register");
+        store.mark_draining(&current).await.expect("mark draining");
+        let superseded =
+            NodeIdentity::new(current.node_id.clone(), uuid::Uuid::new_v4().to_string());
+
+        assert!(
+            !store
+                .retire_after_shutdown(&superseded)
+                .await
+                .expect("retire"),
+            "another epoch of the node id is not this incarnation"
+        );
+        assert!(
+            store.retire_after_shutdown(&current).await.expect("retire"),
+            "the exact incarnation still retires"
+        );
+    }
+
     #[tokio::test]
     async fn retire_after_shutdown_refuses_a_node_that_is_not_draining() {
         let _guard = clustering_control_plane_table_lock().lock().await;

@@ -997,15 +997,18 @@ where
         // retires anything the bounded drain deliberately abandoned.
         self.live_identity.disable().await;
         self.local_claims.demote_owned_by(identity).await;
+        // #1295: disable() is the authority barrier — no guard, claim-store
+        // call or fenced write can run under this identity again — and the
+        // exact-owner demotion has retired every actor it owned. Commit that
+        // as expiry now, so survivors reclaim the claims it still holds
+        // (UserActor claims, and anything the bounded drain abandoned) on
+        // their next acquire instead of after a lease TTL plus an
+        // orphan-reaper sweep. The terminal sweep below is local cleanup
+        // only, and running it first could let process exit cut this off.
+        retire_after_shutdown_bounded(self.lease, identity, self.control_plane_budget).await;
         for entity in self.local_claims.terminal_sweep().await {
             self.local_claims.demote(&entity).await;
         }
-        // #1295: the identity is disabled and every local actor demoted, so
-        // nothing on this node can act under it again. Commit that as
-        // expiry so survivors reclaim the claims it still holds (UserActor
-        // claims, and anything the bounded drain abandoned) on their next
-        // acquire instead of after a lease TTL plus an orphan-reaper sweep.
-        retire_after_shutdown_bounded(self.lease, identity, self.control_plane_budget).await;
     }
 
     async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
@@ -2004,14 +2007,13 @@ mod tests {
         heartbeat_release: Option<Arc<tokio::sync::Notify>>,
         draining_entered: Option<Arc<tokio::sync::Notify>>,
         draining_release: Option<Arc<tokio::sync::Notify>>,
-        /// #1295: every `retire_after_shutdown` call, with whether
-        /// `retire_probe` (when set) still reported the identity active at
-        /// that moment.
+        /// #1295: every `retire_after_shutdown` call, with what
+        /// `retire_probe` (when set) observed at that moment.
         retirements: RetirementLog,
-        retire_probe: Option<SharedNodeIdentity>,
+        retire_probe: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     }
 
-    /// Each retired identity, with whether the probe saw it still active.
+    /// Each retired identity, with the probe's observation.
     type RetirementLog = Arc<std::sync::Mutex<Vec<(NodeIdentity, Option<bool>)>>>;
 
     impl FakeLease {
@@ -2094,14 +2096,11 @@ mod tests {
             Ok(true)
         }
         async fn retire_after_shutdown(&self, me: &NodeIdentity) -> Result<bool, ClaimError> {
-            let active = self
-                .retire_probe
-                .as_ref()
-                .map(|probe| probe.current().is_active());
+            let observed = self.retire_probe.as_ref().map(|probe| probe());
             self.retirements
                 .lock()
                 .expect("lock")
-                .push((me.clone(), active));
+                .push((me.clone(), observed));
             Ok(true)
         }
         async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
@@ -3813,19 +3812,45 @@ mod tests {
         assert!(!live_identity.current().is_active());
     }
 
+    /// Records exact-owner demotion, the step retirement must follow.
+    struct DemotionRecordingLocalClaims {
+        demoted: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for DemotionRecordingLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+        async fn demote(&self, _entity: &Entity) {}
+        async fn demote_owned_by(&self, _owner: &NodeIdentity) {
+            self.demoted.store(true, Ordering::SeqCst);
+        }
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+    }
+
     /// #1295: an ordinary shutdown retires its identity exactly once, and
-    /// only after it has been disabled — retirement must never make claims
-    /// stealable while this node could still act under them.
+    /// only after it has been disabled and its actors demoted — retirement
+    /// must never make claims stealable while this node could still act
+    /// under them.
     #[tokio::test]
     async fn ordinary_shutdown_retires_the_identity_only_after_disabling_it() {
         let owner = identity();
         let live_identity = SharedNodeIdentity::new(owner.clone());
+        let demoted = Arc::new(AtomicBool::new(false));
         let mut lease = FakeLease::new(Box::new(|| Ok(true)));
-        lease.retire_probe = Some(live_identity.clone());
+        let probe_identity = live_identity.clone();
+        let probe_demoted = demoted.clone();
+        lease.retire_probe = Some(Box::new(move || {
+            !probe_identity.current().is_active() && probe_demoted.load(Ordering::SeqCst)
+        }));
         let retirements = lease.retirements.clone();
         let claims: Arc<dyn ClaimStore> =
             Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
-        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+        let local_claims: Arc<dyn LocallyClaimedEntities> =
+            Arc::new(DemotionRecordingLocalClaims { demoted });
         let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let process_stop = CancellationToken::new();
@@ -3857,8 +3882,8 @@ mod tests {
         assert!(!live_identity.current().is_active());
         assert_eq!(
             retirements.lock().expect("lock").as_slice(),
-            &[(owner, Some(false))],
-            "retired once, for the shutdown identity, after it was disabled"
+            &[(owner, Some(true))],
+            "retired once, for the shutdown identity, after disable and demotion"
         );
     }
 
