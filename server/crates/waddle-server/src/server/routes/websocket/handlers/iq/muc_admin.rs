@@ -963,6 +963,116 @@ fn recover_committed_admin_effects(
     recovered
 }
 
+/// The outcome of a muc#admin list GET answered from one room actor.
+pub(super) enum AdminListAnswer {
+    Result(xmpp_parsers::iq::Iq),
+    Error(xmpp_parsers::stanza_error::StanzaError),
+}
+
+impl AdminListAnswer {
+    fn into_frame(
+        self,
+        id: &str,
+        response_from: Option<&str>,
+        response_to: Option<&str>,
+    ) -> String {
+        match self {
+            Self::Result(iq) => iq_to_xml(iq),
+            Self::Error(error) => build_iq_error_xml_typed(id, response_from, response_to, error),
+        }
+    }
+}
+
+/// Answer a muc#admin list GET from the room actor that owns the room.
+///
+/// The requester's affiliation and role come from the live actor, and so
+/// does the list: durable grants plus the permission-derived affiliations
+/// only the actor holds. The local path and the owner side of a forwarded
+/// GET (#1298) both answer here, so a requester sees the same authorization
+/// and list whichever node it is connected to.
+pub(super) async fn answer_admin_list_get(
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    sender_jid: &FullJid,
+    query: &waddle_xmpp::muc::AdminQuery,
+    iq_id: &str,
+) -> AdminListAnswer {
+    let context = match room_actor
+        .ask(GetAdminContext {
+            sender_jid: sender_jid.clone(),
+        })
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+        .await
+    {
+        Ok(context) => context,
+        Err(_) => {
+            return AdminListAnswer::Error(internal_server_error_iq_error("Internal server error."))
+        }
+    };
+    let has_admin_affiliation =
+        matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
+    let is_admin = has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator);
+    // XEP-0045 §9.5: in a non-anonymous room (all Waddle rooms are
+    // muc_nonanonymous) any member SHOULD be able to retrieve the
+    // member list — even when not currently an occupant. Every other
+    // list GET remains admin+ (#1265 item 12).
+    let member_list_get = !query.items.is_empty()
+        && !query.items.iter().any(admin_item_has_role_shape)
+        && query
+            .items
+            .iter()
+            .all(|item| item.affiliation == Some(Affiliation::Member))
+        && context.affiliation >= Affiliation::Member;
+    if !is_admin && !member_list_get {
+        return AdminListAnswer::Error(forbidden_iq_error("Operation not permitted."));
+    }
+    let snapshot = match room_actor
+        .ask(GetSnapshot)
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
+        .await
+    {
+        Ok(snapshot) => snapshot.room,
+        Err(_) => {
+            return AdminListAnswer::Error(internal_server_error_iq_error("Internal server error."))
+        }
+    };
+    let to_jid = Jid::from(sender_jid.clone());
+    if query.items.iter().any(admin_item_has_role_shape) {
+        let role_filter = query.items.iter().find_map(|item| item.role);
+        let items: Vec<(String, waddle_xmpp::Role, Affiliation, FullJid)> = snapshot
+            .occupants
+            .values()
+            .filter(|occupant| role_filter.is_none_or(|role| occupant.role == role))
+            .map(|occupant| {
+                (
+                    occupant.nick.clone(),
+                    occupant.role,
+                    occupant.affiliation,
+                    occupant.real_jid.clone(),
+                )
+            })
+            .collect();
+        return AdminListAnswer::Result(build_role_result(iq_id, &query.room_jid, &to_jid, &items));
+    }
+    if !has_admin_affiliation && !member_list_get {
+        return AdminListAnswer::Error(forbidden_iq_error("Operation not permitted."));
+    }
+    let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
+    let items: Vec<(BareJid, Affiliation)> = if let Some(affiliation) = affiliation_filter {
+        snapshot
+            .get_jids_by_affiliation(affiliation)
+            .into_iter()
+            .map(|jid| (jid, affiliation))
+            .collect()
+    } else {
+        snapshot
+            .get_all_affiliations()
+            .into_iter()
+            .map(|entry| (entry.jid, entry.affiliation))
+            .collect()
+    };
+    AdminListAnswer::Result(build_admin_result(iq_id, &query.room_jid, &to_jid, &items))
+}
+
 pub(super) async fn handle_muc_admin_iq(
     iq: &xmpp_parsers::iq::Iq,
     muc_domain: &str,
@@ -989,6 +1099,23 @@ pub(super) async fn handle_muc_admin_iq(
     };
     let room_actor = match get_room_actor_result(state, &query.room_jid).await {
         Ok(Some(room_actor)) => room_actor,
+        // #1298: another node may own the room's actor. A list GET is
+        // answered by that owner; nothing else is forwarded.
+        #[cfg(feature = "clustering")]
+        Ok(None) if query.is_get => {
+            return vec![
+                super::muc_admin_relay::forward_admin_list_get(
+                    state,
+                    sender_jid,
+                    &iq_with_from,
+                    &query,
+                    response_from,
+                    response_to,
+                )
+                .await,
+            ]
+            .into();
+        }
         Ok(None) => {
             return vec![build_iq_error_xml_typed(
                 iq.id(),
@@ -1009,11 +1136,11 @@ pub(super) async fn handle_muc_admin_iq(
             .into();
         }
     };
-    let _config_guard = if query.is_get {
-        None
-    } else {
-        Some(acquire_room_config_lock(&query.room_jid).await)
-    };
+    if query.is_get {
+        let answer = answer_admin_list_get(&room_actor, sender_jid, &query, iq.id()).await;
+        return vec![answer.into_frame(iq.id(), response_from, response_to)].into();
+    }
+    let _config_guard = acquire_room_config_lock(&query.room_jid).await;
     let context = match room_actor
         .ask(GetAdminContext {
             sender_jid: sender_jid.clone(),
@@ -1035,97 +1162,13 @@ pub(super) async fn handle_muc_admin_iq(
     let has_admin_affiliation =
         matches!(context.affiliation, Affiliation::Owner | Affiliation::Admin);
     let is_admin = has_admin_affiliation || matches!(context.role, waddle_xmpp::Role::Moderator);
-    // XEP-0045 §9.5: in a non-anonymous room (all Waddle rooms are
-    // muc_nonanonymous) any member SHOULD be able to retrieve the
-    // member list — even when not currently an occupant. Every other
-    // list GET and all admin sets remain admin+ (#1265 item 12).
-    let member_list_get = query.is_get
-        && !query.items.is_empty()
-        && !query.items.iter().any(admin_item_has_role_shape)
-        && query
-            .items
-            .iter()
-            .all(|item| item.affiliation == Some(Affiliation::Member))
-        && context.affiliation >= Affiliation::Member;
-    if !is_admin && !member_list_get {
+    if !is_admin {
         return vec![build_iq_error_xml_typed(
             iq.id(),
             response_from,
             response_to,
             forbidden_iq_error("Operation not permitted."),
         )]
-        .into();
-    }
-    if query.is_get {
-        let snapshot = match room_actor
-            .ask(GetSnapshot)
-            .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
-            .await
-        {
-            Ok(snapshot) => snapshot.room,
-            Err(_) => {
-                return vec![build_iq_error_xml_typed(
-                    iq.id(),
-                    response_from,
-                    response_to,
-                    internal_server_error_iq_error("Internal server error."),
-                )]
-                .into();
-            }
-        };
-        let to_jid = Jid::from(sender_jid.clone());
-        if query.items.iter().any(admin_item_has_role_shape) {
-            let role_filter = query.items.iter().find_map(|item| item.role);
-            let items: Vec<(String, waddle_xmpp::Role, Affiliation, FullJid)> = snapshot
-                .occupants
-                .values()
-                .filter(|occupant| role_filter.is_none_or(|role| occupant.role == role))
-                .map(|occupant| {
-                    (
-                        occupant.nick.clone(),
-                        occupant.role,
-                        occupant.affiliation,
-                        occupant.real_jid.clone(),
-                    )
-                })
-                .collect();
-            return vec![iq_to_xml(build_role_result(
-                iq.id(),
-                &query.room_jid,
-                &to_jid,
-                &items,
-            ))]
-            .into();
-        }
-        if !has_admin_affiliation && !member_list_get {
-            return vec![build_iq_error_xml_typed(
-                iq.id(),
-                response_from,
-                response_to,
-                forbidden_iq_error("Operation not permitted."),
-            )]
-            .into();
-        }
-        let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
-        let items: Vec<(BareJid, Affiliation)> = if let Some(affiliation) = affiliation_filter {
-            snapshot
-                .get_jids_by_affiliation(affiliation)
-                .into_iter()
-                .map(|jid| (jid, affiliation))
-                .collect()
-        } else {
-            snapshot
-                .get_all_affiliations()
-                .into_iter()
-                .map(|entry| (entry.jid, entry.affiliation))
-                .collect()
-        };
-        return vec![iq_to_xml(build_admin_result(
-            iq.id(),
-            &query.room_jid,
-            &to_jid,
-            &items,
-        ))]
         .into();
     }
     let room_jid = query.room_jid.clone();

@@ -76,6 +76,7 @@ const REMOTE_RESOURCE_OUTBOUND_CHANNEL_SIZE: usize = 256;
 
 mod delivery;
 mod extension_room;
+mod muc_admin_query;
 mod presence;
 mod reassert;
 mod recipient_inventory;

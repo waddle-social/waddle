@@ -126,6 +126,10 @@ pub(crate) use cleanup::{
     maybe_evict_empty_room, LeaveFanOutProgress,
 };
 pub use connection::router;
+#[cfg(feature = "clustering")]
+pub(crate) use handlers::iq::muc_admin_relay::{
+    relayed_muc_admin_query, MUC_ADMIN_QUERY_MAILBOX_TIMEOUT, MUC_ADMIN_QUERY_REPLY_TIMEOUT,
+};
 pub(crate) use local_departures::{
     InFlightLease, LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures,
     ACK_ABSENT_ROOM_RETRIES,

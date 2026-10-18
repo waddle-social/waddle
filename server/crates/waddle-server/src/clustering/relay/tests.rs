@@ -337,6 +337,68 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
     );
 }
 
+/// #1298: forwarding a muc#admin list GET is a NEW message id; the ordered
+/// relay envelope is untouched, so the room's ordered lane never sees it. An
+/// old peer's `UnknownMessage` is a no-effect failure.
+#[test]
+fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayMucAdminQuery>>::REMOTE_ID,
+        "waddle.clustering.relay.muc_admin_query.v1"
+    );
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
+        "waddle.clustering.relay.deliver_ordered.v13",
+        "a new relay message must not bump the ordered-relay envelope id"
+    );
+    let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
+    let requester: jid::FullJid = "romeo@example.test/phone".parse().expect("requester");
+    let iq = xmpp_parsers::iq::Iq::Get {
+        from: Some(requester.clone().into()),
+        to: Some(room.clone().into()),
+        id: "admin-list".to_owned(),
+        payload: xmpp_parsers::minidom::Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+            .build(),
+    };
+    let message = RelayMucAdminQuery {
+        room: room.clone(),
+        requester: requester.clone(),
+        query: RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(iq))),
+        trace: RelayTraceContext::default(),
+    };
+    let decoded: RelayMucAdminQuery =
+        rmp_serde::from_slice(&rmp_serde::to_vec_named(&message).expect("encode query"))
+            .expect("decode query");
+    assert_eq!(decoded.room, room);
+    assert_eq!(decoded.requester, requester);
+    assert_eq!(decoded.query, message.query);
+
+    for reply in [
+        RelayMucAdminQueryReply::Answered(message.query.clone()),
+        RelayMucAdminQueryReply::NotOwner,
+    ] {
+        let decoded: RelayMucAdminQueryReply =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode reply"))
+                .expect("decode reply");
+        assert_eq!(decoded, reply);
+    }
+
+    let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
+        actor_remote_id: "actor".into(),
+        message_remote_id: "waddle.clustering.relay.muc_admin_query.v1".into(),
+    });
+    assert!(
+        matches!(
+            old_peer,
+            RelayAskError::Send {
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+        ),
+        "a peer that predates the message is a no-effect failure: {old_peer:?}"
+    );
+}
+
 #[test]
 fn incomplete_carbons_reply_has_new_remote_message_id() {
     assert_eq!(

@@ -119,6 +119,7 @@ enum RelayDispatchKind {
     ResourcePresence,
     RecipientInventory,
     ExtensionRoomSend,
+    MucAdminQuery,
 }
 
 impl RelayDispatchKind {
@@ -140,6 +141,7 @@ impl RelayDispatchKind {
             Self::ResourcePresence => "resource_presence",
             Self::RecipientInventory => "recipient_inventory",
             Self::ExtensionRoomSend => "extension_room_send",
+            Self::MucAdminQuery => "muc_admin_query",
         }
     }
 }
@@ -1204,6 +1206,52 @@ impl Message<RelayExtensionRoomSend> for RelayActor {
         spawn_in_dispatch_span(ctx, span, async move {
             bridge.extension_room_send_local(msg).await
         })
+    }
+}
+
+/// #1298: a XEP-0045 muc#admin list GET for a room whose `RoomActor` the
+/// receiver owns. The origin forwards the requester's GET; the owner answers
+/// with exactly the authorization and list it gives a requester connected to
+/// it, from the live actor (durable grants plus permission-derived
+/// affiliations, which only the actor holds). Read-only, and never forwarded
+/// again. A peer that predates this id answers `UnknownMessage` before any
+/// handler runs, and the ordered-relay envelope is untouched.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RelayMucAdminQuery {
+    pub room: jid::BareJid,
+    /// The requester's bound full JID, stamped by the origin.
+    pub requester: jid::FullJid,
+    /// The client's GET, with `from` stamped to `requester`.
+    pub query: RemoteStanza,
+    #[serde(default)]
+    pub trace: RelayTraceContext,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reply)]
+pub enum RelayMucAdminQueryReply {
+    /// The owner's IQ response (result or error), addressed to the requester.
+    Answered(RemoteStanza),
+    /// The receiver has no live local `RoomActor` for the room; nothing ran.
+    NotOwner,
+}
+
+#[kameo::remote_message("waddle.clustering.relay.muc_admin_query.v1")]
+impl Message<RelayMucAdminQuery> for RelayActor {
+    type Reply = kameo::reply::DelegatedReply<RelayMucAdminQueryReply>;
+
+    async fn handle(
+        &mut self,
+        msg: RelayMucAdminQuery,
+        ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let span = relay_dispatch_span(RelayDispatchKind::MucAdminQuery, &msg.trace);
+        span.record("jid", tracing::field::display(&msg.room));
+        let bridge = Arc::clone(&self.ordered_delivery_bridge);
+        spawn_in_dispatch_span(
+            ctx,
+            span,
+            async move { bridge.muc_admin_query_local(msg).await },
+        )
     }
 }
 
@@ -2433,6 +2481,42 @@ impl RelayHandle {
             .reply_timeout(self.reply_timeout)
             .await
             .map_err(send_error)
+    }
+
+    /// Forward a muc#admin list GET to the room owner (#1298). Read-only,
+    /// so a stale relay ref is resolved and asked once more.
+    pub(crate) async fn muc_admin_query(
+        &mut self,
+        mut message: RelayMucAdminQuery,
+    ) -> Result<RelayMucAdminQueryReply, RelayAskError> {
+        message.trace = RelayTraceContext::capture();
+        let stop_token = self.stop_token.clone();
+        tokio::select! {
+            biased;
+            _ = stop_token.cancelled() => Err(RelayAskError::Cancelled),
+            result = async {
+                let remote_ref = self.resolve().await?;
+                match remote_ref
+                    .ask(&message)
+                    .mailbox_timeout(self.mailbox_timeout)
+                    .reply_timeout(self.reply_timeout)
+                    .await
+                {
+                    Ok(reply) => Ok(reply),
+                    Err(error) if is_stale_ref_error(&error) => {
+                        self.cached = None;
+                        let remote_ref = self.resolve().await?;
+                        remote_ref
+                            .ask(&message)
+                            .mailbox_timeout(self.mailbox_timeout)
+                            .reply_timeout(self.reply_timeout)
+                            .await
+                            .map_err(send_error)
+                    }
+                    Err(error) => Err(send_error(error)),
+                }
+            } => result,
+        }
     }
 
     /// Stamps the origin's remaining wait after the relay lookup, so lookup
