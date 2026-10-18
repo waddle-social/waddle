@@ -334,6 +334,7 @@
                 ./server/Cargo.lock
                 (lib.fileset.difference ./server/crates testFiles)
                 ./server/extensions
+                ./server/vendor
                 ./server/wit
               ];
           };
@@ -346,6 +347,7 @@
               ./server/capabilities.toml
               ./server/crates
               ./server/extensions
+              ./server/vendor
               ./server/wit
             ];
           };
@@ -502,6 +504,7 @@
               ./server/capabilities.toml
               ./server/crates
               ./server/extensions
+              ./server/vendor
               ./server/wit
             ];
           };

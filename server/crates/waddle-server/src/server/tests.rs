@@ -1032,6 +1032,7 @@ async fn test_app_for_state(state: Arc<AppState>) -> Router {
             .handle(),
         drain_complete: std::sync::Arc::new(tokio::sync::Notify::new()),
         sm_drain_complete: tokio_util::sync::CancellationToken::new(),
+        connections_drained: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         sm_drain_started: std::sync::Arc::new(std::sync::OnceLock::new()),
     })
     .await

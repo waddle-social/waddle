@@ -107,6 +107,7 @@ pub async fn start_with_config(
     let shutdown = waddle_ecdysis::GracefulShutdown::from_env();
     let stop_token = shutdown.stop_token();
     let sm_drain_complete = tokio_util::sync::CancellationToken::new();
+    let connections_drained = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let sm_drain_started = Arc::new(std::sync::OnceLock::new());
     let sm_drain_budget = session_janitors::max_drain_duration_from_env();
 
@@ -254,9 +255,13 @@ pub async fn start_with_config(
         db_pool.global(),
         &stop_token,
         node_lifecycle.clone(),
-        sm_drain_complete.clone(),
-        sm_drain_budget,
-        sm_drain_started.clone(),
+        crate::clustering::ShutdownSmDrain {
+            process_stop: stop_token.clone(),
+            complete: sm_drain_complete.clone(),
+            connections_drained: connections_drained.clone(),
+            budget: sm_drain_budget,
+            started: sm_drain_started.clone(),
+        },
     )
     .await?;
 
@@ -410,6 +415,7 @@ pub async fn start_with_config(
             drain_complete: http_drain_complete,
             sm_drain_complete,
             sm_drain_started,
+            connections_drained,
         })
         .await
     });

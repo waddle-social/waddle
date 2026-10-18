@@ -1484,7 +1484,8 @@ where
     .await
     {
         RegistrationAfterFrame::Unchanged => {}
-        RegistrationAfterFrame::SessionInitializationFailed => {
+        failure @ (RegistrationAfterFrame::SessionInitializationFailed
+        | RegistrationAfterFrame::RegistrationTemporarilyUnavailable) => {
             if close_if_frame_authority_revoked(
                 state,
                 conn,
@@ -1496,9 +1497,25 @@ where
             {
                 return false;
             }
-            let stream_error = build_internal_server_error_stream_error(
-                "Session initialization failed; please reconnect.",
-            );
+            let stream_error = if matches!(
+                failure,
+                RegistrationAfterFrame::RegistrationTemporarilyUnavailable
+            ) {
+                // RFC 6120 §4.9.3.17: the actor/claim handoff exhausted its
+                // bounded capacity for this stream. A fresh stream may retry.
+                super::transport_xml::element_to_xml(
+                    xmpp_parsers::stream_error::StreamError::new(
+                        xmpp_parsers::stream_error::DefinedCondition::ResourceConstraint,
+                        "en",
+                        "Session registration is temporarily unavailable; please reconnect.",
+                    )
+                    .into(),
+                )
+            } else {
+                build_internal_server_error_stream_error(
+                    "Session initialization failed; please reconnect.",
+                )
+            };
             let send_outcome = send_ws_text_frames_with_authority(
                 ws_sender,
                 [stream_error, websocket_stream_close_xml()],

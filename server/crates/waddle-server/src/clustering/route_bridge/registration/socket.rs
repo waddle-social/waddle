@@ -203,8 +203,18 @@ impl OrderedRelayDeliveryBridge {
             return RemoteResourceRegisterOutcome::Failed;
         };
         let target_entity = user_entity(&jid.to_bare());
-        let Some(target_snapshot) = current_claim(&services, &target_entity).await else {
-            return RemoteResourceRegisterOutcome::NotRemote;
+        let target_snapshot = match services.claim_store.current_claim(&target_entity).await {
+            Ok(Some(snapshot)) => snapshot,
+            Ok(None) => return RemoteResourceRegisterOutcome::NotRemote,
+            Err(error) => {
+                tracing::warn!(
+                    jid = %jid,
+                    %error,
+                    error_class = %RemoteAskErrorClass::Backend,
+                    "clustered remote-resource register claim lookup failed"
+                );
+                return RemoteResourceRegisterOutcome::Failed;
+            }
         };
         if !target_snapshot.owner_lease_fresh {
             return RemoteResourceRegisterOutcome::NotRemote;
@@ -248,14 +258,29 @@ impl OrderedRelayDeliveryBridge {
         .await
         {
             Ok(reply) => reply,
-            Err(_) => {
+            Err(error) => {
                 tracing::warn!(
                     jid = %jid,
                     owner_node = %user_owner.as_str(),
                     error_class = %RemoteAskErrorClass::AskFailed,
                     "clustered remote-resource register ask failed"
                 );
-                return RemoteResourceRegisterOutcome::Failed;
+                return match error {
+                    RelayAskError::NotFound { .. }
+                    | RelayAskError::Send {
+                        failure:
+                            RelaySendFailure::Transport
+                            | RelaySendFailure::StaleRef
+                            | RelaySendFailure::ReplyTimeout
+                            | RelaySendFailure::MailboxFull,
+                        ..
+                    } => Self::registration_after_remote_owner_failure(&services, jid).await,
+                    RelayAskError::Cancelled
+                    | RelayAskError::Send {
+                        failure: RelaySendFailure::Handler | RelaySendFailure::Codec,
+                        ..
+                    } => RemoteResourceRegisterOutcome::Failed,
+                };
             }
         };
         match reply.status {
@@ -307,12 +332,45 @@ impl OrderedRelayDeliveryBridge {
                 }
                 RemoteResourceRegisterOutcome::Registered
             }
-            RelayRemoteResourceRegistrationStatus::NotOwner => {
+            RelayRemoteResourceRegistrationStatus::NotOwner
+            | RelayRemoteResourceRegistrationStatus::Busy
+            | RelayRemoteResourceRegistrationStatus::StaleRegistration => {
+                Self::registration_after_remote_owner_failure(&services, jid).await
+            }
+            RelayRemoteResourceRegistrationStatus::Unavailable => {
+                RemoteResourceRegisterOutcome::Failed
+            }
+        }
+    }
+
+    /// A missing relay is not owner-death proof. Re-read the authoritative
+    /// claim after the failed exchange: only a missing, locally owned, or
+    /// stale claim returns control to the local registry. That registry still
+    /// has to win its OwnerStale CAS and publication guard before registering.
+    async fn registration_after_remote_owner_failure(
+        services: &OrderedRelayDeliveryServices,
+        jid: &jid::FullJid,
+    ) -> RemoteResourceRegisterOutcome {
+        match services
+            .claim_store
+            .current_claim(&user_entity(&jid.to_bare()))
+            .await
+        {
+            Ok(None) => RemoteResourceRegisterOutcome::NotRemote,
+            Ok(Some(snapshot))
+                if !snapshot.owner_lease_fresh
+                    || snapshot.owner == services.node_identity.current() =>
+            {
                 RemoteResourceRegisterOutcome::NotRemote
             }
-            RelayRemoteResourceRegistrationStatus::StaleRegistration
-            | RelayRemoteResourceRegistrationStatus::Busy
-            | RelayRemoteResourceRegistrationStatus::Unavailable => {
+            Ok(Some(_)) => RemoteResourceRegisterOutcome::Retryable,
+            Err(error) => {
+                tracing::warn!(
+                    jid = %jid,
+                    %error,
+                    error_class = %RemoteAskErrorClass::Backend,
+                    "clustered remote-resource register owner recheck failed"
+                );
                 RemoteResourceRegisterOutcome::Failed
             }
         }
@@ -835,7 +893,8 @@ impl OrderedRelayDeliveryBridge {
                         | crate::server::dual_registration::MirrorRegisterOutcome::Failed => false,
                     }
                 }
-                RemoteResourceRegisterOutcome::Failed => false,
+                RemoteResourceRegisterOutcome::Retryable
+                | RemoteResourceRegisterOutcome::Failed => false,
             };
         };
         let origin = RemoteResourceOriginSnapshot {
@@ -1209,6 +1268,10 @@ async fn complete_fresh_remote_retirement(
         },
     }
 }
+
+#[cfg(test)]
+#[path = "socket_registration_tests.rs"]
+mod registration_tests;
 
 #[cfg(test)]
 #[path = "socket_retirement_tests.rs"]

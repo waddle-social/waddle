@@ -185,6 +185,12 @@ impl AllowlistStore for StaticAllowlist {
     ) -> Result<HashSet<PeerId>, super::super::allowlist::AllowlistError> {
         Ok(HashSet::from([self.peer_id]))
     }
+
+    async fn effective_peers(
+        &self,
+    ) -> Result<HashSet<PeerId>, super::super::allowlist::AllowlistError> {
+        self.enrolled_peers().await
+    }
 }
 
 pub(crate) fn origin_identity() -> NodeIdentity {

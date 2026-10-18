@@ -55,6 +55,7 @@ pub(crate) struct HttpServerDeps {
     /// stop_token cancels so the runtime doesn't tear down mid-drain.
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
     pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
+    pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
@@ -118,6 +119,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         drain_complete,
         sm_drain_complete,
         sm_drain_started,
+        connections_drained,
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
@@ -133,6 +135,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         shutdown_handle,
         drain_complete: drain_complete.clone(),
         sm_drain_complete: sm_drain_complete.clone(),
+        connections_drained,
         sm_drain_started,
     })
     .await;
@@ -360,6 +363,7 @@ pub(crate) struct RouterDeps {
     pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
     pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
+    pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
@@ -376,6 +380,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         drain_complete,
         sm_drain_complete,
         sm_drain_started,
+        connections_drained,
     } = deps;
     let shutdown_stop_token = shutdown_handle.stop_token();
     // Create auth broker state
@@ -478,6 +483,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         Arc::clone(&drain_complete),
         sm_drain_complete,
         sm_drain_started,
+        connections_drained,
     );
 
     let extension_webhooks_router =

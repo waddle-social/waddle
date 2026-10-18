@@ -546,6 +546,11 @@ impl crate::clustering::allowlist::AllowlistStore for NoopAllowlist {
     ) -> Result<HashSet<PeerId>, crate::clustering::allowlist::AllowlistError> {
         Ok(HashSet::new())
     }
+    async fn effective_peers(
+        &self,
+    ) -> Result<HashSet<PeerId>, crate::clustering::allowlist::AllowlistError> {
+        self.enrolled_peers().await
+    }
 }
 
 pub(super) fn timeout_envelope() -> RemoteStanzaEnvelope {
