@@ -978,16 +978,27 @@ const IMAGE_MAX: (i32, i32) = (400, 300);
 
 /// Images inline, other files as a button that saves them.
 fn bind_attachments(window: &WaddleWindow, container: &gtk::Box, item: &TimelineItem) {
+    // Build the new widgets before dropping the old ones: the pictures on
+    // screen keep their textures alive, so rebinding finds them instead of
+    // fetching them again.
+    let mut inline = 0;
+    let widgets: Vec<gtk::Widget> = item
+        .attachments
+        .iter()
+        .map(|attachment| {
+            if is_inline_image(attachment) && inline < images::MAX_INLINE_PER_MESSAGE {
+                inline += 1;
+                image_widget(window, attachment)
+            } else {
+                file_widget(window, attachment)
+            }
+        })
+        .collect();
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
-    container.set_visible(!item.attachments.is_empty());
-    for attachment in &item.attachments {
-        let widget = if is_inline_image(attachment) {
-            image_widget(window, attachment)
-        } else {
-            file_widget(window, attachment)
-        };
+    container.set_visible(!widgets.is_empty());
+    for widget in widgets {
         container.append(&widget);
     }
 }
@@ -1070,13 +1081,10 @@ impl WaddleWindow {
             (self.clone(), attachment.clone(), imp.generation.get());
         glib::spawn_future_local(async move {
             let decoded = match session.fetch(attachment).await {
-                Ok(bytes) => gio::spawn_blocking(move || images::decode(&bytes))
-                    .await
-                    .unwrap_or(Err(images::DecodeError::Invalid))
-                    .map_err(|error| {
-                        tracing::warn!(%error, "could not show an image");
-                        false
-                    }),
+                Ok(bytes) => images::decode_off_main(bytes).await.map_err(|error| {
+                    tracing::warn!(%error, "could not show an image");
+                    false
+                }),
                 Err(error) => {
                     tracing::warn!(%error, "could not fetch an image");
                     Err(error.is_transient())

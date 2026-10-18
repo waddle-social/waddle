@@ -257,7 +257,8 @@ impl WaddleWindow {
         let imp = self.imp();
         let editing = matches!(*imp.compose.borrow(), Compose::Edit { .. });
         imp.compose.replace(Compose::Message);
-        imp.composer_context.set_visible(false);
+        // An upload in flight keeps its "Uploading…" note.
+        imp.composer_context.set_visible(imp.uploading.get());
         if editing {
             imp.composer_entry.set_text("");
         }

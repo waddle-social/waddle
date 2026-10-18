@@ -7,7 +7,7 @@
 //! its pixels are decoded.
 
 use std::cell::Cell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use gtk::gdk;
@@ -25,6 +25,13 @@ pub const DECODE_BOX: (i32, i32) = (800, 600);
 const HEADER_CHUNK: usize = 512;
 const BODY_CHUNK: usize = 64 * 1024;
 const CAPACITY: usize = 64;
+/// The formats decoded. Others (SVG, TIFF, ICO…) never run on a sender's
+/// bytes; such files are shown as files.
+const FORMATS: [&str; 4] = ["png", "jpeg", "gif", "webp"];
+/// Images shown inline per message; the rest are shown as files.
+pub const MAX_INLINE_PER_MESSAGE: usize = 8;
+/// Decodes at once: each may briefly hold a full-size image.
+static DECODES: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 const RETRY_AFTER: Duration = Duration::from_secs(60);
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -33,6 +40,14 @@ pub enum DecodeError {
     TooLarge,
     #[error("the image could not be read")]
     Invalid,
+    #[error("the image format is not shown inline")]
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Refusal {
+    TooLarge,
+    Unsupported,
 }
 
 /// Decoded pixels, ready to become a texture on the main thread.
@@ -59,16 +74,31 @@ impl Decoded {
 /// rest to fit [`DECODE_BOX`]. Blocking: run it off the main thread.
 pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
     let loader = gdk_pixbuf::PixbufLoader::new();
-    let refused = std::rc::Rc::new(Cell::new(false));
+    let refused = std::rc::Rc::new(Cell::new(None::<Refusal>));
     let known = std::rc::Rc::new(Cell::new(false));
     let (flag, seen) = (refused.clone(), known.clone());
     loader.connect_size_prepared(move |loader, width, height| {
         seen.set(true);
+        let format = loader
+            .format()
+            .and_then(|format| format.name())
+            .map(|name| name.to_string());
         let pixels = u64::try_from(width)
             .unwrap_or(u64::MAX)
             .saturating_mul(u64::try_from(height).unwrap_or(u64::MAX));
-        if pixels > MAX_PIXELS || width <= 0 || height <= 0 {
-            flag.set(true);
+        let refusal = if !format.is_some_and(|name| FORMATS.contains(&name.as_str())) {
+            Some(Refusal::Unsupported)
+        } else if pixels > MAX_PIXELS || width <= 0 || height <= 0 {
+            Some(Refusal::TooLarge)
+        } else {
+            None
+        };
+        if let Some(refusal) = refusal {
+            flag.set(Some(refusal));
+            // The loader allocates the full image as soon as this returns;
+            // a zero size is the abort gdk_pixbuf_get_file_info uses, and
+            // stops the module before it allocates anything.
+            loader.set_size(0, 0);
             return;
         }
         let (fit_width, fit_height) = fit(width, height, DECODE_BOX);
@@ -77,6 +107,12 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
         }
     });
 
+    let refusal = |refused: &Cell<Option<Refusal>>| {
+        refused.get().map(|refusal| match refusal {
+            Refusal::TooLarge => DecodeError::TooLarge,
+            Refusal::Unsupported => DecodeError::Unsupported,
+        })
+    };
     let mut offset = 0;
     while offset < bytes.len() {
         let chunk = if known.get() {
@@ -86,17 +122,18 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
         };
         let end = usize::min(offset + chunk, bytes.len());
         let written = loader.write(&bytes[offset..end]);
-        if refused.get() {
+        if let Some(error) = refusal(&refused) {
             let _ = loader.close();
-            return Err(DecodeError::TooLarge);
+            return Err(error);
         }
         written.map_err(|_| DecodeError::Invalid)?;
         offset = end;
     }
-    loader.close().map_err(|_| DecodeError::Invalid)?;
-    if refused.get() {
-        return Err(DecodeError::TooLarge);
+    let closed = loader.close();
+    if let Some(error) = refusal(&refused) {
+        return Err(error);
     }
+    closed.map_err(|_| DecodeError::Invalid)?;
     let pixbuf = loader.pixbuf().ok_or(DecodeError::Invalid)?;
     if pixbuf.bits_per_sample() != 8 {
         return Err(DecodeError::Invalid);
@@ -108,6 +145,14 @@ pub fn decode(bytes: &[u8]) -> Result<Decoded, DecodeError> {
         has_alpha: pixbuf.has_alpha(),
         pixels: pixbuf.read_pixel_bytes(),
     })
+}
+
+/// [`decode`] on a worker thread, at most two at a time.
+pub async fn decode_off_main(bytes: Vec<u8>) -> Result<Decoded, DecodeError> {
+    let _permit = DECODES.acquire().await.map_err(|_| DecodeError::Invalid)?;
+    gtk::gio::spawn_blocking(move || decode(&bytes))
+        .await
+        .unwrap_or(Err(DecodeError::Invalid))
 }
 
 /// Scale `width`×`height` down to fit `max`, keeping the aspect ratio.
@@ -186,36 +231,64 @@ impl<V> Lru<V> {
 }
 
 /// The window's shared images by content key.
-pub struct ImageCache(Lru<ImageState>);
+///
+/// Loads in flight are never evicted, and an image still on screen is
+/// found through its widget's reference even after the LRU drops it, so
+/// binding rows can never refetch what is loading or shown. Without that,
+/// more images on screen than the LRU holds would fetch in an endless
+/// cycle.
+pub struct ImageCache {
+    settled: Lru<ImageState>,
+    in_flight: HashSet<String>,
+    shown: HashMap<String, glib::WeakRef<gdk::Texture>>,
+}
 
 impl Default for ImageCache {
     fn default() -> Self {
-        Self(Lru::new(CAPACITY))
+        Self {
+            settled: Lru::new(CAPACITY),
+            in_flight: HashSet::new(),
+            shown: HashMap::new(),
+        }
     }
 }
 
 impl ImageCache {
     /// The image's state, or `None` when it should be (re)loaded now.
     pub fn lookup(&mut self, key: &str, now: Instant) -> Option<ImageState> {
-        match self.0.get(key)? {
-            ImageState::Failed {
-                retry_at: Some(retry_at),
-            } if now >= *retry_at => None,
-            state => Some(state.clone()),
+        if self.in_flight.contains(key) {
+            return Some(ImageState::Loading);
         }
+        match self.settled.get(key) {
+            Some(ImageState::Failed {
+                retry_at: Some(retry_at),
+            }) if now >= *retry_at => return None,
+            Some(state) => return Some(state.clone()),
+            None => {}
+        }
+        let texture = self.shown.get(key)?.upgrade()?;
+        self.settled
+            .insert(key.to_string(), ImageState::Ready(texture.clone()));
+        Some(ImageState::Ready(texture))
     }
 
     pub fn loading(&mut self, key: String) {
-        self.0.insert(key, ImageState::Loading);
+        self.in_flight.insert(key);
     }
 
     pub fn ready(&mut self, key: String, texture: gdk::Texture) {
-        self.0.insert(key, ImageState::Ready(texture));
+        self.in_flight.remove(&key);
+        if self.shown.len() > CAPACITY * 4 {
+            self.shown.retain(|_, texture| texture.upgrade().is_some());
+        }
+        self.shown.insert(key.clone(), texture.downgrade());
+        self.settled.insert(key, ImageState::Ready(texture));
     }
 
     pub fn failed(&mut self, key: String, transient: bool, now: Instant) {
+        self.in_flight.remove(&key);
         let retry_at = transient.then(|| now + RETRY_AFTER);
-        self.0.insert(key, ImageState::Failed { retry_at });
+        self.settled.insert(key, ImageState::Failed { retry_at });
     }
 }
 
@@ -305,6 +378,77 @@ mod tests {
             }
         }
         !crc
+    }
+
+    fn texture() -> gdk::Texture {
+        gdk::MemoryTexture::new(
+            1,
+            1,
+            gdk::MemoryFormat::R8g8b8a8,
+            &glib::Bytes::from_static(&[0, 0, 0, 0]),
+            4,
+        )
+        .upcast()
+    }
+
+    /// More images than the LRU holds, all loading or on screen: none is
+    /// ever asked for again, so rows cannot refetch in a cycle.
+    #[test]
+    fn loading_and_shown_images_are_never_refetched() {
+        let mut cache = ImageCache::default();
+        let now = Instant::now();
+        let keys: Vec<String> = (0..CAPACITY * 2).map(|at| format!("k{at}")).collect();
+        for key in &keys {
+            cache.loading(key.clone());
+        }
+        assert!(keys
+            .iter()
+            .all(|key| matches!(cache.lookup(key, now), Some(ImageState::Loading))));
+
+        // Widgets on screen hold the textures.
+        let on_screen: Vec<gdk::Texture> = keys.iter().map(|_| texture()).collect();
+        for (key, texture) in keys.iter().zip(&on_screen) {
+            cache.ready(key.clone(), texture.clone());
+        }
+        assert!(keys
+            .iter()
+            .all(|key| matches!(cache.lookup(key, now), Some(ImageState::Ready(_)))));
+
+        // Off screen and out of the LRU: loaded again when next shown.
+        drop(on_screen);
+        let missing = keys
+            .iter()
+            .filter(|key| cache.lookup(key, now).is_none())
+            .count();
+        assert!(missing >= CAPACITY, "{missing}");
+    }
+
+    fn peak_memory_kib() -> u64 {
+        std::fs::read_to_string("/proc/self/status")
+            .ok()
+            .and_then(|status| {
+                status
+                    .lines()
+                    .find_map(|line| line.strip_prefix("VmHWM:"))
+                    .and_then(|value| value.trim().trim_end_matches("kB").trim().parse().ok())
+            })
+            .unwrap_or(0)
+    }
+
+    /// A 43-byte GIF declaring a 12000×12000 canvas: refused without
+    /// allocating it (it used to cost 554 MB).
+    #[test]
+    fn a_tiny_bomb_is_refused_without_allocating_its_canvas() {
+        let mut gif: Vec<u8> = b"GIF89a".to_vec();
+        gif.extend_from_slice(&12_000u16.to_le_bytes());
+        gif.extend_from_slice(&12_000u16.to_le_bytes());
+        gif.extend_from_slice(&[0x80, 0, 0, 0xff, 0xff, 0xff, 0, 0, 0]);
+        gif.extend_from_slice(&[0x2c, 0, 0, 0, 0, 1, 0, 1, 0, 0]);
+        gif.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00, 0x3b]);
+        let before = peak_memory_kib();
+        assert_eq!(decode(&gif).err(), Some(DecodeError::TooLarge));
+        let grown = peak_memory_kib().saturating_sub(before);
+        assert!(grown < 128 * 1024, "peak memory grew by {grown} KiB");
     }
 
     #[test]

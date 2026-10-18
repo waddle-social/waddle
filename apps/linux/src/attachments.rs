@@ -33,6 +33,7 @@ const MAX_REDIRECTS: usize = 5;
 const CONNECT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(15);
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const TRANSFER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const UPLOAD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum AttachmentError {
@@ -195,12 +196,34 @@ fn is_loopback(url: &Url) -> bool {
     }
 }
 
+/// An address on this machine or its network, written as an IP literal.
+fn is_local_ip(url: &Url) -> bool {
+    match url.host() {
+        Some(Host::Ipv4(ip)) => {
+            ip.is_loopback() || ip.is_private() || ip.is_link_local() || ip.is_unspecified()
+        }
+        Some(Host::Ipv6(ip)) => {
+            ip.is_loopback()
+                || ip.is_unspecified()
+                || ip.is_unique_local()
+                || ip.is_unicast_link_local()
+        }
+        Some(Host::Domain(domain)) => domain == "localhost",
+        None => false,
+    }
+}
+
 /// An upload or download address: HTTPS (XEP-0363 requires it), or HTTP
 /// on loopback when the account's own server is on loopback (a local
-/// server). Remote senders choose these URLs, so loopback is never open
-/// to them otherwise.
+/// server). Remote senders choose these URLs, so unless the account's
+/// server is local, addresses written as local or private IPs are refused
+/// over HTTPS too. A host name that resolves to one is not caught here;
+/// TLS certificate checks stand in the way of most such services.
 pub fn transfer_url(raw: &str, allow_loopback: bool) -> Result<Url, TransferError> {
     let url = Url::parse(raw).map_err(|_| TransferError::InsecureUrl)?;
+    if !allow_loopback && is_local_ip(&url) {
+        return Err(TransferError::InsecureUrl);
+    }
     match url.scheme() {
         "https" => Ok(url),
         "http" if allow_loopback && is_loopback(&url) => Ok(url),
@@ -269,6 +292,9 @@ impl Transfers {
         let mut request = self
             .http
             .put(self.check(put_url)?)
+            // A large file on a slow link; the read timeout still catches a
+            // stall.
+            .timeout(UPLOAD_TIMEOUT)
             .header(reqwest::header::CONTENT_TYPE, "application/octet-stream");
         for (name, value) in slot_headers(headers) {
             request = request.header(name, value);
@@ -331,7 +357,22 @@ pub fn cache_key(attachment: &Attachment) -> String {
 /// path component, without control characters.
 pub fn safe_file_name(name: &str) -> String {
     let last = name.rsplit(['/', '\\']).next().unwrap_or_default();
-    let cleaned: String = last.chars().filter(|c| !c.is_control()).collect();
+    // Control characters, and the invisible ones that reorder or hide text
+    // (U+202E makes "invoice\u{202E}fdp.exe" read as "invoiceexe.pdf").
+    let invisible = |c: &char| {
+        matches!(
+            *c,
+            '\u{061C}'
+                | '\u{200B}'..='\u{200F}'
+                | '\u{202A}'..='\u{202E}'
+                | '\u{2060}'..='\u{2069}'
+                | '\u{FEFF}'
+        )
+    };
+    let cleaned: String = last
+        .chars()
+        .filter(|c| !c.is_control() && !invisible(c))
+        .collect();
     let cleaned = cleaned.trim().trim_start_matches('.');
     if cleaned.is_empty() {
         "file".to_string()
@@ -493,6 +534,20 @@ mod tests {
                 "a remote sender's {local} must not reach this machine"
             );
         }
+        for local in [
+            "https://127.0.0.1/f",
+            "https://192.168.1.1/f",
+            "https://10.0.0.1/f",
+            "https://169.254.169.254/latest",
+            "https://[fd00::1]/f",
+            "https://localhost/f",
+        ] {
+            assert!(transfer_url(local, true).is_ok(), "{local}");
+            assert!(
+                matches!(transfer_url(local, false), Err(TransferError::InsecureUrl)),
+                "{local} is local to the user, not the sender"
+            );
+        }
         for insecure in [
             "http://up.waddle.social/f",
             "file:///etc/passwd",
@@ -536,6 +591,7 @@ mod tests {
         assert_eq!(safe_file_name("a\u{0}b\nc.txt"), "abc.txt");
         assert_eq!(safe_file_name("../"), "file");
         assert_eq!(safe_file_name("photo.jpg"), "photo.jpg");
+        assert_eq!(safe_file_name("invoice\u{202E}fdp.exe"), "invoicefdp.exe");
     }
 
     #[tokio::test]
