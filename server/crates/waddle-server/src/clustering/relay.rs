@@ -1230,7 +1230,7 @@ pub struct RelayMucAdminQuery {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Reply)]
 pub enum RelayMucAdminQueryReply {
     /// The owner's IQ response (result or error), addressed to the requester.
-    Answered(RemoteStanza),
+    Answered(Box<RemoteStanza>),
     /// The receiver has no live local `RoomActor` for the room; nothing ran.
     NotOwner,
 }

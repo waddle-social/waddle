@@ -374,7 +374,7 @@ fn muc_admin_query_is_a_new_message_id_with_round_tripping_shapes() {
     assert_eq!(decoded.query, message.query);
 
     for reply in [
-        RelayMucAdminQueryReply::Answered(message.query.clone()),
+        RelayMucAdminQueryReply::Answered(Box::new(message.query.clone())),
         RelayMucAdminQueryReply::NotOwner,
     ] {
         let decoded: RelayMucAdminQueryReply =

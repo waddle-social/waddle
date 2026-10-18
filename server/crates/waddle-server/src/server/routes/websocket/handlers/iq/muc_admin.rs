@@ -965,8 +965,8 @@ fn recover_committed_admin_effects(
 
 /// The outcome of a muc#admin list GET answered from one room actor.
 pub(super) enum AdminListAnswer {
-    Result(xmpp_parsers::iq::Iq),
-    Error(xmpp_parsers::stanza_error::StanzaError),
+    Result(Box<xmpp_parsers::iq::Iq>),
+    Error(Box<xmpp_parsers::stanza_error::StanzaError>),
 }
 
 impl AdminListAnswer {
@@ -977,8 +977,8 @@ impl AdminListAnswer {
         response_to: Option<&str>,
     ) -> String {
         match self {
-            Self::Result(iq) => iq_to_xml(iq),
-            Self::Error(error) => build_iq_error_xml_typed(id, response_from, response_to, error),
+            Self::Result(iq) => iq_to_xml(*iq),
+            Self::Error(error) => build_iq_error_xml_typed(id, response_from, response_to, *error),
         }
     }
 }
@@ -1005,7 +1005,9 @@ pub(super) async fn answer_admin_list_get(
     {
         Ok(context) => context,
         Err(_) => {
-            return AdminListAnswer::Error(internal_server_error_iq_error("Internal server error."))
+            return AdminListAnswer::Error(Box::new(internal_server_error_iq_error(
+                "Internal server error.",
+            )))
         }
     };
     let has_admin_affiliation =
@@ -1023,7 +1025,7 @@ pub(super) async fn answer_admin_list_get(
             .all(|item| item.affiliation == Some(Affiliation::Member))
         && context.affiliation >= Affiliation::Member;
     if !is_admin && !member_list_get {
-        return AdminListAnswer::Error(forbidden_iq_error("Operation not permitted."));
+        return AdminListAnswer::Error(Box::new(forbidden_iq_error("Operation not permitted.")));
     }
     let snapshot = match room_actor
         .ask(GetSnapshot)
@@ -1032,7 +1034,9 @@ pub(super) async fn answer_admin_list_get(
     {
         Ok(snapshot) => snapshot.room,
         Err(_) => {
-            return AdminListAnswer::Error(internal_server_error_iq_error("Internal server error."))
+            return AdminListAnswer::Error(Box::new(internal_server_error_iq_error(
+                "Internal server error.",
+            )))
         }
     };
     let to_jid = Jid::from(sender_jid.clone());
@@ -1051,10 +1055,15 @@ pub(super) async fn answer_admin_list_get(
                 )
             })
             .collect();
-        return AdminListAnswer::Result(build_role_result(iq_id, &query.room_jid, &to_jid, &items));
+        return AdminListAnswer::Result(Box::new(build_role_result(
+            iq_id,
+            &query.room_jid,
+            &to_jid,
+            &items,
+        )));
     }
     if !has_admin_affiliation && !member_list_get {
-        return AdminListAnswer::Error(forbidden_iq_error("Operation not permitted."));
+        return AdminListAnswer::Error(Box::new(forbidden_iq_error("Operation not permitted.")));
     }
     let affiliation_filter = query.items.iter().find_map(|item| item.affiliation);
     let items: Vec<(BareJid, Affiliation)> = if let Some(affiliation) = affiliation_filter {
@@ -1070,7 +1079,12 @@ pub(super) async fn answer_admin_list_get(
             .map(|entry| (entry.jid, entry.affiliation))
             .collect()
     };
-    AdminListAnswer::Result(build_admin_result(iq_id, &query.room_jid, &to_jid, &items))
+    AdminListAnswer::Result(Box::new(build_admin_result(
+        iq_id,
+        &query.room_jid,
+        &to_jid,
+        &items,
+    )))
 }
 
 pub(super) async fn handle_muc_admin_iq(

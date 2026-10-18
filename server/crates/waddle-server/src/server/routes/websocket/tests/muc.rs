@@ -9721,11 +9721,12 @@ mod remote_owner_admin_list {
         )
         .await;
 
-        let RelayMucAdminQueryReply::Answered(crate::clustering::codec::RemoteStanza(
-            waddle_xmpp::Stanza::Iq(answer),
-        )) = reply
-        else {
+        let RelayMucAdminQueryReply::Answered(answer) = reply else {
             panic!("a malformed forward is answered, not dropped: {reply:?}");
+        };
+        let crate::clustering::codec::RemoteStanza(waddle_xmpp::Stanza::Iq(answer)) = *answer
+        else {
+            panic!("the answer is an IQ");
         };
         assert!(
             matches!(*answer, Iq::Error { .. }),

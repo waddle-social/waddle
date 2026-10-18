@@ -88,12 +88,12 @@ pub(super) async fn forward_admin_list_get(
                 }
             };
         match ask_owner(state, &owner, message.clone()).await {
-            Ok(RelayMucAdminQueryReply::Answered(RemoteStanza(waddle_xmpp::Stanza::Iq(
-                answer,
-            )))) if answers(&answer, iq_with_from, sender_jid) => {
-                return iq_to_xml(*answer);
-            }
-            Ok(RelayMucAdminQueryReply::Answered(_)) => {
+            Ok(RelayMucAdminQueryReply::Answered(answer)) => {
+                if let RemoteStanza(waddle_xmpp::Stanza::Iq(answer)) = *answer {
+                    if answers(&answer, iq_with_from, sender_jid) {
+                        return iq_to_xml(*answer);
+                    }
+                }
                 tracing::warn!(
                     room = %query.room_jid,
                     owner = %owner.node_id,
@@ -205,9 +205,9 @@ pub(crate) async fn relayed_muc_admin_query(
     };
     match answer_admin_list_get(&room_actor, &requester, &admin_query, request.id()).await {
         AdminListAnswer::Result(iq) => {
-            RelayMucAdminQueryReply::Answered(RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(iq))))
+            RelayMucAdminQueryReply::Answered(Box::new(RemoteStanza(waddle_xmpp::Stanza::Iq(iq))))
         }
-        AdminListAnswer::Error(error) => answered_error(&room, &requester, request.id(), error),
+        AdminListAnswer::Error(error) => answered_error(&room, &requester, request.id(), *error),
     }
 }
 
@@ -222,5 +222,7 @@ fn answered_error(
         to: Some(Jid::from(requester.clone())),
         id: id.to_owned(),
     });
-    RelayMucAdminQueryReply::Answered(RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(iq))))
+    RelayMucAdminQueryReply::Answered(Box::new(RemoteStanza(waddle_xmpp::Stanza::Iq(Box::new(
+        iq,
+    )))))
 }
