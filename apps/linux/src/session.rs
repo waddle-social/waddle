@@ -80,6 +80,9 @@ pub struct Arrival {
     pub message: IncomingMessage,
     /// XEP-0372 mention of this account or the whole room.
     pub mentions_me: bool,
+    /// XEP-0203: the server held it while this client was away. The
+    /// inbox's unread count already includes it, and it is not news.
+    pub delayed: bool,
 }
 
 /// Quoting a message in a reply (XEP-0461).
@@ -407,6 +410,7 @@ pub fn arrival(message: WaddleMessage, me: &Me) -> Option<Arrival> {
 
 fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
     let room = from.to_bare();
+    let delayed = message.timestamp.is_some();
     let Some(nick) = from
         .resource()
         .map(|resource| resource.as_str().to_string())
@@ -422,6 +426,7 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
                 ..IncomingMessage::default()
             },
             mentions_me: false,
+            delayed,
         });
     };
     let stanza_id = verified_stanza_id(&message.stanza_ids, &room);
@@ -463,10 +468,12 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
         kind: Kind::Room,
         message: incoming,
         mentions_me: mentions_me && !own,
+        delayed,
     })
 }
 
 fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
+    let delayed = message.timestamp.is_some();
     let from_me = from.to_bare() == me.bare;
     let own = from_me || message.carbon == Some(WaddleCarbonDirection::Sent);
     let peer = if own {
@@ -512,6 +519,7 @@ fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival>
         kind: Kind::Direct,
         message: incoming,
         mentions_me: false,
+        delayed,
     })
 }
 
@@ -792,6 +800,15 @@ mod tests {
         let mut private = wire("general@muc.waddle.social/ann", "chat", "psst");
         private.muc_user = true;
         assert_eq!(arrival(private, &me()), None);
+    }
+
+    #[test]
+    fn messages_held_while_away_are_marked_delayed() {
+        let held = wire("ann@waddle.social/phone", "chat", "while you were out");
+        assert!(arrival(held, &me()).expect("a DM").delayed);
+        let mut live = wire("ann@waddle.social/phone", "chat", "now");
+        live.timestamp = None;
+        assert!(!arrival(live, &me()).expect("a DM").delayed);
     }
 
     #[test]

@@ -229,6 +229,7 @@ impl WaddleWindow {
             kind,
             message,
             mentions_me,
+            delayed,
         } = arrival;
         if kind == Kind::Direct {
             self.ensure_direct(&conversation);
@@ -253,7 +254,9 @@ impl WaddleWindow {
                 self.scroll_to_end();
             }
         }
-        let Some((sender, body)) = notice.filter(|_| added) else {
+        // A message held while away is already in the inbox's unread
+        // count, and too old to announce.
+        let Some((sender, body)) = notice.filter(|_| added && !delayed) else {
             return;
         };
         if self.is_reading(&conversation) {
