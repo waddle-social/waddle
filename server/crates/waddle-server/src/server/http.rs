@@ -55,6 +55,7 @@ pub(crate) struct HttpServerDeps {
     /// stop_token cancels so the runtime doesn't tear down mid-drain.
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
     pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
+    pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
@@ -118,6 +119,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         drain_complete,
         sm_drain_complete,
         sm_drain_started,
+        connections_drained,
     } = deps;
 
     let stop_token = shutdown_handle.stop_token();
@@ -133,6 +135,7 @@ pub(crate) async fn start_http_server(deps: HttpServerDeps) -> Result<()> {
         shutdown_handle,
         drain_complete: drain_complete.clone(),
         sm_drain_complete: sm_drain_complete.clone(),
+        connections_drained,
         sm_drain_started,
     })
     .await;
@@ -360,6 +363,7 @@ pub(crate) struct RouterDeps {
     pub(crate) shutdown_handle: waddle_ecdysis::ShutdownHandle,
     pub(crate) drain_complete: Arc<tokio::sync::Notify>,
     pub(crate) sm_drain_complete: tokio_util::sync::CancellationToken,
+    pub(crate) connections_drained: Arc<std::sync::atomic::AtomicBool>,
     pub(crate) sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
 }
 
@@ -376,6 +380,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         drain_complete,
         sm_drain_complete,
         sm_drain_started,
+        connections_drained,
     } = deps;
     let shutdown_stop_token = shutdown_handle.stop_token();
     // Create auth broker state
@@ -478,6 +483,7 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         Arc::clone(&drain_complete),
         sm_drain_complete,
         sm_drain_started,
+        connections_drained,
     );
 
     let extension_webhooks_router =
@@ -1264,7 +1270,10 @@ async fn create_websocket_state(
         &state.clustering_claims.ordered_relay_delivery_bridge,
         state.clustering_claims.claim_pair(),
     ) {
-        if let Some(node_lease) = &state.clustering_claims.node_lease {
+        if let (Some(node_lease), Some(node_lease_ttl)) = (
+            &state.clustering_claims.node_lease,
+            state.clustering_claims.lease_ttl,
+        ) {
             bridge.wire(Arc::new(
                 crate::clustering::route_bridge::OrderedRelayDeliveryServices {
                     occupancy_database: state.db_pool.global().clone(),
@@ -1275,6 +1284,7 @@ async fn create_websocket_state(
                         ),
                     ),
                     node_lease: Arc::clone(node_lease),
+                    node_lease_ttl,
                     node_identity,
                     connection_registry: Arc::clone(
                         &websocket_state.deps.protocol.connection_registry,
@@ -1288,7 +1298,7 @@ async fn create_websocket_state(
                 },
             ));
         } else {
-            warn!("ordered relay delivery bridge not wired: clustering node lease handle missing");
+            warn!("ordered relay delivery bridge not wired: clustering node lease handle or TTL missing");
         }
     }
     deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(

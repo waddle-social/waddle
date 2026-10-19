@@ -968,6 +968,17 @@ impl ClusteringShutdown {
     }
 }
 
+/// Shared settlement and socket-closure signals for terminal node retirement.
+#[derive(Clone)]
+pub struct ShutdownSmDrain {
+    pub process_stop: CancellationToken,
+    pub complete: CancellationToken,
+    /// Closure proof, separate from Q6 settlement (which may time out).
+    pub connections_drained: Arc<std::sync::atomic::AtomicBool>,
+    pub budget: Duration,
+    pub started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
+}
+
 /// Conditionally start the clustering swarm subsystem.
 ///
 /// Returns `Ok((ClusteringHandles::default(), ClusteringShutdown(None)))`
@@ -982,9 +993,7 @@ pub async fn start_if_enabled(
     db: &Database,
     stop_token: &CancellationToken,
     readiness: NodeLifecycle,
-    sm_drain_complete: CancellationToken,
-    sm_drain_budget: Duration,
-    sm_drain_started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
+    shutdown_sm_drain: ShutdownSmDrain,
 ) -> Result<(ClusteringHandles, ClusteringShutdown), ClusteringError> {
     if !config.enabled {
         return Ok((ClusteringHandles::default(), ClusteringShutdown(None)));
@@ -997,15 +1006,7 @@ pub async fn start_if_enabled(
     // failure and is reported before the Postgres prerequisite.
     #[cfg(not(feature = "clustering"))]
     {
-        let _ = (
-            db,
-            stop_token,
-            driver,
-            readiness,
-            sm_drain_complete,
-            sm_drain_budget,
-            sm_drain_started,
-        );
+        let _ = (db, stop_token, driver, readiness, shutdown_sm_drain);
         Err(ClusteringError::FeatureNotCompiled)
     }
 
@@ -1085,6 +1086,7 @@ pub async fn start_if_enabled(
             Some(local_peer_id.clone()),
         )
         .await?;
+        handle.refresh_membership();
 
         // ADR-0017 Phase 3 Slice 4 follow-up plumbing: hand back a
         // `ClaimStore` view onto the same `clustering_claims` rows the
@@ -1191,12 +1193,7 @@ pub async fn start_if_enabled(
                     claims::PostgresClaimStore::new(db.clone()),
                 ),
                 claim_release_budget: config.node_lease.claim_release_budget,
-                shutdown_sm_drain: Some(self_fence::ShutdownSmDrain {
-                    process_stop: stop_token.clone(),
-                    complete: sm_drain_complete,
-                    budget: sm_drain_budget,
-                    started: sm_drain_started,
-                }),
+                shutdown_sm_drain: Some(shutdown_sm_drain),
             },
         ));
         Ok((handles, ClusteringShutdown(Some(node_lease_task))))

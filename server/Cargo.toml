@@ -1,5 +1,6 @@
 [workspace]
 resolver = "2"
+exclude = ["vendor/kameo"]
 members = [
     "crates/waddle-ecdysis",
     "crates/waddle-server",
@@ -163,3 +164,6 @@ opt-level = 0
 # line-tables-only keeps usable backtraces while cutting test-binary size
 # roughly 5-10x; full debuginfo repeatedly exhausted local dev disks.
 debug = "line-tables-only"
+
+[patch.crates-io]
+kameo = { path = "vendor/kameo" }

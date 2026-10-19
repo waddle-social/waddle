@@ -11,6 +11,7 @@ use super::{
 /// A resume can briefly observe the previous node's `UserActor` while its
 /// force-detach cleanup drains.  Bound retries keep that handoff from turning
 /// an otherwise-valid XEP-0198 resume into a terminal session-init failure.
+/// The same budget covers local registration after a foreign claim disappears.
 const RESUME_REGISTRATION_BUSY_ATTEMPTS: usize = 3;
 
 const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
@@ -19,6 +20,7 @@ const BIND_RETIREMENT_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 tokio::task_local! {
     pub(super) static PREPARED_BIND_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
     pub(super) static LOCAL_PUBLICATION_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
+    pub(super) static FOREIGN_OWNER_GATE: (Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>);
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -206,6 +208,9 @@ pub(super) enum RegistrationAfterFrame {
     Unchanged,
     Registered(SmRegistrationFinalization),
     SessionInitializationFailed,
+    /// The resource is still converging on an authoritative actor owner.
+    /// The client can establish a new stream and retry registration.
+    RegistrationTemporarilyUnavailable,
     AuthorityRevoked,
     /// Resume finalization has moved the durable detached snapshot into the
     /// live connection. Retain registry ownership so normal shutdown cleanup
@@ -696,22 +701,26 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
             )
             .await
         };
-        let registered = match mirror_outcome {
-            crate::server::dual_registration::MirrorRegisterOutcome::Registered => {
-                bind_guard.complete_actor_retirements_after_registration();
-                true
-            }
+        let registration_outcome = match mirror_outcome {
             crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner => {
+                #[cfg(test)]
+                if let Ok((entered, release)) = FOREIGN_OWNER_GATE.try_with(Clone::clone) {
+                    entered.notify_one();
+                    release.notified().await;
+                }
                 register_remote_clustered_resource(state, &jid, entry, owner.clone()).await
             }
-            crate::server::dual_registration::MirrorRegisterOutcome::Busy => false,
-            crate::server::dual_registration::MirrorRegisterOutcome::Failed => false,
+            outcome => outcome,
         };
         if !registration_authoritative(permit, shutdown) {
             rollback_registered_connection(state, &jid, &owner, conn).await;
             return RegistrationAfterFrame::AuthorityRevoked;
         }
-        if !registered {
+        if registration_outcome
+            == crate::server::dual_registration::MirrorRegisterOutcome::Registered
+        {
+            bind_guard.complete_actor_retirements_after_registration();
+        } else {
             // Rollback also clears the presence_states published above.
             state
                 .deps
@@ -739,7 +748,15 @@ pub(super) async fn register_bound_connection_after_frame_with_admission(
                 conn.sm_state.stream_id.as_deref(),
                 None,
             );
-            return RegistrationAfterFrame::SessionInitializationFailed;
+            return if matches!(
+                registration_outcome,
+                crate::server::dual_registration::MirrorRegisterOutcome::Busy
+                    | crate::server::dual_registration::MirrorRegisterOutcome::ForeignOwner
+            ) {
+                RegistrationAfterFrame::RegistrationTemporarilyUnavailable
+            } else {
+                RegistrationAfterFrame::SessionInitializationFailed
+            };
         }
     }
 
@@ -791,7 +808,8 @@ async fn register_remote_clustered_resource(
     jid: &FullJid,
     entry: waddle_xmpp::registry::ConnectionEntry,
     owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> bool {
+) -> crate::server::dual_registration::MirrorRegisterOutcome {
+    use crate::server::dual_registration::MirrorRegisterOutcome;
     let Some(bridge) = state
         .deps
         .app_state
@@ -799,16 +817,47 @@ async fn register_remote_clustered_resource(
         .ordered_relay_delivery_bridge
         .as_ref()
     else {
-        return false;
+        return MirrorRegisterOutcome::Failed;
     };
-    match bridge
-        .try_register_remote_user_resource(jid, entry, owner)
-        .await
-    {
-        crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Registered => true,
-        crate::clustering::route_bridge::RemoteResourceRegisterOutcome::NotRemote
-        | crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Failed => false,
+
+    // A foreign claim can expire between the initial mirror and the relay
+    // lookup, or while the failed relay exchange is in flight. NotRemote
+    // returns us to the local registry, whose OwnerStale CAS remains the sole
+    // takeover authority. Bound owner-movement races rather than spinning
+    // across an unstable claim or falling through to an unregistered socket.
+    for attempt in 0..RESUME_REGISTRATION_BUSY_ATTEMPTS {
+        match bridge
+            .try_register_remote_user_resource(jid, entry.clone(), owner.clone())
+            .await
+        {
+            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Registered => {
+                return MirrorRegisterOutcome::Registered;
+            }
+            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Retryable => {
+                return MirrorRegisterOutcome::Busy;
+            }
+            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::Failed => {
+                return MirrorRegisterOutcome::Failed;
+            }
+            crate::clustering::route_bridge::RemoteResourceRegisterOutcome::NotRemote => {
+                let outcome = retry_resumed_registration_busy(|| {
+                    crate::server::dual_registration::mirror_register_outcome(
+                        &state.deps.protocol.user_registry,
+                        jid.clone(),
+                        entry.clone(),
+                    )
+                })
+                .await;
+                if outcome != MirrorRegisterOutcome::ForeignOwner {
+                    return outcome;
+                }
+                if attempt + 1 < RESUME_REGISTRATION_BUSY_ATTEMPTS {
+                    tokio::time::sleep(resume_registration_busy_backoff(attempt)).await;
+                }
+            }
+        }
     }
+    MirrorRegisterOutcome::Busy
 }
 
 #[cfg(not(feature = "clustering"))]
@@ -817,6 +866,6 @@ async fn register_remote_clustered_resource(
     _jid: &FullJid,
     _entry: waddle_xmpp::registry::ConnectionEntry,
     _owner: std::sync::Arc<std::sync::atomic::AtomicBool>,
-) -> bool {
-    false
+) -> crate::server::dual_registration::MirrorRegisterOutcome {
+    crate::server::dual_registration::MirrorRegisterOutcome::Failed
 }

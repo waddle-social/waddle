@@ -15,6 +15,7 @@ let _rustInputs = [
 	"rust-toolchain.toml",
 	"crates/**",
 	"extensions/**",
+	"vendor/**",
 	"scripts/**",
 	"wit/**",
 ]
@@ -53,6 +54,7 @@ let _nixInputs = [
 	"rust-toolchain.toml",
 	"crates/**",
 	"extensions/**",
+	"vendor/**",
 	"wit/**",
 ]
 

@@ -26,6 +26,32 @@ let _NamespaceAndroidCache = schema.#Contributor & {
 	]
 }
 
+// Preserve the actual render and JUnit failure when a CI screenshot check
+// differs. The pipeline still fails; reviewers can inspect the evidence.
+let _AndroidTestReports = schema.#Contributor & {
+	id: "androidTestReports"
+	tasks: [{
+		id:        "android.testReports"
+		label:     "Upload Android test failure reports"
+		priority:  100
+		condition: "on_failure"
+		provider: github: {
+			uses: "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+			with: {
+				name: "android-test-failure-reports"
+				path: """
+					apps/android/app/build/outputs/roborazzi/
+					apps/android/app/build/reports/roborazzi/
+					apps/android/app/build/test-results/
+					apps/android/app/build/reports/tests/
+					"""
+				"if-no-files-found": "ignore"
+				"retention-days":    3
+			}
+		}
+	}]
+}
+
 // Shared Rust FFI surface: any change to the client crates retriggers the
 // Android pipelines, mirroring the hand-maintained Apple workflow filters.
 let _ffiInputs = [
@@ -33,6 +59,7 @@ let _ffiInputs = [
 	"../../server/.cargo/**",
 	"../../server/Cargo.toml",
 	"../../server/Cargo.lock",
+	"../../server/vendor/**",
 	"../../server/rust-toolchain.toml",
 	"../../server/crates/**",
 	"../../server/crates/**/.cargo/**",
@@ -73,6 +100,7 @@ schema.#Project & {
 		wc.#FlakeHubCache,
 		wc.#Hestia,
 		_NamespaceAndroidCache,
+		_AndroidTestReports,
 		c.#CuenvRelease,
 	]
 
@@ -98,6 +126,7 @@ schema.#Project & {
 		pullRequest: {
 			when: {
 				pullRequest: true
+				manual:      true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write"}
 			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.build]

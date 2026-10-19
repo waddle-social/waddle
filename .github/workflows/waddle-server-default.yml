@@ -90,6 +90,7 @@ on:
     - server/scripts/cutover_revisions.py/**
     - server/scripts/publish_chart.py
     - server/scripts/publish_chart.py/**
+    - server/vendor/**
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml

@@ -17,6 +17,7 @@ on:
       - server/crates/**
       - server/crates/**/.cargo/**
       - server/rust-toolchain.toml
+      - server/vendor/**
   workflow_dispatch: {}
 
 permissions:
