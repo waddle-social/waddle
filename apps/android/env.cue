@@ -4,7 +4,6 @@ import (
 	"list"
 
 	"github.com/cuenv/cuenv/schema"
-	c "github.com/cuenv/cuenv/contrib/contributors"
 	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
@@ -19,7 +18,7 @@ let _NamespaceAndroidCache = schema.#Contributor & {
 			label:    "Cache Android SDK and Gradle on Namespace volume"
 			priority: 0
 			provider: github: {
-				uses: "namespacelabs/nscloud-cache-action@v1"
+				uses: "namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9" // v1.7.0
 				with: path: "/home/runner/.android-sdk\n/home/runner/.gradle"
 			}
 		},
@@ -101,7 +100,7 @@ schema.#Project & {
 		wc.#Hestia,
 		_NamespaceAndroidCache,
 		_AndroidTestReports,
-		c.#CuenvRelease,
+		wc.#CuenvRelease,
 	]
 
 	ci: provider: github: {
