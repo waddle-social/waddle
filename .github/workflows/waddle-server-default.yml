@@ -104,14 +104,11 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
-permissions:
-  contents: read
-  checks: write
-  pull-requests: none
-  packages: write
-  id-token: write
 jobs:
   checkCiDrift:
+    permissions:
+      contents: read
+      id-token: write
     name: checkCiDrift
     runs-on: namespace-profile-linux-x86
     steps:
@@ -141,7 +138,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -162,6 +159,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkSwitchableAlternativeProgram:
+    permissions:
+      contents: read
+      id-token: write
     name: checkSwitchableAlternativeProgram
     runs-on: namespace-profile-linux-x86
     steps:
@@ -191,7 +191,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -212,6 +212,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkXmppClientFfiBindings:
+    permissions:
+      contents: read
+      id-token: write
     name: checkXmppClientFfiBindings
     runs-on: namespace-profile-linux-x86
     steps:
@@ -241,7 +244,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -262,6 +265,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   clippy:
+    permissions:
+      contents: read
+      id-token: write
     name: clippy
     runs-on: namespace-profile-linux-x86
     steps:
@@ -291,7 +297,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -312,6 +318,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   doctest:
+    permissions:
+      contents: read
+      id-token: write
     name: doctest
     runs-on: namespace-profile-linux-x86
     steps:
@@ -341,7 +350,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -362,6 +371,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   fmt:
+    permissions:
+      contents: read
+      id-token: write
     name: fmt
     runs-on: namespace-profile-linux-x86
     steps:
@@ -391,7 +403,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -412,6 +424,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildExtensionModules:
+    permissions:
+      contents: read
+      id-token: write
     name: nixBuildExtensionModules
     runs-on: namespace-profile-linux-x86
     steps:
@@ -442,6 +457,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildImageStream:
+    permissions:
+      contents: read
+      id-token: write
     name: nixBuildImageStream
     runs-on: namespace-profile-linux-x86
     steps:
@@ -472,6 +490,10 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   publishContainerImage:
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
     name: publishContainerImage
     runs-on: namespace-profile-linux-x86
     needs:
@@ -512,7 +534,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -545,6 +567,9 @@ jobs:
         if-no-files-found: ignore
         include-hidden-files: true
   renderDeployment:
+    permissions:
+      contents: read
+      id-token: write
     name: renderDeployment
     runs-on: namespace-profile-linux-x86
     steps:
@@ -574,7 +599,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -595,6 +620,9 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   test:
+    permissions:
+      contents: read
+      id-token: write
     name: test
     runs-on: namespace-profile-linux-x86
     steps:
@@ -624,7 +652,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

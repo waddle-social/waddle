@@ -12,6 +12,7 @@ import "github.com/cuenv/cuenv/schema"
 		label:    "Install Determinate Nix"
 		priority: 2
 		script:   "curl --proto '=https' --tlsv1.2 -sSf -L https://install.determinate.systems/nix | sh -s -- install linux --no-confirm --init none"
+		ci: github: permissions: "id-token": "write"
 		provider: github: {
 			uses: "DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614"
 			with: "extra-conf": "accept-flake-config = true"
@@ -20,7 +21,7 @@ import "github.com/cuenv/cuenv/schema"
 }
 
 // #FlakeHubCache authenticates the runner against FlakeHub Cache over the
-// job's OIDC token (every pipeline grants `id-token: write`) so store paths
+// job's OIDC token (declared below as `id-token: write`) so store paths
 // built on one ref are substitutable on every other. GitHub's own Actions
 // cache, which Hestia sits on, is scoped per ref and PR builds can never
 // feed `main`; this is the shared layer that closes that gap. The GHA cache
@@ -42,6 +43,7 @@ import "github.com/cuenv/cuenv/schema"
 		label:    "Setup FlakeHub Cache"
 		priority: 3
 		dependsOn: ["nix.install"]
+		ci: github: permissions: "id-token": "write"
 		provider: github: {
 			uses: "DeterminateSystems/flakehub-cache-action@e80fccc9c4e3a885ad51721c8b92ba3f839d2f6f"
 			with: "use-gha-cache": "disabled"
