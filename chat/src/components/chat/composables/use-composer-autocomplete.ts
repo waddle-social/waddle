@@ -1,4 +1,4 @@
-import { computed, ref } from "vue";
+import { computed, onScopeDispose, ref, watch } from "vue";
 import { searchEmoji } from "@/lib/emoji";
 import { getComposerAutocompleteAction } from "@/lib/reply-ux";
 import type { MentionCandidate } from "@/lib/mentions";
@@ -36,6 +36,9 @@ export function useComposerAutocomplete(input: {
   /** Underlying TipTap Editor instance (ProseMirror state + chains). */
   getTiptapEditor: () => any;
   mentionCandidates: () => MentionCandidate[];
+  /** Reports the active `@query` ("" when the mention popover closes) so
+   * the room can add user-directory results to `mentionCandidates`. */
+  searchMentionDirectory?: (query: string) => void;
   slashCommands: () => DiscoveredExtensionCommand[];
   inMuc: () => boolean;
   /** True while a required forum title is missing — holds slash dispatch. */
@@ -66,12 +69,22 @@ export function useComposerAutocomplete(input: {
     const qNorm = stripDiacritics(mentionQuery.value);
     if (!q) return input.mentionCandidates().slice(0, 8);
     return input.mentionCandidates().filter((candidate) => {
+      // Directory hits are already matched server-side for this query.
+      if (candidate.kind === "directory") return true;
       const lower = candidate.username.toLowerCase();
       return lower.includes(q) || stripDiacritics(candidate.username).includes(qNorm);
     }).slice(0, 8);
   });
 
   const emojiResults = computed(() => searchEmoji(emojiQuery.value));
+
+  watch(
+    () => (showMentions.value ? mentionQuery.value : ""),
+    (query) => input.searchMentionDirectory?.(query),
+  );
+  onScopeDispose(() => {
+    if (showMentions.value && mentionQuery.value) input.searchMentionDirectory?.("");
+  });
 
   const slashContext = computed(() => ({ inMuc: input.inMuc() }));
   const slashCandidates = computed(() =>

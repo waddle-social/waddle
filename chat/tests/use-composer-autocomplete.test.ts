@@ -1,5 +1,5 @@
 import { describe, expect, test, mock } from "bun:test";
-import { effectScope } from "vue";
+import { effectScope, nextTick } from "vue";
 import { useComposerAutocomplete } from "../src/components/chat/composables/use-composer-autocomplete";
 import type { MentionCandidate } from "../src/lib/mentions";
 import type { DiscoveredExtensionCommand } from "../src/lib/xmpp/extension-commands";
@@ -94,6 +94,7 @@ function makeHarness(options: {
   slashSubmitBlocked?: boolean;
   dispatcher?: (invocation: SlashInvocation) => Promise<boolean>;
   runBuiltinSlash?: (outcome: BuiltinSlashOutcome) => void;
+  searchMentionDirectory?: (query: string) => void;
 } = {}) {
   const scope = effectScope();
   let api: ReturnType<typeof useComposerAutocomplete> | undefined;
@@ -106,6 +107,7 @@ function makeHarness(options: {
       slashSubmitBlocked: () => options.slashSubmitBlocked ?? false,
       dispatchSlashCommand: () => options.dispatcher,
       runBuiltinSlash: options.runBuiltinSlash ?? (() => {}),
+      searchMentionDirectory: options.searchMentionDirectory,
     });
   });
   if (!api) throw new Error("composable did not initialize");
@@ -153,6 +155,36 @@ describe("useComposerAutocomplete mention trigger", () => {
     (editor.state.selection as { empty: boolean }).empty = false;
     api.checkAutocompleteFromEditor();
     expect(api.showMentions.value).toBe(false);
+    stop();
+  });
+});
+
+describe("useComposerAutocomplete directory mentions", () => {
+  test("reports the active @query and clears it when the popover closes", async () => {
+    const { editor } = makeEditor(["hey @da"], { para: 0, offset: 7 });
+    const queries: string[] = [];
+    const { api, stop } = makeHarness({ editor, searchMentionDirectory: (query) => queries.push(query) });
+    api.checkAutocompleteFromEditor();
+    await nextTick();
+    api.clearAutocomplete();
+    await nextTick();
+    expect(queries).toEqual(["da", ""]);
+    stop();
+  });
+
+  test("lists server-matched directory users after room members and inserts their username", () => {
+    const { editor, chains, pos } = makeEditor(["@da"], { para: 0, offset: 3 });
+    const directory: MentionCandidate = { username: "dave", jid: "dave@example.com", kind: "directory" };
+    const nameMatched: MentionCandidate = { username: "rawkode", jid: "rawkode@example.com", kind: "directory" };
+    const { api, stop } = makeHarness({
+      editor,
+      mentions: [candidate("dana"), candidate("bob"), directory, nameMatched],
+    });
+    api.checkAutocompleteFromEditor();
+    expect(api.mentionResults.value.map((c) => c.username)).toEqual(["dana", "dave", "rawkode"]);
+
+    api.insertMention(api.mentionResults.value[1]);
+    expect(chains[0].insertContentAt).toEqual({ range: { from: pos - 3, to: pos }, content: "@dave " });
     stop();
   });
 });

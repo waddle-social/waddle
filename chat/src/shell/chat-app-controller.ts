@@ -189,6 +189,12 @@ export function useChatAppController() {
     messaging,
     memberJidByNick,
     mentionJidsByNickForSend,
+    searchUsers: async (query) => xmppClient.value ? xmppClient.value.searchUsers(query) : [],
+    activeRoomId: computed(() => {
+      const channel = conversation.activeRoomChannel.value;
+      return channel && !channel.isGroupDm ? channel.id : null;
+    }),
+    selfJid: computed(() => session.value?.jid ?? null),
   });
 
   const { computedChannelUnreadMap, totalTabUnreadCount } = useChatReadActivity({
@@ -487,6 +493,7 @@ export function useChatAppController() {
     members,
     authorJidByNick: memberDirectory.authorJidByNick,
     mentionCandidates: memberDirectory.mentionCandidates,
+    mentionDirectory: memberDirectory.mentionDirectory,
     displayedMemberCount: memberDirectory.displayedMemberCount,
     displayedMemberState: memberDirectory.displayedMemberState,
     memberCountLabel: memberDirectory.memberCountLabel,

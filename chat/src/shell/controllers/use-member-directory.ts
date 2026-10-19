@@ -1,14 +1,21 @@
 import { computed, type Ref, watch } from "vue";
 import type { useChannelMessages } from "@/channels/messages";
 import type { useWaddleDirectory, MemberLoadState } from "@/waddles/directory";
-import type { MemberSummary } from "@/lib/chat-types";
-import { mentionAutocompleteCandidates, mergeMentionMembers } from "@/lib/mentions";
+import type { MemberSummary, UserSearchResult } from "@/lib/chat-types";
+import { mentionAutocompleteCandidates, mergeMentionMembers, withDirectoryMentionJids } from "@/lib/mentions";
+import { useMentionDirectory } from "@/shell/controllers/use-mention-directory";
 
 interface MemberDirectoryDeps {
   waddles: ReturnType<typeof useWaddleDirectory>;
   messaging: ReturnType<typeof useChannelMessages>;
   memberJidByNick: Ref<Record<string, string>>;
   mentionJidsByNickForSend: Ref<Record<string, string>>;
+  /** XEP-0055 directory search for mentioning people with no room presence. */
+  searchUsers: (query: string) => Promise<UserSearchResult[]>;
+  /** Active room conversation's id, null outside rooms (DMs, group DMs). */
+  activeRoomId: Ref<string | null>;
+  /** Signed-in user's bare JID, never offered as a directory mention. */
+  selfJid: Ref<string | null>;
 }
 
 /**
@@ -19,6 +26,10 @@ interface MemberDirectoryDeps {
  */
 export function useMemberDirectory(deps: MemberDirectoryDeps) {
   const { waddles, messaging, memberJidByNick, mentionJidsByNickForSend } = deps;
+  const mentionDirectory = useMentionDirectory({
+    searchUsers: deps.searchUsers,
+    activeRoomId: deps.activeRoomId,
+  });
 
   const mergedMentionMembers = computed(() =>
     mergeMentionMembers({
@@ -29,10 +40,21 @@ export function useMemberDirectory(deps: MemberDirectoryDeps) {
     }),
   );
   const authorJidByNick = computed(() => mergedMentionMembers.value.authorJidByNick);
-  watch(authorJidByNick, (value) => {
+  // Typed `@label` resolution at send: room members/occupants first, then
+  // every directory user seen in this room's searches (members win labels).
+  const mentionJidsForSend = computed(() =>
+    withDirectoryMentionJids(authorJidByNick.value, mentionDirectory.seenUsers.value),
+  );
+  watch(mentionJidsForSend, (value) => {
     mentionJidsByNickForSend.value = value;
   }, { immediate: true });
-  const mentionCandidates = computed(() => mentionAutocompleteCandidates(mergedMentionMembers.value.members));
+  const mentionCandidates = computed(() =>
+    mentionAutocompleteCandidates(
+      mergedMentionMembers.value.members,
+      mentionDirectory.results.value,
+      deps.selfJid.value,
+    ),
+  );
   const mentionSourceDiagnostic = computed(() =>
     mergedMentionMembers.value.diagnostics.join(" "),
   );
@@ -83,6 +105,7 @@ export function useMemberDirectory(deps: MemberDirectoryDeps) {
   return {
     authorJidByNick,
     mentionCandidates,
+    mentionDirectory: { search: mentionDirectory.search },
     inferredMemberJids,
     displayedMemberCount,
     displayedMemberState,

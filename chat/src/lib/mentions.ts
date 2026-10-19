@@ -11,7 +11,13 @@ const BROADCAST_MENTIONS = ["everyone", "here"] as const;
 export interface MentionCandidate {
   username: string;
   jid: string | null;
-  kind: "broadcast" | "member";
+  kind: "broadcast" | "member" | "directory";
+}
+
+/** A XEP-0055 user-directory hit offered as a mention target. */
+export interface MentionDirectoryUser {
+  username: string;
+  jid: string;
 }
 
 function canonicalMentionIdentifier(value: string): string {
@@ -55,8 +61,21 @@ export function mentionAutocompleteNames(memberNames: readonly string[]): string
   return [...BROADCAST_MENTIONS, ...filtered];
 }
 
+function bareJidKey(jid: string): string {
+  return jid.split("/")[0]?.trim().toLowerCase() ?? "";
+}
+
+/**
+ * Broadcasts first, then mentionable room members, then directory users
+ * (people with no room presence) not already listed. Directory users are
+ * deduplicated by bare JID, never include the signed-in user, and never
+ * reuse a label an earlier candidate already owns: the label is what gets
+ * inserted and resolved at send time, so a collision would be ambiguous.
+ */
 export function mentionAutocompleteCandidates(
   members: readonly MemberSummary[],
+  directoryUsers: readonly MentionDirectoryUser[] = [],
+  selfJid?: string | null,
 ): MentionCandidate[] {
   const candidates: MentionCandidate[] = BROADCAST_MENTIONS.map((username) => ({
     username,
@@ -78,7 +97,40 @@ export function mentionAutocompleteCandidates(
     seen.add(canonical);
   }
 
+  const listedJids = new Set(candidates.flatMap((candidate) => candidate.jid ? [bareJidKey(candidate.jid)] : []));
+  if (selfJid) listedJids.add(bareJidKey(selfJid));
+  for (const user of directoryUsers) {
+    const canonical = canonicalMentionIdentifier(user.username);
+    const jidKey = bareJidKey(user.jid);
+    if (!canonical || !jidKey || seen.has(canonical) || listedJids.has(jidKey)) continue;
+    candidates.push({ username: user.username, jid: jidKey, kind: "directory" });
+    seen.add(canonical);
+    listedJids.add(jidKey);
+  }
+
   return candidates;
+}
+
+/**
+ * Extends the room's typed-mention map with directory users seen in this
+ * room's searches. A member or occupant label always wins: colliding
+ * directory labels (case-insensitively) are skipped so a typed `@label`
+ * never resolves ambiguously.
+ */
+export function withDirectoryMentionJids(
+  memberJidsByNick: Readonly<Record<string, string>>,
+  directoryUsers: readonly MentionDirectoryUser[],
+): Record<string, string> {
+  const result: Record<string, string> = { ...memberJidsByNick };
+  const taken = new Set(Object.keys(memberJidsByNick).map(canonicalMentionIdentifier));
+  for (const user of directoryUsers) {
+    const canonical = canonicalMentionIdentifier(user.username);
+    const jid = bareJidKey(user.jid);
+    if (!canonical || !jid || taken.has(canonical) || BROADCAST_MENTION_SET.has(canonical)) continue;
+    result[user.username] = jid;
+    taken.add(canonical);
+  }
+  return result;
 }
 
 export function resolveMentionUri(
