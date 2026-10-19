@@ -253,7 +253,7 @@ pub(super) async fn handle_disco_items_iq(
         };
 
         // XEP-0045 §6.6 (#1265 item 10): disco to an occupant JID.
-        if let Some(error) = muc_occupant_disco::muc_occupant_disco_error(
+        if let Some(error) = muc::occupant_disco::muc_occupant_disco_error(
             state,
             target_to,
             muc_domain,

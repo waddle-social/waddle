@@ -296,7 +296,7 @@ async fn groupchat_retraction_retry_finishes_tombstone_after_archive_write() {
         )),
         origin_id: Some(OriginId::new(origin_id)),
         message_type: XmppMessageType::Groupchat,
-        rich: groupchat_archive::rich_archive_payload(&retraction, Some(&sender_item)),
+        rich: groupchat::archive::rich_archive_payload(&retraction, Some(&sender_item)),
         nickname_generation: Some(7),
         ..ArchivedMessage::for_test(
             jid::Jid::from(occupant.clone()),
@@ -430,7 +430,7 @@ async fn tombstoned_retraction_retry_still_heals_target_tombstone_silently() {
         body: None,
         origin_id: Some(OriginId::new(origin_id)),
         message_type: XmppMessageType::Groupchat,
-        rich: groupchat_archive::rich_archive_payload(&retraction, Some(&sender_item)),
+        rich: groupchat::archive::rich_archive_payload(&retraction, Some(&sender_item)),
         nickname_generation: Some(7),
         ..ArchivedMessage::for_test(
             jid::Jid::from(occupant.clone()),
@@ -617,7 +617,7 @@ async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
         )),
         origin_id: Some(OriginId::new(origin_id)),
         message_type: XmppMessageType::Groupchat,
-        rich: groupchat_archive::rich_archive_payload(&retry, Some(&sender_item)),
+        rich: groupchat::archive::rich_archive_payload(&retry, Some(&sender_item)),
         nickname_generation: Some(7),
         ..ArchivedMessage::for_test(jid::Jid::from(occupant), jid::Jid::from(room.clone()))
     };
