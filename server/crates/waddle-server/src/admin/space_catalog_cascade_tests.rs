@@ -155,7 +155,7 @@ async fn external_bookmark_destruction_preserves_same_named_local_catalog_channe
         &"dormant@remote.example".parse().expect("remote room"),
     )
     .await
-    .expect("remove external target");
+    .unwrap_or_else(|_| panic!("remove external target"));
     assert!(
         get_xmpp_channel(state.db_pool.global_actor().clone(), "dormant")
             .await
