@@ -206,6 +206,9 @@ async fn a_truncated_membership_page_is_an_error() {
         async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
             Ok(())
         }
+        async fn retire(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+            Ok(())
+        }
         async fn count_other_live_nodes(
             &self,
             _me: &NodeIdentity,

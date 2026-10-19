@@ -71,6 +71,7 @@ on:
     - server/scripts/**
     - server/scripts/*cutover*.py
     - server/scripts/*publish_chart.py
+    - server/vendor/**
     - server/wit/**
     - tests/**
     - xeps/xep-*.xml

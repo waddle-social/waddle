@@ -88,7 +88,8 @@ class CutoverRevisionTests(unittest.TestCase):
             'server/Cargo.lock', 'server/.cargo/config.toml', 'server/env.cue',
             'server/extensions/example/env.cue', 'server/schema/migration.sql',
             'server/charts/waddle-server/values.yaml', 'server/scripts/build.sh',
-            'server/wit/extension.wit', 'flake.nix', 'flake.lock',
+            'server/wit/extension.wit', 'server/vendor/kameo/src/remote/registry.rs',
+            'flake.nix', 'flake.lock',
         ):
             with self.subTest(path=path):
                 self.commit('Recreate', 'v2')
