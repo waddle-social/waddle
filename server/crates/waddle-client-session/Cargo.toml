@@ -1,0 +1,12 @@
+[package]
+name = "waddle-client-session"
+description = "Client state shared by every Waddle client (ADR-0019): sans-IO stores that emit list diffs"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+
+[dependencies]
+
+[dev-dependencies]

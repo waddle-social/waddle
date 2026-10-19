@@ -1,0 +1,11 @@
+[Desktop Entry]
+Name=Waddle
+Comment=Chat, rooms and huddles for your communities
+Exec=waddle-linux
+Icon=social.waddle.Waddle
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;Chat;GTK;
+Keywords=chat;xmpp;community;huddle;voice;
+StartupNotify=true
+DBusActivatable=false

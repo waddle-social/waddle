@@ -1,0 +1,342 @@
+using Gtk 4.0;
+using Adw 1;
+
+template $WaddleWindow: Adw.ApplicationWindow {
+  title: _("Waddle");
+  default-width: 1100;
+  default-height: 720;
+  width-request: 360;
+  height-request: 294;
+  // Closing keeps the session running for notifications; Quit ends it.
+  hide-on-close: true;
+
+  Adw.Breakpoint {
+    condition ("max-width: 640sp")
+
+    setters {
+      split_view.collapsed: true;
+    }
+  }
+
+  content: Adw.ToastOverlay toast_overlay {
+    child: Stack stack {
+      transition-type: crossfade;
+
+      StackPage {
+        name: "loading";
+
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {}
+
+          content: Adw.Spinner {};
+        };
+      }
+
+      StackPage {
+        name: "server";
+
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {}
+
+          content: Adw.StatusPage {
+            icon-name: "system-users-symbolic";
+            title: _("Sign in to Waddle");
+            description: _("Enter the address of your community's server.");
+
+            child: Adw.Clamp {
+              maximum-size: 420;
+
+              child: Box {
+                orientation: vertical;
+                spacing: 24;
+
+                ListBox {
+                  selection-mode: none;
+
+                  styles [
+                    "boxed-list",
+                  ]
+
+                  Adw.EntryRow server_entry {
+                    title: _("Server");
+                    text: "xmpp.waddle.social";
+                    input-purpose: url;
+                    activates-default: true;
+                    entry-activated => $on_server_continue() swapped;
+                  }
+                }
+
+                Button server_continue {
+                  label: _("Continue");
+                  halign: center;
+                  clicked => $on_server_continue() swapped;
+
+                  styles [
+                    "pill",
+                    "suggested-action",
+                  ]
+                }
+              };
+            };
+          };
+        };
+      }
+
+      StackPage {
+        name: "providers";
+
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {
+            [start]
+            Button {
+              icon-name: "go-previous-symbolic";
+              tooltip-text: _("Back");
+              clicked => $on_back_to_server() swapped;
+            }
+          }
+
+          content: Adw.StatusPage providers_status {
+            title: _("Choose how to sign in");
+
+            child: Adw.Clamp {
+              maximum-size: 420;
+
+              child: ListBox provider_list {
+                selection-mode: none;
+                row-activated => $on_provider_activated() swapped;
+
+                styles [
+                  "boxed-list",
+                ]
+              };
+            };
+          };
+        };
+      }
+
+      StackPage {
+        name: "code";
+
+        child: Adw.ToolbarView {
+          [top]
+          Adw.HeaderBar {
+            [start]
+            Button {
+              icon-name: "go-previous-symbolic";
+              tooltip-text: _("Cancel");
+              clicked => $on_back_to_server() swapped;
+            }
+          }
+
+          content: Adw.StatusPage {
+            title: _("Approve this device");
+            description: _("Your browser opened the sign-in page. If it asks for a code, enter this one. This window continues by itself once you approve.");
+
+            child: Box {
+              orientation: vertical;
+              spacing: 24;
+              halign: center;
+
+              Label user_code_label {
+                selectable: true;
+
+                styles [
+                  "title-1",
+                  "monospace",
+                ]
+              }
+
+              Button {
+                label: _("Open the Sign-in Page Again");
+                halign: center;
+                clicked => $on_open_verification() swapped;
+
+                styles [
+                  "pill",
+                ]
+              }
+
+              Adw.Spinner {
+                height-request: 32;
+              }
+            };
+          };
+        };
+      }
+
+      StackPage {
+        name: "shell";
+
+        child: Adw.NavigationSplitView split_view {
+          sidebar: Adw.NavigationPage {
+            title: _("Waddle");
+
+            child: Adw.ToolbarView {
+              [top]
+              Adw.HeaderBar {
+                [end]
+                MenuButton {
+                  icon-name: "open-menu-symbolic";
+                  tooltip-text: _("Main Menu");
+                  menu-model: primary_menu;
+                  primary: true;
+                }
+              }
+
+              content: ScrolledWindow {
+                hscrollbar-policy: never;
+
+                child: ListBox room_list {
+                  row-activated => $on_room_activated() swapped;
+
+                  styles [
+                    "navigation-sidebar",
+                  ]
+                };
+              };
+
+              [bottom]
+              Label account_label {
+                xalign: 0;
+                ellipsize: end;
+                margin-start: 12;
+                margin-end: 12;
+                margin-top: 6;
+                margin-bottom: 6;
+
+                styles [
+                  "dim-label",
+                  "caption",
+                ]
+              }
+            };
+          };
+
+          content: Adw.NavigationPage room_page {
+            title: _("Waddle");
+
+            child: Adw.ToolbarView {
+              [top]
+              Adw.HeaderBar {
+                title-widget: Adw.WindowTitle room_title {
+                  title: _("Waddle");
+                };
+              }
+
+              content: Stack content_stack {
+                StackPage {
+                  name: "empty";
+
+                  child: Adw.StatusPage account_status {
+                    icon-name: "chat-bubbles-text-symbolic";
+                    title: _("Connecting…");
+                  };
+                }
+
+                StackPage {
+                  name: "timeline";
+
+                  child: ScrolledWindow timeline_scroller {
+                    hscrollbar-policy: never;
+                    vexpand: true;
+
+                    child: ListView timeline_view {
+                      single-click-activate: false;
+
+                      styles [
+                        "timeline",
+                      ]
+                    };
+                  };
+                }
+              };
+
+              [bottom]
+              Box {
+                orientation: vertical;
+
+                Box composer_context {
+                  visible: false;
+                  spacing: 6;
+                  margin-start: 12;
+                  margin-end: 12;
+                  margin-top: 6;
+
+                  Label composer_context_label {
+                    hexpand: true;
+                    xalign: 0;
+                    ellipsize: end;
+
+                    styles [
+                      "dim-label",
+                      "caption",
+                    ]
+                  }
+
+                  Button {
+                    icon-name: "window-close-symbolic";
+                    tooltip-text: _("Cancel");
+                    clicked => $on_cancel_compose() swapped;
+
+                    styles [
+                      "flat",
+                      "circular",
+                    ]
+                  }
+                }
+
+              Box composer {
+                spacing: 6;
+                margin-start: 12;
+                margin-end: 12;
+                margin-top: 6;
+                margin-bottom: 12;
+                sensitive: false;
+
+                Entry composer_entry {
+                  hexpand: true;
+                  placeholder-text: _("Message");
+                  activate => $on_send() swapped;
+                }
+
+                Button {
+                  icon-name: "paper-plane-symbolic";
+                  tooltip-text: _("Send");
+                  clicked => $on_send() swapped;
+
+                  styles [
+                    "suggested-action",
+                    "circular",
+                  ]
+                }
+              }
+              }
+            };
+          };
+        };
+      }
+    };
+  };
+}
+
+menu primary_menu {
+  section {
+    item {
+      label: _("Sign Out");
+      action: "win.sign-out";
+    }
+
+    item {
+      label: _("About Waddle");
+      action: "app.about";
+    }
+
+    item {
+      label: _("Quit");
+      action: "app.quit";
+    }
+  }
+}

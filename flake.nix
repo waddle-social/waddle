@@ -903,6 +903,37 @@
               echo "  node: $(node --version)"
             '';
           };
+
+          # Linux desktop client (apps/linux): its own shell so GTK never
+          # enters the server's CI closure.
+          linux = pkgs.mkShell {
+            packages = [
+              rustToolchain
+              pkgs.pkg-config
+              pkgs.blueprint-compiler
+              pkgs.desktop-file-utils
+              pkgs.appstream
+            ];
+            buildInputs = [
+              pkgs.gtk4
+              pkgs.libadwaita
+              # Decoding shared images within a pixel budget.
+              pkgs.gdk-pixbuf
+            ];
+            # The toolchain's linker leaves no runtime path to the GTK
+            # stack, so `cargo run` and tests that touch GTK need this to
+            # find the libraries.
+            env.LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath [
+              pkgs.gtk4
+              pkgs.libadwaita
+              pkgs.gdk-pixbuf
+              pkgs.glib
+              pkgs.graphene
+              pkgs.pango
+              pkgs.cairo
+              pkgs.harfbuzz
+            ];
+          };
         }
       );
     };

@@ -92,7 +92,7 @@ pub use room_admin::{
 pub use status_preference::{WaddleManualStatus, WaddleStatusPreference};
 pub use types::*;
 
-use convert::dispatch_event;
+use convert::{dispatch_event, ends_session};
 use waddle_xmpp_client::{
     messaging::SessionId, AccessToken, ClientConfig, ClientHandle, ConnectionConfig,
     OAuthBearerConfig, WebSocketConfig,
@@ -218,7 +218,15 @@ impl WaddleClient {
         tokio::spawn(async move {
             loop {
                 match events.recv().await {
-                    Ok(event) => dispatch_event(event, &account_bare_jid, &**listener),
+                    Ok(event) => {
+                        // Stop at the session's end so `Disconnected` is
+                        // reported once, whichever side closed.
+                        let ended = ends_session(&event);
+                        dispatch_event(event, &account_bare_jid, &**listener);
+                        if ended {
+                            break;
+                        }
+                    }
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => {
                         listener.on_event(WaddleClientEvent::Disconnected);
                         break;

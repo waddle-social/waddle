@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<component type="desktop-application">
+  <id>social.waddle.Waddle</id>
+  <metadata_license>CC0-1.0</metadata_license>
+  <project_license>AGPL-3.0-or-later</project_license>
+  <name>Waddle</name>
+  <summary>Chat, rooms and huddles for your communities</summary>
+  <developer id="social.waddle">
+    <name>Waddle Contributors</name>
+  </developer>
+  <description>
+    <p>Waddle is a self-hostable place for communities to talk: rooms, direct messages and voice huddles, built on XMPP.</p>
+    <p>This is an early build. It signs in and remembers your accounts; rooms, messages and calls are on the way.</p>
+  </description>
+  <launchable type="desktop-id">social.waddle.Waddle.desktop</launchable>
+  <url type="homepage">https://waddle.social</url>
+  <url type="bugtracker">https://github.com/waddle-social/waddle/issues</url>
+  <url type="vcs-browser">https://github.com/waddle-social/waddle</url>
+  <content_rating type="oars-1.1">
+    <content_attribute id="social-chat">intense</content_attribute>
+    <content_attribute id="social-audio">intense</content_attribute>
+  </content_rating>
+  <supports>
+    <control>pointing</control>
+    <control>keyboard</control>
+    <control>touch</control>
+  </supports>
+  <requires>
+    <display_length compare="ge">360</display_length>
+  </requires>
+  <releases>
+    <release version="0.1.0" date="2026-10-18">
+      <description>
+        <p>First scaffold: sign-in with your community's provider and an adaptive shell.</p>
+      </description>
+    </release>
+  </releases>
+</component>
