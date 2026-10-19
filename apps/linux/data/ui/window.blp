@@ -171,6 +171,10 @@ template $WaddleWindow: Adw.ApplicationWindow {
         name: "shell";
 
         child: Adw.NavigationSplitView split_view {
+          min-sidebar-width: 240;
+          max-sidebar-width: 300;
+          sidebar-width-fraction: 0.27;
+
           sidebar: Adw.NavigationPage {
             title: _("Waddle");
 
@@ -191,6 +195,8 @@ template $WaddleWindow: Adw.ApplicationWindow {
 
                 child: ListBox room_list {
                   row-activated => $on_room_activated() swapped;
+                  margin-top: 6;
+                  margin-bottom: 6;
 
                   styles [
                     "navigation-sidebar",
@@ -202,10 +208,10 @@ template $WaddleWindow: Adw.ApplicationWindow {
               Label account_label {
                 xalign: 0;
                 ellipsize: end;
-                margin-start: 12;
-                margin-end: 12;
-                margin-top: 6;
-                margin-bottom: 6;
+                margin-start: 18;
+                margin-end: 18;
+                margin-top: 12;
+                margin-bottom: 12;
 
                 styles [
                   "dim-label",
@@ -257,12 +263,15 @@ template $WaddleWindow: Adw.ApplicationWindow {
               [bottom]
               Box {
                 orientation: vertical;
+                margin-start: 16;
+                margin-end: 16;
+                margin-bottom: 16;
 
                 Box composer_context {
                   visible: false;
                   spacing: 6;
-                  margin-start: 12;
-                  margin-end: 12;
+                  margin-start: 8;
+                  margin-end: 8;
                   margin-top: 6;
 
                   Label composer_context_label {
@@ -288,31 +297,36 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   }
                 }
 
-              Box composer {
-                spacing: 6;
-                margin-start: 12;
-                margin-end: 12;
-                margin-top: 6;
-                margin-bottom: 12;
-                sensitive: false;
-
-                Entry composer_entry {
-                  hexpand: true;
-                  placeholder-text: _("Message");
-                  activate => $on_send() swapped;
-                }
-
-                Button {
-                  icon-name: "paper-plane-symbolic";
-                  tooltip-text: _("Send");
-                  clicked => $on_send() swapped;
+                Box composer {
+                  spacing: 8;
+                  margin-top: 8;
+                  sensitive: false;
 
                   styles [
-                    "suggested-action",
-                    "circular",
+                    "card",
+                    "composer",
                   ]
+
+                  Entry composer_entry {
+                    hexpand: true;
+                    placeholder-text: _("Write a message…");
+                    activate => $on_send() swapped;
+                  }
+
+                  Button {
+                    icon-name: "paper-plane-symbolic";
+                    tooltip-text: _("Send Message");
+                    valign: center;
+                    width-request: 40;
+                    height-request: 40;
+                    clicked => $on_send() swapped;
+
+                    styles [
+                      "suggested-action",
+                      "circular",
+                    ]
+                  }
                 }
-              }
               }
             };
           };

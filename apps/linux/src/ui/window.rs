@@ -12,6 +12,7 @@ use crate::session::{Conversation, Session};
 use waddle_client_session::Timeline;
 
 use super::actions::Compose;
+use super::membership::{Membership, OutboundSends};
 
 mod imp {
     use super::*;
@@ -73,6 +74,8 @@ mod imp {
         /// Bumped on sign-out so events from an old session are ignored.
         pub generation: Cell<u64>,
         pub connected: Cell<bool>,
+        pub membership: RefCell<Membership>,
+        pub outbound: RefCell<OutboundSends>,
         pub reconnect_attempt: Cell<u32>,
         /// Rooms in catalogue order, then DMs.
         pub conversations: RefCell<Vec<Conversation>>,

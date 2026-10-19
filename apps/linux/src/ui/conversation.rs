@@ -57,6 +57,15 @@ impl WaddleWindow {
             };
             bind_row(&window, &child, &object.borrow::<Row>());
         });
+        factory.connect_unbind(|_, item| {
+            if let Some(parts) = item
+                .downcast_ref::<gtk::ListItem>()
+                .and_then(|item| item.child())
+                .and_then(|child| row_parts(&child))
+            {
+                super::media::bind(&parts.media, "", true);
+            }
+        });
         imp.timeline_view
             .set_model(Some(&gtk::NoSelection::new(Some(rows.clone()))));
         imp.timeline_view.set_factory(Some(&factory));
@@ -107,6 +116,8 @@ impl WaddleWindow {
         imp.account_status.set_title("Connecting…");
         imp.content_stack.set_visible_child_name("empty");
 
+        imp.connected.set(false);
+        self.clear_membership();
         let (session, events) = Session::start(account);
         imp.session.replace(Some(session));
         self.watch_connect(generation);
@@ -129,6 +140,7 @@ impl WaddleWindow {
             session.disconnect().await;
         }
         imp.connected.set(false);
+        self.clear_membership();
         imp.conversations.replace(Vec::new());
         imp.timelines.replace(Default::default());
         imp.unread.replace(Default::default());
@@ -186,6 +198,7 @@ impl WaddleWindow {
             }
             SessionEvent::Disconnected => {
                 imp.connected.set(false);
+                self.clear_membership();
                 self.schedule_reconnect(generation);
             }
             SessionEvent::AuthenticationFailed => {
@@ -217,6 +230,8 @@ impl WaddleWindow {
                     self.render_conversations();
                 }
             }
+            SessionEvent::Presence(presence) => self.on_room_presence(*presence),
+            SessionEvent::Rejected { id, from, to } => self.on_message_rejected(id, from, to),
             SessionEvent::DeliveryAcked(id) => self.set_delivery(&id, Delivery::Sent),
             SessionEvent::DeliveryFailed(id) => self.set_delivery(&id, Delivery::Failed),
         }
@@ -285,7 +300,7 @@ impl WaddleWindow {
         let rooms = session.rooms().await;
         let inbox = session.inbox().await;
         for room in rooms.iter().filter(|room| room.autojoin) {
-            session.join(room);
+            self.ensure_room_joined(room);
         }
         let mut conversations = rooms;
         for direct in session::direct_from(&inbox) {
@@ -307,7 +322,7 @@ impl WaddleWindow {
             }
         }
         self.render_conversations();
-        imp.composer.set_sensitive(imp.current.borrow().is_some());
+        self.refresh_composer();
 
         // Reopen what was on screen (or asked for from a notification), or
         // the first room on first connect.
@@ -408,7 +423,8 @@ impl WaddleWindow {
         imp.composer_entry
             .set_placeholder_text(Some(&format!("Message {title}")));
         imp.content_stack.set_visible_child_name("timeline");
-        imp.composer.set_sensitive(imp.connected.get());
+        self.ensure_room_joined(&conversation);
+        self.refresh_composer();
         imp.split_view.set_show_content(true);
         self.read_current();
         self.render_conversations();
@@ -807,7 +823,9 @@ fn row_widget() -> gtk::Box {
         .margin_top(2)
         .margin_bottom(2)
         .build();
+    row.add_css_class("waddle-message");
     let header = gtk::Box::builder().spacing(8).margin_top(8).build();
+    header.add_css_class("message-header");
     let sender = gtk::Label::builder().xalign(0.0).build();
     sender.add_css_class("heading");
     let time = gtk::Label::builder().xalign(0.0).build();
@@ -832,6 +850,8 @@ fn row_widget() -> gtk::Box {
     row.append(&header);
     row.append(&reply);
     row.append(&body);
+    let media = gtk::Box::new(gtk::Orientation::Vertical, 8);
+    row.append(&media);
     row.append(&reactions);
     row
 }
@@ -842,6 +862,7 @@ struct RowParts {
     time: gtk::Label,
     reply: gtk::Label,
     body: gtk::Label,
+    media: gtk::Box,
     reactions: gtk::Box,
 }
 
@@ -849,13 +870,15 @@ fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
     let header = widget.first_child().and_downcast::<gtk::Box>()?;
     let reply = header.next_sibling().and_downcast::<gtk::Label>()?;
     let body = reply.next_sibling().and_downcast::<gtk::Label>()?;
-    let reactions = body.next_sibling().and_downcast::<gtk::Box>()?;
+    let media = body.next_sibling().and_downcast::<gtk::Box>()?;
+    let reactions = media.next_sibling().and_downcast::<gtk::Box>()?;
     Some(RowParts {
         sender: header.first_child().and_downcast::<gtk::Label>()?,
         time: header.last_child().and_downcast::<gtk::Label>()?,
         header,
         reply,
         body,
+        media,
         reactions,
     })
 }
@@ -890,6 +913,7 @@ fn bind_row(window: &WaddleWindow, widget: &gtk::Widget, row: &Row) {
     for class in ["dim-label", "error"] {
         body.remove_css_class(class);
     }
+    super::media::bind(&parts.media, &item.body, item.retracted);
     bind_reactions(window, &parts.reactions, item);
     if item.retracted {
         body.set_markup("<i>Message deleted</i>");

@@ -1,0 +1,29 @@
+.timeline {
+  background: transparent;
+  padding: 12px 8px;
+}
+
+.timeline > row {
+  padding: 0;
+}
+
+.waddle-message {
+  padding: 10px 12px;
+  border-radius: 12px;
+}
+
+.waddle-message .message-header {
+  margin-bottom: 4px;
+}
+
+.composer {
+  padding: 8px;
+  border-radius: 16px;
+}
+
+.composer entry {
+  min-height: 40px;
+  background: transparent;
+  box-shadow: none;
+  border: none;
+}
