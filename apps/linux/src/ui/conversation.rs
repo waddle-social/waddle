@@ -8,9 +8,13 @@
 use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::{gdk, gio, glib};
-use waddle_client_session::{Delivery, Reaction, Timeline, TimelineDiff, TimelineItem};
+use waddle_client_session::{Attachment, Delivery, Reaction, Timeline, TimelineDiff, TimelineItem};
 
+use std::time::Instant;
+
+use super::images::{self, ImageState};
 use super::WaddleWindow;
+use crate::attachments;
 use crate::auth::store::StoredAccount;
 use crate::session::{self, Arrival, Conversation, Kind, Session, SessionEvent};
 
@@ -107,7 +111,14 @@ impl WaddleWindow {
         imp.account_status.set_title("Connecting…");
         imp.content_stack.set_visible_child_name("empty");
 
-        let (session, events) = Session::start(account);
+        let transfers = match attachments::Transfers::new(account.server.as_url()) {
+            Ok(transfers) => transfers,
+            Err(error) => {
+                tracing::warn!(%error, "could not set up HTTP for file sharing");
+                return self.toast("Could not start the session.");
+            }
+        };
+        let (session, events) = Session::start(account, transfers);
         imp.session.replace(Some(session));
         self.watch_connect(generation);
 
@@ -134,6 +145,8 @@ impl WaddleWindow {
         imp.unread.replace(Default::default());
         imp.current.replace(None);
         imp.read_pending.replace(Default::default());
+        imp.images.replace(Default::default());
+        imp.uploading.set(false);
         imp.loading_history.replace(Default::default());
         self.cancel_compose();
         if let Some(rows) = imp.rows.borrow().as_ref() {
@@ -235,7 +248,16 @@ impl WaddleWindow {
             self.ensure_direct(&conversation);
         }
         let notice = (!message.own && !is_fastening(&message))
-            .then(|| (message.sender.clone(), message.body.clone()))
+            .then(|| {
+                let body = message
+                    .body
+                    .clone()
+                    .filter(|body| !body.is_empty())
+                    .or_else(|| {
+                        (!message.attachments.is_empty()).then(|| "Sent a file".to_string())
+                    });
+                (message.sender.clone(), body)
+            })
             .and_then(|(sender, body)| Some((sender, body?)));
         let diffs = imp
             .timelines
@@ -307,7 +329,7 @@ impl WaddleWindow {
             }
         }
         self.render_conversations();
-        imp.composer.set_sensitive(imp.current.borrow().is_some());
+        self.update_composer();
 
         // Reopen what was on screen (or asked for from a notification), or
         // the first room on first connect.
@@ -408,7 +430,7 @@ impl WaddleWindow {
         imp.composer_entry
             .set_placeholder_text(Some(&format!("Message {title}")));
         imp.content_stack.set_visible_child_name("timeline");
-        imp.composer.set_sensitive(imp.connected.get());
+        self.update_composer();
         imp.split_view.set_show_content(true);
         self.read_current();
         self.render_conversations();
@@ -828,10 +850,16 @@ fn row_widget() -> gtk::Box {
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .selectable(true)
         .build();
+    let attachments = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .halign(gtk::Align::Start)
+        .build();
     let reactions = gtk::Box::builder().spacing(4).margin_top(2).build();
     row.append(&header);
     row.append(&reply);
     row.append(&body);
+    row.append(&attachments);
     row.append(&reactions);
     row
 }
@@ -842,6 +870,7 @@ struct RowParts {
     time: gtk::Label,
     reply: gtk::Label,
     body: gtk::Label,
+    attachments: gtk::Box,
     reactions: gtk::Box,
 }
 
@@ -849,13 +878,15 @@ fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
     let header = widget.first_child().and_downcast::<gtk::Box>()?;
     let reply = header.next_sibling().and_downcast::<gtk::Label>()?;
     let body = reply.next_sibling().and_downcast::<gtk::Label>()?;
-    let reactions = body.next_sibling().and_downcast::<gtk::Box>()?;
+    let attachments = body.next_sibling().and_downcast::<gtk::Box>()?;
+    let reactions = attachments.next_sibling().and_downcast::<gtk::Box>()?;
     Some(RowParts {
         sender: header.first_child().and_downcast::<gtk::Label>()?,
         time: header.last_child().and_downcast::<gtk::Label>()?,
         header,
         reply,
         body,
+        attachments,
         reactions,
     })
 }
@@ -891,6 +922,8 @@ fn bind_row(window: &WaddleWindow, widget: &gtk::Widget, row: &Row) {
         body.remove_css_class(class);
     }
     bind_reactions(window, &parts.reactions, item);
+    bind_attachments(window, &parts.attachments, item);
+    body.set_visible(item.retracted || !item.body.is_empty() || item.attachments.is_empty());
     if item.retracted {
         body.set_markup("<i>Message deleted</i>");
         body.add_css_class("dim-label");
@@ -937,6 +970,206 @@ fn bind_reactions(window: &WaddleWindow, container: &gtk::Box, item: &TimelineIt
             }
         });
         container.append(&chip);
+    }
+}
+
+/// Largest image shown in a message, in pixels.
+const IMAGE_MAX: (i32, i32) = (400, 300);
+
+/// Images inline, other files as a button that saves them.
+fn bind_attachments(window: &WaddleWindow, container: &gtk::Box, item: &TimelineItem) {
+    // Build the new widgets before dropping the old ones: the pictures on
+    // screen keep their textures alive, so rebinding finds them instead of
+    // fetching them again.
+    let mut inline = 0;
+    let widgets: Vec<gtk::Widget> = item
+        .attachments
+        .iter()
+        .map(|attachment| {
+            if is_inline_image(attachment) && inline < images::MAX_INLINE_PER_MESSAGE {
+                inline += 1;
+                image_widget(window, attachment)
+            } else {
+                file_widget(window, attachment)
+            }
+        })
+        .collect();
+    while let Some(child) = container.first_child() {
+        container.remove(&child);
+    }
+    container.set_visible(!widgets.is_empty());
+    for widget in widgets {
+        container.append(&widget);
+    }
+}
+
+fn is_inline_image(attachment: &Attachment) -> bool {
+    attachment.inline
+        && attachment
+            .media_type
+            .as_deref()
+            .is_some_and(|media_type| media_type.starts_with("image/"))
+        && attachment
+            .size
+            .is_none_or(|size| size <= crate::attachments::MAX_UPLOAD_BYTES * 3)
+}
+
+fn image_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
+    match window.image(attachment) {
+        ImageState::Ready(texture) => {
+            let (width, height) = images::fit(texture.width(), texture.height(), IMAGE_MAX);
+            let picture = gtk::Picture::for_paintable(&texture);
+            picture.set_content_fit(gtk::ContentFit::Contain);
+            picture.set_size_request(width, height);
+            picture.set_halign(gtk::Align::Start);
+            picture.add_css_class("card");
+            picture.set_tooltip_text(attachment.name.as_deref());
+            picture.upcast()
+        }
+        ImageState::Failed { .. } => file_widget(window, attachment),
+        ImageState::Loading => {
+            let spinner = adw::Spinner::builder()
+                .width_request(IMAGE_MAX.0 / 2)
+                .height_request(IMAGE_MAX.1 / 3)
+                .halign(gtk::Align::Start)
+                .build();
+            spinner.upcast()
+        }
+    }
+}
+
+fn file_widget(window: &WaddleWindow, attachment: &Attachment) -> gtk::Widget {
+    let name = attachments::safe_file_name(attachment.name.as_deref().unwrap_or("File"));
+    let label = match attachment.size {
+        Some(size) => format!("{name} · {}", crate::attachments::format_size(size)),
+        None => name,
+    };
+    let button = gtk::Button::builder()
+        .child(
+            &adw::ButtonContent::builder()
+                .icon_name("document-save-symbolic")
+                .label(label)
+                .build(),
+        )
+        .tooltip_text("Save File")
+        .halign(gtk::Align::Start)
+        .build();
+    let (owner, attachment) = (window.downgrade(), attachment.clone());
+    button.connect_clicked(move |_| {
+        if let Some(window) = owner.upgrade() {
+            window.save_attachment(attachment.clone());
+        }
+    });
+    button.upcast()
+}
+
+impl WaddleWindow {
+    /// A shared image's state, starting its load on first ask (or a retry
+    /// once a transient failure has waited long enough).
+    fn image(&self, attachment: &Attachment) -> ImageState {
+        let imp = self.imp();
+        let key = attachments::cache_key(attachment);
+        let now = Instant::now();
+        if let Some(state) = imp.images.borrow_mut().lookup(&key, now) {
+            return state;
+        }
+        let Some(session) = imp.session.borrow().clone() else {
+            return ImageState::Failed { retry_at: None };
+        };
+        imp.images.borrow_mut().loading(key.clone());
+        let (window, attachment, generation) =
+            (self.clone(), attachment.clone(), imp.generation.get());
+        glib::spawn_future_local(async move {
+            let decoded = match session.fetch(attachment).await {
+                Ok(bytes) => images::decode_off_main(bytes).await.map_err(|error| {
+                    tracing::warn!(%error, "could not show an image");
+                    false
+                }),
+                Err(error) => {
+                    tracing::warn!(%error, "could not fetch an image");
+                    Err(error.is_transient())
+                }
+            };
+            let imp = window.imp();
+            // Signed out (or into another account) meanwhile.
+            if imp.generation.get() != generation {
+                return;
+            }
+            match decoded {
+                Ok(decoded) => imp
+                    .images
+                    .borrow_mut()
+                    .ready(key.clone(), decoded.texture()),
+                Err(transient) => {
+                    imp.images
+                        .borrow_mut()
+                        .failed(key.clone(), transient, Instant::now())
+                }
+            }
+            window.rebind_rows_with(&key);
+        });
+        ImageState::Loading
+    }
+
+    /// Bind again the rows showing this file, so they pick up its state.
+    fn rebind_rows_with(&self, key: &str) {
+        let Some(rows) = self.imp().rows.borrow().clone() else {
+            return;
+        };
+        // An image landing at the bottom grows its row: stay at the end.
+        let stick = self.near_bottom();
+        for position in 0..rows.n_items() {
+            let Some(object) = rows.item(position).and_downcast::<glib::BoxedAnyObject>() else {
+                continue;
+            };
+            let row = object.borrow::<Row>().clone();
+            if row
+                .item
+                .attachments
+                .iter()
+                .any(|file| attachments::cache_key(file) == key)
+            {
+                rows.splice(position, 1, &[glib::BoxedAnyObject::new(row)]);
+            }
+        }
+        if stick {
+            self.scroll_to_end();
+        }
+    }
+
+    /// Fetch, decrypt and save a file where the user chooses.
+    fn save_attachment(&self, attachment: Attachment) {
+        let Some(session) = self.imp().session.borrow().clone() else {
+            return;
+        };
+        let dialog = gtk::FileDialog::builder()
+            .title("Save File")
+            // The sender chose this name: no folders, no control characters.
+            .initial_name(attachments::safe_file_name(
+                attachment.name.as_deref().unwrap_or("file"),
+            ))
+            .build();
+        let window = self.clone();
+        glib::spawn_future_local(async move {
+            let Ok(destination) = dialog.save_future(Some(&window)).await else {
+                return;
+            };
+            let bytes = match session.fetch(attachment).await {
+                Ok(bytes) => bytes,
+                Err(error) => return window.toast(&error.to_string()),
+            };
+            let written = destination
+                .replace_contents_future(
+                    bytes,
+                    None,
+                    false,
+                    gio::FileCreateFlags::REPLACE_DESTINATION,
+                )
+                .await;
+            if written.is_err() {
+                window.toast("The file could not be saved.");
+            }
+        });
     }
 }
 

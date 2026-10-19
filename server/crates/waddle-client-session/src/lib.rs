@@ -11,7 +11,7 @@
 pub mod timeline;
 
 pub use timeline::{
-    strip_fallback, with_reply_fallback, Delivery, IncomingMessage, ItemKey, LocalEcho, Reaction,
-    ReactionUpdate, ReplyPreview, ReplyTo, Timeline, TimelineDiff, TimelineItem,
-    GROUPING_WINDOW_MS,
+    strip_fallback, with_reply_fallback, Attachment, Delivery, Encryption, IncomingMessage,
+    ItemKey, LocalEcho, Reaction, ReactionUpdate, ReplyPreview, ReplyTo, Timeline, TimelineDiff,
+    TimelineItem, GROUPING_WINDOW_MS,
 };

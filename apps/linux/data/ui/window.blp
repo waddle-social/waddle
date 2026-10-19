@@ -296,6 +296,17 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 margin-bottom: 12;
                 sensitive: false;
 
+                Button {
+                  icon-name: "mail-attachment-symbolic";
+                  tooltip-text: _("Attach Files");
+                  clicked => $on_attach() swapped;
+
+                  styles [
+                    "flat",
+                    "circular",
+                  ]
+                }
+
                 Entry composer_entry {
                   hexpand: true;
                   placeholder-text: _("Message");
