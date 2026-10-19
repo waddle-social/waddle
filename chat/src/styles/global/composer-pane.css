@@ -1,6 +1,6 @@
 @layer components {
 .chat-composer {
-  padding: var(--chat-composer-block) var(--chat-content-inline);
+  padding: var(--chat-content-inline);
 }
 
 /* Composer card: one opaque card holding the optional formatting row,
