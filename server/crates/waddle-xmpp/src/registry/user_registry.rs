@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use futures::future::join_all;
 use jid::{BareJid, FullJid};
-use kameo::actor::{ActorRef, Spawn};
+use kameo::actor::{ActorId, ActorRef, Spawn};
 use kameo::error::SendError;
 use kameo::message::Context;
 use kameo::Actor;
@@ -22,9 +22,8 @@ use tracing::{debug, error, info, warn};
 use super::connection_registry::{
     ConnectionEntry, ForceDetachOrigin, ForceDetachOutcome, ForceDetachRequest,
 };
-use super::user_actor::delivery::GetConnectionEntry;
 use super::user_actor::{
-    GetResources, RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
+    RegisterConnection, RegisterConnectionIfOwnerOrAbsent, ResourceCount,
     UnregisterConnectionAndReportEmpty, UserActor,
 };
 use crate::metrics;
@@ -505,14 +504,29 @@ impl UserRegistryActor {
         entry: &UserEntry,
     ) -> UserEntryClaimStatus {
         let current_identity = self.node_identity.current();
-        if entry.claim.owner != current_identity {
+        if !entry.claim.owner.same_incarnation(&current_identity) {
             warn!(
                 jid = %bare_jid,
                 claim_owner = %entry.claim.owner.node_id,
+                claim_owner_epoch = %entry.claim.owner.node_epoch,
+                claim_owner_active = entry.claim.owner.is_active(),
                 current_owner = %current_identity.node_id,
+                current_owner_epoch = %current_identity.node_epoch,
+                current_owner_active = current_identity.is_active(),
                 "existing UserActor claim identity is stale; demoting before reuse"
             );
             return UserEntryClaimStatus::ProvenStale;
+        }
+        if !current_identity.is_active() {
+            debug!(
+                jid = %bare_jid,
+                claim_owner_epoch = %entry.claim.owner.node_epoch,
+                claim_owner_active = entry.claim.owner.is_active(),
+                current_owner_epoch = %current_identity.node_epoch,
+                current_owner_active = current_identity.is_active(),
+                "local publication authority is revoked; refusing reuse without retiring the same-incarnation UserActor"
+            );
+            return UserEntryClaimStatus::ValidationUnavailable;
         }
         let entity = Entity::new(EntityType::UserActor, bare_jid.to_string());
         // Strict bound: this await runs inside the single global registry
@@ -570,43 +584,6 @@ impl UserRegistryActor {
     async fn existing_user_actor_for_current_claim(
         &mut self,
         bare_jid: &BareJid,
-    ) -> Result<Option<ActorRef<UserActor>>, UserRegistryError> {
-        let Some(entry) = self.users.get(bare_jid).cloned() else {
-            return Ok(None);
-        };
-        if !entry.actor_ref.is_alive() {
-            // A registry entry pointing at a dead actor is an internal state
-            // loss even though the caller receives a typed recoverable error.
-            crate::telemetry::mark_span_error();
-            error!(jid = %bare_jid, "Detected dead UserActor; failing fast");
-            return Err(self.mark_actor_state_lost(bare_jid).await);
-        }
-        match self
-            .validate_existing_user_entry_claim(bare_jid, &entry)
-            .await
-        {
-            UserEntryClaimStatus::Current => return Ok(Some(entry.actor_ref)),
-            UserEntryClaimStatus::ValidationUnavailable => {
-                return Err(UserRegistryError::ClaimUnavailable(bare_jid.clone()));
-            }
-            UserEntryClaimStatus::ProvenStale => {}
-        }
-        if !self
-            .force_detach_stale_actor_resources(bare_jid, &entry.actor_ref)
-            .await
-        {
-            return Err(UserRegistryError::StaleUserActorRetirementFailed(
-                bare_jid.clone(),
-            ));
-        }
-        self.users.remove(bare_jid);
-        entry.actor_ref.kill();
-        Ok(None)
-    }
-
-    async fn existing_user_actor_for_register(
-        &mut self,
-        bare_jid: &BareJid,
         actor_ref: &ActorRef<Self>,
     ) -> Result<Option<ActorRef<UserActor>>, UserRegistryError> {
         let Some(entry) = self.users.get(bare_jid).cloned() else {
@@ -636,109 +613,6 @@ impl UserRegistryActor {
                 Err(UserRegistryError::UserActorBusy(bare_jid.clone()))
             }
         }
-    }
-
-    #[tracing::instrument(
-        name = "xmpp.user_registry.force_detach_stale",
-        skip_all,
-        fields(otel.status_code = tracing::field::Empty)
-    )]
-    async fn force_detach_stale_actor_resources(
-        &self,
-        bare_jid: &BareJid,
-        actor_ref: &ActorRef<UserActor>,
-    ) -> bool {
-        let resources = match actor_ref
-            .ask(GetResources)
-            .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
-            .reply_timeout(CHILD_ACTOR_TIMEOUT)
-            .await
-        {
-            Ok(resources) => resources,
-            Err(error) => {
-                // Refused claim reuse is an internal actor-coordination
-                // failure, so mark the active operation before returning false.
-                crate::telemetry::mark_span_error();
-                error!(
-                    jid = %bare_jid,
-                    ?error,
-                    "failed to enumerate stale UserActor resources; refusing claim reuse"
-                );
-                return false;
-            }
-        };
-        let mut ack_receivers = Vec::new();
-        for jid in resources {
-            let entry = match actor_ref
-                .ask(GetConnectionEntry { jid: jid.clone() })
-                .mailbox_timeout(CHILD_ACTOR_TIMEOUT)
-                .reply_timeout(CHILD_ACTOR_TIMEOUT)
-                .await
-            {
-                Ok(Some(entry)) => entry,
-                Ok(None) => continue,
-                Err(error) => {
-                    crate::telemetry::mark_span_error();
-                    error!(
-                        jid = %jid,
-                        ?error,
-                        "failed to read stale UserActor resource entry; refusing claim reuse"
-                    );
-                    return false;
-                }
-            };
-            let (ack, ack_rx) = tokio::sync::oneshot::channel();
-            let request = ForceDetachRequest {
-                origin: ForceDetachOrigin::RegistryStaleActorRetirement,
-                requester_bare_jid: bare_jid.clone(),
-                ack,
-            };
-            if let Err(error) = entry.force_detach_sender().try_send(request) {
-                crate::telemetry::mark_span_error();
-                error!(
-                    jid = %jid,
-                    ?error,
-                    "failed to queue stale UserActor resource force-detach; refusing claim reuse"
-                );
-                return false;
-            }
-            ack_receivers.push((jid, ack_rx));
-        }
-        let ack_waits = ack_receivers.into_iter().map(|(jid, ack_rx)| async move {
-            (jid, tokio::time::timeout(CHILD_ACTOR_TIMEOUT, ack_rx).await)
-        });
-        for (jid, outcome) in join_all(ack_waits).await {
-            match outcome {
-                Ok(Ok(ForceDetachOutcome::Detached | ForceDetachOutcome::NotPersisted)) => {}
-                Ok(Ok(ForceDetachOutcome::IdentityMismatch)) => {
-                    crate::telemetry::mark_span_error();
-                    error!(
-                        jid = %jid,
-                        requester = %bare_jid,
-                        "stale UserActor resource force-detach identity mismatch; refusing claim reuse"
-                    );
-                    return false;
-                }
-                Ok(Err(_closed)) => {
-                    crate::telemetry::mark_span_error();
-                    error!(
-                        jid = %jid,
-                        "stale UserActor resource force-detach ack channel closed; refusing claim reuse"
-                    );
-                    return false;
-                }
-                Err(_elapsed) => {
-                    crate::telemetry::mark_span_error();
-                    error!(
-                        jid = %jid,
-                        timeout_ms = CHILD_ACTOR_TIMEOUT.as_millis() as u64,
-                        "stale UserActor resource force-detach timed out; refusing claim reuse"
-                    );
-                    return false;
-                }
-            }
-        }
-        true
     }
 
     async fn mark_actor_state_lost(&mut self, bare_jid: &BareJid) -> UserRegistryError {
@@ -841,10 +715,16 @@ impl UserRegistryActor {
         self.stale_retirement_queue_retries.remove(bare_jid);
     }
 
-    fn finalize_stale_actor_retirement(&mut self, bare_jid: &BareJid) {
-        // The ack waiter fires exactly once per queued retirement; the entry
-        // may legitimately be gone already (dead actor path, RemoveUser).
-        if !self.pending_stale_retirements.contains(bare_jid) {
+    fn finalize_stale_actor_retirement(&mut self, bare_jid: &BareJid, actor_id: ActorId) {
+        // Exact-owner cleanup can remove an actor and publish a successor
+        // while an old acknowledgement waiter is still alive. A bare JID
+        // alone cannot identify which retirement this completion belongs to.
+        if !self.pending_stale_retirements.contains(bare_jid)
+            || !self
+                .users
+                .get(bare_jid)
+                .is_some_and(|entry| entry.actor_ref.id() == actor_id)
+        {
             return;
         }
         self.retire_stale_user_without_releasing_claim(bare_jid);
@@ -975,6 +855,7 @@ impl UserRegistryActor {
                             // registration retries observe Busy meanwhile.
                             let registry = registry_ref.clone();
                             let finalize_jid = bare_jid.clone();
+                            let actor_id = entry.actor_ref.id();
                             tokio::spawn(async move {
                                 let _ = tokio::time::timeout(
                                     STALE_RETIREMENT_ACK_TIMEOUT,
@@ -984,6 +865,7 @@ impl UserRegistryActor {
                                 let _ = registry
                                     .tell(FinalizeStaleActorRetirement {
                                         bare_jid: finalize_jid,
+                                        actor_id,
                                     })
                                     .await;
                             });
@@ -1100,14 +982,14 @@ impl kameo::message::Message<GetOrCreateUser> for UserRegistryActor {
     async fn handle(
         &mut self,
         msg: GetOrCreateUser,
-        _ctx: &mut Context<Self, Self::Reply>,
+        ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         if self.poisoned_users.contains(&msg.bare_jid) {
             return Err(UserRegistryError::UserActorStateLost(msg.bare_jid));
         }
 
         if let Some(actor_ref) = self
-            .existing_user_actor_for_current_claim(&msg.bare_jid)
+            .existing_user_actor_for_current_claim(&msg.bare_jid, ctx.actor_ref())
             .await?
         {
             debug!(jid = %msg.bare_jid, "Returning existing UserActor");
@@ -1128,11 +1010,11 @@ pub struct GetUser {
 impl kameo::message::Message<GetUser> for UserRegistryActor {
     type Reply = Result<Option<ActorRef<UserActor>>, UserRegistryError>;
 
-    async fn handle(&mut self, msg: GetUser, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
+    async fn handle(&mut self, msg: GetUser, ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
         if self.poisoned_users.contains(&msg.bare_jid) {
             return Err(UserRegistryError::UserActorStateLost(msg.bare_jid));
         }
-        self.existing_user_actor_for_current_claim(&msg.bare_jid)
+        self.existing_user_actor_for_current_claim(&msg.bare_jid, ctx.actor_ref())
             .await
     }
 }
@@ -1197,7 +1079,7 @@ impl kameo::message::Message<RegisterUserResource> for UserRegistryActor {
 
         self.kick_stale_retirement_if_pending(&bare_jid, ctx.actor_ref());
         let user_actor = if let Some(actor_ref) = self
-            .existing_user_actor_for_register(&bare_jid, ctx.actor_ref())
+            .existing_user_actor_for_current_claim(&bare_jid, ctx.actor_ref())
             .await?
         {
             actor_ref
@@ -1263,7 +1145,7 @@ impl kameo::message::Message<RegisterUserResourceIfOwnerOrAbsent> for UserRegist
 
         self.kick_stale_retirement_if_pending(&bare_jid, ctx.actor_ref());
         let user_actor = if let Some(actor_ref) = self
-            .existing_user_actor_for_register(&bare_jid, ctx.actor_ref())
+            .existing_user_actor_for_current_claim(&bare_jid, ctx.actor_ref())
             .await?
         {
             actor_ref
@@ -1415,9 +1297,10 @@ pub struct UserRegistryConvergenceReport {
 /// Finalize an asynchronously queued stale-actor retirement once its
 /// force-detach acknowledgements settled (or their bounded wait elapsed).
 /// Sent by the ack-waiter task the retirement spawned; a no-op when the
-/// retirement is no longer pending.
+/// retirement is no longer pending or the original actor was replaced.
 pub struct FinalizeStaleActorRetirement {
     pub bare_jid: BareJid,
+    pub actor_id: ActorId,
 }
 
 impl kameo::message::Message<FinalizeStaleActorRetirement> for UserRegistryActor {
@@ -1428,7 +1311,7 @@ impl kameo::message::Message<FinalizeStaleActorRetirement> for UserRegistryActor
         msg: FinalizeStaleActorRetirement,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        self.finalize_stale_actor_retirement(&msg.bare_jid);
+        self.finalize_stale_actor_retirement(&msg.bare_jid, msg.actor_id);
     }
 }
 

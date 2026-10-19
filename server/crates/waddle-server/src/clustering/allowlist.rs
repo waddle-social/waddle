@@ -4,9 +4,10 @@
 //! Connections from peers not on the list are rejected at the swarm behaviour
 //! layer (`libp2p::allow_block_list` composed into `WaddleBehaviour`) —
 //! completing the Noise handshake is necessary but never sufficient. A
-//! periodic refresh diffs the enrolled set and **actively closes live
-//! connections** whose peer ID is no longer enrolled, bounding a revoked
-//! peer's swarm access to one refresh interval.
+//! periodic refresh admits only enrolled PeerIds referenced by a committed,
+//! unexpired node row. It closes connections and prunes routing and messaging
+//! addresses after terminal departure or enrollment revocation. Draining and
+//! raw heartbeat-stale nodes stay admitted until departure commits.
 //!
 //! Enrollment authority is separate from the runtime by design: rows are
 //! provisioned only by the deployment pipeline (Phase 4 ships the grants
@@ -68,6 +69,12 @@ pub trait AllowlistStore: Send + Sync {
     /// `PeerId` are skipped with a warning (a malformed enrollment must not
     /// take down the reader).
     async fn enrolled_peers(&self) -> Result<HashSet<PeerId>, AllowlistError>;
+
+    /// Enrolled PeerIds with at least one committed-unexpired node row.
+    /// Draining and heartbeat-stale nodes remain admitted until a terminal
+    /// retirement or the watchdog's expiry CAS commits. Enrollment is static
+    /// pipeline-owned authority and is never changed by runtime departure.
+    async fn effective_peers(&self) -> Result<HashSet<PeerId>, AllowlistError>;
 }
 
 /// Postgres implementation.
@@ -99,18 +106,44 @@ impl AllowlistStore for PostgresAllowlistStore {
     }
 
     async fn enrolled_peers(&self) -> Result<HashSet<PeerId>, AllowlistError> {
-        let conn = self.db.guard().await?;
-        let mut rows = conn
-            .query("SELECT peer_id FROM clustering_peer_allowlist", ())
-            .await?;
+        // Enrollment is also consumed by protocol authorization and startup
+        // before node registration; retain its existing main-pool contract.
+        Self::read_peers(
+            self.db.guard().await?,
+            "SELECT peer_id, true FROM clustering_peer_allowlist",
+        )
+        .await
+    }
+
+    async fn effective_peers(&self) -> Result<HashSet<PeerId>, AllowlistError> {
+        Self::read_peers(
+            self.db.control_plane_guard().await?,
+            "SELECT a.peer_id, EXISTS (
+             SELECT 1 FROM clustering_nodes n WHERE n.peer_id = a.peer_id AND NOT n.expired)
+             FROM clustering_peer_allowlist a",
+        )
+        .await
+    }
+}
+
+impl PostgresAllowlistStore {
+    async fn read_peers(
+        conn: crate::db::ConnectionGuard,
+        query: &str,
+    ) -> Result<HashSet<PeerId>, AllowlistError> {
+        let mut rows = conn.query(query, ()).await?;
         let mut peers = HashSet::new();
         let mut total_rows = 0usize;
+        let mut valid_rows = 0usize;
         while let Some(row) = rows.next().await? {
             total_rows += 1;
             let raw: String = row.get(0)?;
             match PeerId::from_str(&raw) {
                 Ok(peer) => {
-                    peers.insert(peer);
+                    valid_rows += 1;
+                    if row.get::<bool>(1)? {
+                        peers.insert(peer);
+                    }
                 }
                 Err(error) => {
                     tracing::warn!(
@@ -124,7 +157,7 @@ impl AllowlistStore for PostgresAllowlistStore {
         // A populated table where *nothing* parsed is a systematic failure,
         // not an enrollment decision: fail the read (the refresh keeps the
         // last-known set) rather than mass-revoke every peer.
-        if peers.is_empty() && total_rows > 0 {
+        if valid_rows == 0 && total_rows > 0 {
             return Err(AllowlistError::AllRowsInvalid { rows: total_rows });
         }
         Ok(peers)
@@ -186,6 +219,132 @@ mod tests {
         let diff = diff_allowlist(&set, &set.clone());
         assert!(diff.added.is_empty());
         assert!(diff.removed.is_empty());
+    }
+
+    #[tokio::test]
+    async fn effective_membership_tracks_committed_departure_and_stable_peer_rejoin() {
+        use crate::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
+        use waddle_xmpp::ownership::{ClaimStore, NodeIdentity};
+        let _nodes = crate::clustering::claims::clustering_control_plane_table_lock()
+            .lock()
+            .await;
+        let _allowlist = crate::clustering::allowlist_table_lock().lock().await;
+        let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+            return;
+        };
+        let db = Database::from_config(
+            "effective-membership-test",
+            &DatabaseConfig::new(DatabaseDriver::Postgres, url)
+                .with_control_plane_pool(crate::db::DEFAULT_CONTROL_PLANE_POOL_SIZE),
+        )
+        .await
+        .expect("postgres");
+        let store = PostgresAllowlistStore::new(db.clone());
+        let nodes = PostgresClaimStore::new(db.clone());
+        nodes.ensure_schema().await.expect("node schema");
+        store.ensure_schema().await.expect("allowlist schema");
+        let stranger = peer();
+        let peer = peer();
+        let owner = NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let replacement = NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        let conn = db.guard().await.expect("guard");
+        conn.execute("DELETE FROM clustering_nodes", ())
+            .await
+            .expect("clean nodes");
+        conn.execute("DELETE FROM clustering_peer_allowlist", ())
+            .await
+            .expect("clean enrollment");
+        conn.execute(
+            "INSERT INTO clustering_peer_allowlist (peer_id) VALUES (?)",
+            crate::db_params![peer.to_string()],
+        )
+        .await
+        .expect("enroll");
+        assert!(
+            store.effective_peers().await.expect("startup").is_empty(),
+            "enrollment alone grants no runtime admission"
+        );
+        nodes
+            .register_with_peer_id(&owner, None, Some(peer.to_string()))
+            .await
+            .expect("register");
+        nodes
+            .register_with_peer_id(&replacement, None, Some(stranger.to_string()))
+            .await
+            .expect("unenrolled node");
+        nodes.mark_draining(&owner).await.expect("draining");
+        conn.execute(
+            "UPDATE clustering_nodes SET heartbeat = now() - interval '1 day' WHERE node_id = ?",
+            crate::db_params![owner.node_id.clone()],
+        )
+        .await
+        .expect("stale heartbeat");
+        assert_eq!(
+            store.effective_peers().await.expect("still serving"),
+            HashSet::from([peer]),
+            "draining and raw-stale peers remain admitted until committed departure"
+        );
+        assert!(nodes
+            .expire(&owner, std::time::Duration::from_secs(10))
+            .await
+            .expect("expire CAS"));
+        assert!(store.effective_peers().await.expect("departed").is_empty());
+        nodes
+            .register_with_peer_id(&replacement, None, Some(peer.to_string()))
+            .await
+            .expect("stable PeerId rejoin");
+        let overlapping_owner = NodeIdentity::new(
+            uuid::Uuid::new_v4().to_string(),
+            uuid::Uuid::new_v4().to_string(),
+        );
+        nodes
+            .register_with_peer_id(&overlapping_owner, None, Some(peer.to_string()))
+            .await
+            .expect("overlapping live PeerId reference");
+        nodes
+            .retire(&overlapping_owner)
+            .await
+            .expect("one of two live PeerId references retires");
+        assert_eq!(
+            store
+                .effective_peers()
+                .await
+                .expect("other live reference remains"),
+            HashSet::from([peer])
+        );
+        nodes.retire(&owner).await.expect("old retirement");
+        assert_eq!(
+            store.effective_peers().await.expect("replacement stays"),
+            HashSet::from([peer])
+        );
+        let obsolete_epoch = NodeIdentity::new(replacement.node_id.clone(), "obsolete");
+        nodes
+            .retire(&obsolete_epoch)
+            .await
+            .expect("obsolete retirement");
+        assert_eq!(
+            store.effective_peers().await.expect("epoch fenced"),
+            HashSet::from([peer])
+        );
+        nodes
+            .retire(&replacement)
+            .await
+            .expect("terminal retirement");
+        assert!(store
+            .effective_peers()
+            .await
+            .expect("terminal departure")
+            .is_empty());
+        assert_eq!(
+            store.enrolled_peers().await.expect("enrollment preserved"),
+            HashSet::from([peer])
+        );
     }
 
     // Postgres-gated: seeds rows directly (playing the enrollment pipeline's

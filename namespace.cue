@@ -14,6 +14,7 @@ let _serverRustInputs = [
 	"server/rust-toolchain.toml",
 	"server/crates/**",
 	"server/extensions/**",
+	"server/vendor/**",
 	"server/scripts/**",
 	"server/wit/**",
 	"server/charts/waddle-server/**",
