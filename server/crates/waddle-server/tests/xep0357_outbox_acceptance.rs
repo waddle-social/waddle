@@ -368,11 +368,28 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
         )
         .await
         .expect("read");
-    for _ in 0..6 {
+    for attempt in 2..=5 {
         let job = fixture.claim().await;
-        assert!(matches!(fixture.publish(&job).await, NotificationOutboxPublishOutcome::RetryScheduled { .. }), "later known refusal cannot erase prior accepted work or suppress read-zero uncertainty");
+        let outcome = fixture.publish(&job).await;
+        if attempt < 5 {
+            assert!(matches!(outcome, NotificationOutboxPublishOutcome::RetryScheduled { .. }), "later known refusal cannot erase prior queue acceptance or suppress read-zero uncertainty");
+        } else {
+            assert!(
+                matches!(outcome, NotificationOutboxPublishOutcome::Failed { .. }),
+                "the shared attempt budget parks uncertain work after five attempts"
+            );
+        }
     }
-    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'queued' AND attempt_count = 7 AND queue_acceptance_may_exist = 1").await, 1);
+    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL AND next_attempt_at_ms IS NULL").await, 1);
+    assert_eq!(
+        fixture
+            .outbox
+            .prune_completed_before(i64::MAX, 16)
+            .await
+            .expect("parked evidence retention")
+            .jobs_deleted,
+        0
+    );
     fixture
         .push_db
         .execute(
@@ -403,20 +420,50 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
         })
         .await
         .expect("changed registration options");
-    let replay = fixture.claim().await;
-    let replay_item = replay.to_xep0357_pubsub_item();
+    for _ in 0..3 {
+        assert!(
+            fixture
+                .outbox
+                .drain_due_outbox_jobs(
+                    &fixture.push,
+                    &fixture.subscriptions,
+                    &fixture.inbox,
+                    &InMemoryBlockingStorage::new(),
+                    &fixture.service,
+                    1,
+                )
+                .await
+                .expect("parked drain after service recovery")
+                .is_empty(),
+            "restoring service availability cannot resume an exhausted owner's sends"
+        );
+    }
     assert_eq!(
-        replay_item.id, accepted.id,
-        "unknown retry preserves the same key across distinct databases"
+        fixture
+            .outbox_db
+            .optional_text("SELECT approved_payload_xml FROM notification_outbox")
+            .await,
+        accepted.payload.as_ref().map(String::from),
+        "parking preserves the exact accepted payload across distinct databases",
     );
     assert_eq!(
-        replay_item.payload, accepted.payload,
-        "unknown retry preserves the same frozen payload across distinct databases"
+        fixture
+            .outbox_db
+            .optional_text("SELECT approved_publish_options_xml FROM notification_outbox")
+            .await,
+        Some(String::from(&publish_options("whitelist"))),
+        "registration changes cannot mutate parked publish options"
     );
-    assert!(matches!(
-        fixture.publish(&replay).await,
-        NotificationOutboxPublishOutcome::Published { .. }
-    ));
+    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL").await, 1, "proof-only probes never reopen the parked owner");
+    assert!(
+        fixture
+            .backing
+            .get_items(&fixture.service, &fixture.node, None, &[])
+            .await
+            .expect("backing items")
+            .is_empty(),
+        "parked reconciliation never retries backing publication"
+    );
     assert_eq!(
         fixture
             .push_db

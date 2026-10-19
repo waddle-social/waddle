@@ -1515,6 +1515,14 @@ async fn parked_outbox_reconciles_revocation_from_a_separate_push_database() {
         )
         .await
         .expect("authoritative revocation");
+    // Endpoint revocation and upstream outbox reconciliation are distinct
+    // lifecycle transitions. Measure this owner's reconciliation separately.
+    let revoked_before_reconciliation = telemetry
+        .counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")],
+        )
+        .unwrap_or(0);
     let outcomes = store
         .drain_due_outbox_jobs(
             &push_service,
@@ -1566,11 +1574,15 @@ async fn parked_outbox_reconciles_revocation_from_a_separate_push_database() {
         1
     );
     assert_eq!(
-        telemetry.counter_sum(
-            "xmpp.push.disposition",
-            &[("disposition", "registration_revoked")]
-        ),
-        Some(1)
+        telemetry
+            .counter_sum(
+                "xmpp.push.disposition",
+                &[("disposition", "registration_revoked")]
+            )
+            .expect("reconciliation disposition")
+            - revoked_before_reconciliation,
+        1,
+        "reconciling this outbox owner records one additional transition",
     );
 }
 
