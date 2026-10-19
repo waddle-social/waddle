@@ -310,11 +310,12 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   Entry composer_entry {
                     hexpand: true;
                     placeholder-text: _("Write a message…");
+                    styles [ "composer-entry" ]
                     activate => $on_send() swapped;
                   }
 
                   Button {
-                    icon-name: "paper-plane-symbolic";
+                    icon-name: "mail-send-symbolic";
                     tooltip-text: _("Send Message");
                     valign: center;
                     width-request: 40;

@@ -3,7 +3,7 @@
   padding: 12px 8px;
 }
 
-.timeline > row {
+.timeline > * {
   padding: 0;
 }
 
@@ -21,7 +21,7 @@
   border-radius: 16px;
 }
 
-.composer entry {
+.composer .composer-entry {
   min-height: 40px;
   background: transparent;
   box-shadow: none;
