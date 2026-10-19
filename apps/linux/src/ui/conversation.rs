@@ -195,6 +195,7 @@ impl WaddleWindow {
         imp.uploading.set(false);
         imp.loading_history.replace(Default::default());
         self.cancel_compose();
+        imp.availability.set(Default::default());
         if let Some(rows) = imp.rows.borrow().as_ref() {
             rows.remove_all();
         }
@@ -352,7 +353,7 @@ impl WaddleWindow {
             return;
         };
         imp.account_status.set_title("Choose a conversation");
-        session.announce();
+        session.announce(imp.availability.get());
         let rooms = session.rooms().await;
         let inbox = session.inbox().await;
         for room in rooms.iter().filter(|room| room.autojoin) {
@@ -1134,6 +1135,13 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     }
     let mut markup = if super::media::is_media_only(&item.body) {
         String::new()
+    } else if let Some(action) = crate::composer::me_action(&item.body) {
+        // XEP-0245: "* sender action".
+        format!(
+            "<i>* {} {}</i>",
+            glib::markup_escape_text(&item.sender),
+            body_markup(action)
+        )
     } else {
         body_markup(&item.body)
     };

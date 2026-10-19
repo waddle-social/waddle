@@ -8,6 +8,7 @@
 mod application;
 mod attachments;
 mod auth;
+mod composer;
 mod runtime;
 mod session;
 mod ui;

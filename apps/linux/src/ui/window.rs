@@ -7,6 +7,7 @@ use gtk::{gio, glib};
 
 use crate::auth::device::{DeviceAuthClient, DeviceAuthorization, Provider, ServerUrl};
 use crate::auth::store::{CredentialStore, StoredAccount};
+use crate::composer::{Availability, Suggestion};
 use crate::runtime;
 use crate::session::{Conversation, Session};
 use waddle_client_session::Timeline;
@@ -94,6 +95,11 @@ mod imp {
         /// Conversations to mark read on the server shortly.
         pub read_pending: RefCell<HashSet<String>>,
         pub compose: RefCell<Compose>,
+        /// What the composer's popover offers, in its order.
+        pub suggestions: RefCell<Vec<Suggestion>>,
+        pub suggestion_popover: RefCell<Option<(gtk::Popover, gtk::ListBox)>>,
+        /// The user's manual presence, announced again on each connect.
+        pub availability: Cell<Availability>,
         /// Shared images by URL: loading (`None`), shown, or failed.
         pub images: RefCell<crate::ui::images::ImageCache>,
         /// Files are uploading; the composer waits.
@@ -128,6 +134,12 @@ mod imp {
             let window = self.obj().clone();
             window.setup_timeline();
             glib::spawn_future_local(async move { window.restore().await });
+        }
+
+        fn dispose(&self) {
+            if let Some((popover, _)) = self.suggestion_popover.take() {
+                popover.unparent();
+            }
         }
     }
 

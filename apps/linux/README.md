@@ -43,5 +43,7 @@ appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml
 | `src/auth/device.rs` | Device-flow client; typed server URL, session id and JID; tests against a local stand-in server |
 | `src/auth/store.rs` | Secret Service account store |
 | `src/runtime.rs` | tokio on its own threads; UI awaits work from the GLib main loop |
+| `src/composer.rs` | `@` mention and slash command suggestions and actions (`/me`, `/shrug`, `/away`, `/active`, `/dnd`) |
 | `src/ui/window.rs`, `data/ui/window.blp` | Window and sign-in steps (Blueprint template) |
+| `src/ui/suggestions.rs` | The composer's suggestion popover |
 | `data/` | Desktop entry, AppStream metadata, icon |

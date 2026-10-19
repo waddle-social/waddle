@@ -25,13 +25,14 @@ use waddle_client_session::{
 use waddle_xmpp_client_ffi::{
     WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
     WaddleConfig, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleFallbackRange, WaddleInboxEntry, WaddleMessage, WaddlePresence, WaddleReplyTarget,
-    WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile, WaddleStanzaId,
-    WaddleStickerHash, WaddleTopology,
+    WaddleFallbackRange, WaddleInboxEntry, WaddleMentionDirectory, WaddleMentionTarget,
+    WaddleMessage, WaddlePresence, WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions,
+    WaddleSharedFile, WaddleStanzaId, WaddleStickerHash, WaddleTopology,
 };
 
 use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
+use crate::composer::{Availability, Mentionable};
 use crate::runtime;
 
 const PAGE_SIZE: u32 = 50;
@@ -120,6 +121,19 @@ pub struct Quote {
     /// The quoted message is the user's own.
     pub own: bool,
     pub text: String,
+}
+
+/// A message to send.
+pub struct Draft {
+    pub body: String,
+    /// XEP-0359 origin id, which the local echo is keyed by.
+    pub origin_id: String,
+    /// Quoting a message in a reply (XEP-0461).
+    pub quote: Option<Quote>,
+    /// Uploaded files (XEP-0447).
+    pub files: Vec<WaddleSharedFile>,
+    /// Whom the body's typed `@nick`s may mention (XEP-0372).
+    pub mentionable: Vec<Mentionable>,
 }
 
 struct Forwarder(async_channel::Sender<SessionEvent>);
@@ -238,11 +252,13 @@ impl Session {
         });
     }
 
-    /// RFC 6121 initial presence: without it the server treats this
-    /// resource as unavailable and does not deliver 1:1 messages to it.
-    pub fn announce(&self) {
+    /// RFC 6121 presence: initial presence after connecting (without it
+    /// the server treats this resource as unavailable and does not deliver
+    /// 1:1 messages to it), and again whenever the user changes it.
+    pub fn announce(&self, availability: Availability) {
         let client = Arc::clone(&self.client);
-        runtime::spawn(async move { client.send_presence(None, None, None).await });
+        let show = availability.show().map(str::to_string);
+        runtime::spawn(async move { client.send_presence(None, show, None).await });
     }
 
     pub fn join(&self, room: &Conversation) {
@@ -278,23 +294,21 @@ impl Session {
         (messages, page.first_id, page.is_complete)
     }
 
-    /// Send under `origin_id`, optionally as a reply and with uploaded
-    /// files. True when the stanza was written.
-    pub async fn send(
-        &self,
-        jid: &str,
-        kind: Kind,
-        body: String,
-        origin_id: String,
-        quote: Option<Quote>,
-        files: Vec<WaddleSharedFile>,
-    ) -> bool {
+    /// Send `draft`. True when the stanza was written.
+    pub async fn send(&self, jid: &str, kind: Kind, draft: Draft) -> bool {
+        let Draft {
+            mut body,
+            origin_id,
+            quote,
+            files,
+            mentionable,
+        } = draft;
         let mut options = WaddleSendOptions {
             stanza_id: Some(origin_id),
             shared_files: files,
+            mention_directory: mention_directory(kind, &mentionable),
             ..WaddleSendOptions::default()
         };
-        let mut body = body;
         if let Some(quote) = quote {
             let (quoted, start, end) =
                 waddle_client_session::with_reply_fallback(&quote.sender, &quote.text, &body);
@@ -404,19 +418,25 @@ impl Session {
         .unwrap_or(false)
     }
 
-    /// XEP-0308: replace the body of the message with `correction_id`.
+    /// XEP-0308: replace the body of the message with `correction_id`. The
+    /// correction carries the new body's mentions, as a fresh send would.
     pub async fn correct(
         &self,
         jid: &str,
         kind: Kind,
         correction_id: String,
         body: String,
+        mentionable: &[Mentionable],
     ) -> bool {
+        let options = WaddleSendOptions {
+            mention_directory: mention_directory(kind, mentionable),
+            ..WaddleSendOptions::default()
+        };
         let client = Arc::clone(&self.client);
         let peer = jid.to_string();
         let outcome = runtime::spawn(async move {
             client
-                .send_correction(peer, correction_id, body, kind.is_muc(), None)
+                .send_correction(peer, correction_id, body, kind.is_muc(), Some(options))
                 .await
         })
         .await;
@@ -435,6 +455,22 @@ impl Session {
         .await
         .unwrap_or(false)
     }
+}
+
+/// Whom a room send's typed `@label`s may resolve to (XEP-0372): the
+/// occupants whose real JID is known, and the room broadcasts. A DM
+/// mentions nobody.
+fn mention_directory(kind: Kind, mentionable: &[Mentionable]) -> Option<WaddleMentionDirectory> {
+    (kind == Kind::Room).then(|| WaddleMentionDirectory {
+        targets: mentionable
+            .iter()
+            .map(|person| WaddleMentionTarget {
+                label: person.nick.clone(),
+                jid: person.jid.clone(),
+            })
+            .collect(),
+        broadcasts: true,
+    })
 }
 
 /// The XEP-0447 file for an upload, and the core's view of it.
@@ -1125,6 +1161,19 @@ mod tests {
         let anonymous = archived_from(archived(None), &room, Kind::Room, &me()).expect("a message");
         assert!(anonymous.own, "falls back to the nick");
         assert_eq!(anonymous.author_id, None);
+    }
+
+    #[test]
+    fn only_room_sends_resolve_mentions() {
+        let ann = [Mentionable {
+            nick: "ann".into(),
+            jid: "ann@waddle.social".into(),
+        }];
+        let room = mention_directory(Kind::Room, &ann).expect("a room directory");
+        assert!(room.broadcasts);
+        assert_eq!(room.targets[0].label, "ann");
+        assert_eq!(room.targets[0].jid, "ann@waddle.social");
+        assert_eq!(mention_directory(Kind::Direct, &ann), None);
     }
 
     #[test]

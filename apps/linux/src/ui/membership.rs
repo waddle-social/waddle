@@ -1,4 +1,5 @@
 //! Room entry is confirmed by XEP-0045 self-presence, not the socket write.
+//! The same presence stream tells who else is in each room, for mentions.
 use std::collections::{HashMap, VecDeque};
 
 use adw::prelude::*;
@@ -8,6 +9,7 @@ use jid::{BareJid, Jid};
 use waddle_xmpp_client_ffi::WaddlePresence;
 
 use super::WaddleWindow;
+use crate::composer::Mentionable;
 use crate::session::{Conversation, Kind};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -20,6 +22,9 @@ enum RoomState {
 #[derive(Default)]
 pub struct Membership {
     rooms: HashMap<String, RoomState>,
+    /// Each requested room's occupants: nick to real bare JID, when the
+    /// room exposes it (XEP-0045 §7.2.3).
+    occupants: HashMap<String, HashMap<String, Option<BareJid>>>,
     attempt: u64,
 }
 
@@ -84,14 +89,57 @@ impl Membership {
         if self.rooms.get(jid) != Some(&RoomState::Joining(attempt)) {
             return false;
         }
-        self.rooms.insert(jid.to_string(), RoomState::Failed);
+        self.fail(jid);
         true
+    }
+
+    fn fail(&mut self, jid: &str) {
+        self.rooms.insert(jid.to_string(), RoomState::Failed);
+        self.occupants.remove(jid);
+    }
+
+    fn clear(&mut self) {
+        self.rooms.clear();
+        self.occupants.clear();
+    }
+
+    /// Record an occupant's presence in a room this resource asked for.
+    fn track(&mut self, room: &str, nick: &str, present: bool, real: Option<BareJid>) {
+        if !self.rooms.contains_key(room) {
+            return;
+        }
+        let occupants = self.occupants.entry(room.to_string()).or_default();
+        if present {
+            occupants.insert(nick.to_string(), real);
+        } else {
+            occupants.remove(nick);
+        }
+    }
+
+    /// Whom a message in `room` can mention: present occupants with a
+    /// known real JID, other than `own_nick`, by nick.
+    fn mentionable(&self, room: &str, own_nick: &str) -> Vec<Mentionable> {
+        let mut people: Vec<Mentionable> = self
+            .occupants
+            .get(room)
+            .into_iter()
+            .flatten()
+            .filter(|(nick, _)| nick.as_str() != own_nick)
+            .filter_map(|(nick, real)| {
+                Some(Mentionable {
+                    nick: nick.clone(),
+                    jid: real.as_ref()?.to_string(),
+                })
+            })
+            .collect();
+        people.sort_by_key(|person| person.nick.to_lowercase());
+        people
     }
 }
 
 impl WaddleWindow {
     pub(super) fn clear_membership(&self) {
-        self.imp().membership.borrow_mut().rooms.clear();
+        self.imp().membership.borrow_mut().clear();
         self.imp().outbound.borrow_mut().clear();
         self.refresh_composer();
     }
@@ -100,6 +148,20 @@ impl WaddleWindow {
         self.imp().connected.get()
             && (conversation.kind == Kind::Direct
                 || self.imp().membership.borrow().joined(&conversation.jid))
+    }
+
+    /// Whom a message in this conversation can mention.
+    pub(super) fn mentionable(&self, conversation: &Conversation) -> Vec<Mentionable> {
+        let imp = self.imp();
+        if conversation.kind != Kind::Room {
+            return Vec::new();
+        }
+        let Some(own_nick) = imp.session.borrow().as_ref().map(|s| s.me.nick.clone()) else {
+            return Vec::new();
+        };
+        imp.membership
+            .borrow()
+            .mentionable(&conversation.jid, &own_nick)
     }
 
     /// The composer is usable when the open conversation can take a
@@ -178,6 +240,17 @@ impl WaddleWindow {
         let Some(session) = imp.session.borrow().clone() else {
             return;
         };
+        if let Some(nick) = from.resource() {
+            let present = matches!(presence.presence_type.as_str(), "available" | "");
+            let real = presence
+                .muc_jid
+                .as_deref()
+                .and_then(|real| real.parse::<Jid>().ok())
+                .map(|real| real.to_bare());
+            imp.membership
+                .borrow_mut()
+                .track(&room, nick.as_str(), present, real);
+        }
         let expected_nick = from
             .resource()
             .is_some_and(|r| r.as_str() == session.me.nick);
@@ -200,7 +273,11 @@ impl WaddleWindow {
         if !imp.membership.borrow().rooms.contains_key(&room) {
             return;
         }
-        imp.membership.borrow_mut().rooms.insert(room, state);
+        if state == RoomState::Failed {
+            imp.membership.borrow_mut().fail(&room);
+        } else {
+            imp.membership.borrow_mut().rooms.insert(room, state);
+        }
         if state == RoomState::Failed {
             let reason = presence
                 .error_text
@@ -302,6 +379,43 @@ mod tests {
         assert!(membership.joined("room@example.com"));
         membership.rooms.clear();
         assert!(!membership.joined("room@example.com"));
+    }
+
+    #[test]
+    fn occupants_of_requested_rooms_are_mentionable_until_they_leave() {
+        let mut membership = Membership::default();
+        let ann: BareJid = "ann@example.com".parse().unwrap();
+        membership.track("room@example.com", "ann", true, Some(ann.clone()));
+        assert!(
+            membership.mentionable("room@example.com", "me").is_empty(),
+            "a room this resource never asked for"
+        );
+        membership.begin("room@example.com");
+        membership.track("room@example.com", "ann", true, Some(ann));
+        membership.track("room@example.com", "anon", true, None);
+        membership.track(
+            "room@example.com",
+            "me",
+            true,
+            Some("me@example.com".parse().unwrap()),
+        );
+        assert_eq!(
+            membership.mentionable("room@example.com", "me"),
+            [Mentionable {
+                nick: "ann".into(),
+                jid: "ann@example.com".into()
+            }]
+        );
+        membership.track("room@example.com", "ann", false, None);
+        assert!(membership.mentionable("room@example.com", "me").is_empty());
+        membership.track(
+            "room@example.com",
+            "ann",
+            true,
+            Some("ann@example.com".parse().unwrap()),
+        );
+        membership.fail("room@example.com");
+        assert!(membership.mentionable("room@example.com", "me").is_empty());
     }
 
     #[test]
