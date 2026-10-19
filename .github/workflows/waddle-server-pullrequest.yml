@@ -84,14 +84,14 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
-permissions:
-  contents: read
-  checks: write
-  pull-requests: none
-  packages: read
-  id-token: write
 jobs:
   checkCiDrift:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: checkCiDrift
     runs-on: ubuntu-24.04
     steps:
@@ -121,7 +121,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.1"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -142,6 +142,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkSwitchableAlternativeProgram:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: checkSwitchableAlternativeProgram
     runs-on: ubuntu-24.04
     steps:
@@ -171,7 +177,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.1"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -192,6 +198,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   checkXmppClientFfiBindings:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: checkXmppClientFfiBindings
     runs-on: ubuntu-24.04
     steps:
@@ -221,7 +233,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.1"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -242,6 +254,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildCi:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixBuildCi
     runs-on: ubuntu-24.04
     steps:
@@ -272,6 +290,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildExtensionModules:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixBuildExtensionModules
     runs-on: ubuntu-24.04
     steps:
@@ -302,6 +326,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixBuildImageStream:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixBuildImageStream
     runs-on: ubuntu-24.04
     steps:
@@ -332,6 +362,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixClippy:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixClippy
     runs-on: ubuntu-24.04
     steps:
@@ -362,6 +398,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixDoctest:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixDoctest
     runs-on: ubuntu-24.04
     steps:
@@ -392,6 +434,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixFmt:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixFmt
     runs-on: ubuntu-24.04
     steps:
@@ -422,6 +470,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   renderDeployment:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: renderDeployment
     runs-on: ubuntu-24.04
     steps:
@@ -451,7 +505,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.1"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

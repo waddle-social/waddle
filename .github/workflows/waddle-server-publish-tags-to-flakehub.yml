@@ -12,13 +12,13 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
-permissions:
-  contents: read
-  checks: write
-  pull-requests: none
-  id-token: write
 jobs:
   waddle-server-Publish-tags-to-FlakeHub:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      id-token: write
     name: waddle-server-Publish tags to FlakeHub
     runs-on: namespace-profile-linux-x86
     environment: flakehub
@@ -61,7 +61,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.56.7"
+        cuenv_version="0.57.1"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

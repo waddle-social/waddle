@@ -69,14 +69,14 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true
-permissions:
-  contents: read
-  checks: write
-  pull-requests: none
-  packages: read
-  id-token: write
 jobs:
   nixXmppUnitTests:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixXmppUnitTests
     runs-on: ubuntu-24.04
     steps:
@@ -107,6 +107,12 @@ jobs:
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
   nixXmppXepIntegration:
+    permissions:
+      contents: read
+      checks: write
+      pull-requests: none
+      packages: read
+      id-token: write
     name: nixXmppXepIntegration
     runs-on: ubuntu-24.04
     steps:
