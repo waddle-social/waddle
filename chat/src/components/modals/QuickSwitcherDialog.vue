@@ -205,6 +205,7 @@ function badgeLabel(entry: QuickSwitcherEntry): string {
         @mousemove="highlighted = entry.id"
         @mousedown.prevent
         @click="choose(entry)"
+        @keydown.enter.prevent="choose(entry)"
       >
         <UserAvatar v-if="entry.target.kind === 'dm'" :jid="entry.target.peerJid" :name="entry.title" size="sm" />
         <span
