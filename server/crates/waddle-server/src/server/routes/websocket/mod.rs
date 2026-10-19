@@ -31,8 +31,8 @@ use waddle_xmpp::{
     inbox::storage::InboxStorage,
     mam::MamStorage,
     muc::{
-        room_actor::{LeaveByRealJid, RoomActor},
-        room_registry_actor::RoomRegistryActor,
+        room::actor::{LeaveByRealJid, RoomActor},
+        room::registry_actor::RoomRegistryActor,
         RoomConfig,
     },
     protocol::{

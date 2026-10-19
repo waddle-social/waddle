@@ -1,3 +1,8 @@
+pub mod actor;
+pub(super) mod affiliations;
+pub(super) mod broadcast;
+pub mod registry_actor;
+pub mod registry_handle;
 use std::collections::HashMap;
 
 use jid::{BareJid, FullJid};
@@ -5,7 +10,7 @@ use serde::{Deserialize, Serialize};
 
 use super::affiliation::{AffiliationList, FederatedAffiliationConfig, FederatedPermissionPolicy};
 use super::pin::{PinPermission, PinnedEntry};
-use super::room_actor::OccupancyWatermark;
+use super::room::actor::OccupancyWatermark;
 use super::subject::SubjectState;
 use crate::types::{Affiliation, Role};
 use crate::xep::xep0272::Muji;
@@ -205,7 +210,7 @@ pub struct MucRoom {
     pub(super) session_watermarks: HashMap<FullJid, OccupancyWatermark>,
     /// Process-wide occupancy order at which each session joined (see
     /// `LeaveAttemptId`); transplanted with the roster.
-    pub(super) session_orders: HashMap<FullJid, super::room_actor::OccupancyOrder>,
+    pub(super) session_orders: HashMap<FullJid, super::room::actor::OccupancyOrder>,
     /// Connection identity of each live occupant session. A same-full-JID
     /// rejoin overwrites the previous generation so stale cleanup can prove
     /// it belongs to the displaced connection.
@@ -519,7 +524,7 @@ impl MucRoom {
             .insert(occupant.real_jid.clone(), OccupancyWatermark::initial());
         self.session_orders.insert(
             occupant.real_jid.clone(),
-            super::room_actor::next_occupancy_order(),
+            super::room::actor::next_occupancy_order(),
         );
         self.session_generations.insert(
             occupant.real_jid.clone(),
@@ -668,11 +673,11 @@ impl MucRoom {
 
     pub fn set_session_watermark(&mut self, jid: FullJid, watermark: OccupancyWatermark) {
         self.session_orders
-            .insert(jid.clone(), super::room_actor::next_occupancy_order());
+            .insert(jid.clone(), super::room::actor::next_occupancy_order());
         self.session_watermarks.insert(jid, watermark);
     }
 
-    pub fn session_order(&self, jid: &FullJid) -> Option<super::room_actor::OccupancyOrder> {
+    pub fn session_order(&self, jid: &FullJid) -> Option<super::room::actor::OccupancyOrder> {
         self.session_orders.get(jid).copied()
     }
 
@@ -687,7 +692,7 @@ impl MucRoom {
     /// projection awaited: a cleanup attempt minted while the projection was
     /// blocked must classify this session as its target, not as a newer
     /// replacement (#1647, codex round 27).
-    pub fn set_session_order(&mut self, jid: &FullJid, order: super::room_actor::OccupancyOrder) {
+    pub fn set_session_order(&mut self, jid: &FullJid, order: super::room::actor::OccupancyOrder) {
         self.session_orders.insert(jid.clone(), order);
     }
 

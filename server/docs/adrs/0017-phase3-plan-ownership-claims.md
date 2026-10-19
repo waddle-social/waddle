@@ -1403,7 +1403,7 @@ muc_durable.rs` (exact actor-owned durable fencing and legacy cache checks),
 `server/crates/waddle-server/src/server/routes/websocket/cleanup.rs`
 (`get_or_create_room_actor`'s typed `Result`), `server/crates/waddle-server/src/
 server/routes/websocket/handlers/presence/muc.rs` (join-path error mapping),
-`server/crates/waddle-xmpp/src/muc/room_registry_actor.rs`
+`server/crates/waddle-xmpp/src/muc/room/registry_actor.rs`
 (`live_room` async + claim release), `server/crates/waddle-server/src/
 clustering/{local_claims.rs,mod.rs}` (`health_check` fix,
 `demote_room_actor`, `MucDurableStoreInit`), `server/crates/waddle-server/src/
@@ -3339,7 +3339,7 @@ record the retained work.
     another node's legitimate steal-intent for an entity this process can
     no longer act on at all.
 
-    Tests: `room_registry_actor::tests::ownership_claims_tests::
+    Tests: `room::registry_actor::tests::ownership_claims_tests::
     dead_actor_detection_releases_the_orphaned_claim` (kill the actor,
     trigger `live_room` via `GetRoom`, assert the claim store shows the
     claim released AND that a different node identity can now acquire
@@ -3388,7 +3388,7 @@ record the retained work.
     invite grant and rollback errors whose public variants encode that their
     affiliation writes failed before applying memory.
 
-    Test: `room_actor::tests::
+    Test: `room::actor::tests::
     join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_with_no_ban_lost`
     — a `FlakyThenRecoveringStore` fails the initial load and the first
     retry, then succeeds on the second retry with a durable state

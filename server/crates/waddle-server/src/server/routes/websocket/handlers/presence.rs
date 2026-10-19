@@ -3,7 +3,7 @@ use tracing::{debug, info, warn};
 use waddle_xmpp::{
     muc::{
         messages::build_subject_message,
-        room_actor::{JoinAffiliationGrant, JoinWithAffiliation, LeaveByRealJid},
+        room::actor::{JoinAffiliationGrant, JoinWithAffiliation, LeaveByRealJid},
         RoomConfig,
     },
     presence::subscription::{

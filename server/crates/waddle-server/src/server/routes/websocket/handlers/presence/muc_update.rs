@@ -37,7 +37,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::muc::{
     build_occupant_presence_update,
     presence::NS_MUC,
-    room_actor::{ClearMujiPresence, UpsertInCallState, UpsertMujiPresence},
+    room::actor::{ClearMujiPresence, UpsertInCallState, UpsertMujiPresence},
 };
 use waddle_xmpp::xep::xep0167::MediaKind;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji, NS_MUJI};
@@ -175,7 +175,7 @@ pub(crate) async fn try_handle_muc_presence_update(
     // the sender's Muji/SFU call state (previously this path cleared
     // the call state and then dropped the stanza silently).
     let Ok(context) = actor
-        .ask(waddle_xmpp::muc::room_actor::GetAdminContext {
+        .ask(waddle_xmpp::muc::room::actor::GetAdminContext {
             sender_jid: sender_jid.clone(),
         })
         .await
@@ -237,10 +237,10 @@ pub(crate) async fn try_handle_muc_presence_update(
             })
             .await
         {
-            Ok(Some(waddle_xmpp::muc::room_actor::ClearMujiPresenceOutcome::Updated(outcome))) => {
+            Ok(Some(waddle_xmpp::muc::room::actor::ClearMujiPresenceOutcome::Updated(outcome))) => {
                 *outcome
             }
-            Ok(Some(waddle_xmpp::muc::room_actor::ClearMujiPresenceOutcome::Superseded)) => {
+            Ok(Some(waddle_xmpp::muc::room::actor::ClearMujiPresenceOutcome::Superseded)) => {
                 // A replacement connection owns this occupancy now. `None`
                 // would fall through to the JOIN path and let the stale
                 // connection overwrite the replacement's generation, so this

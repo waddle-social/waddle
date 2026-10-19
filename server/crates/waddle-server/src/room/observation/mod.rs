@@ -16,8 +16,8 @@ use tokio::sync::{mpsc, Semaphore};
 use tokio_util::task::TaskTracker;
 use waddle_extensions::{ConfiguredRoomObserver, PluginId, RoomObservationSubscription};
 use waddle_xmpp::muc::{
-    room_actor::{NotifyRoomExtensions, RoomExtensionSubscriber, SubscribeRoomExtension},
-    room_registry_actor::GetRoom,
+    room::actor::{NotifyRoomExtensions, RoomExtensionSubscriber, SubscribeRoomExtension},
+    room::registry_actor::GetRoom,
 };
 
 #[derive(Debug, thiserror::Error)]

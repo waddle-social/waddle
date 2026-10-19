@@ -50,7 +50,7 @@ async fn user_groupchat_with_bot(f: IngressFixture, another_user: bool) {
     }
     for (real_jid, nick) in occupants {
         actor
-            .ask(waddle_xmpp::muc::room_actor::Join {
+            .ask(waddle_xmpp::muc::room::actor::Join {
                 session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
                 nick: nick.into(),
                 real_jid,
@@ -325,7 +325,7 @@ async fn extension_bot_muc_private_message_is_refused_from_the_occupant() {
     get_room_actor(&state, &room)
         .await
         .expect("room actor")
-        .ask(waddle_xmpp::muc::room_actor::Join {
+        .ask(waddle_xmpp::muc::room::actor::Join {
             session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "helper".into(),
             real_jid: bot,

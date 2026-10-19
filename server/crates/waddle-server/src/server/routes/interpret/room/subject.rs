@@ -1,8 +1,8 @@
 use super::super::*;
 use kameo::error::SendError;
-use waddle_xmpp::muc::room_actor::GetSnapshot;
-use waddle_xmpp::muc::room_actor::SetSubjectError;
-use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
+use waddle_xmpp::muc::room::actor::GetSnapshot;
+use waddle_xmpp::muc::room::actor::SetSubjectError;
+use waddle_xmpp::muc::room::registry_actor::DemoteRoomIfExactActor;
 use waddle_xmpp::muc::{RoomClaimFenceContext, RoomSubjectTexts};
 use waddle_xmpp::ownership::{Entity, EntityType};
 
@@ -282,7 +282,7 @@ pub(in crate::server::routes::interpret) async fn reconcile_ambiguous_subject_co
     room_registry: &ActorRef<RoomRegistryActor>,
     room: &BareJid,
     stale_actor: &ActorRef<RoomActor>,
-    durable_recovery_snapshot: Option<&waddle_xmpp::muc::room_actor::RoomSnapshot>,
+    durable_recovery_snapshot: Option<&waddle_xmpp::muc::room::actor::RoomSnapshot>,
     intended_subject: waddle_xmpp::muc::SubjectState,
 ) -> bool {
     let Some(recovery_snapshot) = durable_recovery_snapshot else {
@@ -305,11 +305,11 @@ pub(in crate::server::routes::interpret) async fn reconcile_ambiguous_subject_co
         Err(error) => {
             if matches!(
                 error,
-                waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Timeout
+                waddle_xmpp::muc::room::registry_actor::RoomRegistryError::Timeout
             ) {
                 let _ = room_registry
                     .ask(
-                        waddle_xmpp::muc::room_registry_actor::RetireUnresponsiveRoomIfExactActor {
+                        waddle_xmpp::muc::room::registry_actor::RetireUnresponsiveRoomIfExactActor {
                             room_jid: room.clone(),
                             actor_ref: stale_actor.clone(),
                         },
@@ -350,7 +350,7 @@ mod plan_tests {
     use super::super::super::effects::{Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy};
     use super::*;
     use crate::server::routes::websocket::tests::create_test_websocket_state;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
 
     #[tokio::test]
     async fn plan_subject_records_mutation_without_changing_room_actor() {

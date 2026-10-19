@@ -13,7 +13,7 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 use waddle_extensions::{ConfiguredRoomObserver, RoomObservationSubscription};
-use waddle_xmpp::muc::room_registry_actor::GetOrRestoreDurableRoom;
+use waddle_xmpp::muc::room::registry_actor::GetOrRestoreDurableRoom;
 
 pub(super) async fn run(
     state: Weak<WebSocketState>,

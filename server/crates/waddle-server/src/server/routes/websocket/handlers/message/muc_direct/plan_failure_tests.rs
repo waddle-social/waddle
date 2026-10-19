@@ -14,7 +14,7 @@ use std::sync::Arc;
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, IngressEffectIntent, NormalizedTarget, WireHandledCount,
 };
-use waddle_xmpp::muc::{room_actor::Join, room_registry_actor::CreateRoom};
+use waddle_xmpp::muc::{room::actor::Join, room::registry_actor::CreateRoom};
 use xmpp_parsers::message::MessageType;
 
 async fn state(fixture: &IngressFixture) -> Arc<WebSocketState> {
@@ -149,7 +149,7 @@ async fn accepted(fixture: &IngressFixture, submission: &IngressSubmission) {
 async fn room(
     state: &WebSocketState,
     sender: &FullJid,
-) -> kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+) -> kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor> {
     let actor = state
         .deps
         .protocol
@@ -202,7 +202,7 @@ async fn actor_failure(fixture: IngressFixture, snapshot: bool) {
         );
         let task = tokio::spawn(async move {
             blocked_actor
-                .ask(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+                .ask(waddle_xmpp::muc::room::actor::RestoreDurableRoomState {
                     store: blocked_store,
                     claim_fence: fence,
                 })

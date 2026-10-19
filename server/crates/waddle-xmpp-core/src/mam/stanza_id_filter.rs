@@ -31,7 +31,7 @@ pub const STANZA_ID_FILTER_FIELD: &str = "{urn:waddle:mam-stanza-id:0}stanza-id"
 
 /// Maximum length of a single stanza-id value, in bytes.
 ///
-/// Matches `waddle_xmpp::xep::xep_waddle_pin::MAX_TARGET_STANZA_ID_LEN`
+/// Matches `waddle_xmpp::xep::waddle::pin::MAX_TARGET_STANZA_ID_LEN`
 /// — the pin protocol already constrains the ids the chat client will
 /// ever ask for, and reusing the same cap keeps validation symmetric.
 pub const MAX_FILTER_STANZA_ID_LEN: usize = 256;

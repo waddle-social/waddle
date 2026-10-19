@@ -20,7 +20,7 @@
 //! catches that error and defaults the user to `Inactive` (logged
 //! `warn!`), which silently un-DND's them. To avoid that surprise,
 //! ANY strict-parser tightening (new rejection paths in
-//! `xep_waddle_dnd::WaddleDnd::parse`) MUST bump `urn:waddle:dnd:0`
+//! `xep::waddle::dnd::WaddleDnd::parse`) MUST bump `urn:waddle:dnd:0`
 //! to `:1` (forcing a fresh PEP item id at the wire) AND bump
 //! `pubsub_schema::PUBSUB_SCHEMA_VERSION` so the drop-and-recreate
 //! path clears any unparseable rows. The opposite — loosening the
@@ -43,7 +43,7 @@
 use jid::BareJid;
 use minidom::Element;
 use thiserror::Error;
-use waddle_xmpp::xep::xep_waddle_dnd::{DndParseError, WaddleDnd};
+use waddle_xmpp::xep::waddle::dnd::{DndParseError, WaddleDnd};
 
 use crate::db::{Database, DatabaseError, Transaction};
 
@@ -202,7 +202,7 @@ mod tests {
     use chrono_tz::Tz;
     use jid::BareJid;
     use std::str::FromStr;
-    use waddle_xmpp::xep::xep_waddle_dnd::{ScheduleRule, WeekdaySet};
+    use waddle_xmpp::xep::waddle::dnd::{ScheduleRule, WeekdaySet};
 
     fn alice() -> BareJid {
         BareJid::from_str("alice@waddle.example").expect("test JID parses")

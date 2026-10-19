@@ -1,6 +1,6 @@
 use minidom::Element;
 use waddle_xmpp::muc::{MucRoom, RoomConfig};
-use waddle_xmpp::xep::xep_waddle_group_dm::{
+use waddle_xmpp::xep::waddle::group_dm::{
     build_history_access, history_access_from_mediated_invite, GroupDmHistoryAccess, NS_GROUP_DM,
 };
 

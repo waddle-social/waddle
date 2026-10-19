@@ -32,7 +32,7 @@ use handlers::presence::{
 // Types moved out of mod.rs scope but used in tests
 use waddle_extensions::ExtensionConfig;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     ApplyAdminItems, ChangeAffiliation, GetConfig, GetSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, SetSubject, UpdateConfig,
 };
@@ -1054,7 +1054,7 @@ fn scram_client_final_from_challenge(
 pub(crate) async fn snapshot_room(
     state: &WebSocketState,
     room_jid: &BareJid,
-) -> waddle_xmpp::muc::room_actor::RoomSnapshot {
+) -> waddle_xmpp::muc::room::actor::RoomSnapshot {
     let room_actor = get_room_actor(state, room_jid).await.expect("room actor");
     room_actor.ask(GetSnapshot).await.expect("room snapshot")
 }

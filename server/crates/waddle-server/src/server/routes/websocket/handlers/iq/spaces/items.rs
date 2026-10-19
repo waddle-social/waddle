@@ -149,7 +149,7 @@ async fn backfill_missing_space_bookmarks(
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
                 room_jid: channel_jid.clone(),
             })
             .await
@@ -164,7 +164,7 @@ async fn backfill_missing_space_bookmarks(
                 continue;
             }
         };
-        let config = match room.ask(waddle_xmpp::muc::room_actor::GetConfig).await {
+        let config = match room.ask(waddle_xmpp::muc::room::actor::GetConfig).await {
             Ok(config) => config,
             Err(error) => {
                 warn!(channel = %channel_jid, error = %error, "Failed to load room config for Spaces bookmark backfill");

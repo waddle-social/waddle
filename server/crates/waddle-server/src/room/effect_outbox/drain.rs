@@ -15,7 +15,7 @@ use futures::stream::{FuturesUnordered, StreamExt};
 use jid::FullJid;
 use kameo::actor::ActorRef;
 use tokio::sync::oneshot;
-use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
+use waddle_xmpp::muc::room::registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::muc::RoomEffectReservation;
 use waddle_xmpp::ownership::{Entity, EntityType};
 use waddle_xmpp::registry::{OutboundWriteAcceptance, SendResult};

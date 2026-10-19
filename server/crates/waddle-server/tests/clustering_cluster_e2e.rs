@@ -2397,7 +2397,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use waddle_xmpp::muc::room_actor::{ConfigEffectPlan, HealthCheck, UpdateConfig};
+    use waddle_xmpp::muc::room::actor::{ConfigEffectPlan, HealthCheck, UpdateConfig};
     use waddle_xmpp::muc::{RoomConfig, RoomRegistry};
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
@@ -3978,10 +3978,10 @@ fn muji_terminate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
 /// Muji `session-initiate` IQ for `room`, built with minidom builders
 /// per the repo's XML-generation rule (id = `mji-{sid}`).
 fn muji_initiate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
+    use waddle_xmpp::xep::waddle::livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
     use waddle_xmpp::xep::xep0166::NS_JINGLE;
     use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
     use waddle_xmpp::xep::xep0272::NS_MUJI;
-    use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
     use xmpp_parsers::minidom::Element;
 
     let payload_type = Element::builder("payload-type", NS_JINGLE_RTP)

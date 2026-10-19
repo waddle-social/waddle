@@ -251,9 +251,9 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "");
-        crate::xep::xep_waddle_forums::set_thread_create(
+        crate::xep::waddle::forums::set_thread_create(
             &mut msg,
-            &crate::xep::xep_waddle_forums::ThreadCreate::new("Roadmap"),
+            &crate::xep::waddle::forums::ThreadCreate::new("Roadmap"),
         );
 
         let events = run(&room, &sender, &mut msg);
@@ -350,9 +350,9 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "");
-        crate::xep::xep_waddle_forums::set_thread_reply(
+        crate::xep::waddle::forums::set_thread_reply(
             &mut msg,
-            &crate::xep::xep_waddle_forums::ThreadReply::new("topic-root"),
+            &crate::xep::waddle::forums::ThreadReply::new("topic-root"),
         );
 
         let events = run(&room, &sender, &mut msg);
@@ -418,29 +418,27 @@ mod tests {
         let room = bare("team@conf.example.com");
         let sender = full("alice@example.com/web");
         let mut msg = groupchat(&room, &sender, "");
+        msg.payloads
+            .push(Element::builder("thread-create", crate::xep::waddle::forums::NS_FORUMS).build());
         msg.payloads.push(
-            Element::builder("thread-create", crate::xep::xep_waddle_forums::NS_FORUMS).build(),
-        );
-        msg.payloads.push(
-            Element::builder("thread-create", crate::xep::xep_waddle_forums::NS_FORUMS)
+            Element::builder("thread-create", crate::xep::waddle::forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("title").to_owned(), "")
                 .build(),
         );
         msg.payloads.push(
-            Element::builder("thread-create", crate::xep::xep_waddle_forums::NS_FORUMS)
+            Element::builder("thread-create", crate::xep::waddle::forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("title").to_owned(), "   ")
                 .build(),
         );
+        msg.payloads
+            .push(Element::builder("thread-reply", crate::xep::waddle::forums::NS_FORUMS).build());
         msg.payloads.push(
-            Element::builder("thread-reply", crate::xep::xep_waddle_forums::NS_FORUMS).build(),
-        );
-        msg.payloads.push(
-            Element::builder("thread-reply", crate::xep::xep_waddle_forums::NS_FORUMS)
+            Element::builder("thread-reply", crate::xep::waddle::forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("thread-id").to_owned(), "")
                 .build(),
         );
         msg.payloads.push(
-            Element::builder("thread-reply", crate::xep::xep_waddle_forums::NS_FORUMS)
+            Element::builder("thread-reply", crate::xep::waddle::forums::NS_FORUMS)
                 .attr(minidom::rxml::xml_ncname!("thread-id").to_owned(), "   ")
                 .build(),
         );

@@ -6,11 +6,11 @@ use waddle_xmpp::muc::durable::{
     RoomClaimFenceContext, RoomCommitFuture, RoomCommitOutcome, RoomCommittedCoordinates,
     RoomDurableMutation,
 };
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     ApplyAdminItems, ChangeAffiliation, GetRoomSnapshot, GetSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, RestoreDurableRoomState, RoomActor, SetSubject, SetSubjectError,
 };
-use waddle_xmpp::muc::room_registry_actor::{
+use waddle_xmpp::muc::room::registry_actor::{
     GetOrCreateRoom, GetOrRestoreRoom, WireClusteringClaims,
 };
 use waddle_xmpp::muc::{AdminItem, MucRoom};

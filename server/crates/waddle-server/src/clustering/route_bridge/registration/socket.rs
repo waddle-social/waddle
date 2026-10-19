@@ -1661,10 +1661,10 @@ mod tests {
 
     #[tokio::test]
     async fn fresh_retirement_without_a_registration_cleans_only_its_generation() {
-        use waddle_xmpp::muc::room_actor::{
+        use waddle_xmpp::muc::room::actor::{
             GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation,
         };
-        use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+        use waddle_xmpp::muc::room::registry_actor::CreateRoom;
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let mut services = services_with_claims(
             origin_identity(),

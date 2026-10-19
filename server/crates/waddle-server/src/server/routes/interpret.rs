@@ -48,7 +48,7 @@
 //! - [`OutboundEvent::DispatchToRoom`] — MUC sender-pass: hoists
 //!   managed-room owner check + rich-target validation, queries the
 //!   per-room actor for a frozen
-//!   [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`], runs the
+//!   [`waddle_xmpp::muc::room::actor::RoomChainSnapshot`], runs the
 //!   stateless room handler chain, and recursively interprets emitted
 //!   events.
 //! - [`OutboundEvent::ArchiveGroupchat`] — XEP-0313 §5.1.3 room MAM
@@ -99,13 +99,13 @@ use waddle_xmpp::mam::{
     ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
     RichMessageId, RichText, STANZA_ID_NS,
 };
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, RoomActor, SetSubject,
 };
 #[cfg(feature = "clustering")]
-use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
-use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
+use waddle_xmpp::muc::room::registry_actor::DemoteRoomIfExactActor;
+use waddle_xmpp::muc::room::registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::muc::SubjectState;
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};

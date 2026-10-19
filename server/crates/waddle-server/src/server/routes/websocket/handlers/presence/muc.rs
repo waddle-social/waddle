@@ -11,7 +11,7 @@ pub use access::{
 };
 
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};
-use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::muc::room::actor::GetSnapshot;
 use waddle_xmpp::muc::RoomRegistry;
 use xml::{
     build_muc_conflict_presence_xml, build_muc_join_presence_stanza, build_muc_self_unavailable_xml,
@@ -144,7 +144,7 @@ const RESOLVER_SYNC_RETRY_BACKOFF: std::time::Duration = std::time::Duration::fr
 
 #[cfg(test)]
 fn sync_resolver_affiliation_on_rejection(
-    existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
+    existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>>,
     scheduler: &std::sync::Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
     room_jid: &BareJid,
     jid: BareJid,
@@ -163,7 +163,7 @@ fn sync_resolver_affiliation_on_rejection(
 }
 
 fn sync_resolver_affiliation_on_rejection_with_registry(
-    existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>,
+    existing_room_actor: Option<&kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>>,
     scheduler: &std::sync::Arc<crate::server::routes::websocket::ResolverAffiliationSyncScheduler>,
     room_registry: Option<RoomRegistry>,
     room_jid: &BareJid,
@@ -232,7 +232,7 @@ fn sync_resolver_affiliation_on_rejection_with_registry(
 }
 
 async fn run_resolver_affiliation_sync_worker(
-    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     room_registry: Option<RoomRegistry>,
     room_jid: BareJid,
     jid: BareJid,
@@ -243,7 +243,7 @@ async fn run_resolver_affiliation_sync_worker(
     let mut attempt = 1usize;
     loop {
         let result = actor
-            .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::SyncResolverAffiliation {
                 jid: jid.clone(),
                 affiliation: work.affiliation,
                 expected_admission_revision: effective_admission_revision,
@@ -254,7 +254,7 @@ async fn run_resolver_affiliation_sync_worker(
             .mailbox_timeout(RESOLVER_SYNC_MAILBOX_TIMEOUT)
             .await;
         match result {
-            Ok(waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied {
+            Ok(waddle_xmpp::muc::room::actor::ResolverAffiliationSyncOutcome::Applied {
                 admission_revision,
             }) => {
                 let Some(next) = worker.finish_applied_or_take_update(admission_revision) else {
@@ -266,7 +266,7 @@ async fn run_resolver_affiliation_sync_worker(
                 continue;
             }
             Ok(
-                waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable,
+                waddle_xmpp::muc::room::actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable,
             ) if attempt < RESOLVER_SYNC_MAX_ATTEMPTS => {}
             Ok(outcome) => {
                 // Stale revision, sealing, and invite compensation are
@@ -280,7 +280,7 @@ async fn run_resolver_affiliation_sync_worker(
                     "Skipped resolver affiliation sync on rejected join"
                 );
                 if outcome
-                    == waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::RoomSealed
+                    == waddle_xmpp::muc::room::actor::ResolverAffiliationSyncOutcome::RoomSealed
                 {
                     // This actor incarnation is permanently unable to accept
                     // any queued repair. Release the bounded scheduler slot
@@ -307,7 +307,7 @@ async fn run_resolver_affiliation_sync_worker(
                     return;
                 }
                 let disposition = if outcome
-                    == waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable
+                    == waddle_xmpp::muc::room::actor::ResolverAffiliationSyncOutcome::OwnershipUnavailable
                 {
                     crate::server::routes::websocket::state::ResolverAffiliationSyncTerminalDisposition::NonMutatingExhaustion
                 } else {
@@ -997,7 +997,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
             match get_room_actor_result(state, room_jid).await {
                 Ok(actor) => (actor, false),
                 Err(
-                    waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(_),
+                    waddle_xmpp::muc::room::registry_actor::RoomRegistryError::OwnershipReconciliationPending(_),
                 ) => (None, true),
                 Err(error) => {
                     warn!(room = %room_jid, %error, "Failed to look up MUC room before join");
@@ -1287,7 +1287,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     // another node genuinely, currently owns this room's
                     // claim. Phase 4 first tries the ordered relay MUC proxy
                     // so the owning RoomActor remains the single writer.
-                    Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
+                    Err(waddle_xmpp::muc::room::registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_)) => {
                         #[cfg(feature = "clustering")]
                         if let Some(origin) = ordered_relay_origin.as_ref() {
                             if let Some(bridge) = state
@@ -1399,7 +1399,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                         );
                     }
                     Err(
-                        waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(_),
+                        waddle_xmpp::muc::room::registry_actor::RoomRegistryError::OwnershipReconciliationPending(_),
                     ) => {
                         return deny_join_admission(
                             room_jid,
@@ -1442,7 +1442,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 };
                 let room_created = managed_channel.is_none()
                     && acquisition.creation
-                        == waddle_xmpp::muc::room_registry_actor::RoomCreation::Created;
+                        == waddle_xmpp::muc::room::registry_actor::RoomCreation::Created;
                 (acquisition.actor_ref, room_created)
             }
         };
@@ -1482,7 +1482,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 let room_sealed = matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
-                        waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+                        waddle_xmpp::muc::room::actor::RoomActorError::RoomSealed
                     )
                 );
                 let room_gone =
@@ -1523,7 +1523,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 let nick_collision = matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
-                        waddle_xmpp::muc::room_actor::RoomActorError::NickAlreadyInUse(_)
+                        waddle_xmpp::muc::room::actor::RoomActorError::NickAlreadyInUse(_)
                     )
                 );
                 if nick_collision {
@@ -1548,7 +1548,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     return vec![build_muc_conflict_presence_xml(room_jid, &nick, sender_jid)];
                 }
                 if let kameo::error::SendError::HandlerError(
-                    waddle_xmpp::muc::room_actor::RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
+                    waddle_xmpp::muc::room::actor::RoomActorError::OccupantAlreadyJoinedUnderDifferentNick {
                         current_nick,
                         ..
                     },
@@ -1583,7 +1583,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     );
                 }
                 if let kameo::error::SendError::HandlerError(
-                    waddle_xmpp::muc::room_actor::RoomActorError::StaleAdmissionRevision,
+                    waddle_xmpp::muc::room::actor::RoomActorError::StaleAdmissionRevision,
                 ) = &error
                 {
                     if stale_admission_retries < MAX_STALE_ADMISSION_RETRIES {
@@ -1607,18 +1607,18 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     );
                 }
                 if let kameo::error::SendError::HandlerError(
-                    waddle_xmpp::muc::room_actor::RoomActorError::JoinForbidden { reason },
+                    waddle_xmpp::muc::room::actor::RoomActorError::JoinForbidden { reason },
                 ) = &error
                 {
                     // XEP-0045 §7.2.8: bans map to <forbidden/> even in
                     // members-only rooms (#1265 item 1).
                     let (condition, deny_reason, message) = match reason {
-                        waddle_xmpp::muc::room_actor::JoinDenialReason::MembersOnly => (
+                        waddle_xmpp::muc::room::actor::JoinDenialReason::MembersOnly => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::RegistrationRequired,
                             waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomMembersOnly,
                             "Membership required to join this room.",
                         ),
-                        waddle_xmpp::muc::room_actor::JoinDenialReason::Banned => (
+                        waddle_xmpp::muc::room::actor::JoinDenialReason::Banned => (
                             waddle_xmpp::telemetry::attributes::StanzaErrorCondition::Forbidden,
                             waddle_xmpp::telemetry::attributes::MucJoinDenyReason::RoomBan,
                             "You are banned from this room.",
@@ -1647,7 +1647,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 if matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
-                        waddle_xmpp::muc::room_actor::RoomActorError::RestorePending
+                        waddle_xmpp::muc::room::actor::RoomActorError::RestorePending
                     )
                 ) {
                     return deny_join_admission(
@@ -1670,7 +1670,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 if matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
-                        waddle_xmpp::muc::room_actor::RoomActorError::OwnershipUnavailable
+                        waddle_xmpp::muc::room::actor::RoomActorError::OwnershipUnavailable
                     )
                 ) {
                     return deny_join_admission(
@@ -1692,7 +1692,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                 if matches!(
                     &error,
                     kameo::error::SendError::HandlerError(
-                        waddle_xmpp::muc::room_actor::RoomActorError::RoomFull
+                        waddle_xmpp::muc::room::actor::RoomActorError::RoomFull
                     )
                 ) {
                     // XEP-0045 §7.2.9: the room has reached its maximum
@@ -2062,7 +2062,7 @@ pub async fn handle_muc_leave(
         )];
     };
 
-    let leave_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+    let leave_attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
     // Write-ahead: if this task is cancelled after the actor dropped the
     // occupancy but before the fan-out below, the janitor replays the retained
     // outcome under this attempt. Completed once the effects ran.
@@ -2070,7 +2070,9 @@ pub async fn handle_muc_leave(
         room: room_jid.clone(),
         jid: sender_jid.clone(),
         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-        selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(occupancy_session),
+        selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Generation(
+            occupancy_session,
+        ),
         attempt: leave_attempt,
         notified: HashSet::new(),
         removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
@@ -2089,17 +2091,17 @@ pub async fn handle_muc_leave(
         LeaveByRealJid {
             sender_jid: sender_jid.clone(),
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-            session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+            session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Generation(
                 occupancy_session,
             ),
             attempt: leave_attempt,
-            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
         },
     )
     .await
     {
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => outcome,
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant) => {
+        Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome)) => outcome,
+        Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::NotOccupant) => {
             waddle_xmpp::telemetry::reliability::increment_muc_cleanup_not_occupant();
             state
                 .deps
@@ -2124,7 +2126,7 @@ pub async fn handle_muc_leave(
                 Affiliation::None,
             )];
         }
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded { .. }) => {
+        Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::Superseded { .. }) => {
             waddle_xmpp::telemetry::reliability::increment_muc_cleanup_superseded();
             state
                 .deps
@@ -2147,7 +2149,7 @@ pub async fn handle_muc_leave(
                 Affiliation::None,
             )];
         }
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+        Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::Deferred { .. }) => {
             state
                 .deps
                 .protocol
@@ -2155,7 +2157,7 @@ pub async fn handle_muc_leave(
                 .complete_in_flight(&in_flight);
             return bounce_muc_leave_ownership_unreachable(room_jid, sender_jid, nick);
         }
-        Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
+        Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::Suppressed {
             nick: actor_nick,
             affiliation,
             attempt: acknowledge,
@@ -2201,7 +2203,7 @@ pub async fn handle_muc_leave(
                     room: room_jid.clone(),
                     jid: sender_jid.clone(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+                    selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Generation(
                         occupancy_session,
                     ),
                     attempt: leave_attempt,
@@ -2233,7 +2235,7 @@ pub async fn handle_muc_leave(
                     jid: sender_jid.clone(),
                     actor: room_actor.id(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-                    selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+                    selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Generation(
                         occupancy_session,
                     ),
                     attempt: leave_attempt,
@@ -2328,7 +2330,7 @@ mod resolver_sync_retry_tests {
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         ChangeAffiliation, GetAffiliation, RestoreDurableRoomState, RoomActor,
     };
     use waddle_xmpp::muc::{MucRoom, RoomConfig};
@@ -3409,10 +3411,10 @@ mod occupancy_projection_handler_tests {
         MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomLifecycleId, RoomProjection,
         RoomRevision,
     };
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         GetSnapshot, RestoreDurableRoomState, RoomActor, SealForDestroy, SyncResolverAffiliation,
     };
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
 
     use crate::server::routes::websocket::tests::{

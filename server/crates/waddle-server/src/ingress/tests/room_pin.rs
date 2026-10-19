@@ -13,8 +13,8 @@ use waddle_xmpp::{
     mam::{MamStorage, SqlxMamStorage},
     muc::{
         pin::{PinChangeRequest, PinPreview, PinStateChange, PinnedEntry},
-        room_actor::{ApplyPin, GetPinList, Join},
-        room_registry_actor::{CreateRoom, RoomRegistryActor},
+        room::actor::{ApplyPin, GetPinList, Join},
+        room::registry_actor::{CreateRoom, RoomRegistryActor},
     },
     protocol::OutboundEvent,
     registry::ConnectionRegistry,
@@ -169,7 +169,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
         #[cfg(not(feature = "clustering"))]
         let fence = synthetic_fence();
         actor
-            .ask(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+            .ask(waddle_xmpp::muc::room::actor::RestoreDurableRoomState {
                 store: std::sync::Arc::new(FailingPinStore),
                 claim_fence: fence.clone(),
             })
@@ -749,7 +749,7 @@ async fn room_pin_snapshot_failure(fixture: IngressFixture, unpin: bool) {
     );
     let restore = tokio::spawn(async move {
         blocked_actor
-            .ask(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+            .ask(waddle_xmpp::muc::room::actor::RestoreDurableRoomState {
                 store: blocked_store,
                 claim_fence: fence,
             })
@@ -847,7 +847,7 @@ async fn unpin_snapshot_failure_plan_is_nonadvancing_postgres() {
 /// been captured, so the next snapshot ask fails inside the real interpreter.
 struct BlockAfterRoomEffect {
     inner: PlanSink,
-    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     store: std::sync::Arc<BlockedRoomRestore>,
     fence: waddle_xmpp::muc::RoomClaimFenceContext,
     subject: bool,
@@ -876,7 +876,7 @@ impl BlockAfterRoomEffect {
         };
         if matches && self.armed.swap(false, std::sync::atomic::Ordering::SeqCst) {
             self.actor
-                .tell(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+                .tell(waddle_xmpp::muc::room::actor::RestoreDurableRoomState {
                     store: self.store.clone(),
                     claim_fence: self.fence.clone(),
                 })

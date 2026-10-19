@@ -576,7 +576,7 @@ async fn fresh_groupchat_origin_fans_out_to_every_recipient() {
 async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
     use waddle_xmpp::inbox::storage::InMemoryInboxStorage;
     use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage, StoreOutcome};
-    use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::muc::room::actor::GetSnapshot;
     use waddle_xmpp::registry::UserRegistryActor;
     use waddle_xmpp_core::xep0359::{build_origin_id_element, build_stanza_id_element, OriginId};
 

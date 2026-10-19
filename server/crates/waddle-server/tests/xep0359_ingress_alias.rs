@@ -376,8 +376,8 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
         test_support::websocket_state_with_ingress,
     };
     use waddle_xmpp::muc::{
-        room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-        room_registry_actor::CreateRoom,
+        room::actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
+        room::registry_actor::CreateRoom,
     };
     let room: BareJid = "room@muc.example.com".parse().expect("room");
     let pool = Arc::new(

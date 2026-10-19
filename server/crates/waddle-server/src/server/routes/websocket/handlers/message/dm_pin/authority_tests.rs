@@ -75,7 +75,7 @@ fn set_marker(submission: &mut IngressSubmission, target: &StanzaId, unpin: bool
     message.payloads.push(if cascade {
         waddle_xmpp::xep::build_retract_element(&target.id)
     } else if unpin {
-        waddle_xmpp::xep::xep_waddle_pin::build_unpinned_element(target)
+        waddle_xmpp::xep::waddle::pin::build_unpinned_element(target)
     } else {
         waddle_xmpp::xep::build_pinned_message_element(target)
     });

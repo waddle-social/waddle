@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use jid::{BareJid, FullJid};
 use tokio::sync::mpsc;
-use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::room::registry_actor::CreateRoom;
 use waddle_xmpp::muc::{
     DestroyRecipient, MucConfigStatusCode, OccupantVoiceChange, RoomConfig, RoomLifecycleId,
     RoomLifecycleState, RoomMutationEffects, RoomRevision,

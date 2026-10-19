@@ -124,9 +124,6 @@ mod construction;
 mod invocation;
 mod launch_signing;
 mod manifest;
-mod message_context;
-mod message_helpers;
-mod message_processing;
 #[cfg(any(test, feature = "test-support"))]
 mod observer_test_support;
 mod room_observation;
@@ -134,8 +131,9 @@ mod signing;
 
 use launch_signing::*;
 use manifest::*;
-use message_context::*;
-use message_helpers::*;
+use message::context::*;
+use message::helpers::*;
 
+mod message;
 #[cfg(test)]
 mod tests;

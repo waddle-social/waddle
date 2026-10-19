@@ -1,6 +1,6 @@
 use super::*;
 use crate::server::routes::websocket::tests::create_test_websocket_state;
-use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::room::registry_actor::CreateRoom;
 use waddle_xmpp::muc::{RoomCommittedCoordinates, RoomConfig};
 use waddle_xmpp::ownership::NodeIdentity;
 
@@ -220,10 +220,10 @@ async fn assert_admin_recovery_preserves_final_roster(
     let new_affiliation = *affiliation_changes
         .last()
         .expect("admin affiliation change");
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         Join, LeaveAttemptId, LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector,
     };
-    use waddle_xmpp::muc::room_registry_actor::{GetOrCreateRoom, GetRoom, WireClusteringClaims};
+    use waddle_xmpp::muc::room::registry_actor::{GetOrCreateRoom, GetRoom, WireClusteringClaims};
     use waddle_xmpp::ownership::{InProcessClaimStore, SharedNodeIdentity};
 
     let state = create_test_websocket_state().await;
@@ -371,7 +371,7 @@ async fn assert_admin_recovery_preserves_final_roster(
             })
             .await,
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::CommitOutcomeUnknown
+            waddle_xmpp::muc::room::actor::AdminApplyError::CommitOutcomeUnknown
         ))
     ));
     let sealed = actor.ask(GetSnapshot).await.expect("sealed snapshot");
@@ -380,7 +380,7 @@ async fn assert_admin_recovery_preserves_final_roster(
             .block_next_load
             .store(true, std::sync::atomic::Ordering::SeqCst);
         actor
-            .tell(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+            .tell(waddle_xmpp::muc::room::actor::RestoreDurableRoomState {
                 store: store.clone(),
                 claim_fence: before.claim_fence.clone().expect("exact claim"),
             })
@@ -400,7 +400,7 @@ async fn assert_admin_recovery_preserves_final_roster(
         assert!(matches!(outcome, AdminReconciliationOutcome::Inconclusive));
         assert!(
             matches!(state.deps.protocol.room_registry.ask(GetRoom { room_jid: room_jid.clone() }).await,
-            Err(kameo::error::SendError::HandlerError(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::RoomActorStateLost(jid))) if jid == room_jid)
+            Err(kameo::error::SendError::HandlerError(waddle_xmpp::muc::room::registry_actor::RoomRegistryError::RoomActorStateLost(jid))) if jid == room_jid)
         );
         return;
     }
@@ -661,7 +661,7 @@ async fn assert_admin_recovery_preserves_final_roster(
 
 #[tokio::test]
 async fn xep0045_admin_recovery_does_not_create_missing_room() {
-    use waddle_xmpp::muc::room_registry_actor::{DemoteRoomIfExactActor, GetRoom};
+    use waddle_xmpp::muc::room::registry_actor::{DemoteRoomIfExactActor, GetRoom};
     let state = create_test_websocket_state().await;
     let room_jid: BareJid = "admin-gone@muc.example.com".parse().expect("room");
     let owner: FullJid = "owner@example.com/web".parse().expect("owner");

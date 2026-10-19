@@ -42,13 +42,10 @@ pub(crate) async fn plan_room_result(
         xml_ncname!("source-revision-id").to_owned(),
         publication.source.revision_stanza_id.as_str(),
     );
-    let fastening = Element::builder(
-        "apply-to",
-        waddle_xmpp::xep::xep_waddle_call_thread::NS_FASTEN,
-    )
-    .attr(xml_ncname!("id").to_owned(), origin.as_str())
-    .append(payload)
-    .build();
+    let fastening = Element::builder("apply-to", waddle_xmpp::xep::waddle::call_thread::NS_FASTEN)
+        .attr(xml_ncname!("id").to_owned(), origin.as_str())
+        .append(payload)
+        .build();
     let mut message = Message::new(Some(room.clone().into()));
     message.type_ = XmppMessageType::Groupchat;
     message.from = Some(room.clone().into());

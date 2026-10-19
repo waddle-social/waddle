@@ -163,8 +163,8 @@ mod tests {
         receiver_identity, services_with_claims, test_peer_id,
     };
     use crate::server::routes::websocket::tests::create_test_websocket_state;
-    use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp_core::{Affiliation, OccupancySessionGeneration};
 

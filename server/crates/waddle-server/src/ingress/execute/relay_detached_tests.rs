@@ -911,11 +911,11 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
         effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
     };
     use waddle_xmpp::muc::{
-        room_actor::{
+        room::actor::{
             GetRoomSnapshot, Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin,
             LeaveSessionSelector,
         },
-        room_registry_actor::CreateRoom,
+        room::registry_actor::CreateRoom,
     };
     for (reflection, detached) in [(false, false), (true, false), (false, true), (true, true)] {
         let fixture = IngressFixture::sqlite().await;

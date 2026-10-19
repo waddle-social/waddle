@@ -273,7 +273,7 @@ fn xep_0410_self_ping_result_display_strings() {
 // `Err(HandlerError)` maps to `<not-acceptable/>`.
 
 use kameo::actor::{ActorRef, Spawn};
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, PingSelfCheck, RoomActor,
 };
 use waddle_xmpp::muc::{MucRoom, RoomConfig};
@@ -395,16 +395,16 @@ async fn xep_0410_self_ping_survives_first_session_departure() {
     join_as_alice(&actor, session("mobile")).await;
 
     let outcome = actor
-        .ask(waddle_xmpp::muc::room_actor::LeaveByRealJid {
+        .ask(waddle_xmpp::muc::room::actor::LeaveByRealJid {
             sender_jid: session("web"),
             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
-            session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+            session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+            attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+            origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
         })
         .await
         .expect("leave first session");
-    let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = outcome else {
+    let waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome) = outcome else {
         panic!("web session was joined");
     };
     assert!(

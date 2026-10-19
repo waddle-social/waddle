@@ -26,7 +26,7 @@
 
 use minidom::Element;
 use waddle_sfu::{CallId, Identity, Jti, Jwt, WebsocketUrl};
-use waddle_xmpp::xep::xep_waddle_livekit_transport::{
+use waddle_xmpp::xep::waddle::livekit_transport::{
     IssuedTransport, TransportParseError, WaddleLiveKitTransport, NS_WADDLE_LIVEKIT_TRANSPORT,
 };
 

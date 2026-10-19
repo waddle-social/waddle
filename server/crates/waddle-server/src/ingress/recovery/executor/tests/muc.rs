@@ -3,7 +3,7 @@ use super::*;
 use crate::ingress::uow::DeliveryProgressRepository;
 use crate::ingress::{execute::ExternalOutcome, receipt_key, IngressEffectCapture};
 use waddle_xmpp::{
-    muc::{room_actor::Join, room_registry_actor::CreateRoom},
+    muc::{room::actor::Join, room::registry_actor::CreateRoom},
     protocol::OutboundEvent,
 };
 
@@ -49,7 +49,7 @@ async fn planned_room_with_origin(
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room.clone(),
         })
         .await
@@ -77,7 +77,7 @@ async fn planned_room_with_origin(
         // A reused room already seats these occupants; re-joining them would
         // only collide on the nick.
         if actor
-            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+            .ask(waddle_xmpp::muc::room::actor::GetOccupantByJid {
                 jid: resource.clone(),
             })
             .await
@@ -376,7 +376,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom { room_jid: room })
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom { room_jid: room })
         .await
         .expect("lookup")
         .expect("actor");

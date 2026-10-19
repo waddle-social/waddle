@@ -324,7 +324,7 @@ fn admin_items_match_room(
 }
 
 enum AdminReconciliationOutcome {
-    Committed(waddle_xmpp::muc::room_actor::AdminItemsApplied),
+    Committed(waddle_xmpp::muc::room::actor::AdminItemsApplied),
     NotCommitted,
     Inconclusive,
 }
@@ -397,7 +397,7 @@ async fn recover_committed_admin_effects_after_ambiguity(
     pre_apply_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
     observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
 ) -> Result<
-    (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
+    (waddle_xmpp::muc::room::actor::AdminItemsApplied, bool),
     crate::room::effect_outbox::RoomEffectOutboxError,
 > {
     let mut applied = recover_committed_admin_effects(
@@ -433,9 +433,9 @@ async fn recover_exact_admin_result(
     items: &[AdminItem],
     sender_jid: &FullJid,
     mutation_attempt: waddle_xmpp::muc::AdminMutationId,
-    resolution: Option<waddle_xmpp::muc::room_actor::AdminMutationResolution>,
+    resolution: Option<waddle_xmpp::muc::room::actor::AdminMutationResolution>,
 ) -> (AdminReconciliationOutcome, bool) {
-    use waddle_xmpp::muc::room_actor::AdminMutationResolution;
+    use waddle_xmpp::muc::room::actor::AdminMutationResolution;
     let coordinates = match resolution {
         Some(AdminMutationResolution::Committed {
             attempt,
@@ -475,14 +475,14 @@ async fn recover_exact_admin_result(
 
 async fn reconcile_ambiguous_admin_result(
     state: &WebSocketState,
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     room_jid: &BareJid,
-    pre_apply_snapshot: Option<&waddle_xmpp::muc::room_actor::RoomSnapshot>,
+    pre_apply_snapshot: Option<&waddle_xmpp::muc::room::actor::RoomSnapshot>,
     items: &[AdminItem],
     sender_jid: &FullJid,
     mutation_attempt: waddle_xmpp::muc::AdminMutationId,
 ) -> (
-    Option<waddle_xmpp::muc::room_actor::AdminItemsApplied>,
+    Option<waddle_xmpp::muc::room::actor::AdminItemsApplied>,
     bool,
     bool,
 ) {
@@ -567,8 +567,8 @@ async fn reconcile_ambiguous_admin_result(
 async fn recover_admin_result_after_actor_failure(
     state: &WebSocketState,
     room_jid: &BareJid,
-    pre_apply_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
-    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    pre_apply_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
+    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     mutation_attempt: waddle_xmpp::muc::AdminMutationId,
     items: &[AdminItem],
     sender_jid: &FullJid,
@@ -609,14 +609,14 @@ async fn recover_admin_result_after_actor_failure(
             },
             Ok(None) => return (AdminReconciliationOutcome::Inconclusive, false),
             Err(
-                waddle_xmpp::muc::room_registry_actor::RoomRegistryError::OwnershipReconciliationPending(
+                waddle_xmpp::muc::room::registry_actor::RoomRegistryError::OwnershipReconciliationPending(
                     _,
                 ),
             ) => {}
             Err(error) => {
-                if matches!(error, waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Timeout) {
+                if matches!(error, waddle_xmpp::muc::room::registry_actor::RoomRegistryError::Timeout) {
                     let _ = state.deps.protocol.room_registry.ask(
-                        waddle_xmpp::muc::room_registry_actor::RetireUnresponsiveRoomIfExactActor {
+                        waddle_xmpp::muc::room::registry_actor::RetireUnresponsiveRoomIfExactActor {
                             room_jid: room_jid.clone(), actor_ref: stale_actor.clone(),
                         },
                     ).mailbox_timeout(ADMIN_ROOM_ASK_TIMEOUT).reply_timeout(ADMIN_ROOM_ASK_TIMEOUT).await;
@@ -704,17 +704,17 @@ fn replay_affiliation_change_from_snapshot(
     new_affiliation: Affiliation,
     actor: &BareJid,
     reason: Option<&str>,
-) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
+) -> waddle_xmpp::muc::room::actor::AdminItemsApplied {
     let voices_before = session_voices(room, &target_jid);
     if room
         .set_affiliation(target_jid.clone(), new_affiliation)
         .is_none()
     {
-        return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+        return waddle_xmpp::muc::room::actor::AdminItemsApplied::default();
     }
     let affected_occupants = occupants_for_bare(room, &target_jid);
     if affected_occupants.is_empty() {
-        return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+        return waddle_xmpp::muc::room::actor::AdminItemsApplied::default();
     }
 
     if new_affiliation == Affiliation::Outcast {
@@ -748,7 +748,7 @@ fn replay_affiliation_change_from_snapshot(
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
         }
-        return waddle_xmpp::muc::room_actor::AdminItemsApplied {
+        return waddle_xmpp::muc::room::actor::AdminItemsApplied {
             presence_updates,
             removed_by_moderation,
             voice_changes: Vec::new(),
@@ -789,7 +789,7 @@ fn replay_affiliation_change_from_snapshot(
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
         }
-        return waddle_xmpp::muc::room_actor::AdminItemsApplied {
+        return waddle_xmpp::muc::room::actor::AdminItemsApplied {
             presence_updates,
             removed_by_moderation,
             voice_changes: Vec::new(),
@@ -823,7 +823,7 @@ fn replay_affiliation_change_from_snapshot(
         }
     }
 
-    waddle_xmpp::muc::room_actor::AdminItemsApplied {
+    waddle_xmpp::muc::room::actor::AdminItemsApplied {
         presence_updates,
         removed_by_moderation: Vec::new(),
         voice_changes: changed_session_voices(&voices_before, &session_voices(room, &target_jid)),
@@ -839,9 +839,9 @@ fn replay_role_change_from_snapshot(
     new_role: waddle_xmpp::Role,
     actor: &BareJid,
     reason: Option<&str>,
-) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
+) -> waddle_xmpp::muc::room::actor::AdminItemsApplied {
     let Some(target_occupant) = room.get_occupant(target_nick).cloned() else {
-        return waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+        return waddle_xmpp::muc::room::actor::AdminItemsApplied::default();
     };
     let target_bare = target_occupant.real_jid.to_bare();
     let target_sessions = room.get_occupant_sessions(target_nick);
@@ -869,7 +869,7 @@ fn replay_role_change_from_snapshot(
             }
         }
         room.remove_occupant(target_nick);
-        return waddle_xmpp::muc::room_actor::AdminItemsApplied {
+        return waddle_xmpp::muc::room::actor::AdminItemsApplied {
             presence_updates,
             removed_by_moderation: target_sessions,
             voice_changes: Vec::new(),
@@ -912,7 +912,7 @@ fn replay_role_change_from_snapshot(
             presence_updates.push((recipient, presence));
         }
     }
-    waddle_xmpp::muc::room_actor::AdminItemsApplied {
+    waddle_xmpp::muc::room::actor::AdminItemsApplied {
         presence_updates,
         removed_by_moderation: Vec::new(),
         voice_changes,
@@ -926,10 +926,10 @@ fn recover_committed_admin_effects(
     sender_jid: &FullJid,
     occupant_id_secret: &waddle_xmpp::xep::xep0421::OccupantIdSecret,
     server_hats: &waddle_xmpp::xep::xep0317::ServerHats,
-) -> waddle_xmpp::muc::room_actor::AdminItemsApplied {
+) -> waddle_xmpp::muc::room::actor::AdminItemsApplied {
     let mut replay_room = room.clone();
     let actor = sender_jid.to_bare();
-    let mut recovered = waddle_xmpp::muc::room_actor::AdminItemsApplied::default();
+    let mut recovered = waddle_xmpp::muc::room::actor::AdminItemsApplied::default();
     for item in items {
         let applied = if let (Some(target_jid), Some(new_affiliation)) =
             (item.jid.clone(), item.affiliation)
@@ -1046,7 +1046,7 @@ impl AdminListAnswer {
 /// GET (#1298) both answer here, so a requester sees the same authorization
 /// and list whichever node it is connected to.
 pub(in crate::server::routes::websocket::handlers::iq) async fn answer_admin_list_get(
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     sender_jid: &FullJid,
     query: &waddle_xmpp::muc::AdminQuery,
 ) -> AdminListAnswer {
@@ -1431,7 +1431,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
     {
         Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
+            waddle_xmpp::muc::room::actor::AdminApplyError::CannotRemoveLastOwner,
         )) => {
             warn!(room = %room_jid, "MUC admin set rejected because it would remove the last owner");
             rollback_admin_affiliations(
@@ -1450,7 +1450,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             .into();
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::CannotAdminModifyOwner,
+            waddle_xmpp::muc::room::actor::AdminApplyError::CannotAdminModifyOwner,
         )) => {
             warn!(room = %room_jid, "MUC admin set rejected because an admin tried to change an owner affiliation");
             rollback_admin_affiliations(
@@ -1472,7 +1472,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             .into();
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::CannotModifyPrivilegedRole,
+            waddle_xmpp::muc::room::actor::AdminApplyError::CannotModifyPrivilegedRole,
         )) => {
             warn!(room = %room_jid, "MUC admin set rejected because a non-owner tried to change an owner/admin role");
             rollback_admin_affiliations(
@@ -1494,7 +1494,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             .into();
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(nick),
+            waddle_xmpp::muc::room::actor::AdminApplyError::OccupantNotFound(nick),
         )) => {
             // XEP-0045 §8.2: kicking a nick that is not in the room is
             // <item-not-found/>, not <forbidden/> (#1265 item 16).
@@ -1515,7 +1515,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             .into();
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::CommitOutcomeUnknown,
+            waddle_xmpp::muc::room::actor::AdminApplyError::CommitOutcomeUnknown,
         )) => {
             // Restore the exact attempt's verdict before deciding whether to
             // acknowledge the batch or roll back optimistic affiliations.
@@ -1574,7 +1574,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             }
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::NotOwner,
+            waddle_xmpp::muc::room::actor::AdminApplyError::NotOwner,
         )) => {
             warn!(room = %room_jid, "MUC admin set hit a deposed room actor");
             rollback_admin_affiliations(
@@ -1589,7 +1589,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
                 .protocol
                 .room_registry
                 .ask(
-                    waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                    waddle_xmpp::muc::room::registry_actor::DemoteRoomIfExactActor {
                         room_jid: room_jid.clone(),
                         actor_ref: room_actor.clone(),
                     },
@@ -1604,7 +1604,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             .into();
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::OwnershipUnavailable,
+            waddle_xmpp::muc::room::actor::AdminApplyError::OwnershipUnavailable,
         )) => {
             warn!(room = %room_jid, "MUC admin ownership verification is temporarily unavailable");
             rollback_admin_affiliations(
@@ -1625,7 +1625,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             .into();
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::PersistFailed,
+            waddle_xmpp::muc::room::actor::AdminApplyError::PersistFailed,
         )) => {
             warn!(room = %room_jid, "MUC admin durable commit failed before apply");
             rollback_admin_affiliations(
@@ -1644,7 +1644,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_admin
             .into();
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::InviteRollbackPending,
+            waddle_xmpp::muc::room::actor::AdminApplyError::InviteRollbackPending,
         )) => {
             // This is an explicit wait state, not a permission denial. The
             // actor did not apply the mutation, so restoring the optimistic
@@ -1885,7 +1885,7 @@ mod recovery_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::{
         MucConfigStatusCode, Occupant, RoomCommittedCoordinates, RoomConfig, RoomLifecycleState,
     };

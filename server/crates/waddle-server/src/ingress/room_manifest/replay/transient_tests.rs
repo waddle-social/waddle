@@ -18,8 +18,8 @@ use std::sync::Arc;
 use waddle_xmpp::{
     ingress::{DigestContext, DigestInput, IngressEffectIntent},
     muc::{
-        room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-        room_registry_actor::CreateRoom,
+        room::actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
+        room::registry_actor::CreateRoom,
     },
     xep::xep0334::{add_hint, Hint},
 };

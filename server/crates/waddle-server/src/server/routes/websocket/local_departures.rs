@@ -13,7 +13,7 @@ use kameo::actor::ActorId;
 use tracing::warn;
 use waddle_xmpp::muc::{
     durable::OccupancyLeaveCause,
-    room_actor::{LeaveAttemptId, LeaveSessionSelector},
+    room::actor::{LeaveAttemptId, LeaveSessionSelector},
     MucRemovalCause,
 };
 use waddle_xmpp_core::OccupancySessionGeneration;
@@ -1010,7 +1010,7 @@ impl Drop for InFlightLease {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use waddle_xmpp::muc::room_actor::OccupancyWatermark;
+    use waddle_xmpp::muc::room::actor::OccupancyWatermark;
     use waddle_xmpp_core::OccupancySessionGeneration;
 
     fn jid(value: &str) -> FullJid {

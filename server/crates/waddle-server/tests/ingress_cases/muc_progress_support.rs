@@ -16,8 +16,8 @@ use waddle_xmpp::{
         NormalizedTarget, StoredMessagePayload,
     },
     muc::{
-        room_actor::Join,
-        room_registry_actor::{CreateRoom, RoomRegistryActor},
+        room::actor::Join,
+        room::registry_actor::{CreateRoom, RoomRegistryActor},
     },
     registry::ConnectionRegistry,
     stream_management::InMemorySmSessionRegistry,
@@ -666,7 +666,7 @@ pub async fn seated_ghost_occupant_is_never_evicted(fixture: IngressFixture) {
     }
     assert!(
         actor
-            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid { jid: b.clone() })
+            .ask(waddle_xmpp::muc::room::actor::GetOccupantByJid { jid: b.clone() })
             .await
             .expect("occupancy probe")
             .is_some(),

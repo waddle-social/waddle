@@ -162,8 +162,8 @@ async fn muc_stale_leave_does_not_remove_current_resource() {
 /// joining occupant.
 #[tokio::test]
 async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
-    use waddle_xmpp::muc::room_actor::{IsDormant, SealGuard};
-    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DestroyRoomIfInactive, RoomCount};
+    use waddle_xmpp::muc::room::actor::{IsDormant, SealGuard};
+    use waddle_xmpp::muc::room::registry_actor::{CreateRoom, DestroyRoomIfInactive, RoomCount};
 
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -237,7 +237,7 @@ async fn muc_join_after_guarded_dormancy_eviction_respawns_room() {
 
 #[tokio::test]
 async fn muc_join_maps_registry_ownership_deferral_to_retryable_resource_constraint() {
-    use waddle_xmpp::muc::room_registry_actor::ReservePendingReclaimedRoom;
+    use waddle_xmpp::muc::room::registry_actor::ReservePendingReclaimedRoom;
 
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -289,7 +289,7 @@ async fn ordinary_join_coalesces_with_restoring_room_without_create_permission()
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::muc::room::registry_actor::WireClusteringClaims;
     use waddle_xmpp::ownership::{
         ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
@@ -652,7 +652,7 @@ async fn muc_join_full_room_returns_service_unavailable() {
     room_actor
         .ask(UpdateConfig {
             config,
-            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("room config update");
@@ -1010,7 +1010,7 @@ fn presence_hats_for_test(frame: &str) -> waddle_xmpp::xep::xep0317::HatSet {
 /// humans around it wear no hat.
 #[tokio::test]
 async fn xep_0317_extension_bot_hat_rides_join_replay_and_leave() {
-    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room::actor::{JoinAffiliationGrant, JoinWithAffiliation};
     use waddle_xmpp::xep::xep0317::{Hat, HatSet};
 
     let state = create_test_websocket_state().await;
@@ -1045,7 +1045,7 @@ async fn xep_0317_extension_bot_hat_rides_join_replay_and_leave() {
         .await
         .expect("room actor");
     let admission_revision = actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .await
         .expect("snapshot")
         .admission_revision;
@@ -2012,7 +2012,7 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
         .await
         .admission_revision;
     let seeded = actor
-        .ask(waddle_xmpp::muc::room_actor::SyncResolverAffiliation {
+        .ask(waddle_xmpp::muc::room::actor::SyncResolverAffiliation {
             jid: sender_jid.to_bare(),
             affiliation: waddle_xmpp::Affiliation::Member,
             expected_admission_revision: seed_revision,
@@ -2021,7 +2021,7 @@ async fn rejected_members_only_join_clears_stale_resolver_affiliation_in_live_ac
         .expect("seed stale resolver-derived member");
     assert_eq!(
         seeded,
-        waddle_xmpp::muc::room_actor::ResolverAffiliationSyncOutcome::Applied {
+        waddle_xmpp::muc::room::actor::ResolverAffiliationSyncOutcome::Applied {
             admission_revision: snapshot_room(state.as_ref(), &room_jid)
                 .await
                 .admission_revision,
@@ -2093,7 +2093,7 @@ async fn standard_members_only_join_rejects_unaffiliated_user() {
     actor
         .ask(UpdateConfig {
             config,
-            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("members-only config");
@@ -3877,7 +3877,7 @@ async fn standard_muc_owner_config_reconciles_ambiguous_members_only_commit_befo
     use std::collections::HashMap;
 
     use waddle_xmpp::muc::durable::{DurableRoomState, MucDurableFuture, MucDurableStore};
-    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::muc::room::registry_actor::WireClusteringClaims;
     use waddle_xmpp::ownership::{
         ClaimEpoch, ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
@@ -5355,7 +5355,7 @@ async fn cleanup_muc_presence_broadcasts_unavailable_to_remaining_occupants() {
     cleanup_muc_presence_for_jid(
         state.as_ref(),
         &alice,
-        waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+        waddle_xmpp::muc::room::actor::LeaveSessionSelector::Generation(
             current_test_occupancy_session(state.as_ref(), &alice),
         ),
     )
@@ -6361,7 +6361,7 @@ async fn resumed_muc_join_presence_replays_muji_when_room_is_full() {
     room_actor
         .ask(UpdateConfig {
             config,
-            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("room config update");
@@ -7173,16 +7173,16 @@ async fn make_room_moderated(state: &WebSocketState, room_jid: &BareJid) {
         .expect("room lookup")
         .expect("room actor exists");
     let config = actor
-        .ask(waddle_xmpp::muc::room_actor::GetConfig)
+        .ask(waddle_xmpp::muc::room::actor::GetConfig)
         .await
         .expect("read room config");
     actor
-        .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+        .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
             config: waddle_xmpp::muc::RoomConfig {
                 moderated: true,
                 ..config
             },
-            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("set room moderated");
@@ -7362,7 +7362,7 @@ async fn muc_admin_ban_preserves_single_space_nick_in_rendered_presence() {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -7665,7 +7665,7 @@ async fn join_from_a_superseded_connection_is_ignored() {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "test-waddle".to_string(),
             channel_id: "test-channel".to_string(),
@@ -7980,7 +7980,7 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -8070,7 +8070,7 @@ async fn xep0045_destroy_notifies_every_occupant_session_and_wipes_durable_state
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -8126,7 +8126,7 @@ async fn xep0045_destroy_preserves_single_space_nick_in_rendered_presence() {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -8224,7 +8224,7 @@ async fn xep0045_nonoccupant_owner_destroy_gets_result_without_destroy_presence(
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -8297,7 +8297,7 @@ async fn xep0045_destroy_then_rejoin_yields_fresh_room_without_old_bans() {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -8411,7 +8411,7 @@ async fn xep0045_destroy_group_dm_revokes_member_permission_tuples() {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -9184,7 +9184,7 @@ async fn muc_self_ping_answers_joined_for_recorded_remote_membership() {
 #[tokio::test]
 async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
     use waddle_xmpp::muc::durable::{MucDurableFuture, MucDurableStore, RoomClaimFenceContext};
-    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::muc::room::registry_actor::WireClusteringClaims;
     use waddle_xmpp::ownership::{
         ClaimEpoch, ClaimStore, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
@@ -9327,7 +9327,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -9370,7 +9370,7 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await

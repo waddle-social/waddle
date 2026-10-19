@@ -242,7 +242,7 @@ pub use super::xep0402::{
     BookmarkError, NS_BOOKMARKS2, PEP_NODE as BOOKMARKS_PEP_NODE,
 };
 
-pub use super::xep_waddle_dm_bookmarks::{
+pub use super::waddle::dm_bookmarks::{
     build_dm_bookmark_element, is_dm_bookmarks_node, parse_dm_bookmark, DmBookmark,
     DmBookmarkError, NS_WADDLE_DM_BOOKMARKS_V0, PEP_NODE_WADDLE_DM_BOOKMARKS,
 };
@@ -345,21 +345,21 @@ pub use super::xep0470::{
     PUBSUB_ATTACHMENTS_NODE_PREFIX,
 };
 
-pub use super::xep_waddle_pin::{
+pub use super::waddle::pin::{
     build_pinned_element as build_pinned_message_element,
     build_unpinned_element as build_unpinned_message_element, extract_pin_intent_from_message,
     parse_pinned_element as parse_pinned_message_element,
     parse_unpinned_element as parse_unpinned_message_element, PinIntent, NS_WADDLE_PIN_V0,
 };
 
-pub use super::xep_waddle_call_thread::{
+pub use super::waddle::call_thread::{
     build_call_thread_anchor, build_call_thread_ended, parse_call_thread_anchor,
     parse_call_thread_anchor_child, parse_call_thread_ended, parse_call_thread_ended_child,
     CallThreadAnchor, CallThreadDuration, CallThreadEnded, CallThreadKind, CallThreadMedia,
     CallThreadParseError, NS_FASTEN, NS_WADDLE_CALL_THREAD,
 };
 
-pub use super::xep_waddle_safety_scores::{
+pub use super::waddle::safety_scores::{
     build_room_safety_scores_message, SafetyScoreToSend, SafetyScoresTarget,
     NS_WADDLE_SAFETY_SCORES,
 };
@@ -428,14 +428,14 @@ pub use super::xep0513::{
     FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
 };
 
-pub use super::xep_waddle_forums::{
+pub use super::waddle::forums::{
     build_thread_create_element, build_thread_reply_element, extract_forum_action,
     has_forum_action, is_forum_element, set_thread_create, set_thread_reply, strip_forum,
     ForumAction, ForumCarrier, ThreadCreate, ThreadReply, ThreadSummary, FIELD_FORUM_MODE,
     NS_FORUMS,
 };
 
-pub use super::xep_waddle_link_preview::{
+pub use super::waddle::link_preview::{
     build_link_preview_request_element, decode_link_preview_token, encode_link_preview_token,
     encode_link_preview_token_checked, extract_link_preview_request_from_message,
     is_link_preview_request_element, parse_link_preview_request_element,
@@ -445,7 +445,7 @@ pub use super::xep_waddle_link_preview::{
     NS_WADDLE_LINK_PREVIEW,
 };
 
-pub use super::xep_waddle_in_call::{
+pub use super::waddle::in_call::{
     build_in_call_presence_state_element, build_in_call_reaction_element,
     build_in_call_reaction_message, parse_in_call_presence_state, parse_in_call_signal,
     parse_in_call_signal_child, InCallParseError, InCallPresenceState, InCallReactionEmoji,

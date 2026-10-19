@@ -7,12 +7,12 @@ use waddle_xmpp::{
     ingress::IngressEffectIntent,
     muc::{
         durable::RoomClaimFenceContext,
-        room_actor::{
+        room::actor::{
             GetRoomSnapshot, OccupancyReplayGuardOutcome, RoomActor, RoomChainSnapshot,
             RoomChildRetirementReason, RunOccupancyReplayGuardedAsync,
             RunRoomChildRetirementGuardedAsync,
         },
-        room_registry_actor::{
+        room::registry_actor::{
             GetRoom, GetSingleNodeRoomRetirementAuthority, RoomRegistryActor,
             RunAbsentRoomGuardedAsync,
         },
@@ -644,7 +644,7 @@ mod tests {
     use super::*;
     use waddle_xmpp::{
         ingress::{EffectMessageIdentity, EntityGeneration, MessageKey},
-        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
+        muc::{durable::AdminMutationId, room::actor::OccupancyWatermark},
     };
     use xmpp_parsers::message::{Message, MessageType};
 
@@ -667,8 +667,10 @@ mod tests {
             Deps,
         };
         use waddle_xmpp::muc::{
-            room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-            room_registry_actor::CreateRoom,
+            room::actor::{
+                Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
+            },
+            room::registry_actor::CreateRoom,
         };
         let fixture = IngressFixture::sqlite().await;
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;

@@ -2,7 +2,7 @@
 use super::*;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
 use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
-use waddle_xmpp::muc::room_actor::{Join, OccupancySessionGeneration};
+use waddle_xmpp::muc::room::actor::{Join, OccupancySessionGeneration};
 
 async fn fresh_state() -> AppState {
     let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)

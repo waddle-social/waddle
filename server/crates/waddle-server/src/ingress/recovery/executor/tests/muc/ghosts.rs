@@ -1,7 +1,7 @@
 //! XEP-0045 ghost users: a stalled `route_muc` row evicts the occupants pinning it.
 use super::*;
 use waddle_xmpp::{
-    muc::room_registry_actor::GetRoom, registry::OutboundStanza,
+    muc::room::registry_actor::GetRoom, registry::OutboundStanza,
     stream_management::InMemorySmSessionRegistry,
 };
 
@@ -136,7 +136,7 @@ impl GhostFixture {
             .expect("registry lookup")
             .expect("local room actor");
         actor
-            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+            .ask(waddle_xmpp::muc::room::actor::GetOccupantByJid {
                 jid: occupant.clone(),
             })
             .await
@@ -452,12 +452,12 @@ async fn sqlite_settled_ghost_has_a_retained_sweep_before_its_inline_sweep() {
 #[tokio::test]
 async fn sqlite_ghost_copy_settles_although_the_eviction_destroys_the_room() {
     use crate::ingress::recovery::ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
-    use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, DestroyRoomReason};
+    use waddle_xmpp::muc::room::registry_actor::{DestroyRoom, DestroyRoomReason};
 
     /// Destroys the room exactly once, from inside the window the eviction
     /// opens: from here the registry no longer hosts it and its claim is gone.
     struct DestroyOnce {
-        registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+        registry: kameo::actor::ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
         done: std::sync::atomic::AtomicBool,
         ran: std::sync::Arc<std::sync::atomic::AtomicBool>,
     }
@@ -542,7 +542,7 @@ async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
     /// Rejoins the ghost's full JID exactly once, from inside the probe
     /// window the generation pin exists to close.
     struct RejoinOnce {
-        room: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        room: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
         ghost: jid::FullJid,
         done: std::sync::atomic::AtomicBool,
         ran: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -558,17 +558,18 @@ async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
             self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
             let admission_revision = self
                 .room
-                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
                 .await
                 .expect("room snapshot")
                 .admission_revision;
             self.room
-                .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                     sender_jid: self.ghost.clone(),
                     nick: "alice".to_owned(),
-                    affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
-                        waddle_xmpp::Affiliation::Member,
-                    ),
+                    affiliation_grant:
+                        waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
+                            waddle_xmpp::Affiliation::Member,
+                        ),
                     local_domain: "example.com".to_owned(),
                     admission_revision,
                     session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
@@ -592,9 +593,9 @@ async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
         .await
         .expect("registry lookup")
         .expect("local room actor");
-    let seated = |room: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    let seated = |room: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
                   ghost: jid::FullJid| async move {
-        room.ask(waddle_xmpp::muc::room_actor::GetOccupantSessionGeneration { jid: ghost })
+        room.ask(waddle_xmpp::muc::room::actor::GetOccupantSessionGeneration { jid: ghost })
             .await
             .expect("generation probe")
     };
@@ -665,12 +666,12 @@ async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
 #[tokio::test]
 async fn sqlite_sibling_row_settles_once_the_ghost_eviction_destroyed_the_room() {
     use crate::ingress::recovery::ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
-    use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, DestroyRoomReason};
+    use waddle_xmpp::muc::room::registry_actor::{DestroyRoom, DestroyRoomReason};
 
     /// The empty-room destroy the eviction queues, landing at the worst
     /// possible moment: the instant the first row's eviction is confirmed.
     struct DestroyOnce {
-        registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+        registry: kameo::actor::ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
         done: std::sync::atomic::AtomicBool,
     }
 
@@ -779,7 +780,7 @@ async fn sqlite_ordinary_disconnect_leave_carries_no_removal_status_code() {
         crate::server::routes::websocket::sweep_abandoned_muc_occupancy(
             &f.state,
             &f.ghost,
-            waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+            waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
             waddle_xmpp::muc::MucRemovalCause::Voluntary,
         )
         .await,
@@ -1019,7 +1020,7 @@ async fn sealed_ghost_skips_inbox_refresh_child(inbox_receipted: bool) {
         .expect("persistent room");
     assert!(
         actor
-            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid { jid: ghost.clone() })
+            .ask(waddle_xmpp::muc::room::actor::GetOccupantByJid { jid: ghost.clone() })
             .await
             .expect("occupancy")
             .is_none(),
@@ -1162,7 +1163,7 @@ async fn sqlite_sealed_reflection_only_ghost_is_evicted_and_retired() {
         .expect("registry")
     {
         assert!(
-            room.ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+            room.ask(waddle_xmpp::muc::room::actor::GetOccupantByJid {
                 jid: submission.sender.clone(),
             })
             .await

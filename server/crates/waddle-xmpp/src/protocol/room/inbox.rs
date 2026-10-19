@@ -28,7 +28,7 @@ use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
 use crate::types::Role;
 use crate::xep::parse_call_thread_anchor_child;
-use crate::xep::xep_waddle_forums::{extract_forum_action, ForumAction};
+use crate::xep::waddle::forums::{extract_forum_action, ForumAction};
 use jid::BareJid;
 use std::collections::HashSet;
 use waddle_xmpp_core::xep0201::thread_info_from_message;

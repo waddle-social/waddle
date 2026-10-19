@@ -23,11 +23,11 @@ use jid::BareJid;
 use waddle_xmpp::muc::pin::{
     PinChangeRequest, PinPreview, PinStateChange, PinnedEntry, MAX_PREVIEW_LEN,
 };
-use waddle_xmpp::muc::room_actor::{GetPinList, GetRoomSnapshot};
+use waddle_xmpp::muc::room::actor::{GetPinList, GetRoomSnapshot};
 use waddle_xmpp::protocol::room::pin::{
     build_pinned_system_message, build_unpinned_system_message,
 };
-use waddle_xmpp::xep::xep_waddle_pin::MAX_TARGET_STANZA_ID_LEN;
+use waddle_xmpp::xep::waddle::pin::MAX_TARGET_STANZA_ID_LEN;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(in crate::server::routes::interpret) async fn apply_pin_change_event(
@@ -367,7 +367,7 @@ async fn resolve_preview_from_mam(
     deps: &Deps<'_>,
     room: &BareJid,
     target_stanza_id: &StanzaId,
-    occupants: &[waddle_xmpp::muc::room_actor::RoomChainOccupant],
+    occupants: &[waddle_xmpp::muc::room::actor::RoomChainOccupant],
 ) -> Result<Option<PinPreview>, waddle_xmpp::mam::MamStorageError> {
     let Some(mam_storage) = deps.mam_storage else {
         return Ok(None);
@@ -505,8 +505,8 @@ mod tests {
         MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomLifecycleId, RoomProjection,
         RoomRevision,
     };
-    use waddle_xmpp::muc::room_actor::RestoreDurableRoomState;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::RestoreDurableRoomState;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity};
     use waddle_xmpp_core::xep0359::StanzaId;
 

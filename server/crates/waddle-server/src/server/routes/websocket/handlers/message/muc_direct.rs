@@ -1,6 +1,6 @@
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation},
-    muc::room_registry_actor::GetRoom,
+    muc::room::registry_actor::GetRoom,
     protocol::handlers::errors::message_error_reply,
     Stanza,
 };
@@ -103,7 +103,7 @@ async fn handle_muc_private_message(
         }
     };
     let Ok(snapshot) = room_actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
@@ -864,8 +864,8 @@ mod tests {
         create_test_websocket_state, register_test_connection,
     };
     use kameo::actor::ActorRef;
-    use waddle_xmpp::muc::room_actor::Join;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::Join;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::{
         extract_occupant_id_from_message, generate_occupant_id, OccupantId, OccupantIdSecret,
@@ -890,7 +890,7 @@ mod tests {
     async fn create_test_room(
         state: &WebSocketState,
         room_jid: jid::BareJid,
-    ) -> ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+    ) -> ActorRef<waddle_xmpp::muc::room::actor::RoomActor> {
         state
             .deps
             .protocol

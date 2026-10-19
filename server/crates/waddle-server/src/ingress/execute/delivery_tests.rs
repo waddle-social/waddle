@@ -645,7 +645,7 @@ async fn invite_quota_recovers_generated_notification(
     use waddle_xmpp::{
         ingress::{MucInviteLedgerAction, MucInviteLedgerMutation, MucInviteMembershipGrant},
         muc::{
-            room_actor::{GetSnapshot, RoomActor},
+            room::actor::{GetSnapshot, RoomActor},
             MucRoom, RoomConfig,
         },
         xep::xep0421::OccupantIdSecret,

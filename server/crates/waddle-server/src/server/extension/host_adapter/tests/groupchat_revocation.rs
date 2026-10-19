@@ -10,7 +10,7 @@ use crate::{
 };
 use std::{sync::Arc, time::Duration};
 use waddle_xmpp::{
-    muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
+    muc::room::actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
     Stanza,
 };
 use waddle_xmpp_core::xep0359::OriginId;

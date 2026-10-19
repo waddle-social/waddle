@@ -5,8 +5,8 @@ use kameo::actor::Spawn;
 use waddle_xmpp::{
     muc::{
         durable::OccupancyLeaveCause,
-        room_actor::{LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-        room_registry_actor::{GetRoom, RoomRegistryActor},
+        room::actor::{LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
+        room::registry_actor::{GetRoom, RoomRegistryActor},
     },
     xep::xep0421::OccupantIdSecret,
 };
@@ -366,7 +366,7 @@ async fn sqlite_rejoin_before_the_settlement_write_keeps_its_copy() {
     /// Rejoins the departed occupant's full JID exactly once, from inside the
     /// window between the reachability probes and the settlement write.
     struct RejoinOnce {
-        room: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        room: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
         occupant: jid::FullJid,
         done: std::sync::atomic::AtomicBool,
         ran: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -383,17 +383,18 @@ async fn sqlite_rejoin_before_the_settlement_write_keeps_its_copy() {
             self.ran.store(true, std::sync::atomic::Ordering::SeqCst);
             let admission_revision = self
                 .room
-                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
                 .await
                 .expect("room snapshot")
                 .admission_revision;
             self.room
-                .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+                .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                     sender_jid: self.occupant.clone(),
                     nick: "alice".to_owned(),
-                    affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
-                        waddle_xmpp::Affiliation::Member,
-                    ),
+                    affiliation_grant:
+                        waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
+                            waddle_xmpp::Affiliation::Member,
+                        ),
                     local_domain: "example.com".to_owned(),
                     admission_revision,
                     session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
@@ -781,7 +782,7 @@ mod fenced_authority {
     /// serving the roster it had, so trusting the snapshot alone would let it
     /// permanently drop a copy for an occupant who joined on the new owner.
     async fn fenced_departed_recovery(f: IngressFixture, case: FenceCase) {
-        use waddle_xmpp::muc::room_actor::RestoreDurableRoomState;
+        use waddle_xmpp::muc::room::actor::RestoreDurableRoomState;
 
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let before = metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0);
@@ -821,7 +822,7 @@ mod fenced_authority {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room.clone(),
                 waddle_id: "recovery".into(),
                 channel_id: "recovery".into(),
@@ -849,7 +850,7 @@ mod fenced_authority {
         }
         assert_eq!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
                 .await
                 .expect("room snapshot")
                 .claim_fence
@@ -923,7 +924,7 @@ mod fenced_authority {
         steal_the_claim: bool,
     ) {
         use crate::server::routes::interpret::effects::{self, Effect};
-        use waddle_xmpp::muc::room_actor::RestoreDurableRoomState;
+        use waddle_xmpp::muc::room::actor::RestoreDurableRoomState;
 
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let before = metrics.counter_sum(DEPARTED_COPIES, &[]).unwrap_or(0);
@@ -983,7 +984,7 @@ mod fenced_authority {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room.clone(),
                 waddle_id: "recovery".into(),
                 channel_id: "recovery".into(),
@@ -1084,7 +1085,7 @@ async fn sqlite_sealed_departed_and_destroyed_room_children_retire_by_policy() {
             depart(&state, &ghost).await;
             depart(&state, &submission.sender).await;
         } else {
-            use waddle_xmpp::muc::room_registry_actor::{
+            use waddle_xmpp::muc::room::registry_actor::{
                 CreateRoom, DestroyRoom, DestroyRoomOutcome, DestroyRoomReason,
             };
             assert_eq!(

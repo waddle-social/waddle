@@ -340,7 +340,7 @@ async fn dm_bookmark_node_config_clamps_unbounded_max_items_and_pins_whitelist()
     // from the adversarial review) or access_model=open (which would
     // leak which contacts they have muted to roster peers).
     use waddle_xmpp_core::pubsub::AccessModel;
-    let dm_node = waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    let dm_node = waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1218,7 +1218,7 @@ async fn dnd_publish_with_wrong_item_id_is_bad_request() {
 
     // The `current` id is accepted.
     let good_item = waddle_xmpp::pubsub::PubSubItem {
-        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        id: Some(waddle_xmpp::xep::waddle::dnd::ITEM_ID_CURRENT.to_string()),
         publisher: None,
         payload: Some(dnd_payload()),
     };
@@ -1244,7 +1244,7 @@ async fn dnd_publish_source_version_is_strictly_monotonic_per_publish() {
     let projection_store = crate::dnd::projection::DndProjectionStore::new(storage.database());
 
     let item = waddle_xmpp::pubsub::PubSubItem {
-        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        id: Some(waddle_xmpp::xep::waddle::dnd::ITEM_ID_CURRENT.to_string()),
         publisher: None,
         payload: Some(dnd_payload()),
     };
@@ -1296,7 +1296,7 @@ async fn dnd_publish_without_payload_is_payload_required() {
         .expect("node");
 
     let item_missing_payload = waddle_xmpp::pubsub::PubSubItem {
-        id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
+        id: Some(waddle_xmpp::xep::waddle::dnd::ITEM_ID_CURRENT.to_string()),
         publisher: None,
         payload: None,
     };
@@ -1379,7 +1379,7 @@ async fn dm_bookmark_publish_then_retract_round_trips_direct_projection() {
     use crate::notification::settings_projection::{
         ConversationKind, NotificationSettingsProjectionStore, NotificationSettingsSource,
     };
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1447,7 +1447,7 @@ async fn dm_bookmark_publish_then_retract_round_trips_direct_projection() {
 #[tokio::test]
 async fn dm_bookmark_publish_without_notify_clears_direct_projection() {
     use crate::notification::settings_projection::NotificationSettingsProjectionStore;
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1510,7 +1510,7 @@ async fn dm_bookmark_publish_without_notify_clears_direct_projection() {
 /// leave no `pubsub_items` row behind.
 #[tokio::test]
 async fn dm_bookmark_publish_with_malformed_notify_is_bad_request() {
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1566,7 +1566,7 @@ async fn dm_bookmark_publish_with_malformed_notify_is_bad_request() {
 /// UUID fallback would otherwise surface downstream (Copilot review).
 #[tokio::test]
 async fn dm_bookmark_publish_without_item_id_is_bad_request() {
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1625,7 +1625,7 @@ async fn dm_bookmark_purge_clears_only_direct_projection_rows() {
         ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
         NotificationSettingsSource,
     };
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1736,7 +1736,7 @@ async fn dm_retract_does_not_clobber_muc_projection_row_for_same_jid() {
     use crate::notification::settings_projection::{
         NotificationSettingsProjectionStore, NotificationSettingsSource,
     };
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1846,7 +1846,7 @@ async fn dm_publish_clearing_override_does_not_clobber_muc_projection_row_for_sa
     use crate::notification::settings_projection::{
         NotificationSettingsProjectionStore, NotificationSettingsSource,
     };
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -1937,7 +1937,7 @@ async fn dm_publish_clearing_override_does_not_clobber_muc_projection_row_for_sa
 #[tokio::test]
 async fn dm_bookmark_publish_from_non_owner_is_forbidden() {
     use crate::notification::settings_projection::NotificationSettingsProjectionStore;
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
@@ -2025,7 +2025,7 @@ async fn dm_bookmark_node_delete_clears_only_direct_projection_rows() {
         ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
         NotificationSettingsSource,
     };
-    use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+    use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await

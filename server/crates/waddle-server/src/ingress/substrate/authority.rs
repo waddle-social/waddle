@@ -313,7 +313,7 @@ mod room_manifest_tests {
     use crate::ingress::RoomManifestSnapshot;
     use waddle_xmpp::{
         ingress::{EffectMessageIdentity, IngressEffectIntent},
-        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
+        muc::{durable::AdminMutationId, room::actor::OccupancyWatermark},
     };
 
     fn envelope() -> MessageEnvelope {

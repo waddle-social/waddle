@@ -73,7 +73,7 @@ pub enum DndState {
 /// which reads the durable [`crate::dnd::projection::DndProjectionStore`]
 /// projection of the user's `urn:waddle:dnd:0` PEP item and resolves
 /// the typed [`DndState`] via the pure evaluator in
-/// [`waddle_xmpp::xep::xep_waddle_dnd`].
+/// [`waddle_xmpp::xep::waddle::dnd`].
 ///
 /// The T0 emit path keeps the [`NoopDndReader`] below — DND is a T1
 /// recipient-state read and is intentionally not consulted at emit

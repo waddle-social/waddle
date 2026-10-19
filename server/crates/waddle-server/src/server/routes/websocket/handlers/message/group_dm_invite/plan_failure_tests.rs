@@ -225,7 +225,7 @@ async fn invite_room(
     group_dm: bool,
 ) -> (
     xmpp_parsers::message::Message,
-    kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
 ) {
     let room = "invite-retry@muc.example.com".parse().expect("room");
     let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");
@@ -237,7 +237,7 @@ async fn invite_room(
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room.clone(),
                 waddle_id: "test".into(),
                 channel_id: "invite-retry".into(),
@@ -247,7 +247,7 @@ async fn invite_room(
             .expect("room")
     };
     actor
-        .ask(waddle_xmpp::muc::room_actor::Join {
+        .ask(waddle_xmpp::muc::room::actor::Join {
             session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "romeo".into(),
             real_jid: sender.clone(),
@@ -358,7 +358,7 @@ async fn snapshot_failure(fixture: IngressFixture, group_dm: bool) {
     );
     let restore = tokio::spawn(async move {
         blocked_actor
-            .ask(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+            .ask(waddle_xmpp::muc::room::actor::RestoreDurableRoomState {
                 store: blocked_store,
                 claim_fence: fence,
             })
@@ -552,7 +552,7 @@ async fn ingress_group_dm_invite_ledger_cancel_replay_postgres() {
 #[derive(Default)]
 struct StopInviteeContext {
     actor:
-        std::sync::Mutex<Option<kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>>>,
+        std::sync::Mutex<Option<kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>>>,
 }
 #[async_trait::async_trait]
 impl waddle_xmpp::xep::xep0191::BlockingStorage for StopInviteeContext {

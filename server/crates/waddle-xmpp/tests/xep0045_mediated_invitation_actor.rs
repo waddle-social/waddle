@@ -7,7 +7,7 @@ use jid::{BareJid, FullJid};
 use kameo::actor::{ActorRef, Spawn};
 use kameo::error::SendError;
 use waddle_xmpp::muc::presence::NS_MUC_USER;
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     AuthorizeMediatedInvite, ChangeAffiliation, CommitMediatedInviteGrantRollback, GetAffiliation,
     InviteMembershipGrant, Join, MediatedInviteGrantError, MediatedInviteOperationId,
     MediatedInviteRollbackCommit, PrepareMediatedInviteGrantRollback, RoomActor,
@@ -43,7 +43,7 @@ fn spawn_room(config: RoomConfig) -> ActorRef<RoomActor> {
 
 async fn join(actor: &ActorRef<RoomActor>, jid: FullJid, affiliation: Affiliation) {
     actor
-        .ask(waddle_xmpp::muc::room_actor::Join {
+        .ask(waddle_xmpp::muc::room::actor::Join {
             session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
             nick: "inviter".to_string(),
             real_jid: jid,
@@ -330,8 +330,8 @@ async fn rolling_back_a_joined_invitee_emits_xep0045_status_321() {
 #[tokio::test]
 async fn live_roster_handoffs_preserve_each_unconsumed_admin_verdict() {
     use waddle_xmpp::muc::durable::{AdminMutationId, ChannelId, WaddleId};
-    use waddle_xmpp::muc::room_actor::{AdminMutationResolution, GetSnapshot, RestoreLiveRoster};
-    use waddle_xmpp::muc::room_registry_actor::{
+    use waddle_xmpp::muc::room::actor::{AdminMutationResolution, GetSnapshot, RestoreLiveRoster};
+    use waddle_xmpp::muc::room::registry_actor::{
         CreateRoom, GetOrCreateRoomWithLiveRoster, RoomRegistryActor,
     };
 

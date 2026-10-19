@@ -759,7 +759,7 @@ mod tests {
         Identity, MediaCapabilities, ObservedCallSids, ParticipantInfo, ParticipantSid, RoomInfo,
         RoomSid, TeardownDisposition,
     };
-    use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
+    use waddle_xmpp::muc::room::actor::UpsertMujiPresence;
     use waddle_xmpp::protocol::ConnectionPhase;
     use waddle_xmpp::xep::xep0167::MediaKind;
     use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};

@@ -17,7 +17,7 @@ use crate::{
 };
 use waddle_xmpp::{
     ingress::{DigestContext, DigestInput, IngressEffectIntent, NormalizedTarget},
-    muc::{room_actor::Join, room_registry_actor::CreateRoom},
+    muc::{room::actor::Join, room::registry_actor::CreateRoom},
     protocol::OutboundEvent,
 };
 
@@ -279,7 +279,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         retry_case,
         RetryCase::ReconnectedSender | RetryCase::LegacyArchiveContext
     ) {
-        use waddle_xmpp::muc::room_actor::{
+        use waddle_xmpp::muc::room::actor::{
             LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector,
         };
         actor

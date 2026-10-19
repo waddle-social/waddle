@@ -5,8 +5,8 @@ use waddle_xmpp::{
     ingress::{
         FrozenStanzaError, GroupDmHistoryVisibility, GroupDmMembershipGrant, IngressEffectIntent,
     },
-    muc::room_actor::{ChangeAffiliation, GetAdminContext, GetConfig, GetSnapshot},
-    muc::room_registry_actor::GetRoom,
+    muc::room::actor::{ChangeAffiliation, GetAdminContext, GetConfig, GetSnapshot},
+    muc::room::registry_actor::GetRoom,
     protocol::handlers::errors::message_error_reply,
 };
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
@@ -164,26 +164,26 @@ pub(super) async fn handle_group_dm_mediated_invite(
     }
 
     let requested_access =
-        waddle_xmpp::xep::xep_waddle_group_dm::history_access_from_mediated_invite(&inbound_invite)
-            .unwrap_or(waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin);
+        waddle_xmpp::xep::waddle::group_dm::history_access_from_mediated_invite(&inbound_invite)
+            .unwrap_or(waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::FromJoin);
     let inviter_has_full_history =
         group_dm_archive_boundary(state, &room_jid, &bound_jid.to_bare())
             .await
             .map(|boundary| boundary.is_none())
             .unwrap_or(false);
     let access = match requested_access {
-        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
+        waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::Full
             if inviter_has_full_history =>
         {
-            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
+            waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::Full
         }
-        _ => waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin,
+        _ => waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::FromJoin,
     };
     let history_visibility = match access {
-        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full => {
+        waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::Full => {
             GroupDmHistoryVisibility::Full
         }
-        waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin => {
+        waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::FromJoin => {
             GroupDmHistoryVisibility::FromJoin {
                 visible_after: chrono::Utc::now(),
             }
@@ -363,7 +363,7 @@ fn retain_group_dm_replay_actor(
     sender: &jid::FullJid,
     room: &jid::BareJid,
     invitee: &jid::BareJid,
-    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     deps: &crate::server::routes::interpret::Deps<'_>,
 ) {
     if !deps.effects.is_planning() {
@@ -557,7 +557,7 @@ pub struct GroupDmMembershipMutation {
     pub grant: GroupDmMembershipGrant,
     pub incoming: xmpp_parsers::message::Message,
     pub sender: jid::FullJid,
-    pub actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    pub actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
 }
 
 pub(crate) async fn execute_group_dm_membership(
@@ -638,7 +638,7 @@ pub(crate) async fn execute_group_dm_membership(
             if matches!(
                 error,
                 kameo::error::SendError::HandlerError(
-                    waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown
+                    waddle_xmpp::muc::room::actor::AffiliationMutationError::CommitOutcomeUnknown
                 )
             ) {
                 let Some(recovered_actor) =
@@ -821,7 +821,7 @@ pub(crate) async fn rollback_group_dm_membership(
 /// same reason.
 async fn rollback_group_dm_invite_grant(
     state: &WebSocketState,
-    room_actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     channel_id: &str,
     room_jid: &jid::BareJid,
     invitee: &jid::BareJid,
@@ -886,8 +886,8 @@ mod tests {
     use crate::ingress::IngressEffectCapture;
     use kameo::actor::Spawn;
     use std::sync::Arc;
-    use waddle_xmpp::muc::room_actor::{GetRoomSnapshot, HydrateDurableRecipients, RoomActor};
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::{GetRoomSnapshot, HydrateDurableRecipients, RoomActor};
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::{MucRoom, RoomConfig};
     use waddle_xmpp::pending_delivery::storage::InMemoryPendingDeliveryStorage;
     use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
@@ -1447,10 +1447,10 @@ mod tests {
                 .expect("room")
         };
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: sender.clone(),
                 nick: "alice".into(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     waddle_xmpp::Affiliation::Member,
                 ),
                 local_domain: "example.com".into(),
@@ -1611,10 +1611,10 @@ pub(crate) fn recorded_invite_message(
 ) -> xmpp_parsers::message::Message {
     let access = match grant.history_visibility {
         GroupDmHistoryVisibility::Full => {
-            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::Full
+            waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::Full
         }
         GroupDmHistoryVisibility::FromJoin { .. } => {
-            waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess::FromJoin
+            waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess::FromJoin
         }
     };
     let mut message = incoming.clone();
@@ -1633,7 +1633,7 @@ fn build_server_mediated_invite_payload(
     inviter: &jid::BareJid,
     invitee: &jid::BareJid,
     inbound_invite: &minidom::Element,
-    access: waddle_xmpp::xep::xep_waddle_group_dm::GroupDmHistoryAccess,
+    access: waddle_xmpp::xep::waddle::group_dm::GroupDmHistoryAccess,
 ) -> minidom::Element {
     let mut invite = minidom::Element::builder("invite", waddle_xmpp::muc::presence::NS_MUC_USER)
         .attr(
@@ -1649,7 +1649,7 @@ fn build_server_mediated_invite_payload(
     {
         invite = invite.append(reason.clone());
     }
-    invite = invite.append(waddle_xmpp::xep::xep_waddle_group_dm::build_history_access(
+    invite = invite.append(waddle_xmpp::xep::waddle::group_dm::build_history_access(
         access,
     ));
     minidom::Element::builder("x", waddle_xmpp::muc::presence::NS_MUC_USER)

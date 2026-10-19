@@ -218,8 +218,8 @@ async fn finish_requested_cleanup(
 }
 
 async fn assert_remote_replaces_owner_local(remove_route: bool, timeout_first: bool) {
-    use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
 
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/owner-local".parse().expect("JID");

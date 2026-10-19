@@ -98,8 +98,8 @@ use waddle_xmpp::{
     ingress::{IngressEffectIntent, MessageKey},
     muc::{
         durable::RoomClaimFenceContext,
-        room_actor::{GetOccupantByJid, RoomActor},
-        room_registry_actor::{GetRoom, RoomRegistryActor},
+        room::actor::{GetOccupantByJid, RoomActor},
+        room::registry_actor::{GetRoom, RoomRegistryActor},
     },
 };
 
@@ -657,7 +657,7 @@ async fn proven_fence(
     room: &BareJid,
 ) -> RoomAuthority {
     let fence = match actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .reply_timeout(PROBE_TIMEOUT)
         .await
     {

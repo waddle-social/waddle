@@ -103,7 +103,7 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
 ) {
     use waddle_sfu::{MediaCapabilities, SfuService};
     use waddle_xmpp::registry::UserRegistryActor;
-    use waddle_xmpp::xep::xep_waddle_livekit_transport::{
+    use waddle_xmpp::xep::waddle::livekit_transport::{
         NS_WADDLE_LIVEKIT_TRANSPORT, TRANSPORT_NAME,
     };
 
@@ -155,7 +155,7 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
                     // The REAL issued wire shape (url/room/identity
                     // attrs + <token/> child), exactly as the Jingle
                     // handler injects it.
-                    waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::from_join_token(token.clone())
+                    waddle_xmpp::xep::waddle::livekit_transport::WaddleLiveKitTransport::from_join_token(token.clone())
                         .to_element(),
                 )
                 .build(),

@@ -25,15 +25,15 @@
 //! Slice 2 will replace this with a durable T1 projection alongside
 //! `notification_activity`, eliminating the deferral hole entirely.
 //!
-//! [`RoomRegistryActor`]: waddle_xmpp::muc::room_registry_actor::RoomRegistryActor
+//! [`RoomRegistryActor`]: waddle_xmpp::muc::room::registry_actor::RoomRegistryActor
 //! [`RoomPolicyStore`]: crate::notification::outbox::RoomPolicyStore
 //! [`ConversationKind`]: crate::notification::settings_projection::ConversationKind
 
 use async_trait::async_trait;
 use jid::BareJid;
 use kameo::actor::ActorRef;
-use waddle_xmpp::muc::room_actor::GetConfig;
-use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
+use waddle_xmpp::muc::room::actor::GetConfig;
+use waddle_xmpp::muc::room::registry_actor::{GetRoom, RoomRegistryActor};
 
 use crate::notification::outbox::{NotificationOutboxError, RoomPolicyStore};
 

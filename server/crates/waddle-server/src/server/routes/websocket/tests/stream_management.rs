@@ -10891,7 +10891,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
     cleanup_muc_presence_for_jid(
         state.as_ref(),
         &drained[0].jid,
-        waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+        waddle_xmpp::muc::room::actor::LeaveSessionSelector::Generation(
             drained[0].occupancy_session,
         ),
     )

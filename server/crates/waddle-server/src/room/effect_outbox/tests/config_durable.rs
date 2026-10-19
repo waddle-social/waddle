@@ -5,12 +5,12 @@ use std::time::Duration;
 use kameo::actor::Spawn;
 use tokio::sync::mpsc;
 use waddle_xmpp::muc::durable::{MucDurableFuture, MucDurableStore, RoomCommitFuture};
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     ConfigEffectPlan, EnforceMembersOnlyAffiliations, GetSnapshot, Join, JoinAffiliationGrant,
     JoinWithAffiliation, RestoreDurableRoomState, RollbackConfigIfRevision, RoomActor,
     UpdateConfig,
 };
-use waddle_xmpp::muc::room_registry_actor::{CreateRoom, GetOrCreateRoom};
+use waddle_xmpp::muc::room::registry_actor::{CreateRoom, GetOrCreateRoom};
 use waddle_xmpp::muc::{
     MucRoom, RoomClaimFenceContext, RoomCommitError, RoomCommitOutcome, RoomCommittedCoordinates,
     RoomConfig, RoomDurableMutation, RoomMutationEffects, RoomRevision,

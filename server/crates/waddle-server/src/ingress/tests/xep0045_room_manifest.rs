@@ -6,7 +6,7 @@ use waddle_xmpp::ingress::{
     DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
     NormalizedTarget,
 };
-use waddle_xmpp::muc::{durable::AdminMutationId, room_actor::OccupancyWatermark};
+use waddle_xmpp::muc::{durable::AdminMutationId, room::actor::OccupancyWatermark};
 use waddle_xmpp_core::xep0359::StanzaId;
 
 pub(in crate::ingress) fn room_submission(fixture: &IngressFixture) -> IngressSubmission {

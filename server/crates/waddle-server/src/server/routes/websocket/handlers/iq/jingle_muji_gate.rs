@@ -33,8 +33,8 @@
 
 use jid::{BareJid, FullJid};
 use waddle_sfu::MediaCapabilities;
-use waddle_xmpp::muc::room_actor::GetOccupantVoice;
-use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::muc::room::actor::GetOccupantVoice;
+use waddle_xmpp::muc::room::actor::GetSnapshot;
 use waddle_xmpp::telemetry::attributes::{CallSignalEvent, SfuDenialReason};
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0272::{find_muji, Muji};
@@ -444,8 +444,8 @@ mod tests {
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use std::io;
     use std::sync::{Arc, Mutex};
-    use waddle_xmpp::muc::room_actor::Join;
-    use waddle_xmpp::muc::room_registry_actor::CreateInstantRoom;
+    use waddle_xmpp::muc::room::actor::Join;
+    use waddle_xmpp::muc::room::registry_actor::CreateInstantRoom;
     use waddle_xmpp::xep::xep0167::MediaKind;
     use waddle_xmpp::xep::xep0272::{Creator, MujiContent};
     use waddle_xmpp_core::{Affiliation, Role};
@@ -499,7 +499,7 @@ mod tests {
             waddle_xmpp::xep::xep0167::opus_audio_description(),
         ));
         content.transport = Some(xmpp_parsers::jingle::Transport::Unknown(
-            waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::Request
+            waddle_xmpp::xep::waddle::livekit_transport::WaddleLiveKitTransport::Request
                 .to_element(),
         ));
         let mut jingle = Jingle::new(action, SessionId(sid.into()));
@@ -561,16 +561,16 @@ mod tests {
             .actor_ref;
         if moderated {
             let config = actor
-                .ask(waddle_xmpp::muc::room_actor::GetConfig)
+                .ask(waddle_xmpp::muc::room::actor::GetConfig)
                 .await
                 .expect("read room config");
             actor
-                .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                     config: waddle_xmpp::muc::RoomConfig {
                         moderated: true,
                         ..config
                     },
-                    effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                    effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
                 })
                 .await
                 .expect("set room moderated");
@@ -882,7 +882,7 @@ mod tests {
             waddle_xmpp::xep::xep0167::opus_audio_description(),
         ));
         content.transport = Some(xmpp_parsers::jingle::Transport::Unknown(
-            waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::Request
+            waddle_xmpp::xep::waddle::livekit_transport::WaddleLiveKitTransport::Request
                 .to_element(),
         ));
         let mut jingle = Jingle::new(
@@ -1058,7 +1058,7 @@ mod tests {
             waddle_xmpp::xep::xep0167::opus_audio_description(),
         ));
         content.transport = Some(xmpp_parsers::jingle::Transport::Unknown(
-            waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::Request
+            waddle_xmpp::xep::waddle::livekit_transport::WaddleLiveKitTransport::Request
                 .to_element(),
         ));
         let mut jingle = Jingle::new(Action::SessionInitiate, SessionId("c1".into()));

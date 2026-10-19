@@ -75,7 +75,7 @@ impl IngressAuthority {
         target: &FullJid,
         stanza: &Stanza,
         registry: Option<
-            &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+            &kameo::actor::ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
         >,
         enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
     ) -> FullJidDeliveryOutcome {
@@ -145,7 +145,7 @@ pub(crate) async fn accept_live_delivery_guarded(
     target: &FullJid,
     stanza: &Stanza,
     registry: Option<
-        &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+        &kameo::actor::ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
     >,
     enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
 ) -> FullJidDeliveryOutcome {
@@ -182,7 +182,7 @@ async fn accept_live_delivery_guarded_inner(
     target: &FullJid,
     stanza: &Stanza,
     registry: Option<
-        &kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+        &kameo::actor::ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
     >,
     enqueue: impl FnOnce() -> BroadcastOutcome + Send + 'static,
     check_admission: impl Fn() -> Result<(), IngressUowError>,

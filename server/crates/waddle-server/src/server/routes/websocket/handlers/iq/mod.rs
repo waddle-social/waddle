@@ -23,7 +23,7 @@ use waddle_xmpp::{
             is_role_change_query, parse_admin_query, AdminItem,
         },
         owner::build_config_form,
-        room_actor::{
+        room::actor::{
             ApplyAdminItems, EnforceMembersOnly, EnforceMembersOnlyAffiliations, GetAdminContext,
             GetOccupantByJid, GetSnapshot, PingSelfCheck, UpdateConfig,
         },

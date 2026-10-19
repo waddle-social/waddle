@@ -9,14 +9,14 @@
 //! published DND state defaults to receiving push notifications.
 //!
 //! The evaluator boundary is pure (see
-//! [`waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd::evaluate`]), so the
+//! [`waddle_xmpp::xep::waddle::dnd::WaddleDnd::evaluate`]), so the
 //! reader does no schedule arithmetic itself — it just pairs the
 //! projection read with a clock read.
 //!
 //! Per the typed-payloads hard rule, no string-typed time or state
 //! crosses this boundary: the wall clock is `DateTime<Utc>`, the
 //! evaluator result is the typed
-//! [`waddle_xmpp::xep::xep_waddle_dnd::DndEvaluation`], and the
+//! [`waddle_xmpp::xep::waddle::dnd::DndEvaluation`], and the
 //! returned value is the existing
 //! [`crate::notification::outbox::DndState`].
 
@@ -26,14 +26,14 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use tracing::warn;
-use waddle_xmpp::xep::xep_waddle_dnd::DndEvaluation;
+use waddle_xmpp::xep::waddle::dnd::DndEvaluation;
 
 use crate::dnd::projection::DndProjectionStore;
 use crate::notification::outbox::{DndReader, DndState, NotificationOutboxError};
 
 /// Reads the recipient's projected DND state via
 /// [`DndProjectionStore`] and resolves it through the pure
-/// evaluator in [`waddle_xmpp::xep::xep_waddle_dnd`].
+/// evaluator in [`waddle_xmpp::xep::waddle::dnd`].
 ///
 /// Wall-clock reads go through the [`Clock`] trait so deterministic
 /// tests can inject a frozen instant without globally replacing the
@@ -116,7 +116,7 @@ mod tests {
     use jid::BareJid;
     use std::str::FromStr;
     use std::sync::Mutex;
-    use waddle_xmpp::xep::xep_waddle_dnd::{ScheduleRule, WaddleDnd, WeekdaySet};
+    use waddle_xmpp::xep::waddle::dnd::{ScheduleRule, WaddleDnd, WeekdaySet};
 
     fn alice() -> BareJid {
         BareJid::from_str("alice@waddle.example").expect("test JID parses")

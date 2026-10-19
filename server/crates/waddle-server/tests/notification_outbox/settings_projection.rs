@@ -359,10 +359,7 @@ fn xep0469_pinning_inside_extensions_is_valid_bookmark_payload() {
     );
 }
 
-fn dm_bookmark(
-    item_id: &str,
-    inner: &str,
-) -> waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark {
+fn dm_bookmark(item_id: &str, inner: &str) -> waddle_xmpp::xep::waddle::dm_bookmarks::DmBookmark {
     let payload: Element =
         format!("<dm-bookmark xmlns='urn:waddle:dm-bookmarks:0'>{inner}</dm-bookmark>")
             .parse()
@@ -438,7 +435,7 @@ fn malformed_dm_bookmark_notify_is_rejected_at_publish_validation() {
         matches!(
             error,
             NotificationSettingsProjectionError::InvalidDmBookmark(
-                waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmarkError::InvalidNotify(
+                waddle_xmpp::xep::waddle::dm_bookmarks::DmBookmarkError::InvalidNotify(
                     waddle_xmpp::xep::NotificationSettingsError::MultipleFallbackSettings
                 )
             )

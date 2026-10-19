@@ -3106,7 +3106,7 @@ async fn handle_iq_pubsub_items_spaces_node_backfills_linked_channel_bookmarks()
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: channel_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "legacy".to_string(),
@@ -3206,7 +3206,7 @@ async fn handle_iq_pubsub_items_spaces_node_requires_authorization_before_backfi
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: channel_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "private-legacy".to_string(),
@@ -3573,7 +3573,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
         .deps
         .app_state
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "duplicate".to_string(),
@@ -3700,7 +3700,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
         .deps
         .app_state
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "rename-duplicate".to_string(),
@@ -3918,7 +3918,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
         .deps
         .app_state
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "delete-parent".to_string(),
@@ -5479,7 +5479,7 @@ async fn create_members_only_room_with_member(
     .expect("room actor")
     .actor_ref;
     actor
-        .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+        .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
             sender_jid: member_jid.clone(),
             nick: "member".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),

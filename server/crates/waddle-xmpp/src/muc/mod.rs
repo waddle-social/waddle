@@ -16,12 +16,7 @@ pub mod messages;
 pub mod owner;
 pub mod pin;
 pub mod presence;
-mod room;
-pub mod room_actor;
-mod room_affiliations;
-mod room_broadcast;
-pub mod room_registry_actor;
-pub mod room_registry_handle;
+pub mod room;
 pub mod roominfo;
 mod subject;
 
@@ -59,13 +54,13 @@ pub use presence::{
     MucPresenceAction, MucPresenceStatus, MucPresenceUpdateRequest, MucRemovalCause,
     OutboundMucPresence,
 };
-pub use room::{is_remote_jid, AllowPm, MucRoom, Occupant, RoomConfig};
-pub use room_actor::{RoomActorError, RoomInfo};
-pub use room_registry_actor::RoomRegistryError;
-pub use room_registry_handle::{
+pub use room::actor::{RoomActorError, RoomInfo};
+pub use room::registry_actor::RoomRegistryError;
+pub use room::registry_handle::{
     RoomRegistry, ROOM_REGISTRY_MAILBOX_CAPACITY, ROOM_REGISTRY_MAILBOX_TIMEOUT,
     ROOM_REGISTRY_REPLY_TIMEOUT, ROOM_REGISTRY_SLOW_ASK_WARN,
 };
+pub use room::{is_remote_jid, AllowPm, MucRoom, Occupant, RoomConfig};
 pub use subject::{
     is_groupchat_subject_change, is_groupchat_subject_change_message, RoomSubjectTexts,
     SubjectState,

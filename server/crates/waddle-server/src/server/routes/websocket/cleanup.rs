@@ -12,10 +12,10 @@ use super::{
 };
 use std::collections::HashSet;
 use waddle_xmpp::muc::durable::OccupancyLeaveCause;
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     LeaveDisposition, LeaveOutcome, LeaveSessionSelector, SealGuard,
 };
-use waddle_xmpp::muc::room_registry_actor::{RoomAcquisition, RoomRegistryError};
+use waddle_xmpp::muc::room::registry_actor::{RoomAcquisition, RoomRegistryError};
 use waddle_xmpp::muc::{MucRemovalCause, RoomRegistry};
 use waddle_xmpp::stream_management::SmSessionRegistry as _;
 use waddle_xmpp::xep::xep0272::Muji;
@@ -130,7 +130,7 @@ pub(crate) enum LeaveAskFailure {
     /// carries the same attempt id so a completed one replays its receipt.
     Timeout,
     /// The actor answered with a typed error (sealed / ownership).
-    Handler(waddle_xmpp::muc::room_actor::RoomActorError),
+    Handler(waddle_xmpp::muc::room::actor::RoomActorError),
     /// The actor is not running or stopped before replying.
     Transport,
 }
@@ -139,7 +139,7 @@ pub(crate) enum LeaveAskFailure {
 /// single `LEAVE_ASK_TIMEOUT` deadline, so a wedged room costs a caller at
 /// most that once.
 pub(crate) async fn ask_leave_bounded(
-    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     message: LeaveByRealJid,
 ) -> Result<LeaveDisposition, LeaveAskFailure> {
     match tokio::time::timeout(
@@ -170,10 +170,10 @@ pub(crate) async fn ask_leave_bounded(
 /// the same cause would replay them.
 pub(crate) async fn ack_departure_receipt(
     pending: &PendingLocalMucDepartures,
-    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     room: &BareJid,
     jid: &FullJid,
-    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId,
 ) {
     if try_ack_departure_receipt(actor, attempt).await {
         return;
@@ -191,9 +191,9 @@ pub(crate) async fn ack_departure_receipt(
 /// acknowledgement; the owed entry is cleared only on an authoritative answer.
 pub(crate) fn acknowledge_in_flight(
     pending: &Arc<PendingLocalMucDepartures>,
-    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     in_flight: &LocalDepartureItem,
-    acknowledge: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    acknowledge: waddle_xmpp::muc::room::actor::LeaveAttemptId,
 ) {
     let LocalDepartureItem::InFlight { room, jid, .. } = in_flight else {
         return;
@@ -218,20 +218,20 @@ pub(crate) fn acknowledge_in_flight(
 /// dead actor, or an actor that lost ownership (its ledger may be on its way
 /// to a successor) all leave the acknowledgement owed.
 pub(crate) async fn try_ack_departure_receipt(
-    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
+    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId,
 ) -> bool {
     matches!(
         tokio::time::timeout(
             super::LEAVE_ASK_TIMEOUT,
             actor
-                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt { attempt })
+                .ask(waddle_xmpp::muc::room::actor::AckDepartureReceipt { attempt })
                 .mailbox_timeout(super::LEAVE_ASK_TIMEOUT)
                 .reply_timeout(super::LEAVE_ASK_TIMEOUT),
         )
         .await,
         Ok(Ok(
-            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+            waddle_xmpp::muc::room::actor::AckDepartureOutcome::Acknowledged
         ))
     )
 }
@@ -455,7 +455,7 @@ pub(crate) fn retain_abandoned_muc_occupancy_sweep(
         .record(LocalDepartureItem::FullJidSweep {
             jid: jid.clone(),
             selector: session,
-            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
             remote_ceiling,
             removal,
         });
@@ -483,7 +483,7 @@ pub(crate) async fn redrive_local_muc_cleanup(
     state: &WebSocketState,
     jid: &FullJid,
     session: LeaveSessionSelector,
-    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId,
     remote_ceiling: u64,
     removal: MucRemovalCause,
 ) -> MucCleanupOutcome {
@@ -528,7 +528,7 @@ pub async fn cleanup_muc_presence_for_jid_with_origin(
         Some(&origin),
         LocalSweep {
             remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
             recording: SweepFailureRecording::RecordSweep,
             scope: LocalRoomSweepScope::EveryRoom,
             removal: MucRemovalCause::Voluntary,
@@ -581,7 +581,7 @@ pub(crate) async fn redrive_remote_muc_cleanup(
         None,
         LocalSweep {
             remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
             // The remote-membership reconciler already re-drives from the
             // authoritative membership snapshots, so this retry must not widen
             // a failed pass into a local `FullJidSweep` with selector `Any`.
@@ -1434,7 +1434,7 @@ async fn cleanup_connection_shutdown_inner(
                             cleanup_origin.as_ref(),
                             LocalSweep {
                                 remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                                 recording: SweepFailureRecording::RecordSweep,
                                 scope: LocalRoomSweepScope::EveryRoom,
                                 removal: MucRemovalCause::Voluntary,
@@ -1518,7 +1518,7 @@ async fn cleanup_connection_shutdown_inner(
             cleanup_origin.as_ref(),
             LocalSweep {
                 remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 recording: SweepFailureRecording::RecordSweep,
                 scope: LocalRoomSweepScope::EveryRoom,
                 removal: MucRemovalCause::Voluntary,
@@ -1696,7 +1696,7 @@ pub(crate) async fn retire_occupancy_before_bind(
         None,
         LocalSweep {
             remote_retry: RemoteCleanupRetryPolicy::ImmediateExactGeneration,
-            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
             recording: SweepFailureRecording::RecordSweep,
             scope: LocalRoomSweepScope::EveryRoom,
             removal: MucRemovalCause::Voluntary,
@@ -2736,7 +2736,7 @@ async fn refuse_detach_without_principal(
             cleanup_origin.as_ref(),
             LocalSweep {
                 remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 recording: SweepFailureRecording::RecordSweep,
                 scope: LocalRoomSweepScope::EveryRoom,
                 removal: MucRemovalCause::Voluntary,
@@ -2834,7 +2834,7 @@ async fn cleanup_muc_presence(
         None,
         LocalSweep {
             remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-            attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+            attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
             recording: SweepFailureRecording::RecordSweep,
             scope: LocalRoomSweepScope::EveryRoom,
             removal,
@@ -2881,7 +2881,7 @@ fn retain_remote_membership_departure(
     room: BareJid,
     jid: &FullJid,
     occupant_session: waddle_xmpp_core::OccupancySessionGeneration,
-    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId,
     removal: MucRemovalCause,
 ) {
     state
@@ -2914,7 +2914,7 @@ enum RemoteCleanupRetryPolicy {
 struct LocalSweep {
     remote_retry: RemoteCleanupRetryPolicy,
     /// The occupancy-order ceiling shared by every room in this pass.
-    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId,
+    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId,
     recording: SweepFailureRecording,
     scope: LocalRoomSweepScope,
     removal: MucRemovalCause,
@@ -3072,7 +3072,7 @@ async fn cleanup_muc_presence_with_origin(
                 cause: OccupancyLeaveCause::Disconnect,
                 session,
                 attempt,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             },
         )
         .await;
@@ -3950,7 +3950,7 @@ pub(crate) async fn get_room_actor_result(
 /// typed snapshot into [`drain_destroy_completions`].
 pub(crate) async fn register_destroy_completion(
     state: &WebSocketState,
-    completion: waddle_xmpp::muc::room_registry_actor::DestroyCompletion,
+    completion: waddle_xmpp::muc::room::registry_actor::DestroyCompletion,
 ) -> Result<(), RoomRegistryError> {
     RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .register_destroy_completion(completion)
@@ -4294,8 +4294,8 @@ pub(crate) async fn destroy_room_actor(
     state: &WebSocketState,
     room_jid: &BareJid,
 ) -> Result<
-    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome,
-    waddle_xmpp::muc::room_registry_actor::RoomRegistryError,
+    waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome,
+    waddle_xmpp::muc::room::registry_actor::RoomRegistryError,
 > {
     RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
         .destroy_room(room_jid.clone())
@@ -4307,8 +4307,8 @@ mod destroy_completion_tests {
     use super::super::tests::create_test_websocket_state;
     use super::*;
     use waddle_xmpp::muc::{
-        room_actor::GetSnapshot,
-        room_registry_actor::{CreateInstantRoom, DestroyCompletion},
+        room::actor::GetSnapshot,
+        room::registry_actor::{CreateInstantRoom, DestroyCompletion},
         DestroyRequest,
     };
 
@@ -4355,7 +4355,7 @@ mod destroy_completion_tests {
                 .destroy_room_with_attempt(room_jid.clone(), attempt)
                 .await
                 .expect("destroy with attempt"),
-            waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed,
+            waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::Destroyed,
         );
         attempt
     }
@@ -4392,8 +4392,8 @@ mod eviction_tests {
     use super::super::tests::create_test_websocket_state;
     use super::*;
     use waddle_xmpp::muc::{
-        room_actor::{Join, LeaveByRealJid},
-        room_registry_actor::{CreateInstantRoom, CreateRoom, RoomCount},
+        room::actor::{Join, LeaveByRealJid},
+        room::registry_actor::{CreateInstantRoom, CreateRoom, RoomCount},
         RoomConfig,
     };
     use waddle_xmpp_core::{Affiliation, Role};
@@ -4549,13 +4549,13 @@ mod eviction_tests {
             .expect("room count");
         assert_eq!(count_before, 1);
 
-        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = room_actor
+        let waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome) = room_actor
             .ask(LeaveByRealJid {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -4569,12 +4569,12 @@ mod eviction_tests {
         // receipt now legitimately vetoes the guarded destroy (EffectsOwed).
         assert_eq!(
             room_actor
-                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                .ask(waddle_xmpp::muc::room::actor::AckDepartureReceipt {
                     attempt: outcome.acknowledge,
                 })
                 .await
                 .expect("ack ask"),
-            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+            waddle_xmpp::muc::room::actor::AckDepartureOutcome::Acknowledged
         );
 
         maybe_evict_empty_room(&state, &room_jid, &outcome).await;
@@ -4621,13 +4621,13 @@ mod eviction_tests {
             .await
             .expect("alice joins");
 
-        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = room_actor
+        let waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome) = room_actor
             .ask(LeaveByRealJid {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -4686,13 +4686,13 @@ mod eviction_tests {
                 .expect("join");
         }
 
-        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = room_actor
+        let waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome) = room_actor
             .ask(LeaveByRealJid {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -4842,10 +4842,10 @@ mod local_departure_cleanup_tests {
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, RoomActor,
     };
-    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, ListRooms, WireClusteringClaims};
+    use waddle_xmpp::muc::room::registry_actor::{CreateRoom, ListRooms, WireClusteringClaims};
     use waddle_xmpp::muc::{
         RoomCommitError, RoomCommitOutcome, RoomCommittedCoordinates, RoomConfig, RoomLifecycleId,
         RoomMutationEffects, RoomRevision,
@@ -5088,7 +5088,7 @@ mod local_departure_cleanup_tests {
                 affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),
                 local_domain: "example.com".to_string(),
                 admission_revision: 0,
-                session: waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint(),
+                session: waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint(),
             })
             .await
             .expect("join occupant");
@@ -5098,7 +5098,7 @@ mod local_departure_cleanup_tests {
         room_actor: &ActorRef<RoomActor>,
         jid: &FullJid,
         nick: &str,
-        session: waddle_xmpp::muc::room_actor::OccupancySessionGeneration,
+        session: waddle_xmpp::muc::room::actor::OccupancySessionGeneration,
     ) {
         let admission_revision = room_actor
             .ask(GetSnapshot)
@@ -5682,7 +5682,7 @@ mod local_departure_cleanup_tests {
                 assert_eq!(
                     *selector,
                     LeaveSessionSelector::JoinedAtOrBefore(
-                        waddle_xmpp::muc::room_actor::OccupancyWatermark::from_revision(watermark)
+                        waddle_xmpp::muc::room::actor::OccupancyWatermark::from_revision(watermark)
                     )
                 );
             }
@@ -5861,7 +5861,7 @@ mod local_departure_cleanup_tests {
             .await
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
-        let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let generation = waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", generation).await;
         let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
@@ -5875,7 +5875,7 @@ mod local_departure_cleanup_tests {
                 None,
                 LocalSweep {
                     remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     recording: SweepFailureRecording::RecordSweep,
                     scope: LocalRoomSweepScope::EveryRoom,
                     removal: MucRemovalCause::Voluntary,
@@ -5909,8 +5909,8 @@ mod local_departure_cleanup_tests {
             .await
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
-        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
-        let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let first_generation = waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
+        let second_generation = waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
         join_member_with_generation(&room_actor, &alice, "alice", second_generation).await;
         let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
@@ -5925,7 +5925,7 @@ mod local_departure_cleanup_tests {
                 None,
                 LocalSweep {
                     remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     recording: SweepFailureRecording::RecordSweep,
                     scope: LocalRoomSweepScope::EveryRoom,
                     removal: MucRemovalCause::Voluntary,
@@ -5963,8 +5963,8 @@ mod local_departure_cleanup_tests {
             .await
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
-        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
-        let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let first_generation = waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
+        let second_generation = waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
 
         let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
@@ -5992,7 +5992,7 @@ mod local_departure_cleanup_tests {
                 None,
                 LocalSweep {
                     remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     recording: SweepFailureRecording::RecordSweep,
                     scope: LocalRoomSweepScope::EveryRoom,
                     removal: MucRemovalCause::Voluntary,
@@ -6033,7 +6033,7 @@ mod local_departure_cleanup_tests {
             .await
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
-        let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let generation = waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", generation).await;
 
         let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
@@ -6053,7 +6053,7 @@ mod local_departure_cleanup_tests {
                 None,
                 LocalSweep {
                     remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     recording: SweepFailureRecording::RecordSweep,
                     scope: LocalRoomSweepScope::EveryRoom,
                     removal: MucRemovalCause::Voluntary,
@@ -6095,7 +6095,7 @@ mod local_departure_cleanup_tests {
             .await
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
-        let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+        let first_generation = waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
 
         let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
@@ -6116,7 +6116,7 @@ mod local_departure_cleanup_tests {
                 None,
                 LocalSweep {
                     remote_retry: RemoteCleanupRetryPolicy::RespectBackoff,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     recording: SweepFailureRecording::RecordSweep,
                     scope: LocalRoomSweepScope::EveryRoom,
                     removal: MucRemovalCause::Voluntary,
@@ -6159,7 +6159,7 @@ mod local_departure_cleanup_tests {
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
         let replacement_generation =
-            waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+            waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
 
         state.deps.protocol.remote_muc_memberships.record_join(
             &alice,
@@ -6217,7 +6217,7 @@ mod local_departure_cleanup_tests {
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
         let replacement_generation =
-            waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+            waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
 
         state.deps.protocol.remote_muc_memberships.record_join(
             &alice,
@@ -6267,7 +6267,7 @@ mod local_departure_cleanup_tests {
             .expect("create room");
         let alice = full_jid("alice@example.com/web");
         let replacement_generation =
-            waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
+            waddle_xmpp::muc::room::actor::OccupancySessionGeneration::mint();
 
         let old_generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
         state.deps.protocol.remote_muc_memberships.record_join(
@@ -6366,7 +6366,7 @@ mod local_departure_cleanup_tests {
         let alice = full_jid("alice@example.com/web");
         join_member(&room_actor, &alice, "alice").await;
         room_actor
-            .ask(waddle_xmpp::muc::room_actor::SealForDestroy {
+            .ask(waddle_xmpp::muc::room::actor::SealForDestroy {
                 attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
             })
             .await
@@ -6463,8 +6463,8 @@ mod local_departure_cleanup_tests {
                         sender_jid: alice,
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
-                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                        attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -6483,8 +6483,8 @@ mod local_departure_cleanup_tests {
                         sender_jid: alice,
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
-                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                        attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -6575,8 +6575,8 @@ mod local_departure_cleanup_tests {
                         sender_jid,
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
-                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                        attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -6594,8 +6594,8 @@ mod local_departure_cleanup_tests {
                         sender_jid,
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Any,
-                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                        attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                        origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                     })
                     .mailbox_timeout(Duration::from_secs(30))
                     .reply_timeout(Duration::from_secs(30))
@@ -6611,8 +6611,8 @@ mod local_departure_cleanup_tests {
                 sender_jid: occupants[65].clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             },
         )
         .await;
@@ -6659,8 +6659,8 @@ mod local_departure_cleanup_tests {
                 sender_jid: alice,
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             },
         )
         .await;
@@ -6668,7 +6668,7 @@ mod local_departure_cleanup_tests {
         assert!(matches!(
             result,
             Err(LeaveAskFailure::Handler(
-                waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+                waddle_xmpp::muc::room::actor::RoomActorError::RoomSealed
             ))
         ));
     }
@@ -6698,8 +6698,8 @@ mod local_departure_cleanup_tests {
                 sender_jid: full_jid("alice@example.com/web"),
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             },
         )
         .await;

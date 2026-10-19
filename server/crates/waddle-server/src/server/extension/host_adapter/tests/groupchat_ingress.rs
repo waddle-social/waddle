@@ -7,8 +7,8 @@ use std::time::Duration;
 use tokio::sync::mpsc;
 use waddle_xmpp::{
     muc::{
-        room_actor::{ChangeAffiliation, Join},
-        room_registry_actor::CreateRoom,
+        room::actor::{ChangeAffiliation, Join},
+        room::registry_actor::CreateRoom,
         RoomConfig,
     },
     registry::OutboundStanza,
@@ -348,7 +348,7 @@ async fn sends_share_a_lingering_occupancy(f: IngressFixture) {
     assert_eq!(room.get_affiliation(&bot.to_bare()), Affiliation::None);
     let chain = fixture
         .actor
-        .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
+        .ask(waddle_xmpp::muc::room::actor::GetRoomSnapshot {
             sender_jid: bot.clone(),
         })
         .await
@@ -456,7 +456,7 @@ async fn unloaded_group_dm_is_refused_before_loading(f: IngressFixture) {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom { room_jid: room })
+            .ask(waddle_xmpp::muc::room::registry_actor::GetRoom { room_jid: room })
             .await
             .expect("room lookup")
             .is_none(),
@@ -671,7 +671,7 @@ pub(super) async fn bot_in_room(
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room.clone(),
         })
         .await

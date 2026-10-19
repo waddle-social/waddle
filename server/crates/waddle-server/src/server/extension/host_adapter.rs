@@ -12,8 +12,8 @@ use kameo::actor::ActorRef;
 use waddle_extensions::{host_tools::InvocationKind, DisplayText, PluginId, RoomJid, StanzaId};
 use waddle_xmpp::{
     muc::{
-        room_actor::{GetSnapshot, RoomActor},
-        room_registry_actor::GetRoom,
+        room::actor::{GetSnapshot, RoomActor},
+        room::registry_actor::GetRoom,
     },
     roster::{RosterItem, Subscription},
 };
@@ -235,7 +235,7 @@ impl ExtensionHostAdapter {
     async fn room_snapshot(
         &self,
         room: &BareJid,
-    ) -> Result<waddle_xmpp::muc::room_actor::RoomSnapshot, ExtensionHostAdapterError> {
+    ) -> Result<waddle_xmpp::muc::room::actor::RoomSnapshot, ExtensionHostAdapterError> {
         self.room_actor(room)
             .await?
             .ask(GetSnapshot)

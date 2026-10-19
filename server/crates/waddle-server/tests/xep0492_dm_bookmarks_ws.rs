@@ -49,7 +49,7 @@ use waddle_server::notification::settings_projection::{
 };
 use waddle_server::pubsub::DatabasePubSubStorage;
 use waddle_xmpp::pubsub::{PubSubItem, PubSubStorage};
-use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
+use waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 use waddle_xmpp::xep::NotificationLevel;
 use xmpp_parsers::minidom::Element;
 

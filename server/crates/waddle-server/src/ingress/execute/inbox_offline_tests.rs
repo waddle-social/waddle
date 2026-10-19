@@ -35,8 +35,8 @@ async fn inbox_push_receipt(fixture: IngressFixture, disconnect: bool) {
     socket_tests::register_test_connection(&state, &sender, sender_tx).await;
     socket_tests::create_test_session(&state, "juliet").await;
     use waddle_xmpp::muc::{
-        room_actor::{ChangeAffiliation, Join},
-        room_registry_actor::CreateRoom,
+        room::actor::{ChangeAffiliation, Join},
+        room::registry_actor::CreateRoom,
     };
     let actor = state
         .deps

@@ -2410,7 +2410,7 @@ mod tests {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room_jid.clone(),
                 waddle_id: "connection-replay-completion".to_owned(),
                 channel_id: "connection-replay-completion".to_owned(),

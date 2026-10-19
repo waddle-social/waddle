@@ -238,7 +238,7 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
             .protocol
             .room_registry
             .ask(
-                waddle_xmpp::muc::room_registry_actor::WireClusteringClaims {
+                waddle_xmpp::muc::room::registry_actor::WireClusteringClaims {
                     claim_store: Arc::clone(&claims) as Arc<dyn ClaimStore>,
                     node_identity: node_identity.clone(),
                     durable_store: None,
@@ -608,7 +608,7 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room.clone(),
             waddle_id: "recovery".into(),
             channel_id: "recovery".into(),
@@ -662,7 +662,7 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
     }
     assert_eq!(
         actor
-            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid {
+            .ask(waddle_xmpp::muc::room::actor::GetOccupantByJid {
                 jid: occupant.clone()
             })
             .await
@@ -951,7 +951,7 @@ async fn departed_occupant_cluster_recovery(f: IngressFixture, case: DepartedEls
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room.clone(),
             waddle_id: "recovery".into(),
             channel_id: "recovery".into(),
@@ -1080,7 +1080,7 @@ async fn one_peer_room(
     asker: Arc<dyn crate::clustering::resource_presence::ResourcePresenceAsker>,
 ) -> (
     Arc<WebSocketState>,
-    kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
 ) {
     let local = NodeIdentity::new("recovering-node", "local-epoch");
     let peer = NodeIdentity::new("socket-node", "foreign-epoch");
@@ -1112,7 +1112,7 @@ async fn one_peer_room(
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: "recovery@muc.example.com".parse().expect("room"),
             waddle_id: "recovery".into(),
             channel_id: "recovery".into(),
@@ -1292,7 +1292,7 @@ async fn sqlite_stalled_ghosts_of_one_room_are_repaired_within_the_repair_budget
     for ghost in &ghosts {
         assert!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid { jid: ghost.clone() })
+                .ask(waddle_xmpp::muc::room::actor::GetOccupantByJid { jid: ghost.clone() })
                 .await
                 .expect("occupancy probe")
                 .is_none(),
@@ -1561,7 +1561,7 @@ async fn unhosted_room_recovery(f: IngressFixture, case: UnhostedCase) {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
                 room_jid: room.clone(),
             })
             .await

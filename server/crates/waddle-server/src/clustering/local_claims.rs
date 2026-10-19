@@ -31,7 +31,7 @@ use std::time::Duration;
 use async_trait::async_trait;
 use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
-use waddle_xmpp::muc::room_actor::HealthCheck;
+use waddle_xmpp::muc::room::actor::HealthCheck;
 use waddle_xmpp::muc::RoomRegistry;
 use waddle_xmpp::ownership::{Entity, EntityType};
 use waddle_xmpp::registry::user_actor::HealthCheck as UserHealthCheck;
@@ -2297,12 +2297,13 @@ mod tests {
             let actor_ref = actor_ref.clone();
             async move {
                 actor_ref
-                    .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+                    .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                         config: waddle_xmpp::muc::RoomConfig {
                             persistent: true,
                             ..waddle_xmpp::muc::RoomConfig::default()
                         },
-                        effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                        effect_plan:
+                            waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
                     })
                     .await
             }

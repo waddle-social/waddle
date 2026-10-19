@@ -18,7 +18,7 @@
 //!   members-only channels this also revokes an explicit `member` affiliation.
 //!
 //! All handlers delegate to the typed dependencies on [`AppState`]:
-//! `room_registry` (`waddle_xmpp::muc::room_registry_actor::*`), and
+//! `room_registry` (`waddle_xmpp::muc::room::registry_actor::*`), and
 //! `muc_domain` (used to construct fresh room JIDs on `create`).
 
 use std::collections::HashSet;
@@ -31,14 +31,14 @@ use jid::{BareJid, FullJid};
 use kameo::actor::ActorRef;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use waddle_xmpp::commands::{CommandContext, CommandResult};
-use waddle_xmpp::muc::room_registry_actor::{
+use waddle_xmpp::muc::room::registry_actor::{
     CreateRoom, CreateRoomWithInitialAffiliations, DestroyRoom, DestroyRoomOutcome,
     DestroyRoomReason, GetOrCreateRoom, GetOrCreateRoomWithLiveRoster, GetRoom, ListRooms,
     RetryPendingRoomReleases,
 };
 use waddle_xmpp::muc::{
     affiliation::FederatedAffiliationConfig,
-    room_actor::{
+    room::actor::{
         ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
         GetAffiliation, GetConfig, GetSnapshot, LeaveByRealJid, ListAffiliations, ListOccupants,
         RoomActor, UpdateConfig,
@@ -1312,7 +1312,7 @@ async fn run_list(
 async fn local_channel_snapshot(
     state: &AppState,
     room_jid: &BareJid,
-) -> Option<waddle_xmpp::muc::room_actor::RoomSnapshot> {
+) -> Option<waddle_xmpp::muc::room::actor::RoomSnapshot> {
     let result = tokio::time::timeout(ADMIN_ROOM_ASK_TIMEOUT, async {
         let actor = state
             .room_registry
@@ -2275,7 +2275,7 @@ async fn run_group_dm_leave(
     {
         let should_restore_membership = match &error {
             kameo::error::SendError::HandlerError(
-                waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown,
+                waddle_xmpp::muc::room::actor::AffiliationMutationError::CommitOutcomeUnknown,
             ) => {
                 match reconcile_ambiguous_group_dm_leave(
                     state,
@@ -2316,12 +2316,12 @@ async fn run_group_dm_leave(
     }
     {
         for resource in resources {
-            let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+            let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
             let in_flight = crate::server::routes::websocket::LocalDepartureItem::InFlight {
                 room: args.room_jid.clone(),
                 jid: resource.clone(),
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
                 attempt,
                 notified: HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
@@ -2336,14 +2336,14 @@ async fn run_group_dm_leave(
                 LeaveByRealJid {
                     sender_jid: resource.clone(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                    session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                    session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
                     attempt,
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 },
             )
             .await
             {
-                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome)) => {
+                Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome)) => {
                     broadcast_group_dm_leave(
                         state,
                         connections,
@@ -2358,7 +2358,7 @@ async fn run_group_dm_leave(
                         outcome.acknowledge,
                     );
                 }
-                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Suppressed {
+                Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::Suppressed {
                     attempt: acknowledge,
                     ..
                 }) => {
@@ -2370,19 +2370,19 @@ async fn run_group_dm_leave(
                     );
                 }
                 Ok(
-                    waddle_xmpp::muc::room_actor::LeaveDisposition::NotOccupant
-                    | waddle_xmpp::muc::room_actor::LeaveDisposition::Superseded { .. },
+                    waddle_xmpp::muc::room::actor::LeaveDisposition::NotOccupant
+                    | waddle_xmpp::muc::room::actor::LeaveDisposition::Superseded { .. },
                 ) => {
                     pending_local_muc_departures.complete_in_flight(&in_flight);
                 }
-                Ok(waddle_xmpp::muc::room_actor::LeaveDisposition::Deferred { .. }) => {
+                Ok(waddle_xmpp::muc::room::actor::LeaveDisposition::Deferred { .. }) => {
                     pending_local_muc_departures.complete_in_flight(&in_flight);
                     pending_local_muc_departures.record(
                         crate::server::routes::websocket::LocalDepartureItem::RoomDeparture {
                             room: args.room_jid.clone(),
                             jid: resource,
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
                             removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
@@ -2398,7 +2398,7 @@ async fn run_group_dm_leave(
                             room: args.room_jid.clone(),
                             jid: resource,
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
                             removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
@@ -2406,7 +2406,7 @@ async fn run_group_dm_leave(
                     );
                 }
                 Err(crate::server::routes::websocket::LeaveAskFailure::Handler(
-                    waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
+                    waddle_xmpp::muc::room::actor::RoomActorError::RoomSealed,
                 )) => {
                     pending_local_muc_departures.complete_in_flight(&in_flight);
                     pending_local_muc_departures.record(
@@ -2415,7 +2415,7 @@ async fn run_group_dm_leave(
                             jid: resource,
                             actor: actor.id(),
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
                             removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
@@ -2429,7 +2429,7 @@ async fn run_group_dm_leave(
                             room: args.room_jid.clone(),
                             jid: resource,
                             cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                            selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                            selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
                             attempt,
                             notified: HashSet::new(),
                             removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
@@ -2487,7 +2487,7 @@ async fn run_group_dm_rename(
         .actor_ref;
     hydrate_group_dm_member_affiliations(state, &actor, &channel_id).await?;
     let snapshot = actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .await
         .map_err(send_err("room actor GetSnapshot"))?;
     if !snapshot.room.config.group_dm {
@@ -2500,7 +2500,7 @@ async fn run_group_dm_rename(
     let mut config = previous_config.clone();
     config.name = args.name.clone().unwrap_or_default();
     let intended_config = config.normalized();
-    let mut reconciled_broadcast_snapshot: Option<waddle_xmpp::muc::room_actor::RoomSnapshot> =
+    let mut reconciled_broadcast_snapshot: Option<waddle_xmpp::muc::room::actor::RoomSnapshot> =
         None;
     let mut cancelled_commit_recovery = CancelledConfigAskRecoveryGuard::arm_only(
         websocket_state,
@@ -2510,7 +2510,7 @@ async fn run_group_dm_rename(
         &snapshot,
     );
     let (updated_snapshot, config_reservation) = match actor
-        .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
+        .ask(waddle_xmpp::muc::room::actor::UpdateGroupDmConfigByMember {
             config: intended_config.clone(),
             sender_jid: caller_full_jid.clone(),
         })
@@ -2521,7 +2521,7 @@ async fn run_group_dm_rename(
             (applied.snapshot, applied.reservation)
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown,
+            waddle_xmpp::muc::room::actor::UpdateGroupDmConfigByMemberError::CommitOutcomeUnknown,
         )) => {
             let Some(recovered) = reconcile_ambiguous_group_dm_rename_commit(
                 state,
@@ -2677,7 +2677,7 @@ async fn run_group_dm_rename(
         broadcast_group_dm_config_change(connections, &args.room_jid, broadcast_snapshot);
     } else {
         let broadcast_snapshot = actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .map_err(send_err("room actor GetSnapshot"))?;
         broadcast_group_dm_config_change(connections, &args.room_jid, &broadcast_snapshot);
@@ -2770,7 +2770,7 @@ async fn list_durable_group_dm_members(
 }
 
 fn find_occupant_for_full_jid<'a>(
-    snapshot: &'a waddle_xmpp::muc::room_actor::RoomSnapshot,
+    snapshot: &'a waddle_xmpp::muc::room::actor::RoomSnapshot,
     full_jid: &FullJid,
 ) -> Option<&'a waddle_xmpp::muc::Occupant> {
     snapshot.room.occupants.values().find(|occupant| {
@@ -2790,8 +2790,8 @@ pub(crate) struct GroupDmLeaveEffect {
     removed_last_session: bool,
 }
 
-impl From<&waddle_xmpp::muc::room_actor::LeaveOutcome> for GroupDmLeaveEffect {
-    fn from(outcome: &waddle_xmpp::muc::room_actor::LeaveOutcome) -> Self {
+impl From<&waddle_xmpp::muc::room::actor::LeaveOutcome> for GroupDmLeaveEffect {
+    fn from(outcome: &waddle_xmpp::muc::room::actor::LeaveOutcome) -> Self {
         Self {
             affiliation: outcome.affiliation,
             leaving_room_jid: outcome.leaving_room_jid.clone(),
@@ -2844,7 +2844,7 @@ pub(crate) fn broadcast_group_dm_leave(
 fn broadcast_group_dm_config_change(
     connections: &ConnectionRegistry,
     room_jid: &BareJid,
-    snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
 ) {
     for occupant in snapshot.room.occupants.values() {
         for recipient_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
@@ -2915,7 +2915,7 @@ async fn repair_group_dm_rename_side_effects_after_conflict(
         previous_config.clone()
     } else {
         actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .map(|snapshot| snapshot.room.config)
             .unwrap_or_else(|_| previous_config.clone())
@@ -2938,7 +2938,7 @@ async fn rollback_room_config_or_arm(
     reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
 ) -> bool {
     let rolled_back = actor
-        .ask(waddle_xmpp::muc::room_actor::RollbackConfigIfRevision {
+        .ask(waddle_xmpp::muc::room::actor::RollbackConfigIfRevision {
             expected_revision,
             config: previous_config,
             reservation: reservation.clone(),
@@ -2968,7 +2968,7 @@ async fn broadcast_admin_config_change(
         return;
     }
     let Ok(snapshot) = actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
@@ -3044,13 +3044,14 @@ impl PendingAdminMembersOnlyEnforcementSeed {
 /// Only a sealed actor has a final roster safe to transplant, and the exact
 /// actor demotion prevents overwriting a successor published concurrently.
 pub(crate) async fn reacquire_config_actor(
-    registry: &ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    registry: &ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
     room_jid: &BareJid,
-    previous: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    previous: &waddle_xmpp::muc::room::actor::RoomSnapshot,
     stale_actor: &ActorRef<RoomActor>,
-) -> Result<Option<ActorRef<RoomActor>>, waddle_xmpp::muc::room_registry_actor::RoomRegistryError> {
-    use waddle_xmpp::muc::room_actor::{GetRoomSealState, RoomSealState};
-    use waddle_xmpp::muc::room_registry_actor::{GetOrRestoreRoom, RoomRegistryError};
+) -> Result<Option<ActorRef<RoomActor>>, waddle_xmpp::muc::room::registry_actor::RoomRegistryError>
+{
+    use waddle_xmpp::muc::room::actor::{GetRoomSealState, RoomSealState};
+    use waddle_xmpp::muc::room::registry_actor::{GetOrRestoreRoom, RoomRegistryError};
     let live_restore = match stale_actor
         .ask(GetRoomSealState)
         .mailbox_timeout(ADMIN_ROOM_ASK_TIMEOUT)
@@ -3091,7 +3092,7 @@ pub(crate) async fn reacquire_config_actor(
 /// config commit may advance coordinates without producing a new outbox row.
 pub(crate) async fn staged_config_reservations_since(
     outbox: &crate::room::effect_outbox::RoomEffectOutboxStore,
-    previous: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    previous: &waddle_xmpp::muc::room::actor::RoomSnapshot,
     coordinates: waddle_xmpp::muc::RoomCommittedCoordinates,
     include_latest: bool,
 ) -> Result<
@@ -3125,8 +3126,8 @@ struct CancelledConfigAskRecoveryGuard {
     actor: ActorRef<RoomActor>,
     room_jid: BareJid,
     intended_config: RoomConfig,
-    previous_snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
-    registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    previous_snapshot: waddle_xmpp::muc::room::actor::RoomSnapshot,
+    registry: kameo::actor::ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
     outbox: Arc<crate::room::effect_outbox::RoomEffectOutboxStore>,
     action: CancelledConfigAskRecoveryAction,
     disarmed: bool,
@@ -3138,7 +3139,7 @@ impl CancelledConfigAskRecoveryGuard {
         actor: &ActorRef<RoomActor>,
         room_jid: &BareJid,
         intended_config: &RoomConfig,
-        previous_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+        previous_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
     ) -> Self {
         Self {
             actor: actor.clone(),
@@ -3163,7 +3164,7 @@ impl CancelledConfigAskRecoveryGuard {
         actor: &ActorRef<RoomActor>,
         room_jid: &BareJid,
         intended_config: &RoomConfig,
-        previous_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+        previous_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
         seed: PendingAdminMembersOnlyEnforcementSeed,
     ) -> Self {
         Self {
@@ -3479,7 +3480,7 @@ async fn group_dm_room_config_revision_is_current(
     expected: u64,
 ) -> bool {
     actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .await
         .map(|snapshot| snapshot.config_revision == expected)
         .unwrap_or(false)
@@ -3568,13 +3569,13 @@ async fn recover_actor_with_merged_live_roster(
     state: &AppState,
     room_jid: &BareJid,
     stale_actor: &ActorRef<RoomActor>,
-    previous_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    previous_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
     recovery_context: &'static str,
     snapshot_context: &'static str,
 ) -> Result<
     (
         ActorRef<RoomActor>,
-        waddle_xmpp::muc::room_actor::RoomSnapshot,
+        waddle_xmpp::muc::room::actor::RoomSnapshot,
     ),
     AdminErr,
 > {
@@ -3631,7 +3632,7 @@ async fn recover_group_dm_actor_after_demote(
     {
         Ok(acquisition) => acquisition.actor_ref,
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+            waddle_xmpp::muc::room::registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
         )) => {
             // A successor was already published: a concurrent join reaped the
             // sealed stale actor and re-created the room. Follow the CURRENT
@@ -3692,7 +3693,7 @@ async fn reconcile_ambiguous_group_dm_leave(
 
 struct RecoveredGroupDmRenameCommit {
     actor: ActorRef<RoomActor>,
-    snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
+    snapshot: waddle_xmpp::muc::room::actor::RoomSnapshot,
     reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
 }
 
@@ -3702,7 +3703,7 @@ async fn reconcile_ambiguous_group_dm_rename_commit(
     room_jid: &BareJid,
     stale_actor: &ActorRef<RoomActor>,
     intended_config: &RoomConfig,
-    previous_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    previous_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
 ) -> Result<Option<RecoveredGroupDmRenameCommit>, AdminErr> {
     let (actor, snapshot) = recover_actor_with_merged_live_roster(
         state,
@@ -3751,11 +3752,11 @@ async fn group_dm_rename_update_error(
     room_jid: &BareJid,
     actor: &ActorRef<RoomActor>,
     error: kameo::error::SendError<
-        waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember,
-        waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError,
+        waddle_xmpp::muc::room::actor::UpdateGroupDmConfigByMember,
+        waddle_xmpp::muc::room::actor::UpdateGroupDmConfigByMemberError,
     >,
 ) -> AdminErr {
-    use waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMemberError;
+    use waddle_xmpp::muc::room::actor::UpdateGroupDmConfigByMemberError;
 
     match error {
         kameo::error::SendError::HandlerError(error) => match error {
@@ -3776,7 +3777,7 @@ async fn group_dm_rename_update_error(
                 let _ = state
                     .room_registry
                     .ask(
-                        waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor {
+                        waddle_xmpp::muc::room::registry_actor::DemoteRoomIfExactActor {
                             room_jid: room_jid.clone(),
                             actor_ref: actor.clone(),
                         },
@@ -4186,7 +4187,7 @@ async fn run_update(
     let members_only_enforcement_affiliations =
         if !existing.requires_membership() && updated.requires_membership() {
             let snapshot = actor
-                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
                 .await
                 .map_err(send_err("room actor GetSnapshot"))?;
             let occupant_jids: Vec<BareJid> = snapshot
@@ -4205,9 +4206,9 @@ async fn run_update(
         };
 
     let effect_plan = if !existing.requires_membership() && updated.requires_membership() {
-        waddle_xmpp::muc::room_actor::ConfigEffectPlan::ManagedMembersOnlyFallback
+        waddle_xmpp::muc::room::actor::ConfigEffectPlan::ManagedMembersOnlyFallback
     } else {
-        waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience
+        waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience
     };
     let mut cancelled_commit_recovery =
         if let Some(affiliations) = members_only_enforcement_affiliations.as_ref() {
@@ -4252,7 +4253,7 @@ async fn run_update(
             applied
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::RoomMutationError::CommitOutcomeUnknown,
+            waddle_xmpp::muc::room::actor::RoomMutationError::CommitOutcomeUnknown,
         )) => {
             let (recovered, snapshot) = recover_actor_with_merged_live_roster(
                 state,
@@ -4290,7 +4291,7 @@ async fn run_update(
                 None
             };
             actor = recovered;
-            waddle_xmpp::muc::room_actor::ConfigMutationApplied {
+            waddle_xmpp::muc::room::actor::ConfigMutationApplied {
                 revision: snapshot.config_revision,
                 notification: None,
                 reservation,
@@ -4690,16 +4691,16 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
         .await;
     let failure = match destroy_result {
         Ok(
-            waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
-            | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
+            waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::Destroyed
+            | waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::NotRegistered,
         ) => None,
-        Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
+        Ok(waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
             Some(internal_err(format!(
                 "room destroy refused for {}: durable room-state wipe failed",
                 args.channel_jid
             )))
         }
-        Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
+        Ok(waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
             Some(internal_err(format!(
                 "room destroy refused for {}: exact-release retry backlog is full; retry deletion",
                 args.channel_jid
@@ -5039,7 +5040,7 @@ async fn run_set_affiliation(
     {
         Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::CannotRemoveLastOwner,
+            waddle_xmpp::muc::room::actor::AdminApplyError::CannotRemoveLastOwner,
         )) => {
             let _ = persist_channel_affiliation(
                 state,
@@ -5278,7 +5279,7 @@ async fn run_kick(
     {
         Ok(applied) => applied,
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::AdminApplyError::OccupantNotFound(_),
+            waddle_xmpp::muc::room::actor::AdminApplyError::OccupantNotFound(_),
         )) if revoke_members_only_member => {
             sync_private_kick_affiliation_revocation(
                 state,
@@ -5592,7 +5593,7 @@ mod tests {
     use std::str::FromStr;
     use std::time::Duration;
     use tokio::sync::mpsc;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::{
         MucConfigStatusCode, RoomEffectReservation, RoomLifecycleId, RoomLifecycleState,
         RoomMutationEffects, RoomRevision,
@@ -6107,7 +6108,7 @@ mod sfu_eviction_tests {
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use crate::server::routes::websocket::tests::RecordingSfu;
     use crate::server::AppState;
-    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room::actor::{JoinAffiliationGrant, JoinWithAffiliation};
     use waddle_xmpp::muc::RoomConfig;
 
     async fn fresh_state() -> AppState {
@@ -6264,10 +6265,10 @@ mod group_dm_durable_reconciliation_tests {
         RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
         RoomLifecycleId, RoomRevision,
     };
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         GetSnapshot, Join, JoinAffiliationGrant, JoinWithAffiliation,
     };
-    use waddle_xmpp::muc::room_registry_actor::{
+    use waddle_xmpp::muc::room::registry_actor::{
         CreateRoomWithInitialAffiliations, WireClusteringClaims,
     };
     use waddle_xmpp::ownership::{
@@ -6694,8 +6695,8 @@ mod group_dm_durable_reconciliation_tests {
             .expect("migrations");
         let mut state = AppState::new(Arc::new(db_pool));
         let store = TestGroupDmDurableStore::new(mode);
-        let registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
-            waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
+        let registry = waddle_xmpp::muc::room::registry_actor::RoomRegistryActor::spawn(
+            waddle_xmpp::muc::room::registry_actor::RoomRegistryActor::new(
                 state.muc_domain.to_string(),
                 state.occupant_id_secret.clone(),
             ),
@@ -6901,7 +6902,7 @@ mod group_dm_durable_reconciliation_tests {
     async fn room_snapshot(
         state: &AppState,
         room_jid: &BareJid,
-    ) -> waddle_xmpp::muc::room_actor::RoomSnapshot {
+    ) -> waddle_xmpp::muc::room::actor::RoomSnapshot {
         state
             .room_registry
             .ask(GetRoom {
@@ -7036,14 +7037,14 @@ mod group_dm_durable_reconciliation_tests {
         // just the affiliation (the ghost-occupant regression).
         let successor = state
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
             .expect("successor lookup")
             .expect("successor registered");
         let successor_snapshot = successor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("successor snapshot");
         assert!(
@@ -7210,7 +7211,7 @@ mod group_dm_durable_reconciliation_tests {
                 ref room,
                 ref jid,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                selector: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
+                selector: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
                 ..
             } if room == &room_jid && jid == &alice_web
         ));
@@ -7336,7 +7337,7 @@ mod group_dm_durable_reconciliation_tests {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room_jid.clone(),
                 waddle_id: "group-dm-lookup-fail".to_owned(),
                 channel_id: "group-dm-lookup-fail".to_owned(),
@@ -7495,7 +7496,7 @@ mod group_dm_durable_reconciliation_tests {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room_jid.clone(),
                 waddle_id: "group-dm-recovery".to_owned(),
                 channel_id: "group-dm-recovery".to_owned(),
@@ -7710,7 +7711,7 @@ mod group_dm_durable_reconciliation_tests {
 
     #[tokio::test]
     async fn cancelled_admin_config_guard_respects_destroyed_lifecycle() {
-        use waddle_xmpp::muc::room_registry_actor::{
+        use waddle_xmpp::muc::room::registry_actor::{
             DestroyRoom, DestroyRoomOutcome, DestroyRoomReason, GetRoom,
         };
 
@@ -7910,9 +7911,9 @@ mod group_dm_durable_reconciliation_tests {
         };
         let previous_snapshot = actor.ask(GetSnapshot).await.expect("pre-config snapshot");
         let applied = actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                 config: updated_config.clone(),
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("commit config");
@@ -7928,9 +7929,9 @@ mod group_dm_durable_reconciliation_tests {
             ..RoomConfig::default()
         };
         let latest_applied = actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                 config: latest_config.clone(),
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("commit latest config");
@@ -8013,9 +8014,9 @@ mod group_dm_durable_reconciliation_tests {
             ..RoomConfig::default()
         };
         let previous_exact = exact_actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                 config: previous_exact_config,
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("commit earlier exact config");
@@ -8036,9 +8037,9 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("pre-config snapshot");
         let exact_applied = exact_actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                 config: exact_config.clone(),
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("commit exact config");
@@ -8056,7 +8057,7 @@ mod group_dm_durable_reconciliation_tests {
         let repeated = exact_actor
             .ask(UpdateConfig {
                 config: exact_config.clone(),
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await;
         assert!(repeated.is_err(), "ambiguous config commit seals the actor");
@@ -8138,14 +8139,14 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("seat group-DM member");
         let mut updated = actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("snapshot")
             .room
             .config;
         updated.name = "After".to_owned();
         let applied = actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
+            .ask(waddle_xmpp::muc::room::actor::UpdateGroupDmConfigByMember {
                 config: updated,
                 sender_jid: caller,
             })
@@ -8347,7 +8348,7 @@ mod group_dm_durable_reconciliation_tests {
         let mut updated = actor.ask(GetSnapshot).await.expect("snapshot").room.config;
         updated.name = "After".to_owned();
         let applied = actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateGroupDmConfigByMember {
+            .ask(waddle_xmpp::muc::room::actor::UpdateGroupDmConfigByMember {
                 config: updated,
                 sender_jid: caller,
             })
@@ -8456,9 +8457,9 @@ mod group_dm_durable_reconciliation_tests {
         };
         let previous_exact_snapshot = actor.ask(GetSnapshot).await.expect("pre-config snapshot");
         let exact_applied = actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                 config: exact_config.clone(),
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("commit exact config");
@@ -8517,9 +8518,9 @@ mod group_dm_durable_reconciliation_tests {
         };
         let previous_snapshot = actor.ask(GetSnapshot).await.expect("pre-config snapshot");
         let superseded_applied = actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                 config: superseded_config.clone(),
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("commit superseded config");
@@ -8540,9 +8541,9 @@ mod group_dm_durable_reconciliation_tests {
             ..RoomConfig::default()
         };
         let latest_applied = actor
-            .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+            .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
                 config: latest_config,
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("commit latest config");
@@ -8675,7 +8676,7 @@ mod group_dm_durable_reconciliation_tests {
                 .expect("seat test occupant");
         }
         let mut open_config = actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("initial snapshot")
             .room
@@ -8684,7 +8685,7 @@ mod group_dm_durable_reconciliation_tests {
         let _ = actor
             .ask(UpdateConfig {
                 config: open_config,
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("open the seeded channel");
@@ -8697,7 +8698,7 @@ mod group_dm_durable_reconciliation_tests {
             .ask(UpdateConfig {
                 config: updated.clone(),
                 effect_plan:
-                    waddle_xmpp::muc::room_actor::ConfigEffectPlan::ManagedMembersOnlyFallback,
+                    waddle_xmpp::muc::room::actor::ConfigEffectPlan::ManagedMembersOnlyFallback,
             })
             .await
             .expect("members-only config commit");
@@ -8711,7 +8712,7 @@ mod group_dm_durable_reconciliation_tests {
             let repeated = actor
                 .ask(UpdateConfig {
                     config: updated.clone(),
-                    effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                    effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
                 })
                 .await;
             assert!(repeated.is_err(), "ambiguous config commit seals the actor");
@@ -8781,7 +8782,7 @@ mod group_dm_durable_reconciliation_tests {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
                 let snapshot = actor
-                    .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                    .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
                     .await
                     .expect("post-cancellation snapshot");
                 if snapshot
@@ -8885,7 +8886,7 @@ mod group_dm_durable_reconciliation_tests {
                 .expect("seat test occupant");
         }
         let mut open_config = actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("initial snapshot")
             .room
@@ -8894,12 +8895,12 @@ mod group_dm_durable_reconciliation_tests {
         let _ = actor
             .ask(UpdateConfig {
                 config: open_config,
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("open the seeded channel");
         let previous = actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("previous snapshot")
             .room
@@ -8910,7 +8911,7 @@ mod group_dm_durable_reconciliation_tests {
             .ask(UpdateConfig {
                 config: updated.clone(),
                 effect_plan:
-                    waddle_xmpp::muc::room_actor::ConfigEffectPlan::ManagedMembersOnlyFallback,
+                    waddle_xmpp::muc::room::actor::ConfigEffectPlan::ManagedMembersOnlyFallback,
             })
             .await
             .expect("members-only config commit");
@@ -8951,7 +8952,7 @@ mod group_dm_durable_reconciliation_tests {
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         let snapshot = actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("post-rollback snapshot");
         assert!(
@@ -9022,13 +9023,13 @@ mod group_dm_durable_reconciliation_tests {
                                     .ask(LeaveByRealJid {
                                         sender_jid: caller.clone(),
                                         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                                        session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                                        session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                                        attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                                        origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
 })
                                     .await
                                     .expect("leave recovered room"),
-                                waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+                                waddle_xmpp::muc::room::actor::LeaveDisposition::Left(_)
                             ),
                             "seeded caller must be able to leave the recovered actor"
                         );
@@ -9135,13 +9136,13 @@ mod group_dm_durable_reconciliation_tests {
                                     .ask(LeaveByRealJid {
                                         sender_jid: owner.clone(),
                                         cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Administrative,
-                                        session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                                        attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                                        session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                                        attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                                        origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
 })
                                     .await
                                     .expect("leave recovered channel"),
-                                waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+                                waddle_xmpp::muc::room::actor::LeaveDisposition::Left(_)
                             ),
                             "seeded owner must be able to leave the recovered actor"
                         );
@@ -9421,7 +9422,7 @@ mod group_dm_durable_reconciliation_tests {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room_jid.clone(),
                 waddle_id: "admin-success".to_owned(),
                 channel_id: "admin-success".to_owned(),
@@ -9562,7 +9563,7 @@ mod group_dm_durable_reconciliation_tests {
                     name: "After".to_owned(),
                     ..previous.clone()
                 },
-                effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+                effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
             })
             .await
             .expect("durably stage config before outer work fails");

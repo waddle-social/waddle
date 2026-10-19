@@ -33,8 +33,8 @@ use std::{collections::HashMap, sync::Arc};
 
 use jid::BareJid;
 use waddle_xmpp::commands::{CommandContext, CommandResult};
-use waddle_xmpp::muc::room_actor::GetConfig;
-use waddle_xmpp::muc::room_registry_actor::GetRoom;
+use waddle_xmpp::muc::room::actor::GetConfig;
+use waddle_xmpp::muc::room::registry_actor::GetRoom;
 use waddle_xmpp::pubsub::{Affiliation as PubSubAffiliation, PubSubItem};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 use waddle_xmpp::{ChannelInfo, ChannelType, XmppError};
@@ -1355,22 +1355,22 @@ async fn destroy_space_channel(state: &AppState, room_jid: &BareJid) -> Result<(
     }
     let failure = match state
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::DestroyRoom {
                 room_jid: room_jid.clone(),
-                reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::Destroy,
+                reason: waddle_xmpp::muc::room::registry_actor::DestroyRoomReason::Destroy,
             })
             .await
         {
             Ok(
-                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
-                | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
+                waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::Destroyed
+                | waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::NotRegistered,
             ) => None,
-            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
+            Ok(waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
                 Some(format!(
                     "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
                 ))
             }
-            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
+            Ok(waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
                 Some(format!(
                     "cascade destroy refused for room {room_jid}: exact-release retry backlog is full; retry deletion"
                 ))

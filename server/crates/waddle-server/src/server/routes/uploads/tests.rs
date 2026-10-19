@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use kameo::actor::Spawn;
 use std::str::FromStr;
 use tower::ServiceExt;
-use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+use waddle_xmpp::muc::room::registry_actor::RoomRegistryActor;
 use waddle_xmpp::pubsub::InMemoryPubSubStorage;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 

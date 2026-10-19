@@ -12,7 +12,7 @@ use std::{
     time::Duration,
 };
 use waddle_extensions::PluginId;
-use waddle_xmpp::{muc::room_actor::GetSnapshot, Stanza};
+use waddle_xmpp::{muc::room::actor::GetSnapshot, Stanza};
 
 async fn two_bots(f: IngressFixture) {
     let fixture = GroupchatFixture::new(&f).await;

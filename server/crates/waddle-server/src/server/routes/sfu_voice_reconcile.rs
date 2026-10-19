@@ -74,7 +74,7 @@ pub(super) async fn reconcile_voice_grants(
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::LocalRoomJids)
+        .ask(waddle_xmpp::muc::room::registry_actor::LocalRoomJids)
         .reply_timeout(ROOM_ACTOR_ASK_TIMEOUT)
         .await
     {
@@ -99,7 +99,7 @@ pub(super) async fn reconcile_voice_grants(
         // so one wedged room actor cannot stall the whole pass and
         // starve every later room of convergence.
         let voices = match actor
-            .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
+            .ask(waddle_xmpp::muc::room::actor::OccupantVoices)
             .reply_timeout(ROOM_ACTOR_ASK_TIMEOUT)
             .await
         {

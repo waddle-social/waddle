@@ -49,7 +49,7 @@ use waddle_extensions::{
 };
 use waddle_xmpp::{
     ingress::IngressEffectIntent,
-    muc::room_actor::{ChangeAffiliation, GetSnapshot, Join},
+    muc::room::actor::{ChangeAffiliation, GetSnapshot, Join},
     ownership::{NodeIdentity, SharedNodeIdentity},
     Affiliation, Role, Stanza,
 };
@@ -1105,7 +1105,7 @@ async fn revoked_join_waits_for_slow_remote_join(f: IngressFixture) {
 async fn claim_held_elsewhere_is_owned_remotely(f: IngressFixture) {
     use crate::server::routes::interpret::effects::PlanFailure;
     use waddle_xmpp::{
-        muc::room_registry_actor::{GetRoom, WireClusteringClaims},
+        muc::room::registry_actor::{GetRoom, WireClusteringClaims},
         ownership::{ClaimStore, Entity, EntityType, InProcessClaimStore},
     };
     let adapter = direct_ingress::adapter(&f).await;

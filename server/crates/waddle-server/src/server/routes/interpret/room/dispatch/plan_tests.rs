@@ -8,8 +8,8 @@ use super::*;
 use crate::server::routes::websocket::tests::{
     create_test_websocket_state, register_test_connection,
 };
-use waddle_xmpp::muc::room_actor::{ChangeAffiliation, Join};
-use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+use waddle_xmpp::muc::room::actor::{ChangeAffiliation, Join};
+use waddle_xmpp::muc::room::registry_actor::CreateRoom;
 
 fn message(room: &BareJid, sender: &FullJid) -> Message {
     let mut message = Message::new(Some(Jid::from(room.clone())));
@@ -193,7 +193,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
     };
     use waddle_xmpp::mam::{ArchivedMessage, InMemoryMamStorage};
     use waddle_xmpp::muc::pin::{PinChangeRequest, PinPreview, PinStateChange, PinnedEntry};
-    use waddle_xmpp::muc::room_actor::{ApplyPin, GetPinList};
+    use waddle_xmpp::muc::room::actor::{ApplyPin, GetPinList};
     use waddle_xmpp_core::xep0359::StanzaId;
 
     let state = create_test_websocket_state().await;

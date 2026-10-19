@@ -234,7 +234,7 @@ mod tests {
     };
     use waddle_xmpp::{
         ingress::{EffectMessageIdentity, EntityGeneration, IngressEffectIntent, SemanticDigest},
-        muc::{durable::AdminMutationId, room_actor::OccupancyWatermark},
+        muc::{durable::AdminMutationId, room::actor::OccupancyWatermark},
     };
     use waddle_xmpp_core::xep0359::StanzaId;
     use xmpp_parsers::message::Message;

@@ -96,7 +96,7 @@ pub fn validate_xep0402_bookmark_publish(
 ///
 /// DM counterpart of [`validate_xep0402_bookmark_publish`]: it delegates
 /// to the strict foundation parser
-/// [`waddle_xmpp::xep::xep_waddle_dm_bookmarks::parse_dm_bookmark`],
+/// [`waddle_xmpp::xep::waddle::dm_bookmarks::parse_dm_bookmark`],
 /// which pins the `<dm-bookmark>` root, requires the item id to be a bare
 /// JID with a localpart, and validates the single hosted XEP-0492
 /// `<notify>`. The error maps to
@@ -105,11 +105,11 @@ pub fn validate_xep0402_bookmark_publish(
 pub fn validate_dm_bookmark_publish(
     item_id: &str,
     payload: &Element,
-) -> Result<
-    waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark,
-    NotificationSettingsProjectionError,
-> {
-    Ok(waddle_xmpp::xep::xep_waddle_dm_bookmarks::parse_dm_bookmark(item_id, payload)?)
+) -> Result<waddle_xmpp::xep::waddle::dm_bookmarks::DmBookmark, NotificationSettingsProjectionError>
+{
+    Ok(waddle_xmpp::xep::waddle::dm_bookmarks::parse_dm_bookmark(
+        item_id, payload,
+    )?)
 }
 
 /// Derive the projection mutation for a validated DM bookmark.
@@ -124,11 +124,11 @@ pub fn validate_dm_bookmark_publish(
 /// * `notify == Some(_)` whose fallback resolves to `None` → `Delete` (no override).
 /// * a malformed `<notify>` fallback → propagated [`NotificationSettingsProjectionError::InvalidNotify`].
 ///
-/// [`DmBookmark`]: waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark
-/// [`DmBookmark::notify`]: waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark::notify
+/// [`DmBookmark`]: waddle_xmpp::xep::waddle::dm_bookmarks::DmBookmark
+/// [`DmBookmark::notify`]: waddle_xmpp::xep::waddle::dm_bookmarks::DmBookmark::notify
 pub fn derive_dm_bookmark_projection_mutation(
     owner_bare_jid: &BareJid,
-    dm_bookmark: &waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmark,
+    dm_bookmark: &waddle_xmpp::xep::waddle::dm_bookmarks::DmBookmark,
     updated_at_ms: i64,
     source_version: i64,
 ) -> Result<NotificationSettingsProjectionMutation, NotificationSettingsProjectionError> {

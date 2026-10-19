@@ -87,13 +87,13 @@ fn persisted_destroy_snapshot_matches_attempt(
         .is_ok_and(|attempt| snapshot.attempt == attempt)
 }
 
-impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
+impl TryFrom<&waddle_xmpp::muc::room::registry_actor::DestroyCompletion>
     for PersistedDestroyCompletion
 {
     type Error = ();
 
     fn try_from(
-        completion: &waddle_xmpp::muc::room_registry_actor::DestroyCompletion,
+        completion: &waddle_xmpp::muc::room::registry_actor::DestroyCompletion,
     ) -> Result<Self, Self::Error> {
         Ok(Self {
             attempt: completion.attempt.as_uuid(),
@@ -135,10 +135,10 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                 // and the leaver's session never learns it left.
                 for receipt in &completion.departures.receipts {
                     let nick = match &receipt.outcome {
-                        waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Left(outcome) => {
+                        waddle_xmpp::muc::room::actor::DepartureReceiptOutcome::Left(outcome) => {
                             outcome.nick.clone()
                         }
-                        waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Suppressed {
+                        waddle_xmpp::muc::room::actor::DepartureReceiptOutcome::Suppressed {
                             nick,
                             ..
                         } => nick.clone(),
@@ -623,7 +623,7 @@ fn destroy_completion_origin_instance_id() -> &'static str {
 /// whose terminal mutation failed or was cancelled.
 pub(crate) async fn persist_destroy_completion(
     state: &WebSocketState,
-    completion: &waddle_xmpp::muc::room_registry_actor::DestroyCompletion,
+    completion: &waddle_xmpp::muc::room::registry_actor::DestroyCompletion,
 ) -> Result<(), ()> {
     let payload = serde_json::to_string(&PersistedDestroyCompletion::try_from(completion)?)
         .map_err(|_| ())?;
@@ -1324,7 +1324,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_owner
                     .into();
                 }
             };
-            let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
+            let completion = waddle_xmpp::muc::room::registry_actor::DestroyCompletion {
                 attempt,
                 room_jid: room_jid.clone(),
                 room: snapshot.room,
@@ -1388,7 +1388,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_owner
                 .destroy_room_with_attempt(room_jid.clone(), attempt)
                 .await
             {
-                Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed) => {
+                Ok(waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::Destroyed) => {
                     // In clustered mode the durable destroy transaction has
                     // already armed this attempt's outbox row. Retain the
                     // non-clustered fast path, whose registry has no durable
@@ -1416,7 +1416,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_owner
                 // atomically restored the room — nothing was torn down, so
                 // answer retryable, never a false success.
                 Ok(
-                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed,
+                    waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::DurableWipeFailed,
                 ) => {
                     discard_persisted_destroy_completion(state, attempt).await;
                     return vec![build_iq_error_xml_typed(
@@ -1428,7 +1428,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_owner
                     .into();
                 }
                 Ok(
-                    waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
+                    waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::ReleaseBacklogFull,
                 ) => {
                     cancel_destroy_completion_attempt(state, attempt).await;
                     discard_persisted_destroy_completion(state, attempt).await;
@@ -1442,7 +1442,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_owner
                 }
                 // A concurrent destroy already removed the room between the
                 // `get_room_actor` lookup above and here — genuinely gone.
-                Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered) => {
+                Ok(waddle_xmpp::muc::room::registry_actor::DestroyRoomOutcome::NotRegistered) => {
                     cancel_destroy_completion_attempt(state, attempt).await;
                     discard_persisted_destroy_completion(state, attempt).await;
                     return vec![build_iq_error_xml_typed(
@@ -1458,7 +1458,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn handle_muc_owner
                 // the exact pre-seal reopened; leaving it would otherwise
                 // let a later reconciliation destroy a room after this
                 // request definitively failed to reach the handler.
-                Err(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::Unavailable) => {
+                Err(waddle_xmpp::muc::room::registry_actor::RoomRegistryError::Unavailable) => {
                     cancel_destroy_completion_attempt(state, attempt).await;
                     discard_persisted_destroy_completion(state, attempt).await;
                     match RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -1996,8 +1996,8 @@ mod destroy_completion_tests {
     fn persisted_destroy_recipients_include_owed_departure_receipt_holders() {
         let room_jid: BareJid = "receipts@muc.example.com".parse().expect("valid bare JID");
         let ghost: FullJid = "ghost@example.com/web".parse().expect("valid full JID");
-        let leave_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
-        let completion = waddle_xmpp::muc::room_registry_actor::DestroyCompletion {
+        let leave_attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
+        let completion = waddle_xmpp::muc::room::registry_actor::DestroyCompletion {
             attempt: waddle_xmpp::muc::DestroyAttemptId::generate(),
             room_jid: room_jid.clone(),
             room: waddle_xmpp::muc::MucRoom::new(
@@ -2006,14 +2006,14 @@ mod destroy_completion_tests {
                 "c".to_string(),
                 waddle_xmpp::muc::RoomConfig::default(),
             ),
-            departures: waddle_xmpp::muc::room_actor::DepartureLedger {
-                receipts: vec![waddle_xmpp::muc::room_actor::DepartureReceipt {
+            departures: waddle_xmpp::muc::room::actor::DepartureLedger {
+                receipts: vec![waddle_xmpp::muc::room::actor::DepartureReceipt {
                     attempt: leave_attempt,
                     jid: ghost.clone(),
                     cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Explicit,
                     generation: leave_attempt.order(),
                     nick_generation: None,
-                    outcome: waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Suppressed {
+                    outcome: waddle_xmpp::muc::room::actor::DepartureReceiptOutcome::Suppressed {
                         nick: waddle_xmpp::muc::MucOccupantNick::new("ghost".to_string())
                             .expect("valid nick"),
                         affiliation: waddle_xmpp::Affiliation::Member,

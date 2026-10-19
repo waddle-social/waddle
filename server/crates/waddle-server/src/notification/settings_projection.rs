@@ -67,7 +67,7 @@ impl NotificationSettingsSource {
         match self {
             Self::Xep0402Bookmarks => waddle_xmpp::xep::xep0402::PEP_NODE,
             Self::WaddleDmBookmarks => {
-                waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS
+                waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS
             }
         }
     }
@@ -75,7 +75,7 @@ impl NotificationSettingsSource {
     fn from_node(node: &str) -> Result<Self, NotificationSettingsProjectionError> {
         match node {
             waddle_xmpp::xep::xep0402::PEP_NODE => Ok(Self::Xep0402Bookmarks),
-            waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS => {
+            waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS => {
                 Ok(Self::WaddleDmBookmarks)
             }
             _ => Err(NotificationSettingsProjectionError::InvalidSourceNode(
@@ -143,7 +143,7 @@ pub enum NotificationSettingsProjectionError {
     #[error("invalid XEP-0402 bookmark payload: {0}")]
     InvalidBookmark(#[from] waddle_xmpp::xep::xep0402::BookmarkError),
     #[error("invalid Waddle DM-bookmark payload: {0}")]
-    InvalidDmBookmark(#[from] waddle_xmpp::xep::xep_waddle_dm_bookmarks::DmBookmarkError),
+    InvalidDmBookmark(#[from] waddle_xmpp::xep::waddle::dm_bookmarks::DmBookmarkError),
     #[error("invalid XEP-0492 notify payload: {0}")]
     InvalidNotify(#[from] waddle_xmpp::xep::NotificationSettingsError),
 }

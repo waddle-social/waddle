@@ -256,7 +256,7 @@ pub struct Deps<'a> {
     /// MUC room-registry actor. Used by the
     /// [`OutboundEvent::DispatchToRoom`] arm to look up the per-room
     /// actor and ask it for a frozen
-    /// [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`].
+    /// [`waddle_xmpp::muc::room::actor::RoomChainSnapshot`].
     pub room_registry: Option<&'a ActorRef<RoomRegistryActor>>,
     /// WebSocket route state. Used by the
     /// [`OutboundEvent::DispatchToRoom`] arm for the managed-room

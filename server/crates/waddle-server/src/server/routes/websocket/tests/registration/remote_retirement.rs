@@ -12,8 +12,8 @@ use crate::clustering::{
 };
 use std::time::Duration;
 use waddle_xmpp::{
-    muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
-    muc::room_registry_actor::CreateRoom,
+    muc::room::actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
+    muc::room::registry_actor::CreateRoom,
     ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity},
     registry::{ForceDetachOrigin, ForceDetachOutcome, SocketCleanupState},
     stream_management::SmSessionRegistry,

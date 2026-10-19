@@ -7,7 +7,7 @@ use kameo::actor::ActorRef;
 use std::sync::{Arc, Mutex, OnceLock};
 use tracing::warn;
 use waddle_xmpp::inbox::storage::InboxStorage;
-use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+use waddle_xmpp::muc::room::registry_actor::RoomRegistryActor;
 use waddle_xmpp::pubsub::PubSubStorage;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 

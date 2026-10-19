@@ -105,7 +105,7 @@ use kameo::actor::ActorRef;
 use waddle_xmpp::{
     ingress::MessageKey,
     muc::{
-        room_actor::{
+        room::actor::{
             GetOccupantSessionGeneration, GetReplayOccupantSessionGeneration, LeaveSessionSelector,
             RoomActor,
         },

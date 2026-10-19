@@ -90,8 +90,8 @@ pub struct RoomInventory {
 /// `None` for `sm_live_sessions`) so the publisher / endpoint never
 /// fail hard on a single hung actor.
 pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
-    use waddle_xmpp::muc::room_actor::IsDormant;
-    use waddle_xmpp::muc::room_registry_actor::{GetRoom, ListRooms};
+    use waddle_xmpp::muc::room::actor::IsDormant;
+    use waddle_xmpp::muc::room::registry_actor::{GetRoom, ListRooms};
     use waddle_xmpp::muc::RoomRegistry;
 
     let deps = &ws.deps;

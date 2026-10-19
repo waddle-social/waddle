@@ -39,12 +39,12 @@ pub enum ImmediateAction {
     /// Evicts only the failed actor incarnation so a successor can recover.
     DemoteRoomIfExactActor {
         room: BareJid,
-        actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     },
     /// Reconstructs a missing room actor from committed state after eviction.
     GetOrCreateRoom {
         room: BareJid,
-        snapshot: Box<waddle_xmpp::muc::room_actor::RoomSnapshot>,
+        snapshot: Box<waddle_xmpp::muc::room::actor::RoomSnapshot>,
     },
 }
 

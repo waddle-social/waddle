@@ -1,7 +1,7 @@
 use jid::BareJid;
 use tracing::warn;
 use waddle_xmpp::pubsub::{PubSubItem, PubSubNode, PublishResult, StoredItem};
-use waddle_xmpp::xep::xep_waddle_dm_bookmarks::{is_dm_bookmarks_node, DmBookmark};
+use waddle_xmpp::xep::waddle::dm_bookmarks::{is_dm_bookmarks_node, DmBookmark};
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
@@ -153,7 +153,7 @@ impl DatabasePubSubStorage {
             // would stay in DND with no wire-level way to clear it.
             // Reject up-front so the client surfaces the mistake.
             match item.id.as_deref() {
-                Some(id) if id == waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT => {}
+                Some(id) if id == waddle_xmpp::xep::waddle::dnd::ITEM_ID_CURRENT => {}
                 _ => {
                     warn!(
                         owner = %owner,
@@ -162,7 +162,7 @@ impl DatabasePubSubStorage {
                     );
                     return Err(XmppError::pubsub_invalid_payload(Some(format!(
                         "urn:waddle:dnd:0 publish must use item id '{}'",
-                        waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT,
+                        waddle_xmpp::xep::waddle::dnd::ITEM_ID_CURRENT,
                     ))));
                 }
             }
@@ -176,7 +176,7 @@ impl DatabasePubSubStorage {
                 ))
             })?;
             let parsed =
-                waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd::parse(payload).map_err(|error| {
+                waddle_xmpp::xep::waddle::dnd::WaddleDnd::parse(payload).map_err(|error| {
                     warn!(
                         owner = %owner,
                         %error,
@@ -937,7 +937,7 @@ fn is_bookmarks_node(node_name: &str) -> bool {
 }
 
 fn is_dnd_node(node_name: &str) -> bool {
-    node_name == waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND
+    node_name == waddle_xmpp::xep::waddle::dnd::PEP_NODE_WADDLE_DND
 }
 
 fn is_status_preference_node(node_name: &str) -> bool {

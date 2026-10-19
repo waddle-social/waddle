@@ -1363,7 +1363,7 @@ mod pin_tests {
     ) {
         let message = &mut submission.plan.sanitized_message;
         message.payloads.push(if unpin {
-            waddle_xmpp::xep::xep_waddle_pin::build_unpinned_element(target)
+            waddle_xmpp::xep::waddle::pin::build_unpinned_element(target)
         } else {
             waddle_xmpp::xep::build_pinned_message_element(target)
         });
@@ -2157,8 +2157,8 @@ async fn groupchat_inbox_push_expires_without_replaying_stale_projection(fixture
     socket_tests::register_test_connection(&state, &sender, sender_tx).await;
     socket_tests::create_test_session(&state, "juliet").await;
     use waddle_xmpp::muc::{
-        room_actor::{ChangeAffiliation, Join},
-        room_registry_actor::CreateRoom,
+        room::actor::{ChangeAffiliation, Join},
+        room::registry_actor::CreateRoom,
     };
     let actor = state
         .deps

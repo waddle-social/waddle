@@ -6,7 +6,7 @@ use waddle_sfu::{
     CallGeneration, CallId, Identity, ListedRoom, LiveKitAdmin, MediaCapabilities,
     ObservedCallSids, ParticipantSid, RoomOccupancy, RoomSid, SfuError, SfuService,
 };
-use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
+use waddle_xmpp::muc::room::actor::UpsertMujiPresence;
 use waddle_xmpp::xep::xep0167::MediaKind;
 use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
 use waddle_xmpp_core::OccupancySessionGeneration;

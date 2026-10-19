@@ -18,8 +18,8 @@ async fn sealed_inbox_push_audience(empty_original_audience: bool) {
     use waddle_xmpp::{
         ingress::{DigestContext, DigestInput, EffectMessageIdentity, NormalizedTarget},
         muc::{
-            room_actor::{ChangeAffiliation, Join},
-            room_registry_actor::CreateRoom,
+            room::actor::{ChangeAffiliation, Join},
+            room::registry_actor::CreateRoom,
         },
         protocol::OutboundEvent,
         Stanza,

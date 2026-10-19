@@ -67,8 +67,8 @@ async fn dispatch_to_room_drops_when_no_web_socket_state_in_deps() {
 
 #[tokio::test(flavor = "current_thread")]
 async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
-    use waddle_xmpp::muc::room_actor::Join;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::Join;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::{Affiliation, Role};
 
@@ -730,7 +730,7 @@ async fn assert_room_observer_message_planning(
     use crate::server::routes::interpret::effects::{
         room::ExternalRoomEffect, Effect, ExternalEffect, PlanSink, PlanSuppressionPolicy,
     };
-    use waddle_xmpp::muc::{room_actor::Join, room_registry_actor::CreateRoom, RoomConfig};
+    use waddle_xmpp::muc::{room::actor::Join, room::registry_actor::CreateRoom, RoomConfig};
     use waddle_xmpp::{Affiliation, Role};
 
     let mut state = crate::server::routes::websocket::tests::create_test_websocket_state().await;

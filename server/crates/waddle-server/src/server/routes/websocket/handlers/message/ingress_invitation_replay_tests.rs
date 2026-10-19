@@ -15,8 +15,8 @@ use waddle_xmpp::{
         DigestContext, DigestInput, IngressEffectIntent, NormalizedTarget, WireHandledCount,
     },
     muc::{
-        room_actor::{ChangeAffiliation, GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
-        room_registry_actor::CreateRoom,
+        room::actor::{ChangeAffiliation, GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation},
+        room::registry_actor::CreateRoom,
         RoomConfig,
     },
     pending_delivery::SmSessionId,

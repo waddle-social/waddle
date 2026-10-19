@@ -156,8 +156,8 @@ async fn subject_broadcast_after_actor_commit(
     use waddle_xmpp::{
         ingress::IngressEffectIntent,
         muc::{
-            room_actor::{GetSnapshot, Join, RestoreDurableRoomState, SetSubject},
-            room_registry_actor::{CreateRoom, RoomRegistryActor},
+            room::actor::{GetSnapshot, Join, RestoreDurableRoomState, SetSubject},
+            room::registry_actor::{CreateRoom, RoomRegistryActor},
         },
         registry::{ConnectionEntry, RegisterUserResource, UserRegistryActor},
         xep::xep0421::OccupantIdSecret,

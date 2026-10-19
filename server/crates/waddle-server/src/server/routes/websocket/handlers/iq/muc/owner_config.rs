@@ -75,12 +75,12 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn managed_channel_
 async fn recover_exact_room_after_ambiguous_config_commit(
     state: &WebSocketState,
     room_jid: &BareJid,
-    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-    previous_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
+    previous_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
 ) -> Result<
     (
-        kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-        waddle_xmpp::muc::room_actor::RoomSnapshot,
+        kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
+        waddle_xmpp::muc::room::actor::RoomSnapshot,
     ),
     String,
 > {
@@ -136,7 +136,7 @@ struct PendingMembersOnlyEnforcementSeed {
 impl PendingMembersOnlyEnforcementSeed {
     async fn run(
         self,
-        actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
         fallback_reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
     ) {
         PendingMembersOnlyEnforcement {
@@ -154,11 +154,11 @@ impl PendingMembersOnlyEnforcementSeed {
 }
 
 struct CancelledOwnerConfigAskRecoveryGuard {
-    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     room_jid: BareJid,
     intended_config: waddle_xmpp::muc::RoomConfig,
-    previous_snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
-    registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    previous_snapshot: waddle_xmpp::muc::room::actor::RoomSnapshot,
+    registry: kameo::actor::ActorRef<waddle_xmpp::muc::room::registry_actor::RoomRegistryActor>,
     outbox: std::sync::Arc<crate::room::effect_outbox::RoomEffectOutboxStore>,
     action: CancelledOwnerConfigAskRecoveryAction,
     disarmed: bool,
@@ -170,7 +170,7 @@ impl CancelledOwnerConfigAskRecoveryGuard {
     /// older rows even when a later identical update produced no new row.
     async fn recovered_reservations(
         &self,
-        snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+        snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
     ) -> Vec<waddle_xmpp::muc::RoomEffectReservation> {
         let Some(coordinates) = snapshot.config_durable_coordinates else {
             return Vec::new();
@@ -214,10 +214,10 @@ impl CancelledOwnerConfigAskRecoveryGuard {
 
     fn arm_only(
         state: &WebSocketState,
-        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
         room_jid: &BareJid,
         intended_config: &waddle_xmpp::muc::RoomConfig,
-        previous_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+        previous_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
     ) -> Self {
         Self {
             actor: actor.clone(),
@@ -235,10 +235,10 @@ impl CancelledOwnerConfigAskRecoveryGuard {
 
     fn defer_members_only(
         state: &WebSocketState,
-        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
         room_jid: &BareJid,
         intended_config: &waddle_xmpp::muc::RoomConfig,
-        previous_snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
+        previous_snapshot: &waddle_xmpp::muc::room::actor::RoomSnapshot,
         seed: PendingMembersOnlyEnforcementSeed,
     ) -> Self {
         Self {
@@ -365,7 +365,7 @@ struct CommittedConfigReservationGuard<'a> {
 }
 
 struct PendingMembersOnlyEnforcement {
-    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     request: PendingMembersOnlyEnforcementRequest,
     fallback_reservation: Option<waddle_xmpp::muc::RoomEffectReservation>,
     room_jid: BareJid,
@@ -515,13 +515,13 @@ impl Drop for CommittedConfigReservationGuard<'_> {
 
 async fn rollback_config_or_arm_reservation(
     state: &WebSocketState,
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     expected_revision: u64,
     previous_config: waddle_xmpp::muc::RoomConfig,
     reservation: Option<&waddle_xmpp::muc::RoomEffectReservation>,
 ) {
     let rollback = room_actor
-        .ask(waddle_xmpp::muc::room_actor::RollbackConfigIfRevision {
+        .ask(waddle_xmpp::muc::room::actor::RollbackConfigIfRevision {
             expected_revision,
             config: previous_config,
             reservation: reservation.cloned(),
@@ -667,12 +667,12 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn apply_muc_owner_
     let mut recovered_voice_roster = None;
     let effect_plan = if !previous_members_only && config.members_only {
         if channel_id.is_some() {
-            waddle_xmpp::muc::room_actor::ConfigEffectPlan::ManagedMembersOnlyFallback
+            waddle_xmpp::muc::room::actor::ConfigEffectPlan::ManagedMembersOnlyFallback
         } else {
-            waddle_xmpp::muc::room_actor::ConfigEffectPlan::UnmanagedMembersOnlyPostEnforcement
+            waddle_xmpp::muc::room::actor::ConfigEffectPlan::UnmanagedMembersOnlyPostEnforcement
         }
     } else {
-        waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience
+        waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience
     };
     let mut config_reservation = None;
     let mut cancelled_commit_recovery = if !previous_members_only && config.members_only {
@@ -723,7 +723,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn apply_muc_owner_
             applied.revision
         }
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::RoomMutationError::CommitOutcomeUnknown,
+            waddle_xmpp::muc::room::actor::RoomMutationError::CommitOutcomeUnknown,
         )) => {
             let (recovered_actor, recovered_snapshot) =
                 recover_exact_room_after_ambiguous_config_commit(
@@ -755,7 +755,7 @@ pub(in crate::server::routes::websocket::handlers::iq) async fn apply_muc_owner_
                 // roster; the applied removal effects come from the live
                 // actor's EnforceMembersOnlyAffiliations ask below, so the
                 // in-memory effects are discarded here.
-                let _ = waddle_xmpp::muc::room_actor::enforce_members_only_from_room(
+                let _ = waddle_xmpp::muc::room::actor::enforce_members_only_from_room(
                     &mut room_with_reconciled_config,
                     &state.deps.occupant_id_secret,
                     &state.deps.app_state.server_hats,
@@ -1070,7 +1070,7 @@ async fn drain_or_broadcast_config_change(
 async fn converge_flip(
     state: &WebSocketState,
     room_jid: &BareJid,
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     previous: &waddle_xmpp::muc::RoomConfig,
     updated: &waddle_xmpp::muc::RoomConfig,
     voices_from_recovered_snapshot: Option<&[(FullJid, waddle_xmpp_core::types::Voice)]>,
@@ -1156,11 +1156,11 @@ mod tests {
             DurableRoomState, MucDurableFuture, MucDurableStore, RoomCommitDatabaseError,
             RoomCommitError, RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation,
         },
-        room_actor::{
+        room::actor::{
             ChangeAffiliation, ConfigEffectPlan, GetSnapshot, JoinAffiliationGrant,
             JoinWithAffiliation, UpdateConfig,
         },
-        room_registry_actor::WireClusteringClaims,
+        room::registry_actor::WireClusteringClaims,
         MucConfigStatusCode, RoomEffectReservation, RoomLifecycleId, RoomMutationEffects,
         RoomRevision,
     };
@@ -1543,7 +1543,7 @@ mod tests {
 
     #[tokio::test]
     async fn cancelled_owner_config_guard_respects_destroyed_lifecycle() {
-        use waddle_xmpp::muc::room_registry_actor::{
+        use waddle_xmpp::muc::room::registry_actor::{
             DestroyRoom, DestroyRoomOutcome, DestroyRoomReason, GetRoom,
         };
         use waddle_xmpp::muc::RoomConfig;

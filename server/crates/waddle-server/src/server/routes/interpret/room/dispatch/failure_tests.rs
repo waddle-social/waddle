@@ -10,8 +10,8 @@ use crate::server::routes::websocket::tests::create_test_websocket_state;
 use kameo::actor::Spawn;
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget, WireHandledCount};
 use waddle_xmpp::muc::{
-    room_actor::{ChangeAffiliation, Join},
-    room_registry_actor::{CreateRoom, RoomRegistryActor},
+    room::actor::{ChangeAffiliation, Join},
+    room::registry_actor::{CreateRoom, RoomRegistryActor},
 };
 
 async fn room_submission(fixture: &IngressFixture, room: &BareJid) -> IngressSubmission {
@@ -118,7 +118,7 @@ async fn healthy_room(
     rooms: &kameo::actor::ActorRef<RoomRegistryActor>,
     room: &BareJid,
     sender: &FullJid,
-) -> kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+) -> kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor> {
     let actor = rooms
         .ask(CreateRoom {
             room_jid: room.clone(),
@@ -175,7 +175,7 @@ async fn actor_failure(fixture: IngressFixture, snapshot: bool) {
         );
         let task = tokio::spawn(async move {
             blocked_actor
-                .ask(waddle_xmpp::muc::room_actor::RestoreDurableRoomState {
+                .ask(waddle_xmpp::muc::room::actor::RestoreDurableRoomState {
                     store: blocked_store,
                     claim_fence: fence,
                 })

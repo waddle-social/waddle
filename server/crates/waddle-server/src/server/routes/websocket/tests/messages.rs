@@ -5,7 +5,7 @@ mod messages_offline;
 mod messages_host_owned;
 
 async fn current_admission_revision(
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
 ) -> u64 {
     room_actor
         .ask(GetSnapshot)
@@ -5982,7 +5982,7 @@ async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
             room_jid: room_jid.clone(),
         })
         .await
@@ -6003,14 +6003,14 @@ async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add
         .await
         .expect("grant member");
     let mut config = room_actor
-        .ask(waddle_xmpp::muc::room_actor::GetConfig)
+        .ask(waddle_xmpp::muc::room::actor::GetConfig)
         .await
         .expect("config");
     config.members_only = true;
     room_actor
-        .ask(waddle_xmpp::muc::room_actor::UpdateConfig {
+        .ask(waddle_xmpp::muc::room::actor::UpdateConfig {
             config,
-            effect_plan: waddle_xmpp::muc::room_actor::ConfigEffectPlan::DirectAudience,
+            effect_plan: waddle_xmpp::muc::room::actor::ConfigEffectPlan::DirectAudience,
         })
         .await
         .expect("members-only config");
@@ -6050,7 +6050,7 @@ async fn xep0045_mediated_invite_members_only_restricted_to_admins_with_auto_add
         "owner invite relays asynchronously: {responses:?}"
     );
     let snapshot = room_actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .await
         .expect("snapshot");
     assert_eq!(

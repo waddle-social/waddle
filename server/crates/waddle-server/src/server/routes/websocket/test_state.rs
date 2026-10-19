@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::{
-    commands::CommandRegistry, mam::MamStorage, muc::room_registry_actor::RoomRegistryActor,
+    commands::CommandRegistry, mam::MamStorage, muc::room::registry_actor::RoomRegistryActor,
     protocol::StanzaDispatcher, registry::ConnectionRegistry,
     stream_management::InMemorySmSessionRegistry,
 };

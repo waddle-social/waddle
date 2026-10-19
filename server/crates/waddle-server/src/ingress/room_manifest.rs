@@ -10,7 +10,7 @@ use waddle_xmpp::{
             AdminMutationId, RoomClaimFenceContext, RoomCommittedCoordinates, RoomLifecycleId,
             RoomRevision,
         },
-        room_actor::OccupancyWatermark,
+        room::actor::OccupancyWatermark,
     },
     ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity},
 };
@@ -29,8 +29,8 @@ pub struct RoomManifestSnapshot {
     pub host_no_transport: Vec<FullJid>,
 }
 
-impl From<&waddle_xmpp::muc::room_actor::RoomChainSnapshot> for RoomManifestSnapshot {
-    fn from(snapshot: &waddle_xmpp::muc::room_actor::RoomChainSnapshot) -> Self {
+impl From<&waddle_xmpp::muc::room::actor::RoomChainSnapshot> for RoomManifestSnapshot {
+    fn from(snapshot: &waddle_xmpp::muc::room::actor::RoomChainSnapshot) -> Self {
         Self {
             coordinates: snapshot.durable_coordinates,
             occupancy_incarnation: snapshot.occupancy_incarnation,

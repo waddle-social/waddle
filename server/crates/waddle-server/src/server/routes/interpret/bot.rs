@@ -641,11 +641,11 @@ pub(crate) async fn plan_extension_bot_groupchat(
 async fn room_gone<M>(
     state: &crate::server::routes::websocket::WebSocketState,
     room: &BareJid,
-    error: &kameo::error::SendError<M, waddle_xmpp::muc::room_actor::RoomActorError>,
+    error: &kameo::error::SendError<M, waddle_xmpp::muc::room::actor::RoomActorError>,
 ) -> bool {
     match error {
         kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed,
+            waddle_xmpp::muc::room::actor::RoomActorError::RoomSealed,
         ) => {
             let _ = waddle_xmpp::muc::RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
                 .reap_sealed_room(room.clone())
@@ -665,7 +665,7 @@ async fn load_managed_room(
     room_jid: &BareJid,
 ) -> Result<ActorRef<RoomActor>, ExtensionBotDispatchError> {
     use crate::server::routes::websocket::handlers::presence::get_managed_channel_for_room;
-    use waddle_xmpp::muc::room_registry_actor::RoomRegistryError;
+    use waddle_xmpp::muc::room::registry_actor::RoomRegistryError;
     let channel = match get_managed_channel_for_room(state, room_jid).await {
         Ok(Some(channel)) => channel,
         Ok(None) => {

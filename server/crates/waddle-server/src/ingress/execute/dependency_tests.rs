@@ -14,7 +14,7 @@ use crate::{
 use kameo::actor::Spawn;
 use waddle_xmpp::{
     muc::{
-        room_actor::{GetSnapshot, RoomActor},
+        room::actor::{GetSnapshot, RoomActor},
         MucRoom, RoomConfig,
     },
     xep::xep0421::OccupantIdSecret,

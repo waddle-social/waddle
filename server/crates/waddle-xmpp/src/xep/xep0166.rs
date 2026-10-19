@@ -12,7 +12,7 @@
 //! `session-initiate`, `session-accept`, `session-terminate`,
 //! `session-info`, and `transport-info` actions are exercised, and
 //! the only transport recognised is the custom
-//! [`crate::xep::xep_waddle_livekit_transport`]. Any other transport
+//! [`crate::xep::waddle::livekit_transport`]. Any other transport
 //! is rejected with `<unsupported-transports/>` per XEP-0166 §10.2.
 
 pub use xmpp_parsers::jingle::{

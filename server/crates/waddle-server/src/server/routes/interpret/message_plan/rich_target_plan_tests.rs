@@ -123,8 +123,8 @@ async fn groupchat_rich_target_failure(fixture: IngressFixture, stop_actor: bool
     };
     use kameo::actor::Spawn;
     use waddle_xmpp::muc::{
-        room_actor::Join,
-        room_registry_actor::{CreateRoom, RoomRegistryActor},
+        room::actor::Join,
+        room::registry_actor::{CreateRoom, RoomRegistryActor},
     };
     let room: jid::BareJid = "rich@muc.example.com".parse().expect("room");
     let sender: jid::FullJid = "romeo@example.com/phone".parse().expect("sender");

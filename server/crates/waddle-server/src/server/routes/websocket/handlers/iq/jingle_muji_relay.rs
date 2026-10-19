@@ -21,7 +21,7 @@ use super::jingle_muji_gate::{self, GateInvocation, GateOutcome};
 use super::sans_io::events_contain_iq_error;
 use super::ProtocolStanzaContext;
 #[cfg(test)]
-use waddle_xmpp::muc::room_actor::GetSnapshot;
+use waddle_xmpp::muc::room::actor::GetSnapshot;
 
 use super::jingle_muji_gate::{relayed_muji_generation_is_current, relayed_muji_room};
 
@@ -214,8 +214,8 @@ mod tests {
     use super::*;
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_calls;
     use jid::{BareJid, FullJid};
-    use waddle_xmpp::muc::room_actor::{JoinAffiliationGrant, JoinWithAffiliation};
-    use waddle_xmpp::muc::room_registry_actor::CreateInstantRoom;
+    use waddle_xmpp::muc::room::actor::{JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room::registry_actor::CreateInstantRoom;
     use waddle_xmpp::xep::xep0167::MediaKind;
     use waddle_xmpp::xep::xep0272::{Creator, Muji, MujiContent};
     use waddle_xmpp_core::Affiliation;
@@ -234,7 +234,7 @@ mod tests {
             waddle_xmpp::xep::xep0167::opus_audio_description(),
         ));
         content.transport = Some(xmpp_parsers::jingle::Transport::Unknown(
-            waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport::Request
+            waddle_xmpp::xep::waddle::livekit_transport::WaddleLiveKitTransport::Request
                 .to_element(),
         ));
         // No `initiator` attribute: XEP-0166 §7.1 makes it optional
@@ -465,7 +465,7 @@ mod tests {
             .expect("room lookup")
             .expect("room actor");
         actor
-            .ask(waddle_xmpp::muc::room_actor::UpsertMujiPresence {
+            .ask(waddle_xmpp::muc::room::actor::UpsertMujiPresence {
                 sender_jid: alice.clone(),
                 occupant: None,
                 muji: Muji::with_contents(vec![MujiContent::new(

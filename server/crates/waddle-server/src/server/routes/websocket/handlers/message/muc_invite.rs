@@ -26,8 +26,8 @@ use waddle_xmpp::{
         IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation,
         MucInviteMembershipGrant,
     },
-    muc::room_actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot},
-    muc::room_registry_actor::{GetOrCreateRoom, GetRoom},
+    muc::room::actor::{AffiliationMutationError, ChangeAffiliation, GetSnapshot},
+    muc::room::registry_actor::{GetOrCreateRoom, GetRoom},
     pending_delivery::{PendingPayload, PendingRow, PendingRowId},
     protocol::handlers::errors::message_error_reply,
     Stanza,
@@ -120,21 +120,21 @@ pub(crate) async fn execute_invite_ledger(
 pub struct MucMembershipMutation {
     pub room: jid::BareJid,
     pub invitee: jid::BareJid,
-    pub actor: kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    pub actor: kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     pub previous_affiliation: waddle_xmpp::Affiliation,
 }
 
 pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     state: &WebSocketState,
     room_jid: &jid::BareJid,
-    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
-) -> Option<kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>> {
+    stale_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
+) -> Option<kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>> {
     // Snapshot the stale actor NOW (it is sealed by the ambiguous commit):
     // a caller's pre-grant copy would roll back joins/leaves that projected
     // through the actor since.
     let snapshot = match tokio::time::timeout(
         crate::server::routes::websocket::LEAVE_ASK_TIMEOUT,
-        stale_actor.ask(waddle_xmpp::muc::room_actor::GetSnapshot),
+        stale_actor.ask(waddle_xmpp::muc::room::actor::GetSnapshot),
     )
     .await
     {
@@ -151,7 +151,7 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
                 .deps
                 .protocol
                 .room_registry
-                .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
                     room_jid: room_jid.clone(),
                 })
                 .await
@@ -174,7 +174,7 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
         .protocol
         .room_registry
         .ask(
-            waddle_xmpp::muc::room_registry_actor::GetOrCreateRoomWithLiveRoster {
+            waddle_xmpp::muc::room::registry_actor::GetOrCreateRoomWithLiveRoster {
                 room_jid: room_jid.clone(),
                 waddle_id: waddle_xmpp::muc::durable::WaddleId::new(
                     snapshot.room.waddle_id.clone(),
@@ -198,7 +198,7 @@ pub(super) async fn recover_actor_after_ambiguous_invite_grant(
     let stale_not_current = matches!(
         handoff,
         Err(kameo::error::SendError::HandlerError(
-            waddle_xmpp::muc::room_registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
+            waddle_xmpp::muc::room::registry_actor::RoomRegistryError::StaleActorNotCurrent(_),
         ))
     );
     let recovered = if !stale_not_current {
@@ -733,7 +733,7 @@ pub(crate) async fn rollback_muc_membership(grant: &MucMembershipMutation, deps:
 /// invitation, which an operator must be able to see.
 async fn rollback_invite_grant(
     state: &WebSocketState,
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     room_jid: &jid::BareJid,
     invitee: &jid::BareJid,
     granted_membership: bool,
@@ -766,7 +766,7 @@ async fn rollback_invite_grant(
 /// Best-effort revert of a members-only auto-add after a later step in
 /// the invite flow failed.
 async fn rollback_membership_grant(
-    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    room_actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     invitee: &jid::BareJid,
     previous_affiliation: waddle_xmpp::Affiliation,
 ) {
@@ -960,10 +960,10 @@ mod tests {
     };
     use kameo::actor::{ActorRef, Spawn};
     use waddle_xmpp::ingress::IngressEffectIntent;
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation, RoomActor,
     };
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::{MucRoom, RoomConfig};
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
@@ -1573,13 +1573,13 @@ mod tests {
         // Its still-waiting caller must retain that exact verdict after handoff.
         let attempt = waddle_xmpp::muc::durable::AdminMutationId::generate();
         let verdict =
-            waddle_xmpp::muc::room_actor::AdminMutationResolution::NotCommitted { attempt };
+            waddle_xmpp::muc::room::actor::AdminMutationResolution::NotCommitted { attempt };
         let snapshot = stale_actor
             .ask(GetSnapshot)
             .await
             .expect("predecessor snapshot");
         stale_actor
-            .ask(waddle_xmpp::muc::room_actor::RestoreLiveRoster {
+            .ask(waddle_xmpp::muc::room::actor::RestoreLiveRoster {
                 room: snapshot.room,
                 occupancy_revision: snapshot.occupancy_revision,
                 departures: snapshot.departures,
@@ -1618,18 +1618,18 @@ mod tests {
 #[cfg(test)]
 mod compensation_tests {
     use super::should_compensate_failed_affiliation_grant;
-    use waddle_xmpp::muc::room_actor::ChangeAffiliation;
+    use waddle_xmpp::muc::room::actor::ChangeAffiliation;
 
     #[test]
     fn ambiguous_affiliation_grant_errors_do_not_trigger_compensation() {
         assert!(!should_compensate_failed_affiliation_grant(
             &kameo::error::SendError::<ChangeAffiliation, _>::HandlerError(
-                waddle_xmpp::muc::room_actor::AffiliationMutationError::CommitOutcomeUnknown
+                waddle_xmpp::muc::room::actor::AffiliationMutationError::CommitOutcomeUnknown
             )
         ));
         assert!(should_compensate_failed_affiliation_grant(
             &kameo::error::SendError::<ChangeAffiliation, _>::HandlerError(
-                waddle_xmpp::muc::room_actor::AffiliationMutationError::PersistFailed
+                waddle_xmpp::muc::room::actor::AffiliationMutationError::PersistFailed
             )
         ));
     }

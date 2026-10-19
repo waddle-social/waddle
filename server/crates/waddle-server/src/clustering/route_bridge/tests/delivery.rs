@@ -5,8 +5,8 @@ use crate::room::effect_outbox::{
     RoomEffectProducingNode,
 };
 use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
-use waddle_xmpp::muc::room_actor::GetSnapshot;
-use waddle_xmpp::muc::room_registry_actor::{CreateInstantRoom, CreateRoom, GetRoom};
+use waddle_xmpp::muc::room::actor::GetSnapshot;
+use waddle_xmpp::muc::room::registry_actor::{CreateInstantRoom, CreateRoom, GetRoom};
 use waddle_xmpp::muc::{
     MucConfigStatusCode, RoomConfig, RoomLifecycleId, RoomLifecycleState, RoomMutationEffects,
     RoomRevision,

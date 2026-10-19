@@ -10,7 +10,7 @@ use jid::{BareJid, FullJid};
 use tracing::{debug, warn};
 use waddle_sfu::{ObservedCallSids, TeardownDisposition};
 use waddle_xmpp::muc::build_occupant_presence;
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     ClearMujiPresence, ClearMujiPresenceOutcome, MujiPresenceUpdateOutcome,
 };
 use waddle_xmpp::telemetry::call::increment_call_teardown_stale_dropped;

@@ -202,21 +202,9 @@ pub mod xep0502;
 pub mod xep0503;
 pub mod xep0511;
 pub mod xep0513;
-pub mod xep_waddle_call_thread;
-pub mod xep_waddle_dm_bookmarks;
-pub mod xep_waddle_dnd;
-pub mod xep_waddle_forums;
-pub mod xep_waddle_group_dm;
-pub mod xep_waddle_in_call;
-pub mod xep_waddle_link_preview;
-pub mod xep_waddle_livekit_transport;
-pub mod xep_waddle_pin;
-pub mod xep_waddle_safety_scores;
 
 mod exports;
-
-#[cfg(test)]
-mod xep_waddle_mam_stanza_id_tests;
+pub mod waddle;
 
 pub use exports::*;
 

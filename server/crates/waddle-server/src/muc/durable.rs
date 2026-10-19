@@ -2602,7 +2602,7 @@ mod tests {
         ChannelId, MucOccupantNick, OccupancyLeaveCause, RoomPinProjection, RoomProjection,
         WaddleId,
     };
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         GetSnapshot, RestoreDurableRoomState, RoomActor, SetSubject, SetSubjectError,
     };
     use waddle_xmpp::muc::RoomSubjectTexts;
@@ -5872,7 +5872,7 @@ mod tests {
 
     #[tokio::test]
     async fn legacy_join_preserves_authorized_connection_generation() {
-        use waddle_xmpp::muc::room_actor::{Join, RoomActorError};
+        use waddle_xmpp::muc::room::actor::{Join, RoomActorError};
         use waddle_xmpp::{Affiliation, Role};
 
         let _guard = clustering_control_plane_table_lock().lock().await;

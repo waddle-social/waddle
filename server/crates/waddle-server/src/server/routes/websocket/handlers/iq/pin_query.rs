@@ -15,9 +15,9 @@
 use super::*;
 use jid::FullJid;
 use std::str::FromStr;
-use waddle_xmpp::muc::room_actor::{GetPinList, GetRoomSnapshot};
-use waddle_xmpp::muc::room_registry_actor::GetRoom;
-use waddle_xmpp::xep::xep_waddle_pin::NS_WADDLE_PIN_V0;
+use waddle_xmpp::muc::room::actor::{GetPinList, GetRoomSnapshot};
+use waddle_xmpp::muc::room::registry_actor::GetRoom;
+use waddle_xmpp::xep::waddle::pin::NS_WADDLE_PIN_V0;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::minidom::Element;
 

@@ -1517,7 +1517,7 @@ pub struct ProtocolServices {
         Arc<crate::notification::settings_projection::NotificationSettingsProjectionStore>,
     /// Durable derived projection of the user's `urn:waddle:dnd:0` PEP
     /// item (#367). Lookup keys: `owner_bare_jid` → typed
-    /// [`waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd`]. Consulted at
+    /// [`waddle_xmpp::xep::waddle::dnd::WaddleDnd`]. Consulted at
     /// T1 push dispatch via [`crate::dnd::reader::PepDndReader`].
     pub dnd_projection: Arc<crate::dnd::projection::DndProjectionStore>,
     /// PEP-backed DND reader plumbed into the T1 push gate

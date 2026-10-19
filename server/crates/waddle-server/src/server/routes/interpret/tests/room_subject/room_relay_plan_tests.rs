@@ -2,7 +2,7 @@ use super::*;
 use crate::server::routes::interpret::effects::{
     delivery::ExternalDeliveryEffect, Effect, ExternalEffect, PlanSink,
 };
-use waddle_xmpp::muc::room_actor::Join;
+use waddle_xmpp::muc::room::actor::Join;
 use waddle_xmpp::ownership::{ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity};
 
 #[tokio::test]
