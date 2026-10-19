@@ -163,6 +163,7 @@ impl WaddleWindow {
         };
         imp.connected.set(false);
         self.clear_membership();
+        self.clear_directory_search();
         let (session, events) = Session::start(account, transfers);
         imp.session.replace(Some(session));
         self.watch_connect(generation);
@@ -186,6 +187,7 @@ impl WaddleWindow {
         }
         imp.connected.set(false);
         self.clear_membership();
+        self.clear_directory_search();
         imp.conversations.replace(Vec::new());
         imp.timelines.replace(Default::default());
         imp.unread.replace(Default::default());

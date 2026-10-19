@@ -216,7 +216,7 @@ impl WaddleWindow {
                 quote,
                 files: wire,
                 // Occupants as of now, not when the upload began.
-                mentionable: window.mentionable(&conversation),
+                mentionable: window.mention_targets(&conversation),
             };
             let sent = session
                 .send(&conversation.jid, conversation.kind, draft)
@@ -350,7 +350,7 @@ impl WaddleWindow {
         imp.composer_entry.set_text("");
         let now = chrono::Utc::now().timestamp_millis();
         let nick = session.me.nick.clone();
-        let mentionable = self.mentionable(&conversation);
+        let mentionable = self.mention_targets(&conversation);
 
         if let Compose::Edit {
             correction_id,

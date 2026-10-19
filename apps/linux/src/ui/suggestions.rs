@@ -8,7 +8,7 @@ use adw::subclass::prelude::*;
 use gtk::gdk;
 
 use super::WaddleWindow;
-use crate::composer::{self, Suggestion};
+use crate::composer::{self, RoomPeople, Suggestion};
 use crate::session::Kind;
 
 impl WaddleWindow {
@@ -87,10 +87,16 @@ impl WaddleWindow {
         let editing = matches!(*imp.compose.borrow(), super::actions::Compose::Edit { .. });
         let found = match self.current_conversation() {
             Some(conversation) if self.composer_focused() => {
-                let people = self.mentionable(&conversation);
-                let room = (conversation.kind == Kind::Room).then_some(people.as_slice());
                 let text = entry.text();
                 let cursor = usize::try_from(entry.position()).unwrap_or(0);
+                let occupants = self.mentionable(&conversation);
+                let directory = composer::mention_query(&text, cursor)
+                    .map(|query| self.directory_mentionable(&conversation, &query))
+                    .unwrap_or_default();
+                let room = (conversation.kind == Kind::Room).then_some(RoomPeople {
+                    occupants: &occupants,
+                    directory: &directory,
+                });
                 composer::suggestions(&text, cursor, room)
                     .into_iter()
                     // A correction replaces a body; it cannot run a command.
