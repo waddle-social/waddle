@@ -13,7 +13,7 @@
 //! Only messages with a body count — chat states, receipts, and
 //! markers are message stanzas but not messages a user would count.
 
-use super::attributes::MessageKind;
+use super::attributes::{MentionAudienceCheck, MessageKind};
 use crate::Stanza;
 use xmpp_parsers::message::MessageType;
 
@@ -82,6 +82,20 @@ pub fn record_delivered_message(kind: MessageKind) {
          (dm | muc | muc_pm).",
         1,
         kind,
+    );
+}
+
+/// Count one mentioned non-member excluded from a groupchat inbox
+/// fan-out because a mention-audience check failed. The audience fails
+/// closed, so every tick is a mention that produced no inbox row.
+pub fn record_mention_audience_check_failed(check: MentionAudienceCheck) {
+    crate::counter_add!(
+        "waddle.muc.mention_audience.check_failures",
+        "{failure}",
+        "Mentioned non-members excluded from a groupchat inbox fan-out because a \
+         mention-audience check failed, by check (account | blocking | room_access).",
+        1,
+        check,
     );
 }
 
@@ -166,6 +180,32 @@ mod tests {
         assert_eq!(
             guard.counter_sum("waddle.messages.delivered", &[("kind", "muc")]),
             Some(2)
+        );
+    }
+
+    #[tokio::test]
+    async fn mention_audience_check_failures_are_counted_by_check() {
+        let guard = crate::telemetry::test_support::acquire().await;
+        record_mention_audience_check_failed(MentionAudienceCheck::Blocking);
+        record_mention_audience_check_failed(MentionAudienceCheck::Blocking);
+        record_mention_audience_check_failed(MentionAudienceCheck::RoomAccess);
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.muc.mention_audience.check_failures",
+                &[("check", "blocking")]
+            ),
+            Some(2)
+        );
+        assert_eq!(
+            guard.counter_sum(
+                "waddle.muc.mention_audience.check_failures",
+                &[("check", "room_access")]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            guard.metric_unit("waddle.muc.mention_audience.check_failures"),
+            Some("{failure}".to_string())
         );
     }
 }

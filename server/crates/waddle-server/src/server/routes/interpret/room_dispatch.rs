@@ -442,6 +442,7 @@ pub(super) async fn dispatch_to_room(
         sender_full: &sender_full,
         occupants: &occupants,
         durable_recipient_bare_jids: &durable_recipient_bare_jids,
+        mention_recipient_bare_jids: &[],
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
         room_occupants_may_change_subject: snapshot.config.occupants_may_change_subject,
@@ -560,7 +561,35 @@ pub(super) async fn dispatch_to_room(
         }
     };
 
-    // 7. Build context + run the rest of the chain (canonicalize,
+    // 7. Resolve the personally-mentioned non-members (open rooms only)
+    //    once, here, after every gate has admitted the message. The
+    //    inbox projection effects planned from this dispatch carry the
+    //    result; recovery replays those recorded effects and never
+    //    re-resolves the audience.
+    let mention_recipient_bare_jids = super::mention_audience::resolve_mention_audience(
+        super::mention_audience::MentionAudienceRequest {
+            state,
+            deps,
+            room: &room_jid,
+            room_actor: &room_actor,
+            sender: &sender_full,
+            message: &prototype,
+            config: &snapshot.config,
+            durable_recipients: &durable_recipient_bare_jids,
+            is_correction: correction_target.is_some()
+                || extract_correction_from_message(&prototype).is_some(),
+        },
+    )
+    .await;
+    if let Some(capture) = deps.ingress_effect_capture.as_ref() {
+        capture.reserve_room_capacity(
+            snapshot.config.max_occupants,
+            snapshot.occupants.len(),
+            durable_recipient_bare_jids.len() + mention_recipient_bare_jids.len(),
+        );
+    }
+
+    // 8. Build context + run the rest of the chain (canonicalize,
     //    archive, inbox, reflect). Reuse the `gate_ctx` config — same
     //    snapshot, same managed-room flag, same id-gen.
     let ctx = RoomContext {
@@ -568,6 +597,7 @@ pub(super) async fn dispatch_to_room(
         sender_full: &sender_full,
         occupants: &occupants,
         durable_recipient_bare_jids: &durable_recipient_bare_jids,
+        mention_recipient_bare_jids: &mention_recipient_bare_jids,
         managed_room_forbidden,
         // XEP-0045 §7.5 (Copilot review on PR #279): the chain's
         // `OccupancyValidationHandler` enforces visitor-may-not-speak

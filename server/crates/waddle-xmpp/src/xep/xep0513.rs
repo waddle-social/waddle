@@ -148,6 +148,55 @@ pub fn mentions_exceed_threshold_from_parts(
     mention_target_count_from_parts(explicit_mentions, references) > threshold
 }
 
+/// Returns `true` when `mention` personally names `owner` by bare JID
+/// under the XEP-0513 rules the server honours for notification:
+/// a `jid=` target, no `mentions=` group URI (any group URI declares
+/// group scope, never a personal mention), and no `<noping/>`.
+pub fn explicit_mention_names_jid(mention: &ExplicitMention, owner: &BareJid) -> bool {
+    !mention.noping
+        && mention.mentions.is_none()
+        && mention.jid.as_ref().is_some_and(|jid| jid == owner)
+}
+
+/// Returns `true` when an XEP-0372 `<reference type='mention'/>`
+/// names `owner` (resource, query and fragment stripped).
+pub fn reference_mention_names_jid(reference: &Reference, owner: &BareJid) -> bool {
+    reference.is_mention()
+        && reference
+            .bare_jid()
+            .is_some_and(|mentioned| &mentioned == owner)
+}
+
+/// Bare JIDs personally mentioned by a message, from its pre-parsed
+/// XEP-0513 mentions and XEP-0372 references.
+///
+/// The rules match the per-recipient JID classification exactly (see
+/// [`explicit_mention_names_jid`] and [`reference_mention_names_jid`]):
+/// every XEP-0372 mention reference with an XMPP URI counts, and an
+/// XEP-0513 `<mention/>` counts only with `jid=`, without `mentions=`,
+/// and without `<noping/>`. Occupant-id mentions name live occupants,
+/// who already receive the message, so they never add a target here.
+///
+/// The XEP-0513 §304 `mentions#count` overflow gate is the caller's
+/// responsibility (see [`mentions_exceed_threshold_from_parts`]).
+pub fn personal_mention_targets(
+    explicit_mentions: &[ExplicitMention],
+    references: &[Reference],
+) -> std::collections::BTreeSet<BareJid> {
+    let xep0513 = explicit_mentions.iter().filter_map(|mention| {
+        mention
+            .jid
+            .as_ref()
+            .filter(|jid| explicit_mention_names_jid(mention, jid))
+            .cloned()
+    });
+    let xep0372 = references
+        .iter()
+        .filter(|reference| reference.is_mention())
+        .filter_map(Reference::bare_jid);
+    xep0513.chain(xep0372).collect()
+}
+
 /// A single top-level `<mention/>` payload.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ExplicitMention {
@@ -761,5 +810,108 @@ mod count_tests {
             mentions_exceed_threshold(&mentions, &msg, 4),
             "count > threshold MUST exceed"
         );
+    }
+}
+
+#[cfg(test)]
+mod personal_mention_target_tests {
+    use super::*;
+    use crate::xep::xep0372::Reference;
+    use std::collections::BTreeSet;
+
+    fn bare(value: &str) -> BareJid {
+        value.parse().expect("valid bare jid")
+    }
+
+    fn targets(mentions: &[ExplicitMention], references: &[Reference]) -> Vec<BareJid> {
+        personal_mention_targets(mentions, references)
+            .into_iter()
+            .collect()
+    }
+
+    #[test]
+    fn xep0513_jid_mention_is_a_personal_target() {
+        let mentions = [ExplicitMention::jid(bare("alice@example.com"))];
+        assert_eq!(targets(&mentions, &[]), vec![bare("alice@example.com")]);
+    }
+
+    #[test]
+    fn xep0513_noping_mention_is_not_a_personal_target() {
+        let mut mention = ExplicitMention::jid(bare("alice@example.com"));
+        mention.noping = true;
+        assert!(targets(&[mention], &[]).is_empty());
+    }
+
+    #[test]
+    fn xep0513_group_scoped_mention_with_jid_is_not_a_personal_target() {
+        let mut channel_with_jid = ExplicitMention::channel();
+        channel_with_jid.jid = Some(bare("alice@example.com"));
+        let mut other_group = ExplicitMention::jid(bare("bob@example.com"));
+        other_group.mentions = Some("urn:xmpp:mentions:0#space".to_string());
+        assert!(targets(&[channel_with_jid, other_group], &[]).is_empty());
+    }
+
+    #[test]
+    fn xep0513_occupant_id_mention_is_not_a_personal_target() {
+        let mentions = [ExplicitMention::occupant_id("occ-1")];
+        assert!(targets(&mentions, &[]).is_empty());
+    }
+
+    #[test]
+    fn xep0372_mention_reference_strips_resource_query_and_fragment() {
+        let references = [
+            Reference::mention("xmpp:alice@example.com/phone"),
+            Reference::mention("xmpp:bob@example.com?message"),
+            Reference::mention("xmpp:carol@example.com#frag"),
+        ];
+        assert_eq!(
+            targets(&[], &references),
+            vec![
+                bare("alice@example.com"),
+                bare("bob@example.com"),
+                bare("carol@example.com"),
+            ]
+        );
+    }
+
+    #[test]
+    fn xep0372_non_mention_and_non_xmpp_references_are_not_targets() {
+        let references = [
+            Reference::data("xmpp:alice@example.com"),
+            Reference::mention("https://example.com/alice"),
+            Reference::mention("xmpp:"),
+        ];
+        assert!(targets(&[], &references).is_empty());
+    }
+
+    #[test]
+    fn dual_encoded_mentions_collapse_to_one_target() {
+        let mentions = [ExplicitMention::jid(bare("alice@example.com"))];
+        let references = [Reference::mention("xmpp:alice@example.com")];
+        let expected: BTreeSet<BareJid> = [bare("alice@example.com")].into_iter().collect();
+        assert_eq!(personal_mention_targets(&mentions, &references), expected);
+    }
+
+    #[test]
+    fn per_owner_predicates_agree_with_target_set() {
+        let mut noping = ExplicitMention::jid(bare("bob@example.com"));
+        noping.noping = true;
+        let mentions = [ExplicitMention::jid(bare("alice@example.com")), noping];
+        let references = [Reference::mention("xmpp:carol@example.com/web")];
+        let set = personal_mention_targets(&mentions, &references);
+        for owner in [
+            bare("alice@example.com"),
+            bare("bob@example.com"),
+            bare("carol@example.com"),
+            bare("dave@example.com"),
+        ] {
+            let named = mentions
+                .iter()
+                .any(|mention| explicit_mention_names_jid(mention, &owner))
+                || references
+                    .iter()
+                    .any(|reference| reference_mention_names_jid(reference, &owner));
+            assert_eq!(set.contains(&owner), named, "{owner}");
+        }
     }
 }

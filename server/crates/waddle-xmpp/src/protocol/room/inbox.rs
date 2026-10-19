@@ -13,11 +13,16 @@
 //! (reactions, retractions, moderation, file shares, stickers) so MAM
 //! replay reconstructs the channel timeline.
 //!
-//! The sender is projected with `is_recipient = false` (no unread bump)
-//! to mirror the legacy `upsert(..., false)` for the sender's own row;
-//! durable recipients get `is_recipient = true`.
+//! The sender is projected with [`GroupchatInboxAudience::Sender`] (no
+//! unread bump) to mirror the legacy `upsert(..., false)` for the
+//! sender's own row; durable recipients get
+//! [`GroupchatInboxAudience::DurableMember`]. Personally-mentioned
+//! non-members resolved by the dispatcher
+//! ([`RoomContext::mention_recipient_bare_jids`]) get
+//! [`GroupchatInboxAudience::MentionedNonMember`] rows, so a user who is
+//! not in an open room still sees and is notified of a mention.
 
-use super::super::event::{GroupchatThreadProjection, OutboundEvent};
+use super::super::event::{GroupchatInboxAudience, GroupchatThreadProjection, OutboundEvent};
 use super::context::{RoomContext, SyntheticSenderAuthority};
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
@@ -91,7 +96,9 @@ impl RoomHandler for MucInboxHandler {
             .recipient_occupants()
             .map(|occupant| occupant.bare_jid())
             .collect();
-        let mut events = Vec::with_capacity(1 + ctx.durable_recipient_bare_jids.len());
+        let mut events = Vec::with_capacity(
+            1 + ctx.durable_recipient_bare_jids.len() + ctx.mention_recipient_bare_jids.len(),
+        );
         let sender_bare = ctx.sender_full.to_bare();
         // XEP-0513 §"Multi-User Chats Permissions": freeze the sender's
         // permission to broadcast `urn:xmpp:mentions:0#channel` for push
@@ -113,8 +120,7 @@ impl RoomHandler for MucInboxHandler {
                 owner: sender_bare.clone(),
                 room: ctx.room.clone(),
                 message: Box::new(message.clone()),
-                is_recipient: false,
-                is_durable_recipient: false,
+                audience: GroupchatInboxAudience::Sender,
                 is_live_occupant: true,
                 room_members_only: ctx.room_members_only,
                 sender_can_broadcast_channel_mention,
@@ -130,8 +136,25 @@ impl RoomHandler for MucInboxHandler {
                 owner: bare.clone(),
                 room: ctx.room.clone(),
                 message: Box::new(message.clone()),
-                is_recipient: true,
-                is_durable_recipient: true,
+                audience: GroupchatInboxAudience::DurableMember,
+                is_live_occupant: live_recipient_bares.contains(bare),
+                room_members_only: ctx.room_members_only,
+                sender_can_broadcast_channel_mention,
+                thread: thread.clone(),
+                dispatch_timestamp: ctx.dispatch_timestamp,
+            });
+        }
+        // Mentioned non-members come after the durable set so a durable
+        // member who is also mentioned keeps the `DurableMember` row.
+        for bare in ctx.mention_recipient_bare_jids {
+            if bare == &sender_bare || !seen.insert(bare.clone()) {
+                continue;
+            }
+            events.push(OutboundEvent::ProjectGroupchatInbox {
+                owner: bare.clone(),
+                room: ctx.room.clone(),
+                message: Box::new(message.clone()),
+                audience: GroupchatInboxAudience::MentionedNonMember,
                 is_live_occupant: live_recipient_bares.contains(bare),
                 room_members_only: ctx.room_members_only,
                 sender_can_broadcast_channel_mention,
@@ -235,6 +258,26 @@ mod tests {
         room_members_only: bool,
         msg: &mut Message,
     ) -> Vec<OutboundEvent> {
+        run_with_audiences(
+            room,
+            sender_full,
+            occupants,
+            durable_recipient_bare_jids,
+            &[],
+            room_members_only,
+            msg,
+        )
+    }
+
+    fn run_with_audiences(
+        room: &BareJid,
+        sender_full: &FullJid,
+        occupants: &[OccupantSnapshot],
+        durable_recipient_bare_jids: &[BareJid],
+        mention_recipient_bare_jids: &[BareJid],
+        room_members_only: bool,
+        msg: &mut Message,
+    ) -> Vec<OutboundEvent> {
         let id_gen = FixedIdGenerator("ignored".to_string());
         let secret = OccupantIdSecret::for_testing(b"test-secret".to_vec());
         let ctx = RoomContext {
@@ -242,6 +285,7 @@ mod tests {
             sender_full,
             occupants,
             durable_recipient_bare_jids,
+            mention_recipient_bare_jids,
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,
@@ -266,12 +310,12 @@ mod tests {
             .filter_map(|event| match event {
                 OutboundEvent::ProjectGroupchatInbox {
                     owner,
-                    is_recipient,
+                    audience,
                     thread,
                     ..
                 } => Some((
                     owner.clone(),
-                    *is_recipient,
+                    audience.is_recipient(),
                     thread.as_ref().map(|t| t.thread_id.clone()),
                 )),
                 _ => None,
@@ -371,39 +415,36 @@ mod tests {
             &mut msg,
         );
 
-        let projections: Vec<(String, bool, bool, bool, bool)> = events
-            .iter()
-            .filter_map(|event| match event {
-                OutboundEvent::ProjectGroupchatInbox {
-                    owner,
-                    is_recipient,
-                    is_durable_recipient,
-                    is_live_occupant,
-                    room_members_only,
-                    ..
-                } => Some((
-                    owner.to_string(),
-                    *is_recipient,
-                    *is_durable_recipient,
-                    *is_live_occupant,
-                    *room_members_only,
-                )),
-                _ => None,
-            })
-            .collect();
+        let projections = audiences(&events);
         assert_eq!(
             projections,
             vec![
-                ("alice@example.com".to_string(), false, false, true, true),
-                ("bob@example.com".to_string(), true, true, true, true),
-                ("charlie@example.com".to_string(), true, true, false, true),
+                (
+                    "alice@example.com".to_string(),
+                    GroupchatInboxAudience::Sender,
+                    true,
+                    true
+                ),
+                (
+                    "bob@example.com".to_string(),
+                    GroupchatInboxAudience::DurableMember,
+                    true,
+                    true
+                ),
+                (
+                    "charlie@example.com".to_string(),
+                    GroupchatInboxAudience::DurableMember,
+                    false,
+                    true
+                ),
             ]
         );
         assert!(
             !projections
                 .iter()
-                .any(|(owner, _, _, _, _)| owner == "dave@example.com"),
-            "live occupants outside the durable affiliation set must not get inbox/push projection"
+                .any(|(owner, _, _, _)| owner == "dave@example.com"),
+            "non-mentioned live occupants outside the durable affiliation set must not get \
+             inbox/push projection"
         );
     }
 
@@ -497,6 +538,7 @@ mod tests {
                 sender_full: sender,
                 occupants: &occupants,
                 durable_recipient_bare_jids: &[],
+                mention_recipient_bare_jids: &[],
                 managed_room_forbidden: false,
                 room_moderated: false,
                 room_occupants_may_change_subject: false,
@@ -543,6 +585,7 @@ mod tests {
             sender_full: &bot,
             occupants: &occupants,
             durable_recipient_bare_jids: &[],
+            mention_recipient_bare_jids: &[],
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,
@@ -584,6 +627,7 @@ mod tests {
             sender_full: &participant,
             occupants: &occupants,
             durable_recipient_bare_jids: &[],
+            mention_recipient_bare_jids: &[],
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,
@@ -702,6 +746,137 @@ mod tests {
             permissions.iter().all(|granted| !*granted),
             "participant sender must produce a permission bool of `false` \
              on every emitted ProjectGroupchatInbox event"
+        );
+    }
+
+    fn audiences(events: &[OutboundEvent]) -> Vec<(String, GroupchatInboxAudience, bool, bool)> {
+        events
+            .iter()
+            .filter_map(|event| match event {
+                OutboundEvent::ProjectGroupchatInbox {
+                    owner,
+                    audience,
+                    is_live_occupant,
+                    room_members_only,
+                    ..
+                } => Some((
+                    owner.to_string(),
+                    *audience,
+                    *is_live_occupant,
+                    *room_members_only,
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn xep0372_mentioned_non_member_gets_a_mentioned_non_member_row() {
+        let room = bare("team@conf.example.com");
+        let alice = full("alice@example.com/web");
+        let occupants = vec![occ(alice.clone(), "alice")];
+        let durable = vec![bare("bob@example.com")];
+        let mentioned = vec![bare("carol@example.com")];
+        let mut msg = groupchat(&room, &alice, "hey @carol");
+
+        let events = run_with_audiences(
+            &room, &alice, &occupants, &durable, &mentioned, false, &mut msg,
+        );
+
+        assert_eq!(
+            audiences(&events),
+            vec![
+                (
+                    "alice@example.com".to_string(),
+                    GroupchatInboxAudience::Sender,
+                    true,
+                    false
+                ),
+                (
+                    "bob@example.com".to_string(),
+                    GroupchatInboxAudience::DurableMember,
+                    false,
+                    false
+                ),
+                (
+                    "carol@example.com".to_string(),
+                    GroupchatInboxAudience::MentionedNonMember,
+                    false,
+                    false
+                ),
+            ]
+        );
+        assert!(GroupchatInboxAudience::MentionedNonMember.is_recipient());
+        assert!(!GroupchatInboxAudience::Sender.is_recipient());
+    }
+
+    #[test]
+    fn xep0372_mentioned_non_member_rows_dedupe_against_sender_and_durable_members() {
+        let room = bare("team@conf.example.com");
+        let alice = full("alice@example.com/web");
+        let occupants = vec![occ(alice.clone(), "alice")];
+        let durable = vec![bare("bob@example.com")];
+        // The sender and a durable member are mentioned too, and the
+        // non-member appears twice; each owner still gets exactly one row
+        // under its strongest audience.
+        let mentioned = vec![
+            bare("alice@example.com"),
+            bare("bob@example.com"),
+            bare("carol@example.com"),
+            bare("carol@example.com"),
+        ];
+        let mut msg = groupchat(&room, &alice, "hey all");
+
+        let events = run_with_audiences(
+            &room, &alice, &occupants, &durable, &mentioned, false, &mut msg,
+        );
+
+        let rows: Vec<(String, GroupchatInboxAudience)> = audiences(&events)
+            .into_iter()
+            .map(|(owner, audience, _, _)| (owner, audience))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "alice@example.com".to_string(),
+                    GroupchatInboxAudience::Sender
+                ),
+                (
+                    "bob@example.com".to_string(),
+                    GroupchatInboxAudience::DurableMember
+                ),
+                (
+                    "carol@example.com".to_string(),
+                    GroupchatInboxAudience::MentionedNonMember
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn xep0372_mentioned_non_member_live_flag_tracks_room_occupancy() {
+        let room = bare("team@conf.example.com");
+        let alice = full("alice@example.com/web");
+        let dave = full("dave@example.com/phone");
+        let occupants = vec![occ(alice.clone(), "alice"), occ(dave.clone(), "dave")];
+        let mentioned = vec![bare("dave@example.com"), bare("erin@example.com")];
+        let mut msg = groupchat(&room, &alice, "@dave @erin");
+
+        let events =
+            run_with_audiences(&room, &alice, &occupants, &[], &mentioned, false, &mut msg);
+
+        let live: Vec<(String, bool)> = audiences(&events)
+            .into_iter()
+            .filter(|(_, audience, _, _)| *audience == GroupchatInboxAudience::MentionedNonMember)
+            .map(|(owner, _, is_live, _)| (owner, is_live))
+            .collect();
+        assert_eq!(
+            live,
+            vec![
+                ("dave@example.com".to_string(), true),
+                ("erin@example.com".to_string(), false),
+            ]
         );
     }
 

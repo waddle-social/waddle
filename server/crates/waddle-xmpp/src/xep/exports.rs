@@ -418,12 +418,13 @@ pub use super::xep0490::{
 
 pub use super::xep0513::{
     build_mention_element, build_mentions_elements, build_mentions_permissions_query,
-    extract_explicit_mentions, has_explicit_mentions, is_mention_element,
-    is_mentions_permissions_query, mention_target_count, mention_target_count_from_parts,
-    mentions_exceed_threshold, mentions_exceed_threshold_from_parts, parse_mention_element,
-    set_explicit_mentions, strip_explicit_mentions, ExplicitMention, ExplicitMentionCarrier,
-    ExplicitMentions, MentionsPermission, MentionsPermissions, CHANNEL_MENTION,
-    DEFAULT_MENTIONS_COUNT, FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT,
+    explicit_mention_names_jid, extract_explicit_mentions, has_explicit_mentions,
+    is_mention_element, is_mentions_permissions_query, mention_target_count,
+    mention_target_count_from_parts, mentions_exceed_threshold,
+    mentions_exceed_threshold_from_parts, parse_mention_element, personal_mention_targets,
+    reference_mention_names_jid, set_explicit_mentions, strip_explicit_mentions, ExplicitMention,
+    ExplicitMentionCarrier, ExplicitMentions, MentionsPermission, MentionsPermissions,
+    CHANNEL_MENTION, DEFAULT_MENTIONS_COUNT, FIELD_MENTIONS_CHANNEL, FIELD_MENTIONS_COUNT,
     FIELD_MENTIONS_INDIVIDUAL, NS_EXPLICIT_MENTIONS,
 };
 

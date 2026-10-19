@@ -6,8 +6,8 @@ mod access;
 mod xml;
 
 pub use access::{
-    get_managed_channel_for_room, parse_room_jid_context, resolve_muc_room_archive_access,
-    RoomArchiveAccess,
+    get_managed_channel_for_room, parse_room_jid_context, resolve_managed_channel_entry_access,
+    resolve_muc_room_archive_access, RoomArchiveAccess,
 };
 
 use access::{resolve_managed_channel_affiliation, server_permission_allowed};

@@ -1681,6 +1681,34 @@ impl MetricAttribute for IngressAppendAuthorizationFailure {
     }
 }
 
+/// `check` — which groupchat mention-audience check could not be
+/// completed, so the mentioned non-member was excluded (fail closed).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MentionAudienceCheck {
+    /// The local account lookup failed.
+    Account,
+    /// The mentioned user's XEP-0191 blocklist could not be read.
+    Blocking,
+    /// The room right-to-enter decision could not be made.
+    RoomAccess,
+}
+
+impl sealed::Sealed for MentionAudienceCheck {}
+
+impl MetricAttribute for MentionAudienceCheck {
+    fn key(&self) -> &'static str {
+        "check"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Account => "account",
+            Self::Blocking => "blocking",
+            Self::RoomAccess => "room_access",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MetricAttribute;

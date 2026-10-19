@@ -45,7 +45,8 @@ pub(crate) use muc::RegisteredRemoteDelivery;
 pub(crate) use muc::{deliver_room_presence_locally, route_room_presence_to_occupant};
 pub use muc::{
     get_managed_channel_for_room, handle_muc_join_with_ordered_relay, handle_muc_leave,
-    resolve_muc_room_archive_access, MucJoinRequest, RoomArchiveAccess,
+    resolve_managed_channel_entry_access, resolve_muc_room_archive_access, MucJoinRequest,
+    RoomArchiveAccess,
 };
 #[cfg(any(test, feature = "clustering"))]
 pub use muc::{handle_muc_join, MucJoinConnectionContext};

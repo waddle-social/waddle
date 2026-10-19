@@ -74,6 +74,14 @@ pub struct RoomContext<'a> {
     /// per-user rows; current occupancy is only a live-delivery and
     /// active-mention filter.
     pub durable_recipient_bare_jids: &'a [BareJid],
+    /// Bare JIDs outside the durable recipient set whom this message
+    /// personally mentions and who passed the dispatcher's account,
+    /// blocking and room-entry checks. Resolved once while planning the
+    /// dispatch; the inbox projection emits a
+    /// [`super::super::event::GroupchatInboxAudience::MentionedNonMember`]
+    /// row for each entry not already covered by the sender or the
+    /// durable set. Empty for members-only rooms and corrections.
+    pub mention_recipient_bare_jids: &'a [BareJid],
     /// True when the room is the managed `announcements` room and the
     /// sender is NOT a server owner.
     ///

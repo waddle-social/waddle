@@ -404,6 +404,7 @@ mod tests {
             sender_full,
             occupants,
             durable_recipient_bare_jids: &[],
+            mention_recipient_bare_jids: &[],
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,
