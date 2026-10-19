@@ -1,0 +1,7 @@
+{
+  "generation": 2,
+  "registry": "ghcr.io/waddle-social/waddle/extensions/jev-judgments",
+  "manifest_digest": "sha256:c37619841f9da5861887651779337fe8467f41910566267063b8b596dee379dc",
+  "wasm_sha256": "1978f10bffa42cc58b61bd6a8a4d4418e4a0110aa10d3958c4690c9bb10970df",
+  "policy_sha256": "5e963e413b9a005908e0e513617e82bfef923a27d6acf77cd7f67aef8c8c948e"
+}

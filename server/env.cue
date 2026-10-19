@@ -56,6 +56,8 @@ let _nixInputs = [
 	"extensions/**",
 	"vendor/**",
 	"wit/**",
+	"observer-release.json",
+	"scripts/observer_release.py",
 ]
 
 // cargo-nextest task template: xRust.#Test pins args[0] to "test", but the
@@ -72,7 +74,7 @@ let _gitopsWaddleServerInputs = [
 	"../infrastructure/waddle.cloud/gitops/waddle-server-source.yaml",
 	"../infrastructure/waddle.cloud/gitops/kustomization-infra-waddle-server.yaml",
 ]
-let _deploymentInputs = ["deployment.cue"]
+let _deploymentInputs = ["deployment.cue", "observer-release.json", "scripts/observer_release.py", "scripts/test_observer_release.py"]
 
 schema.#Project & {
 	name: "waddle-server"
@@ -619,6 +621,7 @@ schema.#Project & {
 
 					python3 -m unittest discover -s scripts -p 'test_cutover_*.py'
 					python3 -m unittest discover -s scripts -p 'test_publish_chart.py'
+					python3 -m unittest discover -s scripts -p 'test_observer_release.py'
 
 					placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
 					sample_digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
@@ -926,12 +929,14 @@ schema.#Project & {
 					  fi
 					done
 
-					cue export . -e '#PublishedExtensionModules' --out yaml \
+					jev_judgments_digest="$(python3 scripts/observer_release.py digest observer-release.json)"
+					cue export . -e '#PublishedExtensionModules' --out json \
 					  -t linkBoardDigest="${sample_digest}" \
 					  -t aiChatbotDigest="${sample_digest}" \
 					  -t decisionPollsDigest="${sample_digest}" \
 					  -t githubDigest="${sample_digest}" \
-					  -t jevJudgmentsDigest="${sample_digest}" > "${modules_yaml}"
+					  -t jevJudgmentsDigest="${jev_judgments_digest}" > "${modules_yaml}"
+					python3 scripts/observer_release.py validate observer-release.json "${modules_yaml}"
 					cp "${gitops_values}" "${published_values}"
 					MODULES_YAML="${modules_yaml}" SAMPLE_DIGEST="${sample_digest}" SAMPLE_GIT_SHA="${sample_git_sha}" yq -i '
 					  .image.digest = strenv(SAMPLE_DIGEST) |
@@ -946,7 +951,7 @@ schema.#Project & {
 					  -t aiChatbotDigest="${sample_digest}" \
 					  -t decisionPollsDigest="${sample_digest}" \
 					  -t githubDigest="${sample_digest}" \
-					  -t jevJudgmentsDigest="${sample_digest}"
+					  -t jevJudgmentsDigest="${jev_judgments_digest}"
 					helm lint charts/waddle-server \
 					  --set-string deployment.uuid=018f47b2-4b2e-7a3a-9a4c-52a5a6a9c1c1 \
 					  -f "${published_values}"
@@ -1095,15 +1100,17 @@ schema.#Project & {
 					  "ai-chatbot:ai_chatbot:urn:waddle:ai-chatbot:1"
 					  "decision-polls:decision_polls:urn:waddle:decision-polls:1"
 					  "github:github:urn:waddle:web-integration:1"
-					  "jev-judgments:jev_judgments:urn:waddle:safety-scores:1"
 					)
 
 					link_board_digest=""
 					ai_chatbot_digest=""
 					decision_polls_digest=""
 					github_digest=""
-					jev_judgments_digest=""
-					modules_yaml="../target/digests/extensions-modules.yaml"
+					# Observer identity binds the exact released guest to its generation.
+					# A host rebuild must not promote an incidental new observer binary.
+					jev_judgments_digest="$(python3 scripts/observer_release.py digest observer-release.json)"
+					python3 scripts/observer_release.py fetch observer-release.json ../target/digests/jev-released.wasm
+					modules_yaml="../target/digests/extensions-modules.json"
 					for extension_spec in "${EXTENSIONS[@]}"; do
 					  IFS=: read -r extension_name crate_name _namespace_scheme _namespace_rest <<< "${extension_spec}"
 					  wasm_path="target/wasm32-wasip2/release/${crate_name}.wasm"
@@ -1134,16 +1141,16 @@ schema.#Project & {
 					    ai-chatbot) ai_chatbot_digest="${extension_digest}" ;;
 					    decision-polls) decision_polls_digest="${extension_digest}" ;;
 					    github) github_digest="${extension_digest}" ;;
-					    jev-judgments) jev_judgments_digest="${extension_digest}" ;;
 					    *) echo "unknown extension ${extension_name}" >&2; exit 1 ;;
 					  esac
 					done
-					cue export . -e '#PublishedExtensionModules' --out yaml \
+					cue export . -e '#PublishedExtensionModules' --out json \
 					  -t linkBoardDigest="${link_board_digest:?missing link-board digest}" \
 					  -t aiChatbotDigest="${ai_chatbot_digest:?missing ai-chatbot digest}" \
 					  -t decisionPollsDigest="${decision_polls_digest:?missing decision-polls digest}" \
 					  -t githubDigest="${github_digest:?missing github digest}" \
 					  -t jevJudgmentsDigest="${jev_judgments_digest:?missing jev-judgments digest}" > "${modules_yaml}"
+					python3 scripts/observer_release.py validate observer-release.json "${modules_yaml}"
 
 					# The complete source history identifies the last Recreate window,
 					# even when its build was canceled before publishing any artifact.

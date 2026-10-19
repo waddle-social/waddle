@@ -24,6 +24,7 @@ SERVER_INPUTS = [
     ':(top,glob)server/charts/waddle-server/**',
     ':(top,glob)server/crates/**',
     'server/deployment.cue',
+    'server/observer-release.json',
     ':(top,glob)server/extensions/**',
     'server/rust-toolchain.toml',
     ':(top,glob)server/schema/**',

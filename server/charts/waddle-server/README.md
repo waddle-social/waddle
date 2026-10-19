@@ -298,6 +298,20 @@ configuration and its render assertion together. A rollback must also use a
 higher generation. Publish all bundled guests with the server because the
 extension WIT contract is version 2.
 
+The production publisher reuses the Jev release recorded in
+`server/observer-release.json`: generation, immutable OCI manifest, Wasm payload
+hash, and public execution-policy hash. An unrelated server rebuild does not
+promote a newly built Jev artifact. The publisher verifies the released payload
+and rendered public policy before publishing GitOps. CI tests both the fresh
+source guest and this exact released guest against the current host.
+
+Editing Jev source alone does not deploy that source. To promote an observer,
+publish its tested guest artifact, advance `roomObservation.generation`, and
+update the release metadata and render assertion together. Verify effective
+secret identity separately; public policy validation cannot detect a secret
+rotation. Do not replace a guest under an existing generation or rewrite its
+persisted identity to bypass the startup check.
+
 Room commit notifications start work immediately; a one-second durable sweep
 recovers missed/full-mailbox notifications and saved publications. Existing
 durable room actors can be restored with their fenced ownership after restart.
