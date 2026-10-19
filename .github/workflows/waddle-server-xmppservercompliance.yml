@@ -73,9 +73,6 @@ jobs:
   nixXmppServerTests:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixXmppServerTests
     runs-on: namespace-profile-linux-x86

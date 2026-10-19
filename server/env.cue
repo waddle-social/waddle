@@ -114,6 +114,7 @@ schema.#Project & {
 					label:    "Push to FlakeHub"
 					priority: 5
 					dependsOn: ["checkout.tag", "hestia.setup"]
+					ci: github: permissions: "id-token": "write"
 					provider: github: {
 						uses: "DeterminateSystems/flakehub-push@a225170f3ab20a9d93dbb4424090ef0523ca7425"
 						with: {
@@ -1009,6 +1010,7 @@ schema.#Project & {
 		}
 
 		publishContainerImage: schema.#Task & {
+			ci: github: permissions: packages: "write"
 			// Reads sibling projects through ../ inputs and shells out to cuenv,
 			// cue or nix, which need the host HOME. cuenv 0.56 rejects ../ inputs
 			// under the "dir" sandbox and scrubs HOME from hermetic tasks, so run

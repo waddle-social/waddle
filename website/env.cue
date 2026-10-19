@@ -41,7 +41,7 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			provider: github: permissions: "id-token": "write"
+			provider: github: permissions: {"id-token": "write", packages: "none"}
 			"tasks": [tasks.deployMain]
 		}
 		pullRequest: {
@@ -51,6 +51,7 @@ schema.#Project & {
 			provider: github: permissions: {
 				contents:   "read"
 				"id-token": "write"
+				packages:   "none"
 			}
 			"tasks": [tasks.build]
 		}

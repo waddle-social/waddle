@@ -120,7 +120,7 @@ schema.#Project & {
 				defaultBranch: true
 				manual:        true
 			}
-			provider: github: permissions: {contents: "write", "id-token": "write"}
+			provider: github: permissions: {contents: "write", "id-token": "write", packages: "none"}
 			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.publishApk]
 		}
 		pullRequest: {
@@ -128,7 +128,7 @@ schema.#Project & {
 				pullRequest: true
 				manual:      true
 			}
-			provider: github: permissions: {contents: "read", "id-token": "write"}
+			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
 			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
@@ -144,7 +144,7 @@ schema.#Project & {
 				pullRequest: true
 				manual:      true
 			}
-			provider: github: permissions: {contents: "read", "id-token": "write"}
+			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
 			"tasks": [tasks.gmdCheck]
 		}
 	}
@@ -280,6 +280,7 @@ schema.#Project & {
 		// no published release is ever mutated. Older rolling releases
 		// are pruned to a bounded window.
 		publishApk: schema.#Task & {
+			ci: github: permissions: contents: "write"
 			command: "bash"
 			env: {
 				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}

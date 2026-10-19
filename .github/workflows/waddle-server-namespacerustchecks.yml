@@ -57,9 +57,6 @@ jobs:
   clippy:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: clippy
     runs-on: namespace-profile-linux-x86
@@ -90,7 +87,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.1"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -113,9 +110,6 @@ jobs:
   doctest:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: doctest
     runs-on: namespace-profile-linux-x86
@@ -146,7 +140,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.1"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -169,9 +163,6 @@ jobs:
   test:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: test
     runs-on: namespace-profile-linux-x86
@@ -202,7 +193,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.1"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

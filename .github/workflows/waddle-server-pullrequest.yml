@@ -88,9 +88,6 @@ jobs:
   checkCiDrift:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: checkCiDrift
     runs-on: ubuntu-24.04
@@ -121,7 +118,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.1"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -144,9 +141,6 @@ jobs:
   checkSwitchableAlternativeProgram:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: checkSwitchableAlternativeProgram
     runs-on: ubuntu-24.04
@@ -177,7 +171,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.1"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -200,9 +194,6 @@ jobs:
   checkXmppClientFfiBindings:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: checkXmppClientFfiBindings
     runs-on: ubuntu-24.04
@@ -233,7 +224,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.1"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi
@@ -256,9 +247,6 @@ jobs:
   nixBuildCi:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixBuildCi
     runs-on: ubuntu-24.04
@@ -292,9 +280,6 @@ jobs:
   nixBuildExtensionModules:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixBuildExtensionModules
     runs-on: ubuntu-24.04
@@ -328,9 +313,6 @@ jobs:
   nixBuildImageStream:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixBuildImageStream
     runs-on: ubuntu-24.04
@@ -364,9 +346,6 @@ jobs:
   nixClippy:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixClippy
     runs-on: ubuntu-24.04
@@ -400,9 +379,6 @@ jobs:
   nixDoctest:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixDoctest
     runs-on: ubuntu-24.04
@@ -436,9 +412,6 @@ jobs:
   nixFmt:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixFmt
     runs-on: ubuntu-24.04
@@ -472,9 +445,6 @@ jobs:
   renderDeployment:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: renderDeployment
     runs-on: ubuntu-24.04
@@ -505,7 +475,7 @@ jobs:
           aarch64|arm64) cuenv_asset="cuenv-linux-arm64" ;;
           *) echo "Unsupported Linux architecture: $arch" >&2; exit 1 ;;
         esac
-        cuenv_version="0.57.1"
+        cuenv_version="0.57.2"
         if [ -z "$cuenv_version" ]; then
           cuenv_version="latest"
         fi

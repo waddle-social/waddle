@@ -73,9 +73,6 @@ jobs:
   nixXmppUnitTests:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixXmppUnitTests
     runs-on: ubuntu-24.04
@@ -109,9 +106,6 @@ jobs:
   nixXmppXepIntegration:
     permissions:
       contents: read
-      checks: write
-      pull-requests: none
-      packages: read
       id-token: write
     name: nixXmppXepIntegration
     runs-on: ubuntu-24.04

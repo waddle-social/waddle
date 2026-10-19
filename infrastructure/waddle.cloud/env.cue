@@ -104,6 +104,7 @@ schema.#Project & {
 		}
 
 		helmPush: schema.#Task & {
+			ci: github: permissions: packages: "write"
 			command: "bash"
 			env: {
 				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
@@ -134,6 +135,7 @@ schema.#Project & {
 			inputs: ["charts/livekit-sfu/**", "env.cue"]
 		}
 		gitopsPush: schema.#Task & {
+			ci: github: permissions: packages: "write"
 			command: "bash"
 			env: {
 				CI_GITHUB_TOKEN: schema.#EnvPassthrough & {name: "GITHUB_TOKEN"}
