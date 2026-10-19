@@ -6,3 +6,5 @@
 *.bak
 *.tmp
 *.orig
+# Chart docs must not change the published package.
+README.md

@@ -624,6 +624,10 @@ schema.#Project & {
 					python3 -m unittest discover -s scripts -p 'test_publish_chart.py'
 					python3 -m unittest discover -s scripts -p 'test_observer_release.py'
 
+					# Fail before merge when the chart changed but its version did not.
+					check_chart_package="$(helm package charts/waddle-server -d target/charts | awk '{print $NF}')"
+					python3 scripts/publish_chart.py --check "${check_chart_package}"
+
 					placeholder_digest="sha256:0000000000000000000000000000000000000000000000000000000000000000"
 					sample_digest="sha256:1111111111111111111111111111111111111111111111111111111111111111"
 					sample_git_sha="1111111111111111111111111111111111111111"

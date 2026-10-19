@@ -1,5 +1,8 @@
 #!/usr/bin/env python3
-"""Reuse a verified chart version, or publish and verify a new one."""
+"""Reuse a verified chart version, or publish and verify a new one.
+
+With --check, only verify that publishing would not collide, without pushing.
+"""
 
 from __future__ import annotations
 
@@ -132,7 +135,7 @@ def package_version(package: Path) -> str:
     return version
 
 
-def publish(package: Path) -> None:
+def publish(package: Path, check: bool = False) -> None:
     directory = Path.cwd().resolve() / 'target' / 'charts'
     if directory.resolve() != directory:
         raise PublicationError('Chart output directory cannot be redirected by symlinks')
@@ -141,6 +144,9 @@ def publish(package: Path) -> None:
     version = package_version(package)
     if existing(version, expected):
         print(f'Chart {CHART_NAME}:{version} already exists with identical content; reusing')
+        return
+    if check:
+        print(f'Chart {CHART_NAME}:{version} is unpublished; publishing will push it')
         return
     for attempt in range(1, ATTEMPTS + 1):
         result = run_helm(['push', '--', str(package), REPOSITORY])
@@ -164,9 +170,10 @@ def publish(package: Path) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('package', type=Path)
+    parser.add_argument('--check', action='store_true', help='compare with the registry without pushing')
     args = parser.parse_args()
     try:
-        publish(args.package)
+        publish(args.package, args.check)
     except PublicationError as error:
         print(f'Error: {error}', file=sys.stderr)
         return 1
