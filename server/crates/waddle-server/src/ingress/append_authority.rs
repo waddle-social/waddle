@@ -12,19 +12,15 @@ use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 use waddle_xmpp::telemetry::attributes::IngressAppendAuthorizationFailure;
 use waddle_xmpp::Stanza;
 
-#[path = "append_authority_carbons.rs"]
 mod carbons;
 
 #[cfg(test)]
-#[path = "append_authority_carbon_tests.rs"]
 mod carbon_tests;
 
 #[cfg(test)]
-#[path = "append_authority_room_tests.rs"]
 mod room_tests;
 
 #[cfg(all(test, feature = "clustering"))]
-#[path = "append_authority_deferred_tests.rs"]
 mod deferred_tests;
 
 const AUTHORIZATION_READ_TIMEOUT: Duration = Duration::from_millis(250);

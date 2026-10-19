@@ -1115,11 +1115,9 @@ async fn plan_remote_room(
 }
 
 #[cfg(test)]
-#[path = "room_plan_tests.rs"]
 mod plan_tests;
 
 #[cfg(test)]
-#[path = "room_dispatch_failure_tests.rs"]
 mod failure_tests;
 
 /// The archived message a groupchat correction (XEP-0308) or retraction

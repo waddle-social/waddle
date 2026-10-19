@@ -934,17 +934,13 @@ async fn ingress_local_owner_reply_transport_loss_preserves_pending_receipts_pos
     postgres_connection_reply_receipt(true, true).await;
 }
 
-#[path = "ingress_authority_recovery.rs"]
 mod recovery;
 
-#[path = "ingress_authority_timeout.rs"]
 mod timeout;
 
 #[cfg(feature = "clustering")]
-#[path = "ingress_authority_relay.rs"]
 mod relay;
 
-#[path = "ingress_authority_fence.rs"]
 mod fence;
 
 #[cfg(feature = "clustering")]
@@ -966,5 +962,4 @@ async fn ingress_remote_owner_ack_resume_settles_receipts_after_token_loss_postg
     postgres_connection_reply_receipt_with_remote(true, true, true).await;
 }
 
-#[path = "ingress_authority_recipient_drift.rs"]
 mod recipient_drift;

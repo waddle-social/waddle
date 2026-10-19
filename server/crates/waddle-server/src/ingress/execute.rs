@@ -24,7 +24,6 @@ use crate::{
 use super::decision::{EffectReceiptKey, IngressDecision};
 use crate::ingress::append_authority::AppendAuthority;
 
-#[path = "execute_dependencies.rs"]
 mod dependencies;
 
 pub(super) fn supplies_dependency(
@@ -34,16 +33,12 @@ pub(super) fn supplies_dependency(
     dependencies::produces(effect, dependency)
 }
 
-#[path = "execute_carbon_progress.rs"]
 mod carbon_progress;
 
-#[path = "execute_observers.rs"]
 mod observers;
 
-#[path = "execute_muc_fanout.rs"]
 mod muc_fanout;
 
-#[path = "execute_dispatch_rounds.rs"]
 mod dispatch_rounds;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1260,15 +1255,12 @@ async fn terminalize_if_complete_outcome_in_transaction(
 }
 
 #[cfg(test)]
-#[path = "execute_dependency_tests.rs"]
 mod dependency_tests;
 
 #[cfg(test)]
-#[path = "execute_test_hooks.rs"]
 pub(crate) mod test_hooks;
 
 #[cfg(test)]
-#[path = "execute_settlement_tests.rs"]
 mod settlement_tests;
 
 #[cfg(test)]
@@ -1442,65 +1434,49 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "execute_delivery_tests.rs"]
 mod delivery_tests;
 
 #[cfg(test)]
-#[path = "execute_carbons_retry_tests.rs"]
 mod carbons_retry_tests;
 
 #[cfg(all(test, feature = "clustering"))]
-#[path = "execute_carbon_fanout_tests.rs"]
 mod carbon_fanout_tests;
 
 #[cfg(test)]
-#[path = "execute_observer_tests.rs"]
 mod observer_tests;
 
 #[cfg(test)]
-#[path = "execute_inbox_offline_tests.rs"]
 mod inbox_offline_tests;
 
 #[cfg(test)]
-#[path = "execute_direct_receipt_tests.rs"]
 mod direct_receipt_tests;
 
 #[cfg(test)]
-#[path = "execute_local_carbons_tests.rs"]
 mod local_carbons_tests;
 
 #[cfg(test)]
-#[path = "execute_frame_completion_tests.rs"]
 mod frame_completion_tests;
 
 #[cfg(test)]
-#[path = "execute_invite_noop_tests.rs"]
 mod invite_noop_tests;
 
 #[cfg(test)]
-#[path = "execute_detached_receipt_tests.rs"]
 mod detached_receipt_tests;
 
 #[cfg(test)]
-#[path = "execute_dm_call_tests.rs"]
 mod dm_call_tests;
 
 #[cfg(test)]
-#[path = "execute_activity_tests.rs"]
 mod activity_tests;
 
 #[cfg(all(test, feature = "clustering"))]
-#[path = "execute_groupchat_receipt_tests.rs"]
 mod groupchat_receipt_tests;
 
 #[cfg(test)]
-#[path = "execute_detached_fault_tests.rs"]
 mod detached_fault_tests;
 
 #[cfg(test)]
-#[path = "execute_relay_detached_tests.rs"]
 pub(crate) mod relay_detached_tests;
 
 #[cfg(test)]
-#[path = "execute_custody_tests.rs"]
 mod custody_tests;

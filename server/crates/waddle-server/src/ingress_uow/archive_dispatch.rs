@@ -654,5 +654,4 @@ async fn resource_completed(
 }
 
 #[cfg(test)]
-#[path = "archive_dispatch_tests.rs"]
 mod tests;

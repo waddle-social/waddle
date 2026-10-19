@@ -1757,5 +1757,4 @@ fn stanza_error_from_waddle_parts(
 }
 
 #[cfg(test)]
-#[path = "invite_plan_failure_tests.rs"]
 mod plan_failure_tests;

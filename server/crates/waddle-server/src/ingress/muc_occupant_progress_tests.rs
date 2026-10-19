@@ -556,27 +556,20 @@ async fn postgres_muc_occupant_progress_archive_free_replan() {
     }
 }
 
-#[path = "muc_occupant_progress_tests/canonical.rs"]
 mod canonical;
 
-#[path = "muc_occupant_progress_tests/local.rs"]
 mod local;
 
-#[path = "muc_occupant_progress_tests/stall.rs"]
 pub(super) mod stall;
 
-#[path = "muc_occupant_progress_tests/system.rs"]
 mod system;
 
-#[path = "muc_occupant_progress_tests/replay.rs"]
 mod replay;
 
 #[cfg(feature = "clustering")]
-#[path = "muc_occupant_progress_tests/relay.rs"]
 mod relay;
 
 #[cfg(feature = "clustering")]
-#[path = "muc_occupant_progress_tests/stalled_relay.rs"]
 mod stalled_relay;
 
 #[tokio::test]
@@ -610,21 +603,16 @@ async fn postgres_muc_occupant_progress_old_provenance_fails_closed() {
     }
 }
 
-#[path = "muc_occupant_progress_tests/sibling_retry.rs"]
 mod sibling_retry;
 
-#[path = "muc_occupant_progress_tests/host_owned.rs"]
 mod host_owned;
 
-#[path = "muc_occupant_progress_tests/delivery_retry.rs"]
 mod delivery_retry;
 
 #[cfg(feature = "clustering")]
-#[path = "muc_occupant_progress_tests/relayed_sibling.rs"]
 mod relayed_sibling;
 
 #[cfg(feature = "clustering")]
-#[path = "muc_occupant_progress_tests/ordered_reflection.rs"]
 mod ordered_reflection;
 
 #[tokio::test]

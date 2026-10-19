@@ -211,5 +211,4 @@ async fn invoke_after_commit(
 }
 
 #[cfg(test)]
-#[path = "tests/invocation.rs"]
 mod tests;

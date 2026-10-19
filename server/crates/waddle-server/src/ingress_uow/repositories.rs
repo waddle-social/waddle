@@ -1685,5 +1685,4 @@ impl ClaimRepository {
 }
 
 #[cfg(test)]
-#[path = "reconciliation_authority_tests.rs"]
 mod reconciliation_authority_tests;

@@ -375,5 +375,4 @@ async fn transition(
 }
 
 #[cfg(test)]
-#[path = "send_attempts_tests.rs"]
 mod tests;

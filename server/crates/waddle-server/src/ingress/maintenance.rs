@@ -31,11 +31,9 @@ use super::gc::{run_retention_gc_with_budget, RetentionGcBudget};
 use super::recovery_executor::AttemptClassification;
 use super::RecoveryEnvironment;
 
-#[path = "maintenance_stalls.rs"]
 mod stalls;
 use stalls::{RecoveryAttempt, StalledRows, Suppression, UnsupportedRows};
 
-#[path = "maintenance_waits.rs"]
 mod waits;
 
 type MaintenancePosition = (DateTime<Utc>, MessageKey);
@@ -978,5 +976,4 @@ async fn evidence_now(
 }
 
 #[cfg(test)]
-#[path = "maintenance_tests.rs"]
 mod tests;

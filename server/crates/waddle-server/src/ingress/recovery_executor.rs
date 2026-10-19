@@ -569,5 +569,4 @@ pub(super) fn attempt_count(key: MessageKey) -> u64 {
 }
 
 #[cfg(test)]
-#[path = "recovery_executor_tests.rs"]
 mod tests;

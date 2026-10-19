@@ -242,5 +242,4 @@ impl ResourcePresenceAsker for RelayResourcePresenceAsker {
 }
 
 #[cfg(test)]
-#[path = "resource_presence_tests.rs"]
 mod tests;

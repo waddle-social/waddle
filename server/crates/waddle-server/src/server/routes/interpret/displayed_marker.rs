@@ -493,5 +493,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "displayed_marker_plan_tests.rs"]
 mod plan_tests;

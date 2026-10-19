@@ -1358,11 +1358,9 @@ async fn complete_fresh_remote_retirement(
 }
 
 #[cfg(test)]
-#[path = "socket_registration_tests.rs"]
 mod registration_tests;
 
 #[cfg(test)]
-#[path = "socket_retirement_tests.rs"]
 mod retirement_tests;
 
 #[cfg(test)]

@@ -1401,5 +1401,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "muc_direct_plan_failure_tests.rs"]
 mod plan_failure_tests;

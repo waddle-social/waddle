@@ -738,5 +738,4 @@ pub(crate) fn offline_quota_error() -> xmpp_parsers::stanza_error::StanzaError {
 }
 
 #[cfg(test)]
-#[path = "offline_delivery_recovery_tests.rs"]
 mod recovery_tests;

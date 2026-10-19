@@ -1223,9 +1223,7 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "acceptance_fence_tests.rs"]
 mod acceptance_fence_tests;
 
 #[cfg(test)]
-#[path = "malformed_outbox_tests.rs"]
 mod malformed_outbox_tests;

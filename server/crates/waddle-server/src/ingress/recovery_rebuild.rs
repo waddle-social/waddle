@@ -512,14 +512,10 @@ fn is_delegated(intent: &IngressEffectIntent, delegated: &[GroupchatNotification
 }
 
 #[cfg(test)]
-#[path = "recovery_rebuild_tests.rs"]
 mod tests;
 
-#[path = "recovery_muc.rs"]
 mod muc;
 
-#[path = "recovery_rebuild_carbons.rs"]
 mod carbons;
 
-#[path = "recovery_invitation.rs"]
 mod invitation;

@@ -2013,7 +2013,6 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "groupchat_recovery_tests.rs"]
 mod recovery_tests;
 
 #[cfg(test)]

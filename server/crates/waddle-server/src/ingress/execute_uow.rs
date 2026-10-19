@@ -13,22 +13,17 @@ use crate::{
 
 use super::{decision::IngressDecision, recorded::RouteProgress};
 
-#[path = "execute_offline.rs"]
 mod offline;
 #[cfg(test)]
 pub(crate) use offline::{fail_before_offline_settlement, retry_before_offline_settlement};
 
-#[path = "execute_projection.rs"]
 mod projection;
 
-#[path = "execute_archive.rs"]
 mod archive;
-#[path = "execute_recovery.rs"]
 mod recovery;
 #[cfg(test)]
 pub(crate) use recovery::fail_after_recovery_update;
 
-#[path = "execute_relay_copy.rs"]
 mod relay_copy;
 
 pub(super) async fn execute_legacy_remote(
@@ -70,16 +65,13 @@ pub(super) async fn execute_legacy_remote(
     }
 }
 
-#[path = "execute_invite.rs"]
 mod invite;
 #[cfg(test)]
 pub(crate) use invite::PAUSE_BEFORE_INVITATION_SETTLEMENT;
 
-#[path = "execute_ambiguous_offline.rs"]
 mod ambiguous_offline;
 pub(crate) use ambiguous_offline::pending_id as ambiguous_offline_pending_id;
 
-#[path = "execute_detached.rs"]
 mod detached;
 pub(in crate::ingress) use detached::record_delivery_progress;
 pub(in crate::ingress) use detached::record_policy_progress;

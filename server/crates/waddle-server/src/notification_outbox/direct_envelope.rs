@@ -189,5 +189,4 @@ fn mention_bits_for_recipient(message: &Message, recipient: &BareJid) -> Recipie
 }
 
 #[cfg(test)]
-#[path = "direct_envelope_tests.rs"]
 mod tests;

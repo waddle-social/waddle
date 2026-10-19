@@ -1546,10 +1546,8 @@ async fn sqlite_scoped_listing_fails_closed_on_an_undecodable_matching_row() {
         .expect_err("a matching row that cannot be decoded is not proof of absence");
 }
 
-#[path = "ingress_receipt_tests.rs"]
 mod ingress_receipt_tests;
 
-#[path = "ingress_append_tests.rs"]
 mod ingress_append_tests;
 
 async fn promotion_append_outcomes(storage: &dyn SmPersistenceStorage, stream: &str) {
@@ -2039,5 +2037,4 @@ async fn sqlite_ack_journal_survives_reopen_before_pending_settlement() {
     storage.delete_session(&stream).await.unwrap();
 }
 
-#[path = "incremental_tests.rs"]
 mod incremental_tests;

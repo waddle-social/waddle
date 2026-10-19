@@ -272,5 +272,4 @@ async fn finish_full_jid_relay_at(
 }
 
 #[cfg(test)]
-#[path = "delivery_immediate_tests.rs"]
 mod tests;

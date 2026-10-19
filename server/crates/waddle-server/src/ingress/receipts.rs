@@ -11,7 +11,6 @@ use crate::{
     },
 };
 
-#[path = "receipts_routing.rs"]
 pub(super) mod routing;
 
 pub(super) fn external_receipts(

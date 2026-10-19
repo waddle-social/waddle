@@ -2274,9 +2274,7 @@ mod ingress_colocation_tests {
 }
 
 #[cfg(test)]
-#[path = "pending_colocation_tests.rs"]
 mod pending_colocation_tests;
 
 #[cfg(test)]
-#[path = "sm_colocation_tests.rs"]
 mod sm_colocation_tests;

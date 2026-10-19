@@ -1016,5 +1016,4 @@ fn verify_iq_from_matches_query(from_attr: Option<&str>, service_jid: &str) -> R
 }
 
 #[cfg(test)]
-#[path = "client_account_tests.rs"]
 mod tests;

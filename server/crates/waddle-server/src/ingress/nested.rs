@@ -400,5 +400,4 @@ impl TestGate {
 }
 
 #[cfg(test)]
-#[path = "nested_tests.rs"]
 mod tests;

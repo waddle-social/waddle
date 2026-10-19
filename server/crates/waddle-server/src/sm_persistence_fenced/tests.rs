@@ -1986,5 +1986,4 @@ async fn fenced_only_initialization_creates_ack_journal_and_protects_attached_cl
     admin.close().await;
 }
 
-#[path = "incremental_tests.rs"]
 mod incremental_tests;

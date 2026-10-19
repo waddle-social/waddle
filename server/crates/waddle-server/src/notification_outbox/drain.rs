@@ -879,5 +879,4 @@ async fn settle_candidate_ancestry_tx(
 }
 
 #[cfg(test)]
-#[path = "ancestry_tests.rs"]
 mod ancestry_tests;

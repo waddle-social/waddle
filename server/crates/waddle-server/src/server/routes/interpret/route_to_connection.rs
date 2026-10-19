@@ -1,5 +1,4 @@
 use super::*;
-#[path = "route_to_connection_plan.rs"]
 pub(super) mod plan;
 use std::{future::Future, pin::Pin};
 use waddle_xmpp::ingress::IngressEffectIntent;
@@ -1944,5 +1943,4 @@ fn stanza_message_id(stanza: &Stanza) -> &str {
 }
 
 #[cfg(test)]
-#[path = "routing_plan_failure_tests.rs"]
 mod routing_plan_failure_tests;

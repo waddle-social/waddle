@@ -430,7 +430,6 @@ paired!(
     postgres_live_recorded_frames_are_proven_at_detach
 );
 
-#[path = "user_actor_keyed_append.rs"]
 mod user_actor_keyed_append;
 
 #[tokio::test]

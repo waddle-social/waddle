@@ -1750,5 +1750,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "space_catalog_cascade_tests.rs"]
 mod space_catalog_cascade_tests;

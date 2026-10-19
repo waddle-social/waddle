@@ -312,5 +312,4 @@ fn live_route_allowed(
 }
 
 #[cfg(test)]
-#[path = "restore_offline_tests.rs"]
 mod tests;

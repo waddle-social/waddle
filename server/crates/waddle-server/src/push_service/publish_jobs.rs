@@ -1472,7 +1472,6 @@ impl DatabasePushServiceStore {
 }
 
 #[cfg(test)]
-#[path = "publish_jobs_quota_tests.rs"]
 mod quota_tests;
 
 #[cfg(test)]
@@ -1791,5 +1790,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "publish_jobs_outbox_tests.rs"]
 mod outbox_proof_tests;

@@ -590,9 +590,7 @@ pub(super) async fn delivery_status(
 }
 
 #[cfg(test)]
-#[path = "live_delivery_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "live_delivery_test_hooks.rs"]
 pub(crate) mod test_hooks;

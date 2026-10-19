@@ -467,5 +467,4 @@ impl waddle_xmpp::AppState for XmppAppState {
 }
 
 #[cfg(test)]
-#[path = "xmpp_state_tests.rs"]
 mod tests;

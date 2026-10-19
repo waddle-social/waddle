@@ -161,5 +161,4 @@ impl PlanSink {
 }
 
 #[cfg(test)]
-#[path = "plan_tests.rs"]
 mod tests;

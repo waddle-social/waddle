@@ -8,7 +8,6 @@ use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, NotificationActivity
 
 const PAGE: i64 = 64;
 
-#[path = "legacy_ancestry/quarantine.rs"]
 mod quarantine;
 
 #[derive(Clone, Copy)]
@@ -18,7 +17,6 @@ enum AdoptionPhase {
 }
 
 #[cfg(test)]
-#[path = "legacy_ancestry_tests.rs"]
 mod tests;
 
 struct Recorded {

@@ -1125,5 +1125,4 @@ fn is_client_sm_request(frame: &str) -> bool {
 }
 
 #[cfg(test)]
-#[path = "tests/ingress_replay_receipts.rs"]
 mod ingress_replay_receipts;

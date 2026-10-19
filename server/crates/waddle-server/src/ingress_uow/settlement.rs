@@ -87,5 +87,4 @@ fn discharges(recorded: &IngressEffectIntent, evidence: &IngressEffectIntent) ->
 }
 
 #[cfg(test)]
-#[path = "settlement_tests.rs"]
 mod tests;

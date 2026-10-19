@@ -1399,7 +1399,6 @@ impl DatabasePushServiceStore {
 }
 
 #[cfg(test)]
-#[path = "worker_uncertainty_tests.rs"]
 mod uncertainty_tests;
 
 #[cfg(test)]

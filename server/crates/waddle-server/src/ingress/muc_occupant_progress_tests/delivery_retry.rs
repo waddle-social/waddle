@@ -495,5 +495,4 @@ async fn sqlite_xep0045_blocked_fanout_shares_probe_budget_and_reaches_ready_new
     fixture.close().await;
 }
 
-#[path = "delivery_rounds.rs"]
 mod delivery_rounds;

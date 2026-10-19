@@ -1214,7 +1214,6 @@ async fn migrate_coalescing_index_tx(
 }
 
 #[cfg(test)]
-#[path = "schema/startup_tests.rs"]
 mod startup_tests;
 
 #[cfg(test)]

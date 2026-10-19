@@ -1878,7 +1878,6 @@ pub(super) async fn handle_muc_admin_iq(
 }
 
 #[cfg(test)]
-#[path = "muc_admin_recovery_tests.rs"]
 mod recovery_tests;
 
 #[cfg(test)]

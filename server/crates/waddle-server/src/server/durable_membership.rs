@@ -132,5 +132,4 @@ impl DurableMembershipSource for PermissionDurableMembershipSource {
 }
 
 #[cfg(test)]
-#[path = "durable_membership_tests.rs"]
 mod tests;

@@ -857,7 +857,6 @@ fn mark_retraction_cascade(event: &mut xmpp_parsers::message::Message) {
 }
 
 #[cfg(test)]
-#[path = "dm_pin_authority_tests.rs"]
 mod authority_tests;
 
 #[cfg(test)]

@@ -9614,5 +9614,4 @@ mod group_dm_durable_reconciliation_tests {
 }
 
 #[cfg(test)]
-#[path = "channel_inventory_tests.rs"]
 mod channel_inventory_tests;

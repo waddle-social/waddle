@@ -1219,5 +1219,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "room_manifest_replay_transient_tests.rs"]
 mod transient_tests;

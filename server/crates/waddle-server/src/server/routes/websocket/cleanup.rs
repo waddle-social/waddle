@@ -7090,5 +7090,4 @@ mod remote_muc_retry_tests {
 }
 
 #[cfg(all(test, feature = "clustering"))]
-#[path = "cleanup/remote_muc_observation_tests.rs"]
 mod remote_muc_observation_tests;

@@ -1,4 +1,3 @@
-#[path = "direct_archive_plan.rs"]
 mod plan;
 use super::effects::direct::{external, DurableDirectEffect, ExternalDirectEffect};
 use super::*;
@@ -714,5 +713,4 @@ fn retraction_stanza_id(message: &Message, archive: &BareJid) -> Option<StanzaId
 }
 
 #[cfg(test)]
-#[path = "direct_archive_correction_plan_tests.rs"]
 mod correction_plan_tests;

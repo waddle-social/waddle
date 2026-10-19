@@ -1077,11 +1077,9 @@ pub(crate) mod commit_hooks;
 #[cfg(test)]
 pub(crate) mod commit_race_gate;
 #[cfg(test)]
-#[path = "commit_tests.rs"]
 mod tests;
 
 #[cfg(test)]
-#[path = "alias_denial_replay_tests.rs"]
 mod alias_denial_replay_tests;
 
 /// Live invitation delivery and its offline fallback are mutually exclusive.

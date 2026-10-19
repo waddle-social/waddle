@@ -1310,5 +1310,4 @@ fn reject_resource_message(
 }
 
 #[cfg(test)]
-#[path = "tests/ingress_frame_limits.rs"]
 mod ingress_frame_limits;

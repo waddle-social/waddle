@@ -1,9 +1,7 @@
 use super::*;
 
-#[path = "messages_offline.rs"]
 mod messages_offline;
 
-#[path = "messages_host_owned.rs"]
 mod messages_host_owned;
 
 async fn current_admission_revision(
