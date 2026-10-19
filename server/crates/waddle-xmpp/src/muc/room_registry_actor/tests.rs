@@ -1476,7 +1476,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         sender_full: &sender,
         occupants: &occupants,
         durable_recipient_bare_jids: &snapshot.durable_recipient_bare_jids,
-        mention_recipient_bare_jids: &[],
+        mention_recipients: crate::protocol::room::MentionRecipients::Empty,
         managed_room_forbidden: false,
         room_moderated: snapshot.config.moderated,
         room_occupants_may_change_subject: false,

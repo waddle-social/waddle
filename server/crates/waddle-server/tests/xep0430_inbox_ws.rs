@@ -673,7 +673,7 @@ fn groupchat_xml(
     element_to_xml(message)
 }
 
-async fn send_groupchat(client: &mut WsXmppClient, xml: String, id: &str) {
+async fn send_groupchat(client: &mut WsXmppClient, xml: String, id: &str) -> String {
     client.send(&xml).await.expect("send groupchat");
     let marker_sq = format!("id='{id}'");
     let marker_dq = format!(r#"id="{id}""#);
@@ -687,6 +687,7 @@ async fn send_groupchat(client: &mut WsXmppClient, xml: String, id: &str) {
         !reflection.contains("type='error'") && !reflection.contains(r#"type="error""#),
         "groupchat {id} was rejected: {reflection}"
     );
+    reflection
 }
 
 /// The caller's inbox entry for `room` plus the body of its latest
@@ -744,7 +745,7 @@ async fn wait_for_room_body(client: &mut WsXmppClient, room: &str, body: &str) -
 /// it, proving every earlier message in `room` has been projected.
 async fn barrier(admin: &mut WsXmppClient, room: &str) {
     let body = format!("barrier-{}", uuid::Uuid::new_v4());
-    send_groupchat(admin, groupchat_xml(room, &body, &body, &[], None), &body).await;
+    let _ = send_groupchat(admin, groupchat_xml(room, &body, &body, &[], None), &body).await;
     wait_for_room_body(admin, room, &body).await;
 }
 
@@ -781,7 +782,7 @@ async fn xep0430_mention_gives_offline_non_member_an_inbox_row() {
     // The peer has never joined and is offline. The same message also
     // names the sender (self-mention), an account that does not exist,
     // and a JID on another domain; none of those may block the peer's row.
-    send_groupchat(
+    let _ = send_groupchat(
         &mut admin,
         groupchat_xml(
             &room,
@@ -838,7 +839,7 @@ async fn xep0430_mention_does_not_reach_non_member_of_members_only_room() {
     .await;
     join_as(&mut admin, &room, PRIMARY_USER).await;
 
-    send_groupchat(
+    let _ = send_groupchat(
         &mut admin,
         groupchat_xml(
             &room,
@@ -880,7 +881,7 @@ async fn xep0430_mention_does_not_reach_permission_graph_banned_user() {
     .await;
     join_as(&mut admin, &room, PRIMARY_USER).await;
 
-    send_groupchat(
+    let _ = send_groupchat(
         &mut admin,
         groupchat_xml(
             &room,
@@ -939,7 +940,7 @@ async fn xep0430_mention_does_not_reach_user_who_blocked_the_sender() {
     let mut admin = primary_client(&server, "mention-blocked").await;
     let room = create_channel(&mut admin, "mention-blocked", false).await;
     join_as(&mut admin, &room, PRIMARY_USER).await;
-    send_groupchat(
+    let _ = send_groupchat(
         &mut admin,
         groupchat_xml(
             &room,
@@ -974,7 +975,7 @@ async fn xep0430_mention_over_the_xep0513_count_cap_reaches_nobody() {
     // mention in the message is ignored (XEP-0513 §304).
     let mut mentioned = vec![bare_of(PEER_USER)];
     mentioned.extend((1..=5).map(|index| bare_of(&format!("filler{index}"))));
-    send_groupchat(
+    let _ = send_groupchat(
         &mut admin,
         groupchat_xml(&room, "mention-cap-1", "hey everyone", &mentioned, None),
         "mention-cap-1",
@@ -999,13 +1000,13 @@ async fn xep0430_mention_added_by_correction_reaches_nobody() {
     let room = create_channel(&mut admin, "mention-correct", false).await;
     join_as(&mut admin, &room, PRIMARY_USER).await;
 
-    send_groupchat(
+    let _ = send_groupchat(
         &mut admin,
         groupchat_xml(&room, "mention-correct-1", "hey", &[], None),
         "mention-correct-1",
     )
     .await;
-    send_groupchat(
+    let _ = send_groupchat(
         &mut admin,
         groupchat_xml(
             &room,
@@ -1025,5 +1026,302 @@ async fn xep0430_mention_added_by_correction_reaches_nobody() {
             .is_none(),
         "an XEP-0308 correction must not notify a newly mentioned non-member"
     );
+    let _ = admin.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// Revisions reach the mentioned non-members the original reached
+// ---------------------------------------------------------------------------
+
+const NS_SID: &str = "urn:xmpp:sid:0";
+const NS_WADDLE_INBOX: &str = "urn:waddle:inbox:0";
+const NS_RETRACT: &str = "urn:xmpp:message-retract:1";
+const NS_MODERATE: &str = "urn:xmpp:message-moderate:1";
+
+/// `(unread, preview)` of the caller's inbox row for `room`.
+async fn room_unread_and_preview(
+    client: &mut WsXmppClient,
+    room: &str,
+    id: &str,
+) -> Option<(String, Option<String>)> {
+    client
+        .send(&inbox_query_iq(id, None, Some(false), None))
+        .await
+        .expect("send inbox query");
+    let frames = collect_inbox_response(client, id).await;
+    frames
+        .iter()
+        .filter_map(|frame| Element::from_str(frame).ok())
+        .filter(|message| message.name() == "message")
+        .find_map(|message| {
+            let entry = message
+                .children()
+                .find(|child| child.name() == "entry" && child.ns() == NS_INBOX)?;
+            if entry.attr("jid") != Some(room) {
+                return None;
+            }
+            let preview = message
+                .children()
+                .find(|child| child.name() == "metadata" && child.ns() == NS_WADDLE_INBOX)
+                .and_then(|metadata| metadata.attr("preview"))
+                .map(str::to_string);
+            Some((
+                entry.attr("unread").unwrap_or_default().to_string(),
+                preview,
+            ))
+        })
+}
+
+/// Poll until the caller's row for `room` satisfies `done`; return it.
+async fn wait_for_row<F: Fn(&(String, Option<String>)) -> bool>(
+    client: &mut WsXmppClient,
+    room: &str,
+    done: F,
+) -> (String, Option<String>) {
+    let mut last = None;
+    for attempt in 0..50 {
+        last = room_unread_and_preview(client, room, &format!("row-{attempt}")).await;
+        if last.as_ref().is_some_and(&done) {
+            return last.expect("row present");
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("inbox row for {room} never reached the expected state; last: {last:?}");
+}
+
+fn room_stanza_id(reflection: &str, room: &str) -> String {
+    Element::from_str(reflection)
+        .expect("reflection XML")
+        .children()
+        .find(|child| {
+            child.name() == "stanza-id" && child.ns() == NS_SID && child.attr("by") == Some(room)
+        })
+        .and_then(|stanza_id| stanza_id.attr("id"))
+        .map(str::to_string)
+        .expect("room-assigned stanza-id on the reflection")
+}
+
+/// Open channel, admin joined, and an original message that mentions the
+/// offline peer and is already in the peer's inbox row. Returns the room,
+/// the admin client, the peer client and the original's reflection.
+async fn mentioned_peer_fixture(
+    server: &TestServer,
+    name: &str,
+) -> (String, WsXmppClient, WsXmppClient, String) {
+    let mut admin = primary_client(server, name).await;
+    let room = create_channel(&mut admin, name, false).await;
+    join_as(&mut admin, &room, PRIMARY_USER).await;
+    let reflection = send_groupchat(
+        &mut admin,
+        groupchat_xml(
+            &room,
+            "secret-1",
+            "secret @peer",
+            &[bare_of(PEER_USER)],
+            None,
+        ),
+        "secret-1",
+    )
+    .await;
+    let mut peer = peer_client(server, &format!("{name}-peer")).await;
+    let row = wait_for_row(&mut peer, &room, |(_, preview)| {
+        preview.as_deref() == Some("secret @peer")
+    })
+    .await;
+    assert_eq!(row.0, "1", "the original mention gives the peer one unread");
+    (room, admin, peer, reflection)
+}
+
+#[tokio::test]
+async fn xep0424_retraction_replaces_mentioned_non_member_row() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = mention_server();
+    let (room, mut admin, mut peer, reflection) =
+        mentioned_peer_fixture(&server, "revise-retract").await;
+    let target = room_stanza_id(&reflection, &room);
+
+    let retraction = Element::builder("message", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "groupchat")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room.as_str())
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "retract-1")
+        .append(
+            Element::builder("retract", NS_RETRACT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), target)
+                .build(),
+        )
+        .append(
+            Element::builder("body", CLIENT_NS)
+                .append("/me retracted a previous message".to_string())
+                .build(),
+        )
+        .build();
+    let _ = send_groupchat(&mut admin, element_to_xml(retraction), "retract-1").await;
+
+    let row = wait_for_row(&mut peer, &room, |(_, preview)| {
+        preview.as_deref() != Some("secret @peer")
+    })
+    .await;
+    assert_eq!(
+        row.0, "1",
+        "a retraction replaces the row's content without bumping unread"
+    );
+    let _ = peer.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn xep0425_moderation_replaces_mentioned_non_member_row() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = mention_server();
+    let (room, mut admin, mut peer, reflection) =
+        mentioned_peer_fixture(&server, "revise-moderate").await;
+    let target = room_stanza_id(&reflection, &room);
+
+    let moderate = Element::builder("iq", CLIENT_NS)
+        .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+        .attr(minidom::rxml::xml_ncname!("id").to_owned(), "moderate-1")
+        .attr(minidom::rxml::xml_ncname!("to").to_owned(), room.as_str())
+        .append(
+            Element::builder("moderate", NS_MODERATE)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), target)
+                .append(Element::builder("retract", NS_RETRACT).build())
+                .build(),
+        )
+        .build();
+    admin
+        .send(&element_to_xml(moderate))
+        .await
+        .expect("send moderation");
+    let result = admin
+        .recv_matching(|frame| frame.contains("<iq") && frame.contains("moderate-1"))
+        .await
+        .expect("moderation result");
+    assert!(
+        result.contains("type='result'") || result.contains(r#"type="result""#),
+        "moderation failed: {result}"
+    );
+
+    let row = wait_for_row(&mut peer, &room, |(_, preview)| {
+        preview.as_deref() != Some("secret @peer")
+    })
+    .await;
+    assert_eq!(
+        row.0, "1",
+        "a moderation replaces the row's content without bumping unread"
+    );
+    let _ = peer.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn xep0308_correction_replaces_mentioned_non_member_row() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = mention_server();
+    let (room, mut admin, mut peer, _reflection) =
+        mentioned_peer_fixture(&server, "revise-correct").await;
+
+    let _ = send_groupchat(
+        &mut admin,
+        groupchat_xml(&room, "secret-2", "fixed", &[], Some("secret-1")),
+        "secret-2",
+    )
+    .await;
+
+    let row = wait_for_row(&mut peer, &room, |(_, preview)| {
+        preview.as_deref() == Some("fixed")
+    })
+    .await;
+    assert_eq!(
+        row.0, "1",
+        "a correction replaces the row's content without bumping unread"
+    );
+    let _ = peer.close().await;
+    let _ = admin.close().await;
+}
+
+#[tokio::test]
+async fn xep0191_block_of_room_service_or_occupant_stops_mention_row() {
+    let _guard = TEST_SERIAL.lock().await;
+    let blockers = [
+        ("dave", "dave-password-1"),
+        ("erin", "erin-password-1"),
+        ("frank", "frank-password-1"),
+    ];
+    let server = TestServer::start_with_extra_accounts(&[
+        (PEER_USER, PEER_PASSWORD),
+        blockers[0],
+        blockers[1],
+        blockers[2],
+    ]);
+    let mut admin = primary_client(&server, "mention-block-room").await;
+    let room = create_channel(&mut admin, "mention-block-room", false).await;
+    let service = room
+        .split_once('@')
+        .map(|(_, service)| service.to_string())
+        .expect("room JID has a service domain");
+    let occupant = format!("{room}/{PRIMARY_USER}");
+
+    for ((user, password), blocked) in blockers.iter().zip([&room, &service, &occupant]) {
+        let mut client = WsXmppClient::connect_and_auth(
+            &server.ws_url(),
+            DOMAIN,
+            user,
+            password,
+            &format!("{user}-blocker"),
+        )
+        .await
+        .expect("connect blocker");
+        let block = Element::builder("iq", CLIENT_NS)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), "block-1")
+            .append(
+                Element::builder("block", NS_BLOCKING)
+                    .append(
+                        Element::builder("item", NS_BLOCKING)
+                            .attr(
+                                minidom::rxml::xml_ncname!("jid").to_owned(),
+                                blocked.as_str(),
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build();
+        client
+            .send(&element_to_xml(block))
+            .await
+            .expect("send block");
+        client
+            .recv_matching(|frame| frame.contains("block-1") && frame.contains("result"))
+            .await
+            .expect("block result");
+        let _ = client.close().await;
+    }
+
+    join_as(&mut admin, &room, PRIMARY_USER).await;
+    let mut mentioned: Vec<String> = blockers.iter().map(|(user, _)| bare_of(user)).collect();
+    mentioned.push(bare_of(PEER_USER));
+    let _ = send_groupchat(
+        &mut admin,
+        groupchat_xml(&room, "mention-blockers-1", "hey all", &mentioned, None),
+        "mention-blockers-1",
+    )
+    .await;
+    barrier(&mut admin, &room).await;
+
+    assert!(
+        user_room_row(&server, PEER_USER, PEER_PASSWORD, &room)
+            .await
+            .is_some(),
+        "the non-blocking mentioned non-member still gets a row"
+    );
+    for ((user, password), blocked) in blockers.iter().zip([&room, &service, &occupant]) {
+        assert!(
+            user_room_row(&server, user, password, &room)
+                .await
+                .is_none(),
+            "XEP-0191: {user} blocked {blocked}, so the mention gives them no row"
+        );
+    }
     let _ = admin.close().await;
 }

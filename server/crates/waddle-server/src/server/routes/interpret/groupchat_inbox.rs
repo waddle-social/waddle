@@ -35,9 +35,10 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         thread,
         dispatch_timestamp,
     } = input;
-    // Every non-sender audience bumps unread: durable members and
-    // mentioned non-members alike.
-    let is_recipient = audience.is_recipient();
+    // Durable members and newly mentioned non-members bump unread. The
+    // sender's own copy and a mentioned non-member's revision row only
+    // replace the row's content.
+    let is_recipient = audience.notifies();
     let Some(_) = deps.inbox_storage else {
         debug!(
             owner = %owner,
@@ -160,7 +161,7 @@ fn groupchat_notification_recovery_mutation(
 fn groupchat_notification_recovery_item(
     event: &ProjectGroupchatInboxEvent<'_, '_>,
 ) -> Option<super::effects::room::PlannedGroupchatNotificationRecovery> {
-    if !event.deps.effects.is_planning() || !event.audience.is_recipient() {
+    if !event.deps.effects.is_planning() || !event.audience.notifies() {
         return None;
     }
     let archive_id = extract_room_stanza_id(&event.message, &event.room)?;
@@ -274,9 +275,10 @@ async fn enqueue_groupchat_notification_candidate(
         outcome,
         notification_recovery,
     } = input;
-    // Sender rows never notify. Durable members and resolved
-    // mentioned non-members both enqueue; live occupancy alone never does.
-    if !audience.is_recipient() {
+    // Sender rows and revision rows never notify. Durable members and
+    // resolved mentioned non-members both enqueue; live occupancy alone
+    // never does.
+    if !audience.notifies() {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
     // XEP-0203 `<delay/>` filter NOT applied here (Copilot review

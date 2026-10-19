@@ -18,12 +18,12 @@
 //! sender's own row; durable recipients get
 //! [`GroupchatInboxAudience::DurableMember`]. Personally-mentioned
 //! non-members resolved by the dispatcher
-//! ([`RoomContext::mention_recipient_bare_jids`]) get
+//! ([`RoomContext::mention_recipients`]) get
 //! [`GroupchatInboxAudience::MentionedNonMember`] rows, so a user who is
 //! not in an open room still sees and is notified of a mention.
 
 use super::super::event::{GroupchatInboxAudience, GroupchatThreadProjection, OutboundEvent};
-use super::context::{RoomContext, SyntheticSenderAuthority};
+use super::context::{MentionRecipients, RoomContext, SyntheticSenderAuthority};
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::inbox::runtime::{preview_text, should_project_message};
 use crate::types::Role;
@@ -97,7 +97,7 @@ impl RoomHandler for MucInboxHandler {
             .map(|occupant| occupant.bare_jid())
             .collect();
         let mut events = Vec::with_capacity(
-            1 + ctx.durable_recipient_bare_jids.len() + ctx.mention_recipient_bare_jids.len(),
+            1 + ctx.durable_recipient_bare_jids.len() + ctx.mention_recipients.bare_jids().len(),
         );
         let sender_bare = ctx.sender_full.to_bare();
         // XEP-0513 §"Multi-User Chats Permissions": freeze the sender's
@@ -146,7 +146,13 @@ impl RoomHandler for MucInboxHandler {
         }
         // Mentioned non-members come after the durable set so a durable
         // member who is also mentioned keeps the `DurableMember` row.
-        for bare in ctx.mention_recipient_bare_jids {
+        let mention_audience = match ctx.mention_recipients {
+            MentionRecipients::Empty | MentionRecipients::Mentioned(_) => {
+                GroupchatInboxAudience::MentionedNonMember
+            }
+            MentionRecipients::RevisionOf(_) => GroupchatInboxAudience::MentionedNonMemberRevision,
+        };
+        for bare in ctx.mention_recipients.bare_jids() {
             if bare == &sender_bare || !seen.insert(bare.clone()) {
                 continue;
             }
@@ -154,7 +160,7 @@ impl RoomHandler for MucInboxHandler {
                 owner: bare.clone(),
                 room: ctx.room.clone(),
                 message: Box::new(message.clone()),
-                audience: GroupchatInboxAudience::MentionedNonMember,
+                audience: mention_audience,
                 is_live_occupant: live_recipient_bares.contains(bare),
                 room_members_only: ctx.room_members_only,
                 sender_can_broadcast_channel_mention,
@@ -263,7 +269,7 @@ mod tests {
             sender_full,
             occupants,
             durable_recipient_bare_jids,
-            &[],
+            MentionRecipients::Empty,
             room_members_only,
             msg,
         )
@@ -274,7 +280,7 @@ mod tests {
         sender_full: &FullJid,
         occupants: &[OccupantSnapshot],
         durable_recipient_bare_jids: &[BareJid],
-        mention_recipient_bare_jids: &[BareJid],
+        mention_recipients: MentionRecipients<'_>,
         room_members_only: bool,
         msg: &mut Message,
     ) -> Vec<OutboundEvent> {
@@ -285,7 +291,7 @@ mod tests {
             sender_full,
             occupants,
             durable_recipient_bare_jids,
-            mention_recipient_bare_jids,
+            mention_recipients,
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,
@@ -315,7 +321,7 @@ mod tests {
                     ..
                 } => Some((
                     owner.clone(),
-                    audience.is_recipient(),
+                    audience.notifies(),
                     thread.as_ref().map(|t| t.thread_id.clone()),
                 )),
                 _ => None,
@@ -538,7 +544,7 @@ mod tests {
                 sender_full: sender,
                 occupants: &occupants,
                 durable_recipient_bare_jids: &[],
-                mention_recipient_bare_jids: &[],
+                mention_recipients: crate::protocol::room::MentionRecipients::Empty,
                 managed_room_forbidden: false,
                 room_moderated: false,
                 room_occupants_may_change_subject: false,
@@ -585,7 +591,7 @@ mod tests {
             sender_full: &bot,
             occupants: &occupants,
             durable_recipient_bare_jids: &[],
-            mention_recipient_bare_jids: &[],
+            mention_recipients: crate::protocol::room::MentionRecipients::Empty,
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,
@@ -627,7 +633,7 @@ mod tests {
             sender_full: &participant,
             occupants: &occupants,
             durable_recipient_bare_jids: &[],
-            mention_recipient_bare_jids: &[],
+            mention_recipients: crate::protocol::room::MentionRecipients::Empty,
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,
@@ -780,7 +786,13 @@ mod tests {
         let mut msg = groupchat(&room, &alice, "hey @carol");
 
         let events = run_with_audiences(
-            &room, &alice, &occupants, &durable, &mentioned, false, &mut msg,
+            &room,
+            &alice,
+            &occupants,
+            &durable,
+            MentionRecipients::Mentioned(&mentioned),
+            false,
+            &mut msg,
         );
 
         assert_eq!(
@@ -806,8 +818,8 @@ mod tests {
                 ),
             ]
         );
-        assert!(GroupchatInboxAudience::MentionedNonMember.is_recipient());
-        assert!(!GroupchatInboxAudience::Sender.is_recipient());
+        assert!(GroupchatInboxAudience::MentionedNonMember.notifies());
+        assert!(!GroupchatInboxAudience::Sender.notifies());
     }
 
     #[test]
@@ -828,7 +840,13 @@ mod tests {
         let mut msg = groupchat(&room, &alice, "hey all");
 
         let events = run_with_audiences(
-            &room, &alice, &occupants, &durable, &mentioned, false, &mut msg,
+            &room,
+            &alice,
+            &occupants,
+            &durable,
+            MentionRecipients::Mentioned(&mentioned),
+            false,
+            &mut msg,
         );
 
         let rows: Vec<(String, GroupchatInboxAudience)> = audiences(&events)
@@ -863,8 +881,15 @@ mod tests {
         let mentioned = vec![bare("dave@example.com"), bare("erin@example.com")];
         let mut msg = groupchat(&room, &alice, "@dave @erin");
 
-        let events =
-            run_with_audiences(&room, &alice, &occupants, &[], &mentioned, false, &mut msg);
+        let events = run_with_audiences(
+            &room,
+            &alice,
+            &occupants,
+            &[],
+            MentionRecipients::Mentioned(&mentioned),
+            false,
+            &mut msg,
+        );
 
         let live: Vec<(String, bool)> = audiences(&events)
             .into_iter()
@@ -877,6 +902,52 @@ mod tests {
                 ("dave@example.com".to_string(), true),
                 ("erin@example.com".to_string(), false),
             ]
+        );
+    }
+
+    #[test]
+    fn xep0424_revision_rows_replace_mentioned_non_member_content_without_notifying() {
+        let room = bare("team@conf.example.com");
+        let alice = full("alice@example.com/web");
+        let occupants = vec![occ(alice.clone(), "alice")];
+        let durable = vec![bare("bob@example.com")];
+        let revised_for = vec![bare("bob@example.com"), bare("carol@example.com")];
+        let mut msg = groupchat(&room, &alice, "edited");
+
+        let events = run_with_audiences(
+            &room,
+            &alice,
+            &occupants,
+            &durable,
+            MentionRecipients::RevisionOf(&revised_for),
+            false,
+            &mut msg,
+        );
+
+        let rows: Vec<(String, GroupchatInboxAudience)> = audiences(&events)
+            .into_iter()
+            .map(|(owner, audience, _, _)| (owner, audience))
+            .collect();
+        assert_eq!(
+            rows,
+            vec![
+                (
+                    "alice@example.com".to_string(),
+                    GroupchatInboxAudience::Sender
+                ),
+                (
+                    "bob@example.com".to_string(),
+                    GroupchatInboxAudience::DurableMember
+                ),
+                (
+                    "carol@example.com".to_string(),
+                    GroupchatInboxAudience::MentionedNonMemberRevision
+                ),
+            ]
+        );
+        assert!(
+            !GroupchatInboxAudience::MentionedNonMemberRevision.notifies(),
+            "a revision row replaces content without bumping unread or notifying"
         );
     }
 

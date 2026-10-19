@@ -161,7 +161,7 @@ mod groupchat_archive;
 mod groupchat_inbox;
 mod groupchat_validation;
 mod handoff;
-mod mention_audience;
+pub(crate) mod mention_audience;
 mod notification_activity_ingest;
 pub(crate) mod offline_delivery;
 mod recipient_selection;

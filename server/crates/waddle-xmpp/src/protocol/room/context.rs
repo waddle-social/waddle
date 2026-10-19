@@ -74,14 +74,10 @@ pub struct RoomContext<'a> {
     /// per-user rows; current occupancy is only a live-delivery and
     /// active-mention filter.
     pub durable_recipient_bare_jids: &'a [BareJid],
-    /// Bare JIDs outside the durable recipient set whom this message
-    /// personally mentions and who passed the dispatcher's account,
-    /// blocking and room-entry checks. Resolved once while planning the
-    /// dispatch; the inbox projection emits a
-    /// [`super::super::event::GroupchatInboxAudience::MentionedNonMember`]
-    /// row for each entry not already covered by the sender or the
-    /// durable set. Empty for members-only rooms and corrections.
-    pub mention_recipient_bare_jids: &'a [BareJid],
+    /// Personally-mentioned users outside the durable recipient set,
+    /// resolved once while planning the dispatch (after account,
+    /// blocking and room-entry checks). See [`MentionRecipients`].
+    pub mention_recipients: MentionRecipients<'a>,
     /// True when the room is the managed `announcements` room and the
     /// sender is NOT a server owner.
     ///
@@ -159,6 +155,37 @@ pub struct RoomContext<'a> {
     /// don't drift across a second-boundary (Copilot review on
     /// PR #279).
     pub dispatch_timestamp: i64,
+}
+
+/// Users outside a room's durable recipient set who still get an inbox
+/// row for one groupchat message, and why.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MentionRecipients<'a> {
+    /// No mentioned non-members (members-only rooms, bot sends, no
+    /// personal mentions).
+    #[default]
+    Empty,
+    /// This message personally mentions them: each gets a
+    /// [`super::super::event::GroupchatInboxAudience::MentionedNonMember`]
+    /// row (unread bump and notification).
+    Mentioned(&'a [BareJid]),
+    /// This message revises (XEP-0308 correction, XEP-0424 retraction,
+    /// XEP-0425 moderation) an archived message that mentioned them. Each
+    /// gets a
+    /// [`super::super::event::GroupchatInboxAudience::MentionedNonMemberRevision`]
+    /// row, which replaces the revised content without bumping unread or
+    /// notifying.
+    RevisionOf(&'a [BareJid]),
+}
+
+impl<'a> MentionRecipients<'a> {
+    /// The bare JIDs, whatever the reason.
+    pub fn bare_jids(&self) -> &'a [BareJid] {
+        match self {
+            Self::Empty => &[],
+            Self::Mentioned(jids) | Self::RevisionOf(jids) => jids,
+        }
+    }
 }
 
 /// Typed authority for a synthetic (server-authored) sender that

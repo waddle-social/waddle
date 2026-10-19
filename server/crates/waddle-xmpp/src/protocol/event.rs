@@ -216,14 +216,21 @@ pub enum GroupchatInboxAudience {
     /// An owner outside the durable set whom the message personally
     /// mentions (XEP-0372 mention reference or XEP-0513 `jid=` mention).
     /// The room dispatcher resolves this set once, at planning time,
-    /// after account, blocking and room-access checks.
+    /// after account, blocking and room-entry checks.
     MentionedNonMember,
+    /// An owner outside the durable set whom an archived message
+    /// mentioned, receiving this message's revision of it (XEP-0308
+    /// correction, XEP-0424 retraction, XEP-0425 moderation). The row's
+    /// content is replaced so the revised text no longer lingers, with no
+    /// unread bump and no notification.
+    MentionedNonMemberRevision,
 }
 
 impl GroupchatInboxAudience {
-    /// `true` for every audience except the sender's own copy.
-    pub fn is_recipient(self) -> bool {
-        !matches!(self, Self::Sender)
+    /// `true` when the row bumps unread and may enqueue an XEP-0357
+    /// notification: durable members and newly mentioned non-members.
+    pub fn notifies(self) -> bool {
+        matches!(self, Self::DurableMember | Self::MentionedNonMember)
     }
 }
 

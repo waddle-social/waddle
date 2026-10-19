@@ -442,7 +442,7 @@ pub(super) async fn dispatch_to_room(
         sender_full: &sender_full,
         occupants: &occupants,
         durable_recipient_bare_jids: &durable_recipient_bare_jids,
-        mention_recipient_bare_jids: &[],
+        mention_recipients: waddle_xmpp::protocol::room::MentionRecipients::Empty,
         managed_room_forbidden,
         room_moderated: snapshot.config.moderated,
         room_occupants_may_change_subject: snapshot.config.occupants_may_change_subject,
@@ -562,25 +562,54 @@ pub(super) async fn dispatch_to_room(
     };
 
     // 7. Resolve the personally-mentioned non-members (open rooms only)
-    //    once, here, after every gate has admitted the message. The
-    //    inbox projection effects planned from this dispatch carry the
-    //    result; recovery replays those recorded effects and never
-    //    re-resolves the audience.
-    let mention_recipient_bare_jids = super::mention_audience::resolve_mention_audience(
-        super::mention_audience::MentionAudienceRequest {
-            state,
-            deps,
-            room: &room_jid,
-            room_actor: &room_actor,
-            sender: &sender_full,
-            message: &prototype,
-            config: &snapshot.config,
-            durable_recipients: &durable_recipient_bare_jids,
-            is_correction: correction_target.is_some()
-                || extract_correction_from_message(&prototype).is_some(),
-        },
-    )
-    .await;
+    //    once, here, after every gate has admitted the message. A
+    //    correction or retraction instead re-derives the audience its
+    //    archived target notified, so their rows lose the revised content
+    //    too. The inbox projection effects planned from this dispatch
+    //    carry the result; recovery replays those recorded effects and
+    //    never re-resolves the audience.
+    let audience_scope = super::mention_audience::AudienceScope {
+        state,
+        local_domain: deps.local_domain,
+        blocking_storage: deps.blocking_storage,
+        room: &room_jid,
+        room_actor: &room_actor,
+        config: &snapshot.config,
+        durable_recipients: &durable_recipient_bare_jids,
+    };
+    let mention_author = super::mention_audience::MentionAuthor {
+        real: Some(Jid::from(sender_full.clone())),
+        occupant: sender_room_nick_jid.clone(),
+    };
+    let revised =
+        revised_archive_target(deps, &room_jid, &prototype, correction_target.as_ref()).await;
+    let (mention_recipient_bare_jids, mention_is_revision) = match revised.as_deref() {
+        Some(revised) => (
+            super::mention_audience::resolve_revision_audience(
+                &audience_scope,
+                &mention_author,
+                revised,
+            )
+            .await,
+            true,
+        ),
+        None => (
+            super::mention_audience::resolve_mention_audience(
+                &audience_scope,
+                &mention_author,
+                &prototype,
+                correction_target.is_some()
+                    || extract_correction_from_message(&prototype).is_some(),
+            )
+            .await,
+            false,
+        ),
+    };
+    let mention_recipients = if mention_is_revision {
+        waddle_xmpp::protocol::room::MentionRecipients::RevisionOf(&mention_recipient_bare_jids)
+    } else {
+        waddle_xmpp::protocol::room::MentionRecipients::Mentioned(&mention_recipient_bare_jids)
+    };
     if let Some(capture) = deps.ingress_effect_capture.as_ref() {
         capture.reserve_room_capacity(
             snapshot.config.max_occupants,
@@ -597,7 +626,7 @@ pub(super) async fn dispatch_to_room(
         sender_full: &sender_full,
         occupants: &occupants,
         durable_recipient_bare_jids: &durable_recipient_bare_jids,
-        mention_recipient_bare_jids: &mention_recipient_bare_jids,
+        mention_recipients,
         managed_room_forbidden,
         // XEP-0045 §7.5 (Copilot review on PR #279): the chain's
         // `OccupancyValidationHandler` enforces visitor-may-not-speak
@@ -1092,3 +1121,44 @@ mod plan_tests;
 #[cfg(test)]
 #[path = "room_dispatch_failure_tests.rs"]
 mod failure_tests;
+
+/// The archived message a groupchat correction (XEP-0308) or retraction
+/// (XEP-0424) revises, already authorized by rich-target validation.
+/// `None` for any other message, or when the archive cannot be read (the
+/// revision then reaches only the durable audience).
+async fn revised_archive_target(
+    deps: &Deps<'_>,
+    room: &BareJid,
+    message: &Message,
+    correction_target: Option<&Xep0359StanzaId>,
+) -> Option<Box<MamArchivedMessage>> {
+    let mam_storage = deps.mam_storage?;
+    let lookup = if let Some(target) = correction_target {
+        mam_storage
+            .get_message(&target.id)
+            .await
+            .map(|row| row.filter(|row| row.to.to_bare() == *room))
+    } else if let Some(RetractionKind::Request(retraction)) =
+        extract_retraction_from_message(message)
+    {
+        super::groupchat_validation::lookup_groupchat_retraction_target(
+            mam_storage,
+            room,
+            &retraction.retracts_id,
+        )
+        .await
+    } else {
+        return None;
+    };
+    match lookup {
+        Ok(row) => row.map(Box::new),
+        Err(error) => {
+            warn!(
+                room = %room,
+                %error,
+                "Mention audience: revised archive target lookup failed; revision reaches durable members only"
+            );
+            None
+        }
+    }
+}

@@ -1645,14 +1645,14 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             )]
             .into();
         }
-        match state
+        let moderated_target = match state
             .deps
             .protocol
             .mam_storage
             .get_message(&request.target_id)
             .await
         {
-            Ok(Some(message)) if message.to.to_string() == room_jid.to_string() => {}
+            Ok(Some(message)) if message.to.to_string() == room_jid.to_string() => message,
             Ok(Some(_)) => {
                 return vec![build_iq_error_xml_typed(
                     id,
@@ -1681,7 +1681,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 )]
                 .into();
             }
-        }
+        };
 
         let moderator_nick = context
             .nick
@@ -1916,6 +1916,18 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                 ),
             }
         }
+
+        // The moderated message may have notified mentioned non-members
+        // whose inbox rows still show its content; replace it there too.
+        crate::server::routes::interpret::mention_audience::project_moderation_to_mentioned_non_members(
+            state,
+            &room_jid,
+            &room_actor,
+            sender_jid,
+            &moderated_target,
+            &moderation,
+        )
+        .await;
 
         let mut frames = Vec::new();
         if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
