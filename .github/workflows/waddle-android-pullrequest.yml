@@ -61,6 +61,7 @@ on:
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
     - server/vendor/**
+  workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
   cancel-in-progress: true

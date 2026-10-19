@@ -126,6 +126,7 @@ schema.#Project & {
 		pullRequest: {
 			when: {
 				pullRequest: true
+				manual:      true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write"}
 			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.build]
