@@ -59,7 +59,7 @@ async fn legacy_queued_work_past_budget_parks_before_provider_send() {
 async fn parked_unknown_send_remains_unscheduled_after_restart() {
     let dir = tempfile::tempdir().expect("temporary database directory");
     let path = dir.path().join("parked.sqlite3");
-    let key = [37; 32];
+    let key = rand::random::<[u8; 32]>();
     let (id, node) = {
         let db = crate::db::Database::open_local("parked-restart", &path)
             .await
