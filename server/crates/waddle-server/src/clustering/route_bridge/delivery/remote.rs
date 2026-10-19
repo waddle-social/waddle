@@ -561,7 +561,9 @@ impl OrderedRelayDeliveryBridge {
                 .map(RemoteResourceOriginRefresh::Remote)
                 .unwrap_or(RemoteResourceOriginRefresh::Failed),
             RemoteResourceRegisterOutcome::NotRemote => RemoteResourceOriginRefresh::Failed,
-            RemoteResourceRegisterOutcome::Failed => RemoteResourceOriginRefresh::Failed,
+            RemoteResourceRegisterOutcome::Retryable | RemoteResourceRegisterOutcome::Failed => {
+                RemoteResourceOriginRefresh::Failed
+            }
         }
     }
 }

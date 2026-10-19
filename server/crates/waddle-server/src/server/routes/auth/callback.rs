@@ -1,4 +1,7 @@
 use super::*;
+use crate::auth::redirect::{
+    PkceS256Challenge, RedirectError, TrustedWebOrigins, XmppClientRedirectUri,
+};
 
 #[instrument(skip(state, query))]
 pub(super) async fn callback_handler(
@@ -43,6 +46,22 @@ pub(super) async fn callback_handler(
         return auth_error_to_response(AuthError::InvalidState).into_response();
     }
     record_auth_success(AuthStage::State);
+
+    // Check where this sign-in will be sent before any session exists. The
+    // start handlers already validated it; this also covers handshakes begun
+    // before those checks shipped.
+    let flow = match ValidatedFlow::from_pending(pending.flow.clone(), &state.trusted_web_origins) {
+        Ok(flow) => flow,
+        Err(err) => {
+            record_auth_failure(
+                &pending.provider_id,
+                None,
+                AuthFailure::AuthorizationMalformed,
+            );
+            return auth_error_to_response(AuthError::InvalidRequest(err.to_string()))
+                .into_response();
+        }
+    };
 
     let provider = match state.providers.get(&pending.provider_id) {
         Some(p) => p,
@@ -306,33 +325,15 @@ pub(super) async fn callback_handler(
         return auth_error_response(&provider.id, AuthStage::OidcCallback, err);
     }
 
-    match pending.flow {
-        PendingFlow::Browser {
-            next,
+    match flow {
+        ValidatedFlow::Browser {
+            return_to,
             session_transport,
         } => {
             let redirect_to = match session_transport {
-                BrowserSessionTransport::Cookie => next.unwrap_or_else(|| "/".to_string()),
+                BrowserSessionTransport::Cookie => state.trusted_web_origins.location(&return_to),
                 BrowserSessionTransport::Fragment => {
-                    let target = next.unwrap_or_else(|| "/".to_string());
-                    let mut url = match url::Url::parse(&target) {
-                        Ok(parsed) => parsed,
-                        Err(_) => match url::Url::parse(&state.base_url)
-                            .and_then(|base| base.join(&target))
-                        {
-                            Ok(parsed) => parsed,
-                            Err(err) => {
-                                return auth_error_response(
-                                    &provider.id,
-                                    AuthStage::OidcCallback,
-                                    AuthError::InvalidRequest(format!(
-                                        "invalid browser redirect target: {}",
-                                        err
-                                    )),
-                                );
-                            }
-                        },
-                    };
+                    let mut url = return_to;
 
                     let mut fragment = url::form_urlencoded::Serializer::new(String::new());
                     if let Some(existing) = url.fragment() {
@@ -361,7 +362,7 @@ pub(super) async fn callback_handler(
             record_auth_success(AuthStage::OidcCallback);
             response
         }
-        PendingFlow::Device { device_code } => {
+        ValidatedFlow::Device { device_code } => {
             // The approval must actually land on the device row: if the
             // grant expired and was pruned mid-callback, reporting
             // "Device authorized" would strand the poller forever and
@@ -434,10 +435,10 @@ pub(super) async fn callback_handler(
             )
                 .into_response()
         }
-        PendingFlow::Xmpp {
-            client_redirect_uri,
+        ValidatedFlow::Xmpp {
+            redirect,
             client_state,
-            client_code_challenge,
+            code_challenge,
         } => {
             let auth_code = Uuid::new_v4().to_string();
             if let Err(err) = state
@@ -446,8 +447,8 @@ pub(super) async fn callback_handler(
                     &auth_code,
                     &XmppAuthCode {
                         session_id: session.id.clone(),
-                        redirect_uri: client_redirect_uri.clone(),
-                        code_challenge: client_code_challenge,
+                        redirect_uri: redirect.as_str().to_string(),
+                        code_challenge: Some(code_challenge.as_str().to_string()),
                         created_at: Utc::now(),
                     },
                 )
@@ -461,28 +462,54 @@ pub(super) async fn callback_handler(
                 return auth_error_response(&provider.id, AuthStage::OidcCallback, err);
             }
 
-            let mut redirect = match url::Url::parse(&client_redirect_uri) {
-                Ok(v) => v,
-                Err(err) => {
-                    error!(error = %err, "Invalid XMPP redirect URI");
-                    return auth_error_response(
-                        &provider.id,
-                        AuthStage::OidcCallback,
-                        AuthError::InvalidRequest("invalid xmpp redirect_uri".to_string()),
-                    );
-                }
-            };
-
-            {
-                let mut qp = redirect.query_pairs_mut();
-                qp.append_pair("code", &auth_code);
-                if let Some(state_value) = client_state {
-                    qp.append_pair("state", &state_value);
-                }
-            }
+            let redirect = redirect.with_authorization_code(&auth_code, client_state.as_deref());
 
             record_auth_success(AuthStage::OidcCallback);
             Redirect::temporary(redirect.as_str()).into_response()
         }
+    }
+}
+
+/// A pending flow whose redirect target has been checked.
+enum ValidatedFlow {
+    Browser {
+        return_to: url::Url,
+        session_transport: BrowserSessionTransport,
+    },
+    Device {
+        device_code: String,
+    },
+    Xmpp {
+        redirect: XmppClientRedirectUri,
+        client_state: Option<String>,
+        code_challenge: PkceS256Challenge,
+    },
+}
+
+impl ValidatedFlow {
+    fn from_pending(flow: PendingFlow, trusted: &TrustedWebOrigins) -> Result<Self, RedirectError> {
+        Ok(match flow {
+            PendingFlow::Browser {
+                next,
+                session_transport,
+            } => Self::Browser {
+                return_to: trusted.resolve_return_url(next.as_deref())?,
+                session_transport,
+            },
+            PendingFlow::Device { device_code } => Self::Device { device_code },
+            PendingFlow::Xmpp {
+                client_redirect_uri,
+                client_state,
+                client_code_challenge,
+            } => Self::Xmpp {
+                redirect: XmppClientRedirectUri::parse(&client_redirect_uri)?,
+                client_state,
+                code_challenge: PkceS256Challenge::parse(
+                    client_code_challenge
+                        .as_deref()
+                        .ok_or(RedirectError::InvalidCodeChallenge)?,
+                )?,
+            },
+        })
     }
 }

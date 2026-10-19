@@ -440,12 +440,7 @@ pub struct NodeLeaseRunConfig {
     pub shutdown_sm_drain: Option<ShutdownSmDrain>,
 }
 
-pub struct ShutdownSmDrain {
-    pub process_stop: CancellationToken,
-    pub complete: CancellationToken,
-    pub budget: Duration,
-    pub started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
-}
+use super::ShutdownSmDrain;
 
 /// Best-effort, time-bounded [`NodeLeaseStore::mark_draining`] — mirrors
 /// `swarm.rs::release_slot_bounded`'s pattern exactly, one lease kind over:
@@ -918,6 +913,29 @@ impl<L> TerminalFenceContext<'_, L>
 where
     L: NodeLeaseStore + Send + Sync,
 {
+    async fn retire_if_drained(&self, identity: &NodeIdentity) {
+        let drained = self.shutdown_sm_drain.is_some_and(|sm| {
+            sm.process_stop.is_cancelled()
+                && sm.complete.is_cancelled()
+                && sm.connections_drained.load(Ordering::Acquire)
+        });
+        if !drained {
+            // A timed-out socket drain, or clustering-only self-fence, is
+            // not proof that no socket remains on this node. Let the normal
+            // stale-heartbeat expiry CAS commit its eventual departure.
+            return;
+        }
+        match tokio::time::timeout(self.control_plane_budget, self.lease.retire(identity)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, node_id = %identity.node_id, "terminal node retirement failed; deferring departure to lease expiry")
+            }
+            Err(_) => {
+                tracing::warn!(node_id = %identity.node_id, "terminal node retirement timed out; deferring departure to lease expiry")
+            }
+        }
+    }
+
     async fn shutdown(
         &self,
         claim_store: &Arc<dyn ClaimStore>,
@@ -1009,6 +1027,7 @@ where
         for entity in self.local_claims.terminal_sweep().await {
             self.local_claims.demote(&entity).await;
         }
+        self.retire_if_drained(identity).await;
     }
 
     async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
@@ -1046,6 +1065,10 @@ where
         mark_draining_bounded(self.lease, prior_identity, self.control_plane_budget).await;
         if registered_identity != prior_identity {
             mark_draining_bounded(self.lease, registered_identity, self.control_plane_budget).await;
+        }
+        self.retire_if_drained(prior_identity).await;
+        if registered_identity != prior_identity {
+            self.retire_if_drained(registered_identity).await;
         }
     }
 }
@@ -1983,6 +2006,7 @@ mod tests {
         /// Count of `mark_draining` calls — lets tests assert FIX 1(b)/FIX 3
         /// actually fire (bounded best-effort call issued, not skipped).
         draining_calls: Arc<AtomicU32>,
+        retired: Arc<std::sync::Mutex<Vec<NodeIdentity>>>,
         /// What `count_other_live_nodes` reports, overridable per test so
         /// the re-acquisition hysteresis gate can be made to genuinely
         /// reject several retries before succeeding.
@@ -2025,6 +2049,7 @@ mod tests {
                     std::collections::HashSet::new(),
                 )),
                 draining_calls: Arc::new(AtomicU32::new(0)),
+                retired: Arc::new(std::sync::Mutex::new(Vec::new())),
                 other_live_nodes: Arc::new(AtomicU32::new(0)),
                 steal_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 cleared_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -2111,6 +2136,10 @@ mod tests {
             if let Some(release) = &self.draining_release {
                 release.notified().await;
             }
+            Ok(())
+        }
+        async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
+            self.retired.lock().expect("retirements").push(me.clone());
             Ok(())
         }
         async fn count_other_live_nodes(
@@ -3581,6 +3610,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_departure_requires_completed_socket_drain() {
+        for sockets_drained in [false, true] {
+            let owner = identity();
+            let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(owner.clone());
+            let lease = FakeLease::new(Box::new(|| Ok(true)));
+            let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+            let readiness = NodeLifecycle::new();
+            let stop = CancellationToken::new();
+            stop.cancel();
+            let complete = CancellationToken::new();
+            complete.cancel();
+            let coordination = ShutdownSmDrain {
+                process_stop: stop.clone(),
+                complete,
+                budget: Duration::from_millis(50),
+                started: Arc::new(std::sync::OnceLock::new()),
+                connections_drained: Arc::new(AtomicBool::new(sockets_drained)),
+            };
+            let fatal_fence = readiness.fatal_fence_token();
+            let context = TerminalFenceContext {
+                lease: &lease,
+                live_identity: &live_identity,
+                local_claims: &local_claims,
+                readiness: &readiness,
+                stop_token: &stop,
+                fatal_fence: &fatal_fence,
+                control_plane_budget: Duration::from_millis(50),
+                shutdown_sm_drain: Some(&coordination),
+            };
+            let claim_store: Arc<dyn ClaimStore> =
+                Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+            context
+                .shutdown(
+                    &claim_store,
+                    &owner,
+                    Duration::from_millis(50),
+                    Duration::from_secs(10),
+                    tokio::time::Instant::now(),
+                )
+                .await;
+            assert!(!live_identity.current().is_active());
+            assert_eq!(
+                lease.retired.lock().expect("retirements").len(),
+                usize::from(sockets_drained),
+                "Q6 completion alone must not revoke admission while sockets are still draining"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn ordinary_shutdown_keeps_identity_live_until_real_q6_confirmation() {
         use waddle_xmpp::pending_delivery::storage::{
             InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
@@ -3677,6 +3756,7 @@ mod tests {
         let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: q6_complete.clone(),
             budget: Duration::from_secs(4),
@@ -3700,6 +3780,7 @@ mod tests {
                 q6_complete.clone(),
                 sm_started,
                 Duration::from_secs(4),
+                coordination.connections_drained.clone(),
             ),
         );
         process_stop.cancel();
@@ -3732,6 +3813,7 @@ mod tests {
         }
         assert!(live_identity.current().is_active());
         assert!(!q6_complete.is_cancelled());
+        assert!(lease.retired.lock().expect("retirements").is_empty());
 
         blocklist.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), &mut shutdown)
@@ -3742,6 +3824,10 @@ mod tests {
             .expect("Q6 task completes")
             .expect("Q6 drain task");
         assert!(q6_complete.is_cancelled());
+        assert_eq!(
+            lease.retired.lock().expect("retirements").as_slice(),
+            std::slice::from_ref(&owner)
+        );
         assert!(!live_identity.current().is_active());
         assert!(persistence
             .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id))
@@ -3779,6 +3865,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_millis(80),
@@ -3957,6 +4044,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_secs(2),
@@ -4048,6 +4136,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_secs(2),
@@ -4209,6 +4298,7 @@ mod tests {
         let fatal_fence = readiness.fatal_fence_token();
         let process_stop = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: CancellationToken::new(),
             budget: Duration::from_secs(2),
@@ -4268,6 +4358,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_secs(2),
@@ -4322,6 +4413,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let clustering_stop = process_stop.child_token();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop,
             complete: CancellationToken::new(),
             budget: Duration::from_secs(2),

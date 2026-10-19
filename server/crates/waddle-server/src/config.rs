@@ -1128,6 +1128,9 @@ pub struct ServerConfig {
     /// when unset: the Push Service then records `fcm-not-configured`
     /// for Android devices instead of sending.
     pub fcm: Option<crate::push_service::FcmConfig>,
+    /// Origins a browser sign-in may return to: the origin of `base_url`
+    /// plus every origin in `WADDLE_CORS_ORIGINS`.
+    pub trusted_web_origins: crate::auth::redirect::TrustedWebOrigins,
 }
 
 /// Dedicated ingress authority transaction limits.
@@ -1578,6 +1581,13 @@ pub(crate) fn test_occupant_id_secret() -> OccupantIdSecret {
 // `Default` impl could be silently used (e.g. via `..Default::default()`
 // in scaffolding) and reintroduce the cross-deployment linkability that
 // #283 closes.
+/// Trusted origins for test configs: `http://localhost:3000` only.
+#[cfg(any(test, feature = "test-support"))]
+fn test_trusted_web_origins() -> crate::auth::redirect::TrustedWebOrigins {
+    crate::auth::redirect::TrustedWebOrigins::new("http://localhost:3000", None)
+        .expect("the test base URL is a valid origin")
+}
+
 #[cfg(test)]
 impl Default for ServerConfig {
     fn default() -> Self {
@@ -1595,6 +1605,7 @@ impl Default for ServerConfig {
             clustering: ClusteringConfig::default(),
             apns: None,
             fcm: None,
+            trusted_web_origins: test_trusted_web_origins(),
         }
     }
 }
@@ -1627,6 +1638,11 @@ impl ServerConfig {
         let apns =
             crate::push_service::ApnsConfig::from_env().map_err(|error| error.to_string())?;
         let fcm = crate::push_service::FcmConfig::from_env().map_err(|error| error.to_string())?;
+        let trusted_web_origins = crate::auth::redirect::TrustedWebOrigins::new(
+            &base_url,
+            std::env::var("WADDLE_CORS_ORIGINS").ok().as_deref(),
+        )
+        .map_err(|error| error.to_string())?;
 
         Ok(Self {
             mode,
@@ -1642,6 +1658,7 @@ impl ServerConfig {
             clustering,
             apns,
             fcm,
+            trusted_web_origins,
         })
     }
 
@@ -1679,6 +1696,7 @@ impl ServerConfig {
             clustering: ClusteringConfig::default(),
             apns: None,
             fcm: None,
+            trusted_web_origins: test_trusted_web_origins(),
         }
     }
 
@@ -1698,6 +1716,7 @@ impl ServerConfig {
             clustering: ClusteringConfig::default(),
             apns: None,
             fcm: None,
+            trusted_web_origins: test_trusted_web_origins(),
         }
     }
 }

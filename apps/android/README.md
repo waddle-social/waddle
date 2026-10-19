@@ -82,10 +82,16 @@ Three layers, cheapest first:
    for anything interactive (calls, notifications, battery behavior).
 
 Screenshot goldens (Roborazzi, JVM, light and dark) live in
-`app/src/test/screenshots`. CI verifies them; after an intended visual
+`app/src/test/screenshots`. Record them on Linux x86_64, matching CI:
+native rendering on other platforms can differ by one or two RGB levels
+around glows even when layout and content match. After an intended visual
 change, re-record with
 `./gradlew :app:testFossDebugUnitTest -Proborazzi.test.record=true` and
-review the PNG diff. `QUALITY.md` tracks what each feature is guarded by.
+review the PNG diff. Run the Android checks independently with
+`gh workflow run waddle-android-pullrequest.yml --ref <branch>`; verify that
+the unit-test tasks actually ran before treating the run as evidence.
+Failed checks upload actual images, visual diffs, and test reports.
+`QUALITY.md` tracks what each feature is guarded by.
 
 ## Distributions
 

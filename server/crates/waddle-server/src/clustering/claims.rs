@@ -1385,6 +1385,12 @@ pub trait NodeLeaseStore: Send + Sync {
     /// serving already-owned ones). Best-effort, idempotent.
     async fn mark_draining(&self, me: &NodeIdentity) -> Result<(), ClaimError>;
 
+    /// Commit terminal departure for this exact incarnation only, after its
+    /// sockets have drained and local authority has been disabled/demoted.
+    /// A stale epoch cannot retire a replacement. Failed retirement safely
+    /// leaves the row for the normal stale-heartbeat expiry watchdog.
+    async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError>;
+
     /// Count other (not `me`) live rows in `clustering_nodes` right now —
     /// feeds the isolation rule's "`clustering_nodes` shows two or more
     /// other live nodes" condition (element 4). "Live" means: not
@@ -2058,6 +2064,15 @@ impl NodeLeaseStore for PostgresClaimStore {
         )
         .await
         .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        conn.execute(
+            "UPDATE clustering_nodes SET expired = true, draining = true WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![me.node_id.clone(), me.node_epoch.clone()],
+        ).await.map_err(db_err)?;
         Ok(())
     }
 

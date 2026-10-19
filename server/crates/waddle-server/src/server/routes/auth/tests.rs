@@ -254,3 +254,139 @@ async fn callback_records_state_success_before_subsequent_provider_failure() {
         Some(1),
     );
 }
+
+async fn insert_pending_flow(auth_state: &AuthState, state: &str, flow: PendingFlow) {
+    auth_state
+        .auth_handshake
+        .insert_pending(&PendingAuthorization {
+            state: state.to_string(),
+            provider_id: "missing-provider".to_string(),
+            nonce: "nonce".to_string(),
+            code_verifier: "verifier".to_string(),
+            redirect_uri: "http://localhost:3000/api/auth/callback".to_string(),
+            client_id: "client-id".to_string(),
+            client_secret: String::new(),
+            token_endpoint_auth_method: AuthProviderTokenEndpointAuthMethod::NoAuthentication,
+            require_dpop: false,
+            flow,
+            created_at: Utc::now(),
+        })
+        .await
+        .expect("insert pending authorization");
+}
+
+async fn callback_error(auth_state: Arc<AuthState>, state: &str) -> (StatusCode, String) {
+    let response = router(auth_state)
+        .oneshot(
+            Request::builder()
+                .uri(format!(
+                    "/api/auth/callback?state={state}&code=authorization-code"
+                ))
+                .body(Body::empty())
+                .expect("callback request"),
+        )
+        .await
+        .expect("callback response");
+    let status = response.status();
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    (status, String::from_utf8_lossy(&body).into_owned())
+}
+
+/// A browser sign-in whose return URL is on another site must be refused
+/// before the provider exchange: the fragment transport would otherwise put
+/// the new session id in that site's URL.
+#[tokio::test]
+async fn callback_refuses_browser_return_to_untrusted_origin() {
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _) = create_test_auth_state(&server_config).await;
+    for (state, next) in [
+        ("fragment-offsite", "https://attacker.example/"),
+        ("fragment-backslash", "/\\attacker.example/"),
+        (
+            "fragment-userinfo",
+            "http://localhost:3000@attacker.example/",
+        ),
+    ] {
+        insert_pending_flow(
+            &auth_state,
+            state,
+            PendingFlow::Browser {
+                next: Some(next.to_string()),
+                session_transport: BrowserSessionTransport::Fragment,
+            },
+        )
+        .await;
+
+        let (status, body) = callback_error(auth_state.clone(), state).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{next}");
+        assert!(body.contains("sign-in return URL"), "{next}: {body}");
+        assert!(
+            !body.contains("invalid_client"),
+            "{next} reached the provider"
+        );
+    }
+}
+
+#[tokio::test]
+async fn callback_refuses_xmpp_flow_without_safe_redirect_or_pkce() {
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _) = create_test_auth_state(&server_config).await;
+    let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    for (state, redirect, code_challenge) in [
+        (
+            "xmpp-offsite",
+            "https://attacker.example/cb",
+            Some(challenge.to_string()),
+        ),
+        ("xmpp-no-pkce", "http://127.0.0.1:9000/cb", None),
+    ] {
+        insert_pending_flow(
+            &auth_state,
+            state,
+            PendingFlow::Xmpp {
+                client_redirect_uri: redirect.to_string(),
+                client_state: None,
+                client_code_challenge: code_challenge,
+            },
+        )
+        .await;
+
+        let (status, body) = callback_error(auth_state.clone(), state).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{state}");
+        assert!(
+            !body.contains("invalid_client"),
+            "{state} reached the provider: {body}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn xmpp_authorize_refuses_unsafe_redirects_and_missing_pkce() {
+    let server_config = ServerConfig::test_homeserver();
+    let (auth_state, _) = create_test_auth_state(&server_config).await;
+    let challenge = "E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM";
+    for query in [
+        format!(
+            "redirect_uri=https%3A%2F%2Fattacker.example%2Fcb&code_challenge={challenge}&code_challenge_method=S256"
+        ),
+        "redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcb".to_string(),
+        format!("redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcb&code_challenge={challenge}"),
+        format!(
+            "redirect_uri=http%3A%2F%2F127.0.0.1%3A9000%2Fcb&code_challenge={challenge}&code_challenge_method=plain"
+        ),
+    ] {
+        let response = crate::server::routes::xmpp_oauth::router(auth_state.clone())
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/auth/xmpp/authorize?{query}"))
+                    .body(Body::empty())
+                    .expect("authorize request"),
+            )
+            .await
+            .expect("authorize response");
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(json["error"], "invalid_request", "{query}");
+    }
+}

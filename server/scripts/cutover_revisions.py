@@ -28,6 +28,7 @@ SERVER_INPUTS = [
     'server/rust-toolchain.toml',
     ':(top,glob)server/schema/**',
     ':(top,glob)server/scripts/**',
+    ':(top,glob)server/vendor/**',
     ':(top,glob)server/wit/**',
     'flake.nix',
     'flake.lock',

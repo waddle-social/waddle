@@ -309,7 +309,7 @@
   white-space: nowrap;
 }
 
-/* Timestamps are mono: 12px JetBrains Mono in the muted ink, both in
+/* Timestamps are mono: 12px system monospace in the muted ink, both in
  * the meta row and in the hover-revealed gutter of grouped rows. */
 .chat-message-meta-row > .type-meta,
 .chat-message-time-gutter > .type-meta {

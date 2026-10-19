@@ -544,6 +544,10 @@ impl NodeLeaseStore for NoopNodeLease {
         Ok(())
     }
 
+    async fn retire(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+        Ok(())
+    }
+
     async fn count_other_live_nodes(
         &self,
         _me: &NodeIdentity,
@@ -615,6 +619,11 @@ impl crate::clustering::allowlist::AllowlistStore for NoopAllowlist {
         &self,
     ) -> Result<HashSet<PeerId>, crate::clustering::allowlist::AllowlistError> {
         Ok(HashSet::new())
+    }
+    async fn effective_peers(
+        &self,
+    ) -> Result<HashSet<PeerId>, crate::clustering::allowlist::AllowlistError> {
+        self.enrolled_peers().await
     }
 }
 
@@ -690,6 +699,7 @@ fn spawn_test_relay_actor() -> kameo::actor::ActorRef<RelayActor> {
 mod dispatch;
 mod dispatch_span;
 mod error_classification;
+mod peer_eviction;
 
 #[test]
 fn keyed_carbon_side_effect_retains_original_obligation_on_wire() {

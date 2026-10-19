@@ -108,7 +108,7 @@ fun RoomTile(
     }
 }
 
-/** `#` (or the forum glyph) in teal, then the room's name in Space Grotesk. */
+/** `#` (or the forum glyph) in teal, then the room's name in the display style. */
 @Composable
 fun RoomTitle(name: String, forum: Boolean, modifier: Modifier = Modifier) {
     Row(

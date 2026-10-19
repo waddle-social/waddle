@@ -2,7 +2,6 @@ package social.waddle.android.theme
 
 import androidx.compose.material3.Typography
 import androidx.compose.ui.text.TextStyle
-import androidx.compose.ui.text.font.Font
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.LineHeightStyle
@@ -10,28 +9,13 @@ import androidx.compose.ui.unit.TextUnit
 import androidx.compose.ui.unit.em
 import androidx.compose.ui.unit.isSpecified
 import androidx.compose.ui.unit.sp
-import social.waddle.android.R
 
-/** Outfit: body, controls and messages (Huddle `body`). */
-val OutfitFamily = FontFamily(
-    Font(R.font.outfit_regular, FontWeight.Normal),
-    Font(R.font.outfit_medium, FontWeight.Medium),
-    Font(R.font.outfit_semibold, FontWeight.SemiBold),
-    Font(R.font.outfit_bold, FontWeight.Bold),
-)
-
-/** Space Grotesk: headlines, room, community and people names, big numbers (Huddle `display`). */
-val SpaceGroteskFamily = FontFamily(
-    Font(R.font.space_grotesk_medium, FontWeight.Medium),
-    Font(R.font.space_grotesk_semibold, FontWeight.SemiBold),
-    Font(R.font.space_grotesk_bold, FontWeight.Bold),
-)
-
-/** JetBrains Mono: kickers, timestamps, counts and code (Huddle `mono`). */
-val JetBrainsMonoFamily = FontFamily(
-    Font(R.font.jetbrains_mono_regular, FontWeight.Normal),
-    Font(R.font.jetbrains_mono_medium, FontWeight.Medium),
-)
+/**
+ * Waddle ships no font files on any platform: display and body use the
+ * system face (headlines differ by weight and size), mono uses the system
+ * monospace.
+ */
+val MonoFamily: FontFamily = FontFamily.Monospace
 
 /** Extra leading split evenly above and below each line, as CSS does. */
 private val Centered = LineHeightStyle(
@@ -40,9 +24,8 @@ private val Centered = LineHeightStyle(
 )
 
 private fun familyOf(font: HuddleFont): FontFamily = when (font) {
-    HuddleFont.Display -> SpaceGroteskFamily
-    HuddleFont.Body -> OutfitFamily
-    HuddleFont.Mono -> JetBrainsMonoFamily
+    HuddleFont.Display, HuddleFont.Body -> FontFamily.Default
+    HuddleFont.Mono -> MonoFamily
 }
 
 /**
@@ -83,17 +66,17 @@ object WaddleType {
     val display: TextStyle = T.display.toStyle().copy(lineHeight = (T.display.size.value * DISPLAY_LEADING).sp)
     val headline: TextStyle = T.headline.toStyle().copy(lineHeight = (T.headline.size.value * DISPLAY_LEADING).sp)
 
-    /** Room, card, section and people titles: Space Grotesk 18/600. */
+    /** Room, card, section and people titles: display 18/600. */
     val title: TextStyle = T.title.toStyle()
 
     /** Big numbers. */
     val stat: TextStyle = T.stat.toStyle()
     val lead: TextStyle = T.lead.toStyle()
 
-    /** Message body: Outfit 15/1.5. */
+    /** Message body: body 15/1.5. */
     val body: TextStyle = T.body.toStyle()
 
-    /** Buttons, tabs, fields: Outfit 14/500. */
+    /** Buttons, tabs, fields: body 14/500. */
     val control: TextStyle = T.control.toStyle()
 
     /** Mono 11/500, tracked 0.08em; render uppercase through `Kicker`. */
@@ -108,7 +91,7 @@ private val F = WaddleTokens.Huddle.FontSize
 /**
  * Huddle mapped onto Material roles, so stock components follow it:
  * display roles are the hero/display/headline styles, title roles are
- * Space Grotesk (top bars, sheet and dialog titles), body roles Outfit at
+ * the display style (top bars, sheet and dialog titles), body roles the body style at
  * message/body/caption sizes, labels the control style down to kicker
  * size.
  */
