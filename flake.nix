@@ -508,7 +508,10 @@
                 outputHash = observerRelease.wasm_sha256;
               }
               ''
-                python3 ${./server/scripts/observer_release.py} fetch ${./server/observer-release.json} "$TMPDIR/jev.wasm"
+                mkdir -p observer/scripts
+                cp ${./server/scripts/observer_release.py} observer/scripts/observer_release.py
+                cp ${./server/observer-release.json} observer/observer-release.json
+                python3 observer/scripts/observer_release.py fetch > "$TMPDIR/jev.wasm"
                 cp "$TMPDIR/jev.wasm" "$out"
               '';
           serverCheckSrc = lib.fileset.toSource {

@@ -929,14 +929,14 @@ schema.#Project & {
 					  fi
 					done
 
-					jev_judgments_digest="$(python3 scripts/observer_release.py digest observer-release.json)"
+					jev_judgments_digest="$(python3 scripts/observer_release.py digest)"
 					cue export . -e '#PublishedExtensionModules' --out json \
 					  -t linkBoardDigest="${sample_digest}" \
 					  -t aiChatbotDigest="${sample_digest}" \
 					  -t decisionPollsDigest="${sample_digest}" \
 					  -t githubDigest="${sample_digest}" \
 					  -t jevJudgmentsDigest="${jev_judgments_digest}" > "${modules_yaml}"
-					python3 scripts/observer_release.py validate observer-release.json "${modules_yaml}"
+					python3 scripts/observer_release.py validate < "${modules_yaml}"
 					cp "${gitops_values}" "${published_values}"
 					MODULES_YAML="${modules_yaml}" SAMPLE_DIGEST="${sample_digest}" SAMPLE_GIT_SHA="${sample_git_sha}" yq -i '
 					  .image.digest = strenv(SAMPLE_DIGEST) |
@@ -1108,8 +1108,8 @@ schema.#Project & {
 					github_digest=""
 					# Observer identity binds the exact released guest to its generation.
 					# A host rebuild must not promote an incidental new observer binary.
-					jev_judgments_digest="$(python3 scripts/observer_release.py digest observer-release.json)"
-					python3 scripts/observer_release.py fetch observer-release.json ../target/digests/jev-released.wasm
+					jev_judgments_digest="$(python3 scripts/observer_release.py digest)"
+					python3 scripts/observer_release.py fetch > ../target/digests/jev-released.wasm
 					modules_yaml="../target/digests/extensions-modules.json"
 					for extension_spec in "${EXTENSIONS[@]}"; do
 					  IFS=: read -r extension_name crate_name _namespace_scheme _namespace_rest <<< "${extension_spec}"
@@ -1150,7 +1150,7 @@ schema.#Project & {
 					  -t decisionPollsDigest="${decision_polls_digest:?missing decision-polls digest}" \
 					  -t githubDigest="${github_digest:?missing github digest}" \
 					  -t jevJudgmentsDigest="${jev_judgments_digest:?missing jev-judgments digest}" > "${modules_yaml}"
-					python3 scripts/observer_release.py validate observer-release.json "${modules_yaml}"
+					python3 scripts/observer_release.py validate < "${modules_yaml}"
 
 					# The complete source history identifies the last Recreate window,
 					# even when its build was canceled before publishing any artifact.

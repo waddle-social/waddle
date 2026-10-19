@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 from pathlib import Path
 import re
 import subprocess
@@ -40,16 +39,22 @@ def invalid_constant(_: str) -> None:
     raise ReleaseError('JSON contains a non-finite number')
 
 
-def read_json(path: Path, maximum: int = MAX_MANIFEST_BYTES) -> object:
+def parse_json(contents: bytes) -> object:
+    if len(contents) > MAX_MANIFEST_BYTES:
+        raise ReleaseError('JSON exceeds the supported size')
     try:
-        with path.open('rb') as source:
-            contents = source.read(maximum + 1)
-        if len(contents) > maximum:
-            raise ReleaseError('JSON exceeds the supported size')
         return json.loads(contents, object_pairs_hook=unique_fields,
                           parse_constant=invalid_constant)
-    except (OSError, ValueError, UnicodeError) as error:
+    except (ValueError, UnicodeError) as error:
         raise ReleaseError('Cannot read valid JSON') from error
+
+
+def read_json(path: Path) -> object:
+    try:
+        with path.open('rb') as source:
+            return parse_json(source.read(MAX_MANIFEST_BYTES + 1))
+    except OSError as error:
+        raise ReleaseError('Cannot read release JSON') from error
 
 
 def load_release(path: Path) -> dict:
@@ -80,8 +85,7 @@ def policy_sha256(module: dict) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def validate(release: dict, modules_path: Path) -> None:
-    modules = read_json(modules_path)
+def validate(release: dict, modules: object) -> None:
     if not isinstance(modules, list) or any(not isinstance(module, dict) for module in modules):
         raise ReleaseError('Published modules must be a JSON array of objects')
     observers = [module for module in modules if module.get('name') == 'jev-judgments']
@@ -135,10 +139,9 @@ def manifest_layer(path: Path, release: dict) -> dict:
     return layer
 
 
-def fetch(release: dict, destination: Path) -> None:
+def fetch_bytes(release: dict) -> bytes:
     try:
-        # Stage beside the destination so the final rename is atomic on its filesystem.
-        with tempfile.TemporaryDirectory(prefix='.observer-release-', dir=destination.parent) as temporary:
+        with tempfile.TemporaryDirectory(prefix='observer-release-') as temporary:
             directory = Path(temporary)
             manifest = directory / 'manifest.json'
             payload = directory / 'observer.wasm'
@@ -153,7 +156,7 @@ def fetch(release: dict, destination: Path) -> None:
             if (not contents.startswith(b'\x00asm')
                     or hashlib.sha256(contents).hexdigest() != release['wasm_sha256']):
                 raise ReleaseError('Observer Wasm bytes do not match the released payload')
-            os.replace(payload, destination)
+            return contents
     except OSError as error:
         raise ReleaseError('Cannot stage the verified observer artifact') from error
 
@@ -162,21 +165,16 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest='command', required=True)
     for command in ('digest', 'fetch', 'validate'):
-        child = commands.add_parser(command)
-        child.add_argument('release', type=Path)
-        if command == 'fetch':
-            child.add_argument('output', type=Path)
-        if command == 'validate':
-            child.add_argument('modules_json', type=Path)
+        commands.add_parser(command)
     args = parser.parse_args()
     try:
-        release = load_release(args.release)
+        release = load_release(Path(__file__).resolve().parents[1] / 'observer-release.json')
         if args.command == 'digest':
             print(release['manifest_digest'])
         elif args.command == 'fetch':
-            fetch(release, args.output)
+            sys.stdout.buffer.write(fetch_bytes(release))
         else:
-            validate(release, args.modules_json)
+            validate(release, parse_json(sys.stdin.buffer.read(MAX_MANIFEST_BYTES + 1)))
     except ReleaseError as error:
         print(f'Error: {error}', file=sys.stderr)
         return 1

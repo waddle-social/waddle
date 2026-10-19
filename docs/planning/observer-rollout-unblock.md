@@ -46,3 +46,26 @@ the frozen raw-byte identity without changing the observer logic.
 - Wasm payload: `1978f10bffa42cc58b61bd6a8a4d4418e4a0110aa10d3958c4690c9bb10970df`.
 - Read-only inspection found no live generation-2 work or pending publications.
   Completed history and published results must remain untouched.
+
+## Verified recovery, 19 October 2026
+
+The production construction code, using the current effective configuration in
+memory, confirmed that the released guest matches the stored generation-2
+identity; the rebuilt guest does not. No secret values were logged or persisted.
+
+Republished the successful `21f63f7` GitOps artifact with only Jev's manifest
+digest restored to the release above. The host image, source revision, execution
+policy, generation, update strategy, cutover guard and every other artifact file
+remained unchanged. An immutable staging artifact was pulled back and compared
+byte-for-byte before promoting it to `latest`.
+
+- Prior GitOps artifact: `sha256:3aa3b749277bc9ee547c555445750c998b23d7ac50d0f9632a16225287a87aa7`.
+- Recovery artifact: `sha256:ae24b567701a4d7a71fe2ddd5e806db35688ef0345476db9445085a7188c96e6`.
+- OCIRepository and Kustomization observed the recovery content digest.
+- HelmRelease reported `UpgradeSucceeded` for chart 0.4.7.
+- Both replicas reached Ready on `21f63f74e309f20029eedbb623c505b067c64429`
+  by 12:45:24 UTC, with zero restarts. Subsequent checks found no identity
+  conflicts or self-fencing in their recent logs.
+
+The permanent publisher guard is tracked in PR #1998. It verifies the pinned
+release and tests its compatibility with the current host before later releases.

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import copy
+from contextlib import redirect_stderr
+import io
 import hashlib
 import json
 from pathlib import Path
@@ -11,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import observer_release as observer
@@ -25,8 +28,6 @@ class ObserverReleaseTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory(prefix='observer-release-test-')
         self.addCleanup(self.temporary.cleanup)
         self.directory = Path(self.temporary.name)
-        self.output = self.directory / 'released.wasm'
-        self.output.write_bytes(b'previous verified artifact')
         self.payload = b'\x00asm\x0d\x00\x01\x00fixture component'
         self.release = observer.load_release(SERVER / 'observer-release.json')
         self.release['wasm_sha256'] = hashlib.sha256(self.payload).hexdigest()
@@ -56,15 +57,14 @@ class ObserverReleaseTests(unittest.TestCase):
             self.fail('Unexpected registry command')
         return subprocess.CompletedProcess(args, 0, b'', b'')
 
-    def fetch(self) -> None:
+    def fetch(self) -> bytes:
         with patch.object(observer.subprocess, 'run', side_effect=self.registry):
-            observer.fetch(self.release, self.output)
+            return observer.fetch_bytes(self.release)
 
     def assert_fetch_rejected(self) -> None:
         with self.assertRaises(observer.ReleaseError):
             self.fetch()
-        self.assertEqual(self.output.read_bytes(), b'previous verified artifact')
-        self.assertEqual(list(self.directory.iterdir()), [self.output])
+        self.assertEqual(list(self.directory.iterdir()), [])
 
     def module(self) -> dict:
         return {
@@ -77,9 +77,7 @@ class ObserverReleaseTests(unittest.TestCase):
         }
 
     def validate(self, modules: object) -> None:
-        path = self.directory / 'modules.json'
-        path.write_text(json.dumps(modules))
-        observer.validate(self.release, path)
+        observer.validate(self.release, modules)
 
     def test_checked_in_release_matches_actual_generation_two_manifest(self) -> None:
         release = observer.load_release(SERVER / 'observer-release.json')
@@ -90,14 +88,13 @@ class ObserverReleaseTests(unittest.TestCase):
         self.assertEqual(layer['digest'], 'sha256:1978f10bffa42cc58b61bd6a8a4d4418e4a0110aa10d3958c4690c9bb10970df')
         self.assertEqual(layer['size'], 446651)
 
-    def test_fetch_verifies_both_digests_and_atomically_replaces_output(self) -> None:
+    def test_fetch_returns_only_fully_verified_bytes(self) -> None:
         # A hostile archive-style annotation cannot affect the flat output path.
         self.manifest['layers'][0]['annotations']['org.opencontainers.image.title'] = '../../escape'
         self.pin_manifest()
-        self.fetch()
-        self.assertEqual(self.output.read_bytes(), self.payload)
+        self.assertEqual(self.fetch(), self.payload)
         self.assertEqual(len(self.calls), 2)
-        self.assertEqual(list(self.directory.iterdir()), [self.output])
+        self.assertEqual(list(self.directory.iterdir()), [])
 
     def test_wrong_manifest_digest_rejected_before_blob_download(self) -> None:
         self.raw_manifest += b' '
@@ -119,8 +116,8 @@ class ObserverReleaseTests(unittest.TestCase):
                     return self.registry(args, **kwargs)
                 with patch.object(observer.subprocess, 'run', side_effect=registry):
                     with self.assertRaises(observer.ReleaseError):
-                        observer.fetch(self.release, self.output)
-                self.assertEqual(self.output.read_bytes(), b'previous verified artifact')
+                        observer.fetch_bytes(self.release)
+                self.assertEqual(list(self.directory.iterdir()), [])
 
     def test_unexpected_manifest_layers_rejected(self) -> None:
         original = copy.deepcopy(self.manifest)
@@ -166,9 +163,9 @@ class ObserverReleaseTests(unittest.TestCase):
                         return subprocess.CompletedProcess(args, 1, b'', b'secret=do-not-log')
                     with patch.object(observer.subprocess, 'run', side_effect=registry):
                         with self.assertRaises(observer.ReleaseError) as raised:
-                            observer.fetch(self.release, self.output)
+                            observer.fetch_bytes(self.release)
                     self.assertNotIn('do-not-log', str(raised.exception))
-                    self.assertEqual(self.output.read_bytes(), b'previous verified artifact')
+                    self.assertEqual(list(self.directory.iterdir()), [])
 
     def test_same_generation_rejects_any_public_policy_change(self) -> None:
         module = self.module()
@@ -218,12 +215,55 @@ class ObserverReleaseTests(unittest.TestCase):
             observer.load_release(path)
 
     def test_digest_cli_prints_only_the_immutable_manifest_digest(self) -> None:
-        result = subprocess.run([sys.executable, str(SERVER / 'scripts/observer_release.py'), 'digest',
-                                 str(SERVER / 'observer-release.json')], capture_output=True,
+        result = subprocess.run([sys.executable, str(SERVER / 'scripts/observer_release.py'), 'digest'], capture_output=True,
                                 text=True, timeout=5)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout, 'sha256:c37619841f9da5861887651779337fe8467f41910566267063b8b596dee379dc\n')
         self.assertEqual(result.stderr, '')
+
+    def test_fetch_cli_emits_no_partial_bytes_or_registry_secrets_on_failure(self) -> None:
+        self.payload = b'corrupted blob'
+        output = io.BytesIO()
+        errors = io.StringIO()
+        with patch.object(observer, 'load_release', return_value=self.release), \
+                patch.object(observer.subprocess, 'run', side_effect=self.registry), \
+                patch.object(sys, 'argv', ['observer_release.py', 'fetch']), \
+                patch.object(sys, 'stdout', SimpleNamespace(buffer=output)), redirect_stderr(errors):
+            status = observer.main()
+        self.assertEqual(status, 1)
+        self.assertEqual(output.getvalue(), b'')
+        self.assertIn('Observer Wasm', errors.getvalue())
+
+    def test_fetch_cli_emits_verified_payload_only(self) -> None:
+        output = io.BytesIO()
+        errors = io.StringIO()
+        with patch.object(observer, 'load_release', return_value=self.release), \
+                patch.object(observer.subprocess, 'run', side_effect=self.registry), \
+                patch.object(sys, 'argv', ['observer_release.py', 'fetch']), \
+                patch.object(sys, 'stdout', SimpleNamespace(buffer=output)), redirect_stderr(errors):
+            status = observer.main()
+        self.assertEqual(status, 0)
+        self.assertEqual(output.getvalue(), self.payload)
+        self.assertEqual(errors.getvalue(), '')
+
+    def test_validate_cli_reads_bounded_json_from_stdin(self) -> None:
+        module = self.module()
+        self.release['policy_sha256'] = observer.policy_sha256(module)
+        for contents, status in ((json.dumps([module]).encode(), 0), (b'{broken', 1),
+                                 (b' ' * (observer.MAX_MANIFEST_BYTES + 1), 1)):
+            with self.subTest(status=status), \
+                    patch.object(observer, 'load_release', return_value=self.release), \
+                    patch.object(sys, 'argv', ['observer_release.py', 'validate']), \
+                    patch.object(sys, 'stdin', SimpleNamespace(buffer=io.BytesIO(contents))), \
+                    redirect_stderr(io.StringIO()):
+                self.assertEqual(observer.main(), status)
+
+    def test_cli_rejects_caller_controlled_paths(self) -> None:
+        for command in ('digest', 'fetch', 'validate'):
+            result = subprocess.run([sys.executable, str(SERVER / 'scripts/observer_release.py'),
+                                     command, '../../arbitrary-path'], capture_output=True, timeout=5)
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, b'')
 
 
 if __name__ == '__main__':
