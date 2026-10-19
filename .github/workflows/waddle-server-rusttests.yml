@@ -67,6 +67,8 @@ name: waddle-server-rustTests
       - server/env.cue
       - server/env.cue/**
       - server/extensions/**
+      - server/observer-release.json
+      - server/observer-release.json/**
       - server/rust-toolchain.toml
       - server/rust-toolchain.toml/**
       - server/schema/**
@@ -79,6 +81,8 @@ name: waddle-server-rustTests
       - server/scripts/check_nextest_shards.py/**
       - server/scripts/nextest-archive-transfer.sh
       - server/scripts/nextest-archive-transfer.sh/**
+      - server/scripts/observer_release.py
+      - server/scripts/observer_release.py/**
       - server/scripts/pin-nextest-shard.py
       - server/scripts/pin-nextest-shard.py/**
       - server/scripts/plan_nextest_binary_shards.py
@@ -91,6 +95,8 @@ name: waddle-server-rustTests
       - server/scripts/test_check_nextest_shards.py/**
       - server/scripts/test_nextest_archive_transfer.py
       - server/scripts/test_nextest_archive_transfer.py/**
+      - server/scripts/test_observer_release.py
+      - server/scripts/test_observer_release.py/**
       - server/scripts/test_pin_nextest_shard.py
       - server/scripts/test_pin_nextest_shard.py/**
       - server/scripts/test_plan_nextest_binary_shards.py

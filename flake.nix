@@ -494,6 +494,26 @@
           lib = pkgs.lib;
           rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./server/rust-toolchain.toml;
           craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
+          observerRelease = builtins.fromJSON (builtins.readFile ./server/observer-release.json);
+          releasedJevGuest =
+            pkgs.runCommand "jev-judgments-generation-${toString observerRelease.generation}.wasm"
+              {
+                nativeBuildInputs = [
+                  pkgs.python3
+                  pkgs.oras
+                ];
+                SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
+                outputHashMode = "flat";
+                outputHashAlgo = "sha256";
+                outputHash = observerRelease.wasm_sha256;
+              }
+              ''
+                mkdir -p observer/scripts
+                cp ${./server/scripts/observer_release.py} observer/scripts/observer_release.py
+                cp ${./server/observer-release.json} observer/observer-release.json
+                python3 observer/scripts/observer_release.py fetch > "$TMPDIR/jev.wasm"
+                cp "$TMPDIR/jev.wasm" "$out"
+              '';
           serverCheckSrc = lib.fileset.toSource {
             root = ./server;
             fileset = lib.fileset.unions [
@@ -757,6 +777,14 @@
               WADDLE_JEV_GUEST_WASM = "${
                 self.checks.${system}.waddle-server-extension-modules
               }/wasm/jev_judgments.wasm";
+              preCheck = ''
+                test -s "$WADDLE_JEV_GUEST_WASM"
+                test -s "${releasedJevGuest}"
+              '';
+              postCheck = ''
+                WADDLE_JEV_GUEST_WASM="${releasedJevGuest}" \
+                  cargo test --profile ci-test --locked --package waddle-extensions --test jev_guest_runtime
+              '';
             }
           );
           waddle-server-xmpp-unit-tests = craneLib.cargoNextest (
