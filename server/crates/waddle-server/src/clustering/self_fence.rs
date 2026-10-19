@@ -440,12 +440,7 @@ pub struct NodeLeaseRunConfig {
     pub shutdown_sm_drain: Option<ShutdownSmDrain>,
 }
 
-pub struct ShutdownSmDrain {
-    pub process_stop: CancellationToken,
-    pub complete: CancellationToken,
-    pub budget: Duration,
-    pub started: Arc<std::sync::OnceLock<tokio::time::Instant>>,
-}
+use super::ShutdownSmDrain;
 
 /// Best-effort, time-bounded [`NodeLeaseStore::mark_draining`] — mirrors
 /// `swarm.rs::release_slot_bounded`'s pattern exactly, one lease kind over:
@@ -507,6 +502,46 @@ where
                 node_id = %identity.node_id,
                 "clustering: expiring this node's own just-superseded identity timed out; \
                  orphaned claims still age out via the row's own lapsed heartbeat"
+            );
+        }
+    }
+}
+
+/// Retire this node's own disabled identity at the end of a graceful
+/// shutdown (#1295). Best-effort and bounded: on failure or timeout the row
+/// still ages out through its lapsed heartbeat and the orphan reaper, which
+/// is exactly the pre-#1295 behaviour.
+async fn retire_after_shutdown_bounded<L>(lease: &L, identity: &NodeIdentity, budget: Duration)
+where
+    L: NodeLeaseStore + Send + Sync,
+{
+    match tokio::time::timeout(budget, lease.retire_after_shutdown(identity)).await {
+        Ok(Ok(true)) => {
+            tracing::info!(
+                node_id = %identity.node_id,
+                "clustering: retired this node's identity after graceful shutdown; \
+                 its remaining claims are reclaimable immediately"
+            );
+        }
+        Ok(Ok(false)) => {
+            tracing::debug!(
+                node_id = %identity.node_id,
+                "clustering: no draining node row to retire after graceful shutdown"
+            );
+        }
+        Ok(Err(error)) => {
+            tracing::warn!(
+                %error,
+                node_id = %identity.node_id,
+                "clustering: failed to retire this node's identity after graceful shutdown; \
+                 its claims age out via the lapsed heartbeat instead"
+            );
+        }
+        Err(_) => {
+            tracing::warn!(
+                node_id = %identity.node_id,
+                "clustering: retiring this node's identity after graceful shutdown timed out; \
+                 its claims age out via the lapsed heartbeat instead"
             );
         }
     }
@@ -878,6 +913,29 @@ impl<L> TerminalFenceContext<'_, L>
 where
     L: NodeLeaseStore + Send + Sync,
 {
+    async fn retire_if_drained(&self, identity: &NodeIdentity) {
+        let drained = self.shutdown_sm_drain.is_some_and(|sm| {
+            sm.process_stop.is_cancelled()
+                && sm.complete.is_cancelled()
+                && sm.connections_drained.load(Ordering::Acquire)
+        });
+        if !drained {
+            // A timed-out socket drain, or clustering-only self-fence, is
+            // not proof that no socket remains on this node. Let the normal
+            // stale-heartbeat expiry CAS commit its eventual departure.
+            return;
+        }
+        match tokio::time::timeout(self.control_plane_budget, self.lease.retire(identity)).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => {
+                tracing::warn!(%error, node_id = %identity.node_id, "terminal node retirement failed; deferring departure to lease expiry")
+            }
+            Err(_) => {
+                tracing::warn!(node_id = %identity.node_id, "terminal node retirement timed out; deferring departure to lease expiry")
+            }
+        }
+    }
+
     async fn shutdown(
         &self,
         claim_store: &Arc<dyn ClaimStore>,
@@ -957,9 +1015,19 @@ where
         // retires anything the bounded drain deliberately abandoned.
         self.live_identity.disable().await;
         self.local_claims.demote_owned_by(identity).await;
+        // #1295: disable() is the authority barrier — no guard, claim-store
+        // call or fenced write can run under this identity again — and the
+        // exact-owner demotion has retired every actor it owned. Commit that
+        // as expiry now, so survivors reclaim the claims it still holds
+        // (UserActor claims, and anything the bounded drain abandoned) on
+        // their next acquire instead of after a lease TTL plus an
+        // orphan-reaper sweep. The terminal sweep below is local cleanup
+        // only, and running it first could let process exit cut this off.
+        retire_after_shutdown_bounded(self.lease, identity, self.control_plane_budget).await;
         for entity in self.local_claims.terminal_sweep().await {
             self.local_claims.demote(&entity).await;
         }
+        self.retire_if_drained(identity).await;
     }
 
     async fn finish(&self, prior_identity: &NodeIdentity, registered_identity: &NodeIdentity) {
@@ -997,6 +1065,10 @@ where
         mark_draining_bounded(self.lease, prior_identity, self.control_plane_budget).await;
         if registered_identity != prior_identity {
             mark_draining_bounded(self.lease, registered_identity, self.control_plane_budget).await;
+        }
+        self.retire_if_drained(prior_identity).await;
+        if registered_identity != prior_identity {
+            self.retire_if_drained(registered_identity).await;
         }
     }
 }
@@ -1934,6 +2006,7 @@ mod tests {
         /// Count of `mark_draining` calls — lets tests assert FIX 1(b)/FIX 3
         /// actually fire (bounded best-effort call issued, not skipped).
         draining_calls: Arc<AtomicU32>,
+        retired: Arc<std::sync::Mutex<Vec<NodeIdentity>>>,
         /// What `count_other_live_nodes` reports, overridable per test so
         /// the re-acquisition hysteresis gate can be made to genuinely
         /// reject several retries before succeeding.
@@ -1958,7 +2031,14 @@ mod tests {
         heartbeat_release: Option<Arc<tokio::sync::Notify>>,
         draining_entered: Option<Arc<tokio::sync::Notify>>,
         draining_release: Option<Arc<tokio::sync::Notify>>,
+        /// #1295: every `retire_after_shutdown` call, with what
+        /// `retire_probe` (when set) observed at that moment.
+        retirements: RetirementLog,
+        retire_probe: Option<Box<dyn Fn() -> bool + Send + Sync>>,
     }
+
+    /// Each retired identity, with the probe's observation.
+    type RetirementLog = Arc<std::sync::Mutex<Vec<(NodeIdentity, Option<bool>)>>>;
 
     impl FakeLease {
         fn new(heartbeat_result: Box<dyn FnMut() -> Result<bool, ClaimError> + Send>) -> Self {
@@ -1969,6 +2049,7 @@ mod tests {
                     std::collections::HashSet::new(),
                 )),
                 draining_calls: Arc::new(AtomicU32::new(0)),
+                retired: Arc::new(std::sync::Mutex::new(Vec::new())),
                 other_live_nodes: Arc::new(AtomicU32::new(0)),
                 steal_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
                 cleared_intents: Arc::new(std::sync::Mutex::new(Vec::new())),
@@ -1980,6 +2061,8 @@ mod tests {
                 heartbeat_release: None,
                 draining_entered: None,
                 draining_release: None,
+                retirements: Arc::new(std::sync::Mutex::new(Vec::new())),
+                retire_probe: None,
             }
         }
     }
@@ -2037,6 +2120,14 @@ mod tests {
         ) -> Result<bool, ClaimError> {
             Ok(true)
         }
+        async fn retire_after_shutdown(&self, me: &NodeIdentity) -> Result<bool, ClaimError> {
+            let observed = self.retire_probe.as_ref().map(|probe| probe());
+            self.retirements
+                .lock()
+                .expect("lock")
+                .push((me.clone(), observed));
+            Ok(true)
+        }
         async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
             self.draining_calls.fetch_add(1, Ordering::SeqCst);
             if let Some(entered) = &self.draining_entered {
@@ -2045,6 +2136,10 @@ mod tests {
             if let Some(release) = &self.draining_release {
                 release.notified().await;
             }
+            Ok(())
+        }
+        async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
+            self.retired.lock().expect("retirements").push(me.clone());
             Ok(())
         }
         async fn count_other_live_nodes(
@@ -3515,6 +3610,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn terminal_departure_requires_completed_socket_drain() {
+        for sockets_drained in [false, true] {
+            let owner = identity();
+            let live_identity = waddle_xmpp::ownership::SharedNodeIdentity::new(owner.clone());
+            let lease = FakeLease::new(Box::new(|| Ok(true)));
+            let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(NoLocallyClaimedEntities);
+            let readiness = NodeLifecycle::new();
+            let stop = CancellationToken::new();
+            stop.cancel();
+            let complete = CancellationToken::new();
+            complete.cancel();
+            let coordination = ShutdownSmDrain {
+                process_stop: stop.clone(),
+                complete,
+                budget: Duration::from_millis(50),
+                started: Arc::new(std::sync::OnceLock::new()),
+                connections_drained: Arc::new(AtomicBool::new(sockets_drained)),
+            };
+            let fatal_fence = readiness.fatal_fence_token();
+            let context = TerminalFenceContext {
+                lease: &lease,
+                live_identity: &live_identity,
+                local_claims: &local_claims,
+                readiness: &readiness,
+                stop_token: &stop,
+                fatal_fence: &fatal_fence,
+                control_plane_budget: Duration::from_millis(50),
+                shutdown_sm_drain: Some(&coordination),
+            };
+            let claim_store: Arc<dyn ClaimStore> =
+                Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+            context
+                .shutdown(
+                    &claim_store,
+                    &owner,
+                    Duration::from_millis(50),
+                    Duration::from_secs(10),
+                    tokio::time::Instant::now(),
+                )
+                .await;
+            assert!(!live_identity.current().is_active());
+            assert_eq!(
+                lease.retired.lock().expect("retirements").len(),
+                usize::from(sockets_drained),
+                "Q6 completion alone must not revoke admission while sockets are still draining"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn ordinary_shutdown_keeps_identity_live_until_real_q6_confirmation() {
         use waddle_xmpp::pending_delivery::storage::{
             InMemoryPendingDeliveryStorage, PendingDeliveryStorage,
@@ -3611,6 +3756,7 @@ mod tests {
         let readiness = NodeLifecycle::new();
         let fatal_fence = readiness.fatal_fence_token();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: q6_complete.clone(),
             budget: Duration::from_secs(4),
@@ -3634,6 +3780,7 @@ mod tests {
                 q6_complete.clone(),
                 sm_started,
                 Duration::from_secs(4),
+                coordination.connections_drained.clone(),
             ),
         );
         process_stop.cancel();
@@ -3666,6 +3813,7 @@ mod tests {
         }
         assert!(live_identity.current().is_active());
         assert!(!q6_complete.is_cancelled());
+        assert!(lease.retired.lock().expect("retirements").is_empty());
 
         blocklist.release.notify_one();
         tokio::time::timeout(Duration::from_secs(5), &mut shutdown)
@@ -3676,6 +3824,10 @@ mod tests {
             .expect("Q6 task completes")
             .expect("Q6 drain task");
         assert!(q6_complete.is_cancelled());
+        assert_eq!(
+            lease.retired.lock().expect("retirements").as_slice(),
+            std::slice::from_ref(&owner)
+        );
         assert!(!live_identity.current().is_active());
         assert!(persistence
             .get_session(&waddle_xmpp::pending_delivery::SmSessionId::new(stream_id))
@@ -3713,6 +3865,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_millis(80),
@@ -3746,6 +3899,133 @@ mod tests {
         assert!(!live_identity.current().is_active());
     }
 
+    /// Records exact-owner demotion, the step retirement must follow.
+    struct DemotionRecordingLocalClaims {
+        demoted: Arc<AtomicBool>,
+    }
+
+    #[async_trait]
+    impl LocallyClaimedEntities for DemotionRecordingLocalClaims {
+        async fn owned(&self) -> Vec<Entity> {
+            Vec::new()
+        }
+        async fn demote(&self, _entity: &Entity) {}
+        async fn demote_owned_by(&self, _owner: &NodeIdentity) {
+            self.demoted.store(true, Ordering::SeqCst);
+        }
+        async fn health_check(&self, _entity: &Entity) -> bool {
+            true
+        }
+    }
+
+    /// #1295: an ordinary shutdown retires its identity exactly once, and
+    /// only after it has been disabled and its actors demoted — retirement
+    /// must never make claims stealable while this node could still act
+    /// under them.
+    #[tokio::test]
+    async fn ordinary_shutdown_retires_the_identity_only_after_disabling_it() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let demoted = Arc::new(AtomicBool::new(false));
+        let mut lease = FakeLease::new(Box::new(|| Ok(true)));
+        let probe_identity = live_identity.clone();
+        let probe_demoted = demoted.clone();
+        lease.retire_probe = Some(Box::new(move || {
+            !probe_identity.current().is_active() && probe_demoted.load(Ordering::SeqCst)
+        }));
+        let retirements = lease.retirements.clone();
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        let local_claims: Arc<dyn LocallyClaimedEntities> =
+            Arc::new(DemotionRecordingLocalClaims { demoted });
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(50),
+            shutdown_sm_drain: None,
+        };
+        process_stop.cancel();
+
+        tokio::time::timeout(
+            Duration::from_millis(500),
+            context.shutdown(
+                &claims,
+                &owner,
+                Duration::from_millis(20),
+                Duration::from_secs(2),
+                tokio::time::Instant::now(),
+            ),
+        )
+        .await
+        .expect("ordinary shutdown completes");
+
+        assert!(!live_identity.current().is_active());
+        assert_eq!(
+            retirements.lock().expect("lock").as_slice(),
+            &[(owner, Some(true))],
+            "retired once, for the shutdown identity, after disable and demotion"
+        );
+    }
+
+    /// A shutdown that loses its lease takes the fatal path: the reaper,
+    /// not this node, decides when its claims become stealable.
+    #[tokio::test]
+    async fn lost_shutdown_lease_does_not_self_retire() {
+        let owner = identity();
+        let live_identity = SharedNodeIdentity::new(owner.clone());
+        let lease = FakeLease::new(Box::new(|| Ok(false)));
+        let retirements = lease.retirements.clone();
+        let claims: Arc<dyn ClaimStore> =
+            Arc::new(waddle_xmpp::ownership::InProcessClaimStore::new());
+        // Hold the drain in `owned()` so the heartbeat's fencing loss, not
+        // drain completion, decides the outcome.
+        let local_claims: Arc<dyn LocallyClaimedEntities> = Arc::new(BlockingOwnedLocalClaims {
+            owned_started: Arc::new(tokio::sync::Notify::new()),
+            owned_release: Arc::new(tokio::sync::Notify::new()),
+            block_once: AtomicBool::new(false),
+        });
+        let readiness = NodeLifecycle::new();
+        let fatal_fence = readiness.fatal_fence_token();
+        let process_stop = CancellationToken::new();
+        let context = TerminalFenceContext {
+            lease: &lease,
+            live_identity: &live_identity,
+            local_claims: &local_claims,
+            readiness: &readiness,
+            stop_token: &process_stop,
+            fatal_fence: &fatal_fence,
+            control_plane_budget: Duration::from_millis(20),
+            shutdown_sm_drain: None,
+        };
+        process_stop.cancel();
+
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            context.shutdown(
+                &claims,
+                &owner,
+                Duration::from_secs(1),
+                Duration::from_millis(100),
+                tokio::time::Instant::now(),
+            ),
+        )
+        .await
+        .expect("shutdown with a lost lease completes");
+
+        assert!(!live_identity.current().is_active());
+        assert!(
+            retirements.lock().expect("lock").is_empty(),
+            "a lost lease never self-retires"
+        );
+    }
+
     #[tokio::test]
     async fn lost_shutdown_heartbeat_preempts_q6_and_disables_identity() {
         let owner = identity();
@@ -3764,6 +4044,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_secs(2),
@@ -3855,6 +4136,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_secs(2),
@@ -4016,6 +4298,7 @@ mod tests {
         let fatal_fence = readiness.fatal_fence_token();
         let process_stop = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: CancellationToken::new(),
             budget: Duration::from_secs(2),
@@ -4075,6 +4358,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let completion = CancellationToken::new();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop: process_stop.clone(),
             complete: completion.clone(),
             budget: Duration::from_secs(2),
@@ -4129,6 +4413,7 @@ mod tests {
         let process_stop = CancellationToken::new();
         let clustering_stop = process_stop.child_token();
         let coordination = ShutdownSmDrain {
+            connections_drained: Arc::new(AtomicBool::new(false)),
             process_stop,
             complete: CancellationToken::new(),
             budget: Duration::from_secs(2),

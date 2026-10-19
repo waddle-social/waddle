@@ -30,9 +30,16 @@
 //! drain paths concurrently would be exactly the double-drain hazard the
 //! phase plan's Slice 10 "interaction with existing drain" note warns
 //! against — one path could release a claim the other path's promotion is
-//! still mid-write under. Only [`EntityType::RoomActor`] (and, forward-
-//! looking, `UserActor` once a later phase wires production claims for it)
-//! is drained here.
+//! still mid-write under. Only [`EntityType::RoomActor`] is drained here.
+//!
+//! `UserActor` claims are acquired in production but have no durable
+//! final-write barrier, so this loop cannot seal them (see
+//! `UserLocalClaims::seal_before_release`). A user's claim is normally
+//! released by the user registry when its last local resource
+//! unregisters. Whatever is still held when shutdown completes is handed
+//! off by retiring the node's disabled identity
+//! (`NodeLeaseStore::retire_after_shutdown`, #1295), which makes those
+//! claims reclaimable through `steal_stale`'s `OwnerStale` predicate.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -109,9 +116,9 @@ pub(crate) async fn run_shutdown_drain<L>(
 
     for entity in owned {
         // Only entities this generic loop owns draining for — see the
-        // module doc for why `SmSession` is deliberately excluded (the
-        // existing Q6 drain owns those) and `UserActor` has no production
-        // claim-acquisition call site yet (deviation 34).
+        // module doc: `SmSession` belongs to the existing Q6 drain, and
+        // `UserActor` claims are handed off by identity retirement after
+        // shutdown instead of a seal here.
         if entity.entity_type != EntityType::RoomActor {
             continue;
         }
@@ -329,6 +336,9 @@ mod tests {
             Ok(true)
         }
         async fn mark_draining(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+            Ok(())
+        }
+        async fn retire(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
             Ok(())
         }
         async fn count_other_live_nodes(

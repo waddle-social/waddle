@@ -6,6 +6,7 @@
 //! `waddle-client-session` (ADR-0019); nothing here keeps its own copy.
 
 mod application;
+mod attachments;
 mod auth;
 mod composer;
 mod runtime;

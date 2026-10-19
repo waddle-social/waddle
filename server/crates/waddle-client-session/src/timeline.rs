@@ -103,6 +103,32 @@ pub struct ReactionUpdate {
     pub emojis: Vec<String>,
 }
 
+/// A file shared in a message (XEP-0447), with its XEP-0448 envelope when
+/// the bytes at `url` are ciphertext.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Attachment {
+    pub url: String,
+    pub name: Option<String>,
+    pub media_type: Option<String>,
+    /// Plaintext size in bytes.
+    pub size: Option<u64>,
+    /// XEP-0446 `disposition='inline'`: show it in the message.
+    pub inline: bool,
+    pub encryption: Option<Encryption>,
+}
+
+/// XEP-0448: how to decrypt an attachment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Encryption {
+    pub cipher: String,
+    pub key_b64: String,
+    pub iv_b64: String,
+    /// SHA-256 hashes of the ciphertext, base64.
+    pub sha256_b64: Vec<String>,
+    /// Where the ciphertext can be fetched; never empty.
+    pub sources: Vec<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TimelineItem {
     pub key: ItemKey,
@@ -132,6 +158,7 @@ pub struct TimelineItem {
     pub reply: Option<ReplyPreview>,
     /// Tallies in emoji order.
     pub reactions: Vec<Reaction>,
+    pub attachments: Vec<Attachment>,
     /// When the applied correction was sent, so an older one arriving later
     /// cannot undo a newer one.
     edited_at: Option<i64>,
@@ -168,6 +195,7 @@ pub struct IncomingMessage {
     pub tombstone: bool,
     pub reply_to: Option<ReplyTo>,
     pub reaction: Option<ReactionUpdate>,
+    pub attachments: Vec<Attachment>,
 }
 
 /// The user's own send, shown before the server has seen it.
@@ -180,6 +208,7 @@ pub struct LocalEcho {
     /// Known up front in a DM (the origin id); a room assigns it.
     pub reference_id: Option<String>,
     pub reply_to: Option<ReplyTo>,
+    pub attachments: Vec<Attachment>,
 }
 
 /// A change to the list a UI shows. Indices refer to the list as it stands
@@ -430,6 +459,7 @@ impl Timeline {
             correction_id: Some(echo.origin_id),
             reply: echo.reply_to.map(unresolved_preview),
             reactions: Vec::new(),
+            attachments: echo.attachments,
             edited_at: None,
         };
         self.append(item, ids)
@@ -499,6 +529,7 @@ impl Timeline {
         item.edited = previous.edited;
         item.edited_at = previous.edited_at;
         item.retracted = previous.retracted;
+        item.attachments.clone_from(&previous.attachments);
         let mut touched = BTreeSet::from([at]);
         self.refresh_replies_to(at, &mut touched);
         self.sets(touched)
@@ -911,6 +942,7 @@ impl Timeline {
         }
         item.retracted = true;
         item.body.clear();
+        item.attachments.clear();
         true
     }
 
@@ -1099,8 +1131,16 @@ fn content_item(message: &IncomingMessage) -> Option<TimelineItem> {
         .or_else(|| message.origin_id.clone().map(ItemKey::Origin))?;
     let body = if message.tombstone {
         String::new()
-    } else {
+    } else if message.attachments.is_empty() {
         message.body.clone()?
+    } else {
+        // Files may be sent with no text, or with their URL as the text
+        // for clients that cannot show them.
+        message
+            .body
+            .clone()
+            .filter(|body| !message.attachments.iter().any(|file| file.url == *body))
+            .unwrap_or_default()
     };
     Some(TimelineItem {
         key,
@@ -1123,6 +1163,11 @@ fn content_item(message: &IncomingMessage) -> Option<TimelineItem> {
             .or_else(|| message.message_id.clone()),
         reply: message.reply_to.clone().map(unresolved_preview),
         reactions: Vec::new(),
+        attachments: if message.tombstone {
+            Vec::new()
+        } else {
+            message.attachments.clone()
+        },
         edited_at: None,
     })
 }
@@ -1180,6 +1225,7 @@ mod tests {
             timestamp_ms: 10,
             reference_id: None,
             reply_to: None,
+            attachments: Vec::new(),
         }
     }
 
@@ -1825,5 +1871,53 @@ mod tests {
         assert!(
             matches!(&diffs[0], TimelineDiff::Set { index: 0, item } if item.body == "draft" && !item.edited)
         );
+    }
+
+    fn file(url: &str) -> Attachment {
+        Attachment {
+            url: url.into(),
+            name: Some("cat.png".into()),
+            media_type: Some("image/png".into()),
+            size: Some(3),
+            inline: true,
+            encryption: None,
+        }
+    }
+
+    #[test]
+    fn files_show_without_text_and_hide_a_url_fallback_body() {
+        let mut timeline = Timeline::new();
+        timeline.apply_live(IncomingMessage {
+            body: None,
+            attachments: vec![file("https://up.example/a")],
+            ..message("s1", "ann", "", 1)
+        });
+        timeline.apply_live(IncomingMessage {
+            attachments: vec![file("https://up.example/b")],
+            ..message("s2", "ann", "https://up.example/b", 2)
+        });
+        timeline.apply_live(IncomingMessage {
+            attachments: vec![file("https://up.example/c")],
+            ..message("s3", "ann", "look at this", 3)
+        });
+        assert_eq!(bodies(&timeline), ["", "", "look at this"]);
+        assert!(timeline
+            .items()
+            .iter()
+            .all(|item| item.attachments.len() == 1));
+    }
+
+    #[test]
+    fn deleting_a_message_drops_its_files() {
+        let mut timeline = Timeline::new();
+        timeline.apply_live(IncomingMessage {
+            attachments: vec![file("https://up.example/a")],
+            ..message("s1", "ann", "pic", 1)
+        });
+        timeline.apply_live(IncomingMessage {
+            retracts_id: Some("s1".into()),
+            ..message("s2", "ann", "", 2)
+        });
+        assert!(timeline.items()[0].attachments.is_empty());
     }
 }

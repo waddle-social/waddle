@@ -70,6 +70,209 @@ mod owner_local;
 #[path = "registration_remote_retirement.rs"]
 mod remote_retirement;
 
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn registration_reacquires_locally_when_foreign_owner_disappears_before_relay() {
+    use super::super::registration::FOREIGN_OWNER_GATE;
+    use crate::clustering::route_bridge::{wire_for_test, OrderedRelayDeliveryBridge};
+    use crate::clustering::ClusteringHandles;
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::registry::{GetUser, WireUserClusteringClaims};
+
+    let jid: FullJid = "alice@example.com/reacquire".parse().expect("jid");
+    let entity = Entity::new(EntityType::UserActor, jid.to_bare().to_string());
+    let claims = Arc::new(InProcessClaimStore::new());
+    let foreign = NodeIdentity::new("departed-owner", "departed-epoch");
+    let foreign_epoch = claims
+        .acquire(&entity, &foreign)
+        .await
+        .expect("foreign claim");
+    let identity = SharedNodeIdentity::new(NodeIdentity::new("socket-node", "socket-epoch"));
+    let bridge = OrderedRelayDeliveryBridge::new(
+        tokio_util::sync::CancellationToken::new(),
+        &crate::config::ClusteringMessagingConfig::default(),
+    );
+    let state = super::create_test_websocket_state_with_clustering(
+        ClusteringHandles {
+            ordered_relay_delivery_bridge: Some(bridge.clone()),
+            ..Default::default()
+        },
+        Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
+    )
+    .await;
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(WireUserClusteringClaims {
+            claim_store: claims.clone(),
+            node_identity: identity.clone(),
+        })
+        .await
+        .expect("wire user ownership");
+    wire_for_test(&bridge, &state, claims.clone(), identity).await;
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let ((outcome, mut conn, mut rx, _), ()) = tokio::join!(
+        FOREIGN_OWNER_GATE.scope(
+            (entered.clone(), release.clone()),
+            bind_fresh_test_connection(state.clone(), jid.clone()),
+        ),
+        async {
+            entered.notified().await;
+            // Model the authoritative owner teardown after the initial
+            // ForeignOwner response and before the bridge reads the claim.
+            claims
+                .release(&entity, &foreign, foreign_epoch)
+                .await
+                .expect("owner release");
+            release.notify_one();
+        },
+    );
+    assert!(
+        matches!(outcome, RegistrationAfterFrame::Registered(_)),
+        "NotRemote must retry authoritative local registration"
+    );
+    let actor = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .await
+        .expect("lookup")
+        .expect("local actor");
+    assert_eq!(
+        actor
+            .ask(waddle_xmpp::registry::user_actor::GetResources)
+            .await
+            .expect("resources"),
+        vec![jid.clone()]
+    );
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .is_owned_by(&jid, conn.registry_owner.as_ref().expect("socket owner")));
+    finish_test_socket_cleanup(&state, &mut conn, &mut rx).await;
+}
+
+#[tokio::test]
+async fn busy_registration_sends_resource_constraint_and_rolls_back() {
+    use super::super::connection::{
+        handle_inbound_text, ConnectionIo, FrameAuthority, RegistrationChannels,
+    };
+    use axum::extract::ws::Message;
+    use tokio::sync::oneshot;
+    use waddle_xmpp::registry::user_actor::test_support::GateMailbox;
+    use waddle_xmpp::registry::{ConnectionEntry, GetUser, RegisterUserResource};
+
+    let state = create_test_websocket_state().await;
+    let jid: FullJid = "alice@example.com/busy-registration".parse().expect("jid");
+    let (seed_tx, _seed_rx) = mpsc::channel(1);
+    state
+        .deps
+        .protocol
+        .user_registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry: ConnectionEntry::new(seed_tx),
+        })
+        .await
+        .expect("seed actor");
+    let actor = state
+        .deps
+        .protocol
+        .user_registry
+        .ask(GetUser {
+            bare_jid: jid.to_bare(),
+        })
+        .await
+        .expect("lookup")
+        .expect("actor");
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let (release_tx, release_rx) = oneshot::channel();
+    actor
+        .tell(GateMailbox {
+            entered: entered.clone(),
+            release_rx,
+        })
+        .await
+        .expect("gate child");
+    entered.notified().await;
+
+    let mut conn = WsConnState::new();
+    conn.phase = ConnectionPhase::ready(jid.clone(), false);
+    let (tx, _rx) = mpsc::channel(1);
+    let mut pending_tx = Some(tx);
+    let mut force_detach_rx = None;
+    let permit = state.deps.app_state.node_lifecycle.admit().expect("permit");
+    let shutdown = tokio_util::sync::CancellationToken::new();
+    let captured = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let mut socket = Box::pin(futures::sink::unfold(
+        captured.clone(),
+        |captured, frame: Message| async move {
+            captured.lock().expect("frames").push(frame);
+            Ok::<_, std::io::Error>(captured)
+        },
+    ));
+    let mut reader = futures::stream::pending::<Result<Message, std::io::Error>>();
+    let stayed_open = handle_inbound_text(
+        " ",
+        "example.com",
+        &state,
+        &mut conn,
+        RegistrationChannels {
+            pending_tx: &mut pending_tx,
+            force_detach_rx: &mut force_detach_rx,
+        },
+        ConnectionIo {
+            sender: &mut socket,
+            receiver: &mut reader,
+        },
+        FrameAuthority {
+            permit: &permit,
+            shutdown: &shutdown,
+        },
+    )
+    .await;
+    release_tx.send(()).expect("release actor");
+
+    assert!(
+        !stayed_open,
+        "the overloaded stream closes within its bounded registration budget"
+    );
+    assert!(conn.registry_owner.is_none());
+    assert!(state
+        .deps
+        .protocol
+        .connection_registry
+        .get_entry(&jid)
+        .is_none());
+    let captured = captured.lock().expect("frames");
+    let frames: Vec<Element> = captured
+        .iter()
+        .filter_map(|frame| match frame {
+            Message::Text(xml) => Some(xml.parse().expect("server XML")),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(frames.len(), 2, "stream error and framing close");
+    assert_eq!(frames[0].name(), "error");
+    assert_eq!(frames[0].ns(), waddle_xmpp::ns::STREAM);
+    assert!(frames[0]
+        .get_child("resource-constraint", waddle_xmpp::ns::STREAMS)
+        .is_some());
+    assert!(frames[0]
+        .get_child("internal-server-error", waddle_xmpp::ns::STREAMS)
+        .is_none());
+    assert_eq!(frames[1].name(), "close");
+    assert_eq!(frames[1].ns(), "urn:ietf:params:xml:ns:xmpp-framing");
+}
+
 #[tokio::test]
 async fn paused_local_mirror_releases_the_only_main_pool_connection() {
     use super::super::registration::LOCAL_PUBLICATION_GATE;

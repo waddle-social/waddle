@@ -111,6 +111,10 @@ impl NodeLeaseStore for StaticNodeLease {
         Ok(())
     }
 
+    async fn retire(&self, _me: &NodeIdentity) -> Result<(), ClaimError> {
+        Ok(())
+    }
+
     async fn count_other_live_nodes(
         &self,
         _me: &NodeIdentity,
@@ -184,6 +188,12 @@ impl AllowlistStore for StaticAllowlist {
         &self,
     ) -> Result<HashSet<PeerId>, super::super::allowlist::AllowlistError> {
         Ok(HashSet::from([self.peer_id]))
+    }
+
+    async fn effective_peers(
+        &self,
+    ) -> Result<HashSet<PeerId>, super::super::allowlist::AllowlistError> {
+        self.enrolled_peers().await
     }
 }
 
@@ -394,6 +404,7 @@ async fn services_with_claims_and_blocking(
             origin: origin_owner,
             peer_id: origin_peer_id,
         }),
+        node_lease_ttl: crate::config::ClusteringNodeLeaseConfig::default().lease_ttl,
         node_identity: SharedNodeIdentity::new(receiver),
         connection_registry: Arc::new(ConnectionRegistry::new()),
         user_registry: UserRegistryActor::spawn(UserRegistryActor::new()),
@@ -405,6 +416,7 @@ async fn services_with_claims_and_blocking(
 
 pub(crate) mod delivery;
 pub(crate) mod diversion_recovery;
+mod expired_owner_promotion;
 mod ingress_append;
 mod live_send_lease;
 pub(crate) mod muc_refresh;

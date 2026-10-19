@@ -61,6 +61,7 @@ on:
     - server/crates/**/.cargo/**
     - server/rust-toolchain.toml
     - server/rust-toolchain.toml/**
+    - server/vendor/**
   workflow_dispatch: {}
 concurrency:
   group: ${{ github.workflow }}-${{ github.head_ref || github.ref }}
@@ -127,3 +128,15 @@ jobs:
         GITHUB_ACTOR: ${{ github.actor }}
         GITHUB_REF_TYPE: ${{ github.ref_type }}
         GITHUB_REF_NAME: ${{ github.ref_name }}
+    - name: Upload Android test failure reports
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        if-no-files-found: ignore
+        name: android-test-failure-reports
+        path: |-
+          apps/android/app/build/outputs/roborazzi/
+          apps/android/app/build/reports/roborazzi/
+          apps/android/app/build/test-results/
+          apps/android/app/build/reports/tests/
+        retention-days: 3

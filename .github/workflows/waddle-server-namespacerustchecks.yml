@@ -47,6 +47,7 @@ on:
     - server/rust-toolchain.toml/**
     - server/schema/**
     - server/scripts/**
+    - server/vendor/**
     - server/wit/**
   workflow_dispatch: {}
 concurrency:

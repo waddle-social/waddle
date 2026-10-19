@@ -17,6 +17,7 @@ let _WasmSourceInputs = [
 	"../server/.cargo/**",
 	"../server/Cargo.lock",
 	"../server/Cargo.toml",
+	"../server/vendor/**",
 	"../server/crates/waddle-xmpp-client-wasm/**",
 	"../server/crates/waddle-xmpp-client/**",
 	"../server/crates/waddle-xmpp-core/**",
@@ -44,6 +45,7 @@ let _NativeTelemetryContractInputs = [
 	"../scripts/native-telemetry-cargo-closure.py",
 	"../server/.cargo/**",
 	"../server/crates/**",
+	"../server/vendor/**",
 	"../server/crates/**/.cargo/**",
 	"../server/wasm-pkg/waddle-xmpp-client-wasm/**",
 ]

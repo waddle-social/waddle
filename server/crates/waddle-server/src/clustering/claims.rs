@@ -1322,6 +1322,30 @@ pub trait NodeLeaseStore: Send + Sync {
     /// subsequent `steal_stale` may proceed — `false` if the row is fresh.
     async fn expire(&self, owner: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError>;
 
+    /// Commit `expired = true` for this node's own identity at the end of a
+    /// completed graceful shutdown (#1295).
+    ///
+    /// The caller must already have disabled `me` (no publication guard or
+    /// claim-store operation can run under it again) and demoted every local
+    /// actor. Retirement is then the self-attested form of the proof
+    /// [`Self::expire`] infers from a lapsed heartbeat: every claim the
+    /// identity still holds — UserActor claims the generic drain never
+    /// releases, and anything the bounded drain abandoned — becomes
+    /// immediately reclaimable through `steal_stale`'s `OwnerStale` predicate
+    /// instead of waiting a lease TTL plus an orphan-reaper sweep. Write
+    /// ordering is unchanged: a fenced write already holding a claim row
+    /// lock still serializes ahead of any steal.
+    ///
+    /// Only a `draining` row may be retired, so this can never expire a
+    /// node that is still admitting work. Returns `true` if the row is now
+    /// committed-expired by this call, `false` if no row matched.
+    ///
+    /// The default supports test/no-op lease stores; production
+    /// [`PostgresClaimStore`] overrides it.
+    async fn retire_after_shutdown(&self, _me: &NodeIdentity) -> Result<bool, ClaimError> {
+        Ok(false)
+    }
+
     /// Bounded advisory scan for non-expired nodes whose raw heartbeat has
     /// lapsed past `lease_ttl`.
     ///
@@ -1360,6 +1384,12 @@ pub trait NodeLeaseStore: Send + Sync {
     /// Mark this node draining (Slice 10: stop acquiring new claims, keep
     /// serving already-owned ones). Best-effort, idempotent.
     async fn mark_draining(&self, me: &NodeIdentity) -> Result<(), ClaimError>;
+
+    /// Commit terminal departure for this exact incarnation only, after its
+    /// sockets have drained and local authority has been disabled/demoted.
+    /// A stale epoch cannot retire a replacement. Failed retirement safely
+    /// leaves the row for the normal stale-heartbeat expiry watchdog.
+    async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError>;
 
     /// Count other (not `me`) live rows in `clustering_nodes` right now —
     /// feeds the isolation rule's "`clustering_nodes` shows two or more
@@ -1901,6 +1931,30 @@ impl NodeLeaseStore for PostgresClaimStore {
         Ok(affected == 1)
     }
 
+    async fn retire_after_shutdown(&self, me: &NodeIdentity) -> Result<bool, ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        // Same committed-flag transition as the Expire CAS below, without
+        // its heartbeat predicate: the caller has disabled this identity, so
+        // the staleness `expire` infers from a lapsed heartbeat is attested
+        // directly. `draining` restricts it to a node already refusing new
+        // claims.
+        let affected = conn
+            .execute(
+                r#"
+                UPDATE clustering_nodes
+                SET expired = true
+                WHERE node_id = ?
+                  AND node_epoch = ?
+                  AND draining
+                  AND NOT expired
+                "#,
+                crate::db_params![me.node_id.clone(), me.node_epoch.clone()],
+            )
+            .await
+            .map_err(db_err)?;
+        Ok(affected == 1)
+    }
+
     async fn expire(&self, owner: &NodeIdentity, lease_ttl: Duration) -> Result<bool, ClaimError> {
         let conn = self.db.control_plane_guard().await.map_err(db_err)?;
         // Expire CAS (element 4, locked verbatim): the single serialized
@@ -2010,6 +2064,15 @@ impl NodeLeaseStore for PostgresClaimStore {
         )
         .await
         .map_err(db_err)?;
+        Ok(())
+    }
+
+    async fn retire(&self, me: &NodeIdentity) -> Result<(), ClaimError> {
+        let conn = self.db.control_plane_guard().await.map_err(db_err)?;
+        conn.execute(
+            "UPDATE clustering_nodes SET expired = true, draining = true WHERE node_id = ? AND node_epoch = ?",
+            crate::db_params![me.node_id.clone(), me.node_epoch.clone()],
+        ).await.map_err(db_err)?;
         Ok(())
     }
 
@@ -4540,6 +4603,121 @@ mod tests {
             .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &other)
             .await
             .expect("a non-draining node can still steal the dead owner's claim");
+    }
+
+    /// #1295: a gracefully shut down node retires its disabled identity, so
+    /// the UserActor claim it still holds is reclaimable on the survivor's
+    /// next acquire — no lease TTL or orphan-reaper sweep in between.
+    #[tokio::test]
+    async fn retire_after_shutdown_makes_a_held_user_actor_claim_reclaimable_immediately() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let departing = node_identity();
+        store.register(&departing, None).await.expect("register");
+        let entity = Entity::new(EntityType::UserActor, "romeo@example.com".to_string());
+        let epoch0 = store.acquire(&entity, &departing).await.expect("acquire");
+        store
+            .mark_draining(&departing)
+            .await
+            .expect("mark draining");
+
+        let survivor = node_identity();
+        store
+            .register(&survivor, None)
+            .await
+            .expect("register survivor");
+        let refused = store
+            .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &survivor)
+            .await
+            .expect_err("a draining owner still holds its claim until it retires");
+        assert!(matches!(refused, ClaimError::Conflict));
+
+        assert!(
+            store
+                .retire_after_shutdown(&departing)
+                .await
+                .expect("retire"),
+            "the draining identity is retired"
+        );
+        let snapshot = store
+            .current_claim(&entity)
+            .await
+            .expect("claim read")
+            .expect("claim still recorded");
+        assert!(
+            !snapshot.owner_lease_fresh,
+            "a retired owner is not fresh, so steal_from_dead_user_owner proceeds"
+        );
+        let epoch1 = store
+            .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &survivor)
+            .await
+            .expect("the survivor reclaims the retired owner's claim");
+        assert!(epoch1.0 > epoch0.0);
+        assert!(store
+            .fence(&entity, &survivor, epoch1)
+            .await
+            .expect("fence"));
+        assert!(
+            !store
+                .retire_after_shutdown(&departing)
+                .await
+                .expect("second retire"),
+            "retirement is a one-way transition"
+        );
+    }
+
+    /// Retirement is pinned to the exact incarnation: a superseded epoch of
+    /// the same node id never expires the current one.
+    #[tokio::test]
+    async fn retire_after_shutdown_refuses_another_incarnation_of_the_node() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let current = node_identity();
+        store.register(&current, None).await.expect("register");
+        store.mark_draining(&current).await.expect("mark draining");
+        let superseded =
+            NodeIdentity::new(current.node_id.clone(), uuid::Uuid::new_v4().to_string());
+
+        assert!(
+            !store
+                .retire_after_shutdown(&superseded)
+                .await
+                .expect("retire"),
+            "another epoch of the node id is not this incarnation"
+        );
+        assert!(
+            store.retire_after_shutdown(&current).await.expect("retire"),
+            "the exact incarnation still retires"
+        );
+    }
+
+    #[tokio::test]
+    async fn retire_after_shutdown_refuses_a_node_that_is_not_draining() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some(store) = clean_store().await else {
+            return;
+        };
+        let live = node_identity();
+        store.register(&live, None).await.expect("register");
+        let entity = Entity::new(EntityType::UserActor, "juliet@example.com".to_string());
+        let epoch0 = store.acquire(&entity, &live).await.expect("acquire");
+
+        assert!(
+            !store.retire_after_shutdown(&live).await.expect("retire"),
+            "a node still admitting work is never retired"
+        );
+        let other = node_identity();
+        store.register(&other, None).await.expect("register other");
+        let refused = store
+            .steal_stale(&entity, epoch0, StalePredicate::OwnerStale, &other)
+            .await
+            .expect_err("the live owner keeps its claim");
+        assert!(matches!(refused, ClaimError::Conflict));
+        assert!(store.fence(&entity, &live, epoch0).await.expect("fence"));
     }
 
     #[tokio::test]

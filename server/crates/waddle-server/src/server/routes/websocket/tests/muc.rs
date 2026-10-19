@@ -9388,3 +9388,400 @@ async fn xep0045_destroy_wipe_failure_sends_no_destroy_presence() {
          the channel catalog row (and all other waddle-side rows) intact"
     );
 }
+
+/// #1298 / XEP-0045 §9.5: a muc#admin list GET for a room whose actor is
+/// owned by another node is answered by that owner, with the owner's
+/// authorization and list, instead of `item-not-found`.
+#[cfg(feature = "clustering")]
+mod remote_owner_admin_list {
+    use super::*;
+    use crate::clustering::relay::{
+        RelayAskError, RelayMucAdminQuery, RelayMucAdminQueryItem, RelayMucAdminQueryReply,
+        RelaySendEffect, RelaySendFailure,
+    };
+    use crate::clustering::ClusteringHandles;
+    use crate::server::routes::websocket::handlers::iq::muc_admin_relay::{
+        TestMucAdminOwnerRelay, TEST_MUC_ADMIN_OWNER_RELAY,
+    };
+    use crate::server::routes::websocket::{
+        relayed_muc_admin_query, AdminListAnswer, AdminListDenial,
+    };
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+
+    fn admin_list_get(room_jid: &BareJid, id: &str, affiliation: &str) -> String {
+        element_to_xml(
+            Element::builder("iq", waddle_xmpp::ns::JABBER_CLIENT)
+                .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+                .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+                .attr(
+                    minidom::rxml::xml_ncname!("to").to_owned(),
+                    room_jid.to_string(),
+                )
+                .append(
+                    Element::builder("query", waddle_xmpp::muc::NS_MUC_ADMIN)
+                        .append(
+                            Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                                .attr(
+                                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                                    affiliation,
+                                )
+                                .build(),
+                        )
+                        .build(),
+                )
+                .build(),
+        )
+    }
+
+    /// The owning node: alice owns the room and has granted bob membership.
+    async fn owner_with_member(room_jid: &BareJid) -> (Arc<WebSocketState>, FullJid) {
+        let owner = create_test_websocket_state().await;
+        let (alice_session, alice_jid, bob_jid) =
+            join_alice_owner_and_bob(owner.as_ref(), room_jid).await;
+        let grant = build_admin_set_iq_xml(
+            room_jid,
+            "grant-bob",
+            Element::builder("item", waddle_xmpp::muc::NS_MUC_ADMIN)
+                .attr(
+                    minidom::rxml::xml_ncname!("jid").to_owned(),
+                    bob_jid.to_bare().to_string(),
+                )
+                .attr(
+                    minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                    "member",
+                )
+                .build(),
+        );
+        let granted = handle_iq(
+            &grant,
+            "example.com",
+            "muc.example.com",
+            owner.as_ref(),
+            &Some(alice_session),
+            &ready_phase(&alice_jid),
+        )
+        .await;
+        assert!(
+            granted.first().is_some_and(|r| r.contains("type='result'")),
+            "membership grant: {granted:?}"
+        );
+        (owner, bob_jid)
+    }
+
+    /// A node with no local actor for the room, whose claim another node
+    /// holds when `remote_owner` is set.
+    async fn origin(room_jid: &BareJid, remote_owner: bool) -> Arc<WebSocketState> {
+        let local = NodeIdentity::new("origin-node", "origin-epoch");
+        let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        if remote_owner {
+            claims
+                .acquire(
+                    &Entity::new(EntityType::RoomActor, room_jid.to_string()),
+                    &NodeIdentity::new("owner-node", "owner-epoch"),
+                )
+                .await
+                .expect("remote room claim");
+        }
+        create_test_websocket_state_with_extension_manager(
+            empty_extension_manager().await,
+            TestStateOverrides {
+                clustering: Some(ClusteringHandles {
+                    claim_store: Some(claims),
+                    node_identity: Some(SharedNodeIdentity::new(local)),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    /// The transport hop, answered by `owner` exactly as its relay would.
+    fn relay_to(
+        owner: Arc<WebSocketState>,
+        asked: Arc<std::sync::Mutex<Vec<RelayMucAdminQuery>>>,
+    ) -> TestMucAdminOwnerRelay {
+        Arc::new(move |_node, message: RelayMucAdminQuery| {
+            let owner = owner.clone();
+            asked.lock().expect("asked").push(message.clone());
+            Box::pin(async move { Ok(relayed_muc_admin_query(owner.as_ref(), message).await) })
+        })
+    }
+
+    async fn get_from_origin(
+        origin: &WebSocketState,
+        relay: TestMucAdminOwnerRelay,
+        request: &str,
+        requester: &FullJid,
+    ) -> String {
+        TEST_MUC_ADMIN_OWNER_RELAY
+            .scope(relay, async {
+                handle_iq(
+                    request,
+                    "example.com",
+                    "muc.example.com",
+                    origin,
+                    &None,
+                    &ready_phase(requester),
+                )
+                .await
+            })
+            .await
+            .into_iter()
+            .next()
+            .expect("one response")
+    }
+
+    #[tokio::test]
+    async fn xep0045_member_list_get_is_answered_by_the_remote_room_owner() {
+        let room_jid: BareJid = "remote-members@muc.example.com".parse().expect("room");
+        let (owner, bob_jid) = owner_with_member(&room_jid).await;
+        let origin = origin(&room_jid, true).await;
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        let response = get_from_origin(
+            origin.as_ref(),
+            relay_to(owner, asked.clone()),
+            &admin_list_get(&room_jid, "remote-members", "member"),
+            &bob_jid,
+        )
+        .await;
+
+        assert!(response.contains("type='result'"), "{response}");
+        assert!(response.contains("id='remote-members'"), "{response}");
+        assert!(
+            response.contains(&format!("jid='{}'", bob_jid.to_bare())),
+            "the owner's member list names bob: {response}"
+        );
+        let asked = asked.lock().expect("asked");
+        assert_eq!(asked.len(), 1, "forwarded exactly once");
+        assert_eq!(
+            asked[0].requester, bob_jid,
+            "the origin stamps the requester"
+        );
+        assert_eq!(asked[0].room, room_jid);
+    }
+
+    #[tokio::test]
+    async fn xep0045_remote_owner_applies_its_own_authorization() {
+        let room_jid: BareJid = "remote-owners@muc.example.com".parse().expect("room");
+        let (owner, bob_jid) = owner_with_member(&room_jid).await;
+        let origin = origin(&room_jid, true).await;
+
+        let response = get_from_origin(
+            origin.as_ref(),
+            relay_to(owner, Arc::new(std::sync::Mutex::new(Vec::new()))),
+            &admin_list_get(&room_jid, "remote-owner-list", "owner"),
+            &bob_jid,
+        )
+        .await;
+
+        assert!(response.contains("type='error'"), "{response}");
+        assert!(
+            response.contains("<forbidden"),
+            "a member may not list owners on any node: {response}"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep0045_unreachable_remote_owner_is_a_retryable_error() {
+        let room_jid: BareJid = "remote-unreachable@muc.example.com".parse().expect("room");
+        let origin = origin(&room_jid, true).await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+        let relay: TestMucAdminOwnerRelay = Arc::new(|_node, _message| {
+            Box::pin(async {
+                Err(RelayAskError::Send {
+                    failure: RelaySendFailure::ReplyTimeout,
+                    effect: RelaySendEffect::NoEffect,
+                    message: "test: owner did not answer".to_owned(),
+                })
+            })
+        });
+
+        let response = get_from_origin(
+            origin.as_ref(),
+            relay,
+            &admin_list_get(&room_jid, "remote-unreachable", "member"),
+            &bob,
+        )
+        .await;
+
+        assert!(response.contains("type='wait'"), "{response}");
+        assert!(response.contains("<resource-constraint"), "{response}");
+        assert!(!response.contains("item-not-found"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn xep0045_owner_without_the_room_twice_is_a_retryable_error() {
+        let room_jid: BareJid = "remote-moving@muc.example.com".parse().expect("room");
+        let origin = origin(&room_jid, true).await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+        let asks = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let counted = asks.clone();
+        let relay: TestMucAdminOwnerRelay = Arc::new(move |_node, _message| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async { Ok(RelayMucAdminQueryReply::NotOwner) })
+        });
+
+        let response = get_from_origin(
+            origin.as_ref(),
+            relay,
+            &admin_list_get(&room_jid, "remote-moving", "member"),
+            &bob,
+        )
+        .await;
+
+        assert_eq!(
+            asks.load(std::sync::atomic::Ordering::SeqCst),
+            2,
+            "a moved claim is resolved and asked once more"
+        );
+        assert!(response.contains("<resource-constraint"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn xep0045_unclaimed_room_without_an_actor_stays_item_not_found() {
+        let room_jid: BareJid = "nobody-owns@muc.example.com".parse().expect("room");
+        let origin = origin(&room_jid, false).await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+        let relay: TestMucAdminOwnerRelay = Arc::new(|_node, _message| {
+            Box::pin(async { panic!("an unclaimed room is never forwarded") })
+        });
+
+        let response = get_from_origin(
+            origin.as_ref(),
+            relay,
+            &admin_list_get(&room_jid, "nobody", "member"),
+            &bob,
+        )
+        .await;
+
+        assert!(response.contains("item-not-found"), "{response}");
+    }
+
+    fn member_list_request(room: BareJid, requester: FullJid) -> RelayMucAdminQuery {
+        RelayMucAdminQuery {
+            room,
+            requester,
+            items: vec![RelayMucAdminQueryItem {
+                affiliation: Some(Affiliation::Member),
+                role: None,
+            }],
+            trace: Default::default(),
+        }
+    }
+
+    #[tokio::test]
+    async fn xep0045_forwarded_answer_has_the_local_wire_shape() {
+        let room_jid: BareJid = "remote-shape@muc.example.com".parse().expect("room");
+        let (owner, bob_jid) = owner_with_member(&room_jid).await;
+        let origin = origin(&room_jid, true).await;
+        let request = admin_list_get(&room_jid, "same-shape", "member");
+
+        let forwarded = get_from_origin(
+            origin.as_ref(),
+            relay_to(owner.clone(), Arc::new(std::sync::Mutex::new(Vec::new()))),
+            &request,
+            &bob_jid,
+        )
+        .await;
+        let local = handle_iq(
+            &request,
+            "example.com",
+            "muc.example.com",
+            owner.as_ref(),
+            &None,
+            &ready_phase(&bob_jid),
+        )
+        .await
+        .into_iter()
+        .next()
+        .expect("local response");
+
+        assert_eq!(
+            forwarded, local,
+            "a forwarded GET leaves exactly as the owner would answer it locally"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep0045_too_large_remote_list_is_a_definite_error() {
+        let room_jid: BareJid = "remote-huge@muc.example.com".parse().expect("room");
+        let origin = origin(&room_jid, true).await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+        let relay: TestMucAdminOwnerRelay =
+            Arc::new(|_node, _message| Box::pin(async { Ok(RelayMucAdminQueryReply::TooLarge) }));
+
+        let response = get_from_origin(
+            origin.as_ref(),
+            relay,
+            &admin_list_get(&room_jid, "remote-huge", "member"),
+            &bob,
+        )
+        .await;
+
+        assert!(response.contains("type='cancel'"), "{response}");
+        assert!(response.contains("<resource-constraint"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn xep0045_silent_remote_owner_is_bounded_by_the_origin_budget() {
+        let room_jid: BareJid = "remote-silent@muc.example.com".parse().expect("room");
+        let origin = origin(&room_jid, true).await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+        let relay: TestMucAdminOwnerRelay =
+            Arc::new(|_node, _message| Box::pin(std::future::pending()));
+        let request = admin_list_get(&room_jid, "remote-silent", "member");
+
+        tokio::time::pause();
+        let started = tokio::time::Instant::now();
+        let response = get_from_origin(origin.as_ref(), relay, &request, &bob).await;
+
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(15),
+            "the origin answers inside the stanza-handler backstop"
+        );
+        assert!(response.contains("<resource-constraint"), "{response}");
+        assert!(response.contains("type='wait'"), "{response}");
+    }
+
+    #[tokio::test]
+    async fn relayed_query_for_a_room_without_a_local_actor_is_not_owner() {
+        let room_jid: BareJid = "not-here@muc.example.com".parse().expect("room");
+        let state = create_test_websocket_state().await;
+        let bob: FullJid = "bob@example.com/web".parse().expect("bob");
+
+        let reply =
+            relayed_muc_admin_query(state.as_ref(), member_list_request(room_jid, bob)).await;
+
+        assert_eq!(reply, RelayMucAdminQueryReply::NotOwner);
+    }
+
+    #[tokio::test]
+    async fn relayed_query_applies_the_owners_authorization() {
+        let room_jid: BareJid = "relayed-auth@muc.example.com".parse().expect("room");
+        let (owner, bob_jid) = owner_with_member(&room_jid).await;
+        let mallory: FullJid = "mallory@example.com/web".parse().expect("mallory");
+
+        let member = relayed_muc_admin_query(
+            owner.as_ref(),
+            member_list_request(room_jid.clone(), bob_jid.clone()),
+        )
+        .await;
+        let RelayMucAdminQueryReply::Answered(AdminListAnswer::Affiliations(members)) = member
+        else {
+            panic!("a member gets the member list: {member:?}");
+        };
+        assert!(members.contains(&(bob_jid.to_bare(), Affiliation::Member)));
+
+        let stranger =
+            relayed_muc_admin_query(owner.as_ref(), member_list_request(room_jid, mallory)).await;
+        assert_eq!(
+            stranger,
+            RelayMucAdminQueryReply::Answered(AdminListAnswer::Denied(AdminListDenial::Forbidden)),
+            "a non-member is refused on the owner exactly as locally"
+        );
+    }
+}
