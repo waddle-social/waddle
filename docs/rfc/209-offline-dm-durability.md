@@ -196,7 +196,7 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 
 ### Files to touch
 
-- `server/crates/waddle-server/src/db/mod.rs` — add transaction support (driver-aware; `BEGIN`/`COMMIT` for both SQLite and Postgres).
+- `server/crates/waddle-server/src/db.rs` — add transaction support (driver-aware; `BEGIN`/`COMMIT` for both SQLite and Postgres).
 - `server/crates/waddle-xmpp/src/stream_management/persistence.rs` — extend trait with the JOIN method.
 - `server/crates/waddle-server/src/sm/persistence.rs` — implement the JOIN query.
 - `server/crates/waddle-xmpp/src/stream_management/session_registry.rs` — use the transaction in `store_session`'s persistence write.

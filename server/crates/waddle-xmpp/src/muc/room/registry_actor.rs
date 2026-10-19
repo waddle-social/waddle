@@ -3936,13 +3936,13 @@ impl kameo::message::Message<RetryPendingRoomWork> for RoomRegistryActor {
 ///
 /// Construction-order note: `clustering::start_if_enabled` (which
 /// produces the real `ClaimStore`/`MucDurableStore`) runs *after* the
-/// room registry is spawned in `server/mod.rs`, mirroring the exact
+/// room registry is spawned in `server.rs`, mirroring the exact
 /// chicken-and-egg the `local_claims`/`resume_bridge` fill-in-later cells
 /// already solve for Slices 5/6 — here realized as a message instead of
 /// an `OnceLock`, since a kameo actor's state is only mutable through its
 /// own mailbox. Sent once, before any client traffic can reach
 /// `GetOrCreateRoom` (the HTTP/WebSocket listeners start after this
-/// point in `server/mod.rs`).
+/// point in `server.rs`).
 pub struct WireClusteringClaims {
     pub claim_store: Arc<dyn ClaimStore>,
     pub node_identity: SharedNodeIdentity,

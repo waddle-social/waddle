@@ -684,7 +684,7 @@ fn xep0160_hints_in_error_stanzas_are_ignored() {
 // `sm_promotion` tests in waddle-server (which exercise
 // `promote_session_unacked` — the same callable invoked by the
 // shutdown-drain task in
-// `server/crates/waddle-server/src/server/mod.rs::start_with_config`)
+// `server/crates/waddle-server/src/server.rs::start_with_config`)
 // plus the persist-after-promotion contract on
 // `InMemorySmSessionRegistry::drain_all_for_shutdown` /
 // `confirm_drained` exercised by `xep0198_session_registry.rs::*`.

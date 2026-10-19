@@ -1820,7 +1820,7 @@ async fn surge_node_joins_default_mesh_without_rotating_startup_identity() {
 /// a harness-only reimplementation: every node spawned here
 /// (`spawn_cluster_server`) is a full `waddle-server` subprocess that runs
 /// `clustering::start_if_enabled`'s production bring-up unconditionally
-/// (`server::start_with_config` always calls it — see `server/mod.rs`), so
+/// (`server::start_with_config` always calls it — see `server.rs`), so
 /// `run_node_lease` is already driving each subprocess's readiness signal
 /// with no harness-side wiring required. The one gap this fills: the
 /// pre-existing harness never drove a *third* in-process node through this

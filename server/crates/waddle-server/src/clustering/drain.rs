@@ -220,7 +220,7 @@ const OLD_GENERATION_BACKOFF: Duration = Duration::from_millis(250);
 /// [`waddle_xmpp::ownership::RolloutBackoff`] implementation: resolves
 /// [`NodeLeaseStore::current_generation`] once per call and folds it
 /// through [`rollout_backoff_delay`] against this node's own
-/// `pod_template_hash`. Wired at `server/mod.rs` alongside the room
+/// `pod_template_hash`. Wired at `server.rs` alongside the room
 /// registry's other clustering handles, mirroring the orphan reaper's
 /// identical direct use of `rollout_backoff_delay` (`session_janitors.rs`)
 /// one crate boundary over.

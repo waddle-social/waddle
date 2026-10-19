@@ -15,7 +15,7 @@ fn read(relative: &str) -> String {
 
 #[test]
 fn active_server_permissions_stay_actor_only() {
-    for relative in ["src/server/mod.rs", "src/server/xmpp_state.rs"] {
+    for relative in ["src/server.rs", "src/server/xmpp_state.rs"] {
         let contents = read(relative);
         assert!(
             contents.contains("PermissionActor"),
@@ -52,7 +52,7 @@ fn spicedb_runtime_and_chart_stay_free_of_removed_bootstrap_knobs() {
 
     for relative in [
         "src/config.rs",
-        "src/permissions/mod.rs",
+        "src/permissions.rs",
         "src/permissions/spicedb.rs",
         "../../charts/waddle-server/templates/configmap.yaml",
         "../../charts/waddle-server/templates/validations.yaml",

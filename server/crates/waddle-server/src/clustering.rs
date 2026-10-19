@@ -754,9 +754,9 @@ pub struct ClusteringHandles {
     /// ADR-0017 Phase 3 Slice 7: the `RoomActor`-backed
     /// `LocallyClaimedEntities` counterpart of `local_claims`, constructed
     /// empty here (the MUC room registry does not exist yet at this point
-    /// in startup — it is spawned earlier, in `server/mod.rs`, mirroring
+    /// in startup — it is spawned earlier, in `server.rs`, mirroring
     /// `local_claims`'s own construction-order note) and wired later by
-    /// `server/mod.rs` calling `RoomRegistry::wire_clustering_claims` /
+    /// `server.rs` calling `RoomRegistry::wire_clustering_claims` /
     /// `RoomLocalClaims::wire` once the registry handle is available. Also
     /// the same `Arc` `RelayActor` answers `Demote` asks through (the
     /// two-part demotion protocol's part (a) receiving side). `None`
@@ -772,7 +772,7 @@ pub struct ClusteringHandles {
     #[cfg(feature = "clustering")]
     pub user_local_claims: Option<Arc<local_claims::UserLocalClaims>>,
     /// ADR-0017 Phase 3 Slice 7: the durable MUC room ownership store —
-    /// the SAME `Arc` `server/mod.rs` hands to
+    /// the SAME `Arc` `server.rs` hands to
     /// `RoomRegistry::wire_clustering_claims` (never a second, independent
     /// store) and the one `dispatch_to_room`'s fenced pre-fan-out backstop
     /// reads directly. `None` under the exact same conditions
@@ -937,7 +937,7 @@ impl ClusteringHandles {
 /// its fields: `JoinHandle` is neither `Clone` nor meaningfully `Default`,
 /// and `ClusteringHandles` derives both for its many other call sites (it
 /// is cloned onto `AppState`, `WebSocketState`, and every janitor). This
-/// lets `server/mod.rs` await this node's per-entity graceful drain
+/// lets `server.rs` await this node's per-entity graceful drain
 /// (`self_fence::run_node_lease`'s own exit, which runs the drain sequence
 /// on its way out) actually completing before process exit — "in parallel
 /// with connection drain but completing before process exit," per element
@@ -1035,9 +1035,9 @@ pub async fn start_if_enabled(
         // ADR-0017 Phase 3 Slice 7: constructed empty for the same
         // construction-order reason as `resume_bridge` — the MUC room
         // registry doesn't exist yet at this point in startup (it is
-        // spawned before `start_if_enabled` runs, in `server/mod.rs`) —
+        // spawned before `start_if_enabled` runs, in `server.rs`) —
         // and wired later via `RoomRegistry::wire_clustering_claims`'s
-        // caller in `server/mod.rs`. The swarm's `RelayActor` answers
+        // caller in `server.rs`. The swarm's `RelayActor` answers
         // `Demote` asks (the two-part demotion protocol's part (a))
         // through this exact `Arc`.
         let room_local_claims = local_claims::RoomLocalClaims::new();
@@ -1122,7 +1122,7 @@ pub async fn start_if_enabled(
         let node_lease_handle: Arc<dyn claims::NodeLeaseStore> =
             Arc::new(claims::PostgresClaimStore::new(db.clone()));
         // ADR-0017 Phase 3 Slice 7: the durable MUC room store. Built here
-        // (not deferred to `server/mod.rs`) because it only needs `db` and
+        // (not deferred to `server.rs`) because it only needs `db` and
         // `clustering_stop` — both already in scope — unlike
         // `room_local_claims` above, which genuinely must wait for the room
         // registry to exist.
@@ -1169,7 +1169,7 @@ pub async fn start_if_enabled(
         };
 
         // ADR-0017 Phase 3 Slice 10: keep the join handle so
-        // `server/mod.rs` can await this node's graceful drain (which this
+        // `server.rs` can await this node's graceful drain (which this
         // task runs on its own exit) actually completing before process
         // exit — see `ClusteringShutdown`'s doc comment.
         let node_lease_task = tokio::spawn(self_fence::run_node_lease(
