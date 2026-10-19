@@ -70,6 +70,7 @@ workflow: {
 					shell: "bash"
 					run: """
 						python3 tests/ci-timings-test.py
+						python3 server/scripts/test_check_nextest_filters.py
 						python3 server/scripts/test_check_nextest_shards.py
 						python3 server/scripts/test_nextest_archive_transfer.py
 						python3 server/scripts/test_build_nextest_archive.py
