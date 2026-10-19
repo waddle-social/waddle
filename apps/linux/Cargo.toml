@@ -15,8 +15,8 @@ publish = false
 # Baseline: GNOME 48 (GTK 4.18, libadwaita 1.7).
 gtk = { package = "gtk4", version = "0.11", features = ["gnome_48", "blueprint"] }
 adw = { package = "libadwaita", version = "0.9", features = ["v1_7"] }
-# HTTP for the RFC 8628 device-flow sign-in only, which runs before any XMPP
-# stream exists. rustls with ring, matching waddle-xmpp-client.
+# HTTP for RFC 8628 sign-in and fetching media URLs carried in XMPP messages.
+# rustls with ring, matching waddle-xmpp-client.
 reqwest = { version = "0.13", default-features = false, features = ["json", "charset", "http2", "rustls-no-provider"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
 # Secret Service (works in and outside Flatpak through the portal).
