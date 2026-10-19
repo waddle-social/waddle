@@ -1,0 +1,150 @@
+/* Waddle teal, as on the web and phones (chat/src/styles/tokens.css). */
+:root {
+  --accent-bg-color: #0b7a6f;
+  --accent-fg-color: #ffffff;
+  --accent-color: #0b7a6f;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --accent-color: #6fd3c7;
+  }
+}
+
+/* Avatar tints: DJB2 over the name picks one (src/ui/avatar.rs). */
+/* Adw.Avatar draws in an inner `avatar` node that carries its own colour. */
+.waddle-avatar avatar {
+  background-image: none;
+  color: #0b1219;
+}
+.waddle-avatar.tint-0 avatar { background-color: #d6f3ef; }
+.waddle-avatar.tint-1 avatar { background-color: #ffe3cd; }
+.waddle-avatar.tint-2 avatar { background-color: #e3e8f7; }
+.waddle-avatar.tint-3 avatar { background-color: #c9d4dc; }
+
+/* Sidebar */
+.conversation .room-tile {
+  border-radius: 8px;
+  background-color: alpha(currentColor, 0.08);
+  font-weight: 700;
+}
+
+.conversation.unread .title {
+  font-weight: 700;
+}
+
+.unread-badge {
+  min-width: 20px;
+  min-height: 20px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background-color: var(--accent-bg-color);
+  color: var(--accent-fg-color);
+  font-size: 0.8em;
+  font-weight: 700;
+}
+
+/* Timeline */
+.timeline {
+  background: none;
+  padding: 8px 0 16px;
+}
+
+.timeline > row {
+  padding: 0 12px;
+  background: none;
+}
+
+.waddle-message {
+  padding: 3px 12px;
+  border-radius: 10px;
+  transition: background-color 120ms ease-out;
+}
+
+.waddle-message.starts-group {
+  margin-top: 10px;
+  padding-top: 6px;
+}
+
+.timeline > row:hover .waddle-message {
+  background-color: alpha(currentColor, 0.04);
+}
+
+.waddle-message.sending {
+  opacity: 0.55;
+}
+
+.waddle-message .sender {
+  font-weight: 600;
+}
+
+.waddle-message .gutter-time {
+  opacity: 0;
+  transition: opacity 120ms ease-out;
+}
+
+.timeline > row:hover .gutter-time {
+  opacity: 1;
+}
+
+.waddle-message .body {
+  line-height: 1.4;
+}
+
+.waddle-message .body link {
+  color: var(--accent-color);
+}
+
+.day-divider {
+  padding: 0 12px;
+}
+
+.reply-quote {
+  padding: 4px 10px;
+  border-left: 3px solid alpha(var(--accent-bg-color), 0.55);
+  border-radius: 6px;
+  background-color: alpha(currentColor, 0.05);
+}
+
+.waddle-message picture.media {
+  border-radius: 10px;
+  outline: 1px solid alpha(currentColor, 0.1);
+  outline-offset: -1px;
+}
+
+.media-placeholder {
+  border-radius: 10px;
+  background-color: alpha(currentColor, 0.06);
+}
+
+button.reaction {
+  min-height: 26px;
+  padding: 0 8px;
+  border-radius: 8px;
+  border: 1px solid alpha(currentColor, 0.1);
+  background-color: alpha(currentColor, 0.05);
+  font-weight: normal;
+}
+
+button.reaction:hover {
+  background-color: alpha(currentColor, 0.1);
+}
+
+button.reaction:checked {
+  border-color: alpha(var(--accent-bg-color), 0.4);
+  background-color: alpha(var(--accent-bg-color), 0.14);
+  color: inherit;
+}
+
+/* Composer */
+.composer {
+  padding: 4px 4px 4px 8px;
+  border-radius: 14px;
+}
+
+.composer .composer-entry {
+  min-height: 40px;
+  background: none;
+  box-shadow: none;
+  border: none;
+}

@@ -13,16 +13,50 @@ use waddle_client_session::{Attachment, Delivery, Reaction, Timeline, TimelineDi
 use std::time::Instant;
 
 use super::images::{self, ImageState};
-use super::WaddleWindow;
+use super::{avatar, WaddleWindow};
 use crate::attachments;
 use crate::auth::store::StoredAccount;
 use crate::session::{self, Arrival, Conversation, Kind, Session, SessionEvent};
 
-/// One row in the list: the core's item plus whether it starts a group.
+/// One row in the list: the core's item plus where it sits.
 #[derive(Clone)]
 pub(super) struct Row {
     pub item: TimelineItem,
+    pub layout: Layout,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub(super) struct Layout {
+    /// Starts a group: shows the avatar, sender and time.
     pub header: bool,
+    /// Starts a local day: shows the date above.
+    pub day: bool,
+}
+
+impl Layout {
+    /// Until `refresh_headers` places the row.
+    const UNPLACED: Self = Self {
+        header: true,
+        day: false,
+    };
+
+    fn of(timeline: &Timeline, at: usize, utc_offset_ms: i64) -> Self {
+        let items = timeline.items();
+        let local_day = |item: &TimelineItem| {
+            (item.timestamp_ms + utc_offset_ms).div_euclid(24 * 60 * 60 * 1000)
+        };
+        Self {
+            header: !timeline.continues_group(at, utc_offset_ms),
+            day: match (
+                at.checked_sub(1).and_then(|at| items.get(at)),
+                items.get(at),
+            ) {
+                (Some(previous), Some(item)) => local_day(previous) != local_day(item),
+                (None, Some(_)) => true,
+                _ => false,
+            },
+        }
+    }
 }
 
 /// How long to wait for `Connected` before treating a connect as failed.
@@ -59,7 +93,16 @@ impl WaddleWindow {
             ) else {
                 return;
             };
-            bind_row(&window, &child, &object.borrow::<Row>());
+            bind_row(&window.downgrade(), &child, &object.borrow::<Row>());
+        });
+        factory.connect_unbind(|_, item| {
+            if let Some(parts) = item
+                .downcast_ref::<gtk::ListItem>()
+                .and_then(|item| item.child())
+                .and_then(|child| row_parts(&child))
+            {
+                super::media::bind(&parts.media, "", true);
+            }
         });
         imp.timeline_view
             .set_model(Some(&gtk::NoSelection::new(Some(rows.clone()))));
@@ -118,6 +161,8 @@ impl WaddleWindow {
                 return self.toast("Could not start the session.");
             }
         };
+        imp.connected.set(false);
+        self.clear_membership();
         let (session, events) = Session::start(account, transfers);
         imp.session.replace(Some(session));
         self.watch_connect(generation);
@@ -140,6 +185,7 @@ impl WaddleWindow {
             session.disconnect().await;
         }
         imp.connected.set(false);
+        self.clear_membership();
         imp.conversations.replace(Vec::new());
         imp.timelines.replace(Default::default());
         imp.unread.replace(Default::default());
@@ -199,6 +245,7 @@ impl WaddleWindow {
             }
             SessionEvent::Disconnected => {
                 imp.connected.set(false);
+                self.clear_membership();
                 self.schedule_reconnect(generation);
             }
             SessionEvent::AuthenticationFailed => {
@@ -230,6 +277,8 @@ impl WaddleWindow {
                     self.render_conversations();
                 }
             }
+            SessionEvent::Presence(presence) => self.on_room_presence(*presence),
+            SessionEvent::Rejected { id, from, to } => self.on_message_rejected(id, from, to),
             SessionEvent::DeliveryAcked(id) => self.set_delivery(&id, Delivery::Sent),
             SessionEvent::DeliveryFailed(id) => self.set_delivery(&id, Delivery::Failed),
         }
@@ -307,7 +356,7 @@ impl WaddleWindow {
         let rooms = session.rooms().await;
         let inbox = session.inbox().await;
         for room in rooms.iter().filter(|room| room.autojoin) {
-            session.join(room);
+            self.ensure_room_joined(room);
         }
         let mut conversations = rooms;
         for direct in session::direct_from(&inbox) {
@@ -329,7 +378,7 @@ impl WaddleWindow {
             }
         }
         self.render_conversations();
-        self.update_composer();
+        self.refresh_composer();
 
         // Reopen what was on screen (or asked for from a notification), or
         // the first room on first connect.
@@ -373,17 +422,8 @@ impl WaddleWindow {
         let current = imp.current.borrow().clone();
         let unread = imp.unread.borrow();
         for conversation in imp.conversations.borrow().iter() {
-            let row = adw::ActionRow::builder()
-                .title(sidebar_title(conversation))
-                .activatable(true)
-                .build();
-            if let Some(count) = unread.get(&conversation.jid).filter(|count| **count > 0) {
-                let badge = gtk::Label::new(Some(&count.to_string()));
-                badge.add_css_class("numeric");
-                badge.add_css_class("dim-label");
-                row.add_suffix(&badge);
-                row.add_css_class("heading");
-            }
+            let unread = unread.get(&conversation.jid).copied().unwrap_or(0);
+            let row = conversation_row(conversation, unread);
             imp.room_list.append(&row);
             if current.as_deref() == Some(conversation.jid.as_str()) {
                 imp.room_list.select_row(Some(&row));
@@ -430,7 +470,8 @@ impl WaddleWindow {
         imp.composer_entry
             .set_placeholder_text(Some(&format!("Message {title}")));
         imp.content_stack.set_visible_child_name("timeline");
-        self.update_composer();
+        self.ensure_room_joined(&conversation);
+        self.refresh_composer();
         imp.split_view.set_show_content(true);
         self.read_current();
         self.render_conversations();
@@ -633,22 +674,26 @@ impl WaddleWindow {
         for diff in diffs {
             match diff {
                 TimelineDiff::PushFront { items } => {
-                    let objects: Vec<glib::BoxedAnyObject> =
-                        items.iter().map(|item| boxed(item.clone(), true)).collect();
+                    let objects: Vec<glib::BoxedAnyObject> = items
+                        .iter()
+                        .map(|item| boxed(item.clone(), Layout::UNPLACED))
+                        .collect();
                     rows.splice(0, 0, &objects);
                     touched.iter_mut().for_each(|at| *at += items.len());
                     touched.extend(0..=items.len());
                 }
                 TimelineDiff::Append { items } => {
                     let start = rows.n_items() as usize;
-                    let objects: Vec<glib::BoxedAnyObject> =
-                        items.iter().map(|item| boxed(item.clone(), true)).collect();
+                    let objects: Vec<glib::BoxedAnyObject> = items
+                        .iter()
+                        .map(|item| boxed(item.clone(), Layout::UNPLACED))
+                        .collect();
                     rows.extend_from_slice(&objects);
                     touched.extend(start..start + items.len());
                 }
                 TimelineDiff::Set { index, item } => {
                     let at = *index as usize;
-                    rows.splice(*index, 1, &[boxed((**item).clone(), true)]);
+                    rows.splice(*index, 1, &[boxed((**item).clone(), Layout::UNPLACED)]);
                     touched.extend([at, at + 1]);
                 }
             }
@@ -673,16 +718,16 @@ impl WaddleWindow {
             let Some(item) = timeline.items().get(at) else {
                 continue;
             };
-            let header = !timeline.continues_group(at, offset);
+            let layout = Layout::of(timeline, at, offset);
             let Ok(position) = u32::try_from(at) else {
                 continue;
             };
             let current = rows
                 .item(position)
                 .and_downcast::<glib::BoxedAnyObject>()
-                .map(|object| object.borrow::<Row>().header);
-            if current != Some(header) {
-                rows.splice(position, 1, &[boxed(item.clone(), header)]);
+                .map(|object| object.borrow::<Row>().layout);
+            if current != Some(layout) {
+                rows.splice(position, 1, &[boxed(item.clone(), layout)]);
             }
         }
     }
@@ -704,7 +749,7 @@ impl WaddleWindow {
             .items()
             .iter()
             .enumerate()
-            .map(|(at, item)| boxed(item.clone(), !timeline.continues_group(at, offset)))
+            .map(|(at, item)| boxed(item.clone(), Layout::of(timeline, at, offset)))
             .collect();
         rows.extend_from_slice(&objects);
     }
@@ -758,6 +803,49 @@ fn sidebar_title(conversation: &Conversation) -> String {
     }
 }
 
+/// A room's `#` tile or a DM's avatar, the name, and any unread count.
+fn conversation_row(conversation: &Conversation, unread: u32) -> adw::ActionRow {
+    let row = adw::ActionRow::builder()
+        .title(conversation.name.as_str())
+        .title_lines(1)
+        .activatable(true)
+        .build();
+    row.add_css_class("conversation");
+    let icon: gtk::Widget = match conversation.kind {
+        Kind::Room => {
+            let tile = gtk::Label::builder()
+                .label("#")
+                .width_request(28)
+                .height_request(28)
+                .build();
+            tile.add_css_class("room-tile");
+            tile.upcast()
+        }
+        Kind::Direct => {
+            let avatar = avatar::avatar(28);
+            avatar::set_name(&avatar, &conversation.name);
+            avatar.upcast()
+        }
+    };
+    icon.set_valign(gtk::Align::Center);
+    row.add_prefix(&icon);
+    if unread > 0 {
+        let badge = gtk::Label::builder()
+            .label(if unread > 99 {
+                "99+".to_string()
+            } else {
+                unread.to_string()
+            })
+            .valign(gtk::Align::Center)
+            .build();
+        badge.add_css_class("unread-badge");
+        badge.add_css_class("numeric");
+        row.add_suffix(&badge);
+        row.add_css_class("unread");
+    }
+    row
+}
+
 fn section_header(kind: Kind) -> gtk::Label {
     let label = gtk::Label::builder()
         .label(match kind {
@@ -774,8 +862,8 @@ fn section_header(kind: Kind) -> gtk::Label {
     label
 }
 
-fn boxed(item: TimelineItem, header: bool) -> glib::BoxedAnyObject {
-    glib::BoxedAnyObject::new(Row { item, header })
+fn boxed(item: TimelineItem, layout: Layout) -> glib::BoxedAnyObject {
+    glib::BoxedAnyObject::new(Row { item, layout })
 }
 
 fn utc_offset_ms() -> i64 {
@@ -818,87 +906,192 @@ fn attach_action_gestures(
     widget.add_controller(press);
 }
 
-/// Header (sender + time), reply quote, body, reaction chips. The header
-/// hides for a message that continues the previous one's group.
+/// Avatar gutter beside sender and time, reply quote, body, images and
+/// reaction chips, under the date when the row starts a day. A row that
+/// continues its group shows its time in the gutter on hover instead.
 fn row_widget() -> gtk::Box {
-    let row = gtk::Box::builder()
-        .orientation(gtk::Orientation::Vertical)
-        .spacing(2)
-        .margin_start(16)
-        .margin_end(16)
-        .margin_top(2)
-        .margin_bottom(2)
+    let outer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+
+    let day = gtk::Box::builder()
+        .spacing(12)
+        .margin_top(16)
+        .margin_bottom(8)
         .build();
-    let header = gtk::Box::builder().spacing(8).margin_top(8).build();
-    let sender = gtk::Label::builder().xalign(0.0).build();
-    sender.add_css_class("heading");
-    let time = gtk::Label::builder().xalign(0.0).build();
-    time.add_css_class("dim-label");
-    time.add_css_class("caption");
-    time.add_css_class("numeric");
-    header.append(&sender);
-    header.append(&time);
-    let reply = gtk::Label::builder()
+    day.add_css_class("day-divider");
+    let day_label = gtk::Label::new(None);
+    day_label.add_css_class("caption-heading");
+    day_label.add_css_class("dim-label");
+    for (at, widget) in [
+        gtk::Separator::new(gtk::Orientation::Horizontal).upcast::<gtk::Widget>(),
+        day_label.upcast(),
+        gtk::Separator::new(gtk::Orientation::Horizontal).upcast(),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        widget.set_valign(gtk::Align::Center);
+        widget.set_hexpand(at != 1);
+        day.append(&widget);
+    }
+
+    let row = gtk::Box::builder().spacing(12).build();
+    row.add_css_class("waddle-message");
+    let gutter = gtk::Stack::builder()
+        .width_request(GUTTER)
+        .vhomogeneous(false)
+        .build();
+    let avatar = avatar::avatar(GUTTER);
+    avatar.set_valign(gtk::Align::Start);
+    gutter.add_named(&avatar, Some("avatar"));
+    let gutter_time = gtk::Label::builder()
+        .valign(gtk::Align::Start)
+        .margin_top(3)
+        .build();
+    for class in ["gutter-time", "caption", "numeric", "dim-label"] {
+        gutter_time.add_css_class(class);
+    }
+    gutter.add_named(&gutter_time, Some("time"));
+
+    let content = gtk::Box::builder()
+        .orientation(gtk::Orientation::Vertical)
+        .spacing(4)
+        .hexpand(true)
+        .build();
+    let header = gtk::Box::builder().spacing(8).build();
+    let sender = gtk::Label::builder()
         .xalign(0.0)
         .ellipsize(gtk::pango::EllipsizeMode::End)
         .build();
-    reply.add_css_class("dim-label");
-    reply.add_css_class("caption");
+    sender.add_css_class("sender");
+    let time = gtk::Label::builder()
+        .xalign(0.0)
+        .valign(gtk::Align::Baseline)
+        .build();
+    for class in ["caption", "numeric", "dim-label"] {
+        time.add_css_class(class);
+    }
+    header.append(&sender);
+    header.append(&time);
+
+    let reply = gtk::Box::builder()
+        .spacing(6)
+        .halign(gtk::Align::Start)
+        .build();
+    reply.add_css_class("reply-quote");
+    let reply_icon = gtk::Image::from_icon_name("mail-reply-sender-symbolic");
+    reply_icon.add_css_class("dim-label");
+    let reply_label = gtk::Label::builder()
+        .xalign(0.0)
+        .ellipsize(gtk::pango::EllipsizeMode::End)
+        .build();
+    reply_label.add_css_class("caption");
+    reply.append(&reply_icon);
+    reply.append(&reply_label);
+
     let body = gtk::Label::builder()
         .xalign(0.0)
         .wrap(true)
         .wrap_mode(gtk::pango::WrapMode::WordChar)
         .selectable(true)
         .build();
+    body.add_css_class("body");
     let attachments = gtk::Box::builder()
         .orientation(gtk::Orientation::Vertical)
         .spacing(4)
         .halign(gtk::Align::Start)
         .build();
-    let reactions = gtk::Box::builder().spacing(4).margin_top(2).build();
-    row.append(&header);
-    row.append(&reply);
-    row.append(&body);
-    row.append(&attachments);
-    row.append(&reactions);
-    row
+    let media = gtk::Box::new(gtk::Orientation::Vertical, 6);
+    let reactions = gtk::Box::builder().spacing(6).margin_top(2).build();
+    reactions.add_css_class("reactions");
+
+    content.append(&header);
+    content.append(&reply);
+    content.append(&body);
+    content.append(&media);
+    content.append(&attachments);
+    content.append(&reactions);
+    row.append(&gutter);
+    row.append(&content);
+    outer.append(&day);
+    outer.append(&row);
+    outer
 }
 
+/// The avatar column's width.
+const GUTTER: i32 = 36;
+
 struct RowParts {
+    day: gtk::Box,
+    day_label: gtk::Label,
+    row: gtk::Box,
+    gutter: gtk::Stack,
+    avatar: adw::Avatar,
+    gutter_time: gtk::Label,
     header: gtk::Box,
     sender: gtk::Label,
     time: gtk::Label,
-    reply: gtk::Label,
+    reply: gtk::Box,
+    reply_label: gtk::Label,
     body: gtk::Label,
+    media: gtk::Box,
     attachments: gtk::Box,
     reactions: gtk::Box,
 }
 
 fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
-    let header = widget.first_child().and_downcast::<gtk::Box>()?;
-    let reply = header.next_sibling().and_downcast::<gtk::Label>()?;
+    let day = widget.first_child().and_downcast::<gtk::Box>()?;
+    let row = day.next_sibling().and_downcast::<gtk::Box>()?;
+    let gutter = row.first_child().and_downcast::<gtk::Stack>()?;
+    let content = gutter.next_sibling()?;
+    let header = content.first_child().and_downcast::<gtk::Box>()?;
+    let reply = header.next_sibling().and_downcast::<gtk::Box>()?;
     let body = reply.next_sibling().and_downcast::<gtk::Label>()?;
-    let attachments = body.next_sibling().and_downcast::<gtk::Box>()?;
+    let media = body.next_sibling().and_downcast::<gtk::Box>()?;
+    let attachments = media.next_sibling().and_downcast::<gtk::Box>()?;
     let reactions = attachments.next_sibling().and_downcast::<gtk::Box>()?;
     Some(RowParts {
-        sender: header.first_child().and_downcast::<gtk::Label>()?,
-        time: header.last_child().and_downcast::<gtk::Label>()?,
+        day_label: day.first_child()?.next_sibling().and_downcast()?,
+        avatar: gutter.child_by_name("avatar").and_downcast()?,
+        gutter_time: gutter.child_by_name("time").and_downcast()?,
+        sender: header.first_child().and_downcast()?,
+        time: header.last_child().and_downcast()?,
+        reply_label: reply.last_child().and_downcast()?,
+        day,
+        row,
+        gutter,
         header,
         reply,
         body,
+        media,
         attachments,
         reactions,
     })
 }
 
-fn bind_row(window: &WaddleWindow, widget: &gtk::Widget, row: &Row) {
+fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Row) {
     let Some(parts) = row_parts(widget) else {
         return;
     };
     let item = &row.item;
-    parts.header.set_visible(row.header);
+    let Layout { header, day } = row.layout;
+    parts.day.set_visible(day);
+    if day {
+        parts.day_label.set_label(&format_day(item.timestamp_ms));
+    }
+    let time = format_time(item.timestamp_ms);
+    parts.header.set_visible(header);
+    parts.row.set_css_classes(if header {
+        &["waddle-message", "starts-group"]
+    } else {
+        &["waddle-message"]
+    });
+    parts
+        .gutter
+        .set_visible_child_name(if header { "avatar" } else { "time" });
+    avatar::set_name(&parts.avatar, &item.sender);
+    parts.gutter_time.set_label(&time);
     parts.sender.set_label(&item.sender);
-    parts.time.set_label(&format_time(item.timestamp_ms));
+    parts.time.set_label(&time);
 
     match &item.reply {
         Some(reply) => {
@@ -906,12 +1099,17 @@ fn bind_row(window: &WaddleWindow, widget: &gtk::Widget, row: &Row) {
             let what = if reply.target_retracted {
                 "Message deleted".to_string()
             } else {
-                reply
-                    .snippet
-                    .clone()
-                    .unwrap_or_else(|| "Original message not loaded".to_string())
+                match reply.snippet.as_deref() {
+                    Some(snippet) if super::media::is_media_only(snippet) => "Photo".to_string(),
+                    Some(snippet) => snippet.to_string(),
+                    None => "Original message not loaded".to_string(),
+                }
             };
-            parts.reply.set_label(&format!("↪ {who}: {what}"));
+            parts.reply_label.set_markup(&format!(
+                "<b>{}</b>  <i>{}</i>",
+                glib::markup_escape_text(who),
+                glib::markup_escape_text(&what)
+            ));
             parts.reply.set_visible(true);
         }
         None => parts.reply.set_visible(false),
@@ -921,33 +1119,78 @@ fn bind_row(window: &WaddleWindow, widget: &gtk::Widget, row: &Row) {
     for class in ["dim-label", "error"] {
         body.remove_css_class(class);
     }
+    parts.row.remove_css_class("sending");
+    super::media::bind(&parts.media, &item.body, item.retracted);
     bind_reactions(window, &parts.reactions, item);
-    bind_attachments(window, &parts.attachments, item);
-    body.set_visible(item.retracted || !item.body.is_empty() || item.attachments.is_empty());
+    match window.upgrade() {
+        Some(window) => bind_attachments(&window, &parts.attachments, item),
+        None => parts.attachments.set_visible(false),
+    }
     if item.retracted {
         body.set_markup("<i>Message deleted</i>");
         body.add_css_class("dim-label");
+        body.set_visible(true);
         return;
     }
-    let mut text = item.body.clone();
+    let mut markup = if super::media::is_media_only(&item.body) {
+        String::new()
+    } else {
+        body_markup(&item.body)
+    };
+    let mut note = |text: &str| {
+        if !markup.is_empty() {
+            markup.push(' ');
+        }
+        markup.push_str(&format!("<span size=\"small\" alpha=\"60%\">{text}</span>"));
+    };
     if item.edited {
-        text.push_str(" (edited)");
+        note("(edited)");
     }
     match item.delivery {
-        Delivery::Sending => {
-            body.set_label(&text);
-            body.add_css_class("dim-label");
-        }
+        Delivery::Sending => parts.row.add_css_class("sending"),
         Delivery::Failed => {
-            body.set_label(&format!("{text}  · not sent"));
+            note("· Not sent");
             body.add_css_class("error");
         }
-        Delivery::Sent | Delivery::Received => body.set_label(&text),
+        Delivery::Sent | Delivery::Received => {}
     }
+    body.set_visible(!markup.is_empty());
+    body.set_markup(&markup);
+}
+
+/// The body as Pango markup, with its web links clickable.
+fn body_markup(body: &str) -> String {
+    let mut markup = String::with_capacity(body.len());
+    let mut rest = body;
+    while !rest.is_empty() {
+        let word_end = rest.find(char::is_whitespace).unwrap_or(rest.len());
+        let (word, after) = rest.split_at(word_end);
+        let space_end = after
+            .find(|c: char| !c.is_whitespace())
+            .unwrap_or(after.len());
+        let (space, after) = after.split_at(space_end);
+        // Trailing punctuation usually ends the sentence, not the link.
+        let link_end = word
+            .trim_end_matches(['.', ',', ';', ':', '!', '?', ')', '\'', '"'])
+            .len();
+        let (link, trailing) = word.split_at(link_end);
+        let is_link = (link.starts_with("https://") || link.starts_with("http://"))
+            && url::Url::parse(link).is_ok();
+        if is_link {
+            let escaped = glib::markup_escape_text(link);
+            markup.push_str(&format!("<a href=\"{escaped}\">{escaped}</a>"));
+            markup.push_str(&glib::markup_escape_text(trailing));
+        } else {
+            markup.push_str(&glib::markup_escape_text(word));
+        }
+        markup.push_str(&glib::markup_escape_text(space));
+        rest = after;
+    }
+    markup
 }
 
 /// One toggle chip per emoji; clicking toggles the user's own reaction.
-fn bind_reactions(window: &WaddleWindow, container: &gtk::Box, item: &TimelineItem) {
+fn bind_reactions(window: &glib::WeakRef<WaddleWindow>, container: &gtk::Box, item: &TimelineItem) {
     while let Some(child) = container.first_child() {
         container.remove(&child);
     }
@@ -961,9 +1204,8 @@ fn bind_reactions(window: &WaddleWindow, container: &gtk::Box, item: &TimelineIt
             .label(format!("{emoji} {count}"))
             .active(*own)
             .build();
-        chip.add_css_class("pill");
-        chip.add_css_class("small");
-        let (owner, target, emoji) = (window.downgrade(), reference.clone(), emoji.clone());
+        chip.add_css_class("reaction");
+        let (owner, target, emoji) = (window.clone(), reference.clone(), emoji.clone());
         chip.connect_clicked(move |_| {
             if let Some(window) = owner.upgrade() {
                 window.toggle_reaction(&target, &emoji);
@@ -1176,6 +1418,28 @@ impl WaddleWindow {
 fn format_time(ms: i64) -> String {
     glib::DateTime::from_unix_local(ms.div_euclid(1000))
         .and_then(|at| at.format("%H:%M"))
+        .map(|text| text.to_string())
+        .unwrap_or_default()
+}
+
+/// "Today", "Yesterday", the weekday this week, else the date.
+fn format_day(ms: i64) -> String {
+    let (Ok(at), Ok(now)) = (
+        glib::DateTime::from_unix_local(ms.div_euclid(1000)),
+        glib::DateTime::now_local(),
+    ) else {
+        return String::new();
+    };
+    let offset = utc_offset_ms();
+    let local_day = |ms: i64| (ms + offset).div_euclid(24 * 60 * 60 * 1000);
+    let format = match local_day(now.to_unix() * 1000) - local_day(ms) {
+        0 => return "Today".to_string(),
+        1 => return "Yesterday".to_string(),
+        2..=6 => "%A",
+        _ if at.year() == now.year() => "%A %-d %B",
+        _ => "%-d %B %Y",
+    };
+    at.format(format)
         .map(|text| text.to_string())
         .unwrap_or_default()
 }

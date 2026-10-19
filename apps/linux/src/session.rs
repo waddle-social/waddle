@@ -25,7 +25,7 @@ use waddle_client_session::{
 use waddle_xmpp_client_ffi::{
     WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
     WaddleConfig, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
-    WaddleFallbackRange, WaddleInboxEntry, WaddleMessage, WaddleReplyTarget,
+    WaddleFallbackRange, WaddleInboxEntry, WaddleMessage, WaddlePresence, WaddleReplyTarget,
     WaddleSendMessageOutcome, WaddleSendOptions, WaddleSharedFile, WaddleStanzaId,
     WaddleStickerHash, WaddleTopology,
 };
@@ -67,6 +67,12 @@ pub enum SessionEvent {
     Inbox(WaddleInboxEntry),
     DeliveryAcked(String),
     DeliveryFailed(String),
+    Presence(Box<WaddlePresence>),
+    Rejected {
+        id: String,
+        from: String,
+        to: Option<String>,
+    },
 }
 
 /// Who this account is in conversations.
@@ -132,6 +138,16 @@ impl WaddleEventListener for Forwarder {
             WaddleClientEvent::DeliveryFailed { stanza_id } => {
                 SessionEvent::DeliveryFailed(stanza_id)
             }
+            WaddleClientEvent::Presence { presence } => SessionEvent::Presence(Box::new(presence)),
+            WaddleClientEvent::MessageRejected {
+                stanza_id,
+                from,
+                to,
+            } => SessionEvent::Rejected {
+                id: stanza_id.to_string(),
+                from: from.to_string(),
+                to: to.map(|jid| jid.to_string()),
+            },
             WaddleClientEvent::Error { description } => {
                 tracing::warn!(%description, "xmpp client error");
                 return;

@@ -12,6 +12,7 @@ use crate::session::{Conversation, Session};
 use waddle_client_session::Timeline;
 
 use super::actions::Compose;
+use super::membership::{Membership, OutboundSends};
 
 mod imp {
     use super::*;
@@ -35,6 +36,10 @@ mod imp {
         pub user_code_label: TemplateChild<gtk::Label>,
         #[template_child]
         pub account_status: TemplateChild<adw::StatusPage>,
+        #[template_child]
+        pub account_avatar: TemplateChild<adw::Avatar>,
+        #[template_child]
+        pub account_name: TemplateChild<gtk::Label>,
         #[template_child]
         pub account_label: TemplateChild<gtk::Label>,
         #[template_child]
@@ -73,6 +78,8 @@ mod imp {
         /// Bumped on sign-out so events from an old session are ignored.
         pub generation: Cell<u64>,
         pub connected: Cell<bool>,
+        pub membership: RefCell<Membership>,
+        pub outbound: RefCell<OutboundSends>,
         pub reconnect_attempt: Cell<u32>,
         /// Rooms in catalogue order, then DMs.
         pub conversations: RefCell<Vec<Conversation>>,
@@ -340,8 +347,11 @@ impl WaddleWindow {
 
     fn enter(&self, account: StoredAccount) {
         let imp = self.imp();
-        imp.account_label
-            .set_label(&format!("{} · {}", account.session.jid, account.server));
+        let jid = account.session.jid.to_string();
+        let name = jid.split('@').next().unwrap_or(&jid);
+        super::avatar::set_name(&imp.account_avatar, name);
+        imp.account_name.set_label(name);
+        imp.account_label.set_label(&jid);
         imp.account.replace(Some(account.clone()));
         imp.stack.set_visible_child_name("shell");
         self.start_session(&account);

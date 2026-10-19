@@ -89,18 +89,16 @@ impl WaddleWindow {
         if imp.uploading.get() {
             return Some("Wait for the current upload to finish.");
         }
+        // Dropped files bypass the insensitive composer.
+        if !self
+            .current_conversation()
+            .is_some_and(|c| self.can_send(&c))
+        {
+            return Some("Wait until this conversation is connected before sending.");
+        }
         // The entry holds the message being edited; it is not a caption.
         matches!(*imp.compose.borrow(), Compose::Edit { .. })
             .then_some("Finish editing the message first.")
-    }
-
-    /// The composer is usable when connected, in a conversation, and not
-    /// waiting on an upload.
-    pub(super) fn update_composer(&self) {
-        let imp = self.imp();
-        imp.composer.set_sensitive(
-            imp.connected.get() && !imp.uploading.get() && imp.current.borrow().is_some(),
-        );
     }
 
     pub(super) fn pick_files(&self) {
@@ -166,7 +164,7 @@ impl WaddleWindow {
             if matches!(*imp.compose.borrow(), Compose::Message) {
                 imp.composer_context.set_visible(false);
             }
-            window.update_composer();
+            window.refresh_composer();
             let uploaded = match result {
                 Ok(uploaded) => uploaded,
                 Err(message) => {
@@ -313,6 +311,11 @@ impl WaddleWindow {
         else {
             return;
         };
+        if !self.can_send(&conversation) {
+            self.ensure_room_joined(&conversation);
+            self.toast("Wait until this conversation is connected before sending.");
+            return;
+        }
         let compose = imp.compose.replace(Compose::Message);
         imp.composer_context.set_visible(false);
         imp.composer_entry.set_text("");
@@ -339,10 +342,12 @@ impl WaddleWindow {
                 })
             });
             let window = self.clone();
+            let generation = imp.generation.get();
             glib::spawn_future_local(async move {
                 if !session
                     .correct(&conversation.jid, conversation.kind, correction_id, body)
                     .await
+                    && window.imp().generation.get() == generation
                 {
                     window.edit_conversation(&jid, |timeline| timeline.restore(&original));
                     window.toast("The edit could not be sent.");
@@ -359,6 +364,9 @@ impl WaddleWindow {
             Compose::Message | Compose::Edit { .. } => None,
         };
         let origin = uuid::Uuid::new_v4().to_string();
+        imp.outbound
+            .borrow_mut()
+            .insert(origin.clone(), conversation.clone());
         let echo = LocalEcho {
             origin_id: origin.clone(),
             sender: nick,
@@ -376,6 +384,7 @@ impl WaddleWindow {
         self.scroll_to_end();
 
         let window = self.clone();
+        let generation = imp.generation.get();
         glib::spawn_future_local(async move {
             let sent = session
                 .send(
@@ -387,7 +396,11 @@ impl WaddleWindow {
                     Vec::new(),
                 )
                 .await;
+            if window.imp().generation.get() != generation {
+                return;
+            }
             if !sent {
+                window.imp().outbound.borrow_mut().remove(&origin);
                 window.edit_conversation(&conversation.jid, |timeline| {
                     timeline.set_delivery(&origin, Delivery::Failed)
                 });
@@ -424,10 +437,12 @@ impl WaddleWindow {
         });
 
         let (window, target) = (self.clone(), target.to_string());
+        let generation = imp.generation.get();
         glib::spawn_future_local(async move {
             if session
                 .react(&conversation.jid, conversation.kind, target.clone(), next)
                 .await
+                || window.imp().generation.get() != generation
             {
                 return;
             }
@@ -500,10 +515,12 @@ impl WaddleWindow {
             })
         });
         let window = self.clone();
+        let generation = imp.generation.get();
         glib::spawn_future_local(async move {
             if !session
                 .retract(&conversation.jid, conversation.kind, reference)
                 .await
+                && window.imp().generation.get() == generation
             {
                 window.edit_conversation(&conversation.jid, |timeline| timeline.restore(&original));
                 window.toast("The message could not be deleted.");
