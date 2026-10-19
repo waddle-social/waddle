@@ -494,8 +494,8 @@ async fn xep0045_legacy_archive_free_storage_hints_never_acquire_replayable_refl
                 .iter()
                 .all(|intent| !matches!(intent, IngressEffectIntent::RouteDirect { .. })));
             tx.commit().await.expect("retry authority commit");
-            let recovery = crate::ingress::recovery_rebuild::rebuild(
-                crate::ingress::recovery_rebuild::RecoveryInput {
+            let recovery = crate::ingress::recovery::rebuild::rebuild(
+                crate::ingress::recovery::rebuild::RecoveryInput {
                     key,
                     envelope: &envelope,
                     created_at,

@@ -1,4 +1,12 @@
 //! Reconcile notification obligations without exposing ingress transactions.
+pub(super) mod departed;
+pub(super) mod environment;
+pub(super) mod executor;
+pub(super) mod ghosts;
+pub(super) mod reachability;
+pub(super) mod rebuild;
+#[cfg(test)]
+pub(crate) mod tests;
 use super::IngressAuthority;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{

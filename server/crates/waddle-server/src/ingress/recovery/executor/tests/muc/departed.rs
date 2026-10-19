@@ -361,7 +361,7 @@ async fn postgres_departed_occupant_copy_settles() {
 /// occupancy, and the frozen copy is left to the ordinary rebuild.
 #[tokio::test]
 async fn sqlite_rejoin_before_the_settlement_write_keeps_its_copy() {
-    use crate::ingress::recovery_departed::{hook_settlement_write_window, SettlementWriteWindow};
+    use crate::ingress::recovery::departed::{hook_settlement_write_window, SettlementWriteWindow};
 
     /// Rejoins the departed occupant's full JID exactly once, from inside the
     /// window between the reachability probes and the settlement write.
@@ -495,7 +495,7 @@ async fn sqlite_rejoin_before_the_settlement_write_keeps_its_copy() {
 /// it instead of re-proving everything from scratch.
 #[tokio::test]
 async fn sqlite_a_settled_chunk_survives_a_deadline_that_cuts_the_next_one() {
-    use crate::ingress::recovery_departed::{
+    use crate::ingress::recovery::departed::{
         hook_settlement_write_window, SettlementWriteWindow, PROBE_CONCURRENCY,
     };
 

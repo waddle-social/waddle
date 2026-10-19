@@ -144,7 +144,7 @@ async fn host_owned_progress(fixture: IngressFixture) {
     );
     tx.commit().await.expect("inspection commit");
     let recovered =
-        super::super::recovery_rebuild::rebuild(super::super::recovery_rebuild::RecoveryInput {
+        super::super::recovery::rebuild::rebuild(super::super::recovery::rebuild::RecoveryInput {
             key,
             envelope: &envelope,
             created_at: chrono::Utc::now(),

@@ -126,7 +126,7 @@ fn muc_recovery_body_with_subject_does_not_require_subject_mutation() {
 fn original_reflection_recovers_after_occupant_receipt_without_new_audience() {
     use crate::ingress::{
         recorded::RouteProgress,
-        recovery_rebuild::{self, RecoveryInput},
+        recovery::rebuild::{self, RecoveryInput},
     };
     use waddle_xmpp::ingress::MessageKey;
     let (envelope, room) = groupchat();
@@ -137,7 +137,7 @@ fn original_reflection_recovers_after_occupant_receipt_without_new_audience() {
     let progress = RouteProgress::from_intent(&reflection, None, vec![])
         .expect("progress")
         .expect("direct");
-    let rebuilt = recovery_rebuild::rebuild(RecoveryInput {
+    let rebuilt = rebuild::rebuild(RecoveryInput {
         key: MessageKey::new(),
         envelope: &envelope,
         created_at: chrono::Utc::now(),

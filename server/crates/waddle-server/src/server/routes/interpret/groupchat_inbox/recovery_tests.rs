@@ -38,7 +38,7 @@ async fn deferred_policy_restart(fixture: IngressFixture, deliver: bool) {
         .await
         .expect("projection schema");
     let state = state_for(&fixture).await;
-    let mut submission = crate::ingress::recovery_tests::recovery_plan(&fixture);
+    let mut submission = crate::ingress::recovery::tests::recovery_plan(&fixture);
     let recovery = submission
         .plan
         .plan
@@ -183,7 +183,7 @@ async fn recorded_candidate_sweep(fixture: IngressFixture) {
         .await
         .expect("projection schema");
     let state = state_for(&fixture).await;
-    let submission = crate::ingress::recovery_tests::recovery_plan(&fixture);
+    let submission = crate::ingress::recovery::tests::recovery_plan(&fixture);
     let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("commit before lost execution");

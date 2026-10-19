@@ -6,7 +6,7 @@ use crate::clustering::{
     ClusteringHandles, NodeId,
 };
 use crate::ingress::IngressDecision;
-use crate::ingress::{recorded::RouteProgress, recovery_rebuild};
+use crate::ingress::{recorded::RouteProgress, recovery::rebuild};
 use crate::server::routes::interpret::{effects::EffectOutcome, FullJidDeliveryOutcome};
 use waddle_xmpp::ownership::{
     ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
@@ -130,7 +130,7 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
     let reflection =
         crate::ingress::reflection_dispatch::original_intent(muc).expect("original reflection");
     let reflection_receipt = receipt_key(&reflection).expect("reflection receipt");
-    let rebuilt = recovery_rebuild::rebuild(recovery_rebuild::RecoveryInput {
+    let rebuilt = rebuild::rebuild(rebuild::RecoveryInput {
         key,
         envelope: &envelope,
         created_at: chrono::Utc::now(),

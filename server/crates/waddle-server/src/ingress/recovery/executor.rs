@@ -17,16 +17,16 @@ use crate::{
     },
 };
 
-use super::{recovery_rebuild, Deps, EffectReceiptKey, ImmediateSink, RouteProgress};
+use super::super::{recovery::rebuild, Deps, EffectReceiptKey, ImmediateSink, RouteProgress};
 use crate::server::routes::interpret::DeliveryExecutionContext;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum AttemptClassification {
+pub(in crate::ingress) enum AttemptClassification {
     Evaluable,
     Inconclusive,
 }
 
-pub(super) enum RowRecovery {
+pub(in crate::ingress) enum RowRecovery {
     Vanished,
     NothingPending,
     Executed {
@@ -49,7 +49,7 @@ struct FrozenRecovery {
 /// Freeze under the canonical lock, release it, rebuild, then run the arms.
 /// Progress accounting is the caller's: it compares receipt counts around this
 /// call so a row deadline cancelling any await here cannot lose credit.
-pub(super) async fn recover_row(
+pub(in crate::ingress) async fn recover_row(
     database: &Database,
     uow: &IngressUnitOfWork,
     deps: &Deps<'_>,
@@ -65,7 +65,7 @@ pub(super) async fn recover_row(
         return Ok(RowRecovery::NothingPending);
     }
     #[cfg(test)]
-    super::execute::test_hooks::after_recovery_freeze(key).await;
+    super::super::execute::test_hooks::after_recovery_freeze(key).await;
     let mut classification = AttemptClassification::Evaluable;
     let departed = discharge_departed_copies(uow, deps, key, &mut frozen).await?;
     if departed.classification == AttemptClassification::Inconclusive {
@@ -93,7 +93,7 @@ pub(super) async fn recover_row(
         .filter(|target| deps.owns_host_resource(target))
         .cloned()
         .collect();
-    let rebuilt = recovery_rebuild::rebuild(recovery_rebuild::RecoveryInput {
+    let rebuilt = rebuild::rebuild(rebuild::RecoveryInput {
         key,
         envelope: &frozen.envelope,
         created_at: frozen.created_at,
@@ -116,7 +116,7 @@ pub(super) async fn recover_row(
     if !rebuilt.decision.external.is_empty() {
         let mut recovery_deps = deps.clone();
         recovery_deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
-        let report = super::execute::execute_effects(
+        let report = super::super::execute::execute_effects(
             uow,
             database,
             &rebuilt.decision,
@@ -153,7 +153,7 @@ pub(super) async fn recover_row(
         let outcome =
             crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
                 .await?;
-        if outcome != super::RecoverySweepOutcome::Completed {
+        if outcome != super::super::RecoverySweepOutcome::Completed {
             classification = AttemptClassification::Inconclusive;
         }
     }
@@ -204,9 +204,9 @@ async fn discharge_departed_copies(
     deps: &Deps<'_>,
     key: MessageKey,
     frozen: &mut FrozenRecovery,
-) -> Result<super::recovery_departed::DepartedSettlement, IngressUowError> {
+) -> Result<super::super::recovery::departed::DepartedSettlement, IngressUowError> {
     if let Some(manifest) = frozen.envelope.room_manifest().cloned() {
-        let mut settlement = super::recovery_departed::DepartedSettlement {
+        let mut settlement = super::super::recovery::departed::DepartedSettlement {
             occupants: Vec::new(),
             settled: Vec::new(),
             classification: AttemptClassification::Evaluable,
@@ -225,7 +225,7 @@ async fn discharge_departed_copies(
                 received_at: Some(frozen.created_at),
                 archive_positions: Vec::new(),
                 dispatch_stream: None,
-                authority: super::append_authority::AppendAuthority::LocalOnly,
+                authority: super::super::append_authority::AppendAuthority::LocalOnly,
             };
             let owed: Vec<_> = route
                 .fanout
@@ -234,7 +234,7 @@ async fn discharge_departed_copies(
                 .cloned()
                 .collect();
             for target in owed {
-                match super::room_manifest_replay::settle_superseded(
+                match super::super::room_manifest_replay::settle_superseded(
                     uow,
                     &manifest,
                     deps.room_registry,
@@ -263,7 +263,7 @@ async fn discharge_departed_copies(
             .route_progress
             .retain(|route| !settlement.settled.contains(&route.settle_evidence()));
         if !settlement.settled.is_empty() {
-            super::execute::terminalize_if_complete_outcome(
+            super::super::execute::terminalize_if_complete_outcome(
                 uow,
                 key,
                 DeliveryExecutionContext::MaintenanceRecovery.into(),
@@ -272,9 +272,13 @@ async fn discharge_departed_copies(
         }
         return Ok(settlement);
     }
-    let departed =
-        super::recovery_departed::settle_departed_occupants(uow, deps, key, &frozen.route_progress)
-            .await?;
+    let departed = super::super::recovery::departed::settle_departed_occupants(
+        uow,
+        deps,
+        key,
+        &frozen.route_progress,
+    )
+    .await?;
     if departed.settled.is_empty() {
         return Ok(departed);
     }
@@ -286,7 +290,7 @@ async fn discharge_departed_copies(
         .retain(|progress| !departed.settled.contains(&progress.settle_evidence()));
     // A row whose last obligation the settlement discharged must leave the
     // backlog in this pass rather than wait for the next terminalization phase.
-    super::execute::terminalize_if_complete_outcome(
+    super::super::execute::terminalize_if_complete_outcome(
         uow,
         key,
         DeliveryExecutionContext::MaintenanceRecovery.into(),
@@ -306,12 +310,12 @@ fn pending_kinds(intents: &[IngressEffectIntent]) -> Vec<IngressEffectKind> {
     kinds
 }
 
-fn classify_report(report: &super::execute::ExecutionReport) -> AttemptClassification {
+fn classify_report(report: &super::super::execute::ExecutionReport) -> AttemptClassification {
     if report.outcomes.iter().any(|(_, outcome)| {
         matches!(
             outcome,
-            super::execute::ExternalOutcome::Uncertain
-                | super::execute::ExternalOutcome::AwaitingPredecessor
+            super::super::execute::ExternalOutcome::Uncertain
+                | super::super::execute::ExternalOutcome::AwaitingPredecessor
         )
     }) || !report.receipt_failures.is_empty()
         || report.terminalization_failure.is_some()
@@ -339,7 +343,7 @@ async fn blocked_recipients(
         .iter()
         .filter_map(|intent| match intent {
             IngressEffectIntent::RouteDirect { recipient, .. }
-                if recovery_rebuild::policy_checked_direct_route(
+                if rebuild::policy_checked_direct_route(
                     &frozen.envelope,
                     &frozen.recorded,
                     intent,
@@ -395,7 +399,7 @@ async fn record_discarded_receipts(
     for receipt in discarded {
         if intents.iter().any(|intent| {
             matches!(intent, IngressEffectIntent::RouteDirect { recipient, .. } if blocked_recipients.contains(recipient))
-                && super::receipt_key(intent).ok().as_ref() == Some(receipt)
+                && super::super::receipt_key(intent).ok().as_ref() == Some(receipt)
         }) {
             EffectReceiptRepository::record_policy_discard(&mut tx, key, receipt,
                 crate::ingress_uow::PolicyDiscardReason::RecipientBlocked).await?;
@@ -409,7 +413,7 @@ async fn record_discarded_receipts(
         )
         .await?;
     }
-    super::execute::terminalize_if_complete_in_transaction(
+    super::super::execute::terminalize_if_complete_in_transaction(
         &mut tx,
         key,
         DeliveryExecutionContext::MaintenanceRecovery.into(),
@@ -455,13 +459,13 @@ async fn freeze(
     let receipted = EffectReceiptRepository::keys(&mut tx, key).await?;
     let mut unreceipted = Vec::new();
     for intent in &recorded {
-        if !receipted.contains(&super::receipt_key(intent)?) {
+        if !receipted.contains(&super::super::receipt_key(intent)?) {
             unreceipted.push(intent.clone());
         }
     }
     // A live invitation delivery and its offline fallback are mutually
     // exclusive: one committed receipt proves both, exactly as alias replay.
-    super::commit::reconcile_invitation_delivery_receipts(
+    super::super::commit::reconcile_invitation_delivery_receipts(
         &mut tx,
         key,
         &recorded,
@@ -477,7 +481,7 @@ async fn freeze(
         else {
             continue;
         };
-        super::reflection_dispatch::classify_progress(&mut route, &recorded);
+        super::super::reflection_dispatch::classify_progress(&mut route, &recorded);
         route.completed = progress
             .iter()
             .find(|(receipt, _)| receipt == &route.receipt)
@@ -503,7 +507,7 @@ async fn freeze(
     }
     if !settled_routes.is_empty() {
         unreceipted.retain(|intent| !settled_routes.contains(intent));
-        super::execute::terminalize_if_complete_in_transaction(
+        super::super::execute::terminalize_if_complete_in_transaction(
             &mut tx,
             key,
             DeliveryExecutionContext::MaintenanceRecovery.into(),
@@ -559,7 +563,7 @@ fn record_attempt(key: MessageKey) {
 }
 
 #[cfg(test)]
-pub(super) fn attempt_count(key: MessageKey) -> u64 {
+pub(in crate::ingress) fn attempt_count(key: MessageKey) -> u64 {
     ATTEMPTS
         .lock()
         .expect("recovery attempts")

@@ -28,7 +28,7 @@ use crate::ingress_uow::{
 };
 
 use super::gc::{run_retention_gc_with_budget, RetentionGcBudget};
-use super::recovery_executor::AttemptClassification;
+use super::recovery::executor::AttemptClassification;
 use super::RecoveryEnvironment;
 
 mod stalls;
@@ -479,7 +479,7 @@ async fn terminalize_candidates(
 }
 
 fn recoverable_receipt_kinds() -> Vec<EffectReceiptKind> {
-    super::recovery_rebuild::RECOVERABLE_KINDS
+    super::recovery::rebuild::RECOVERABLE_KINDS
         .iter()
         .map(|kind| EffectReceiptKind::from_storage(kind.storage_tag()))
         .collect()
@@ -596,7 +596,7 @@ async fn recover_candidates(
             let deadline = tokio::time::Instant::now() + budget.recovery_row;
             let result = tokio::time::timeout_at(
                 deadline,
-                super::recovery_executor::recover_row(
+                super::recovery::executor::recover_row(
                     database,
                     uow,
                     &deps,
@@ -605,7 +605,7 @@ async fn recover_candidates(
                 ),
             )
             .await;
-            if let Ok(Ok(super::recovery_executor::RowRecovery::Executed {
+            if let Ok(Ok(super::recovery::executor::RowRecovery::Executed {
                 classification,
                 pending,
                 ..
@@ -624,7 +624,7 @@ async fn recover_candidates(
             }
             if matches!(
                 &result,
-                Ok(Ok(super::recovery_executor::RowRecovery::Executed {
+                Ok(Ok(super::recovery::executor::RowRecovery::Executed {
                     classification: AttemptClassification::Inconclusive,
                     unsupported: false,
                     ..
@@ -896,7 +896,7 @@ async fn repair_stalled_row(
     let deps = environment.recovery_deps();
     match tokio::time::timeout(
         GHOST_REPAIR_BUDGET,
-        super::recovery_ghosts::repair_stalled_row(uow, &deps, key),
+        super::recovery::ghosts::repair_stalled_row(uow, &deps, key),
     )
     .await
     {
@@ -929,11 +929,11 @@ enum RowDisposition {
 fn record_recovery_result(
     candidate: RecoveryCandidate,
     result: Result<
-        Result<super::recovery_executor::RowRecovery, IngressUowError>,
+        Result<super::recovery::executor::RowRecovery, IngressUowError>,
         tokio::time::error::Elapsed,
     >,
 ) -> RowDisposition {
-    use super::recovery_executor::RowRecovery;
+    use super::recovery::executor::RowRecovery;
     use waddle_xmpp::telemetry::reliability::increment_ingress_maintenance_unrecoverable_obligations;
     match result {
         Ok(Ok(RowRecovery::Executed {

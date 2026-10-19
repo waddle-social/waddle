@@ -180,7 +180,7 @@ async fn local_carbons_receipts(
             .await
             .expect("register late actor resource");
         if recovery {
-            let result = crate::ingress::recovery_executor::recover_row(
+            let result = crate::ingress::recovery::executor::recover_row(
                 &fixture.db,
                 &fixture.uow,
                 &deps,
@@ -190,7 +190,7 @@ async fn local_carbons_receipts(
             .await
             .expect("recover without sender retry");
             assert!(
-                matches!(result, crate::ingress::recovery_executor::RowRecovery::Executed {
+                matches!(result, crate::ingress::recovery::executor::RowRecovery::Executed {
                 unrecoverable, unsupported: false, ..
             } if unrecoverable.is_empty())
             );

@@ -512,7 +512,7 @@ async fn authorize_direct_stanza(
     }) {
         return Err(IngressUowError::EffectIntentConflict);
     }
-    if super::recovery_rebuild::rebuildable_direct_route(&envelope, intents, intent) {
+    if super::recovery::rebuild::rebuildable_direct_route(&envelope, intents, intent) {
         let mut expected = envelope.message().clone();
         let recipient = target.to_bare();
         let mut archived_recipient = false;

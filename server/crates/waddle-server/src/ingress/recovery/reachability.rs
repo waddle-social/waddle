@@ -1,8 +1,8 @@
 //! #1803: "can anything at all still hand this exact full JID its copy?"
 //!
 //! The one answer both irreversible decisions rest on — evicting a ghost
-//! occupancy (`recovery_ghosts`) and settling a frozen copy the room no longer
-//! lists (`recovery_departed`). Both permanently take something away, so both
+//! occupancy (`recovery::ghosts`) and settling a frozen copy the room no longer
+//! lists (`recovery::departed`). Both permanently take something away, so both
 //! ask the same question with the same fail-closed rules; keeping it in one
 //! place is what stops the two paths drifting apart, which is exactly how the
 //! settlement came to trust a purely LOCAL answer while the eviction already
@@ -24,7 +24,7 @@ use crate::server::routes::interpret::Deps;
 /// it can afford to wait out a slow peer: half a second over one peer's own
 /// one-second ask budget, so a single slow peer resolves inside it rather
 /// than being cut off by it.
-pub(super) const GHOST_FANOUT_BUDGET: Duration = Duration::from_millis(1_500);
+pub(in crate::ingress) const GHOST_FANOUT_BUDGET: Duration = Duration::from_millis(1_500);
 
 /// Fan-out budget for the departed-copy settlement, which runs INSIDE
 /// `recover_row`'s ~1 s row deadline and before the rebuild that still has to
@@ -32,15 +32,15 @@ pub(super) const GHOST_FANOUT_BUDGET: Duration = Duration::from_millis(1_500);
 /// cancelled mid-flight and lose the whole attempt's work, so the settlement
 /// takes the tighter bound and simply leaves the copy owed when it elapses —
 /// the next pass re-asks against a warm relay cache.
-pub(super) const SETTLEMENT_FANOUT_BUDGET: Duration = Duration::from_millis(500);
+pub(in crate::ingress) const SETTLEMENT_FANOUT_BUDGET: Duration = Duration::from_millis(500);
 
 /// Where else this exact resource can still be reached.
 ///
 /// The three outcomes are deliberately distinct, because the caller's
 /// *classification* of the attempt depends on which one it got — see
-/// `recovery_departed::settle_departed_occupants`.
+/// `recovery::departed::settle_departed_occupants`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) enum ResourceReachability {
+pub(in crate::ingress) enum ResourceReachability {
     /// Nothing anywhere holds this resource: this node's actor tree does not
     /// list it and every unexpired peer denied it (including the degenerate
     /// single-node case). The only outcome that permits taking something
@@ -65,7 +65,7 @@ pub(super) enum ResourceReachability {
 /// registered-remote mirror of a peer's socket, which this node cannot
 /// actually deliver to — [`ResourceReachability`] is what distinguishes the
 /// two, and either way the copy stays owed.
-pub(super) async fn locally_reachable(deps: &Deps<'_>, occupant: &FullJid) -> bool {
+pub(in crate::ingress) async fn locally_reachable(deps: &Deps<'_>, occupant: &FullJid) -> bool {
     if deps.connection_registry.is_connected(occupant) {
         return true;
     }
@@ -83,7 +83,7 @@ pub(super) async fn locally_reachable(deps: &Deps<'_>, occupant: &FullJid) -> bo
 /// Whether anything OTHER than this node's own socket/session state can still
 /// reach the exact resource: this node's authoritative actor tree first (it is
 /// free and answers locally), then every unexpired cluster peer.
-pub(super) async fn reachable_elsewhere(
+pub(in crate::ingress) async fn reachable_elsewhere(
     deps: &Deps<'_>,
     occupant: &FullJid,
     budget: Duration,

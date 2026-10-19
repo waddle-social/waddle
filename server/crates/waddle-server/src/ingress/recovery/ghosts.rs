@@ -8,7 +8,7 @@
 //!
 //! A `route_muc` obligation freezes its occupant full JIDs at acceptance, and
 //! its aggregate receipt lands only once every one of them has delivery
-//! progress. `recovery_departed` settles the copies of occupants the room no
+//! progress. `recovery::departed` settles the copies of occupants the room no
 //! longer lists; an occupant the room DOES still list but that has no socket,
 //! no resumable XEP-0198 session and no cluster presence is the residue of a
 //! cleanup leak (#1803) — the room owes it a copy forever and the row never
@@ -59,7 +59,7 @@
 //! on the local-departure janitor's next tick once the departure receipt is
 //! acknowledged — removes the registry entry AND releases the durable room
 //! claim. A settlement that re-derived its authority afterwards would find no
-//! room to settle against. `recovery_departed::RoomAuthority::Unhosted`
+//! room to settle against. `departed::RoomAuthority::Unhosted`
 //! recovers that state on a LATER pass — a room no node hosts has no roster
 //! anywhere, so its frozen occupants are absent by definition — but only after
 //! another whole maintenance cycle, and only for the occupants the every-peer
@@ -85,7 +85,7 @@
 //! answer `Superseded`: the copy is settled against the occupancy that was
 //! proven abandoned, and XEP-0045 §7.2.14 owes a new occupancy the room's
 //! history rather than the traffic that predates its join — the same
-//! reasoning `recovery_departed` already rests on. The eviction counter still
+//! reasoning `recovery::departed` already rests on. The eviction counter still
 //! counts only confirmed unseatings, so a sweep that could not remove the
 //! occupancy settles the undeliverable copy without claiming an eviction; the
 //! leaked occupancy then stays in the roster for another cleanup path, which
@@ -128,9 +128,10 @@ use crate::{
     },
 };
 
-use super::{
-    recovery_departed::{self, RoomAuthority},
-    recovery_reachability, RouteProgress,
+use super::super::{
+    recovery::departed::{self, RoomAuthority},
+    recovery::reachability,
+    RouteProgress,
 };
 
 /// Test seam for the window the generation pin exists to close: everything
@@ -223,7 +224,7 @@ const READ_STATEMENT_TIMEOUT: Duration = Duration::from_millis(250);
 /// Returns `true` only when the repair recorded durable progress for at least
 /// one ghost's copy: the caller then restarts the stall streak instead of
 /// parking and classifying the row.
-pub(super) async fn repair_stalled_row(
+pub(in crate::ingress) async fn repair_stalled_row(
     uow: &IngressUnitOfWork,
     deps: &Deps<'_>,
     key: MessageKey,
@@ -246,17 +247,17 @@ pub(super) async fn repair_stalled_row(
         // room nobody hosts (`Unhosted`) seats nobody, so there is no ghost to
         // evict — the departed-copy settlement discharges those copies.
         let RoomAuthority::Local { actor, fence } =
-            recovery_departed::resolve_authority(rooms, deps, room).await
+            departed::resolve_authority(rooms, deps, room).await
         else {
             continue;
         };
-        let owed = recovery_departed::owed_occupants(deps, route);
+        let owed = departed::owed_occupants(deps, route);
         // Bounded chunks, each settled (and swept) before the next is probed:
         // every probe below may spend the whole ghost fan-out budget, so a
         // room with several owed occupants would otherwise exhaust
         // maintenance's repair budget before the first write and discard the
         // prefix it had already proven. See `PROBE_CONCURRENCY`.
-        for chunk in owed.chunks(recovery_departed::PROBE_CONCURRENCY) {
+        for chunk in owed.chunks(departed::PROBE_CONCURRENCY) {
             let ghosts = probe_chunk(&actor, deps, key, chunk, manifest.as_ref(), route).await;
             let ghosts = still_abandoned(&actor, ghosts).await;
             if ghosts.is_empty() {
@@ -302,16 +303,17 @@ pub(super) async fn repair_stalled_row(
                             received_at: retiring_route.received_at,
                             archive_positions: Vec::new(),
                             dispatch_stream: None,
-                            authority: super::append_authority::AppendAuthority::Verified,
+                            authority: super::super::append_authority::AppendAuthority::Verified,
                         };
-                        if let Some(settled) = super::room_manifest_replay::settle_superseded(
-                            uow,
-                            manifest,
-                            Some(rooms),
-                            &context,
-                            &occupant,
-                        )
-                        .await?
+                        if let Some(settled) =
+                            super::super::room_manifest_replay::settle_superseded(
+                                uow,
+                                manifest,
+                                Some(rooms),
+                                &context,
+                                &occupant,
+                            )
+                            .await?
                         {
                             settled_any = true;
                             receipted_any |= !settled.is_empty();
@@ -325,7 +327,7 @@ pub(super) async fn repair_stalled_row(
             // — see this function's ordering note above `evict`. The
             // in-transaction claim assertion still fences a steal that
             // committed since the authority was resolved.
-            let settled = match super::execute_uow::record_delivery_progress(
+            let settled = match super::super::execute_uow::record_delivery_progress(
                 uow,
                 key,
                 route,
@@ -335,7 +337,7 @@ pub(super) async fn repair_stalled_row(
             .await
             {
                 Ok(settled) => settled,
-                Err(error) if recovery_departed::lost_room_claim(&error) => {
+                Err(error) if departed::lost_room_claim(&error) => {
                     tracing::debug!(
                         %room,
                         "ghost repair lost the room claim fence before it committed"
@@ -405,7 +407,7 @@ pub(super) async fn repair_stalled_row(
         }
     }
     if receipted_any {
-        super::execute::terminalize_if_complete_outcome(
+        super::super::execute::terminalize_if_complete_outcome(
             uow,
             key,
             DeliveryExecutionContext::MaintenanceRecovery.into(),
@@ -427,7 +429,7 @@ async fn probe_chunk(
     deps: &Deps<'_>,
     key: MessageKey,
     chunk: &[FullJid],
-    manifest: Option<&super::FrozenRoomManifest>,
+    manifest: Option<&super::super::FrozenRoomManifest>,
     route: &RouteProgress,
 ) -> Vec<(FullJid, OccupancySessionGeneration)> {
     let probed = futures::future::join_all(
@@ -447,7 +449,7 @@ async fn probe_chunk(
 ///
 /// The probes above may have spent the whole fan-out budget, and the roster is
 /// actor memory that no transaction can hold still — exactly the window
-/// `recovery_departed::still_departed` narrows for a departed occupant. Only
+/// `departed::still_departed` narrows for a departed occupant. Only
 /// the pinned generation may be settled: a full JID that rebound and rejoined
 /// during the probes is seated at a DIFFERENT generation, and that new
 /// occupancy keeps both its seat and its copy. An occupancy that vanished on
@@ -467,7 +469,7 @@ async fn still_abandoned(
             .ask(GetOccupantSessionGeneration {
                 jid: occupant.clone(),
             })
-            .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+            .reply_timeout(departed::PROBE_TIMEOUT)
             .await
     }))
     .await;
@@ -512,7 +514,7 @@ async fn abandoned_occupancy(
     deps: &Deps<'_>,
     key: MessageKey,
     occupant: &FullJid,
-    manifest: Option<&super::FrozenRoomManifest>,
+    manifest: Option<&super::super::FrozenRoomManifest>,
     route: &RouteProgress,
 ) -> Option<OccupancySessionGeneration> {
     let generation = if let Some(manifest) = manifest {
@@ -523,7 +525,7 @@ async fn abandoned_occupancy(
                 occupancy_incarnation: manifest.occupancy_incarnation,
                 watermark,
             })
-            .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+            .reply_timeout(departed::PROBE_TIMEOUT)
             .await
             .ok()??
     } else {
@@ -531,7 +533,7 @@ async fn abandoned_occupancy(
             .ask(GetOccupantSessionGeneration {
                 jid: occupant.clone(),
             })
-            .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+            .reply_timeout(departed::PROBE_TIMEOUT)
             .await
         {
             Ok(generation) => generation?,
@@ -545,19 +547,14 @@ async fn abandoned_occupancy(
     enter_probe_window(key, occupant).await;
     #[cfg(not(test))]
     let _ = key;
-    if recovery_reachability::locally_reachable(deps, occupant).await {
+    if reachability::locally_reachable(deps, occupant).await {
         return None;
     }
     // Ghost repair runs after the row was already classified as stalled, so
     // it takes the generous fan-out budget; anything short of "nothing
     // anywhere holds this resource" leaves the occupant seated.
-    if recovery_reachability::reachable_elsewhere(
-        deps,
-        occupant,
-        recovery_reachability::GHOST_FANOUT_BUDGET,
-    )
-    .await
-        != recovery_reachability::ResourceReachability::AbsentEverywhere
+    if reachability::reachable_elsewhere(deps, occupant, reachability::GHOST_FANOUT_BUDGET).await
+        != reachability::ResourceReachability::AbsentEverywhere
     {
         return None;
     }
@@ -603,7 +600,7 @@ async fn evict(
         .ask(GetOccupantSessionGeneration {
             jid: occupant.clone(),
         })
-        .reply_timeout(recovery_departed::PROBE_TIMEOUT)
+        .reply_timeout(departed::PROBE_TIMEOUT)
         .await
     {
         // Any seat at all means the room still owes this full JID a copy: a
@@ -626,7 +623,7 @@ async fn evict(
 async fn pending_groupchat_routes(
     uow: &IngressUnitOfWork,
     key: MessageKey,
-) -> Result<(Vec<RouteProgress>, Option<super::FrozenRoomManifest>), IngressUowError> {
+) -> Result<(Vec<RouteProgress>, Option<super::super::FrozenRoomManifest>), IngressUowError> {
     let mut tx = uow
         .begin_with_timeouts(READ_LOCK_TIMEOUT, READ_STATEMENT_TIMEOUT)
         .await?;
@@ -644,7 +641,7 @@ async fn pending_groupchat_routes(
     tx.commit().await?;
     let mut routes = Vec::new();
     for intent in &recorded {
-        if receipted.contains(&super::receipt_key(intent)?) {
+        if receipted.contains(&super::super::receipt_key(intent)?) {
             continue;
         }
         let Some(mut route) = RouteProgress::from_intent(intent, Some(created_at), Vec::new())?
@@ -652,7 +649,7 @@ async fn pending_groupchat_routes(
             continue;
         };
         if manifest.is_some() {
-            super::reflection_dispatch::classify_progress(&mut route, &recorded);
+            super::super::reflection_dispatch::classify_progress(&mut route, &recorded);
         }
         if route.room().is_none() || route.is_direct() && manifest.is_none() {
             continue;

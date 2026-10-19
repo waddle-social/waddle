@@ -1,5 +1,5 @@
 //! Pure selection and reconstruction of obligations retained by canonical ingress.
-use super::{
+use super::super::{
     decision::{self, AliasOutcomeClass, IngressDecision, IngressDecisionClass},
     recorded::RouteProgress,
 };
@@ -40,7 +40,7 @@ pub(crate) const RECOVERABLE_KINDS: [IngressEffectKind; 11] = [
     IngressEffectKind::RelayCarbons,
 ];
 
-pub(super) struct RecoveryInput<'a> {
+pub(in crate::ingress) struct RecoveryInput<'a> {
     pub key: MessageKey,
     pub envelope: &'a MessageEnvelope,
     pub created_at: DateTime<Utc>,
@@ -54,7 +54,7 @@ pub(super) struct RecoveryInput<'a> {
     pub departed_occupants: Vec<jid::FullJid>,
     pub blocked_recipients: &'a [jid::BareJid],
 }
-pub(super) struct RebuiltRecovery {
+pub(in crate::ingress) struct RebuiltRecovery {
     pub decision: IngressDecision,
     pub delegated: Vec<GroupchatNotificationRecovery>,
     pub unrecoverable: Vec<IngressEffectKind>,
@@ -64,7 +64,9 @@ pub(super) struct RebuiltRecovery {
     pub discarded_receipts: Vec<decision::EffectReceiptKey>,
 }
 
-pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, IngressUowError> {
+pub(in crate::ingress) fn rebuild(
+    input: RecoveryInput<'_>,
+) -> Result<RebuiltRecovery, IngressUowError> {
     let mut plan = IngressPlan {
         failure: None,
         rejection: None,
@@ -103,7 +105,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         .iter()
         .any(|i| matches!(i, IngressEffectIntent::PendingDelivery { .. }))
     {
-        super::restore_offline::restore_recorded_offline_deliveries(
+        super::super::restore_offline::restore_recorded_offline_deliveries(
             &mut plan,
             input.recorded,
             input.unreceipted,
@@ -116,7 +118,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         .iter()
         .any(|i| matches!(i, IngressEffectIntent::RoomObserver { .. }))
     {
-        match super::recorded::restore_room_observer_envelope(
+        match super::super::recorded::restore_room_observer_envelope(
             &mut plan,
             input.recorded,
             input.envelope,
@@ -135,7 +137,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
     discarded_receipts.extend(carbons::restore(&mut plan, &input)?);
     muc::restore_muc_routes(&mut plan, &input)?;
     let delegated = delegated_recoveries(&input);
-    let mut external = super::suppression::filter_external_effects(
+    let mut external = super::super::suppression::filter_external_effects(
         &plan,
         None,
         &ReconcileVerdict::Consistent,
@@ -143,7 +145,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
         input.unreceipted,
         &input.route_progress,
     );
-    let external_dependencies = super::suppression::external_effect_indices(
+    let external_dependencies = super::super::suppression::external_effect_indices(
         &plan,
         None,
         &ReconcileVerdict::Consistent,
@@ -160,7 +162,7 @@ pub(super) fn rebuild(input: RecoveryInput<'_>) -> Result<RebuiltRecovery, Ingre
     let mut receipts_pending = Vec::new();
     let mut unsupported_receipts = Vec::new();
     for intent in input.unreceipted {
-        let receipt = super::durable::receipt_key(intent)?;
+        let receipt = super::super::durable::receipt_key(intent)?;
         if !external_receipts
             .iter()
             .any(|receipts| receipts.contains(&receipt))
@@ -258,7 +260,7 @@ fn retain_pin_routes(plan: &mut IngressPlan, unreceipted: &[IngressEffectIntent]
                 matches!(dependency, PlanEffectDependency::AfterDmPinMutation { .. })
             }) =>
         {
-            super::recorded::recorded_route_obligation(unreceipted, effect)
+            super::super::recorded::recorded_route_obligation(unreceipted, effect)
         }
         _ => true,
     });
@@ -305,17 +307,17 @@ fn restore_direct_routes(
             // Never replay a stale projection after a crash; clients query the
             // authoritative inbox on reconnect. Message and notification
             // delivery have independent obligations.
-            discarded.push(super::durable::receipt_key(intent)?);
+            discarded.push(super::super::durable::receipt_key(intent)?);
             continue;
         }
         if input.blocked_recipients.contains(recipient) {
             // Specialized restorers may already have reconstructed this route.
             plan.plan.retain(|planned| {
                 !matches!(&planned.effect,
-                Effect::External(effect) if super::recorded::recorded_route_obligation(
+                Effect::External(effect) if super::super::recorded::recorded_route_obligation(
                     std::slice::from_ref(intent), effect))
             });
-            discarded.push(super::durable::receipt_key(intent)?);
+            discarded.push(super::super::durable::receipt_key(intent)?);
             continue;
         }
         if !rebuildable_direct_route(input.envelope, input.recorded, intent) {
@@ -327,16 +329,20 @@ fn restore_direct_routes(
             bare: recipient.clone(),
             resources: fanout.clone(),
             stanza: Box::new(Stanza::Message(
-                super::recorded::prepared_direct_message(input.envelope, intent)
+                super::super::recorded::prepared_direct_message(input.envelope, intent)
                     .cloned()
                     .unwrap_or_else(|| {
-                        super::recorded::delivery_message(input.envelope, recipient, input.recorded)
+                        super::super::recorded::delivery_message(
+                            input.envelope,
+                            recipient,
+                            input.recorded,
+                        )
                     }),
             )),
         });
         if plan.plan.iter().any(|planned| {
             matches!(&planned.effect, Effect::External(existing)
-            if super::recorded::recorded_route_obligation(std::slice::from_ref(intent), existing))
+            if super::super::recorded::recorded_route_obligation(std::slice::from_ref(intent), existing))
         }) {
             continue;
         }
@@ -351,7 +357,7 @@ fn restore_direct_routes(
 /// rebuild routes recorded next to an offline row for the recipient, a DM pin
 /// mutation, or an invitation-ledger claim. A lost groupchat row records one
 /// inbox-push route per occupant and none of these hold for it.
-pub(super) fn policy_checked_direct_route(
+pub(in crate::ingress) fn policy_checked_direct_route(
     envelope: &MessageEnvelope,
     recorded: &[IngressEffectIntent],
     intent: &IngressEffectIntent,
@@ -379,7 +385,7 @@ pub(super) fn policy_checked_direct_route(
 /// Whether the generic direct-route arm would rebuild this unreceipted intent:
 /// a non-empty fanout, not a route owned by a DM pin mutation, and payload
 /// provenance for the recipient.
-pub(super) fn rebuildable_direct_route(
+pub(in crate::ingress) fn rebuildable_direct_route(
     envelope: &MessageEnvelope,
     recorded: &[IngressEffectIntent],
     intent: &IngressEffectIntent,
@@ -405,7 +411,7 @@ pub(super) fn rebuildable_direct_route(
                 prepared: Some(_),
                 ..
             }
-        ) || super::recorded::prepared_direct_message(envelope, intent).is_some())
+        ) || super::super::recorded::prepared_direct_message(envelope, intent).is_some())
         && direct_provenance(envelope, recorded, recipient)
 }
 
@@ -424,7 +430,7 @@ fn direct_provenance(
         || target.to_bare() != *recipient
         || recorded
             .iter()
-            .any(super::restore_offline::specialized_invitation)
+            .any(super::super::restore_offline::specialized_invitation)
         || recorded.iter().any(|i| {
             matches!(i, IngressEffectIntent::PendingDelivery {
             mutation: PendingDeliveryMutation::Archived { recipient: saved, .. }
@@ -438,7 +444,7 @@ fn direct_provenance(
         Ok(full) => NormalizedTarget::Full(full),
         Err(bare) => NormalizedTarget::Bare(bare),
     };
-    !super::commit::live_recipient_delegated(&target, &sender.to_bare(), recorded)
+    !super::super::commit::live_recipient_delegated(&target, &sender.to_bare(), recorded)
 }
 
 fn delegated_recoveries(input: &RecoveryInput<'_>) -> Vec<GroupchatNotificationRecovery> {

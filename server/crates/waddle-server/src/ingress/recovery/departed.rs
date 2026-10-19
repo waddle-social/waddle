@@ -108,11 +108,13 @@ use crate::{
     server::routes::interpret::Deps,
 };
 
-use super::{recovery_executor::AttemptClassification, recovery_reachability, RouteProgress};
+use super::super::{
+    recovery::executor::AttemptClassification, recovery::reachability, RouteProgress,
+};
 
 /// Bounded budget for one room probe, matching the statement budget every
 /// recovery transaction runs under. A slower answer is not proof of absence.
-pub(super) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
+pub(in crate::ingress) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
 /// How many occupants of one route are probed at the same time.
 ///
@@ -124,14 +126,14 @@ pub(super) const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 /// the in-flight asks at a few dozen against the two-replica deployment.
 /// Each chunk is settled before the next is probed, so a deadline that elapses
 /// mid-route can only lose the chunk in flight, never the proven prefix.
-pub(super) const PROBE_CONCURRENCY: usize = 16;
+pub(in crate::ingress) const PROBE_CONCURRENCY: usize = 16;
 
 /// Test seam for the window [`still_departed`] narrows: between the
 /// reachability probes, which may spend the whole fan-out budget, and the
 /// settlement write.
 ///
 /// Registered per canonical row rather than per task, for the same reason as
-/// `recovery_ghosts::GhostProbeWindow`: the settlement runs on the
+/// `recovery::ghosts::GhostProbeWindow`: the settlement runs on the
 /// recovery-accounting worker task, so a `task_local` set around a
 /// maintenance pass never reaches it.
 #[cfg(test)]
@@ -171,14 +173,14 @@ async fn enter_settlement_window(key: MessageKey, occupants: &[FullJid]) {
 }
 
 /// What one recovery attempt's departed-occupant settlement discharged.
-pub(super) struct DepartedSettlement {
+pub(in crate::ingress) struct DepartedSettlement {
     /// Occupants whose frozen copy this attempt settled. No rebuilt effect may
     /// queue a copy for them.
-    pub(super) occupants: Vec<FullJid>,
+    pub(in crate::ingress) occupants: Vec<FullJid>,
     /// Obligations whose aggregate receipt landed because the settlement
     /// completed their frozen fanout.
-    pub(super) settled: Vec<IngressEffectIntent>,
-    pub(super) classification: AttemptClassification,
+    pub(in crate::ingress) settled: Vec<IngressEffectIntent>,
+    pub(in crate::ingress) classification: AttemptClassification,
     /// Whether some frozen MUC route still owes a copy to an occupant this
     /// attempt neither completed nor settled.
     ///
@@ -190,13 +192,13 @@ pub(super) struct DepartedSettlement {
     /// it `unsupported`, which would cache it until its receipt or progress
     /// counts changed: the very counts only a later settlement can change
     /// (#1803).
-    pub(super) still_owed: bool,
+    pub(in crate::ingress) still_owed: bool,
 }
 
 /// Record delivery progress for every frozen occupant this node can prove is
 /// no longer in the room, settling each obligation whose fanout that completes,
 /// and report whether any copy is still owed afterwards.
-pub(super) async fn settle_departed_occupants(
+pub(in crate::ingress) async fn settle_departed_occupants(
     uow: &IngressUnitOfWork,
     deps: &Deps<'_>,
     key: MessageKey,
@@ -389,7 +391,7 @@ async fn departed_verdict(
     }
     // H1: a roster answer never settles a copy for somebody this node itself
     // can still hand it to.
-    if recovery_reachability::locally_reachable(deps, occupant).await {
+    if reachability::locally_reachable(deps, occupant).await {
         return OccupantVerdict::Owed;
     }
     // R2-1: nor for somebody a PEER can hand it to. After a room-host restart
@@ -398,14 +400,10 @@ async fn departed_verdict(
     // attached one — every local signal says "gone" about a user who is simply
     // connected to the other replica, whose own maintenance pass would deliver
     // the copy.
-    match recovery_reachability::reachable_elsewhere(
-        deps,
-        occupant,
-        recovery_reachability::SETTLEMENT_FANOUT_BUDGET,
-    )
-    .await
+    match reachability::reachable_elsewhere(deps, occupant, reachability::SETTLEMENT_FANOUT_BUDGET)
+        .await
     {
-        recovery_reachability::ResourceReachability::AbsentEverywhere => OccupantVerdict::Departed,
+        reachability::ResourceReachability::AbsentEverywhere => OccupantVerdict::Departed,
         // A peer is holding that socket. That is a STABLE fact, not a failed
         // read: re-running this attempt answers the same until the socket goes
         // away, and the peer delivers the copy in its own pass. Keeping the
@@ -413,10 +411,10 @@ async fn departed_verdict(
         // stable fact must still be able to accumulate its stall streak and
         // reach ghost repair, which is the path that resolves a resource
         // nothing can actually deliver to.
-        recovery_reachability::ResourceReachability::Reachable => OccupantVerdict::Owed,
+        reachability::ResourceReachability::Reachable => OccupantVerdict::Owed,
         // A read failed or the budget elapsed. Transient, and the row must not
         // be parked on evidence this attempt never gathered.
-        recovery_reachability::ResourceReachability::Unproven => OccupantVerdict::Inconclusive,
+        reachability::ResourceReachability::Unproven => OccupantVerdict::Inconclusive,
     }
 }
 
@@ -431,7 +429,7 @@ async fn commit_departed(
     fence: Option<&RoomClaimFenceContext>,
     departed: &[FullJid],
 ) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
-    let settled = match super::execute_uow::record_delivery_progress(
+    let settled = match super::super::execute_uow::record_delivery_progress(
         uow,
         key,
         progress,
@@ -464,7 +462,10 @@ async fn commit_departed(
 
 /// Frozen occupants this obligation still owes a copy. Host-owned resources
 /// belong to an extension host rather than a room roster.
-pub(super) fn owed_occupants(deps: &Deps<'_>, progress: &RouteProgress) -> Vec<FullJid> {
+pub(in crate::ingress) fn owed_occupants(
+    deps: &Deps<'_>,
+    progress: &RouteProgress,
+) -> Vec<FullJid> {
     progress
         .fanout
         .iter()
@@ -476,7 +477,7 @@ pub(super) fn owed_occupants(deps: &Deps<'_>, progress: &RouteProgress) -> Vec<F
 }
 
 /// Whether this node's roster answer for a room is usable.
-pub(super) enum RoomAuthority {
+pub(in crate::ingress) enum RoomAuthority {
     /// The authoritative local incarnation; its roster decides. `fence`
     /// carries the exact claim that proof rests on, so the settlement
     /// transaction can re-assert it under `FOR SHARE`; `None` means durable
@@ -505,7 +506,7 @@ pub(super) enum RoomAuthority {
     Unreadable,
 }
 
-pub(super) async fn resolve_authority(
+pub(in crate::ingress) async fn resolve_authority(
     registry: &ActorRef<RoomRegistryActor>,
     deps: &Deps<'_>,
     room: &BareJid,
@@ -567,7 +568,7 @@ async fn hosted_elsewhere(deps: &Deps<'_>, room: &BareJid) -> RoomAuthority {
     };
     let handles = &state.deps.app_state.clustering_claims;
     let Some(store) = handles.claim_store.as_ref() else {
-        // The same single-node carve-out `recovery_reachability` makes: no
+        // The same single-node carve-out `recovery::reachability` makes: no
         // claim store AND no cluster membership is the unclustered
         // configuration, where this node is the whole cluster. Exactly one of
         // the two missing is a half-wired cluster, which proves nothing.
@@ -604,13 +605,13 @@ async fn hosted_elsewhere(deps: &Deps<'_>, room: &BareJid) -> RoomAuthority {
 /// asserting is no longer on file — a steal that committed between the roster
 /// probe and the write.
 #[cfg(feature = "clustering")]
-pub(super) fn lost_room_claim(error: &IngressUowError) -> bool {
+pub(in crate::ingress) fn lost_room_claim(error: &IngressUowError) -> bool {
     matches!(error, IngressUowError::ClaimFenceMissing)
 }
 
 /// Without clustering nothing asserts a room claim, so no error can mean this.
 #[cfg(not(feature = "clustering"))]
-pub(super) fn lost_room_claim(_error: &IngressUowError) -> bool {
+pub(in crate::ingress) fn lost_room_claim(_error: &IngressUowError) -> bool {
     false
 }
 

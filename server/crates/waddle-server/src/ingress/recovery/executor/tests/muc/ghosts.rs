@@ -381,7 +381,7 @@ async fn sqlite_ghost_occupant_survives_below_the_stall_threshold() {
 /// inline sweep opens observes it.
 #[tokio::test]
 async fn sqlite_settled_ghost_has_a_retained_sweep_before_its_inline_sweep() {
-    use crate::ingress::recovery_ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
+    use crate::ingress::recovery::ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
     use crate::server::routes::websocket::LocalDepartureItem;
 
     /// Records whether a full-JID sweep for the ghost was already retained
@@ -451,7 +451,7 @@ async fn sqlite_settled_ghost_has_a_retained_sweep_before_its_inline_sweep() {
 /// worst possible moment — the instant the eviction is confirmed.
 #[tokio::test]
 async fn sqlite_ghost_copy_settles_although_the_eviction_destroys_the_room() {
-    use crate::ingress::recovery_ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
+    use crate::ingress::recovery::ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
     use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, DestroyRoomReason};
 
     /// Destroys the room exactly once, from inside the window the eviction
@@ -537,7 +537,7 @@ async fn sqlite_ghost_copy_settles_although_the_eviction_destroys_the_room() {
 /// classified `Superseded` instead of being torn out.
 #[tokio::test]
 async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
-    use crate::ingress::recovery_ghosts::{hook_ghost_probe_window, GhostProbeWindow};
+    use crate::ingress::recovery::ghosts::{hook_ghost_probe_window, GhostProbeWindow};
 
     /// Rejoins the ghost's full JID exactly once, from inside the probe
     /// window the generation pin exists to close.
@@ -664,7 +664,7 @@ async fn sqlite_rejoin_during_the_ghost_probes_keeps_its_seat() {
 /// settles on a later pass.
 #[tokio::test]
 async fn sqlite_sibling_row_settles_once_the_ghost_eviction_destroyed_the_room() {
-    use crate::ingress::recovery_ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
+    use crate::ingress::recovery::ghosts::{hook_ghost_eviction_window, GhostEvictionWindow};
     use waddle_xmpp::muc::room_registry_actor::{DestroyRoom, DestroyRoomReason};
 
     /// The empty-room destroy the eviction queues, landing at the worst
@@ -1003,7 +1003,7 @@ async fn sealed_ghost_skips_inbox_refresh_child(inbox_receipted: bool) {
     super::departed::settle_non_delivery_effects(&f, &state, &decision).await;
     let deps = build_interpret_deps(&state, None);
     assert!(
-        crate::ingress::recovery_ghosts::repair_stalled_row(&f.uow, &deps, key)
+        crate::ingress::recovery::ghosts::repair_stalled_row(&f.uow, &deps, key)
             .await
             .expect("inbox child must not abort room ghost repair")
     );

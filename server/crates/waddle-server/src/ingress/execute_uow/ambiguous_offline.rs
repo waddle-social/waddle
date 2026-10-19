@@ -14,7 +14,7 @@ use waddle_xmpp::{
 };
 
 use crate::{
-    ingress::{recorded::RouteProgress, recovery_rebuild},
+    ingress::{recorded::RouteProgress, recovery::rebuild},
     ingress_uow::{
         settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
         DeliveryProgressRepository, EffectIntentRepository, EffectReceiptRepository,
@@ -79,7 +79,7 @@ pub(super) async fn handoff(
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
     if !intents.contains(&intent)
         || !progress.fanout.contains(resource)
-        || !recovery_rebuild::rebuildable_direct_route(&envelope, &intents, &intent)
+        || !rebuild::rebuildable_direct_route(&envelope, &intents, &intent)
     {
         return Ok(None);
     }

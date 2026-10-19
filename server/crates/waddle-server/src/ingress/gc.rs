@@ -18,7 +18,7 @@ use super::maintenance::{
     run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome,
 };
 
-use super::recovery_environment::RecoveryBinding;
+use super::recovery::environment::RecoveryBinding;
 
 #[cfg(test)]
 mod send_attempt_tests;

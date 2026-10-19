@@ -1,7 +1,7 @@
 use super::*;
 use crate::{
     ingress::{
-        commit::commit_submission, receipt_key, recovery_rebuild::RecoveryInput,
+        commit::commit_submission, receipt_key, recovery::rebuild::RecoveryInput,
         test_support::IngressFixture,
     },
     ingress_uow::{
@@ -241,7 +241,7 @@ async fn recovered_attempt_notification_with_delay(
         .await
         .expect("created at");
     tx.commit().await.expect("recovery snapshot");
-    let rebuilt = recovery_rebuild::rebuild(RecoveryInput {
+    let rebuilt = crate::ingress::recovery::rebuild::rebuild(RecoveryInput {
         key,
         envelope: &envelope,
         created_at,

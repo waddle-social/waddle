@@ -552,7 +552,7 @@ async fn postgres_pool_one_remains_admissible_during_maintenance() {
     assert_eq!(outcome, MaintenanceOutcome::Complete);
     assert_eq!(terminal_count(&fixture).await, 2);
     cursor.wait_for_recovery_accounting().await;
-    assert_eq!(super::super::recovery_executor::attempt_count(pending), 1);
+    assert_eq!(super::super::recovery::executor::attempt_count(pending), 1);
     fixture.close().await;
 }
 
@@ -726,7 +726,7 @@ async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture)
     );
     assert_eq!(append_count(&sm, &resource).await, 0);
     assert_eq!(terminal_count(&fixture).await, 0);
-    assert_eq!(super::super::recovery_executor::attempt_count(key), 0);
+    assert_eq!(super::super::recovery::executor::attempt_count(key), 0);
     let gate = test_hooks::pause_after_recovery_freeze(key);
     let pass = run_maintenance_pass(
         &fixture.db,
@@ -751,7 +751,7 @@ async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture)
     assert_eq!(append_count(&sm, &resource).await, 1);
     assert_eq!(fixture.count("ingress_effect_receipts").await, 1);
     assert_eq!(terminal_count(&fixture).await, 1);
-    assert_eq!(super::super::recovery_executor::attempt_count(key), 1);
+    assert_eq!(super::super::recovery::executor::attempt_count(key), 1);
     assert_eq!(
         run_maintenance_pass(
             &fixture.db,
@@ -928,7 +928,7 @@ async fn sqlite_rapid_passes_within_the_sample_interval_never_park_a_row() {
         cursor.wait_for_recovery_accounting().await;
     }
     assert_eq!(
-        super::super::recovery_executor::attempt_count(key),
+        super::super::recovery::executor::attempt_count(key),
         u64::from(budget.recovery_stall_attempts * 4),
         "every rapid pass still attempts the row; none of them parks it"
     );
@@ -949,7 +949,7 @@ async fn sqlite_stalled_row_parks_exactly_at_threshold_and_cache_hit_queues_noth
             MaintenanceOutcome::Complete
         );
         assert_eq!(
-            super::super::recovery_executor::attempt_count(key),
+            super::super::recovery::executor::attempt_count(key),
             u64::from(attempt)
         );
         super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
@@ -960,7 +960,7 @@ async fn sqlite_stalled_row_parks_exactly_at_threshold_and_cache_hit_queues_noth
         MaintenanceOutcome::Complete
     );
     assert_eq!(
-        super::super::recovery_executor::attempt_count(key),
+        super::super::recovery::executor::attempt_count(key),
         u64::from(budget.recovery_stall_attempts)
     );
     assert!(cursor.recovery_accounting.lock().expect("queue").is_empty());
@@ -971,7 +971,7 @@ async fn sqlite_stalled_row_parks_exactly_at_threshold_and_cache_hit_queues_noth
     tokio::time::resume();
     super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
     assert_eq!(
-        super::super::recovery_executor::attempt_count(key),
+        super::super::recovery::executor::attempt_count(key),
         u64::from(budget.recovery_stall_attempts) + 1
     );
     assert_eq!(cursor.recovery_accounting.lock().expect("queue").len(), 1);
@@ -1154,13 +1154,13 @@ async fn sqlite_replica_progress_rearms_parked_row_and_counts_a_new_episode() {
             .evidence,
         fresh
     );
-    let attempts = super::super::recovery_executor::attempt_count(key);
+    let attempts = super::super::recovery::executor::attempt_count(key);
     for index in 1..=budget.recovery_stall_attempts {
         super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment).await;
         super::spawn_recovery_accounting(&fixture.db, &fixture.uow, &cursor, budget, None);
         cursor.wait_for_recovery_accounting().await;
         assert_eq!(
-            super::super::recovery_executor::attempt_count(key),
+            super::super::recovery::executor::attempt_count(key),
             attempts + u64::from(index)
         );
         assert_eq!(

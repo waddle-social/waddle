@@ -609,8 +609,8 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
             .await
             .expect("restore absent observer on replay");
         let observer = submission.plan.intents.last().expect("observer intent");
-        let recovered = crate::ingress::recovery_rebuild::rebuild(
-            crate::ingress::recovery_rebuild::RecoveryInput {
+        let recovered = crate::ingress::recovery::rebuild::rebuild(
+            crate::ingress::recovery::rebuild::RecoveryInput {
                 key: decision.message_key.expect("key"),
                 envelope: &envelope,
                 created_at: chrono::Utc::now(),

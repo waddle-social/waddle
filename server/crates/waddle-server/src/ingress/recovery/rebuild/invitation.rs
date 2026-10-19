@@ -78,12 +78,12 @@ pub(super) fn restore(
             {
                 // This is policy resolution, not evidence of socket delivery.
                 // Resolve the paired fallback too, without changing membership.
-                discarded.push(super::super::receipt_key(route)?);
-                discarded.push(super::super::receipt_key(pending)?);
+                discarded.push(super::super::super::receipt_key(route)?);
+                discarded.push(super::super::super::receipt_key(pending)?);
                 continue;
             }
-            let receipt = super::super::receipt_key(route)?;
-            let Some(message) = super::super::invitation_authority::recorded_message(
+            let receipt = super::super::super::receipt_key(route)?;
+            let Some(message) = super::super::super::invitation_authority::recorded_message(
                 input.envelope,
                 input.recorded,
                 &receipt,

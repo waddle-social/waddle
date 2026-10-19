@@ -223,7 +223,7 @@ async fn queued_copy_before_relayed_reflection(mut fixture: IngressFixture, full
             "full queue leaves B unresolved"
         );
         deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
-        super::super::recovery_executor::recover_row(
+        super::super::recovery::executor::recover_row(
             &fixture.db,
             &fixture.uow,
             &deps,

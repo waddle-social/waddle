@@ -26,7 +26,7 @@ pub(super) fn restore(
             _ => continue,
         };
         if kind == CarbonKind::Received && input.blocked_recipients.contains(&owner) {
-            discarded.push(super::super::durable::receipt_key(intent)?);
+            discarded.push(super::super::super::durable::receipt_key(intent)?);
             continue;
         }
         let (message, dependencies) = carbon_message(input, &owner);

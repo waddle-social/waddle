@@ -873,7 +873,7 @@ mod family_tests {
         let state = family_state(&fixture).await;
         let decision = commit_submission(
             &fixture.uow,
-            &crate::ingress::recovery_tests::recovery_plan(&fixture),
+            &crate::ingress::recovery::tests::recovery_plan(&fixture),
             5,
         )
         .await
@@ -947,7 +947,7 @@ mod family_tests {
             .deps
             .protocol
             .extension_manager = Arc::new(manager);
-        let mut submission = crate::ingress::recovery_tests::recovery_plan(&fixture);
+        let mut submission = crate::ingress::recovery::tests::recovery_plan(&fixture);
         let room = submission
             .plan
             .intents
@@ -1068,7 +1068,7 @@ mod family_tests {
         let state = family_state(&fixture).await;
         let first = commit_submission(
             &fixture.uow,
-            &crate::ingress::recovery_tests::recovery_plan(&fixture),
+            &crate::ingress::recovery::tests::recovery_plan(&fixture),
             5,
         )
         .await
@@ -1110,7 +1110,7 @@ mod family_tests {
             // Wait until A's delegate has failed and the same pass enters B,
             // rather than racing a wall-clock sleep against delegate startup.
             tokio::time::timeout(Duration::from_millis(750), async {
-                while crate::ingress::recovery_executor::attempt_count(later_key) == 0 {
+                while crate::ingress::recovery::executor::attempt_count(later_key) == 0 {
                     tokio::time::sleep(Duration::from_millis(5)).await;
                 }
             })
@@ -1545,7 +1545,7 @@ mod pin_tests {
         let cursor = MaintenanceCursor::default();
         if scenario == Scenario::ChangedEvidence {
             pass(&f, &state, &cursor).await;
-            assert_eq!(crate::ingress::recovery_executor::attempt_count(key), 1);
+            assert_eq!(crate::ingress::recovery::executor::attempt_count(key), 1);
             assert!(!terminal(&f, &decision).await);
             assert!(!state.deps.protocol.dm_pin_store.contains(&pair, &target));
             assert!(sender_rx.try_recv().is_err() && peer_rx.try_recv().is_err());
@@ -1630,7 +1630,7 @@ mod pin_tests {
             }
             tx.commit().await.expect("commit");
         }
-        let attempts = crate::ingress::recovery_executor::attempt_count(key);
+        let attempts = crate::ingress::recovery::executor::attempt_count(key);
         assert_eq!(
             attempts,
             if scenario == Scenario::ChangedEvidence {
@@ -1641,7 +1641,7 @@ mod pin_tests {
         );
         pass(&f, &state, &cursor).await;
         assert_eq!(
-            crate::ingress::recovery_executor::attempt_count(key),
+            crate::ingress::recovery::executor::attempt_count(key),
             attempts
         );
         assert!(sender_rx.try_recv().is_err() && peer_rx.try_recv().is_err());

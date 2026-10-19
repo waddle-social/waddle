@@ -30,16 +30,10 @@ pub(crate) mod room_manifest_replay;
 pub use principal::{ExtensionPrincipal, IngressPrincipal};
 pub(crate) mod maintenance;
 mod receipts;
-mod recovery;
-mod recovery_departed;
-mod recovery_environment;
-mod recovery_executor;
-mod recovery_ghosts;
-mod recovery_reachability;
-mod recovery_rebuild;
+pub(crate) mod recovery;
+use recovery::environment::RecoveryBinding;
+pub use recovery::environment::RecoveryEnvironment;
 pub use recovery::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
-use recovery_environment::RecoveryBinding;
-pub use recovery_environment::RecoveryEnvironment;
 mod recorded;
 pub(crate) mod room_manifest;
 pub use recorded::{ProgressObligation, RouteProgress};
@@ -1314,9 +1308,6 @@ pub(crate) mod test_support {
 
 #[cfg(test)]
 mod subject_receipt_tests;
-
-#[cfg(test)]
-pub(crate) mod recovery_tests;
 
 #[cfg(test)]
 mod offline_settlement_tests;

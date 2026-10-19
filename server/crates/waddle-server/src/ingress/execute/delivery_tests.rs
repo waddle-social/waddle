@@ -827,23 +827,25 @@ async fn invite_quota_recovers_generated_notification(
     let rebuild = |recorded: &[IngressEffectIntent],
                    pending: &[IngressEffectIntent],
                    blocked: &[jid::BareJid]| {
-        crate::ingress::recovery_rebuild::rebuild(crate::ingress::recovery_rebuild::RecoveryInput {
-            key,
-            envelope: &envelope,
-            created_at: recorded_at,
-            recorded,
-            unreceipted: pending,
-            route_progress: pending
-                .iter()
-                .filter_map(|intent| {
-                    crate::ingress::recorded::RouteProgress::from_intent(intent, None, vec![])
-                        .expect("progress")
-                })
-                .collect(),
-            host_owned_resources: vec![],
-            departed_occupants: vec![],
-            blocked_recipients: blocked,
-        })
+        crate::ingress::recovery::rebuild::rebuild(
+            crate::ingress::recovery::rebuild::RecoveryInput {
+                key,
+                envelope: &envelope,
+                created_at: recorded_at,
+                recorded,
+                unreceipted: pending,
+                route_progress: pending
+                    .iter()
+                    .filter_map(|intent| {
+                        crate::ingress::recorded::RouteProgress::from_intent(intent, None, vec![])
+                            .expect("progress")
+                    })
+                    .collect(),
+                host_owned_resources: vec![],
+                departed_occupants: vec![],
+                blocked_recipients: blocked,
+            },
+        )
         .expect("rebuild generated invitation")
     };
     let missing_prerequisite = rebuild(&recorded, &recorded, &[]);

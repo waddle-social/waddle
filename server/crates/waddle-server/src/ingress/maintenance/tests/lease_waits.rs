@@ -75,7 +75,7 @@ async fn sqlite_lease_wait_backlog_does_not_spend_attempt_budget_after_first_sca
         MaintenanceOutcome::Partial,
         "the continuation finishes the original scan"
     );
-    assert_eq!(crate::ingress::recovery_executor::attempt_count(later), 1);
+    assert_eq!(crate::ingress::recovery::executor::attempt_count(later), 1);
     assert_eq!(
         super::super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment)
             .await,
@@ -83,9 +83,9 @@ async fn sqlite_lease_wait_backlog_does_not_spend_attempt_budget_after_first_sca
         "65 known waits no longer force every scan to exhaust 64 attempts"
     );
     for key in waiting {
-        assert_eq!(crate::ingress::recovery_executor::attempt_count(key), 1);
+        assert_eq!(crate::ingress::recovery::executor::attempt_count(key), 1);
     }
-    assert_eq!(crate::ingress::recovery_executor::attempt_count(later), 2);
+    assert_eq!(crate::ingress::recovery::executor::attempt_count(later), 2);
     fixture.close().await;
 }
 
@@ -126,13 +126,13 @@ async fn sqlite_lease_wait_expiry_retries_even_without_receipt_changes() {
         super::super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment)
             .await;
     }
-    assert_eq!(crate::ingress::recovery_executor::attempt_count(key), 1);
+    assert_eq!(crate::ingress::recovery::executor::attempt_count(key), 1);
     tokio::time::pause();
     tokio::time::advance(Duration::from_secs(61)).await;
     tokio::time::resume();
     super::super::recover_candidates(&fixture.db, &fixture.uow, budget, &cursor, &environment)
         .await;
-    assert_eq!(crate::ingress::recovery_executor::attempt_count(key), 2);
+    assert_eq!(crate::ingress::recovery::executor::attempt_count(key), 2);
     fixture.close().await;
 }
 
