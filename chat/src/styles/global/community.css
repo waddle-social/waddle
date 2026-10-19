@@ -407,10 +407,14 @@
   flex-direction: column;
 }
 
+/* Same height as the chat pane header so the two bottom borders line up. */
 .people-rail__search {
+  display: flex;
+  height: var(--chat-header-height);
   flex-shrink: 0;
+  align-items: center;
   border-bottom: 1px solid var(--border);
-  padding: var(--space-sm);
+  padding-inline: var(--space-sm);
 }
 
 .people-rail__input {
