@@ -1858,7 +1858,7 @@ async fn upsert_group_dm_catalog(
         .map_err(|error| internal_err(format!("group-DM catalog upsert failed: {error}")))
 }
 
-async fn restore_channel_catalog_record(state: &AppState, record: &XmppChannelRecord) {
+pub(super) async fn restore_channel_catalog_record(state: &AppState, record: &XmppChannelRecord) {
     let db_actor = state.db_pool.global_actor().clone();
     let upsert = XmppChannelUpsert {
         id: record.id.clone(),
