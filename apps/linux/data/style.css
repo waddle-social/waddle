@@ -148,3 +148,7 @@ button.reaction:checked {
   box-shadow: none;
   border: none;
 }
+
+.composer-suggestions > contents {
+  padding: 4px;
+}

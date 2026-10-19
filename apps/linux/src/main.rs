@@ -7,6 +7,7 @@
 
 mod application;
 mod auth;
+mod composer;
 mod runtime;
 mod session;
 mod ui;

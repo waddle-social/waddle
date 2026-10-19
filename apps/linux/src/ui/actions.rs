@@ -1,4 +1,5 @@
-//! What the user does to messages: send, reply, react, edit, delete.
+//! What the user does to messages: send, reply, react, edit, delete, and
+//! the composer's slash commands.
 //!
 //! Each action updates the open conversation's timeline at once (the core
 //! dedupes the server's echo against it) and undoes or flags it when the
@@ -11,6 +12,7 @@ use waddle_client_session::{Delivery, IncomingMessage, LocalEcho, ReplyTo, Timel
 
 use super::conversation::Row;
 use super::WaddleWindow;
+use crate::composer::{self, Availability, CommandAction};
 use crate::session::{Kind, Quote};
 
 /// One tap away in the message menu.
@@ -50,12 +52,20 @@ pub enum Compose {
 
 impl WaddleWindow {
     pub(super) fn setup_composer(&self) {
-        let keys = gtk::EventControllerKey::new();
+        self.setup_suggestions();
+        // Capture: the entry's text widget would otherwise act on Enter and
+        // Tab before an open suggestion list could.
+        let keys = gtk::EventControllerKey::builder()
+            .propagation_phase(gtk::PropagationPhase::Capture)
+            .build();
         let window = self.downgrade();
         keys.connect_key_pressed(move |_, key, _, _| {
             let Some(window) = window.upgrade() else {
                 return glib::Propagation::Proceed;
             };
+            if window.suggestion_key(key) {
+                return glib::Propagation::Stop;
+            }
             if key == gdk::Key::Escape
                 && !matches!(*window.imp().compose.borrow(), Compose::Message)
             {
@@ -70,6 +80,7 @@ impl WaddleWindow {
     pub(super) fn cancel_compose(&self) {
         let imp = self.imp();
         let editing = matches!(*imp.compose.borrow(), Compose::Edit { .. });
+        self.hide_suggestions();
         imp.compose.replace(Compose::Message);
         imp.composer_context.set_visible(false);
         if editing {
@@ -98,12 +109,29 @@ impl WaddleWindow {
 
     pub(super) fn send_current(&self) {
         let imp = self.imp();
-        let body = imp.composer_entry.text().trim().to_string();
+        let mut body = imp.composer_entry.text().trim().to_string();
         let (Some(conversation), Some(session)) =
             (self.current_conversation(), imp.session.borrow().clone())
         else {
             return;
         };
+        // A correction replaces a body as written; only a new message runs
+        // a command.
+        let command = composer::command_action(&body)
+            .filter(|_| !matches!(*imp.compose.borrow(), Compose::Edit { .. }));
+        match command {
+            Some((_, CommandAction::Send(text))) => body = text,
+            Some((command, CommandAction::Incomplete)) => {
+                self.toast(&format!("Add some text after /{}.", command.name()));
+                return;
+            }
+            Some((_, CommandAction::SetAvailability(availability))) => {
+                imp.composer_entry.set_text("");
+                self.set_availability(availability);
+                return;
+            }
+            None => {}
+        }
         if !self.can_send(&conversation) {
             self.ensure_room_joined(&conversation);
             self.toast("Wait until this conversation is connected before sending.");
@@ -114,6 +142,7 @@ impl WaddleWindow {
         imp.composer_entry.set_text("");
         let now = chrono::Utc::now().timestamp_millis();
         let nick = session.me.nick.clone();
+        let mentionable = self.mentionable(&conversation);
 
         if let Compose::Edit {
             correction_id,
@@ -138,7 +167,13 @@ impl WaddleWindow {
             let generation = imp.generation.get();
             glib::spawn_future_local(async move {
                 if !session
-                    .correct(&conversation.jid, conversation.kind, correction_id, body)
+                    .correct(
+                        &conversation.jid,
+                        conversation.kind,
+                        correction_id,
+                        body,
+                        &mentionable,
+                    )
                     .await
                     && window.imp().generation.get() == generation
                 {
@@ -185,6 +220,7 @@ impl WaddleWindow {
                     body,
                     origin.clone(),
                     quote,
+                    &mentionable,
                 )
                 .await;
             if window.imp().generation.get() != generation {
@@ -198,6 +234,16 @@ impl WaddleWindow {
                 window.toast("The message could not be sent.");
             }
         });
+    }
+
+    /// `/away`, `/active`, `/dnd`: announce it now and on every reconnect.
+    fn set_availability(&self, availability: Availability) {
+        let imp = self.imp();
+        imp.availability.set(availability);
+        if let Some(session) = imp.session.borrow().as_ref() {
+            session.announce(availability);
+        }
+        self.toast(&format!("Your status is now {}.", availability.title()));
     }
 
     /// XEP-0444 sends the user's complete set, so toggle within it.

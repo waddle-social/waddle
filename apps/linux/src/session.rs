@@ -22,12 +22,13 @@ use jid::{BareJid, Jid};
 use waddle_client_session::{strip_fallback, IncomingMessage, ReactionUpdate, ReplyTo};
 use waddle_xmpp_client_ffi::{
     WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
-    WaddleConfig, WaddleEventListener, WaddleFallbackRange, WaddleInboxEntry, WaddleMessage,
-    WaddlePresence, WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions, WaddleStanzaId,
-    WaddleTopology,
+    WaddleConfig, WaddleEventListener, WaddleFallbackRange, WaddleInboxEntry,
+    WaddleMentionDirectory, WaddleMentionTarget, WaddleMessage, WaddlePresence, WaddleReplyTarget,
+    WaddleSendMessageOutcome, WaddleSendOptions, WaddleStanzaId, WaddleTopology,
 };
 
 use crate::auth::store::StoredAccount;
+use crate::composer::{Availability, Mentionable};
 use crate::runtime;
 
 const PAGE_SIZE: u32 = 50;
@@ -213,11 +214,13 @@ impl Session {
         });
     }
 
-    /// RFC 6121 initial presence: without it the server treats this
-    /// resource as unavailable and does not deliver 1:1 messages to it.
-    pub fn announce(&self) {
+    /// RFC 6121 presence: initial presence after connecting (without it
+    /// the server treats this resource as unavailable and does not deliver
+    /// 1:1 messages to it), and again whenever the user changes it.
+    pub fn announce(&self, availability: Availability) {
         let client = Arc::clone(&self.client);
-        runtime::spawn(async move { client.send_presence(None, None, None).await });
+        let show = availability.show().map(str::to_string);
+        runtime::spawn(async move { client.send_presence(None, show, None).await });
     }
 
     pub fn join(&self, room: &Conversation) {
@@ -253,8 +256,9 @@ impl Session {
         (messages, page.first_id, page.is_complete)
     }
 
-    /// Send under `origin_id`, optionally as a reply. True when the stanza
-    /// was written.
+    /// Send under `origin_id`, optionally as a reply, mentioning whom the
+    /// body's `@nick`s name among `mentionable`. True when the stanza was
+    /// written.
     pub async fn send(
         &self,
         jid: &str,
@@ -262,9 +266,11 @@ impl Session {
         body: String,
         origin_id: String,
         quote: Option<Quote>,
+        mentionable: &[Mentionable],
     ) -> bool {
         let mut options = WaddleSendOptions {
             stanza_id: Some(origin_id),
+            mention_directory: mention_directory(kind, mentionable),
             ..WaddleSendOptions::default()
         };
         let mut body = body;
@@ -307,19 +313,25 @@ impl Session {
         .unwrap_or(false)
     }
 
-    /// XEP-0308: replace the body of the message with `correction_id`.
+    /// XEP-0308: replace the body of the message with `correction_id`. The
+    /// correction carries the new body's mentions, as a fresh send would.
     pub async fn correct(
         &self,
         jid: &str,
         kind: Kind,
         correction_id: String,
         body: String,
+        mentionable: &[Mentionable],
     ) -> bool {
+        let options = WaddleSendOptions {
+            mention_directory: mention_directory(kind, mentionable),
+            ..WaddleSendOptions::default()
+        };
         let client = Arc::clone(&self.client);
         let peer = jid.to_string();
         let outcome = runtime::spawn(async move {
             client
-                .send_correction(peer, correction_id, body, kind.is_muc(), None)
+                .send_correction(peer, correction_id, body, kind.is_muc(), Some(options))
                 .await
         })
         .await;
@@ -338,6 +350,22 @@ impl Session {
         .await
         .unwrap_or(false)
     }
+}
+
+/// Whom a room send's typed `@label`s may resolve to (XEP-0372): the
+/// occupants whose real JID is known, and the room broadcasts. A DM
+/// mentions nobody.
+fn mention_directory(kind: Kind, mentionable: &[Mentionable]) -> Option<WaddleMentionDirectory> {
+    (kind == Kind::Room).then(|| WaddleMentionDirectory {
+        targets: mentionable
+            .iter()
+            .map(|person| WaddleMentionTarget {
+                label: person.nick.clone(),
+                jid: person.jid.clone(),
+            })
+            .collect(),
+        broadcasts: true,
+    })
 }
 
 /// XEP-0461 `to`: the quoted message's author. In a room, its occupant
@@ -968,6 +996,19 @@ mod tests {
         let anonymous = archived_from(archived(None), &room, Kind::Room, &me()).expect("a message");
         assert!(anonymous.own, "falls back to the nick");
         assert_eq!(anonymous.author_id, None);
+    }
+
+    #[test]
+    fn only_room_sends_resolve_mentions() {
+        let ann = [Mentionable {
+            nick: "ann".into(),
+            jid: "ann@waddle.social".into(),
+        }];
+        let room = mention_directory(Kind::Room, &ann).expect("a room directory");
+        assert!(room.broadcasts);
+        assert_eq!(room.targets[0].label, "ann");
+        assert_eq!(room.targets[0].jid, "ann@waddle.social");
+        assert_eq!(mention_directory(Kind::Direct, &ann), None);
     }
 
     #[test]
