@@ -29,6 +29,10 @@ impl WaddleWindow {
             .hscrollbar_policy(gtk::PolicyType::Never)
             .propagate_natural_height(true)
             .max_content_height(320)
+            .margin_top(4)
+            .margin_bottom(4)
+            .margin_start(4)
+            .margin_end(4)
             .child(&list)
             .build();
         let popover = gtk::Popover::builder()
@@ -38,7 +42,6 @@ impl WaddleWindow {
             .position(gtk::PositionType::Top)
             .child(&scroller)
             .build();
-        popover.add_css_class("composer-suggestions");
         popover.set_parent(&*imp.composer);
         imp.suggestion_popover.replace(Some((popover, list)));
 
