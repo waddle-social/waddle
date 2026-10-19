@@ -87,7 +87,7 @@ pub trait DndReader: Send + Sync {
 ///
 /// Used at the T0 emit call sites
 /// ([`crate::server::routes::interpret::offline_delivery`],
-/// [`crate::server::routes::interpret::groupchat_inbox`]) where the
+/// [`crate::server::routes::interpret::groupchat::inbox`]) where the
 /// evaluator's typed signature requires a reader but DND consultation
 /// is skipped by the [`PushEvalStage::T1Drain`] guard. Production
 /// T1 drain (`session_janitors`) uses [`crate::dnd::reader::PepDndReader`]

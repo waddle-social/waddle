@@ -322,7 +322,7 @@ async fn retraction_plans_tombstone_and_scrub_without_mutating_archive() {
         .push(waddle_xmpp::xep::xep0424::build_retract_element(
             "wire-original",
         ));
-    let planned_id = super::super::direct_retraction::apply_retraction_tombstone(
+    let planned_id = super::super::direct::retraction::apply_retraction_tombstone(
         &deps,
         &archive,
         "wire-original",

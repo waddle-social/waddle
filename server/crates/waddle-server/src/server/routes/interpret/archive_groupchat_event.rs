@@ -57,7 +57,7 @@ pub(super) async fn archive_groupchat_event(
     // context `dispatch_to_room`'s own pre-fan-out check reads, so the
     // fenced archive write below agrees with it by construction.
     let fence = resolve_room_claim_fence(deps, &room).await;
-    let archive_id = match super::groupchat_archive::archive_groupchat_message_with_effects(
+    let archive_id = match super::groupchat::archive::archive_groupchat_message_with_effects(
         Some(deps),
         mam_storage,
         &room,

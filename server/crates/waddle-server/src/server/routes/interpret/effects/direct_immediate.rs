@@ -130,7 +130,7 @@ pub(super) async fn execute_external(
                 }) if recipient == &owner
                     && fanout.iter().all(|resource| resource.to_bare() == owner) =>
                 {
-                    super::super::groupchat_archive::push_inbox_update_to(
+                    super::super::groupchat::archive::push_inbox_update_to(
                         deps.connection_registry,
                         fanout,
                         entry,
@@ -142,7 +142,7 @@ pub(super) async fn execute_external(
                     ..
                 }) => return EffectOutcome::Unavailable,
                 Some(_) | None => {
-                    super::super::groupchat_archive::push_inbox_update(
+                    super::super::groupchat::archive::push_inbox_update(
                         deps.connection_registry,
                         deps.user_registry,
                         &owner,
@@ -154,7 +154,7 @@ pub(super) async fn execute_external(
             EffectOutcome::InboxPush(resources)
         }
         ExternalDirectEffect::ScrubReplayForTombstone { target } => {
-            if super::super::groupchat_archive::scrub_unacked_for_tombstone(
+            if super::super::groupchat::archive::scrub_unacked_for_tombstone(
                 deps.sm_session_registry,
                 deps.pending_delivery_storage,
                 &target,
@@ -171,7 +171,7 @@ pub(super) async fn execute_external(
             let Some(socket) = deps.web_socket_state else {
                 return EffectOutcome::Unavailable;
             };
-            super::super::direct_archive::prune_dm_call_thread_state(socket, chrono::Utc::now());
+            super::super::direct::archive::prune_dm_call_thread_state(socket, chrono::Utc::now());
             let protocol = &socket.deps.protocol;
             match state.pending {
                 Some(pending) => {

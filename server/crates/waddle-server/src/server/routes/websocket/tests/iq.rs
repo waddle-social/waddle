@@ -1239,7 +1239,7 @@ async fn handle_iq_disco_items_lists_room_bots() {
         fixture.clone(),
         waddle_extensions::PluginId::new("uninstalled").expect("plugin"),
     ] {
-        crate::server::extension_bot_rooms::record(db, &room, &plugin)
+        crate::server::extension::bot::rooms::record(db, &room, &plugin)
             .await
             .expect("record bot room");
     }
@@ -1248,7 +1248,7 @@ async fn handle_iq_disco_items_lists_room_bots() {
         state.deps.service_domains.extensions
     );
     let name =
-        crate::server::extension_bot::bot_name(&state.deps.protocol.extension_manager, &fixture);
+        crate::server::extension::bot::bot_name(&state.deps.protocol.extension_manager, &fixture);
     let list = |requester: &FullJid| {
         let (state, phase) = (Arc::clone(&state), ready_phase(requester));
         async move {
@@ -1381,7 +1381,7 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
     let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
     let extensions = state.deps.service_domains.extensions.clone();
     let bot = format!("{FIXTURE_BOT_PLUGIN}@{extensions}");
-    let installed = crate::server::extension_bot::installed_bot(
+    let installed = crate::server::extension::bot::installed_bot(
         &state.deps.service_domains,
         &state.deps.protocol.extension_manager,
         &bot.parse().expect("bot jid"),
@@ -1481,7 +1481,7 @@ fn vcard_get_frame(to: &str) -> String {
 /// fetch completes, the answers are those of a bot without an avatar.
 #[tokio::test]
 async fn handle_iq_serves_extension_bot_avatars_in_band() {
-    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use crate::server::extension::bot::avatar::tests::{encode_image, serve_artifact};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
 
@@ -1580,7 +1580,7 @@ async fn handle_iq_serves_extension_bot_avatars_in_band() {
 /// answers: XEP-0084 metadata then data, else the vcard-temp PHOTO.
 #[tokio::test]
 async fn shared_client_resolves_extension_bot_avatars() {
-    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use crate::server::extension::bot::avatar::tests::{encode_image, serve_artifact};
     use waddle_xmpp_client::avatar::{
         parse_vcard_photo_response, request_avatar_with_iq, AvatarId, AvatarRequestFailure,
     };
@@ -1628,7 +1628,7 @@ async fn shared_client_resolves_extension_bot_avatars() {
 /// served: the bot answers as one without an avatar.
 #[tokio::test]
 async fn handle_iq_serves_no_extension_bot_avatar_on_digest_mismatch() {
-    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use crate::server::extension::bot::avatar::tests::{encode_image, serve_artifact};
     use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
 
     let artifacts = wiremock::MockServer::start().await;

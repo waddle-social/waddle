@@ -88,7 +88,7 @@ pub(crate) enum UnknownRoomPolicySource {
 /// - **T0 (candidate emission gate, compliance)** — DM
 ///   ([`crate::server::routes::interpret::offline_delivery`]) and
 ///   groupchat
-///   ([`crate::server::routes::interpret::groupchat_inbox`])
+///   ([`crate::server::routes::interpret::groupchat::inbox`])
 ///   emission paths invoke this on a constructed-but-not-inserted
 ///   [`NotificationCandidate`] before persisting it. A `Suppressed`
 ///   outcome short-circuits emission entirely — no row is written.

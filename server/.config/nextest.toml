@@ -59,7 +59,7 @@ package(waddle-server) & (
     | test(websocket::tests::keyed_detach_drain::)
     | test(paused_local_mirror_releases_the_only_main_pool_connection)
     | test(ingress::uow::)
-    | test(extension_host_adapter::tests::room_results::)
+    | test(extension::host_adapter::tests::room_results::)
     | test(muc::durable::)
     | test(notification::outbox::)
     | test(pending_delivery::)
@@ -70,7 +70,7 @@ package(waddle-server) & (
     | test(sm_colocation_tests::)
     | test(stream_management::)
     | test(muc_direct::plan_failure_tests::) | test(group_dm_invite::plan_failure_tests::) | test(dm_pin::authority_tests::)
-    | test(routing_plan_failure_tests::) | test(direct_archive::correction_plan_tests::) | test(message_plan::envelope_tests::)
+    | test(routing_plan_failure_tests::) | test(direct::archive::correction_plan_tests::) | test(message_plan::envelope_tests::)
     | test(ingress_frame_limits::) | test(ingress_replay_receipts::)
 )
 '''

@@ -634,7 +634,7 @@ async fn groupchat_subject_retry_is_stored_and_fans_out_normally() {
     let mut recipient_reflection = retry.clone();
     recipient_reflection.to = Some(jid::Jid::from(recipient.clone()));
 
-    let events = super::super::room_dispatch::order_subject_persistence_after_archive(vec![
+    let events = super::super::room::dispatch::order_subject_persistence_after_archive(vec![
         persist_subject_event(&room, &sender, subject, claim_fence),
         OutboundEvent::ArchiveGroupchat {
             room: room.clone(),

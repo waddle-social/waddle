@@ -165,7 +165,7 @@ pub(crate) fn message_dependencies(
     room: &BareJid,
     message: &Message,
 ) -> Vec<super::PlanEffectDependency> {
-    super::super::groupchat_archive::extract_room_stanza_id(message, room)
+    super::super::groupchat::archive::extract_room_stanza_id(message, room)
         .map(|id| after_archive(room, &id))
         .into_iter()
         .collect()

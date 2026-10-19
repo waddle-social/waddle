@@ -9400,7 +9400,7 @@ mod remote_owner_admin_list {
         RelaySendEffect, RelaySendFailure,
     };
     use crate::clustering::ClusteringHandles;
-    use crate::server::routes::websocket::handlers::iq::muc_admin_relay::{
+    use crate::server::routes::websocket::handlers::iq::muc::admin::relay::{
         TestMucAdminOwnerRelay, TEST_MUC_ADMIN_OWNER_RELAY,
     };
     use crate::server::routes::websocket::{

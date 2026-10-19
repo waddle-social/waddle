@@ -4006,7 +4006,7 @@ pub(crate) async fn drain_destroy_completions(
         // proof from an inert row: it cannot distinguish a committed destroy
         // from an in-flight or refused intent.
         if !clustered
-            && !super::handlers::iq::muc_owner_moderation::arm_destroy_completion_recovery(
+            && !super::handlers::iq::muc::owner_moderation::arm_destroy_completion_recovery(
                 state, attempt,
             )
             .await
@@ -4020,12 +4020,12 @@ pub(crate) async fn drain_destroy_completions(
             continue;
         }
         let Some(lease) =
-            super::handlers::iq::muc_owner_moderation::claim_persisted_destroy_completion(
+            super::handlers::iq::muc::owner_moderation::claim_persisted_destroy_completion(
                 state, attempt,
             )
             .await
         else {
-            match super::handlers::iq::muc_owner_moderation::persisted_destroy_completion_exists(
+            match super::handlers::iq::muc::owner_moderation::persisted_destroy_completion_exists(
                 state, attempt,
             )
             .await
@@ -4051,7 +4051,7 @@ pub(crate) async fn drain_destroy_completions(
             }
             continue;
         };
-        match super::handlers::iq::muc_owner_moderation::complete_leased_destroy_completion(
+        match super::handlers::iq::muc::owner_moderation::complete_leased_destroy_completion(
             state,
             &lease,
             inline_session,
@@ -4059,7 +4059,7 @@ pub(crate) async fn drain_destroy_completions(
         .await
         {
             Ok(completion_frames) => {
-                let persisted_acknowledged = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, true).await;
+                let persisted_acknowledged = super::handlers::iq::muc::owner_moderation::finalize_persisted_destroy_completion(state, &lease, true).await;
                 if persisted_acknowledged {
                     if let Err(error) =
                         RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
@@ -4080,7 +4080,7 @@ pub(crate) async fn drain_destroy_completions(
                 batch.append_batch(completion_frames);
             }
             Err(()) => {
-                let _ = super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(state, &lease, false).await;
+                let _ = super::handlers::iq::muc::owner_moderation::finalize_persisted_destroy_completion(state, &lease, false).await;
                 if let Err(error) = RoomRegistry::wrap(state.deps.protocol.room_registry.clone())
                     .requeue_destroy_completion(attempt)
                     .await
@@ -4090,7 +4090,7 @@ pub(crate) async fn drain_destroy_completions(
             }
         }
     }
-    super::handlers::iq::muc_owner_moderation::drain_persisted_destroy_completions(state).await;
+    super::handlers::iq::muc::owner_moderation::drain_persisted_destroy_completions(state).await;
     batch
 }
 
@@ -4124,7 +4124,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
         #[cfg(not(feature = "clustering"))]
         let clustered = false;
         if !clustered
-            && !super::handlers::iq::muc_owner_moderation::arm_destroy_completion_recovery(
+            && !super::handlers::iq::muc::owner_moderation::arm_destroy_completion_recovery(
                 state, attempt,
             )
             .await
@@ -4139,13 +4139,13 @@ pub(crate) async fn drain_destroy_completion_attempt(
         }
     }
     let Some(lease) =
-        super::handlers::iq::muc_owner_moderation::claim_persisted_destroy_completion(
+        super::handlers::iq::muc::owner_moderation::claim_persisted_destroy_completion(
             state, attempt,
         )
         .await
     else {
         if local_completion.is_some() {
-            match super::handlers::iq::muc_owner_moderation::persisted_destroy_completion_exists(
+            match super::handlers::iq::muc::owner_moderation::persisted_destroy_completion_exists(
                 state, attempt,
             )
             .await
@@ -4172,7 +4172,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
         }
         return Err(());
     };
-    match super::handlers::iq::muc_owner_moderation::complete_leased_destroy_completion(
+    match super::handlers::iq::muc::owner_moderation::complete_leased_destroy_completion(
         state,
         &lease,
         inline_session,
@@ -4181,7 +4181,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
     {
         Ok(frames) => {
             let persisted_acknowledged =
-                super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(
+                super::handlers::iq::muc::owner_moderation::finalize_persisted_destroy_completion(
                     state, &lease, true,
                 )
                 .await;
@@ -4206,7 +4206,7 @@ pub(crate) async fn drain_destroy_completion_attempt(
         }
         Err(()) => {
             let _ =
-                super::handlers::iq::muc_owner_moderation::finalize_persisted_destroy_completion(
+                super::handlers::iq::muc::owner_moderation::finalize_persisted_destroy_completion(
                     state, &lease, false,
                 )
                 .await;
@@ -4341,7 +4341,7 @@ mod destroy_completion_tests {
             departures: snapshot.departures,
             request: DestroyRequest::default(),
         };
-        super::super::handlers::iq::muc_owner_moderation::persist_destroy_completion(
+        super::super::handlers::iq::muc::owner_moderation::persist_destroy_completion(
             state,
             &completion,
         )

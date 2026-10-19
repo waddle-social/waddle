@@ -4740,7 +4740,7 @@ async fn run_delete(state: &AppState, args: &ChannelsDeleteArgs) -> Result<(), A
 /// listing is gated on entering a room that no longer exists.
 pub(crate) async fn forget_extension_bot_room(state: &AppState, room: &BareJid) {
     if let Err(error) =
-        crate::server::extension_bot_rooms::delete_room(state.db_pool.global(), room).await
+        crate::server::extension::bot::rooms::delete_room(state.db_pool.global(), room).await
     {
         tracing::warn!(%error, %room, "Failed to delete extension bot rows of a destroyed room");
     }

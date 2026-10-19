@@ -237,7 +237,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         community: "community.example.com".to_string(),
     };
     // Mirror `http.rs`: the bot hat is server-assigned for every bot JID.
-    crate::server::extension_bot::install_bot_hats(
+    crate::server::extension::bot::install_bot_hats(
         &app_state.server_hats,
         service_domains.clone(),
         Arc::clone(&extension_manager),
@@ -297,7 +297,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     },
                     extension_manager,
                     bot_avatars: Arc::new(
-                        crate::server::extension_bot_avatar::BotAvatars::loopback(),
+                        crate::server::extension::bot::avatar::BotAvatars::loopback(),
                     ),
                     dispatcher: Arc::new(dispatcher),
                     muji_pre_dispatch_terminate_rate_limit: Arc::new(

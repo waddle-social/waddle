@@ -249,7 +249,7 @@ pub(super) async fn handle_muc_disco_info<'a>(
     // non-occupants (MUST), <feature-not-implemented/> for occupants
     // (pass-through unsupported) — instead of leaking room info by
     // silently stripping the resource.
-    if let Some(error) = super::super::muc_occupant_disco::muc_occupant_disco_error(
+    if let Some(error) = super::super::muc::occupant_disco::muc_occupant_disco_error(
         state,
         req.target_to,
         req.muc_domain,

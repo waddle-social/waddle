@@ -561,7 +561,7 @@ fn extension_bot_pep_item(
     {
         return None;
     }
-    let bot = crate::server::extension_bot::installed_bot(
+    let bot = crate::server::extension::bot::installed_bot(
         &state.deps.service_domains,
         &state.deps.protocol.extension_manager,
         target,

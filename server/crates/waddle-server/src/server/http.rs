@@ -1,7 +1,7 @@
 use crate::config::ServerConfig;
-use crate::server::extension_commands::{build_extension_manager, register_extension_commands};
-use crate::server::extension_host_adapter;
-use crate::server::extension_host_tools::DeferredExtensionHostTools;
+use crate::server::extension::commands::{build_extension_manager, register_extension_commands};
+use crate::server::extension::host_adapter;
+use crate::server::extension::host_tools::DeferredExtensionHostTools;
 use crate::server::health::{
     configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
 };
@@ -561,9 +561,9 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // setting the env var. Returns per-map `.len()` counts so a
     // Prometheus scrape can correlate the offending structure with
     // process RSS.
-    if let Some(auth) = crate::server::state_inventory_route::debug_state_auth_from_env() {
+    if let Some(auth) = crate::server::state_inventory::route::debug_state_auth_from_env() {
         info!("Mounting /debug/state-inventory (WADDLE_DEBUG_STATE_TOKEN set)");
-        app_router = app_router.merge(crate::server::state_inventory_route::router(
+        app_router = app_router.merge(crate::server::state_inventory::route::router(
             websocket_state.clone(),
             auth,
         ));
@@ -713,12 +713,12 @@ async fn create_websocket_state(
         Arc::clone(&deferred_extension_host_tools),
     )
     .await?;
-    crate::server::extension_bot::install_bot_hats(
+    crate::server::extension::bot::install_bot_hats(
         &state.server_hats,
         service_domains.clone(),
         Arc::clone(&extension_manager),
     );
-    let bot_avatars = Arc::new(crate::server::extension_bot_avatar::BotAvatars::default());
+    let bot_avatars = Arc::new(crate::server::extension::bot::avatar::BotAvatars::default());
     bot_avatars.prefetch(&extension_manager);
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
@@ -945,7 +945,7 @@ async fn create_websocket_state(
             state.db_pool.global().clone(),
             state.lineage_config.clone(),
         )?;
-        crate::server::extension_commands::startup::sync_extension_grants(
+        crate::server::extension::commands::startup::sync_extension_grants(
             &extension_manager,
             &extension_grant_uow,
         )
@@ -1304,7 +1304,7 @@ async fn create_websocket_state(
             warn!("ordered relay delivery bridge not wired: clustering node lease handle or TTL missing");
         }
     }
-    deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
+    deferred_extension_host_tools.set(Arc::new(host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));
     // Start the SFU ghost-reconciliation backstop: periodically ask
@@ -1410,7 +1410,7 @@ fn promote_to_serving_and_spawn_janitors(
     crate::server::session_janitors::spawn_local_muc_departure_janitor(websocket_state);
     #[cfg(feature = "clustering")]
     crate::server::session_janitors::spawn_remote_muc_membership_reconciler(websocket_state);
-    crate::server::state_inventory_metrics::spawn_state_inventory_publisher(websocket_state);
+    crate::server::state_inventory::metrics::spawn_state_inventory_publisher(websocket_state);
 }
 
 /// One startup attestation pass with a short bounded retry for transient

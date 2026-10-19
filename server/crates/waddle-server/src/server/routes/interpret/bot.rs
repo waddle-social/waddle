@@ -1,5 +1,5 @@
 use super::effects::{EffectSink, IngressPlan, PlanFailure, PlanSink, RoomExecutionPath};
-use super::groupchat_archive::room_scoped_reply_to_attr;
+use super::groupchat::archive::room_scoped_reply_to_attr;
 use super::*;
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, DigestInputError, EntityGeneration, IngressEffectIntent,
@@ -225,7 +225,7 @@ pub(super) async fn plan_bot_groupchat_message(
         .ok_or(ExtensionBotDispatchError::MissingCanonicalStanzaId)?;
     sink.observe_message(&working);
     let mut events = dispatch_outcome.events;
-    super::room_dispatch::bind_room_claim_fence(&mut events, bot_ctx.claim_fence);
+    super::room::dispatch::bind_room_claim_fence(&mut events, bot_ctx.claim_fence);
     let mut reflection = working.clone();
     reflection.to = Some(bot_ctx.sender_full.clone().into());
     events.push(OutboundEvent::RouteToConnection {
@@ -233,7 +233,7 @@ pub(super) async fn plan_bot_groupchat_message(
         stanza: Box::new(Stanza::Message(reflection)),
         call_setup: None,
     });
-    let events = super::room_dispatch::order_subject_persistence_after_archive(events);
+    let events = super::room::dispatch::order_subject_persistence_after_archive(events);
     let nested = Box::pin(interpret_with_depth(events, deps, 0)).await;
     if nested.route_to_connection_events > 0 {
         let room_generation = bot_ctx
@@ -533,7 +533,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
     if let Some((join, bot_nick)) = join {
         // Before anyone sees the join: a client that refetches the room's bot
         // listing on the hatted join must find this bot.
-        if let Err(error) = crate::server::extension_bot_rooms::record(
+        if let Err(error) = crate::server::extension::bot::rooms::record(
             state.deps.app_state.db_pool.global(),
             &room_jid,
             &plugin,

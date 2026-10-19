@@ -136,7 +136,7 @@ fn handle_extension_bot_disco_info<'a>(
     if !domains.is_extensions_address(&target) {
         return None;
     }
-    let bot = crate::server::extension_bot::installed_bot(
+    let bot = crate::server::extension::bot::installed_bot(
         domains,
         &state.deps.protocol.extension_manager,
         &target,

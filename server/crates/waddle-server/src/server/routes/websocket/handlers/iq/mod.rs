@@ -81,10 +81,6 @@ mod archive_inbox_upload;
 pub(crate) mod blocking;
 mod caps_result;
 mod commands;
-mod community_items;
-mod community_publish;
-mod community_retract;
-mod community_rsvp;
 mod conn_state;
 mod disco_info;
 mod disco_items;
@@ -96,21 +92,11 @@ mod jingle_muji_gate;
 #[cfg(feature = "clustering")]
 pub(crate) mod jingle_muji_relay;
 mod last_activity;
-mod link_preview_lookup;
-pub(crate) mod link_preview_player_embed;
-mod link_preview_resolver;
 mod mentions_permissions;
-mod muc_admin;
-#[cfg(feature = "clustering")]
-pub(crate) mod muc_admin_relay;
 // XEP-0045 §7.8.2 (#1248): the members-only mediated-invite auto-add in
 // `handlers::message::muc_invite` persists the granted membership with
 // the exact same tuple write the admin affiliation path uses.
-pub(in crate::server::routes::websocket::handlers) use muc_admin::persist_managed_channel_affiliation;
-mod muc_occupant_disco;
-mod muc_owner_config;
-pub(crate) mod muc_owner_moderation;
-mod muc_self_ping;
+pub(in crate::server::routes::websocket::handlers) use muc::admin::persist_managed_channel_affiliation;
 mod pep_addressing;
 mod permissions;
 mod pin_query;
@@ -121,11 +107,6 @@ pub(crate) mod roster;
 mod sans_io;
 mod search;
 mod session_jid;
-mod spaces_bookmark_cleanup;
-mod spaces_discovery;
-mod spaces_items;
-mod spaces_publish;
-mod spaces_retract;
 mod story_attachments;
 #[cfg(test)]
 mod test_helpers;
@@ -135,9 +116,9 @@ use archive_inbox_upload::handle_archive_inbox_upload_iq;
 use blocking::handle_blocking_iq;
 use caps_result::handle_caps_disco_info_result;
 use commands::{handle_command_iq, CommandTargets};
-use community_items::handle_community_items;
-use community_publish::handle_community_publish;
-use community_retract::handle_community_retract;
+use community::items::handle_community_items;
+use community::publish::handle_community_publish;
+use community::retract::handle_community_retract;
 pub use conn_state::IqConnState;
 use disco_info::handle_disco_info_iq;
 use disco_items::handle_disco_items_iq;
@@ -149,11 +130,11 @@ use extension_forms::{
 use extension_route_items::{handle_extension_route_items, PubSubItemsRead};
 use full_jid_forward::route_full_jid_iq;
 use last_activity::handle_last_activity_iq;
-use link_preview_lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
+use link_preview::lookup::{handle_link_preview_lookup_iq, is_link_preview_lookup_iq};
 use mentions_permissions::{handle_mentions_permissions_iq, is_mentions_permissions_iq};
-use muc_owner_config::apply_muc_owner_config;
-use muc_owner_moderation::handle_muc_owner_and_moderation_iq;
-use muc_self_ping::handle_muc_self_ping_iq;
+use muc::owner_config::apply_muc_owner_config;
+use muc::owner_moderation::handle_muc_owner_and_moderation_iq;
+use muc::self_ping::handle_muc_self_ping_iq;
 use pep_addressing::is_pep_self_or_to;
 pub(crate) use permissions::managed_channel_permission_allowed;
 use permissions::{
@@ -163,12 +144,12 @@ use permissions::{
 };
 use pin_query::{handle_pin_query_iq, is_pin_query_iq};
 use pubsub_dispatch::handle_pubsub_iq;
-use spaces_discovery::{
+use spaces::discovery::{
     room_space_link, space_details_from_node, spaces_service_bare_jid, RoomSpaceLink,
 };
-use spaces_items::handle_spaces_items;
-use spaces_publish::handle_spaces_publish;
-use spaces_retract::handle_spaces_retract;
+use spaces::items::handle_spaces_items;
+use spaces::publish::handle_spaces_publish;
+use spaces::retract::handle_spaces_retract;
 #[cfg(test)]
 pub use test_helpers::handle_iq;
 // Re-exported via `pub(super)` so submodules that wildcard-import the
@@ -210,7 +191,7 @@ fn push_service_stanza_error(error: XmppError) -> xmpp_parsers::stanza_error::St
         _ => internal_server_error_iq_error("Internal server error."),
     }
 }
-use muc_admin::handle_muc_admin_iq;
+use muc::admin::handle_muc_admin_iq;
 use push::handle_push_iq;
 use roster::handle_roster_iq;
 use sans_io::handle_sans_io_iq;
@@ -547,5 +528,9 @@ pub async fn handle_iq_with_conn_state(
     .into()
 }
 
+mod community;
+pub(crate) mod link_preview;
+pub(crate) mod muc;
+mod spaces;
 #[cfg(test)]
 mod tests;

@@ -3,12 +3,6 @@ pub(crate) mod caps_resolution;
 mod config;
 pub(crate) mod dual_registration;
 pub(crate) mod durable_membership;
-pub(crate) mod extension_bot;
-pub(crate) mod extension_bot_avatar;
-pub(crate) mod extension_bot_rooms;
-mod extension_commands;
-pub mod extension_host_adapter;
-mod extension_host_tools;
 mod fixed_account;
 mod health;
 mod http;
@@ -18,29 +12,9 @@ mod room_registry_gauge;
 pub(crate) mod session_janitors;
 mod state;
 pub(crate) mod state_inventory;
-pub(crate) mod state_inventory_metrics;
-pub(crate) mod state_inventory_route;
 mod topology;
 mod trace;
-#[cfg(test)]
-mod xmpp_account_state;
-#[cfg(test)]
-mod xmpp_app_state;
-#[cfg(test)]
-mod xmpp_auth_state;
 mod xmpp_channels;
-#[cfg(test)]
-mod xmpp_permission_state;
-#[cfg(test)]
-mod xmpp_profile_state;
-#[cfg(test)]
-mod xmpp_roster_state;
-#[cfg(test)]
-mod xmpp_space_state;
-#[cfg(test)]
-mod xmpp_upload_state;
-#[cfg(test)]
-mod xmpp_user_storage_state;
 
 pub(crate) mod bootstrap_membership;
 pub(crate) mod managed_channel_policy;
@@ -595,5 +569,6 @@ async fn bootstrap_mam_lineage(
     anyhow::bail!("MAM storage did not expose a lineage backend")
 }
 
+pub mod extension;
 #[cfg(test)]
 mod tests;

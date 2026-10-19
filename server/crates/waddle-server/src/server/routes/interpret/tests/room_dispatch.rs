@@ -1,6 +1,6 @@
 #[cfg(feature = "clustering")]
-use super::super::room_dispatch::capture_delivered_remote_room_route;
-use super::super::room_dispatch::push_sender_error_reply;
+use super::super::room::dispatch::capture_delivered_remote_room_route;
+use super::super::room::dispatch::push_sender_error_reply;
 use super::*;
 use crate::ingress::IngressEffectCapture;
 

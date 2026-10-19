@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp_core::mam::ThreadId;
 
-use super::groupchat_archive::push_inbox_update;
+use super::groupchat::archive::push_inbox_update;
 use super::Deps;
 
 /// Drive [`OutboundEvent::MarkInboxReadFromDisplayed`] effects against

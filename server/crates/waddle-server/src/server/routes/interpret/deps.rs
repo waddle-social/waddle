@@ -177,7 +177,7 @@ impl HostOwnedResources {
     }
 
     pub(super) fn owns_configured_bot(target: &FullJid, state: &WebSocketState) -> bool {
-        target.resource().as_str() == crate::server::extension_bot::RESOURCE
+        target.resource().as_str() == crate::server::extension::bot::RESOURCE
             && state
                 .deps
                 .service_domains

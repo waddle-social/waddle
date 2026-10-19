@@ -7,8 +7,8 @@ impl OrderedRelayDeliveryBridge {
     pub(crate) fn extension_room_handle(&self, owner: &NodeIdentity) -> RelayHandle {
         RelayHandle::new(NodeId::new(owner.node_id.clone()), self.stop_token.clone())
             .with_ask_timeouts(
-                crate::server::extension_host_adapter::EXTENSION_ROOM_MAILBOX_TIMEOUT,
-                crate::server::extension_host_adapter::EXTENSION_ROOM_REPLY_TIMEOUT,
+                crate::server::extension::host_adapter::EXTENSION_ROOM_MAILBOX_TIMEOUT,
+                crate::server::extension::host_adapter::EXTENSION_ROOM_REPLY_TIMEOUT,
             )
     }
 
@@ -23,10 +23,10 @@ impl OrderedRelayDeliveryBridge {
             .and_then(|services| services.web_socket_state.upgrade())
         {
             Some(state) => {
-                crate::server::extension_host_adapter::relayed_room_send(state, message).await
+                crate::server::extension::host_adapter::relayed_room_send(state, message).await
             }
             None => RelayExtensionRoomSendReply::HostError(
-                crate::server::extension_host_adapter::temporary_failure(
+                crate::server::extension::host_adapter::temporary_failure(
                     "extension room owner is starting up",
                 ),
             ),

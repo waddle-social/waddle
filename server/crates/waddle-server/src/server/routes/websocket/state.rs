@@ -1466,7 +1466,7 @@ pub struct ProtocolServices {
     /// Runtime extension manager for message embeds + feature advertisements.
     pub extension_manager: Arc<ExtensionManager>,
     /// Extension bots' manifest avatars, fetched and served in-band.
-    pub(crate) bot_avatars: Arc<crate::server::extension_bot_avatar::BotAvatars>,
+    pub(crate) bot_avatars: Arc<crate::server::extension::bot::avatar::BotAvatars>,
     /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session,
     /// carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.
@@ -1592,7 +1592,7 @@ pub struct ProtocolServices {
     /// presence to the authoritative remote RoomActor even though no local
     /// RoomActor exists to discover by registry scan.
     pub remote_muc_memberships: Arc<RemoteMucMemberships>,
-    pub extension_bot_rooms: crate::server::extension_host_adapter::BotRoomLocks,
+    pub extension_bot_rooms: crate::server::extension::host_adapter::BotRoomLocks,
     /// Local departures retained until the owning room actor can project them.
     pub pending_local_muc_departures: Arc<super::PendingLocalMucDepartures>,
     /// At most one detached resolver-affiliation repair per room/member pair.

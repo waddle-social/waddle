@@ -119,7 +119,7 @@ async fn rich_target_missing_target_commits_semantic_denial_postgres() {
 async fn groupchat_rich_target_failure(fixture: IngressFixture, stop_actor: bool) {
     use super::super::{
         effects::{EffectSink, PlanSink},
-        groupchat_validation::validate_groupchat_rich_targets,
+        groupchat::validation::validate_groupchat_rich_targets,
     };
     use kameo::actor::Spawn;
     use waddle_xmpp::muc::{

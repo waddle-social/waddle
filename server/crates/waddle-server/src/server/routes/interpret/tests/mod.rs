@@ -2,9 +2,9 @@ use super::bot::{
     available_bot_nick, available_bot_nick_with_base, plan_bot_groupchat_message,
     prepare_extension_room_message, BotGroupchatDispatch,
 };
-use super::groupchat_archive::room_scoped_reply_to_attr;
-use super::groupchat_validation::lookup_groupchat_retraction_target;
-use super::room_dispatch::normalize_thread_create_source;
+use super::groupchat::archive::room_scoped_reply_to_attr;
+use super::groupchat::validation::lookup_groupchat_retraction_target;
+use super::room::dispatch::normalize_thread_create_source;
 use super::*;
 use kameo::actor::Spawn;
 use std::io;

@@ -436,11 +436,11 @@ pub(super) async fn build_muc_owner_config_response(
         .map_err(|error| XmppError::internal(format!("snapshot failed: {error:?}")))?;
     let mut room = snapshot.room;
     if let Some(channel_type) =
-        super::muc_owner_config::managed_channel_type_for_room(state, room_jid)
+        super::muc::owner_config::managed_channel_type_for_room(state, room_jid)
             .await
             .map_err(XmppError::internal)?
     {
-        super::muc_owner_config::project_channel_type_to_config(&mut room.config, channel_type);
+        super::muc::owner_config::project_channel_type_to_config(&mut room.config, channel_type);
     }
     let form = build_config_form(&room);
     let query = Element::builder("query", waddle_xmpp::muc::NS_MUC_OWNER)

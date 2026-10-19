@@ -127,12 +127,12 @@ pub(crate) use cleanup::{
 };
 pub use connection::router;
 #[cfg(feature = "clustering")]
-pub(crate) use handlers::iq::muc_admin_relay::{
+pub(crate) use handlers::iq::muc::admin::relay::{
     relayed_muc_admin_query, AdminListAnswer, MUC_ADMIN_QUERY_MAILBOX_TIMEOUT,
     MUC_ADMIN_QUERY_REPLY_TIMEOUT,
 };
 #[cfg(all(test, feature = "clustering"))]
-pub(crate) use handlers::iq::muc_admin_relay::{AdminListDenial, AdminRoleEntry};
+pub(crate) use handlers::iq::muc::admin::relay::{AdminListDenial, AdminRoleEntry};
 pub(crate) use local_departures::{
     InFlightLease, LocalDepartureItem, PendingLocalDeparture, PendingLocalMucDepartures,
     ACK_ABSENT_ROOM_RETRIES,

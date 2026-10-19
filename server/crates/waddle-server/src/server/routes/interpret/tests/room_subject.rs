@@ -1290,7 +1290,7 @@ async fn xep0045_subject_recovery_timeout_retires_unresponsive_exact_actor() {
         .expect("queue stalled actor operation");
     store.load_started.notified().await;
     assert!(
-        !super::super::room_subject::reconcile_ambiguous_subject_commit(
+        !super::super::room::subject::reconcile_ambiguous_subject_commit(
             &registry,
             &room,
             &actor,
@@ -1384,7 +1384,7 @@ async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
         coordinates.revision = coordinates.revision.next().expect("foreign revision");
     }
     assert!(
-        super::super::room_subject::reconcile_ambiguous_subject_commit(
+        super::super::room::subject::reconcile_ambiguous_subject_commit(
             &registry,
             &room,
             &actor,
