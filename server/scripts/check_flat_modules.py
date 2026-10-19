@@ -31,30 +31,53 @@ def source_dirs(root):
             yield src
 
 
+def prefix_findings(directory, files):
+    groups = defaultdict(list)
+    for path in files:
+        if "_" in path.stem:
+            groups[path.stem.split("_", 1)[0]].append(path)
+    return [
+        ("prefix", directory / f"{prefix}_*.rs", len(members))
+        for prefix, members in sorted(groups.items())
+        if len(members) >= PREFIX_THRESHOLD
+    ]
+
+
+def satellite_parent(path, stems):
+    parts = path.stem.split("_")
+    for cut in range(1, len(parts)):
+        parent = "_".join(parts[:cut])
+        if parent in stems:
+            return parent
+    return None
+
+
+def directory_findings(directory):
+    files = sorted(p for p in directory.glob("*.rs") if p.name not in ROOT_FILES)
+    stems = {p.stem for p in files} | {p.name for p in directory.iterdir() if p.is_dir()}
+    found = prefix_findings(directory, files)
+    for path in files:
+        parent = satellite_parent(path, stems)
+        if parent:
+            found.append(("satellite", path, parent))
+    return found
+
+
+def path_attribute_findings(src):
+    return [
+        ("path", path, number)
+        for path in sorted(src.rglob("*.rs"))
+        for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1)
+        if PATH_ATTR.match(line)
+    ]
+
+
 def findings(root):
     found = []
     for src in source_dirs(root):
         for directory in sorted({src, *(p for p in src.rglob("*") if p.is_dir())}):
-            files = sorted(p for p in directory.glob("*.rs") if p.name not in ROOT_FILES)
-            stems = {p.stem for p in files} | {p.name for p in directory.iterdir() if p.is_dir()}
-            groups = defaultdict(list)
-            for path in files:
-                if "_" in path.stem:
-                    groups[path.stem.split("_", 1)[0]].append(path)
-            for prefix, members in sorted(groups.items()):
-                if len(members) >= PREFIX_THRESHOLD:
-                    found.append(("prefix", directory / f"{prefix}_*.rs", len(members)))
-            for path in files:
-                parts = path.stem.split("_")
-                for cut in range(1, len(parts)):
-                    parent = "_".join(parts[:cut])
-                    if parent in stems:
-                        found.append(("satellite", path, parent))
-                        break
-        for path in sorted(src.rglob("*.rs")):
-            for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
-                if PATH_ATTR.match(line):
-                    found.append(("path", path, number))
+            found.extend(directory_findings(directory))
+        found.extend(path_attribute_findings(src))
     return found
 
 

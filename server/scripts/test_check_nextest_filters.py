@@ -1,9 +1,11 @@
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from check_nextest_filters import dead_atoms
 
@@ -15,6 +17,9 @@ class NextestFilterLivenessTests(unittest.TestCase):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
         self.root = Path(self.directory.name)
+        environment = patch.dict(os.environ, {"out": str(self.root)})
+        environment.start()
+        self.addCleanup(environment.stop)
         self.inventory = self.root / "inventory.json"
         self.inventory.write_text(json.dumps({
             "rust-suites": {
@@ -59,10 +64,17 @@ class NextestFilterLivenessTests(unittest.TestCase):
         self.write_filter("binary(xep0198)")
         self.assertEqual(len(dead_atoms(self.config, self.inventory)), 1)
 
+    def test_paths_outside_build_roots_are_rejected(self):
+        self.write_filter("test(ingress::)")
+        with patch.dict(os.environ, {"out": ""}), patch.object(Path, "cwd", return_value=SCRIPT.parent):
+            with self.assertRaises(ValueError):
+                dead_atoms(self.config, self.inventory)
+
     def test_cli_exits_nonzero_on_dead_atom(self):
         self.write_filter("test(missing::)")
         result = subprocess.run(
-            [sys.executable, SCRIPT, self.config, self.inventory], capture_output=True, text=True
+            [sys.executable, SCRIPT, self.config, self.inventory],
+            capture_output=True, text=True, env={**os.environ, "out": str(self.root)},
         )
         self.assertEqual(result.returncode, 1)
         self.assertIn("test(missing::) matches nothing", result.stderr)

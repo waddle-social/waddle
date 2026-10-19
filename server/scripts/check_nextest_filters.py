@@ -9,11 +9,15 @@ atom in each `[[profile.*.overrides]]` filter must match at least one listed
 binary or test. Renaming a module or test binary does not fail compilation, so
 without this check an override (for example the serial `postgres` test group)
 silently stops applying.
+
+Both paths must resolve inside the current working directory or the Nix
+build's explicit `out` directory.
 """
 
 import argparse
 import fnmatch
 import json
+import os
 from pathlib import Path
 import re
 import tomllib
@@ -43,8 +47,19 @@ def matcher(kind, raw):
     return lambda name: fnmatch.fnmatchcase(name, raw)
 
 
+def confined_path(value):
+    """Resolve traversal and symlinks before checking trusted caller roots."""
+    roots = [Path.cwd().resolve()]
+    if os.environ.get("out"):
+        roots.append(Path(os.environ["out"]).resolve())
+    path = Path(value).resolve()
+    if not any(path.is_relative_to(root) for root in roots):
+        raise ValueError("path is outside the permitted build directories")
+    return path
+
+
 def filters(config_path):
-    with open(config_path, "rb") as stream:
+    with open(confined_path(config_path), "rb") as stream:
         document = tomllib.load(stream)
     for profile_name, profile in document.get("profile", {}).items():
         for index, override in enumerate(profile.get("overrides", [])):
@@ -52,7 +67,7 @@ def filters(config_path):
 
 
 def candidates(inventory_path):
-    with open(inventory_path, encoding="utf-8") as stream:
+    with open(confined_path(inventory_path), encoding="utf-8") as stream:
         document = json.load(stream)
     names = {"binary_id": set(), "binary": set(), "package": set(), "test": set()}
     for binary_id, suite in document["rust-suites"].items():
