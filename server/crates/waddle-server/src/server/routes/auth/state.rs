@@ -18,6 +18,9 @@ pub struct AuthState {
     pub identity_service: IdentityService,
     pub providers: ProviderRegistry,
     pub base_url: String,
+    /// Where a browser sign-in may return to; see
+    /// [`crate::auth::redirect::TrustedWebOrigins`].
+    pub trusted_web_origins: crate::auth::redirect::TrustedWebOrigins,
     /// Trusted public RFC 7395 endpoint advertised to XMPP clients. Kept
     /// separate from `base_url`, which describes the HTTP application and may
     /// have a different external scheme/authority behind a TLS terminator.
@@ -71,6 +74,7 @@ impl AuthState {
             identity_service,
             providers,
             base_url: server_config.base_url.trim_end_matches('/').to_string(),
+            trusted_web_origins: server_config.trusted_web_origins.clone(),
             public_xmpp_websocket_url: public_xmpp_websocket_url.clone(),
             xmpp_domain,
             caps_server_domain,

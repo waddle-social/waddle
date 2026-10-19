@@ -57,7 +57,7 @@ fun Modifier.overlayShadow(cornerRadius: Dp): Modifier = drawBehind {
 
 /**
  * One sheet chrome for every conversation sheet: card colour, radius-16
- * top corners, a 40×4 handle, an optional Space Grotesk title that is a
+ * top corners, a 40×4 handle, an optional display title that is a
  * heading for screen readers, and 16dp side padding. Insets come from the
  * sheet's own window insets (navigation bar and keyboard), never added
  * again by the content.
@@ -120,7 +120,7 @@ internal fun SheetHandle(modifier: Modifier = Modifier) {
     }
 }
 
-/** A sheet title: Space Grotesk 18/600, a heading. */
+/** A sheet title: display 18/600, a heading. */
 @Composable
 internal fun SheetTitle(text: String, modifier: Modifier = Modifier) {
     Text(
@@ -157,7 +157,7 @@ internal fun PopoverSurface(modifier: Modifier = Modifier, content: @Composable 
 }
 
 /**
- * Quiet is an invitation: the mascot, a Space Grotesk title (a heading)
+ * Quiet is an invitation: the mascot, a display title (a heading)
  * and a line that asks someone to start. Used where a conversation has
  * nothing in it yet.
  */

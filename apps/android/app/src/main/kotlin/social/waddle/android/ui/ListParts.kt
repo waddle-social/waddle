@@ -61,7 +61,7 @@ import java.time.format.FormatStyle
 
 /**
  * The app's top bar: the screen ground (no tonal tint), the Huddle
- * title style (Space Grotesk 18/600) and a heading for screen readers,
+ * title style (display 18/600) and a heading for screen readers,
  * so every screen's title lines up and is reachable by heading.
  * Scrolled content lifts it onto the rail colour.
  */
@@ -165,7 +165,7 @@ fun SectionKicker(text: String, modifier: Modifier = Modifier, live: Boolean = f
 
 /**
  * The head of a bottom sheet, one recipe for every sheet: an optional
- * mono [kicker], the title in Space Grotesk 18/600 (a heading), and an
+ * mono [kicker], the title at 18/600 (a heading), and an
  * optional muted [supporting] line.
  */
 @Composable
@@ -358,7 +358,7 @@ enum class EmptyStateTone {
 
 /**
  * Centred empty state (web `.chat-empty`): the mascot ([mascot]) or a
- * glyph tile, a Space Grotesk title that is a heading, and one line
+ * glyph tile, a display title that is a heading, and one line
  * that invites rather than reports. [action] sits under the copy.
  */
 @Composable
@@ -419,7 +419,7 @@ fun EmptyState(
 fun social.waddle.android.theme.WaddleColors.dangerSubtle(): Color = danger.copy(alpha = DANGER_WASH_ALPHA)
 
 /**
- * The `waddle.` wordmark: lowercase Space Grotesk with the full stop in
+ * The `waddle.` wordmark: lowercase, in the display weight, with the full stop in
  * ember — the one brand mark that is allowed to be warm when nothing is
  * live. [style] sets the size (headline by default).
  */

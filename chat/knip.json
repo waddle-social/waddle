@@ -16,9 +16,6 @@
   "ignore": [],
   "astro": true,
   "ignoreDependencies": [
-    "@fontsource-variable/jetbrains-mono",
-    "@fontsource-variable/outfit",
-    "@fontsource-variable/space-grotesk",
     "cloudflare",
     "events",
     "tailwindcss"

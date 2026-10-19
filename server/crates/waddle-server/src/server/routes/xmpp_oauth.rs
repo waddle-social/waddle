@@ -2,6 +2,7 @@
 
 use super::auth::{AuthState, ErrorResponse, PendingFlow};
 use super::auth_telemetry::{record_auth_failure, record_auth_success, AuthFailure};
+use crate::auth::redirect::{PkceS256Challenge, RedirectError, XmppClientRedirectUri};
 use axum::{
     extract::{Query, State},
     http::StatusCode,
@@ -91,19 +92,22 @@ pub async fn xmpp_authorize_handler(
             .into_response();
     }
 
-    if let Some(method) = params.code_challenge_method.as_deref() {
-        if method != "S256" {
-            record_auth_failure("unknown", None, AuthFailure::AuthorizationMalformed);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "invalid_request",
-                    "Only code_challenge_method=S256 is supported",
-                )),
-            )
-                .into_response();
-        }
-    }
+    // RFC 6749 §4.1.2.1: an invalid redirect URI is reported to the user
+    // agent, never redirected to.
+    let redirect = match XmppClientRedirectUri::parse(&params.redirect_uri) {
+        Ok(redirect) => redirect,
+        Err(err) => return invalid_authorization_request(&err),
+    };
+    // XEP-0493 makes PKCE mandatory, and without RFC 7591 client
+    // registration it is the only binding between this request and the
+    // later token request.
+    let code_challenge = match PkceS256Challenge::from_request(
+        params.code_challenge.as_deref(),
+        params.code_challenge_method.as_deref(),
+    ) {
+        Ok(challenge) => challenge,
+        Err(err) => return invalid_authorization_request(&err),
+    };
 
     let provider_id = match params.provider {
         Some(v) => v,
@@ -141,9 +145,9 @@ pub async fn xmpp_authorize_handler(
         .start_authorization(
             provider,
             PendingFlow::Xmpp {
-                client_redirect_uri: params.redirect_uri,
+                client_redirect_uri: redirect.as_str().to_string(),
                 client_state: params.state,
-                client_code_challenge: params.code_challenge,
+                client_code_challenge: Some(code_challenge.as_str().to_string()),
             },
         )
         .await
@@ -165,6 +169,15 @@ pub async fn xmpp_authorize_handler(
                 .into_response()
         }
     }
+}
+
+fn invalid_authorization_request(err: &RedirectError) -> axum::response::Response {
+    record_auth_failure("unknown", None, AuthFailure::AuthorizationMalformed);
+    (
+        StatusCode::BAD_REQUEST,
+        Json(ErrorResponse::new("invalid_request", &err.to_string())),
+    )
+        .into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -254,32 +267,42 @@ pub async fn xmpp_token_handler(
             .into_response();
     }
 
-    if let Some(challenge) = code.code_challenge.as_deref() {
-        let Some(verifier) = request.code_verifier.as_deref() else {
-            record_auth_failure("waddle", None, AuthFailure::TokenMalformed);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "invalid_request",
-                    "code_verifier is required",
-                )),
-            )
-                .into_response();
-        };
+    // Codes are only minted with a challenge; one without is refused rather
+    // than exchanged unbound.
+    let Some(challenge) = code.code_challenge.as_deref() else {
+        record_auth_failure("waddle", None, AuthFailure::TokenInvalidGrant);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "invalid_grant",
+                "authorization code has no PKCE challenge",
+            )),
+        )
+            .into_response();
+    };
+    let Some(verifier) = request.code_verifier.as_deref() else {
+        record_auth_failure("waddle", None, AuthFailure::TokenMalformed);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "invalid_request",
+                "code_verifier is required",
+            )),
+        )
+            .into_response();
+    };
 
-        if pkce_s256(verifier) != challenge {
-            record_auth_failure("waddle", None, AuthFailure::TokenInvalidGrant);
-            return (
-                StatusCode::BAD_REQUEST,
-                Json(ErrorResponse::new(
-                    "invalid_grant",
-                    "PKCE verification failed",
-                )),
-            )
-                .into_response();
-        }
+    if pkce_s256(verifier) != challenge {
+        record_auth_failure("waddle", None, AuthFailure::TokenInvalidGrant);
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse::new(
+                "invalid_grant",
+                "PKCE verification failed",
+            )),
+        )
+            .into_response();
     }
-
     let session = match state.session_manager.get_session(&code.session_id).await {
         Ok(Some(s)) => s,
         Ok(None) => {

@@ -34,7 +34,7 @@ import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import social.waddle.android.client.RichBlock
 import social.waddle.android.client.RichInlineRun
-import social.waddle.android.theme.JetBrainsMonoFamily
+import social.waddle.android.theme.MonoFamily
 import social.waddle.android.theme.Waddle
 
 /**
@@ -151,7 +151,7 @@ private fun RichInlineRun.spanStyle(mentionColor: Color, codeBackground: Color):
         },
         fontStyle = if (italic) FontStyle.Italic else null,
         textDecoration = if (strikethrough) TextDecoration.LineThrough else null,
-        fontFamily = if (code) JetBrainsMonoFamily else null,
+        fontFamily = if (code) MonoFamily else null,
         background = if (code) codeBackground else Color.Unspecified,
         color = if (mentionUri != null) mentionColor else Color.Unspecified,
     )
