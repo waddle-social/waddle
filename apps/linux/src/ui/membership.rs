@@ -5,7 +5,6 @@ use adw::prelude::*;
 use adw::subclass::prelude::*;
 use gtk::glib;
 use jid::{BareJid, Jid};
-use waddle_client_session::Delivery;
 use waddle_xmpp_client_ffi::WaddlePresence;
 
 use super::WaddleWindow;
@@ -229,9 +228,7 @@ impl WaddleWindow {
             return;
         }
         imp.outbound.borrow_mut().remove(&id);
-        self.edit_conversation(&conversation.jid, |timeline| {
-            timeline.set_delivery(&id, Delivery::Failed)
-        });
+        self.edit_conversation(&conversation.jid, |timeline| timeline.reject_send(&id));
         self.toast("The server rejected the message.");
     }
 }

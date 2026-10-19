@@ -58,6 +58,13 @@ pub enum Delivery {
     Failed,
 }
 
+/// Application-level evidence takes precedence over transport outcomes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DeliveryEvidence {
+    Reflected,
+    Rejected,
+}
+
 /// The message a reply quotes (XEP-0461).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReplyTo {
@@ -251,6 +258,9 @@ pub struct Timeline {
     by_chosen: HashMap<(Author, String), usize>,
     /// The user's own rows by origin id and `@id`, for delivery outcomes.
     own_chosen: HashMap<String, usize>,
+    /// Confirmed reflections and explicit rejections, by stable row serial.
+    /// Transport acknowledgments alone do not establish acceptance.
+    delivery_evidence: HashMap<u64, DeliveryEvidence>,
     /// Corrections whose target is not held yet, by sender name and
     /// target. Every candidate is kept: one claiming the same name under
     /// another identity must not displace the real sender's.
@@ -431,11 +441,36 @@ impl Timeline {
         let Some(&at) = self.own_chosen.get(origin_id) else {
             return Vec::new();
         };
+        if self.delivery_evidence.contains_key(&self.serials[at]) {
+            return Vec::new();
+        }
         let item = &mut self.items[at];
         if item.delivery == Delivery::Sent || item.delivery == delivery {
             return Vec::new();
         }
         item.delivery = delivery;
+        self.sets([at])
+    }
+
+    /// Apply an explicit server rejection after the adapter has correlated
+    /// its message id and addresses with a retained outbound send. Unlike a
+    /// transport failure, this can supersede a stream acknowledgment. An
+    /// actual reflection remains proof that the message was accepted.
+    pub fn reject_send(&mut self, origin_id: &str) -> Vec<TimelineDiff> {
+        let Some(&at) = self.own_chosen.get(origin_id) else {
+            return Vec::new();
+        };
+        let serial = self.serials[at];
+        if self.delivery_evidence.get(&serial) == Some(&DeliveryEvidence::Reflected) {
+            return Vec::new();
+        }
+        self.delivery_evidence
+            .insert(serial, DeliveryEvidence::Rejected);
+        let item = &mut self.items[at];
+        if item.delivery == Delivery::Failed {
+            return Vec::new();
+        }
+        item.delivery = Delivery::Failed;
         self.sets([at])
     }
 
@@ -613,6 +648,8 @@ impl Timeline {
             item.reference_id.clone_from(&message.reference_id);
         }
         item.delivery = Delivery::Sent;
+        self.delivery_evidence
+            .insert(self.serials[at], DeliveryEvidence::Reflected);
         let ids = &mut self.ids[at];
         if ids.stanza.is_none() {
             ids.stanza = reflected.stanza;
@@ -1276,6 +1313,52 @@ mod tests {
 
         timeline.apply_live(message("s1", "bob", "yo", 2));
         assert!(timeline.set_delivery("s1", Delivery::Failed).is_empty());
+    }
+
+    #[test]
+    fn explicit_rejection_overrides_stream_ack_and_survives_reindex() {
+        let mut timeline = Timeline::new();
+        timeline.add_local_echo(echo("o1", "hi"));
+        timeline.set_delivery("o1", Delivery::Sent);
+        let diffs = timeline.reject_send("o1");
+        assert!(
+            matches!(diffs.as_slice(), [TimelineDiff::Set { item, .. }] if item.delivery == Delivery::Failed)
+        );
+
+        // History prepends move the row, but do not lose its rejection.
+        timeline.apply_history_page(vec![message("older", "bob", "earlier", 1)], None, true);
+        assert!(timeline.set_delivery("o1", Delivery::Sent).is_empty());
+        assert!(timeline.set_delivery("o1", Delivery::Sending).is_empty());
+        assert!(timeline.reject_send("o1").is_empty());
+        assert_eq!(timeline.items()[1].delivery, Delivery::Failed);
+        assert_eq!(timeline.items()[0].delivery, Delivery::Received);
+        assert!(timeline.reject_send("unknown").is_empty());
+        assert!(timeline.reject_send("older").is_empty());
+    }
+
+    #[test]
+    fn explicit_rejection_before_stream_ack_remains_failed() {
+        let mut timeline = Timeline::new();
+        timeline.add_local_echo(echo("o1", "hi"));
+        timeline.reject_send("o1");
+        assert!(timeline.set_delivery("o1", Delivery::Sent).is_empty());
+        assert_eq!(timeline.items()[0].delivery, Delivery::Failed);
+    }
+
+    #[test]
+    fn actual_reflection_supersedes_rejection_and_remains_terminal() {
+        let mut timeline = Timeline::new();
+        timeline.add_local_echo(echo("o1", "hi"));
+        timeline.reject_send("o1");
+        timeline.apply_live(IncomingMessage {
+            origin_id: Some("o1".into()),
+            own: true,
+            ..message("s9", "me", "hi", 11)
+        });
+        assert_eq!(timeline.items()[0].delivery, Delivery::Sent);
+        assert!(timeline.reject_send("o1").is_empty());
+        assert!(timeline.set_delivery("o1", Delivery::Failed).is_empty());
+        assert_eq!(timeline.items()[0].delivery, Delivery::Sent);
     }
 
     #[test]
