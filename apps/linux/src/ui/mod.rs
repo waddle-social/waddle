@@ -1,4 +1,5 @@
 mod actions;
+mod avatar;
 mod conversation;
 mod media;
 mod membership;

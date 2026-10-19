@@ -205,18 +205,45 @@ template $WaddleWindow: Adw.ApplicationWindow {
               };
 
               [bottom]
-              Label account_label {
-                xalign: 0;
-                ellipsize: end;
-                margin-start: 18;
-                margin-end: 18;
-                margin-top: 12;
-                margin-bottom: 12;
+              Box {
+                spacing: 10;
+                margin-start: 14;
+                margin-end: 14;
+                margin-top: 10;
+                margin-bottom: 10;
 
-                styles [
-                  "dim-label",
-                  "caption",
-                ]
+                Adw.Avatar account_avatar {
+                  size: 28;
+                  show-initials: true;
+
+                  styles [
+                    "waddle-avatar",
+                  ]
+                }
+
+                Box {
+                  orientation: vertical;
+                  valign: center;
+
+                  Label account_name {
+                    xalign: 0;
+                    ellipsize: end;
+
+                    styles [
+                      "caption-heading",
+                    ]
+                  }
+
+                  Label account_label {
+                    xalign: 0;
+                    ellipsize: end;
+
+                    styles [
+                      "dim-label",
+                      "caption",
+                    ]
+                  }
+                }
               }
             };
           };
