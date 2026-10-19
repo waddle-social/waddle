@@ -7,7 +7,7 @@ use waddle_xmpp::{
     protocol::OutboundEvent,
 };
 
-use crate::ingress::muc_occupant_progress_tests::stall as stalled_copy;
+use crate::ingress::tests::muc_occupant_progress::stall as stalled_copy;
 
 #[derive(Clone, Copy)]
 enum Case {

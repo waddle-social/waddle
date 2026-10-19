@@ -1,6 +1,6 @@
 //! The live Phase C executor and maintenance share the actual socket fence.
 use super::*;
-use crate::ingress::{execute::ExternalOutcome, execute_uow::FAIL_DELIVERY_PROGRESS_TX};
+use crate::ingress::{execute::uow::FAIL_DELIVERY_PROGRESS_TX, execute::ExternalOutcome};
 use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
 
 fn live_submission(

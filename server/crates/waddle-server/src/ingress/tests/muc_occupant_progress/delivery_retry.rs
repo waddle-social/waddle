@@ -54,7 +54,7 @@ async fn shared_state(
 
 #[tokio::test]
 async fn sqlite_xep0045_progress_contention_retries_without_repeating_live_delivery() {
-    use crate::ingress::execute_uow::CONTEND_DELIVERY_PROGRESS_ONCE;
+    use crate::ingress::execute::uow::CONTEND_DELIVERY_PROGRESS_ONCE;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,

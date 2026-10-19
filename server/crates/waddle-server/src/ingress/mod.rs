@@ -11,14 +11,11 @@ mod reflection_dispatch;
 pub(crate) use capture::TEST_CAPTURE_LIMIT;
 pub use capture::{IngressEffectCapture, IngressEffectCaptureSnapshot};
 pub mod commit;
-mod commit_room;
-mod commit_stream;
 pub mod decision;
 mod durable;
 pub(crate) use durable::receipt_key;
 pub mod execute;
-mod execute_uow;
-pub(crate) use execute_uow::ambiguous_offline_pending_id;
+pub(crate) use execute::uow::ambiguous_offline_pending_id;
 mod frame_receipt_retry;
 pub(crate) mod gc;
 pub mod identity;
@@ -26,7 +23,6 @@ mod invitation_authority;
 pub(crate) mod live_delivery;
 pub mod nested;
 pub mod principal;
-pub(crate) mod room_manifest_replay;
 pub use principal::{ExtensionPrincipal, IngressPrincipal};
 pub(crate) mod maintenance;
 mod receipts;
@@ -1236,9 +1232,6 @@ mod lifecycle_tests {
 }
 
 #[cfg(test)]
-mod room_pin_tests;
-
-#[cfg(test)]
 pub(crate) mod test_support {
     /// Model the room dispatcher's explicit canonical capture in synthetic plans.
     pub(crate) fn capture_room_message(
@@ -1306,20 +1299,7 @@ pub(crate) mod test_support {
     ));
 }
 
-#[cfg(test)]
-mod subject_receipt_tests;
-
-#[cfg(test)]
-mod offline_settlement_tests;
-
-#[cfg(test)]
-mod offline_hardening_tests;
-
-#[cfg(test)]
-mod muc_occupant_progress_tests;
-
-#[cfg(test)]
-mod xep0045_room_manifest_tests;
-
 mod room_canonical;
 pub(crate) mod storage_hint;
+#[cfg(test)]
+mod tests;

@@ -306,7 +306,7 @@ pub(in crate::ingress) async fn repair_stalled_row(
                             authority: super::super::append_authority::AppendAuthority::Verified,
                         };
                         if let Some(settled) =
-                            super::super::room_manifest_replay::settle_superseded(
+                            super::super::room_manifest::replay::settle_superseded(
                                 uow,
                                 manifest,
                                 Some(rooms),
@@ -327,7 +327,7 @@ pub(in crate::ingress) async fn repair_stalled_row(
             // — see this function's ordering note above `evict`. The
             // in-transaction claim assertion still fences a steal that
             // committed since the authority was resolved.
-            let settled = match super::super::execute_uow::record_delivery_progress(
+            let settled = match super::super::execute::uow::record_delivery_progress(
                 uow,
                 key,
                 route,

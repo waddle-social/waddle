@@ -1,4 +1,5 @@
 //! The sealed audience and child identities of a canonical room submission.
+pub(crate) mod replay;
 use std::collections::HashSet;
 
 use jid::{BareJid, FullJid};

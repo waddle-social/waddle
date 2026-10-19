@@ -1,4 +1,6 @@
 //! Phase B: one immutable plan, retried as complete fresh transactions.
+pub(super) mod room;
+pub(super) mod stream;
 use super::{
     decision::{AliasOutcomeClass, IngressDecision, IngressDecisionClass},
     identity::IngressStreamIdentity,
@@ -143,9 +145,9 @@ async fn commit_attempt(
     }
     // A relayed retry must prove the room claim before touching canonical identity.
     if matches!(submission.identity, IngressStreamIdentity::Relayed { .. }) {
-        super::commit_room::assert_room(&mut tx, submission, false).await?;
+        super::commit::room::assert_room(&mut tx, submission, false).await?;
     }
-    let stream = super::commit_stream::lock_stream(&mut tx, &submission.identity).await?;
+    let stream = super::commit::stream::lock_stream(&mut tx, &submission.identity).await?;
     let digest = waddle_xmpp::ingress::digest::v1::digest(&submission.digest_input);
     let transient_direct = super::storage_hint::protects_plan(&submission.plan);
     let envelope = if transient_direct {
@@ -231,7 +233,7 @@ async fn commit_attempt(
         });
     }
     let room_proof =
-        super::commit_room::assert_room(&mut tx, submission, rejection.is_none()).await?;
+        super::commit::room::assert_room(&mut tx, submission, rejection.is_none()).await?;
     let recorded = EffectIntentRepository::load(&mut tx, key).await?;
     let sealed_manifest = CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await?
@@ -275,10 +277,10 @@ async fn commit_attempt(
     // must retain legacy keyed relay settlement until P2; persisted manifests
     // remain authoritative even after new seals are disabled.
     let can_seal = sealed_manifest.is_some()
-        || (super::commit_room::new_manifests_enabled(uow)
+        || (super::commit::room::new_manifests_enabled(uow)
             && (alias != AliasOutcomeClass::Existing || owner_first));
     if can_seal && sealed_manifest.is_none() && rejection.is_none() {
-        super::commit_room::assert_snapshot_coordinates(&mut tx, submission).await?;
+        super::commit::room::assert_snapshot_coordinates(&mut tx, submission).await?;
     }
     // A recorded denial is authority: any retransmission that resolves to it
     // re-emits the committed reply, whatever today's policy would decide.
@@ -589,20 +591,20 @@ async fn commit_attempt(
         }
     }
     let sealed_manifest = if can_seal && rejection.is_none() {
-        super::commit_room::seal(&mut tx, key, submission).await?
+        super::commit::room::seal(&mut tx, key, submission).await?
     } else {
         sealed_manifest
     };
     if let Some(manifest) = &sealed_manifest {
         intents = manifest.recorded_intents().to_vec();
         plan.intents = intents.clone();
-        super::commit_room::prepare_sealed_plan(&mut plan, manifest, &transient_room_reflections);
+        super::commit::room::prepare_sealed_plan(&mut plan, manifest, &transient_room_reflections);
     }
     if sealed_manifest.is_some() && commit_hooks::fail_after_manifest() {
         return Err(IngressUowError::Timeout);
     }
     let ordinal = stream.as_ref().map(|stream| stream.ordinal);
-    super::commit_stream::finish_stream(&mut tx, stream.as_ref(), key).await?;
+    super::commit::stream::finish_stream(&mut tx, stream.as_ref(), key).await?;
     let class = rejection.unwrap_or_else(|| {
         decision_class(
             submission,
@@ -706,7 +708,7 @@ async fn commit_attempt(
             }
         }
         let pending_effect = |effect: &super::ExternalEffect| {
-            super::commit_room::child_receipts(effect, manifest)
+            super::commit::room::child_receipts(effect, manifest)
                 .iter()
                 .any(|receipt| {
                     if matches!(effect, super::ExternalEffect::Frame(_))
@@ -748,7 +750,7 @@ async fn commit_attempt(
             let proven_prerequisite = required
                 .iter()
                 .any(|dependency| super::execute::supplies_dependency(effect, dependency))
-                && super::commit_room::child_receipts(effect, manifest)
+                && super::commit::room::child_receipts(effect, manifest)
                     .iter()
                     .any(|receipt| complete.contains(receipt));
             if proven_prerequisite {

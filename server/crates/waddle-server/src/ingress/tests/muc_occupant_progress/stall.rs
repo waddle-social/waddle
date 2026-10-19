@@ -9,8 +9,8 @@ use std::{
 };
 
 use crate::ingress::{
+    execute::uow::{CANCEL_STALLED_DELIVERY, STALL_DELIVERY_RESOURCE},
     execute::ExecutionReport,
-    execute_uow::{CANCEL_STALLED_DELIVERY, STALL_DELIVERY_RESOURCE},
 };
 
 pub(in crate::ingress) async fn execute(

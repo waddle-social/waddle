@@ -59,7 +59,7 @@ pub(super) async fn attempt_before_readiness(
         authority: crate::ingress::append_authority::AppendAuthority::Verified,
     };
     let Some(manifest) =
-        crate::ingress::room_manifest_replay::load(uow, &context, resource, stanza).await?
+        crate::ingress::room_manifest::replay::load(uow, &context, resource, stanza).await?
     else {
         return Ok(None);
     };
@@ -73,7 +73,7 @@ pub(super) async fn attempt_before_readiness(
     {
         return Ok(None);
     }
-    if let Some(settled) = crate::ingress::room_manifest_replay::settle_superseded(
+    if let Some(settled) = crate::ingress::room_manifest::replay::settle_superseded(
         uow,
         &manifest,
         deps.room_registry,

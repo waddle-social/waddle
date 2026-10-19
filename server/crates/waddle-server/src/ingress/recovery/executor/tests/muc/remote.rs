@@ -277,7 +277,7 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         let mut deps = env.recovery_deps();
         deps.delivery_execution_context =
             crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery;
-        let outcome = crate::ingress::execute_uow::execute_with_uow(
+        let outcome = crate::ingress::execute::uow::execute_with_uow(
             &f.uow,
             &f.db,
             &rebuilt.decision,

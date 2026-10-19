@@ -4,7 +4,7 @@ use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress::{
         commit::commit_submission,
-        execute_uow::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE},
+        execute::uow::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE},
         test_support::IngressFixture,
     },
     ingress_uow::DeliveryProgressRepository,

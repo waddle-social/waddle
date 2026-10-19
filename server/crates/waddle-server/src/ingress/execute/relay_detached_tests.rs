@@ -420,7 +420,7 @@ tokio::task_local! {
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keyed_custody() {
-    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::ingress::tests::xep0045_room_manifest::room_submission;
     use crate::server::routes::interpret::{OrderedRelayRouteOrigin, OrderedRelayRouteOriginKind};
     use waddle_xmpp::ownership::{Entity, EntityType};
     let fixture = IngressFixture::sqlite().await;
@@ -586,7 +586,7 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending() {
-    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::ingress::tests::xep0045_room_manifest::room_submission;
     use crate::server::routes::interpret::{
         effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
     };
@@ -677,7 +677,7 @@ async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending()
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_without_retirement() {
-    use crate::ingress::xep0045_room_manifest_tests::room_submission;
+    use crate::ingress::tests::xep0045_room_manifest::room_submission;
     use crate::ingress_uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
     };
@@ -905,7 +905,7 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_wire_attempt() {
-    use crate::ingress::{xep0045_room_manifest_tests::room_submission, RoomManifestSnapshot};
+    use crate::ingress::{tests::xep0045_room_manifest::room_submission, RoomManifestSnapshot};
     use crate::ingress_uow::{CanonicalMessageRepository, DeliveryProgressRepository};
     use crate::server::routes::interpret::{
         effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,

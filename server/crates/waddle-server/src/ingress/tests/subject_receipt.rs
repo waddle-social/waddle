@@ -1,4 +1,4 @@
-use super::*;
+use super::super::*;
 use crate::server::routes::interpret::{effects::PlanSink, interpret};
 use waddle_xmpp::{muc::RoomSubjectTexts, protocol::OutboundEvent, registry::ConnectionRegistry};
 

@@ -1,4 +1,4 @@
-//! Public Phase B/C wire regressions; real planner coverage lives in muc_occupant_progress_tests.
+//! Public Phase B/C wire regressions; real planner coverage lives in `ingress::tests::muc_occupant_progress`.
 use crate::{detached_progress_support as detached, ingress_support::IngressFixture};
 use jid::{BareJid, FullJid};
 use kameo::actor::Spawn;

@@ -310,7 +310,7 @@ async fn consume_host_frames(
                 .iter()
                 .find(|receipt| manifest.contains(receipt, Some(target)))
                 .ok_or(IngressUowError::EffectIntentConflict)?;
-            super::room_manifest_replay::validate_child(&envelope, receipt, target, stanza)?;
+            super::room_manifest::replay::validate_child(&envelope, receipt, target, stanza)?;
             let context = SmIngressAppendContext {
                 message_key: key,
                 receipt: receipt.clone(),

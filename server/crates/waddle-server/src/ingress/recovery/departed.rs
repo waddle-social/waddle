@@ -429,7 +429,7 @@ async fn commit_departed(
     fence: Option<&RoomClaimFenceContext>,
     departed: &[FullJid],
 ) -> Result<Option<Vec<IngressEffectIntent>>, IngressUowError> {
-    let settled = match super::super::execute_uow::record_delivery_progress(
+    let settled = match super::super::execute::uow::record_delivery_progress(
         uow,
         key,
         progress,

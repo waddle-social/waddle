@@ -1,9 +1,9 @@
 //! Real room planning, canonical commit and delivery execution regressions.
-use super::{
+use super::super::{
     commit::commit_submission,
     effects::{delivery::ExternalDeliveryEffect, PlanSink},
+    execute::uow::STALL_DELIVERY_RESOURCE,
     execute::{execute_effects, terminalize_if_complete},
-    execute_uow::STALL_DELIVERY_RESOURCE,
     test_support::IngressFixture,
     *,
 };
@@ -498,8 +498,8 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
             .expect("envelope");
         let intent = retry.route_progress[0].settle_evidence();
         assert_eq!(
-            super::room_canonical::source(&envelope, &intent),
-            Err(super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
+            super::super::room_canonical::source(&envelope, &intent),
+            Err(super::super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
         );
         assert_eq!(
             DeliveryProgressRepository::load(&mut tx, key, &receipt)
@@ -560,7 +560,7 @@ mod canonical;
 
 mod local;
 
-pub(super) mod stall;
+pub(in crate::ingress) mod stall;
 
 mod system;
 
@@ -656,8 +656,8 @@ async fn assert_unverifiable_archive_rejected(
         .find(|intent| matches!(intent, IngressEffectIntent::RouteMucGroupchat { .. }))
         .expect("route");
     assert_eq!(
-        super::room_canonical::source(&envelope, route),
-        Err(super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
+        super::super::room_canonical::source(&envelope, route),
+        Err(super::super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
     );
     tx.commit().await.expect("read commit");
     let receipts = fixture.count("ingress_effect_receipts").await;

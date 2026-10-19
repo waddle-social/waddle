@@ -162,7 +162,9 @@ async fn rollback(fixture: IngressFixture) {
     let decision = commit_submission(&fixture.uow, &recovery_plan(&fixture), 5)
         .await
         .expect("commit recovery plan");
-    super::super::execute_uow::fail_after_recovery_update(decision.message_key.expect("canonical"));
+    super::super::execute::uow::fail_after_recovery_update(
+        decision.message_key.expect("canonical"),
+    );
     let registry = ConnectionRegistry::new();
     let deps = Deps::new(&registry, "example.com");
     let report = execute_effects(

@@ -1,21 +1,23 @@
-use super::submission::IngressSubmission;
+use super::super::submission::IngressSubmission;
 use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
 
 /// Cluster integration stays dark until remote children can complete. The
 /// test-only scope exercises guarded manifests without enabling production.
-pub(super) fn new_manifests_enabled(uow: &crate::ingress_uow::IngressUnitOfWork) -> bool {
+pub(in crate::ingress) fn new_manifests_enabled(
+    uow: &crate::ingress_uow::IngressUnitOfWork,
+) -> bool {
     match uow.fencing() {
         crate::ingress_uow::IngressFencing::SingleNode => true,
         #[cfg(feature = "clustering")]
         crate::ingress_uow::IngressFencing::Clustered(_) => {
-            super::commit::commit_hooks::allow_clustered_room_manifests()
+            super::super::commit::commit_hooks::allow_clustered_room_manifests()
         }
     }
 }
 
 /// Admission coordinates fence the snapshot once. Later revisions do not revoke
 /// the children of an already accepted manifest.
-pub(super) async fn assert_snapshot_coordinates(
+pub(in crate::ingress) async fn assert_snapshot_coordinates(
     tx: &mut IngressUowTransaction<'_>,
     submission: &IngressSubmission,
 ) -> Result<(), IngressUowError> {
@@ -42,11 +44,11 @@ pub(super) async fn assert_snapshot_coordinates(
         .await
 }
 
-pub(super) async fn seal(
+pub(in crate::ingress) async fn seal(
     tx: &mut IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,
     submission: &IngressSubmission,
-) -> Result<Option<super::FrozenRoomManifest>, IngressUowError> {
+) -> Result<Option<super::super::FrozenRoomManifest>, IngressUowError> {
     use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
     use crate::server::routes::interpret::effects::{
         room::RoomFenceRequirement, RoomExecutionPath,
@@ -97,7 +99,7 @@ pub(super) async fn seal(
             _ => None,
         }
     }).collect();
-    let manifest = super::FrozenRoomManifest::build(
+    let manifest = super::super::FrozenRoomManifest::build(
         key,
         room.clone(),
         stamp,
@@ -114,10 +116,10 @@ pub(super) async fn seal(
 }
 
 /// A sealed reflection is delivered by its ordinary keyed endpoint sink.
-pub(super) fn prepare_sealed_plan(
-    plan: &mut super::IngressPlan,
-    manifest: &super::FrozenRoomManifest,
-    initial_transient: &[super::EffectReceiptKey],
+pub(in crate::ingress) fn prepare_sealed_plan(
+    plan: &mut super::super::IngressPlan,
+    manifest: &super::super::FrozenRoomManifest,
+    initial_transient: &[super::super::EffectReceiptKey],
 ) {
     use crate::server::routes::interpret::effects::{
         Effect, ExternalEffect, PlanSuppressionPolicy,
@@ -127,10 +129,10 @@ pub(super) fn prepare_sealed_plan(
             if child_receipts(effect, manifest).iter().any(|receipt| initial_transient.contains(receipt)) {
                 let stanza = match effect {
                     ExternalEffect::Delivery(
-                        super::effects::delivery::ExternalDeliveryEffect::RouteToPeer { stanza, .. }
-                        | super::effects::delivery::ExternalDeliveryEffect::RelayFullJid { stanza, .. }
-                        | super::effects::delivery::ExternalDeliveryEffect::QueueDetached { stanza, .. }
-                        | super::effects::delivery::ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+                        super::super::effects::delivery::ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+                        | super::super::effects::delivery::ExternalDeliveryEffect::RelayFullJid { stanza, .. }
+                        | super::super::effects::delivery::ExternalDeliveryEffect::QueueDetached { stanza, .. }
+                        | super::super::effects::delivery::ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
                     ) => stanza.clone(),
                     _ => return false,
                 };
@@ -157,11 +159,11 @@ pub(super) fn prepare_sealed_plan(
                 if message.to.as_ref().and_then(|jid| jid.try_as_full().ok()) != Some(target) {
                     return false;
                 }
-                let authorized = manifest.recorded_intents().iter().filter_map(super::reflection_dispatch::original_intent)
+                let authorized = manifest.recorded_intents().iter().filter_map(super::super::reflection_dispatch::original_intent)
                     .any(|intent| {
-                        let Ok(receipt) = super::receipt_key(&intent) else { return false; };
+                        let Ok(receipt) = super::super::receipt_key(&intent) else { return false; };
                         manifest.contains(&receipt, Some(target))
-                            && super::receipts::external_receipts(std::slice::from_ref(&ExternalEffect::Frame(stanza.clone())), std::slice::from_ref(&intent))
+                            && super::super::receipts::external_receipts(std::slice::from_ref(&ExternalEffect::Frame(stanza.clone())), std::slice::from_ref(&intent))
                                 .is_ok_and(|receipts| receipts.iter().flatten().any(|saved| saved == &receipt))
                     });
                 if authorized { planned.suppression = PlanSuppressionPolicy::SenderOnly; }
@@ -171,7 +173,7 @@ pub(super) fn prepare_sealed_plan(
         }
         let Effect::External(effect) = &planned.effect else { return true; };
         let receipts = child_receipts(effect, manifest);
-        let authorized = if let Some(target) = super::recorded::single_target(effect) {
+        let authorized = if let Some(target) = super::super::recorded::single_target(effect) {
             receipts.iter().any(|receipt| manifest.contains(receipt, Some(target)))
         } else {
             receipts.iter().any(|receipt| manifest.contains(receipt, None))
@@ -183,11 +185,11 @@ pub(super) fn prepare_sealed_plan(
 
 /// Aggregate route receipts are assembled from per-resource progress, while
 /// mutation receipts use exact matching. Both name existing frozen children.
-pub(super) fn child_receipts(
-    effect: &super::ExternalEffect,
-    manifest: &super::FrozenRoomManifest,
-) -> Vec<super::EffectReceiptKey> {
-    let mut receipts = super::receipts::external_receipts(
+pub(in crate::ingress) fn child_receipts(
+    effect: &super::super::ExternalEffect,
+    manifest: &super::super::FrozenRoomManifest,
+) -> Vec<super::super::EffectReceiptKey> {
+    let mut receipts = super::super::receipts::external_receipts(
         std::slice::from_ref(effect),
         manifest.recorded_intents(),
     )
@@ -195,7 +197,9 @@ pub(super) fn child_receipts(
     .and_then(|mut receipts| receipts.pop())
     .unwrap_or_default();
     for intent in manifest.recorded_intents() {
-        if let Ok(Some(progress)) = super::RouteProgress::from_intent(intent, None, Vec::new()) {
+        if let Ok(Some(progress)) =
+            super::super::RouteProgress::from_intent(intent, None, Vec::new())
+        {
             if progress.matches(effect) && !receipts.contains(&progress.receipt) {
                 receipts.push(progress.receipt);
             }
@@ -205,18 +209,18 @@ pub(super) fn child_receipts(
 }
 
 #[cfg(feature = "clustering")]
-pub(super) type RoomProof<'a> = Option<crate::ingress_uow::RoomClaimFence<'a>>;
+pub(in crate::ingress) type RoomProof<'a> = Option<crate::ingress_uow::RoomClaimFence<'a>>;
 #[cfg(not(feature = "clustering"))]
-pub(super) type RoomProof<'a> = std::marker::PhantomData<&'a ()>;
+pub(in crate::ingress) type RoomProof<'a> = std::marker::PhantomData<&'a ()>;
 
-pub(super) async fn assert_room<'a>(
+pub(in crate::ingress) async fn assert_room<'a>(
     tx: &mut IngressUowTransaction<'a>,
     submission: &IngressSubmission,
     validate_local: bool,
 ) -> Result<RoomProof<'a>, IngressUowError> {
     #[cfg(feature = "clustering")]
     {
-        use super::identity::IngressStreamIdentity;
+        use super::super::identity::IngressStreamIdentity;
         use crate::server::routes::interpret::effects::{
             room::RoomFenceRequirement, RoomExecutionPath,
         };

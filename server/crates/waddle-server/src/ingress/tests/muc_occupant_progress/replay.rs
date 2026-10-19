@@ -103,7 +103,9 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .plan
         .plan
         .sort_by_key(|planned| match &planned.effect {
-            Effect::External(effect) => super::super::recorded::single_target(effect) == Some(&b),
+            Effect::External(effect) => {
+                super::super::super::recorded::single_target(effect) == Some(&b)
+            }
             _ => false,
         });
     let intent = submission
@@ -226,7 +228,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
     let targets: Vec<_> = retry
         .external
         .iter()
-        .filter_map(super::super::recorded::single_target)
+        .filter_map(super::super::super::recorded::single_target)
         .cloned()
         .collect();
     assert_eq!(
@@ -271,7 +273,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         let IngressEffectIntent::RouteMucGroupchat { route_identity, .. } = &intent else {
             panic!("MUC")
         };
-        assert!(super::super::receipts::routing::message_identity(
+        assert!(super::super::super::receipts::routing::message_identity(
             copy,
             route_identity
         ));
@@ -285,7 +287,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
             "late C is outside the frozen subject audience: {targets:?}"
         );
         for (index, effect) in retry.external.iter().enumerate() {
-            if super::super::recorded::single_target(effect) == Some(&b) {
+            if super::super::super::recorded::single_target(effect) == Some(&b) {
                 assert!(
                     retry.external_dependencies[index]
                         .iter()
@@ -295,7 +297,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
                         )),
                     "the pending subject copy retains its mutation dependency"
                 );
-                assert!(super::super::execute_uow::owns(
+                assert!(super::super::super::execute::uow::owns(
                     effect,
                     &retry.route_progress
                 ));

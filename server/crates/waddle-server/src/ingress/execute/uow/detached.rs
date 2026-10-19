@@ -19,7 +19,7 @@ use crate::{
     },
 };
 
-use super::super::{decision::IngressDecision, recorded::RouteProgress};
+use super::super::super::{decision::IngressDecision, recorded::RouteProgress};
 use crate::ingress::append_authority::AppendAuthority;
 
 #[cfg(test)]
@@ -191,7 +191,7 @@ pub(super) async fn execute(
             dispatch_stream,
             authority: AppendAuthority::Verified,
         });
-        let sealed = match crate::ingress::room_manifest_replay::load(
+        let sealed = match crate::ingress::room_manifest::replay::load(
             uow,
             match resource_deps.ingress_append_context.as_ref() {
                 Some(context) => context,
@@ -214,7 +214,7 @@ pub(super) async fn execute(
             let Some(context) = resource_deps.ingress_append_context.as_ref() else {
                 return EffectOutcome::Unavailable;
             };
-            match crate::ingress::room_manifest_replay::settle_superseded(
+            match crate::ingress::room_manifest::replay::settle_superseded(
                 uow,
                 manifest,
                 resource_deps.room_registry,
@@ -418,7 +418,7 @@ async fn append_resource(
         // The ordered relay's legacy ACK has no frozen-child completion proof.
         // A sealed child stays pending until its actual local sink can prove it.
         let outcome = match deps.ingress_append_context.as_ref() {
-            Some(context) => match crate::ingress::room_manifest_replay::queue_detached(
+            Some(context) => match crate::ingress::room_manifest::replay::queue_detached(
                 manifest,
                 uow,
                 deps,

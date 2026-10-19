@@ -2,7 +2,7 @@
 use super::*;
 use crate::ingress::{
     commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
-    xep0045_room_manifest_tests::room_submission, IngressSubmission, RoomManifestSnapshot,
+    tests::xep0045_room_manifest::room_submission, IngressSubmission, RoomManifestSnapshot,
 };
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,

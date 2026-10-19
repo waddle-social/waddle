@@ -1,6 +1,6 @@
 //! Pin system broadcasts freeze the archived payload for each pending occupant.
 use super::*;
-use crate::ingress::execute_uow::STALL_DELIVERY_RESOURCE;
+use crate::ingress::execute::uow::STALL_DELIVERY_RESOURCE;
 use crate::ingress_substrate::MessageEnvelope;
 use crate::ingress_uow::EffectIntentRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;

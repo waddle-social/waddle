@@ -5,8 +5,8 @@ use crate::{
     ingress::{
         commit::commit_submission,
         effects::{delivery::ExternalDeliveryEffect, Effect, PlanSink},
+        execute::uow::STALL_DELIVERY_RESOURCE,
         execute::{execute_effects, test_hooks},
-        execute_uow::STALL_DELIVERY_RESOURCE,
         maintenance::{
             run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
             MaintenanceOutcome,
@@ -1253,8 +1253,8 @@ mod family_tests {
 mod pin_tests {
     use crate::ingress::{
         commit::commit_submission,
+        execute::uow::STALL_DELIVERY_RESOURCE,
         execute::{execute_effects, test_hooks},
-        execute_uow::STALL_DELIVERY_RESOURCE,
         maintenance::{
             run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor,
             MaintenanceOutcome,

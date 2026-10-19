@@ -79,7 +79,7 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         .plan
         .sort_by_key(|planned| match &planned.effect {
             Effect::External(effect) => {
-                super::super::recorded::single_target(effect) == Some(&sibling)
+                super::super::super::recorded::single_target(effect) == Some(&sibling)
             }
             _ => false,
         });
@@ -131,7 +131,7 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         .expect("source")
         .expect("envelope");
     let frozen_source =
-        super::super::room_canonical::source(&frozen, &intent).expect("canonical source");
+        super::super::super::room_canonical::source(&frozen, &intent).expect("canonical source");
     if !canonical {
         assert!(
             frozen.room_manifest().is_none(),
@@ -172,7 +172,9 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         .external
         .iter()
         .enumerate()
-        .filter(|(_, effect)| super::super::recorded::single_target(effect) == Some(&sibling))
+        .filter(|(_, effect)| {
+            super::super::super::recorded::single_target(effect) == Some(&sibling)
+        })
         .collect();
     let reflections: Vec<_> = sibling_effects
         .iter()
@@ -193,7 +195,7 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         "historical copy needs validated frozen content"
     );
     for (_, effect) in repairs {
-        assert!(super::super::execute_uow::owns(
+        assert!(super::super::super::execute::uow::owns(
             effect,
             &retry.route_progress
         ));
@@ -208,7 +210,7 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         let IngressEffectIntent::RouteMucGroupchat { route_identity, .. } = &intent else {
             panic!("MUC intent");
         };
-        assert!(super::super::receipts::routing::message_identity(
+        assert!(super::super::super::receipts::routing::message_identity(
             copy,
             route_identity
         ));
@@ -278,8 +280,8 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
             .expect("load")
             .expect("envelope");
         assert_eq!(
-            super::super::room_canonical::source(&envelope, &intent),
-            Err(super::super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
+            super::super::super::room_canonical::source(&envelope, &intent),
+            Err(super::super::super::room_canonical::CanonicalSourceError::MissingCanonicalProvenance)
         );
     }
     tx.commit().await.expect("read commit");

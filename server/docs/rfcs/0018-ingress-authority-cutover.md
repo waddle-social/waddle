@@ -169,7 +169,7 @@ and the receipts of the recorded intents it discharges in ONE ingress
 transaction: attested epoch → canonical row `FOR UPDATE` → effect tables →
 `settle_recorded` → commit. No actor, registry, extension or socket call runs
 while that transaction is open. Such effects are executed by unit-of-work arms
-(`execute_uow`) selected by exact effect variant; the generic executor never
+(`ingress::execute::uow`) selected by exact effect variant; the generic executor never
 writes a receipt owned by an arm (`arm_owned_receipts`). Evidence discharges a
 recorded intent only by exact identity, with two typed coalescences: a
 `Duplicate` candidate insertion discharges the recorded `Inserted` obligation,
@@ -689,7 +689,7 @@ Between terminalization and retention GC, recovery freezes the canonical
 envelope, recorded and unreceipted intents, and route progress under the
 canonical lock; releases the lock; rebuilds a synthetic decision through the
 existing restorers; then executes through the unchanged `execute_effects` /
-`execute_uow` arms and settlement contract. Groupchat notification recovery
+`ingress::execute::uow` arms and settlement contract. Groupchat notification recovery
 delegates to its existing settlement. No actor call runs under the freeze lock.
 
 Recorded wins: never invent audience or payload. The plan's provenance gate

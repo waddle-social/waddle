@@ -11,7 +11,7 @@ use crate::{
     },
 };
 
-use super::{decision::IngressDecision, recorded::RouteProgress};
+use super::super::{decision::IngressDecision, recorded::RouteProgress};
 
 mod offline;
 #[cfg(test)]
@@ -26,7 +26,7 @@ pub(crate) use recovery::fail_after_recovery_update;
 
 mod relay_copy;
 
-pub(super) async fn execute_legacy_remote(
+pub(in crate::ingress) async fn execute_legacy_remote(
     uow: &IngressUnitOfWork,
     decision: &IngressDecision,
     index: usize,
@@ -82,7 +82,7 @@ pub(crate) use detached::{
     CANCEL_STALLED_DELIVERY, FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE,
 };
 
-pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
+pub(in crate::ingress) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) -> bool {
     match effect {
         ExternalEffect::Frame(stanza) => {
             matches!(stanza.as_ref(), waddle_xmpp::Stanza::Message(message)
@@ -121,7 +121,7 @@ pub(super) fn owns(effect: &ExternalEffect, route_progress: &[RouteProgress]) ->
 /// Specialized invitations retain their generic receipt mapping, but their
 /// mutually exclusive live and pending sinks share the canonical transaction.
 /// The caller wraps this entire future in its existing timeout_at(deadline).
-pub(super) async fn execute_with_uow(
+pub(in crate::ingress) async fn execute_with_uow(
     uow: &IngressUnitOfWork,
     _db: &Database,
     decision: &IngressDecision,
@@ -145,7 +145,7 @@ pub(super) async fn execute_with_uow(
     }
     if let ExternalEffect::Frame(stanza) = effect {
         if owns(effect, &decision.route_progress) {
-            return match super::room_manifest_replay::release_transient_reflection(
+            return match super::super::room_manifest::replay::release_transient_reflection(
                 uow, decision, index, stanza, deps,
             )
             .await

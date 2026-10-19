@@ -268,7 +268,7 @@ mod tests {
                 panic!("external repair")
             };
             assert_eq!(single_target(effect), Some(&sibling));
-            assert!(crate::ingress::execute_uow::owns(effect, pending));
+            assert!(crate::ingress::execute::uow::owns(effect, pending));
             let (restored_identity, restored_stanza) =
                 delivery_payload(&mut repair).expect("delivery payload");
             assert_eq!(restored_identity.as_ref(), Some(&identity));
@@ -282,7 +282,7 @@ mod tests {
                 panic!("reflection")
             };
             assert!(single_target(effect).is_none());
-            assert!(!crate::ingress::execute_uow::owns(effect, pending));
+            assert!(!crate::ingress::execute::uow::owns(effect, pending));
             assert!(
                 matches!(effect, ExternalEffect::Frame(copy) if matches!(copy.as_ref(), Stanza::Message(message) if message == &fresh))
             );

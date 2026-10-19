@@ -43,7 +43,7 @@ pub(super) async fn apply_durable(
     key: MessageKey,
     plan: &IngressPlan,
     recorded: &[IngressEffectIntent],
-    room_proof: &super::commit_room::RoomProof<'_>,
+    room_proof: &super::commit::room::RoomProof<'_>,
     sender: &jid::BareJid,
     publication: Option<&crate::ingress_uow::RoomPublication>,
 ) -> Result<AppliedDurable, IngressUowError> {

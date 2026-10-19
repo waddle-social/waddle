@@ -93,9 +93,9 @@ async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress_uo
         .expect("commit pending plan");
     let key = decision.message_key.expect("canonical");
     if let Some(retry_class) = retry_class {
-        super::execute_uow::retry_before_offline_settlement(key, retry_class);
+        super::super::execute::uow::retry_before_offline_settlement(key, retry_class);
     } else {
-        super::execute_uow::fail_before_offline_settlement(key);
+        super::super::execute::uow::fail_before_offline_settlement(key);
     }
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::new(&registry, "example.com");

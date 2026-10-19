@@ -143,8 +143,8 @@ async fn host_owned_progress(fixture: IngressFixture) {
         "host policy cannot resolve a disconnected human recipient"
     );
     tx.commit().await.expect("inspection commit");
-    let recovered =
-        super::super::recovery::rebuild::rebuild(super::super::recovery::rebuild::RecoveryInput {
+    let recovered = super::super::super::recovery::rebuild::rebuild(
+        super::super::super::recovery::rebuild::RecoveryInput {
             key,
             envelope: &envelope,
             created_at: chrono::Utc::now(),
@@ -154,8 +154,9 @@ async fn host_owned_progress(fixture: IngressFixture) {
             host_owned_resources: vec![bot.clone()],
             departed_occupants: vec![],
             blocked_recipients: &[],
-        })
-        .expect("rebuild host-owned route");
+        },
+    )
+    .expect("rebuild host-owned route");
     assert!(
         recovered.decision.external.iter().all(|effect| !matches!(
             effect,

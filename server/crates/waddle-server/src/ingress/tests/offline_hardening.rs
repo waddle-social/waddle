@@ -319,7 +319,7 @@ async fn missing_pending_obligation(fixture: IngressFixture) {
     let storage = pending_storage(&fixture).await;
     let (mut submission, row) = archived_submission(&fixture, "offline-missing-pending");
     let [pending, _, marker] = obligations(&row);
-    let pending_key = super::receipt_key(&pending).expect("pending receipt identity");
+    let pending_key = super::super::receipt_key(&pending).expect("pending receipt identity");
     submission.plan.intents.extend([pending, marker]);
     add_effect(
         &mut submission,

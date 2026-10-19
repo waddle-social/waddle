@@ -1,6 +1,6 @@
 //! Regression coverage for the real interpreter -> commit -> execute seam.
-use super::test_support::IngressFixture;
-use super::{commit::commit_submission, execute::execute_effects, *};
+use super::super::test_support::IngressFixture;
+use super::super::{commit::commit_submission, execute::execute_effects, *};
 use crate::server::routes::interpret::{
     effects::{EffectSink, PlanSink},
     interpret,

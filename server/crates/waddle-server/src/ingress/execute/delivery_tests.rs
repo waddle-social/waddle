@@ -563,7 +563,7 @@ async fn invite_live_acceptance_after_offline_probe_prevents_pending_fallback(
     let entered = Arc::new(Notify::new());
     let resume = Arc::new(Notify::new());
     let (tx, mut rx) = tokio::sync::mpsc::channel(4);
-    let offline_attempt = crate::ingress::execute_uow::PAUSE_BEFORE_INVITATION_SETTLEMENT.scope(
+    let offline_attempt = crate::ingress::execute::uow::PAUSE_BEFORE_INVITATION_SETTLEMENT.scope(
         (entered.clone(), resume.clone()),
         execute_effects(
             &fixture.uow,

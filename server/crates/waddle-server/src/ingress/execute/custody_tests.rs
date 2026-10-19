@@ -1,7 +1,8 @@
 //! #1760: settled route progress never owns the last recoverable delivery payload.
 use super::*;
 use crate::ingress::{
-    commit::commit_submission, execute_uow::FAIL_DELIVERY_PROGRESS_TX, test_support::IngressFixture,
+    commit::commit_submission, execute::uow::FAIL_DELIVERY_PROGRESS_TX,
+    test_support::IngressFixture,
 };
 use crate::ingress_uow::DeliveryProgressRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;

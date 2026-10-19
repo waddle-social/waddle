@@ -234,7 +234,7 @@ async fn discharge_departed_copies(
                 .cloned()
                 .collect();
             for target in owed {
-                match super::super::room_manifest_replay::settle_superseded(
+                match super::super::room_manifest::replay::settle_superseded(
                     uow,
                     &manifest,
                     deps.room_registry,

@@ -188,7 +188,7 @@ async fn accept_live_delivery_guarded_inner(
     check_admission: impl Fn() -> Result<(), IngressUowError>,
 ) -> Result<FullJidDeliveryOutcome, IngressUowError> {
     check_admission()?;
-    let manifest = super::room_manifest_replay::load(uow, context, target, stanza).await?;
+    let manifest = super::room_manifest::replay::load(uow, context, target, stanza).await?;
     accept_live_delivery_inner(
         uow,
         context,
@@ -197,7 +197,7 @@ async fn accept_live_delivery_guarded_inner(
         || async {
             match manifest {
                 Some(manifest) => {
-                    super::room_manifest_replay::enqueue(
+                    super::room_manifest::replay::enqueue(
                         &manifest,
                         uow,
                         registry,
@@ -289,7 +289,7 @@ where
     let envelope = CanonicalMessageRepository::load_envelope(&mut tx, context.message_key)
         .await?
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
-    super::room_manifest_replay::validate_child(&envelope, &context.receipt, target, stanza)?;
+    super::room_manifest::replay::validate_child(&envelope, &context.receipt, target, stanza)?;
     if envelope.room_manifest().is_some() && !sealed_sink_guarded {
         return Err(IngressUowError::EffectIntentConflict);
     }

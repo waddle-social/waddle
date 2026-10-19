@@ -1,4 +1,4 @@
-use super::identity::IngressStreamIdentity;
+use super::super::identity::IngressStreamIdentity;
 use crate::ingress_substrate::{FrontierOutcome, MessageWriteOutcome};
 use crate::ingress_uow::{
     IngressFencing, IngressUowError, IngressUowTransaction, SmIngressRepository,
@@ -6,14 +6,14 @@ use crate::ingress_uow::{
 };
 use waddle_xmpp::ingress::{IngressOrdinal, MessageKey, SmIngressId, WireHandledCount};
 
-pub(super) struct StreamAttempt {
+pub(in crate::ingress) struct StreamAttempt {
     pub id: SmIngressId,
     pub ordinal: IngressOrdinal,
     pub bound: Option<(MessageKey, IngressOrdinal)>,
     wire: WireHandledCount,
     checkpoint: WireHandledCount,
 }
-pub(super) async fn lock_stream(
+pub(in crate::ingress) async fn lock_stream(
     tx: &mut IngressUowTransaction<'_>,
     identity: &IngressStreamIdentity,
 ) -> Result<Option<StreamAttempt>, IngressUowError> {
@@ -97,7 +97,7 @@ pub(super) async fn lock_stream(
         checkpoint: *checkpoint_h,
     }))
 }
-pub(super) async fn finish_stream(
+pub(in crate::ingress) async fn finish_stream(
     tx: &mut IngressUowTransaction<'_>,
     stream: Option<&StreamAttempt>,
     key: MessageKey,

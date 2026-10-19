@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
+use crate::ingress::execute::uow::FAIL_DELIVERY_PROGRESS_TX;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::stream_management::{

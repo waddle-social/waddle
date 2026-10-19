@@ -1,4 +1,5 @@
 //! Bounded post-commit execution. Failures never revise ingress authority.
+pub(super) mod uow;
 
 use std::time::Duration;
 
@@ -556,7 +557,7 @@ pub async fn execute_effects(
                         }
                         return sink.execute_with_applied(planned[index].clone(), &immediate, &decision.applied_durable).await;
                     }
-                    if let Some(outcome) = super::execute_uow::execute_legacy_remote(uow, decision, index, effect, deps).await {
+                    if let Some(outcome) = super::execute::uow::execute_legacy_remote(uow, decision, index, effect, deps).await {
                         return outcome;
                     }
                     let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
@@ -582,7 +583,7 @@ pub async fn execute_effects(
                         Effect::External(resolved @ (ExternalEffect::RouteToPeer(_) | ExternalEffect::QueueOfflineDelivery(_))) => resolved,
                         _ => effect,
                     };
-                    if let Some(result) = super::execute_uow::execute_with_uow(uow, db, decision, index, resolved_effect, deps, deadline).await {
+                    if let Some(result) = super::execute::uow::execute_with_uow(uow, db, decision, index, resolved_effect, deps, deadline).await {
                         result
                     } else {
                         let mut execution = planned[index].clone();

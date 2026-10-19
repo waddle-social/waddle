@@ -1,6 +1,6 @@
 //! Controlled outcomes test ingress progress, not retry eligibility on a diverted relay channel.
 use super::*;
-use crate::ingress::execute_uow::FAIL_DELIVERY_PROGRESS_TX;
+use crate::ingress::execute::uow::FAIL_DELIVERY_PROGRESS_TX;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{
     ControlledMucRelay, FullJidDeliveryOutcome, CONTROLLED_MUC_RELAY,

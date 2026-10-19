@@ -1,5 +1,5 @@
 //! XEP-0045 frozen room acceptance and crash/retry authority.
-use super::{commit::commit_submission, test_support::IngressFixture, *};
+use super::super::{commit::commit_submission, test_support::IngressFixture, *};
 use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
 use crate::server::routes::interpret::effects::{room::RoomFenceRequirement, RoomExecutionPath};
 use waddle_xmpp::ingress::{
@@ -9,7 +9,7 @@ use waddle_xmpp::ingress::{
 use waddle_xmpp::muc::{durable::AdminMutationId, room_actor::OccupancyWatermark};
 use waddle_xmpp_core::xep0359::StanzaId;
 
-pub(super) fn room_submission(fixture: &IngressFixture) -> IngressSubmission {
+pub(in crate::ingress) fn room_submission(fixture: &IngressFixture) -> IngressSubmission {
     let mut submission = fixture.submission(Some("frozen-room-manifest"), "accepted room body");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let peer: jid::FullJid = "alice@example.com/phone".parse().expect("peer");
@@ -142,7 +142,7 @@ async fn postgres_clustered_dark_manifest_remains_authoritative_without_test_opt
             crate::db_params![room.to_string(), coordinates.lifecycle.to_string(), 1_i64],
         )
         .await;
-    let accepted = super::commit::commit_hooks::ALLOW_CLUSTERED_ROOM_MANIFESTS
+    let accepted = super::super::commit::commit_hooks::ALLOW_CLUSTERED_ROOM_MANIFESTS
         .scope(true, commit_submission(&fixture.uow, &submission, 1))
         .await
         .expect("explicit dark acceptance");
@@ -284,7 +284,7 @@ async fn postgres_clustered_legacy_remote_completion_releases_local_successor() 
         let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
             .scope(
                 (FullJidDeliveryOutcome::Delivered, wire.clone()),
-                super::execute::execute_effects(
+                super::super::execute::execute_effects(
                     &fixture.uow,
                     &fixture.db,
                     &decision,
@@ -294,7 +294,7 @@ async fn postgres_clustered_legacy_remote_completion_releases_local_successor() 
                 ),
             )
             .await;
-        assert_eq!(report.outcomes[0].1, super::ExternalOutcome::Done);
+        assert_eq!(report.outcomes[0].1, super::super::ExternalOutcome::Done);
         assert_eq!(
             fixture
                 .count("ingress_messages WHERE terminal_at IS NOT NULL")
@@ -327,7 +327,7 @@ async fn postgres_clustered_legacy_remote_completion_releases_local_successor() 
     let _ = CONTROLLED_REGISTERED_REMOTE_DELIVERY
         .scope(
             (FullJidDeliveryOutcome::Delivered, wire.clone()),
-            super::execute::execute_effects(
+            super::super::execute::execute_effects(
                 &fixture.uow,
                 &fixture.db,
                 &retry,
@@ -447,7 +447,7 @@ async fn crash_mid_manifest_rolls_back_canonical_authority_and_every_child() {
         reserved_wire_position: waddle_xmpp::ingress::WireHandledCount::from_storage(1),
         checkpoint_h: waddle_xmpp::ingress::WireHandledCount::from_storage(1),
     };
-    let result = super::commit::commit_hooks::FAIL_AFTER_MANIFEST
+    let result = super::super::commit::commit_hooks::FAIL_AFTER_MANIFEST
         .scope(true, commit_submission(&fixture.uow, &submission, 1))
         .await;
     assert!(result.is_err(), "crash checkpoint was reached");

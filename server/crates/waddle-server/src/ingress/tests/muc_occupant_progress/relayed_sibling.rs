@@ -173,7 +173,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
         .plan
         .sort_by_key(|planned| match &planned.effect {
             Effect::External(effect) => {
-                super::super::recorded::single_target(effect) == Some(&sibling)
+                super::super::super::recorded::single_target(effect) == Some(&sibling)
             }
             _ => false,
         });
@@ -246,14 +246,14 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
         .expect("envelope");
     tx.commit().await.expect("read commit");
     let frozen_source =
-        super::super::room_canonical::source(&frozen, &intent).expect("frozen source");
+        super::super::super::room_canonical::source(&frozen, &intent).expect("frozen source");
 
     submission.sender = sibling.clone();
     message.from = Some(sibling.clone().into());
     submission.plan = plan_muc_for_relay(&deps, room.clone(), message).await;
     guard_plan(&mut submission.plan, &fence);
     assert!(submission.plan.plan.iter().any(|planned| matches!(&planned.effect,
-        Effect::External(effect @ ExternalEffect::Delivery(_)) if super::super::recorded::single_target(effect) == Some(&sibling))), "real relay planner keeps the archived sibling reflection in the resource FIFO");
+        Effect::External(effect @ ExternalEffect::Delivery(_)) if super::super::super::recorded::single_target(effect) == Some(&sibling))), "real relay planner keeps the archived sibling reflection in the resource FIFO");
     let retry = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("relayed sibling owner retry");
@@ -267,7 +267,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
                     !retry.external_receipts[index].contains(&receipt),
                     "frame never owns kind-2 receipt"
                 );
-                assert!(!super::super::execute_uow::owns(
+                assert!(!super::super::super::execute::uow::owns(
                     effect,
                     &retry.route_progress
                 ));
@@ -282,7 +282,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
                 }
             }
             ExternalEffect::Delivery(delivery)
-                if super::super::recorded::single_target(effect) == Some(&sibling) =>
+                if super::super::super::recorded::single_target(effect) == Some(&sibling) =>
             {
                 let stanza = match (destination, delivery) {
                     (Destination::Live, ExternalDeliveryEffect::RouteToPeer { stanza, .. })
@@ -300,7 +300,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
                 if !retry.external_receipts[index].contains(&receipt) {
                     reflections += 1;
                     assert!(
-                        !super::super::execute_uow::owns(effect, &retry.route_progress),
+                        !super::super::super::execute::uow::owns(effect, &retry.route_progress),
                         "fresh attempt echo never owns historical occupant progress"
                     );
                     let Stanza::Message(copy) = stanza.as_ref() else {
@@ -313,7 +313,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
                     continue;
                 }
                 repairs += 1;
-                assert!(super::super::execute_uow::owns(
+                assert!(super::super::super::execute::uow::owns(
                     effect,
                     &retry.route_progress
                 ));
@@ -326,7 +326,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
                 let IngressEffectIntent::RouteMucGroupchat { route_identity, .. } = &intent else {
                     panic!("MUC intent")
                 };
-                assert!(super::super::receipts::routing::message_identity(
+                assert!(super::super::super::receipts::routing::message_identity(
                     copy,
                     route_identity
                 ));

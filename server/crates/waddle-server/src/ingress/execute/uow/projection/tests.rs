@@ -10,7 +10,7 @@ use waddle_xmpp::{
 use waddle_xmpp_core::xep0359::StanzaId;
 
 async fn sealed_inbox_push_audience(empty_original_audience: bool) {
-    use crate::ingress::{execute_uow::execute_with_uow, IngressEffectCapture};
+    use crate::ingress::{execute::uow::execute_with_uow, IngressEffectCapture};
     use crate::server::routes::{
         interpret::{effects::PlanSink, interpret},
         websocket::{interpret_loop::build_interpret_deps, tests as socket_tests},

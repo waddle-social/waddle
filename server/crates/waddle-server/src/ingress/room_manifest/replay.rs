@@ -29,7 +29,7 @@ use crate::{
     server::routes::interpret::SmIngressAppendContext,
 };
 
-use super::{EffectReceiptKey, FrozenRoomManifest};
+use super::super::{EffectReceiptKey, FrozenRoomManifest};
 
 const PROBE_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -151,7 +151,7 @@ async fn enqueue_under_current_node(
 
 /// Validate the payload before any endpoint decision. Unknown authority is an
 /// error, never permission to fall back to today's roster or an unkeyed send.
-pub(super) fn validate_child(
+pub(in crate::ingress) fn validate_child(
     envelope: &MessageEnvelope,
     receipt: &EffectReceiptKey,
     target: &FullJid,
@@ -169,7 +169,7 @@ pub(super) fn validate_child(
     let intent = manifest
         .recorded_intents()
         .iter()
-        .find(|intent| super::receipt_key(intent).ok().as_ref() == Some(receipt))
+        .find(|intent| super::super::receipt_key(intent).ok().as_ref() == Some(receipt))
         .ok_or(IngressUowError::EffectIntentConflict)?;
     let source_intent = match intent {
         IngressEffectIntent::RouteMucGroupchat { .. }
@@ -178,21 +178,21 @@ pub(super) fn validate_child(
             .recorded_intents()
             .iter()
             .find(|source| {
-                super::reflection_dispatch::original_intent(source).as_ref() == Some(intent)
+                super::super::reflection_dispatch::original_intent(source).as_ref() == Some(intent)
             })
             .ok_or(IngressUowError::EffectIntentConflict)?,
         _ => return Err(IngressUowError::EffectIntentConflict),
     };
-    let source = super::room_canonical::source(envelope, source_intent)
+    let source = super::super::room_canonical::source(envelope, source_intent)
         .map_err(|_| IngressUowError::EffectIntentConflict)?;
-    let expected = super::room_canonical::occupant_copy_message(source, target);
-    if !super::append_authority::same_message_content(&expected, offered) {
+    let expected = super::super::room_canonical::occupant_copy_message(source, target);
+    if !super::super::append_authority::same_message_content(&expected, offered) {
         return Err(IngressUowError::EffectIntentConflict);
     }
     Ok(())
 }
 
-pub(super) async fn load(
+pub(in crate::ingress) async fn load(
     uow: &IngressUnitOfWork,
     context: &SmIngressAppendContext,
     target: &FullJid,
@@ -213,7 +213,7 @@ pub(super) async fn load(
 /// Retire only the frozen original child, never a replacement recipient.
 /// Clustered manifests require strictly newer inherited occupancy; single-node
 /// authority also proves departure, published reconstruction, or room absence.
-pub(super) async fn settle_superseded(
+pub(in crate::ingress) async fn settle_superseded(
     uow: &IngressUnitOfWork,
     manifest: &FrozenRoomManifest,
     registry: Option<&ActorRef<RoomRegistryActor>>,
@@ -226,7 +226,7 @@ pub(super) async fn settle_superseded(
     let child = manifest
         .child(&context.receipt, Some(target))
         .ok_or(IngressUowError::EffectIntentConflict)?;
-    if child.disposition != super::RoomManifestChildDisposition::Delivery {
+    if child.disposition != super::super::RoomManifestChildDisposition::Delivery {
         return Ok(None);
     }
     let watermark = child
@@ -235,7 +235,7 @@ pub(super) async fn settle_superseded(
     let intent = manifest
         .recorded_intents()
         .iter()
-        .find(|intent| super::receipt_key(intent).ok().as_ref() == Some(&context.receipt))
+        .find(|intent| super::super::receipt_key(intent).ok().as_ref() == Some(&context.receipt))
         .ok_or(IngressUowError::EffectIntentConflict)?;
     if child.delivery_key
         != waddle_xmpp::ingress::DeliveryKey::resource(
@@ -246,10 +246,16 @@ pub(super) async fn settle_superseded(
     {
         return Err(IngressUowError::EffectIntentConflict);
     }
-    let mut progress =
-        super::recorded::RouteProgress::from_intent(intent, context.received_at, Vec::new())?
-            .ok_or(IngressUowError::EffectIntentConflict)?;
-    super::reflection_dispatch::classify_progress(&mut progress, manifest.recorded_intents());
+    let mut progress = super::super::recorded::RouteProgress::from_intent(
+        intent,
+        context.received_at,
+        Vec::new(),
+    )?
+    .ok_or(IngressUowError::EffectIntentConflict)?;
+    super::super::reflection_dispatch::classify_progress(
+        &mut progress,
+        manifest.recorded_intents(),
+    );
     if !progress.fanout.contains(target) || progress.room() != Some(&manifest.room) {
         return Err(IngressUowError::EffectIntentConflict);
     }
@@ -300,7 +306,7 @@ pub(super) async fn settle_superseded(
                 action: Box::new(move || {
                     Box::pin(async move {
                         crate::ingress_uow::run_with_retry(5, || {
-                            super::execute_uow::record_policy_progress(
+                            super::super::execute::uow::record_policy_progress(
                                 &uow_owned,
                                 key,
                                 &progress,
@@ -368,7 +374,7 @@ pub(super) async fn settle_superseded(
                             crate::ingress_uow::IngressFencing::SingleNode => None,
                         };
                         crate::ingress_uow::run_with_retry(5, || {
-                            super::execute_uow::record_policy_progress(
+                            super::super::execute::uow::record_policy_progress(
                                 &uow_owned,
                                 key,
                                 &progress,
@@ -395,7 +401,7 @@ pub(super) async fn settle_superseded(
 
 /// The actor validates lifecycle and monotonic occupancy immediately before the
 /// synchronous socket enqueue, with no roster mutation between proof and sink.
-pub(super) async fn enqueue(
+pub(in crate::ingress) async fn enqueue(
     manifest: &FrozenRoomManifest,
     uow: &IngressUnitOfWork,
     registry: Option<&ActorRef<RoomRegistryActor>>,
@@ -439,9 +445,9 @@ pub(super) async fn enqueue(
 
 /// Release one policy-settled initial reflection into its original sender-stream
 /// frame queue. This never allocates keyed custody or an ingress delivery retry.
-pub(super) async fn release_transient_reflection(
+pub(in crate::ingress) async fn release_transient_reflection(
     uow: &IngressUnitOfWork,
-    decision: &super::IngressDecision,
+    decision: &super::super::IngressDecision,
     index: usize,
     stanza: &Stanza,
     deps: &crate::server::routes::interpret::Deps<'_>,
@@ -473,7 +479,8 @@ pub(super) async fn release_transient_reflection(
     };
     if !matches!(
         decision.class,
-        super::IngressDecisionClass::Accepted | super::IngressDecisionClass::OwnerFirstAcceptance
+        super::super::IngressDecisionClass::Accepted
+            | super::super::IngressDecisionClass::OwnerFirstAcceptance
     ) || deps.delivery_execution_context != DeliveryExecutionContext::Live
         || !decision
             .external_receipts
@@ -492,13 +499,13 @@ pub(super) async fn release_transient_reflection(
     let reflection = manifest
         .recorded_intents()
         .iter()
-        .filter_map(super::reflection_dispatch::original_intent)
+        .filter_map(super::super::reflection_dispatch::original_intent)
         .find(|intent| {
             matches!(intent, IngressEffectIntent::RouteDirect { fanout, .. }
             if fanout.as_slice() == [target.clone()])
         })
         .ok_or(IngressUowError::EffectIntentConflict)?;
-    let receipt = super::receipt_key(&reflection)?;
+    let receipt = super::super::receipt_key(&reflection)?;
     validate_child(&envelope, &receipt, target, stanza)?;
     if !EffectReceiptRepository::contains_policy_discard(
         &mut tx,
@@ -555,7 +562,7 @@ pub(super) async fn release_transient_reflection(
 
 /// Keep a new detached allocation in the same serialized occupancy turn as its
 /// proof. The existing SM key remains the only durable acceptance ledger.
-pub(super) async fn queue_detached(
+pub(in crate::ingress) async fn queue_detached(
     manifest: &FrozenRoomManifest,
     uow: &IngressUnitOfWork,
     deps: &crate::server::routes::interpret::Deps<'_>,
@@ -646,7 +653,7 @@ mod tests {
     ) {
         use crate::ingress::{
             commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
-            xep0045_room_manifest_tests::room_submission, RoomManifestSnapshot,
+            tests::xep0045_room_manifest::room_submission, RoomManifestSnapshot,
         };
         use crate::ingress_uow::{
             CanonicalMessageRepository, DeliveryProgressRepository, EffectReceiptRepository,
@@ -721,7 +728,7 @@ mod tests {
         if let IngressEffectIntent::RouteMucGroupchat { occupants, .. } = route {
             occupants.push(other.clone());
         }
-        let receipt = super::super::receipt_key(route).expect("route receipt");
+        let receipt = super::super::super::receipt_key(route).expect("route receipt");
         let mut offered = submission
             .plan
             .room_canonical_message
@@ -764,7 +771,7 @@ mod tests {
             received_at: None,
             archive_positions: Vec::new(),
             dispatch_stream: None,
-            authority: super::super::append_authority::AppendAuthority::Verified,
+            authority: super::super::super::append_authority::AppendAuthority::Verified,
         };
         let registry = Some(&state.deps.protocol.room_registry);
         assert!(
@@ -889,7 +896,7 @@ mod tests {
             MessageKey::new(),
             room.clone(),
             waddle_xmpp_core::xep0359::StanzaId::new("sealed", room.into()),
-            &super::super::RoomManifestSnapshot {
+            &super::super::super::RoomManifestSnapshot {
                 host_no_transport: Vec::new(),
                 coordinates: Some(coordinates),
                 occupancy_incarnation: incarnation,
@@ -941,9 +948,10 @@ mod tests {
     #[tokio::test]
     async fn xep0045_cancelled_caller_cannot_publish_after_queued_node_rotation() {
         use waddle_xmpp::ownership::NodeIdentity;
-        let Some(mut fixture) =
-            super::super::test_support::IngressFixture::postgres("manifest_cancelled_enqueue")
-                .await
+        let Some(mut fixture) = super::super::super::test_support::IngressFixture::postgres(
+            "manifest_cancelled_enqueue",
+        )
+        .await
         else {
             return;
         };
@@ -1018,7 +1026,7 @@ mod tests {
     async fn xep0045_room_claim_protection_does_not_deadlock_queued_node_rotation() {
         use waddle_xmpp::ownership::NodeIdentity;
         let Some(mut fixture) =
-            super::super::test_support::IngressFixture::postgres("manifest_rotation").await
+            super::super::super::test_support::IngressFixture::postgres("manifest_rotation").await
         else {
             return;
         };
@@ -1079,7 +1087,8 @@ mod tests {
     #[tokio::test]
     async fn xep0045_current_claim_blocks_takeover_until_child_acceptance_resolves() {
         let Some(mut fixture) =
-            super::super::test_support::IngressFixture::postgres("manifest_current_claim").await
+            super::super::super::test_support::IngressFixture::postgres("manifest_current_claim")
+                .await
         else {
             return;
         };
@@ -1166,7 +1175,7 @@ mod tests {
             route_identity: EffectMessageIdentity::stanza(stamp.clone()),
         };
         let reflection =
-            super::super::reflection_dispatch::original_intent(&route).expect("reflection");
+            super::super::super::reflection_dispatch::original_intent(&route).expect("reflection");
         let mut message = Message::new(Some(room.clone().into()));
         message.type_ = MessageType::Groupchat;
         message.from = Some(room.with_resource_str("sender").expect("nick").into());
@@ -1182,7 +1191,7 @@ mod tests {
             MessageKey::new(),
             room,
             stamp,
-            &super::super::RoomManifestSnapshot {
+            &super::super::super::RoomManifestSnapshot {
                 host_no_transport: Vec::new(),
                 coordinates: None,
                 occupancy_incarnation: AdminMutationId::generate(),
@@ -1199,8 +1208,8 @@ mod tests {
             .with_room_manifest(manifest)
             .expect("envelope");
         for (intent, target) in [(&route, &peer), (&reflection, &sender)] {
-            let receipt = super::super::receipt_key(intent).expect("receipt");
-            let copy = super::super::room_canonical::occupant_copy_message(&message, target);
+            let receipt = super::super::super::receipt_key(intent).expect("receipt");
+            let copy = super::super::super::room_canonical::occupant_copy_message(&message, target);
             validate_child(&envelope, &receipt, target, &Stanza::Message(copy.clone()))
                 .expect("admitted child");
             let mut changed = copy;
@@ -1210,7 +1219,8 @@ mod tests {
             assert!(
                 validate_child(&envelope, &receipt, target, &Stanza::Message(changed)).is_err()
             );
-            let newcomer = super::super::room_canonical::occupant_copy_message(&message, &sibling);
+            let newcomer =
+                super::super::super::room_canonical::occupant_copy_message(&message, &sibling);
             assert!(
                 validate_child(&envelope, &receipt, &sibling, &Stanza::Message(newcomer)).is_err()
             );

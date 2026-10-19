@@ -88,7 +88,8 @@ pub(super) async fn execute_sealed_inbox_push(
                 .child(&receipt_key, Some(target))
                 .is_none_or(|child| {
                     child.delivery_key != DeliveryKey::resource(key, &intent.semantic_key(), target)
-                        || child.disposition != super::super::RoomManifestChildDisposition::Delivery
+                        || child.disposition
+                            != super::super::super::RoomManifestChildDisposition::Delivery
                 })
         })
     {
@@ -106,7 +107,7 @@ pub(super) async fn execute_sealed_inbox_push(
                 InboxProjectionMutation::GroupchatChannelAndThread { room, thread_id, .. } => room == &entry.partner && (entry.thread_id.is_none() || entry.thread_id.as_deref() == Some(thread_id.as_str())),
                 _ => false,
             }))
-        || !recorded.iter().any(|source| super::super::room_canonical::source(&envelope, source).is_ok_and(|message| {
+        || !recorded.iter().any(|source| super::super::super::room_canonical::source(&envelope, source).is_ok_and(|message| {
             waddle_xmpp::xep::extract_stanza_ids(message).contains(&manifest.stanza_id)
         }))
     {
