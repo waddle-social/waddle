@@ -980,19 +980,30 @@ impl OrderedRelayDeliveryBridge {
             socket_generation: registration.socket_generation,
             user_owner: registration.user_owner.clone(),
         };
-        let claim_snapshot = current_claim(&services, &user_entity(&jid.to_bare())).await;
-        let Some(snapshot) = claim_snapshot else {
+        let snapshot = match services
+            .claim_store
+            .current_claim(&user_entity(&jid.to_bare()))
+            .await
+        {
+            Ok(Some(snapshot)) if snapshot.owner_lease_fresh => snapshot,
+            // #1295: no owner, or one committed expired (crashed, or retired
+            // after a graceful shutdown). Waiting cannot help — nothing else
+            // reclaims a user whose live socket is here — so take the user
+            // over through the refresh path, whose registry claim CAS decides
+            // against any fresh owner that wins first.
+            Ok(None | Some(_)) => {
+                let refresh = self.refresh_remote_resource_origin(&origin).await;
+                tracing::info!(
+                    jid = %jid,
+                    ?refresh,
+                    "clustered remote-resource resync promoted after its owner expired"
+                );
+                return !matches!(refresh, RemoteResourceOriginRefresh::Failed);
+            }
             // No readable claim: the authoritative owner is unknown, so an
             // Updated from the recorded owner would prove nothing. Retry.
-            return false;
+            Err(_) => return false,
         };
-        if !snapshot.owner_lease_fresh {
-            // The recorded owner's lease is stale — it may be mid-deposition
-            // and can still answer Updated while its self-fence cleanup
-            // runs. Retry until the claim resolves to a fresh owner
-            // (same node, or a move handled below).
-            return false;
-        }
         {
             let owner_moved = snapshot.owner.node_id != registration.user_owner.as_str();
             if owner_moved {

@@ -102,11 +102,15 @@ impl WaddleWindow {
                 || self.imp().membership.borrow().joined(&conversation.jid))
     }
 
+    /// The composer is usable when the open conversation can take a
+    /// message and no upload is in flight.
     pub(super) fn refresh_composer(&self) {
         let ready = self
             .current_conversation()
             .is_some_and(|c| self.can_send(&c));
-        self.imp().composer.set_sensitive(ready);
+        self.imp()
+            .composer
+            .set_sensitive(ready && !self.imp().uploading.get());
         if let Some(conversation) = self.current_conversation() {
             let hint = if !self.imp().connected.get() {
                 "Reconnecting…".to_string()

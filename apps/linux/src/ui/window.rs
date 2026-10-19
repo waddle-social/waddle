@@ -94,6 +94,10 @@ mod imp {
         /// Conversations to mark read on the server shortly.
         pub read_pending: RefCell<HashSet<String>>,
         pub compose: RefCell<Compose>,
+        /// Shared images by URL: loading (`None`), shown, or failed.
+        pub images: RefCell<crate::ui::images::ImageCache>,
+        /// Files are uploading; the composer waits.
+        pub uploading: Cell<bool>,
         /// Conversations with a history page in flight.
         pub loading_history: RefCell<HashSet<String>>,
         pub rows: RefCell<Option<gio::ListStore>>,
@@ -242,6 +246,11 @@ impl WaddleWindow {
     #[template_callback]
     fn on_cancel_compose(&self) {
         self.cancel_compose();
+    }
+
+    #[template_callback]
+    fn on_attach(&self) {
+        self.pick_files();
     }
 
     #[template_callback]

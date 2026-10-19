@@ -416,6 +416,7 @@ async fn services_with_claims_and_blocking(
 
 pub(crate) mod delivery;
 pub(crate) mod diversion_recovery;
+mod expired_owner_promotion;
 mod ingress_append;
 mod live_send_lease;
 pub(crate) mod muc_refresh;

@@ -1,20 +1,20 @@
 # Distributed-actors implementation TODO
 
-Status audited **2026-09-27** against `main@35ecd05c8`, with the #1658 acceptance section reconciled **2026-10-05** after #1896/#1899/#1903. Other sections retain their original audit date. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. No new live deployment result is asserted here.
+Status audited **2026-09-27** against `main@35ecd05c8`, with the #1658 acceptance section reconciled **2026-10-05** after #1896/#1899/#1903 and "What to tackle next" reconciled **2026-10-18** against `main@44ae8a8`. Other sections retain their original audit date. A merged PR proves implementation landed; it does not prove a deployment or an operational check succeeded. No new live deployment result is asserted here.
 
-The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. Native blocked-by edges remain canonical for sequencing. The October 9 triage confirmed #1658 closed on October 6, unblocking #1659 and #1660.
+The program index is [#1664](https://github.com/waddle-social/waddle/issues/1664); historical decisions are in closed #1628 and #1425. Their original “takeable now” lists are historical. Native blocked-by edges remain canonical for sequencing.
 
 ## What to tackle next
 
-- **Current actor implementation:** #1660 is being delivered in [PR #1939](https://github.com/waddle-social/waddle/pull/1939), using the [Astra-reviewed plan](docs/planning/1660-extension-delivery-keys.md). Keep the issue open until implementation, acceptance verification and merge are complete; this is not a deployment record.
-- **Next actor spine:** #1659 — reconcile the existing frozen MUC/reflection machinery and remove `GroupchatRetrySuppression`, preserving explicit tombstone disposition and missing-child recovery. It is unblocked now; coordinate its observer handoff with #1660.
-- **Immediate reliability:** #1938 — preserve resumption when the client recovers from an SM progress timeout. #1386 and its later #1926 shutdown follow-up are closed; do not repeat them as unfinished implementation.
+- **P1 effect executors are complete:** #1660 closed on October 11 (PR #1939) and #1659 closed on October 14 (PR #1945, local/dark). The remote-origin pre-`h` guarantee moved to #1948 under P2.
+- **User-visible clustering bugs, in PR #1985:** #1298 forwards muc#admin list GETs to the room owner over the new `muc_admin_query.v1` relay message, a new message ID that needs no Recreate cutover. #1295 makes a gracefully shut down node retire its disabled identity, so survivors reclaim its UserActor claims at once.
+- **P2 sharpening:** #1661 now has its first substrate slice, [#1986 — P2.2 durable mailbox core](https://github.com/waddle-social/waddle/issues/1986), scoped in [p2-2-durable-mailbox-core.md](docs/planning/p2-2-durable-mailbox-core.md). It blocks #1948. P2.1 (main-pool transaction authority) is its prerequisite and still needs its own slice issue.
+- **Immediate reliability:** #1938 — PR #1949 (merged October 15) targets it, but the issue is still open; verify its acceptance and close or narrow it.
 - **Distributed-actors bug:** #1732 — retire displaced-generation media authority without revoking the successor's tokens or removing its LiveKit participant. #1869 narrowed the replacement paths but explicitly deferred this work; re-establish the reproducer against the new bind fencing.
 - **Small distributed-actors task:** #1688 — require `deployment.uuid` at render time for durable database configurations. Clustering already requires it; cover the remaining durable/noncluster configurations, preserve explicit dev/memory behavior, bump the chart, and verify the GitOps render.
-- **Completed roadmap milestone:** #1658's final closure record was attached on October 6 and the epic is closed. Every carve-out (#1759, #1776, #1790, #1906, #1909–#1912) is complete; #1899's bounded uncertainty policy remains the accepted baseline.
 - **Larger recovery task:** design #1826 and #1825 together — durable remote-join handoff plus recovery of departures after socket-node restart. Persisting membership only after the join reply does not close the lost-acknowledgement gap.
 
-**Remaining critical path:** (#1659 ∥ #1660) → #1661 → #1662 → #1663. All prerequisites through #1658 are closed. The later umbrellas are sharpening/evaluation work, not ready-to-code feature tickets.
+**Remaining critical path:** P2.1 → #1986 (P2.2) → #1948 and the rest of #1661 → #1662 → #1663. All prerequisites through #1660 are closed. The later umbrellas are sharpening/evaluation work, not ready-to-code feature tickets.
 
 ## Delivery and verification
 
@@ -73,9 +73,9 @@ Completed acceptance reconciliation:
 
 | Issue | Current state | Boundary to preserve |
 | --- | --- | --- |
-| #1659 — fenced MUC manifest/reflection | Unblocked; #1658 and #1646 are closed | Frozen pre-`h` targets, reflection as an ordinary child, idempotent missing-child recovery; `GroupchatRetrySuppression` still exists in `server/routes/interpret/deps.rs` and the tombstone path; deletion remains pending. |
-| #1660 — opaque extension delivery keys | Unblocked; implementation in PR #1939, parallel with #1659 | One receipt authority, durable same-key acceptance, descendant-aware GC; calls/pins retain the `AwaitingDurableOwner` carve-out. V1025 and extension ABI 3 require a separate verified cutover. |
-| #1661 — P2 transport sharpening | Blocked by #1659 and #1660 | Mailbox + zero-payload hints; explicit **P2.2 mailbox DDL/core** slice is needed (issue comment identifies the omission). Cut relay consumers over lane by lane before deleting ordered relay. |
+| #1659 — fenced MUC manifest/reflection | Closed 2026-10-14 (PR #1945); local/dark executor only | Frozen pre-`h` targets, reflection as an ordinary child, idempotent missing-child recovery; `GroupchatRetrySuppression` no longer exists in the server crates (checked at `main@44ae8a8`). |
+| #1660 — opaque extension delivery keys | Closed 2026-10-11 (PR #1939) | One receipt authority, durable same-key acceptance, descendant-aware GC; calls/pins retain the `AwaitingDurableOwner` carve-out. V1025 and extension ABI 3 require a separate verified cutover. |
+| #1661 — P2 transport sharpening | Unblocked; first slice #1986 (P2.2), focused follow-up #1948 | Mailbox + zero-payload hints; the **P2.2 mailbox DDL/core** slice is #1986; P2.1 still needs its own slice. Cut relay consumers over lane by lane before deleting ordered relay. |
 | #1662 — P3 connections/resume sharpening | Blocked by #1661 | Build on existing claim/resume machinery. Includes server + WASM/chat XEP-0388 SASL2 and XEP-0198 §11 inline resume; preserve #1294/#1389 behavior. |
 | #1663 — P4 state/actor sharpening | Blocked by #1662 | Evaluate remaining state against the code then; calls/pins durability and obsolete actor cleanup are not assumed complete. |
 | #1664 — program index | Open umbrella | Keep open until the program is dispositioned; its initial “takeable now” section needs reconciliation with this completed foundation. |
@@ -129,8 +129,8 @@ Recommendations below are based on source/test inspection and merged PR evidence
 | #1658 | Closed October 6 with the final closure record. Retain #1899's explicit unknown-outcome duplicate policy. |
 | #1709 | The stack-size mitigation does not establish that the remaining oversized-future work is complete. |
 | #1401 | #1869 addresses connection displacement, but malformed/invalid bind error handling remains a separate acceptance requirement. |
-| #1295 | Ordinary cluster drain still skips UserActor claims; do not close merely because #1294 takeover or room draining landed. |
-| #1298 | Member-list IQ still depends on a local RoomActor; relay support alone does not prove remote-owner query acceptance. |
+| #1295 | Addressed in PR #1985: the drain still cannot seal UserActor claims, so a completed graceful shutdown retires the disabled node identity and survivors reclaim them through `OwnerStale`. Close on merge plus a post-deploy check that the `ClaimHeldByAnotherNode` storm is gone. |
+| #1298 | Addressed in PR #1985: list GETs for a remotely owned room are answered by the owner over `muc_admin_query.v1`. Close on merge plus a post-deploy check that Faro `member-query-item-not-found` drops to near zero. |
 | #1670 | Cancellation/custody improvements do not establish durable promotion inventory for every failure/restart path; some retry queues remain memory-only. |
 | #1427 | Some retention/age-out work exists, but the missing-target quota-bounce path still needs disposition. |
 

@@ -1490,6 +1490,14 @@ async fn cluster_exit_criteria_end_to_end() {
         server_a.wait_for_exit(Duration::from_secs(30)).await,
         "node A did not exit after SIGTERM"
     );
+    // #1295: a completed graceful shutdown retires its disabled identity, so
+    // survivors may reclaim every claim it still held without waiting for
+    // the orphan reaper.
+    assert_eq!(
+        node_expired_flag(&db, &recovered_a).await,
+        Some(true),
+        "a gracefully shut down node commits its own row expired before exit"
+    );
     drop(server_a);
     let (server_a2, _startup_node_a2, peer_a2) =
         spawn_cluster_server(&postgres_url, &pool.pool_env, port_a, &[port_b]).await;
@@ -2344,10 +2352,11 @@ async fn orphan_reaper_kills_one_node_and_hydrates_only_its_orphaned_sessions() 
 /// deposed-owner-with-live-socket harness scenario's `RoomActor` variant —
 /// bound to this slice per the phase plan's own text ("the `RoomActor`
 /// variant of this same scenario is NOT carried [to Phase 4] — it already
-/// lands in Slice 7"). The `UserActor` variant remains deferred to
-/// whichever Phase 4 slice first wires `UserActor` Postgres claims
-/// (deviation 34) — no production `UserActor` claim-acquisition call site
-/// exists in this phase.
+/// lands in Slice 7"). Deviation 34 (no production `UserActor` claim
+/// acquisition) is retired: UserActor claims are acquired in production,
+/// and a graceful shutdown hands off the ones it still holds by retiring
+/// the node identity (#1295). This harness still covers only the
+/// `RoomActor` variant.
 ///
 /// Scenario: a genuinely wedged, genuinely-claimed `RoomActor` (this node
 /// really holds its Postgres claim via `PostgresClaimStore`), contested via

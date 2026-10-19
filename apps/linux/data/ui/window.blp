@@ -329,6 +329,18 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   margin-top: 8;
                   sensitive: false;
 
+                  Button {
+                    icon-name: "mail-attachment-symbolic";
+                    tooltip-text: _("Attach Files");
+                    valign: center;
+                    clicked => $on_attach() swapped;
+
+                    styles [
+                      "flat",
+                      "circular",
+                    ]
+                  }
+
                   styles [
                     "card",
                     "composer",

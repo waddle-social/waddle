@@ -222,6 +222,7 @@ fn echo_reflection_survives_reindex() {
         timestamp_ms: 10,
         reference_id: None,
         reply_to: None,
+        attachments: Vec::new(),
     });
     let d = t.apply_live(IncomingMessage {
         own: true,
@@ -263,6 +264,7 @@ fn pending_moderation_applies_after_reflection() {
         timestamp_ms: 10,
         reference_id: None,
         reply_to: None,
+        attachments: Vec::new(),
     });
     t.apply_live(IncomingMessage {
         moderates_id: Some("S9".into()),
