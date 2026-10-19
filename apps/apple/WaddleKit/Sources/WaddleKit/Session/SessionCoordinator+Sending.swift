@@ -331,12 +331,18 @@ extension SessionCoordinator {
         return true
     }
 
-    /// The room's mention directory for typed `@nick` tokens; nil in 1:1.
+    /// The room's mention directory for typed `@nick` tokens: occupants,
+    /// then directory users the room's `@` searches found; nil in 1:1.
     func mentionDirectory(for conversation: ConversationID) -> MentionDirectory? {
         guard conversation.isRoom else { return nil }
         let room = conversation.jid
         let occupants = presence.occupants[room].map { Array($0.values) } ?? []
-        return .room(occupants: occupants, ownNick: presence.selfNicks[room])
+        return .room(
+            occupants: occupants,
+            ownNick: presence.selfNicks[room],
+            directoryUsers: mentionSearches.seenUsers(in: room),
+            ownJID: account.jid
+        )
     }
 
     private func correctionDraft(of item: TimelineItem, draft: Draft) -> Draft {

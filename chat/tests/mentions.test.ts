@@ -7,6 +7,7 @@ import {
   mentionMatchesUsername,
   mergeMentionMembers,
   resolveMentionUri,
+  withDirectoryMentionJids,
 } from "../src/lib/mentions";
 
 describe("mention helpers", () => {
@@ -190,5 +191,41 @@ describe("mention helpers", () => {
     expect(merged.diagnostics).toEqual([
       "Presence invariant violated: room appears anonymous or omitted bare occupant JIDs for alice, bob.",
     ]);
+  });
+
+  test("appends directory users after members, deduped by bare JID and excluding self", () => {
+    const candidates = mentionAutocompleteCandidates(
+      [{ jid: "alice@example.com", username: "alice", affiliation: "member", joined_at: "" }],
+      [
+        { username: "Alice2", jid: "ALICE@example.com" },
+        { username: "dave", jid: "dave@example.com" },
+        { username: "dave-alt", jid: "Dave@Example.com" },
+        { username: "me", jid: "me@example.com" },
+        { username: "ALICE", jid: "other-alice@example.com" },
+        { username: "here", jid: "here@example.com" },
+      ],
+      "me@example.com/web",
+    );
+    expect(candidates).toEqual([
+      { username: "everyone", jid: null, kind: "broadcast" },
+      { username: "here", jid: null, kind: "broadcast" },
+      { username: "alice", jid: "alice@example.com", kind: "member" },
+      { username: "dave", jid: "dave@example.com", kind: "directory" },
+    ]);
+  });
+
+  test("directory labels resolve at send time but never override a member label", () => {
+    const map = withDirectoryMentionJids(
+      { Alice: "alice@example.com" },
+      [
+        { username: "alice", jid: "impostor@example.com" },
+        { username: "dave", jid: "Dave@Example.com" },
+        { username: "everyone", jid: "everyone@example.com" },
+      ],
+    );
+    expect(map).toEqual({ Alice: "alice@example.com", dave: "dave@example.com" });
+    // A selected directory candidate resolves exactly like an occupant would.
+    expect(resolveMentionUri("dave", map)).toBe("xmpp:dave@example.com");
+    expect(resolveMentionUri("alice", map)).toBe("xmpp:alice@example.com");
   });
 });

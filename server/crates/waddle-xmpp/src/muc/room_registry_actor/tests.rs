@@ -1476,6 +1476,7 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         sender_full: &sender,
         occupants: &occupants,
         durable_recipient_bare_jids: &snapshot.durable_recipient_bare_jids,
+        mention_recipients: crate::protocol::room::MentionRecipients::Empty,
         managed_room_forbidden: false,
         room_moderated: snapshot.config.moderated,
         room_occupants_may_change_subject: false,
@@ -1505,13 +1506,10 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         .find_map(|event| match event {
             OutboundEvent::ProjectGroupchatInbox {
                 owner,
-                is_recipient,
-                is_durable_recipient,
+                audience,
                 is_live_occupant,
                 ..
-            } if owner == &offline_member => {
-                Some((*is_recipient, *is_durable_recipient, *is_live_occupant))
-            }
+            } if owner == &offline_member => Some((*audience, *is_live_occupant)),
             _ => None,
         })
         .expect(
@@ -1520,9 +1518,11 @@ async fn offline_durable_member_gets_inbox_projection_after_actor_respawn() {
         );
     assert_eq!(
         offline_projection,
-        (true, true, false),
-        "offline member's row must bump unread (is_recipient) as a \
-         durable, non-live recipient"
+        (
+            crate::protocol::event::GroupchatInboxAudience::DurableMember,
+            false
+        ),
+        "offline member's row must bump unread as a durable, non-live recipient"
     );
 }
 

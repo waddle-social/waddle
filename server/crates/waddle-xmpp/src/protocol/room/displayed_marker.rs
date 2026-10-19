@@ -106,6 +106,7 @@ mod tests {
             sender_full: sender,
             occupants,
             durable_recipient_bare_jids: &[],
+            mention_recipients: crate::protocol::room::MentionRecipients::Empty,
             managed_room_forbidden: false,
             room_moderated: false,
             room_occupants_may_change_subject: false,

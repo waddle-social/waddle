@@ -253,6 +253,7 @@ fn run_chain(
         sender_full: sender,
         occupants: &occupants,
         durable_recipient_bare_jids: &[],
+        mention_recipients: waddle_xmpp::protocol::room::MentionRecipients::Empty,
         managed_room_forbidden: false,
         room_moderated: false,
         room_occupants_may_change_subject: false,

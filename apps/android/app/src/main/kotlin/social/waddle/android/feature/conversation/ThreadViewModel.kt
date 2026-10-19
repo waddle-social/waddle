@@ -49,6 +49,11 @@ class ThreadViewModel(
     } else {
         flowOf(emptyList())
     },
+    mentionDirectorySearch = if (isGroupchat) {
+        { query -> sessionManager.searchRoomMentionUsers(conversationJid, query) }
+    } else {
+        null
+    },
     occupantPresence = if (isGroupchat) {
         sessionManager.presenceStore.occupants
             .map { rooms -> rooms[conversationJid].orEmpty() }

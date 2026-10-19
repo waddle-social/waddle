@@ -129,6 +129,7 @@ impl Membership {
                 Some(Mentionable {
                     nick: nick.clone(),
                     jid: real.as_ref()?.to_string(),
+                    display_name: None,
                 })
             })
             .collect();
@@ -403,7 +404,8 @@ mod tests {
             membership.mentionable("room@example.com", "me"),
             [Mentionable {
                 nick: "ann".into(),
-                jid: "ann@example.com".into()
+                jid: "ann@example.com".into(),
+                display_name: None,
             }]
         );
         membership.track("room@example.com", "ann", false, None);

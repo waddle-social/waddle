@@ -1,6 +1,7 @@
 mod actions;
 mod avatar;
 mod conversation;
+mod directory;
 mod images;
 mod media;
 mod membership;

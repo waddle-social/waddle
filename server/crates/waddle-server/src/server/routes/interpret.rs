@@ -110,7 +110,8 @@ use waddle_xmpp::muc::SubjectState;
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
 use waddle_xmpp::protocol::event::{
-    ArchivedMessage as ProtocolArchivedMessage, GroupchatThreadProjection, InboundEvent, MessageRef,
+    ArchivedMessage as ProtocolArchivedMessage, GroupchatInboxAudience, GroupchatThreadProjection,
+    InboundEvent, MessageRef,
 };
 use waddle_xmpp::protocol::id_gen::UuidV4Generator;
 use waddle_xmpp::protocol::room::{
@@ -160,6 +161,7 @@ mod groupchat_archive;
 mod groupchat_inbox;
 mod groupchat_validation;
 mod handoff;
+pub(crate) mod mention_audience;
 mod notification_activity_ingest;
 pub(crate) mod offline_delivery;
 mod recipient_selection;
@@ -799,8 +801,7 @@ async fn interpret_with_depth(
                 owner,
                 room,
                 message,
-                is_recipient,
-                is_durable_recipient,
+                audience,
                 is_live_occupant,
                 room_members_only,
                 sender_can_broadcast_channel_mention,
@@ -812,8 +813,7 @@ async fn interpret_with_depth(
                     owner,
                     room,
                     message,
-                    is_recipient,
-                    is_durable_recipient,
+                    audience,
                     is_live_occupant,
                     room_members_only,
                     sender_can_broadcast_channel_mention,

@@ -135,6 +135,13 @@ fun MessageComposer(
     uploadState: UploadState = UploadState.Idle,
     onClearUpload: () -> Unit = {},
     mentionCandidates: List<MentionCandidate> = emptyList(),
+    /**
+     * XEP-0055 directory hits per `@` query (rooms only); rows for the
+     * current query follow the matching occupants in the popover.
+     */
+    mentionDirectoryHits: Map<String, List<MentionCandidate>> = emptyMap(),
+    /** The active `@` query (`null` when no mention token is armed). */
+    onMentionQuery: (String?) -> Unit = {},
     /** Discovered slash commands; empty until discovery answers. */
     slashCommands: List<ExtensionCommand> = emptyList(),
     /** Channel-scoped commands only match inside MUC rooms. */
@@ -214,7 +221,11 @@ fun MessageComposer(
     } else {
         null
     }
-    val mentionResults = mentionToken?.let { filterMentionCandidates(mentionCandidates, it.query) }.orEmpty()
+    val mentionQuery = mentionToken?.query
+    LaunchedEffect(mentionQuery) { onMentionQuery(mentionQuery) }
+    val mentionResults = mentionToken?.let { token ->
+        mentionPopoverResults(mentionCandidates, token.query, mentionDirectoryHits[token.query].orEmpty())
+    }.orEmpty()
 
     // Slash-command autocomplete arms when the whole draft is a
     // `/prefix` trigger (never in edit mode — a XEP-0308 correction of

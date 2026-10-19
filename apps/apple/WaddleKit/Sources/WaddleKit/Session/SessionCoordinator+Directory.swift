@@ -119,6 +119,25 @@ extension SessionCoordinator {
         return try await port.searchUsers(trimmed)
     }
 
+    /// XEP-0055 directory results for an `@query` typed in a room, so
+    /// people with no presence there can be mentioned. Answers from the
+    /// room's cache when this query was searched before; otherwise searches
+    /// and remembers the result, which also makes those users addressable
+    /// by username in the room's mention directory.
+    public func searchMentionableUsers(_ query: String, in room: BareJID) async throws -> [UserSearchResult] {
+        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        if let cached = mentionSearches.cached(trimmed, in: room) { return cached }
+        let found = try await port.searchUsers(trimmed)
+        mentionSearches.record(found, for: trimmed, in: room)
+        return found
+    }
+
+    /// Cached directory results for an `@query` in `room`, without searching.
+    public func cachedMentionableUsers(_ query: String, in room: BareJID) -> [UserSearchResult]? {
+        mentionSearches.cached(query, in: room)
+    }
+
     /// Our own occupant in `room`, for permission checks.
     public func selfOccupant(in room: BareJID) -> Occupant? {
         presence.occupant(named: account.nick, in: room)

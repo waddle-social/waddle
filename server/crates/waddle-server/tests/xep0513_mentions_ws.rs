@@ -544,3 +544,182 @@ fn recovery_envelope_preserves_occupant_mention_and_noping() {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Personal mentions of non-members (XEP-0430 inbox fan-out)
+// ---------------------------------------------------------------------------
+
+const MENTION_PEER: &str = "peer";
+const MENTION_PEER_PASSWORD: &str = "peer-password-1";
+const MENTION_OTHER: &str = "carol";
+const MENTION_OTHER_PASSWORD: &str = "carol-password-1";
+const NS_INBOX: &str = "urn:xmpp:inbox:1";
+
+fn mention_element_to_xml(element: &xmpp_parsers::minidom::Element) -> String {
+    let mut buf = Vec::new();
+    element.write_to(&mut buf).expect("serialize XML");
+    String::from_utf8(buf).expect("UTF-8")
+}
+
+/// `unread` of the caller's XEP-0430 inbox row for `room`, if any.
+async fn inbox_unread(client: &mut WsXmppClient, room: &str, id: &str) -> Option<String> {
+    use xmpp_parsers::minidom::Element;
+    let query = Element::builder("iq", "jabber:client")
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("type").to_owned(),
+            "get",
+        )
+        .attr(
+            xmpp_parsers::minidom::rxml::xml_ncname!("id").to_owned(),
+            id,
+        )
+        .append(
+            Element::builder("inbox", NS_INBOX)
+                .attr(
+                    xmpp_parsers::minidom::rxml::xml_ncname!("messages").to_owned(),
+                    "false",
+                )
+                .build(),
+        )
+        .build();
+    client
+        .send(&mention_element_to_xml(&query))
+        .await
+        .expect("send inbox query");
+    let frames = client
+        .recv_until(|frame| frame.contains("<iq") && frame.contains(id) && frame.contains("<fin"))
+        .await
+        .expect("inbox response");
+    frames
+        .iter()
+        .filter_map(|frame| frame.parse::<Element>().ok())
+        .filter(|message| message.name() == "message" && message.attr("type") != Some("headline"))
+        .flat_map(|message| {
+            message
+                .children()
+                .filter(|child| child.name() == "entry" && child.ns() == NS_INBOX)
+                .cloned()
+                .collect::<Vec<_>>()
+        })
+        .find(|entry| entry.attr("jid") == Some(room))
+        .and_then(|entry| entry.attr("unread").map(str::to_string))
+}
+
+/// Poll a fresh session for `user` until its inbox has a row for `room`.
+async fn wait_for_inbox_unread(
+    server: &TestServer,
+    user: &str,
+    password: &str,
+    room: &str,
+) -> Option<String> {
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        user,
+        password,
+        &format!("inbox-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("connect inbox client");
+    let mut unread = None;
+    for attempt in 0..50 {
+        unread = inbox_unread(&mut client, room, &format!("inbox-poll-{attempt}")).await;
+        if unread.is_some() {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    let _ = client.close().await;
+    unread
+}
+
+/// `unread` for `user`'s row in `room`, read once.
+async fn inbox_unread_once(
+    server: &TestServer,
+    user: &str,
+    password: &str,
+    room: &str,
+) -> Option<String> {
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        user,
+        password,
+        &format!("inbox-{}", uuid::Uuid::new_v4()),
+    )
+    .await
+    .expect("connect inbox client");
+    let unread = inbox_unread(&mut client, room, "inbox-once").await;
+    let _ = client.close().await;
+    unread
+}
+
+/// XEP-0513 §304 bounds who a message can reach: personal mentions of
+/// non-members (XEP-0372 references, since a room that supports
+/// occupant-ids rejects `jid=` mentions) reach an offline non-member only
+/// while the message's combined XEP-0513 + XEP-0372 target count stays
+/// within `mentions#count`.
+#[tokio::test]
+async fn mention_count_cap_bounds_offline_non_member_inbox_rows() {
+    let _guard = TEST_SERIAL.lock().await;
+    let server = TestServer::start_with_extra_accounts(&[
+        (MENTION_PEER, MENTION_PEER_PASSWORD),
+        (MENTION_OTHER, MENTION_OTHER_PASSWORD),
+    ]);
+    let password = server.fixed_account_password().to_string();
+    let mut client =
+        WsXmppClient::connect_and_auth(&server.ws_url(), DOMAIN, USERNAME, &password, "xep0513-nm")
+            .await
+            .expect("connect and auth");
+    let room = format!("mentions-nm-{}@muc.{DOMAIN}", uuid::Uuid::new_v4());
+    let occupant_id = join_room(&mut client, &room).await;
+
+    // Five XEP-0513 occupant-id targets plus one XEP-0372 reference to
+    // carol exceed the cap of five, so every mention is ignored.
+    let over_cap = (0..5)
+        .map(|_| format!(r#"<mention xmlns="urn:xmpp:mentions:0" occupantid="{occupant_id}"/>"#))
+        .collect::<String>();
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="mention-nm-1">
+                <body>@carol and friends</body>
+                {over_cap}
+                <reference xmlns="urn:xmpp:reference:0" type="mention" uri="xmpp:carol@localhost"/>
+            </message>"#
+        ))
+        .await
+        .expect("send over-cap mention");
+    client
+        .recv_matching(|frame| frame.contains("mention-nm-1"))
+        .await
+        .expect("over-cap echo");
+    // Within the cap: one occupant-id mention plus a reference to the peer.
+    // Room dispatch is serialized, so once the peer's row exists the
+    // earlier message has been fully projected.
+    client
+        .send(&format!(
+            r#"<message type="groupchat" to="{room}" id="mention-nm-2">
+                <body>@admin @peer please check</body>
+                <mention xmlns="urn:xmpp:mentions:0" occupantid="{occupant_id}"/>
+                <reference xmlns="urn:xmpp:reference:0" type="mention" uri="xmpp:peer@localhost"/>
+            </message>"#
+        ))
+        .await
+        .expect("send within-cap mention");
+    client
+        .recv_matching(|frame| frame.contains("mention-nm-2"))
+        .await
+        .expect("within-cap echo");
+
+    assert_eq!(
+        wait_for_inbox_unread(&server, MENTION_PEER, MENTION_PEER_PASSWORD, &room).await,
+        Some("1".to_string()),
+        "a within-cap mention must give the offline non-member one unread row"
+    );
+    assert_eq!(
+        inbox_unread_once(&server, MENTION_OTHER, MENTION_OTHER_PASSWORD, &room).await,
+        None,
+        "an over-cap message must not project a row for a mentioned non-member"
+    );
+    let _ = client.close().await;
+}

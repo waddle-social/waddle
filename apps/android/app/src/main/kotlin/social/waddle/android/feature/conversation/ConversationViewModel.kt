@@ -5,12 +5,14 @@ import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineDispatcher
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.emptyFlow
 import kotlinx.coroutines.flow.flowOf
@@ -30,6 +32,7 @@ import social.waddle.android.client.UploadResult
 import social.waddle.android.client.VerbResult
 import social.waddle.android.client.XmppEvent
 import social.waddle.android.client.composeMarkdown
+import social.waddle.android.client.directoryMentionCandidatesOf
 import social.waddle.android.client.firstEligibleHttpsUrl
 import social.waddle.android.client.linkPreviewSendToken
 import social.waddle.android.client.prefs.SharedFileRef
@@ -38,6 +41,7 @@ import social.waddle.android.client.store.TimelineItem
 import social.waddle.android.client.store.UnreadStore
 import social.waddle.client.ffi.WaddleNotifyMode
 import social.waddle.client.ffi.WaddlePresence
+import social.waddle.client.ffi.WaddleUserSearchEntry
 import java.time.Instant
 
 /**
@@ -65,6 +69,12 @@ open class ConversationViewModel(
     private val threadId: String? = null,
     /** `@` popover candidates; empty (the default) hides mention UI. */
     mentionCandidates: Flow<List<MentionCandidate>> = flowOf(emptyList()),
+    /**
+     * XEP-0055 directory search behind the `@` popover, so people with no
+     * MUC presence can be mentioned. Rooms only; `null` (DMs) disables it.
+     * A `null` answer (offline/failed) falls back to the occupants.
+     */
+    private val mentionDirectorySearch: (suspend (String) -> List<WaddleUserSearchEntry>?)? = null,
     /**
      * MUC occupant presence keyed by nick, for XEP-0317 hats /
      * XEP-0045 authority badges on message rows. Empty for DMs.
@@ -141,6 +151,23 @@ open class ConversationViewModel(
     /** XEP-0372 `@` autocomplete candidates for the composer popover. */
     val mentionCandidates: StateFlow<List<MentionCandidate>> =
         mentionCandidates.stateIn(viewModelScope, SharingStarted.Eagerly, emptyList())
+
+    /** The composer's active `@` query; null when no mention token is armed. */
+    private val mentionQuery = MutableStateFlow<String?>(null)
+
+    private val _mentionDirectoryHits = MutableStateFlow<Map<String, List<MentionCandidate>>>(emptyMap())
+
+    /**
+     * XEP-0055 directory popover rows per `@` query, cached for this room
+     * (own JID excluded). The composer shows only the current query's
+     * entry, so a stale answer never surfaces.
+     */
+    val mentionDirectoryHits: StateFlow<Map<String, List<MentionCandidate>>> = _mentionDirectoryHits
+
+    /** The composer's active `@` query changed (`null` = no token armed). */
+    fun onMentionQueryChanged(query: String?) {
+        mentionQuery.value = query
+    }
 
     /** Occupant presence by nick (hats + authority badges on rows). */
     val authorPresence: StateFlow<Map<String, WaddlePresence>> =
@@ -265,6 +292,32 @@ open class ConversationViewModel(
             loadOlder()
         }
         viewModelScope.launch { events.collect(::onEvent) }
+        mentionDirectorySearch?.let { search ->
+            viewModelScope.launch { mentionQuery.collectLatest { query -> searchMentionDirectory(search, query) } }
+        }
+    }
+
+    /**
+     * Debounced XEP-0055 lookup for one `@` query. Runs under
+     * `collectLatest`, so a newer query cancels this one; cached queries
+     * skip the wire, and failures cache nothing (the popover keeps the
+     * occupants and the next keystroke retries).
+     */
+    private suspend fun searchMentionDirectory(
+        search: suspend (String) -> List<WaddleUserSearchEntry>?,
+        query: String?,
+    ) {
+        if (query.isNullOrEmpty() || query in _mentionDirectoryHits.value) return
+        delay(MENTION_SEARCH_DEBOUNCE_MS)
+        val entries = try {
+            search(query)
+        } catch (cancellation: CancellationException) {
+            throw cancellation
+        } catch (_: Exception) {
+            null
+        } ?: return
+        val hits = directoryMentionCandidatesOf(entries, selfBareJid)
+        _mentionDirectoryHits.update { it + (query to hits) }
     }
 
     private suspend fun onEvent(event: XmppEvent) {
@@ -624,6 +677,9 @@ open class ConversationViewModel(
 
     private companion object {
         const val PAGE_SIZE = 50u
+
+        /** Keystroke settle time before an `@` query hits the directory. */
+        const val MENTION_SEARCH_DEBOUNCE_MS = 200L
 
         /** Scroll-back budget per screen (50 · 20 = 1000 messages). */
         const val HISTORY_PAGE_BUDGET = 20

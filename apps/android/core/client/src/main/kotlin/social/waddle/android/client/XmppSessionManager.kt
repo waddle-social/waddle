@@ -609,6 +609,13 @@ class XmppSessionManager(
     /** XEP-0055 user directory search backing the add-member flow. */
     suspend fun searchUsers(query: String): List<WaddleUserSearchEntry>? = roomAdmin.searchUsers(query)
 
+    /**
+     * XEP-0055 search behind a room's `@` mention popover; hits become
+     * resolvable typed `@username` mentions in [roomJid] sends.
+     */
+    suspend fun searchRoomMentionUsers(roomJid: String, query: String): List<WaddleUserSearchEntry>? =
+        roomAdmin.searchRoomMentionUsers(roomJid, query)
+
     /** Best-effort community-owner probe gating the admin UI entry. */
     suspend fun isCommunityOwner(): Boolean = roomAdmin.isCommunityOwner()
 

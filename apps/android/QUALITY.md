@@ -47,7 +47,7 @@ other session of the account is online.
 | Replies, threads, reactions, corrections, retraction | ✅ | `XmppSessionManagerVerbsTest` | `timeline`, `message_actions` | — |
 | Attached reply card under thread roots (faces, count, age, latest reply); tapping a post with replies opens its thread | 🟡 | `ThreadActivityTest`, `ConversationTimeTest` | `conversation_mention_popover` | — |
 | Message avatar or author name opens the author's profile, with "Message" to their DM (timeline and thread) | 🟡 | `MessageAuthorTest` | `conversation_author_profile` | — |
-| Composer (formatting, mentions, slash commands, attachments) | ✅ | `MessageComposerJvmTest` | `composer` | — |
+| Composer (formatting, mentions, slash commands, attachments); room `@` mentions also reach people with no MUC presence via XEP-0055 directory search | ✅ | `MessageComposerJvmTest`, `MentionTokenizerTest`, `ConversationViewModelTest`, `XmppSessionManagerMentionDirectoryTest` | `composer` | — |
 | Paste, keyboard-insert or drop an image into the composer: sent at once as an encrypted XEP-0363 attachment (web stages it first) | 🟡 | — | — | — |
 | Social layout (Settings → Timeline): newest at top under a top-pinned composer; grouping, day separators and the unread divider follow the flipped order | ✅ | `FeedEntriesTest` | `timeline_social` | — |
 | Read markers and sync (0333, 0490) | ✅ | `XmppSessionManagerReadStateTest` | — | — |

@@ -108,23 +108,14 @@ pub async fn resolve_muc_room_archive_access(
             .as_ref()
             .map(|snapshot| snapshot.room.config.members_only)
             .unwrap_or(channel.members_only);
-        return match resolve_managed_channel_affiliation(
+        return resolve_managed_channel_entry_access(
             state,
-            requester,
             room_jid,
-            &channel.id,
+            requester,
+            channel,
             members_only,
-            // Read-only archive gate: never mutate the permission graph.
-            false,
         )
-        .await
-        {
-            Ok(Some(Affiliation::Outcast)) => RoomArchiveAccess::Denied,
-            Ok(Some(_)) => RoomArchiveAccess::Allowed,
-            Ok(None) if members_only => RoomArchiveAccess::Denied,
-            Ok(None) => RoomArchiveAccess::Allowed,
-            Err(()) => RoomArchiveAccess::Error,
-        };
+        .await;
     }
 
     // Unmanaged room (instant room, no channel row). Admission data lives
@@ -153,6 +144,41 @@ pub async fn resolve_muc_room_archive_access(
             );
             RoomArchiveAccess::Denied
         }
+    }
+}
+
+/// Right-to-enter decision for a managed channel, given the room's
+/// already-frozen `members_only` setting (a live actor's config wins over
+/// the persisted channel row; the caller resolves that precedence once).
+///
+/// Members-only rooms require at least Member affiliation; open rooms
+/// admit any non-outcast, including permission-graph `outcast` bans.
+/// Read-only: it never repairs or mutates the permission graph. Shared by
+/// the XEP-0313 §5.1 archive gate and the groupchat mention audience so
+/// both apply the same entry rule.
+pub async fn resolve_managed_channel_entry_access(
+    state: &WebSocketState,
+    room_jid: &BareJid,
+    requester: &BareJid,
+    channel: &XmppChannelRecord,
+    members_only: bool,
+) -> RoomArchiveAccess {
+    match resolve_managed_channel_affiliation(
+        state,
+        requester,
+        room_jid,
+        &channel.id,
+        members_only,
+        // Read-only gate: never mutate the permission graph.
+        false,
+    )
+    .await
+    {
+        Ok(Some(Affiliation::Outcast)) => RoomArchiveAccess::Denied,
+        Ok(Some(_)) => RoomArchiveAccess::Allowed,
+        Ok(None) if members_only => RoomArchiveAccess::Denied,
+        Ok(None) => RoomArchiveAccess::Allowed,
+        Err(()) => RoomArchiveAccess::Error,
     }
 }
 

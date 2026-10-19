@@ -7,6 +7,7 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 import social.waddle.client.ffi.WaddleMentionTarget
 import social.waddle.client.ffi.WaddleMucRole
+import social.waddle.client.ffi.WaddleUserSearchEntry
 
 class MentionsTest {
     @Test
@@ -122,6 +123,60 @@ class MentionsTest {
         )
 
         assertEquals(listOf(WaddleMentionTarget(label = "bob", jid = "bob@waddle.test")), directory.targets)
+        assertTrue(directory.broadcasts)
+    }
+
+    @Test
+    fun `directory candidates label by username and drop self and duplicates`() {
+        val candidates = directoryMentionCandidatesOf(
+            listOf(
+                WaddleUserSearchEntry(jid = "Carol@Waddle.Test", username = "carol", displayName = "Carol"),
+                WaddleUserSearchEntry(jid = "carol@waddle.test", username = "carol2", displayName = null),
+                WaddleUserSearchEntry(jid = "icepuma@waddle.test", username = "icepuma", displayName = null),
+                WaddleUserSearchEntry(jid = "waddle.test", username = "server", displayName = null),
+                WaddleUserSearchEntry(jid = "dave@waddle.test", username = " ", displayName = null),
+            ),
+            selfBareJid = "IcePuma@waddle.test/phone",
+        )
+
+        assertEquals(
+            listOf(
+                MentionCandidate(
+                    display = "carol",
+                    uri = "xmpp:carol@waddle.test",
+                    isBroadcast = false,
+                    jid = "carol@waddle.test",
+                ),
+            ),
+            candidates,
+        )
+    }
+
+    @Test
+    fun `room mention directory appends directory users after occupants`() {
+        val directory = roomMentionDirectoryOf(
+            occupants = mapOf(
+                "bob" to testPresence(from = "room@muc.waddle.test/bob", mucJid = "bob@waddle.test/phone"),
+            ),
+            directoryUsers = listOf(
+                WaddleUserSearchEntry(jid = "carol@waddle.test", username = "carol", displayName = null),
+                // Occupant labels win: a colliding username is skipped.
+                WaddleUserSearchEntry(jid = "robert@waddle.test", username = "Bob", displayName = null),
+                // So do broadcast identifiers.
+                WaddleUserSearchEntry(jid = "here@waddle.test", username = "here", displayName = null),
+                // An occupant may also be reachable by their username.
+                WaddleUserSearchEntry(jid = "bob@waddle.test", username = "bobby", displayName = null),
+            ),
+        )
+
+        assertEquals(
+            listOf(
+                WaddleMentionTarget(label = "bob", jid = "bob@waddle.test"),
+                WaddleMentionTarget(label = "carol", jid = "carol@waddle.test"),
+                WaddleMentionTarget(label = "bobby", jid = "bob@waddle.test"),
+            ),
+            directory.targets,
+        )
         assertTrue(directory.broadcasts)
     }
 }

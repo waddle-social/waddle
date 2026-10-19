@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, onMounted, onUnmounted, provide, ref, watch } from "vue";
+import { mentionDirectoryKey } from "@/shell/controllers/use-mention-directory";
 import { useStore } from "@nanostores/vue";
 import {
   $mucCallMedia,
@@ -80,6 +81,9 @@ const props = defineProps<{
 }>();
 
 const controller = props.controller;
+// Room composers (main, thread, call chat) report their `@query` here so
+// people without room presence can be mentioned via the user directory.
+provide(mentionDirectoryKey, controller.mentionDirectory);
 
 const {
   connectionStore,

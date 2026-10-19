@@ -49,6 +49,7 @@ class ChannelViewModel(
     pinnedIds = sessionManager.pinStore.pinnedIds(roomJid),
     mentionCandidates = sessionManager.presenceStore.occupants
         .map { rooms -> mentionCandidatesOf(rooms[roomJid].orEmpty()) },
+    mentionDirectorySearch = { query -> sessionManager.searchRoomMentionUsers(roomJid, query) },
     occupantPresence = sessionManager.presenceStore.occupants
         .map { rooms -> rooms[roomJid].orEmpty() },
     occupantJids = sessionManager.occupantJidStore.jidsIn(roomJid),

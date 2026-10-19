@@ -16,11 +16,15 @@ struct MentionCandidate: Hashable, Identifiable {
 
 /// Autocomplete candidates for a room. Only occupants whose real JID is
 /// known can be mentioned, because a XEP-0372 mention URI names a JID.
+/// XEP-0055 directory results for the query follow the occupants, so
+/// people with no presence in the room can be mentioned too.
 enum MentionCandidates {
     static func matching(
         _ query: String,
         occupants: [Occupant],
         ownNick: String,
+        directoryUsers: [UserSearchResult] = [],
+        ownJID: BareJID? = nil,
         limit: Int = 8
     ) -> [MentionCandidate] {
         let broadcasts = broadcastCandidates.filter { matches(query, $0.name) }
@@ -33,7 +37,10 @@ enum MentionCandidates {
                 return left < right
             }
             .compactMap(candidate)
-        return Array((people + broadcasts).prefix(limit))
+        let absent = MentionDirectorySearch
+            .additions(directoryUsers, listed: people.compactMap(\.jid), ownJID: ownJID)
+            .map(directoryCandidate)
+        return Array((people + absent + broadcasts).prefix(limit))
     }
 
     static let broadcastCandidates = [
@@ -44,6 +51,10 @@ enum MentionCandidates {
     private static func candidate(_ occupant: Occupant) -> MentionCandidate? {
         guard let jid = occupant.realJID else { return nil }
         return MentionCandidate(id: "nick:\(occupant.nick)", name: occupant.nick, detail: jid.description, target: .user(jid), jid: jid)
+    }
+
+    private static func directoryCandidate(_ user: UserSearchResult) -> MentionCandidate {
+        MentionCandidate(id: "jid:\(user.jid)", name: user.username, detail: user.jid.description, target: .user(user.jid), jid: user.jid)
     }
 
     private static func matches(_ query: String, _ value: String) -> Bool {

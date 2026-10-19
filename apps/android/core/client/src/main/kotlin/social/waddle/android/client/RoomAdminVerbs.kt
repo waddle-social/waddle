@@ -270,6 +270,20 @@ internal class RoomAdminVerbs(
         }
 
     /**
+     * XEP-0055 search for a room's `@` mention popover: same query as
+     * [searchUsers], and every hit is remembered for [roomJid] so a typed
+     * `@username` resolves at send time ([roomMentionDirectory]). The
+     * write is generation-gated: an answer arriving after a relogin must
+     * not seed the successor's store. `null` offline/failed.
+     */
+    suspend fun searchRoomMentionUsers(roomJid: String, query: String): List<WaddleUserSearchEntry>? {
+        val lease = activeSession.captureOwnerLease() ?: return null
+        val results = activeSession.fetchIfCurrent(lease) { it.searchUsers(query) } ?: return null
+        if (!activeSession.applyIfCurrent(lease) { stores.mentionDirectoryStore.record(roomJid, results) }) return null
+        return results
+    }
+
+    /**
      * Best-effort community-owner probe (`urn:waddle:admin:users:list:0`
      * with `page_size=1`). Gates the admin UI entry points only — the
      * server re-authorizes every actual command, so a false positive

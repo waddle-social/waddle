@@ -191,6 +191,9 @@ pub(super) async fn plan_bot_groupchat_message(
         sender_full: bot_ctx.sender_full,
         occupants: bot_ctx.occupants,
         durable_recipient_bare_jids: bot_ctx.durable_recipient_bare_jids,
+        // Extension bot messages reach only the durable audience; the
+        // mention audience is resolved for occupant sends only.
+        mention_recipients: waddle_xmpp::protocol::room::MentionRecipients::Empty,
         managed_room_forbidden: false,
         room_moderated: bot_ctx.room_moderated,
         room_occupants_may_change_subject: bot_ctx.room_occupants_may_change_subject,

@@ -1,5 +1,6 @@
 <script setup lang="ts">
-import { ref, computed, watch, onBeforeUnmount, nextTick } from "vue";
+import { ref, computed, watch, onBeforeUnmount, nextTick, inject } from "vue";
+import { mentionDirectoryKey } from "@/shell/controllers/use-mention-directory";
 import { AtSign, CaseSensitive, CornerDownLeft, FileText, Loader2, Plus, SendHorizontal, Smile, SquareSlash, X } from "lucide-vue-next";
 import type { JSONContent } from "@tiptap/core";
 import GifPicker from "@/components/chat/GifPicker.vue";
@@ -155,6 +156,8 @@ onBeforeUnmount(() => {
 });
 
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
+// Provided by the chat shell; the controller only searches in rooms.
+const mentionDirectory = inject(mentionDirectoryKey, null);
 
 const {
   showMentions,
@@ -178,6 +181,7 @@ const {
 } = useComposerAutocomplete({
   getTiptapEditor,
   mentionCandidates: () => props.mentionCandidates,
+  searchMentionDirectory: mentionDirectory ? (query) => mentionDirectory.search(query) : undefined,
   slashCommands: () => props.slashCommands ?? [],
   inMuc: () => !!props.inMuc,
   slashSubmitBlocked: () => showForumTitleInput.value && !forumTitle.value.trim(),

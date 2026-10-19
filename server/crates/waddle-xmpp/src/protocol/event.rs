@@ -203,6 +203,37 @@ pub enum CallbackResult {
     Err { stanza: Box<Stanza> },
 }
 
+/// Why an [`OutboundEvent::ProjectGroupchatInbox`] row is projected for
+/// its owner. The audience decides the unread bump and whether an
+/// XEP-0357 groupchat notification candidate may be enqueued; live
+/// occupancy alone never selects an audience.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GroupchatInboxAudience {
+    /// The sender's own copy: no unread bump, no notification.
+    Sender,
+    /// An owner from the room's durable affiliation-derived recipient set.
+    DurableMember,
+    /// An owner outside the durable set whom the message personally
+    /// mentions (XEP-0372 mention reference or XEP-0513 `jid=` mention).
+    /// The room dispatcher resolves this set once, at planning time,
+    /// after account, blocking and room-entry checks.
+    MentionedNonMember,
+    /// An owner outside the durable set whom an archived message
+    /// mentioned, receiving this message's revision of it (XEP-0308
+    /// correction, XEP-0424 retraction, XEP-0425 moderation). The row's
+    /// content is replaced so the revised text no longer lingers, with no
+    /// unread bump and no notification.
+    MentionedNonMemberRevision,
+}
+
+impl GroupchatInboxAudience {
+    /// `true` when the row bumps unread and may enqueue an XEP-0357
+    /// notification: durable members and newly mentioned non-members.
+    pub fn notifies(self) -> bool {
+        matches!(self, Self::DurableMember | Self::MentionedNonMember)
+    }
+}
+
 /// Thread metadata accompanying an [`OutboundEvent::ProjectGroupchatInbox`]
 /// projection.
 ///

@@ -13,6 +13,7 @@ use crate::session::{Conversation, Session};
 use waddle_client_session::Timeline;
 
 use super::actions::Compose;
+use super::directory::DirectorySearch;
 use super::membership::{Membership, OutboundSends};
 
 mod imp {
@@ -81,6 +82,8 @@ mod imp {
         pub connected: Cell<bool>,
         pub membership: RefCell<Membership>,
         pub outbound: RefCell<OutboundSends>,
+        /// XEP-0055 lookups for mentioning people not in a room.
+        pub directory_search: RefCell<DirectorySearch>,
         pub reconnect_attempt: Cell<u32>,
         /// Rooms in catalogue order, then DMs.
         pub conversations: RefCell<Vec<Conversation>>,

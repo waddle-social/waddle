@@ -57,7 +57,7 @@ extension FFIInbound {
 
     static func userSearchResult(_ entry: WaddleUserSearchEntry) -> UserSearchResult? {
         guard let user = bareJID(entry.jid) else { return nil }
-        return UserSearchResult(jid: user, displayName: entry.displayName)
+        return UserSearchResult(jid: user, username: entry.username, displayName: entry.displayName)
     }
 
     /// XEP-0430 row. `last_updated` is epoch seconds on the wire.

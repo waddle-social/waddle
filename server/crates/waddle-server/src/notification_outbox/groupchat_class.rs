@@ -215,23 +215,20 @@ pub(crate) fn groupchat_mentions_owner(
         // and piggyback on the personal pipeline. Tightening to
         // `mention.mentions.is_none()` covers EVERY group URI by
         // the wire-shape attribute, not by a hardcoded URI value.
-        !mention.noping
-            && mention.mentions.is_none()
-            && (mention
-                .jid
-                .as_ref()
-                .is_some_and(|mentioned| mentioned == owner)
-                || mention
+        // The JID arm is shared with `personal_mention_targets`, which
+        // selects mentioned non-members for room inbox fan-out, so the
+        // row-emission audience and this classification cannot drift.
+        waddle_xmpp::xep::explicit_mention_names_jid(mention, owner)
+            || (!mention.noping
+                && mention.mentions.is_none()
+                && mention
                     .occupant_id
                     .as_deref()
                     .is_some_and(|mentioned| mentioned == owner_occupant_id))
     });
-    let xep0372 = references.iter().any(|reference| {
-        reference.is_mention()
-            && reference
-                .bare_jid()
-                .is_some_and(|mentioned| &mentioned == owner)
-    });
+    let xep0372 = references
+        .iter()
+        .any(|reference| waddle_xmpp::xep::reference_mention_names_jid(reference, owner));
     xep0513 || xep0372
 }
 

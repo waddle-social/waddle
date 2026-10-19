@@ -132,10 +132,22 @@ pub fn command_action(body: &str) -> Option<(Command, CommandAction)> {
 /// Someone a room message can mention.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Mentionable {
-    /// The room nick, typed after `@`.
+    /// What is typed after `@`: the room nick of an occupant, or the
+    /// username of someone found in the XEP-0055 user directory.
     pub nick: String,
-    /// The real bare JID, when the room exposes it.
+    /// The real bare JID.
     pub jid: String,
+    /// A directory entry's display name, shown beside the JID.
+    pub display_name: Option<String>,
+}
+
+/// Whom an `@` in a room can name.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct RoomPeople<'a> {
+    /// Present occupants with a known real JID.
+    pub occupants: &'a [Mentionable],
+    /// XEP-0055 directory results for the query being typed.
+    pub directory: &'a [Mentionable],
 }
 
 /// One row in the suggestion popover.
@@ -151,8 +163,8 @@ pub struct Suggestion {
 
 /// Suggestions for the token being typed at `cursor` (in characters):
 /// commands while the first word starts with `/`, and in a room, the
-/// occupants and broadcasts an `@word` could name.
-pub fn suggestions(text: &str, cursor: usize, room: Option<&[Mentionable]>) -> Vec<Suggestion> {
+/// occupants, directory users and broadcasts an `@word` could name.
+pub fn suggestions(text: &str, cursor: usize, room: Option<RoomPeople<'_>>) -> Vec<Suggestion> {
     let before: Vec<char> = text.chars().take(cursor).collect();
     if before.len() != cursor {
         return Vec::new();
@@ -164,15 +176,30 @@ pub fn suggestions(text: &str, cursor: usize, room: Option<&[Mentionable]>) -> V
     let Some(people) = room else {
         return Vec::new();
     };
-    let Some(at) = before.iter().rposition(|c| *c == '@') else {
+    let Some((at, query)) = mention_token(&before) else {
         return Vec::new();
     };
+    mention_suggestions(&query.to_lowercase(), people, at, cursor)
+}
+
+/// The `@query` being typed at `cursor`, without the `@`, or `None`
+/// when the cursor is not in a mention token.
+pub fn mention_query(text: &str, cursor: usize) -> Option<String> {
+    let before: Vec<char> = text.chars().take(cursor).collect();
+    let command = before.first() == Some(&'/') && !before.iter().any(|c| c.is_whitespace());
+    if before.len() != cursor || command {
+        return None;
+    }
+    mention_token(&before).map(|(_, query)| query)
+}
+
+/// Where the `@` of the token ending at the end of `before` sits, and
+/// what follows it.
+fn mention_token(before: &[char]) -> Option<(usize, String)> {
+    let at = before.iter().rposition(|c| *c == '@')?;
     let starts_word = at == 0 || before[at - 1].is_whitespace() || before[at - 1] == '(';
     let query: String = before[at + 1..].iter().collect();
-    if !starts_word || query.chars().any(char::is_whitespace) {
-        return Vec::new();
-    }
-    mention_suggestions(&query.to_lowercase(), people, at, cursor)
+    (starts_word && !query.chars().any(char::is_whitespace)).then_some((at, query))
 }
 
 fn command_suggestions(query: &str, cursor: usize) -> Vec<Suggestion> {
@@ -189,9 +216,11 @@ fn command_suggestions(query: &str, cursor: usize) -> Vec<Suggestion> {
         .collect()
 }
 
+/// Matching occupants, then directory users not already listed, then
+/// broadcasts.
 fn mention_suggestions(
     query: &str,
-    people: &[Mentionable],
+    people: RoomPeople<'_>,
     start: usize,
     end: usize,
 ) -> Vec<Suggestion> {
@@ -202,25 +231,71 @@ fn mention_suggestions(
         start,
         end,
     };
-    let mut people: Vec<&Mentionable> = people
+    let mut occupants: Vec<&Mentionable> = people
+        .occupants
         .iter()
         .filter(|person| person.nick.to_lowercase().contains(query))
         .collect();
     // Prefix matches first, then alphabetical.
-    people.sort_by_key(|person| {
+    occupants.sort_by_key(|person| {
         let nick = person.nick.to_lowercase();
         (!nick.starts_with(query), nick)
+    });
+    // The directory matched the query itself; keep its order. A directory
+    // user whose label an occupant already holds is left out: picking it
+    // would insert `@label`, which `mention_targets` resolves to the occupant.
+    let occupant_labels: Vec<String> = people
+        .occupants
+        .iter()
+        .map(|p| p.nick.trim().to_lowercase())
+        .collect();
+    let mut listed: Vec<String> = occupants.iter().map(|p| p.jid.to_lowercase()).collect();
+    let directory = people.directory.iter().filter(|person| {
+        let jid = person.jid.to_lowercase();
+        let new =
+            !listed.contains(&jid) && !occupant_labels.contains(&person.nick.trim().to_lowercase());
+        listed.push(jid);
+        new
     });
     let broadcasts = BROADCASTS
         .into_iter()
         .filter(|(label, _)| label.starts_with(query))
         .map(|(label, subtitle)| mention(label, subtitle));
-    people
+    occupants
         .into_iter()
-        .map(|person| mention(&person.nick, &person.jid))
+        .chain(directory)
+        .map(|person| mention(&person.nick, &person_subtitle(person)))
         .chain(broadcasts)
         .take(MAX_SUGGESTIONS)
         .collect()
+}
+
+fn person_subtitle(person: &Mentionable) -> String {
+    match person.display_name.as_deref().map(str::trim) {
+        Some(name) if !name.is_empty() && name != person.nick => {
+            format!("{name} · {}", person.jid)
+        }
+        _ => person.jid.clone(),
+    }
+}
+
+/// Whom a room send's typed `@label`s resolve to: the occupants, then
+/// the directory users seen in this room's searches, except a directory
+/// user whose label an occupant already uses, so no label is ambiguous.
+pub fn mention_targets(occupants: Vec<Mentionable>, directory: &[Mentionable]) -> Vec<Mentionable> {
+    let mut labels: Vec<String> = occupants
+        .iter()
+        .map(|person| person.nick.trim().to_lowercase())
+        .collect();
+    let mut targets = occupants;
+    for person in directory {
+        let label = person.nick.trim().to_lowercase();
+        if !labels.contains(&label) {
+            labels.push(label);
+            targets.push(person.clone());
+        }
+    }
+    targets
 }
 
 /// The text with `suggestion` applied, and where the cursor goes.
@@ -256,8 +331,24 @@ mod tests {
             .map(|nick| Mentionable {
                 nick: nick.into(),
                 jid: format!("{}@waddle.social", nick.to_lowercase()),
+                display_name: None,
             })
             .collect()
+    }
+
+    fn room(occupants: &[Mentionable]) -> Option<RoomPeople<'_>> {
+        Some(RoomPeople {
+            occupants,
+            directory: &[],
+        })
+    }
+
+    fn user(username: &str, jid: &str, display_name: Option<&str>) -> Mentionable {
+        Mentionable {
+            nick: username.into(),
+            jid: jid.into(),
+            display_name: display_name.map(Into::into),
+        }
     }
 
     fn titles(suggestions: &[Suggestion]) -> Vec<&str> {
@@ -275,26 +366,101 @@ mod tests {
     #[test]
     fn at_lists_occupants_prefix_first_then_broadcasts_in_rooms_only() {
         let people = people();
-        let found = suggestions("hi @an", 6, Some(&people));
+        let found = suggestions("hi @an", 6, room(&people));
         assert_eq!(titles(&found), ["@Ann", "@annette"]);
         assert_eq!((found[0].start, found[0].end), (3, 6));
         assert_eq!(
-            titles(&suggestions("@e", 2, Some(&people))),
+            titles(&suggestions("@e", 2, room(&people))),
             ["@annette", "@everyone"]
         );
         assert!(suggestions("hi @an", 6, None).is_empty());
-        assert!(suggestions("mail@an", 7, Some(&people)).is_empty());
-        assert!(suggestions("@ann lee", 8, Some(&people)).is_empty());
+        assert!(suggestions("mail@an", 7, room(&people)).is_empty());
+        assert!(suggestions("@ann lee", 8, room(&people)).is_empty());
+    }
+
+    #[test]
+    fn directory_users_follow_occupants_without_duplicates_before_broadcasts() {
+        let people = people();
+        let directory = [
+            user("ann", "ANN@waddle.social", None),
+            user("anna", "anna@waddle.social", Some("Anna Lee")),
+            user("anna2", "anna@waddle.social", None),
+        ];
+        let room = Some(RoomPeople {
+            occupants: &people,
+            directory: &directory,
+        });
+        let found = suggestions("hi @an", 6, room);
+        assert_eq!(titles(&found), ["@Ann", "@annette", "@anna"]);
+        assert_eq!(found[2].subtitle, "Anna Lee · anna@waddle.social");
+        assert_eq!(found[2].replacement, "@anna ");
+        assert_eq!(
+            titles(&suggestions("@e", 2, room)),
+            ["@annette", "@anna", "@everyone"],
+            "the server matched the query; one entry per JID and per occupant label"
+        );
+        let clash = [user("ann", "other@waddle.social", None)];
+        let clashing = Some(RoomPeople {
+            occupants: &people,
+            directory: &clash,
+        });
+        assert_eq!(
+            titles(&suggestions("@an", 3, clashing)),
+            ["@Ann", "@annette"],
+            "`@ann` would resolve to the occupant, so the other account is not offered"
+        );
+        let many: Vec<Mentionable> = (0..20)
+            .map(|n| user(&format!("e{n}"), &format!("e{n}@waddle.social"), None))
+            .collect();
+        let crowded = Some(RoomPeople {
+            occupants: &people,
+            directory: &many,
+        });
+        assert_eq!(suggestions("@e", 2, crowded).len(), MAX_SUGGESTIONS);
+    }
+
+    #[test]
+    fn the_mention_query_is_the_at_token_before_the_cursor() {
+        assert_eq!(mention_query("hi @An", 6).as_deref(), Some("An"));
+        assert_eq!(mention_query("hi @", 4).as_deref(), Some(""));
+        assert_eq!(mention_query("hi @an there", 12), None);
+        assert_eq!(mention_query("mail@an", 7), None);
+        assert_eq!(mention_query("/@an", 4), None);
+        assert_eq!(mention_query("/me @an", 7).as_deref(), Some("an"));
+        assert_eq!(mention_query("@an", 9), None);
+    }
+
+    #[test]
+    fn send_targets_add_directory_users_whose_labels_occupants_do_not_use() {
+        let occupants = vec![user("Ann", "ann@waddle.social", None)];
+        let directory = [
+            user("ann", "other@waddle.social", None),
+            user("bob", "bob@waddle.social", None),
+            user("ann2", "ann@waddle.social", None),
+        ];
+        let targets = mention_targets(occupants, &directory);
+        let labels: Vec<(&str, &str)> = targets
+            .iter()
+            .map(|t| (t.nick.as_str(), t.jid.as_str()))
+            .collect();
+        assert_eq!(
+            labels,
+            [
+                ("Ann", "ann@waddle.social"),
+                ("bob", "bob@waddle.social"),
+                ("ann2", "ann@waddle.social"),
+            ]
+        );
     }
 
     #[test]
     fn applying_replaces_the_token_and_places_the_cursor_after_it() {
         let people = people();
-        let pick = &suggestions("hi @bo there", 6, Some(&people))[0];
+        let pick = &suggestions("hi @bo there", 6, room(&people))[0];
         assert_eq!(apply("hi @bo there", pick), ("hi @bob there".into(), 8));
         let pick = &suggestions("/sh", 3, None)[0];
         assert_eq!(apply("/sh", pick), ("/shrug ".into(), 7));
-        let pick = &suggestions("ñ @b", 4, Some(&people))[0];
+        let pick = &suggestions("ñ @b", 4, room(&people))[0];
         assert_eq!(apply("ñ @b", pick), ("ñ @bob ".into(), 7));
     }
 

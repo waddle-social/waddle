@@ -27,7 +27,7 @@ use waddle_xmpp_client_ffi::{
     WaddleConfig, WaddleEncryptedFile, WaddleEncryptedFileHash, WaddleEventListener,
     WaddleFallbackRange, WaddleInboxEntry, WaddleMentionDirectory, WaddleMentionTarget,
     WaddleMessage, WaddlePresence, WaddleReplyTarget, WaddleSendMessageOutcome, WaddleSendOptions,
-    WaddleSharedFile, WaddleStanzaId, WaddleStickerHash, WaddleTopology,
+    WaddleSharedFile, WaddleStanzaId, WaddleStickerHash, WaddleTopology, WaddleUserSearchEntry,
 };
 
 use crate::attachments::{self, TransferError};
@@ -443,6 +443,21 @@ impl Session {
         matches!(outcome, Ok(WaddleSendMessageOutcome::Sent { .. }))
     }
 
+    /// XEP-0055: people in the account domain's user directory whose
+    /// username matches `query`, as mention candidates. `None` when the
+    /// search fails.
+    pub async fn search_users(&self, query: String) -> Option<Vec<Mentionable>> {
+        let client = Arc::clone(&self.client);
+        match runtime::spawn(async move { client.search_users(query).await }).await {
+            Ok(Ok(entries)) => Some(directory_people(entries)),
+            Ok(Err(error)) => {
+                tracing::debug!(?error, "could not search the user directory");
+                None
+            }
+            Err(_) => None,
+        }
+    }
+
     /// XEP-0424: retract the message with `reference_id`.
     pub async fn retract(&self, jid: &str, kind: Kind, reference_id: String) -> bool {
         let client = Arc::clone(&self.client);
@@ -458,7 +473,8 @@ impl Session {
 }
 
 /// Whom a room send's typed `@label`s may resolve to (XEP-0372): the
-/// occupants whose real JID is known, and the room broadcasts. A DM
+/// occupants whose real JID is known, directory users found from this
+/// room's composer, and the room broadcasts. A DM
 /// mentions nobody.
 fn mention_directory(kind: Kind, mentionable: &[Mentionable]) -> Option<WaddleMentionDirectory> {
     (kind == Kind::Room).then(|| WaddleMentionDirectory {
@@ -471,6 +487,22 @@ fn mention_directory(kind: Kind, mentionable: &[Mentionable]) -> Option<WaddleMe
             .collect(),
         broadcasts: true,
     })
+}
+
+/// Directory entries with a valid JID and username, by bare JID.
+fn directory_people(entries: Vec<WaddleUserSearchEntry>) -> Vec<Mentionable> {
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let jid = entry.jid.parse::<Jid>().ok()?.to_bare();
+            let username = entry.username.trim();
+            (!username.is_empty() && !username.contains(char::is_whitespace)).then(|| Mentionable {
+                nick: username.to_string(),
+                jid: jid.to_string(),
+                display_name: entry.display_name,
+            })
+        })
+        .collect()
 }
 
 /// The XEP-0447 file for an upload, and the core's view of it.
@@ -1168,12 +1200,36 @@ mod tests {
         let ann = [Mentionable {
             nick: "ann".into(),
             jid: "ann@waddle.social".into(),
+            display_name: None,
         }];
         let room = mention_directory(Kind::Room, &ann).expect("a room directory");
         assert!(room.broadcasts);
         assert_eq!(room.targets[0].label, "ann");
         assert_eq!(room.targets[0].jid, "ann@waddle.social");
         assert_eq!(mention_directory(Kind::Direct, &ann), None);
+    }
+
+    #[test]
+    fn directory_entries_become_mentionable_by_bare_jid_and_username() {
+        let entry = |jid: &str, username: &str| WaddleUserSearchEntry {
+            jid: jid.into(),
+            username: username.into(),
+            display_name: Some("Ann Lee".into()),
+        };
+        let people = directory_people(vec![
+            entry("ann@waddle.social/phone", " ann "),
+            entry("not a jid@", "bad"),
+            entry("blank@waddle.social", "  "),
+            entry("spaced@waddle.social", "two words"),
+        ]);
+        assert_eq!(
+            people,
+            [Mentionable {
+                nick: "ann".into(),
+                jid: "ann@waddle.social".into(),
+                display_name: Some("Ann Lee".into()),
+            }]
+        );
     }
 
     #[test]

@@ -239,3 +239,65 @@ fn xep0492_suppression_reason_never_distinct_from_on_mention() {
         "<never/> and <on-mention/> MUST surface distinct typed suppression reasons"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Mentioned non-member in a public group. An ordinary user of an open
+// room holds affiliation `none` and is not a durable recipient; when a
+// message personally mentions them the server enqueues a groupchat
+// candidate for them. Lock that such a candidate classifies as a
+// personal mention and that the public-group `<on-mention/>` default
+// delivers it.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn xep0492_public_group_default_delivers_personal_mention_for_mentioned_non_member() {
+    use waddle_server::notification_outbox::{
+        candidate_from_envelope, GroupchatCandidateIdentity, NotificationClass,
+        NotificationThreadId,
+    };
+    use xmpp_parsers::message::{Lang, Message, MessageType};
+
+    let room: jid::BareJid = "lobby@muc.localhost".parse().expect("room JID");
+    let carol: jid::BareJid = "carol@localhost".parse().expect("recipient JID");
+    let sender = jid::Jid::from(room.clone().with_resource_str("alice").expect("room nick"));
+    let mut message = Message::new(Some(jid::Jid::from(room.clone())));
+    message.type_ = MessageType::Groupchat;
+    message.from = Some(sender.clone());
+    message.bodies.insert(Lang::new(), "hey @carol".to_string());
+    waddle_xmpp::xep::add_reference(
+        &mut message,
+        &waddle_xmpp::xep::Reference::mention("xmpp:carol@localhost"),
+    );
+    let archive_stanza_id =
+        waddle_xmpp_core::xep0359::StanzaId::new("archive-1", jid::Jid::from(room.clone()));
+    let secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+        b"xep0492-mention-non-member-secret-32b".to_vec(),
+    )
+    .expect("occupant-id secret");
+
+    let candidate = candidate_from_envelope(
+        &message,
+        GroupchatCandidateIdentity {
+            owner: &carol,
+            room: &room,
+            sender: &sender,
+            thread_id: NotificationThreadId::root(),
+            archive_stanza_id: &archive_stanza_id,
+            // Never joined: not a live occupant.
+            is_live_occupant: false,
+            sender_can_broadcast_channel_mention: false,
+        },
+        &secret,
+    )
+    .expect("groupchat candidate");
+
+    assert_eq!(candidate.class(), NotificationClass::PersonalMention);
+    assert_eq!(
+        PushDispatchDecision::evaluate(
+            ConversationKind::PublicGroup.default_notification_setting(),
+            true,
+        ),
+        PushDispatchDecision::Deliver,
+        "public-group <on-mention/> default delivers a personal mention"
+    );
+}

@@ -10,8 +10,7 @@ pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
     pub owner: BareJid,
     pub room: BareJid,
     pub message: Box<Message>,
-    pub is_recipient: bool,
-    pub is_durable_recipient: bool,
+    pub audience: GroupchatInboxAudience,
     pub is_live_occupant: bool,
     pub room_members_only: bool,
     /// XEP-0513 §"Multi-User Chats Permissions": frozen at dispatch
@@ -29,14 +28,17 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         owner,
         room,
         message,
-        is_recipient,
-        is_durable_recipient,
+        audience,
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
         thread,
         dispatch_timestamp,
     } = input;
+    // Durable members and newly mentioned non-members bump unread. The
+    // sender's own copy and a mentioned non-member's revision row only
+    // replace the row's content.
+    let is_recipient = audience.notifies();
     let Some(_) = deps.inbox_storage else {
         debug!(
             owner = %owner,
@@ -81,8 +83,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         owner: &owner,
         room: &room,
         message: &message,
-        is_recipient,
-        is_durable_recipient,
+        audience,
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
@@ -125,8 +126,7 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     owner: &'a BareJid,
     room: &'a BareJid,
     message: &'a Message,
-    is_recipient: bool,
-    is_durable_recipient: bool,
+    audience: GroupchatInboxAudience,
     is_live_occupant: bool,
     room_members_only: bool,
     /// XEP-0513 frozen permission snapshot; see
@@ -161,7 +161,7 @@ fn groupchat_notification_recovery_mutation(
 fn groupchat_notification_recovery_item(
     event: &ProjectGroupchatInboxEvent<'_, '_>,
 ) -> Option<super::effects::room::PlannedGroupchatNotificationRecovery> {
-    if !event.deps.effects.is_planning() || !event.is_recipient || !event.is_durable_recipient {
+    if !event.deps.effects.is_planning() || !event.audience.notifies() {
         return None;
     }
     let archive_id = extract_room_stanza_id(&event.message, &event.room)?;
@@ -230,8 +230,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         owner,
         room,
         message,
-        is_recipient,
-        is_durable_recipient,
+        audience,
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
@@ -244,8 +243,7 @@ async fn maybe_enqueue_groupchat_notification_candidate(
         owner,
         room,
         message,
-        is_recipient,
-        is_durable_recipient,
+        audience,
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
@@ -269,8 +267,7 @@ async fn enqueue_groupchat_notification_candidate(
         owner,
         room,
         message,
-        is_recipient,
-        is_durable_recipient,
+        audience,
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
@@ -278,7 +275,10 @@ async fn enqueue_groupchat_notification_candidate(
         outcome,
         notification_recovery,
     } = input;
-    if !is_recipient || !is_durable_recipient {
+    // Sender rows and revision rows never notify. Durable members and
+    // resolved mentioned non-members both enqueue; live occupancy alone
+    // never does.
+    if !audience.notifies() {
         return GroupchatNotificationCandidateQueueOutcome::Completed;
     }
     // XEP-0203 `<delay/>` filter NOT applied here (Copilot review
@@ -2015,3 +2015,182 @@ mod tests {
 #[cfg(test)]
 #[path = "groupchat_recovery_tests.rs"]
 mod recovery_tests;
+
+#[cfg(test)]
+mod audience_tests {
+    use super::*;
+    use crate::server::routes::interpret::effects::{Effect, ExternalEffect, PlanSink};
+
+    fn bare(value: &str) -> BareJid {
+        value.parse().expect("valid bare JID")
+    }
+
+    /// An archived room message from `room/alice` that mentions carol by
+    /// XEP-0372 reference.
+    fn mentioning_message(room: &BareJid) -> Message {
+        let mut message = Message::new(Some(Jid::from(room.clone())));
+        message.type_ = XmppMessageType::Groupchat;
+        message.from = Some(Jid::from(
+            room.clone()
+                .with_resource_str("alice")
+                .expect("room nick JID"),
+        ));
+        message
+            .bodies
+            .insert(xmpp_parsers::message::Lang::new(), "hey @carol".to_string());
+        waddle_xmpp::xep::add_reference(
+            &mut message,
+            &waddle_xmpp::xep::Reference::mention("xmpp:carol@example.com"),
+        );
+        replace_stanza_id(
+            &mut message,
+            &Xep0359StanzaId::new("archive-1", Jid::from(room.clone())),
+        );
+        message
+    }
+
+    fn event<'a, 'deps>(
+        deps: &'a Deps<'deps>,
+        owner: &BareJid,
+        room: &BareJid,
+        audience: GroupchatInboxAudience,
+    ) -> ProjectGroupchatInboxEvent<'a, 'deps> {
+        ProjectGroupchatInboxEvent {
+            deps,
+            owner: owner.clone(),
+            room: room.clone(),
+            message: Box::new(mentioning_message(room)),
+            audience,
+            is_live_occupant: false,
+            room_members_only: false,
+            sender_can_broadcast_channel_mention: false,
+            thread: None,
+            dispatch_timestamp: 1_752_768_000,
+        }
+    }
+
+    fn committed_channel() -> GroupchatInboxProjectionOutcome {
+        GroupchatInboxProjectionOutcome {
+            channel_committed: true,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn xep0372_mentioned_non_member_plans_a_notification_recovery_row() {
+        let registry = waddle_xmpp::registry::ConnectionRegistry::new();
+        let sink = PlanSink::new();
+        let mut deps = Deps::new(&registry, "example.com");
+        deps.effects = &sink;
+        let room = bare("lobby@muc.example.com");
+        let carol = bare("carol@example.com");
+
+        let recovery = groupchat_notification_recovery_item(&event(
+            &deps,
+            &carol,
+            &room,
+            GroupchatInboxAudience::MentionedNonMember,
+        ))
+        .expect("a mentioned non-member gets a recovery row");
+        assert_eq!(recovery.key.recipient, carol);
+        assert_eq!(recovery.key.room, room);
+
+        assert!(
+            groupchat_notification_recovery_item(&event(
+                &deps,
+                &bare("alice@example.com"),
+                &room,
+                GroupchatInboxAudience::Sender,
+            ))
+            .is_none(),
+            "the sender's own row never plans a notification recovery row"
+        );
+    }
+
+    #[tokio::test]
+    async fn xep0372_mentioned_non_member_enqueues_a_personal_mention_candidate() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let registry = waddle_xmpp::registry::ConnectionRegistry::new();
+        let sink = PlanSink::new();
+        let mut deps = Deps::new(&registry, "example.com");
+        deps.effects = &sink;
+        deps.web_socket_state = Some(&state);
+        let room = bare("lobby@muc.example.com");
+        let carol = bare("carol@example.com");
+        let message = mentioning_message(&room);
+        let outcome = committed_channel();
+
+        let queued = enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
+            deps: &deps,
+            owner: &carol,
+            room: &room,
+            message: &message,
+            audience: GroupchatInboxAudience::MentionedNonMember,
+            is_live_occupant: false,
+            room_members_only: false,
+            sender_can_broadcast_channel_mention: false,
+            thread: &None,
+            outcome: &outcome,
+            notification_recovery: None,
+        })
+        .await;
+
+        assert_eq!(queued, GroupchatNotificationCandidateQueueOutcome::Planned);
+        let classes: Vec<crate::notification_outbox::NotificationClass> = sink
+            .snapshot()
+            .into_iter()
+            .filter_map(|planned| match planned.effect {
+                Effect::External(ExternalEffect::Room(
+                    super::super::effects::room::ExternalRoomEffect::NotificationCandidate {
+                        candidate: Some(candidate),
+                        owner,
+                        ..
+                    },
+                )) if owner == carol => Some(candidate.class()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            classes,
+            vec![crate::notification_outbox::NotificationClass::PersonalMention]
+        );
+    }
+
+    #[tokio::test]
+    async fn xep0372_sender_row_enqueues_no_candidate() {
+        let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
+        let registry = waddle_xmpp::registry::ConnectionRegistry::new();
+        let sink = PlanSink::new();
+        let mut deps = Deps::new(&registry, "example.com");
+        deps.effects = &sink;
+        deps.web_socket_state = Some(&state);
+        let room = bare("lobby@muc.example.com");
+        let alice = bare("alice@example.com");
+        let message = mentioning_message(&room);
+        let outcome = committed_channel();
+
+        let queued = enqueue_groupchat_notification_candidate(GroupchatNotificationProjection {
+            deps: &deps,
+            owner: &alice,
+            room: &room,
+            message: &message,
+            audience: GroupchatInboxAudience::Sender,
+            is_live_occupant: true,
+            room_members_only: false,
+            sender_can_broadcast_channel_mention: false,
+            thread: &None,
+            outcome: &outcome,
+            notification_recovery: None,
+        })
+        .await;
+
+        assert_eq!(
+            queued,
+            GroupchatNotificationCandidateQueueOutcome::Completed
+        );
+        assert!(
+            sink.snapshot().is_empty(),
+            "the sender's own row must not plan a notification candidate"
+        );
+    }
+}

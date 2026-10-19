@@ -34,6 +34,8 @@ struct ConversationComposer: View {
     @State private var gifSearch: ComposerGifSearch?
     @State private var linkPrompt = ComposerLinkPrompt()
     @State private var commands = ComposerCommandCenter()
+    /// XEP-0055 directory results for the `@query` being typed in a room.
+    @State private var mentionDirectory = MentionDirectoryResults()
     /// Counts sends, to play the send haptic.
     @State private var sendCount = 0
 
@@ -81,6 +83,9 @@ struct ConversationComposer: View {
         .sensoryFeedback(.impact(flexibility: .soft, intensity: 0.7), trigger: sendCount)
         .task(id: commands.notice?.id) {
             await expireInfoNotice()
+        }
+        .task(id: mentionSearchKey) {
+            await searchMentionDirectory(mentionSearchKey)
         }
     }
 
@@ -194,8 +199,46 @@ struct ConversationComposer: View {
             return nil
         }
         let occupants = Array((session.presence.occupants[conversation.jid] ?? [:]).values)
-        let candidates = MentionCandidates.matching(query.text, occupants: occupants, ownNick: session.account.nick)
+        let key = mentionSearchKey
+        let directoryUsers = key != nil && mentionDirectory.key == key ? mentionDirectory.users : []
+        let candidates = MentionCandidates.matching(
+            query.text,
+            occupants: occupants,
+            ownNick: session.account.nick,
+            directoryUsers: directoryUsers,
+            ownJID: session.account.jid
+        )
         return (query, candidates)
+    }
+
+    /// The room and non-empty `@query` to search the user directory for.
+    private var mentionSearchKey: MentionSearchKey? {
+        guard conversation.isRoom, !model.isEditing, let query = MentionTokens.trailingQuery(in: model.text) else {
+            return nil
+        }
+        let text = query.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !text.isEmpty else { return nil }
+        return MentionSearchKey(room: conversation.jid, query: text)
+    }
+
+    /// XEP-0055 search for people with no presence in the room, debounced:
+    /// `.task(id:)` cancels the previous run whenever the query changes, so
+    /// the latest query wins. A failed search leaves the occupants alone.
+    private func searchMentionDirectory(_ key: MentionSearchKey?) async {
+        guard let key else { return }
+        if let cached = session.cachedMentionableUsers(key.query, in: key.room) {
+            mentionDirectory = MentionDirectoryResults(key: key, users: cached)
+            return
+        }
+        try? await Task.sleep(nanoseconds: 200_000_000)
+        guard !Task.isCancelled else { return }
+        do {
+            let users = try await session.searchMentionableUsers(key.query, in: key.room)
+            guard !Task.isCancelled else { return }
+            mentionDirectory = MentionDirectoryResults(key: key, users: users)
+        } catch {
+            // Directory search is best effort; occupants are still offered.
+        }
     }
 
     /// Tab accepts the first suggestion. Return does too, except on a
@@ -406,4 +449,16 @@ struct ConversationComposer: View {
         guard !Task.isCancelled, commands.notice?.id == notice.id else { return }
         commands.dismissNotice()
     }
+}
+
+/// The room and typed `@query` a directory search answers.
+private struct MentionSearchKey: Hashable {
+    let room: BareJID
+    let query: String
+}
+
+/// The latest directory results, shown only while their query is typed.
+private struct MentionDirectoryResults {
+    var key: MentionSearchKey?
+    var users: [UserSearchResult] = []
 }

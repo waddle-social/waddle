@@ -19,6 +19,9 @@ final class FakePort: XmppPort {
     var roomBots: [BareJID: [RoomBot]] = [:]
     var roomBotRequests: [BareJID] = []
     var failsRoomBots = false
+    var userSearchResults: [String: [UserSearchResult]] = [:]
+    var userSearchRequests: [String] = []
+    var failsUserSearch = false
     var inboxReads: [BareJID] = []
     /// Every `<mark-read/>` with its thread, in order.
     var inboxReadRequests: [(partner: BareJID, threadID: String?)] = []
@@ -188,7 +191,11 @@ final class FakePort: XmppPort {
     }
     func setAffiliation(_ affiliation: RoomAffiliation, of user: BareJID, in room: BareJID, reason: String?) async throws {}
     func kick(nick: String, from room: BareJID, reason: String?) async throws {}
-    func searchUsers(_ query: String) async throws -> [UserSearchResult] { [] }
+    func searchUsers(_ query: String) async throws -> [UserSearchResult] {
+        userSearchRequests.append(query)
+        if failsUserSearch { throw PortError.failed }
+        return userSearchResults[query] ?? []
+    }
 
     func createRoom(localpart: String, name: String, summary: String?, nick: String) async throws -> BareJID {
         BareJID(localpart: localpart, domain: "muc.waddle.test")!
