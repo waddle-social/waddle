@@ -241,11 +241,19 @@ fn mention_suggestions(
         let nick = person.nick.to_lowercase();
         (!nick.starts_with(query), nick)
     });
-    // The directory matched the query itself; keep its order.
+    // The directory matched the query itself; keep its order. A directory
+    // user whose label an occupant already holds is left out: picking it
+    // would insert `@label`, which `mention_targets` resolves to the occupant.
+    let occupant_labels: Vec<String> = people
+        .occupants
+        .iter()
+        .map(|p| p.nick.trim().to_lowercase())
+        .collect();
     let mut listed: Vec<String> = occupants.iter().map(|p| p.jid.to_lowercase()).collect();
     let directory = people.directory.iter().filter(|person| {
         let jid = person.jid.to_lowercase();
-        let new = !listed.contains(&jid);
+        let new =
+            !listed.contains(&jid) && !occupant_labels.contains(&person.nick.trim().to_lowercase());
         listed.push(jid);
         new
     });
@@ -388,8 +396,18 @@ mod tests {
         assert_eq!(found[2].replacement, "@anna ");
         assert_eq!(
             titles(&suggestions("@e", 2, room)),
-            ["@annette", "@ann", "@anna", "@everyone"],
-            "the server matched the query; one entry per JID"
+            ["@annette", "@anna", "@everyone"],
+            "the server matched the query; one entry per JID and per occupant label"
+        );
+        let clash = [user("ann", "other@waddle.social", None)];
+        let clashing = Some(RoomPeople {
+            occupants: &people,
+            directory: &clash,
+        });
+        assert_eq!(
+            titles(&suggestions("@an", 3, clashing)),
+            ["@Ann", "@annette"],
+            "`@ann` would resolve to the occupant, so the other account is not offered"
         );
         let many: Vec<Mentionable> = (0..20)
             .map(|n| user(&format!("e{n}"), &format!("e{n}@waddle.social"), None))
