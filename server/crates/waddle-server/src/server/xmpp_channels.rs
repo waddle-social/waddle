@@ -159,7 +159,7 @@ pub(crate) async fn list_xmpp_channels(
             sql: r#"
                 SELECT id, name, description, channel_type, position, is_default, pin_permission, created_at, updated_at, members_only, public_room
                 FROM channels
-                ORDER BY position ASC, created_at ASC
+                ORDER BY position ASC, created_at ASC, id ASC
                 LIMIT ? OFFSET ?
             "#
             .to_string(),

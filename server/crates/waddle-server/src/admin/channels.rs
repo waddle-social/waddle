@@ -2,7 +2,7 @@
 //!
 //! Eight owner-gated commands under `urn:waddle:admin:channels:*`:
 //!
-//! - `list` — paginated read of all MUC rooms tracked by the room registry,
+//! - `list` — paginated read of catalog channels and locally tracked MUC rooms,
 //!   with occupant + per-tier affiliation counts.
 //! - `create` — create a new MUC room (defaults: public, persistent, not
 //!   members-only).
@@ -23,7 +23,7 @@
 
 use std::collections::HashSet;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, OnceLock},
 };
 
@@ -41,7 +41,7 @@ use waddle_xmpp::muc::{
     room_actor::{
         ApplyAdminItems, ApplyAffiliationChange, ChangeAffiliation, EnforceMembersOnlyAffiliations,
         GetAffiliation, GetConfig, GetSnapshot, LeaveByRealJid, ListAffiliations, ListOccupants,
-        OccupantCount, RoomActor, UpdateConfig,
+        RoomActor, UpdateConfig,
     },
     AdminItem, PinPermission, RoomConfig,
 };
@@ -66,8 +66,8 @@ use crate::permissions::{
 };
 use crate::server::routes::websocket::WebSocketState;
 use crate::server::xmpp_state::{
-    delete_xmpp_channel, get_xmpp_channel, upsert_xmpp_channel, XmppChannelRecord,
-    XmppChannelUpsert,
+    delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, upsert_xmpp_channel,
+    XmppChannelRecord, XmppChannelUpsert,
 };
 use crate::server::AppState;
 use crate::space_identity::{canonical_space_projection, SpaceNode, SpaceProjectionError};
@@ -1175,125 +1175,162 @@ async fn run_list(
     state: &AppState,
     args: &ChannelsListArgs,
 ) -> Result<ChannelsListResult, AdminErr> {
-    let mut rooms = state
+    // Inventory is durable; room actor residency is only used for enrichment.
+    // Preserve instant rooms too, using serialized JIDs for sorting and cursors.
+    let mut rooms = BTreeMap::new();
+    const CATALOG_BATCH_SIZE: usize = 200;
+    let mut offset = 0;
+    loop {
+        let channels = list_xmpp_channels(
+            state.db_pool.global_actor().clone(),
+            CATALOG_BATCH_SIZE,
+            offset,
+        )
+        .await
+        .map_err(|error| internal_err(format!("channel catalog lookup failed: {error}")))?;
+        let complete = channels.len() < CATALOG_BATCH_SIZE;
+        offset += channels.len();
+        for channel in channels {
+            let room_jid = waddle_xmpp::managed_room_jid(&channel.id, state.muc_domain.as_str())
+                .map_err(|error| internal_err(format!("invalid catalog channel JID: {error}")))?;
+            let config = channel.room_config();
+            let channel_type = channel_type_from_catalog_or_config(Some(&channel), &config);
+            rooms.insert(room_jid.to_string(), (room_jid, config, channel_type));
+        }
+        if complete {
+            break;
+        }
+    }
+
+    match state
         .room_registry
         .ask(ListRooms)
+        .reply_timeout(ADMIN_ROOM_ASK_TIMEOUT)
         .await
-        .map_err(send_err("room_registry ask ListRooms"))?;
-    rooms.sort();
-
-    // Narrow by the exact Spaces PubSub node against the channel↔space link projection.
-    // A channel belongs to at most one space; rooms with no link row
-    // are not in any space, so they are filtered out when a
-    // space filter is supplied.
-    if let Some(space_jid) = args.space_jid.as_ref() {
-        let (space_node, _) =
-            canonical_space_jid(&state.spaces_jid, space_jid, args.space_node.as_ref())?;
-        let in_space = state
-            .channel_space_link_store
-            .list_channels_in_space_node(&space_node)
-            .await
-            .map_err(map_link_err)?;
-        let permitted: std::collections::HashSet<BareJid> = in_space.into_iter().collect();
-        rooms.retain(|jid| permitted.contains(jid));
-    } else if let Some(space_node) = args.space_node.as_ref() {
-        let in_space = state
-            .channel_space_link_store
-            .list_channels_in_space_node(space_node)
-            .await
-            .map_err(map_link_err)?;
-        let permitted: std::collections::HashSet<BareJid> = in_space.into_iter().collect();
-        rooms.retain(|jid| permitted.contains(jid));
+    {
+        Ok(local_rooms) => {
+            for room_jid in local_rooms {
+                let key = room_jid.to_string();
+                if rooms.contains_key(&key)
+                    || waddle_xmpp::parse_managed_room_jid(&room_jid).is_none()
+                {
+                    continue;
+                }
+                if let Some(snapshot) = local_channel_snapshot(state, &room_jid).await {
+                    let config = snapshot.room.config;
+                    let channel_type = channel_type_from_catalog_or_config(None, &config);
+                    rooms.insert(key, (room_jid, config, channel_type));
+                }
+            }
+        }
+        Err(error) => tracing::warn!(%error, "Admin channel inventory has no local room details"),
     }
 
-    if let Some(cursor) = args.after_cursor.as_deref() {
-        rooms.retain(|jid| jid.to_string().as_str() > cursor);
-    }
-    // Filter by name prefix if requested. Requires asking each room's
-    // config — bounded by the list size, which is small (single-tenant).
+    // Space links may live in a separate database; use their storage interface.
+    let space_node = match args.space_jid.as_ref() {
+        Some(space_jid) => {
+            Some(canonical_space_jid(&state.spaces_jid, space_jid, args.space_node.as_ref())?.0)
+        }
+        None => args.space_node.clone(),
+    };
+    let in_space = match space_node.as_ref() {
+        Some(space_node) => Some(
+            state
+                .channel_space_link_store
+                .list_channels_in_space_node(space_node)
+                .await
+                .map_err(map_link_err)?
+                .into_iter()
+                .collect::<HashSet<BareJid>>(),
+        ),
+        None => None,
+    };
+    // Filter before limiting. Rust casing preserves Unicode prefix semantics;
+    // '%' and '_' remain literal rather than SQL LIKE wildcards.
     let limit = args.page_size as usize;
-    let mut entries = Vec::with_capacity(limit.min(rooms.len()));
-    let mut iter_count = 0usize;
-    for room_jid in &rooms {
-        // Honour the prefix filter on the canonical name.
-        let actor = match state
+    let mut entries: Vec<ChannelListEntry> = rooms
+        .into_iter()
+        .filter(|(key, (jid, config, _))| {
+            !config.group_dm
+                && in_space
+                    .as_ref()
+                    .is_none_or(|allowed| allowed.contains(jid))
+                && args.after_cursor.as_ref().is_none_or(|cursor| key > cursor)
+                && args
+                    .prefix
+                    .as_ref()
+                    .is_none_or(|prefix| config.name.to_lowercase().starts_with(prefix))
+        })
+        .take(limit + 1)
+        .map(
+            |(_, (channel_jid, config, channel_type))| ChannelListEntry {
+                channel_jid,
+                name: config.name,
+                topic: config.description,
+                channel_type,
+                is_public: config.public_room,
+                members_only: config.members_only,
+                occupant_count: 0,
+                affiliation_owner_count: 0,
+                affiliation_admin_count: 0,
+                affiliation_member_count: 0,
+                affiliation_outcast_count: 0,
+            },
+        )
+        .collect();
+    let has_more = entries.len() > limit;
+    entries.truncate(limit);
+    let next_cursor = if has_more {
+        entries.last().map(|entry| entry.channel_jid.to_string())
+    } else {
+        None
+    };
+
+    // Counts describe available local snapshots, not cluster-wide presence.
+    // Dormant, remote, or disappearing actors must never remove catalog rows.
+    for entry in &mut entries {
+        if let Some(snapshot) = local_channel_snapshot(state, &entry.channel_jid).await {
+            entry.occupant_count =
+                u32::try_from(snapshot.room.occupant_count()).unwrap_or(u32::MAX);
+            for affiliation in snapshot.room.get_all_affiliations() {
+                match affiliation.affiliation {
+                    Affiliation::Owner => entry.affiliation_owner_count += 1,
+                    Affiliation::Admin => entry.affiliation_admin_count += 1,
+                    Affiliation::Member => entry.affiliation_member_count += 1,
+                    Affiliation::Outcast => entry.affiliation_outcast_count += 1,
+                    Affiliation::None => {}
+                }
+            }
+        }
+    }
+    Ok(ChannelsListResult {
+        entries,
+        next_cursor,
+    })
+}
+
+async fn local_channel_snapshot(
+    state: &AppState,
+    room_jid: &BareJid,
+) -> Option<waddle_xmpp::muc::room_actor::RoomSnapshot> {
+    let result = tokio::time::timeout(ADMIN_ROOM_ASK_TIMEOUT, async {
+        let actor = state
             .room_registry
             .ask(GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
-        {
-            Ok(Some(actor)) => actor,
-            Ok(None) | Err(_) => continue,
-        };
-        let config = actor
-            .ask(GetConfig)
-            .await
-            .map_err(send_err("room actor GetConfig"))?;
-        if config.group_dm {
-            continue;
-        }
-        if let Some(prefix) = args.prefix.as_deref() {
-            if !config.name.to_lowercase().starts_with(prefix) {
-                continue;
-            }
-        }
-        let channel_id = match waddle_xmpp::parse_managed_room_jid(room_jid) {
-            Some(channel_id) => channel_id,
-            None => continue,
-        };
-        let catalog_snapshot = get_xmpp_channel(state.db_pool.global_actor().clone(), &channel_id)
-            .await
-            .map_err(|error| internal_err(format!("channel catalog lookup failed: {error}")))?;
-        let channel_type = channel_type_from_catalog_or_config(catalog_snapshot.as_ref(), &config);
-        let occupant_count = actor
-            .ask(OccupantCount)
-            .await
-            .map_err(send_err("room actor OccupantCount"))?;
-        let affiliations = actor
-            .ask(ListAffiliations { filter: None })
-            .await
-            .map_err(send_err("room actor ListAffiliations"))?;
-        let (mut owner_n, mut admin_n, mut member_n, mut outcast_n) = (0u32, 0u32, 0u32, 0u32);
-        for entry in &affiliations {
-            match entry.affiliation {
-                Affiliation::Owner => owner_n += 1,
-                Affiliation::Admin => admin_n += 1,
-                Affiliation::Member => member_n += 1,
-                Affiliation::Outcast => outcast_n += 1,
-                Affiliation::None => {}
-            }
-        }
-        iter_count += 1;
-        if iter_count > limit {
-            break;
-        }
-        entries.push(ChannelListEntry {
-            channel_jid: room_jid.clone(),
-            name: config.name,
-            topic: config.description,
-            channel_type,
-            is_public: config.public_room,
-            members_only: config.members_only,
-            occupant_count: u32::try_from(occupant_count).unwrap_or(u32::MAX),
-            affiliation_owner_count: owner_n,
-            affiliation_admin_count: admin_n,
-            affiliation_member_count: member_n,
-            affiliation_outcast_count: outcast_n,
-        });
-        if entries.len() >= limit {
-            break;
+            .ok()??;
+        actor.ask(GetSnapshot).await.ok()
+    })
+    .await;
+    match result {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            tracing::warn!(%room_jid, %error, "Admin channel local snapshot timed out");
+            None
         }
     }
-    let next_cursor = if iter_count > limit && !entries.is_empty() {
-        entries.last().map(|entry| entry.channel_jid.to_string())
-    } else {
-        None
-    };
-    Ok(ChannelsListResult {
-        entries,
-        next_cursor,
-    })
 }
 
 fn map_link_err(error: ChannelSpaceLinkError) -> AdminErr {
@@ -9575,3 +9612,7 @@ mod group_dm_durable_reconciliation_tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "channel_inventory_tests.rs"]
+mod channel_inventory_tests;
