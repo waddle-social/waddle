@@ -39,7 +39,7 @@ import { pickPresence } from "@/presence/presence-store";
 const draft = defineModel<string>("draft", { required: true });
 const forumTitle = defineModel<string>("forumTitle", { default: "" });
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   channelName: string;
   isForumChannel: boolean;
   isSending: boolean;
@@ -58,7 +58,11 @@ const props = defineProps<{
   showExtensions?: boolean;
   /** Overrides the default `Message #channel` placeholder (DMs, threads). */
   placeholder?: string;
-}>();
+}>(), {
+  // An omitted boolean prop resolves to `false` in Vue, so surfaces opt out
+  // of the extensions launcher explicitly instead.
+  showExtensions: true,
+});
 
 const emit = defineEmits<{
   send: [
@@ -151,7 +155,6 @@ onBeforeUnmount(() => {
 });
 
 const showForumTitleInput = computed(() => props.isForumChannel && !props.replyingTo);
-const showExtensions = computed(() => props.showExtensions !== false);
 
 const {
   showMentions,

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { renderVueComponent } from "./helpers/render-vue-sfc";
+import { renderVueComponent, renderVueComponentSource } from "./helpers/render-vue-sfc";
 import { composerPlaceholder } from "../src/components/chat/composer-placeholder";
 import { sanitizeLinkUrl } from "../src/components/chat/composables/use-editor-link-input";
 import {
@@ -52,6 +52,21 @@ describe("Slack-style composer layout", () => {
 
     expect(html).not.toContain('aria-label="Extensions"');
     expect(html).toContain('aria-haspopup="menu"');
+  });
+
+  test("offers extensions in the + menu unless a surface opts out", async () => {
+    // Vue resolves an omitted boolean prop to `false`, so the default must be
+    // declared for the main channel composer, which never passes the prop.
+    const html = await renderVueComponentSource(`
+<script setup lang="ts">
+import MessageComposer from "@/components/chat/MessageComposer.vue";
+const showExtensionsDefault = (MessageComposer as { props: Record<string, { default?: unknown }> })
+  .props.showExtensions.default;
+</script>
+<template><output>{{ showExtensionsDefault }}</output></template>
+`);
+
+    expect(html).toBe("<output>true</output>");
   });
 
   test("send stays unarmed and disabled while the draft is empty", async () => {
