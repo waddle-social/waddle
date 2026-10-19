@@ -330,6 +330,9 @@ pub(crate) fn outcome_to_attempt_status(outcome: &WebPushOutcome) -> &'static st
         WebPushOutcome::RateLimited { .. } => ATTEMPT_STATUS_WEB_RATE_LIMITED,
         WebPushOutcome::PayloadTooLarge { .. } => ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE,
         WebPushOutcome::BadRequest { .. } => ATTEMPT_STATUS_WEB_BAD_REQUEST,
+        WebPushOutcome::Transient {
+            kind: waddle_xmpp::push::types::TransientFailure::ServerError { .. },
+        } => ATTEMPT_STATUS_WEB_SERVER_ERROR,
         WebPushOutcome::Transient { .. } => ATTEMPT_STATUS_WEB_TRANSIENT,
     }
 }
@@ -354,6 +357,7 @@ pub(crate) const ATTEMPT_STATUS_WEB_CLOCK_SKEW: &str = "web-clock-skew";
 pub(crate) const ATTEMPT_STATUS_WEB_RATE_LIMITED: &str = "web-rate-limited";
 pub(crate) const ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE: &str = "web-payload-too-large";
 pub(crate) const ATTEMPT_STATUS_WEB_BAD_REQUEST: &str = "web-bad-request";
+pub(crate) const ATTEMPT_STATUS_WEB_SERVER_ERROR: &str = "web-server-error";
 pub(crate) const ATTEMPT_STATUS_WEB_TRANSIENT: &str = "web-transient";
 pub(crate) const ATTEMPT_STATUS_WEB_MISSING_MATERIAL: &str = "web-missing-material";
 pub(crate) const ATTEMPT_STATUS_WEB_UNSEAL_FAILED: &str = "web-unseal-failed";
@@ -364,6 +368,23 @@ pub(crate) const ATTEMPT_STATUS_WEB_INVALID_KEYS: &str = "web-invalid-keys";
 mod tests {
     use super::*;
     use waddle_xmpp::push::envelope::{push_class_for_db_value, PushClass};
+
+    #[test]
+    fn server_response_is_persisted_separately_from_lost_response() {
+        use waddle_xmpp::push::types::TransientFailure;
+        assert_eq!(
+            outcome_to_attempt_status(&WebPushOutcome::Transient {
+                kind: TransientFailure::ServerError { status: 503 }
+            }),
+            ATTEMPT_STATUS_WEB_SERVER_ERROR
+        );
+        for kind in [TransientFailure::Network, TransientFailure::Timeout] {
+            assert_eq!(
+                outcome_to_attempt_status(&WebPushOutcome::Transient { kind }),
+                ATTEMPT_STATUS_WEB_TRANSIENT
+            );
+        }
+    }
 
     /// Build a notification XML payload via structured `minidom`
     /// builders (per CLAUDE.md "XML generation hard rule": never via

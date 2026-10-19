@@ -386,7 +386,7 @@ mod tests {
             )
             .await,
             FcmOutcome::Transient {
-                cause: FcmTransient::Failure(TransientFailure::ServerError { status: 503 }),
+                cause: FcmTransient::Unavailable,
                 retry_after: None,
             }
         );

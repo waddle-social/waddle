@@ -157,6 +157,7 @@ pub fn record_apns_outcome(outcome: &ApnsOutcome) -> Option<PushStage> {
         | ApnsOutcome::Transient {
             cause:
                 ApnsTransient::RateLimited { .. }
+                | ApnsTransient::Refused { .. }
                 | ApnsTransient::Failure(TransientFailure::ServerError { .. }),
             ..
         } => {
@@ -198,7 +199,9 @@ pub fn record_fcm_outcome(outcome: &FcmOutcome) -> Option<PushStage> {
         | FcmOutcome::Rejected { status: 1.., .. }
         | FcmOutcome::Transient {
             cause:
-                FcmTransient::RateLimited | FcmTransient::Failure(TransientFailure::ServerError { .. }),
+                FcmTransient::RateLimited
+                | FcmTransient::Unavailable
+                | FcmTransient::Failure(TransientFailure::ServerError { .. }),
             ..
         } => {
             increment_provider_rejected(PushProvider::Fcm);

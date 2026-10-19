@@ -65,7 +65,7 @@ const FCM_NOT_CONFIGURED: &str = "fcm-not-configured";
 const FCM_PROVIDER_AUTH: &str = "fcm-provider-auth";
 const FCM_APP_ID_MISMATCH: &str = "fcm-app-id-mismatch";
 const FCM_TOKEN_TRANSIENT: &str = "fcm-token-transient";
-const FCM_TRANSIENT: &str = "fcm-transient";
+const FCM_SERVER_ERROR: &str = "fcm-server-error";
 /// RFC 8291 §3.4 / RFC 8188 §2 constants for the receiver side.
 const WEBPUSH_INFO_PREFIX: &[u8] = b"WebPush: info\0";
 const CEK_INFO: &[u8] = b"Content-Encoding: aes128gcm\0";
@@ -1129,7 +1129,7 @@ async fn fcm_transient_failure_requeues_without_resending_to_delivered_siblings(
     );
     assert!(attempt_statuses(&store, &node)
         .await
-        .contains(&("flaky-phone".to_string(), FCM_TRANSIENT.to_string())));
+        .contains(&("flaky-phone".to_string(), FCM_SERVER_ERROR.to_string())));
 
     {
         let db = store.database();
@@ -1150,4 +1150,148 @@ async fn fcm_transient_failure_requeues_without_resending_to_delivered_siblings(
         1,
         "#1123: an already-delivered Android device is not pushed twice"
     );
+}
+
+#[tokio::test]
+async fn persistent_provider_failures_stop_dispatch_after_twenty_four_attempts() {
+    for prior_unknown in [false, true] {
+        for (status, outcome, new_uncertainty) in [
+            (
+                "fcm-server-error",
+                FcmOutcome::Transient {
+                    cause: FcmTransient::Failure(TransientFailure::ServerError { status: 500 }),
+                    retry_after: None,
+                },
+                true,
+            ),
+            (
+                "fcm-rate-limited",
+                FcmOutcome::Transient {
+                    cause: FcmTransient::RateLimited,
+                    retry_after: Some(Duration::from_secs(120)),
+                },
+                false,
+            ),
+            (
+                "fcm-provider-refused",
+                FcmOutcome::Transient {
+                    cause: FcmTransient::Unavailable,
+                    retry_after: None,
+                },
+                false,
+            ),
+            (
+                "fcm-transient",
+                FcmOutcome::Transient {
+                    cause: FcmTransient::Failure(TransientFailure::Timeout),
+                    retry_after: None,
+                },
+                true,
+            ),
+        ] {
+            let phone = AndroidDevice::new("persistent-phone");
+            let sender =
+                FakeFcmSender::with_outcomes(vec![("persistent-phone", vec![outcome; 25])]);
+            let store = store_with_fcm(sender.clone(), CountingTokens::new()).await;
+            let owner = owner();
+            let node = android_node(&store, &owner, APP_ID, &[("phone", &phone)]).await;
+            publish(
+                &store,
+                &owner,
+                &node,
+                notification_item("persistent", "dm", 1),
+            )
+            .await;
+            if prior_unknown {
+                let db = store.database();
+                let conn = db.guard().await.expect("db guard");
+                conn.execute("UPDATE push_publish_jobs SET uncertain_send = 1", ())
+                    .await
+                    .expect("earlier lost response");
+            }
+            for completed in 1..=24 {
+                store
+                    .drain_queued_notification_publish_jobs(1)
+                    .await
+                    .expect("worker attempt");
+                assert_eq!(sender.calls().len(), completed);
+                assert_eq!(
+                    job_uncertain_send(&store, "persistent").await,
+                    i64::from(prior_unknown || new_uncertainty)
+                );
+                if completed < 24 {
+                    assert_eq!(job_status(&store, "persistent").await, "queued");
+                    let db = store.database();
+                    let conn = db.guard().await.expect("db guard");
+                    conn.execute("UPDATE push_publish_jobs SET next_retry_at_ms = 0", ())
+                        .await
+                        .expect("retry eligible");
+                }
+            }
+            assert_eq!(job_status(&store, "persistent").await, "failed");
+            assert!(attempt_statuses(&store, &node)
+                .await
+                .iter()
+                .all(|(_, actual)| actual == status));
+            for _ in 0..2 {
+                store
+                    .drain_queued_notification_publish_jobs(16)
+                    .await
+                    .expect("idle worker");
+            }
+            assert_eq!(
+                sender.calls().len(),
+                24,
+                "{status} prior={prior_unknown}: exhausted jobs never send again"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn persistent_pre_send_token_failure_stops_at_budget_without_contacting_provider() {
+    for prior_unknown in [false, true] {
+        let phone = AndroidDevice::new("presend-phone");
+        let sender = FakeFcmSender::default();
+        let tokens =
+            CountingTokens::failing_with(Some(FcmTokenError::Transient(TransientFailure::Timeout)));
+        let store = store_with_fcm(sender.clone(), tokens).await;
+        let owner = owner();
+        let node = android_node(&store, &owner, APP_ID, &[("phone", &phone)]).await;
+        publish(&store, &owner, &node, notification_item("presend", "dm", 1)).await;
+        {
+            let db = store.database();
+            let conn = db.guard().await.expect("db guard");
+            conn.execute(
+                "UPDATE push_publish_jobs SET uncertain_send = ?",
+                db_params![i64::from(prior_unknown)],
+            )
+            .await
+            .expect("earlier uncertainty");
+        }
+        for _ in 1..24 {
+            {
+                let db = store.database();
+                let conn = db.guard().await.expect("db guard");
+                conn.execute("UPDATE push_publish_jobs SET next_retry_at_ms = 0", ())
+                    .await
+                    .expect("retry eligible");
+            }
+            store
+                .drain_queued_notification_publish_jobs(1)
+                .await
+                .expect("token attempt");
+        }
+        assert_eq!(job_status(&store, "presend").await, "failed");
+        assert_eq!(
+            job_uncertain_send(&store, "presend").await,
+            i64::from(prior_unknown)
+        );
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("idle worker");
+        assert!(sender.calls().is_empty());
+        assert_eq!(attempt_statuses(&store, &node).await.len(), 24);
+    }
 }

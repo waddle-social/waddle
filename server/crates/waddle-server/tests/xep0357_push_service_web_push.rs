@@ -6,9 +6,9 @@
 //! the same tx so future publish jobs for the node skip it. These
 //! tests exercise the full path with a mock `WebPushSender` so the
 //! cleanup behavior is locked in without needing a live relay.
-//! Known pre-send errors stop at the existing retry cap under the §6.1 error
-//! policy; uncertain sends remain retryable, and PubSub/queue acceptance never
-//! substitutes for a provider reply.
+//! All transient failures stop dispatch after 24 attempts under the §6.1 error
+//! policy. Uncertain sends then retain custody as parked failed records;
+//! PubSub/queue acceptance never substitutes for a provider reply.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -376,9 +376,18 @@ async fn missing_backing_retries_are_bounded_without_provider_sends() {
         assert_eq!(row.get::<Option<i64>>(4).expect("claim time"), None);
         assert_eq!(row.get::<Option<i64>>(5).expect("published time"), None);
     }
-    let queued = store.queued_publish_jobs().await.expect("queue");
-    assert_eq!(queued.len(), 1, "prior uncertainty must survive the cap");
-    assert_eq!(queued[0].item_id(), "prior-uncertain-send");
+    assert!(store.queued_publish_jobs().await.expect("queue").is_empty());
+    let mut rows = query(&store, "SELECT status, uncertain_send, attempt_count, next_retry_at_ms, published_at_ms FROM push_publish_jobs WHERE item_id = ?", db_params!["prior-uncertain-send"]).await;
+    let row = rows.next().await.expect("row").expect("parked acceptance");
+    assert_eq!(row.get::<String>(0).expect("status"), "failed");
+    assert_eq!(
+        row.get::<i64>(1).expect("uncertainty"),
+        1,
+        "the earlier possible send survives exhaustion"
+    );
+    assert_eq!(row.get::<i64>(2).expect("attempt count"), 24);
+    assert_eq!(row.get::<Option<i64>>(3).expect("retry deadline"), None);
+    assert_eq!(row.get::<Option<i64>>(4).expect("published time"), None);
     assert_eq!(sender.call_count(), 0);
     assert!(store
         .delivery_attempts_for_node(node.node())
@@ -615,7 +624,7 @@ async fn gone_device_with_live_sibling_keeps_registration_enabled() {
 }
 
 #[tokio::test]
-async fn transient_outcome_keeps_device_active_and_requeues() {
+async fn transient_outcome_keeps_device_active_and_parks_at_budget() {
     let (store, sender) = store_with_web_push_provider(WebPushOutcome::Transient {
         kind: waddle_xmpp::push::types::TransientFailure::Network,
     })
@@ -646,14 +655,24 @@ async fn transient_outcome_keeps_device_active_and_requeues() {
     let db = store.database();
     db.guard().await.expect("guard").execute(
         "UPDATE push_publish_jobs SET attempt_count = ?, next_retry_at_ms = NULL WHERE item_id = ?",
-        db_params![50_i64, "transient-item-1"],
-    ).await.expect("many previous unknown outcomes");
+        db_params![23_i64, "transient-item-1"],
+    ).await.expect("final permitted attempt");
     store
         .drain_queued_notification_publish_jobs(16)
         .await
         .expect("drain");
 
     assert_eq!(sender.call_count(), 2);
+    assert!(store.queued_publish_jobs().await.expect("queue").is_empty());
+    store
+        .drain_queued_notification_publish_jobs(16)
+        .await
+        .expect("parked work is idle");
+    assert_eq!(
+        sender.call_count(),
+        2,
+        "exhausted uncertain work cannot send again"
+    );
     assert_eq!(
         device_status(&store, node.node(), "web-1").await,
         DEVICE_STATUS_ACTIVE,
@@ -739,11 +758,11 @@ async fn earlier_provider_timeout_survives_later_known_failure() {
         let db = store.database();
         let conn = db.guard().await.expect("retry fixture");
         conn.execute(
-            "UPDATE push_publish_jobs SET attempt_count = 50 WHERE item_id = ?",
+            "UPDATE push_publish_jobs SET attempt_count = 23 WHERE item_id = ?",
             db_params![&item_id],
         )
         .await
-        .expect("past known failure cap");
+        .expect("final permitted attempt");
         if failure == "parser" {
             conn.execute(
                 "UPDATE push_publish_jobs SET payload_xml = 'not XML' WHERE item_id = ?",
@@ -785,11 +804,11 @@ async fn earlier_provider_timeout_survives_later_known_failure() {
         let row = rows.next().await.expect("row").expect("uncertain job");
         assert_eq!(
             row.get::<String>(0).expect("status"),
-            "queued",
-            "{failure} cannot resolve the earlier provider timeout"
+            "failed",
+            "{failure} parks the earlier provider timeout at the retry cap"
         );
         assert_eq!(row.get::<i64>(1).expect("uncertainty"), 1);
-        assert!(row.get::<Option<i64>>(2).expect("retry deadline").is_some());
+        assert_eq!(row.get::<Option<i64>>(2).expect("retry deadline"), None);
         assert_eq!(row.get::<Option<String>>(3).expect("claim token"), None);
         assert_eq!(row.get::<Option<i64>>(4).expect("claimed time"), None);
         assert_eq!(row.get::<Option<i64>>(5).expect("published time"), None);
@@ -797,6 +816,13 @@ async fn earlier_provider_timeout_survives_later_known_failure() {
             sender.calls_matching("sticky-device"),
             if failure == "parser" { 1 } else { 2 }
         );
+        assert!(store.queued_publish_jobs().await.expect("queue").is_empty());
+        let sends = sender.calls_matching("sticky-device");
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("parked job stays idle");
+        assert_eq!(sender.calls_matching("sticky-device"), sends);
     }
 }
 
@@ -1166,11 +1192,121 @@ async fn phase3_failure_after_web_send_keeps_uncertainty_and_lease_until_recover
     store
         .drain_queued_notification_publish_jobs(1)
         .await
-        .expect("known429 after uncertain send");
-    assert_eq!(sender.calls_matching("phase3-repair"), 2);
-    assert_eq!(
-        store.queued_publish_jobs().await.expect("queue").len(),
-        1,
-        "the later explicit transient and attempt50 cannot erase prior uncertainty"
-    );
+        .expect("parked lease cannot send again");
+    assert_eq!(sender.calls_matching("phase3-repair"), 1);
+    assert!(store.queued_publish_jobs().await.expect("queue").is_empty());
+    let mut rows = query(&store, "SELECT status, uncertain_send, claim_token, claimed_at_ms, published_at_ms FROM push_publish_jobs WHERE item_id = ?", db_params!["phase3-repair"]).await;
+    let row = rows.next().await.expect("row").expect("parked lease");
+    assert_eq!(row.get::<String>(0).expect("status"), "failed");
+    assert_eq!(row.get::<i64>(1).expect("uncertainty"), 1);
+    assert_eq!(row.get::<Option<String>>(2).expect("claim token"), None);
+    assert_eq!(row.get::<Option<i64>>(3).expect("claim time"), None);
+    assert_eq!(row.get::<Option<i64>>(4).expect("published time"), None);
+}
+
+#[tokio::test]
+async fn persistent_web_push_failures_stop_dispatch_after_twenty_four_attempts() {
+    use waddle_xmpp::push::types::TransientFailure;
+    for prior_unknown in [false, true] {
+        for (status, outcome, new_uncertainty) in [
+            (
+                "web-server-error",
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::ServerError { status: 500 },
+                },
+                true,
+            ),
+            (
+                "web-server-error",
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::ServerError { status: 503 },
+                },
+                true,
+            ),
+            (
+                "web-transient",
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::Timeout,
+                },
+                true,
+            ),
+            (
+                "web-rate-limited",
+                WebPushOutcome::RateLimited {
+                    status: 429,
+                    retry_after: Some(std::time::Duration::from_secs(120)),
+                },
+                false,
+            ),
+        ] {
+            let (store, sender) = store_with_web_push_provider(outcome).await;
+            let owner = owner();
+            let node = store.ensure_node(&owner, "web-cap").await.expect("node");
+            register_web_device(&store, &owner, node.node(), "phone", "persistent").await;
+            store
+                .publish_notification_from_user_server(
+                    node.node(),
+                    &web_push_notification_item("persistent", "alice@example.com", "dm", 1),
+                    &owner,
+                )
+                .await
+                .expect("first attempt");
+            if prior_unknown {
+                store
+                    .database()
+                    .guard()
+                    .await
+                    .expect("guard")
+                    .execute("UPDATE push_publish_jobs SET uncertain_send = 1", ())
+                    .await
+                    .expect("earlier possible send");
+            }
+            for completed in 1..=24 {
+                assert_eq!(sender.call_count(), completed);
+                let mut rows = query(&store, "SELECT status, uncertain_send, attempt_count, next_retry_at_ms FROM push_publish_jobs WHERE item_id = 'persistent'", ()).await;
+                let row = rows.next().await.expect("row").expect("work");
+                assert_eq!(
+                    row.get::<i64>(1).expect("uncertainty"),
+                    i64::from(prior_unknown || new_uncertainty)
+                );
+                assert_eq!(row.get::<i64>(2).expect("attempt count"), completed as i64);
+                assert_eq!(
+                    row.get::<String>(0).expect("status"),
+                    if completed < 24 { "queued" } else { "failed" }
+                );
+                if completed < 24 {
+                    assert!(row.get::<Option<i64>>(3).expect("retry deadline").is_some());
+                    force_retry_eligibility(&store).await;
+                    store
+                        .drain_queued_notification_publish_jobs(1)
+                        .await
+                        .expect("next attempt");
+                } else {
+                    assert_eq!(row.get::<Option<i64>>(3).expect("retry deadline"), None);
+                }
+            }
+            assert!(store.queued_publish_jobs().await.expect("queue").is_empty());
+            let attempts = store
+                .delivery_attempts_for_node(node.node())
+                .await
+                .expect("attempts");
+            assert_eq!(attempts.len(), 24);
+            assert!(attempts.iter().all(|attempt| attempt.status() == status));
+            for _ in 0..2 {
+                store
+                    .drain_queued_notification_publish_jobs(16)
+                    .await
+                    .expect("idle worker");
+            }
+            assert_eq!(
+                sender.call_count(),
+                24,
+                "{status} prior={prior_unknown}: exhausted work never sends again"
+            );
+            assert_eq!(
+                device_status(&store, node.node(), "phone").await,
+                DEVICE_STATUS_ACTIVE
+            );
+        }
+    }
 }

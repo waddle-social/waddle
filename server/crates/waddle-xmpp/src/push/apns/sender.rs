@@ -545,7 +545,10 @@ mod tests {
         assert_eq!(
             send_with_status(500, r#"{"reason":"InternalServerError"}"#, None).await,
             ApnsOutcome::Transient {
-                cause: ApnsTransient::Failure(TransientFailure::ServerError { status: 500 }),
+                cause: ApnsTransient::Refused {
+                    status: 500,
+                    reason: ApnsReason::InternalServerError
+                },
                 retry_after: None,
             }
         );
@@ -556,7 +559,10 @@ mod tests {
         assert_eq!(
             send_with_status(503, r#"{"reason":"ServiceUnavailable"}"#, None).await,
             ApnsOutcome::Transient {
-                cause: ApnsTransient::Failure(TransientFailure::ServerError { status: 503 }),
+                cause: ApnsTransient::Refused {
+                    status: 503,
+                    reason: ApnsReason::ServiceUnavailable
+                },
                 retry_after: None,
             }
         );

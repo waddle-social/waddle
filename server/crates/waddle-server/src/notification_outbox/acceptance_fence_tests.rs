@@ -85,7 +85,7 @@ async fn stale_claim_neither_enters_nor_clears_boundary(fixture: IngressFixture)
     );
     assert_eq!(
         fixture
-            .count("notification_outbox WHERE status = 'in-progress' AND attempt_count = 0")
+            .count("notification_outbox WHERE status = 'in-progress' AND attempt_count = 1")
             .await,
         1
     );
@@ -159,7 +159,20 @@ async fn cancelled_boundary_retains_uncertainty_without_a_local_queue(fixture: I
             .expect("unknown retry"),
         Some(5)
     );
-    assert_eq!(fixture.count("notification_outbox WHERE status = 'queued' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL").await, 1);
+    assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL").await, 1);
+    assert!(store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("parked jobs stay unclaimed")
+        .is_empty());
+    let pruned = store
+        .prune_completed_before(i64::MAX, 16)
+        .await
+        .expect("prune");
+    assert_eq!(
+        pruned.jobs_deleted, 0,
+        "uncertain parked evidence must survive retention"
+    );
     drop(store);
     fixture.close().await;
 }
@@ -249,6 +262,7 @@ async fn postgres_unknown_legacy_job_cannot_coalesce_new_work() {
 
 #[tokio::test]
 async fn postgres_queue_boundary_committing_while_cap_waits_keeps_custody() {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
     let Some(fixture) = IngressFixture::postgres("queue_cap_boundary_race").await else {
         return;
     };
@@ -291,17 +305,27 @@ async fn postgres_queue_boundary_committing_while_cap_waits_keeps_custody() {
             drop(conn);
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
-    }).await.expect("cap read marker0, then blocked on the boundary transaction");
+    }).await.expect("cap waits for the boundary transaction's current uncertainty marker");
     boundary
         .commit()
         .await
         .expect("possible acceptance becomes durable");
     assert_eq!(
         retry.await.expect("retry task").expect("fenced retry"),
-        None,
-        "the terminal cap must recheck uncertainty after waiting for the row lock"
+        Some(5),
+        "the cap parks using the current uncertainty marker after acquiring the row lock"
     );
-    assert_eq!(fixture.count("notification_outbox WHERE status = 'in-progress' AND attempt_count = 4 AND queue_acceptance_may_exist = 1 AND claim_token IS NOT NULL").await, 1);
+    assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL").await, 1);
+    assert_eq!(
+        telemetry.counter_sum("xmpp.push.disposition", &[("disposition", "parked")]),
+        Some(1)
+    );
+    assert_eq!(
+        telemetry
+            .counter_sum("xmpp.push.outbox_dead_lettered", &[])
+            .unwrap_or(0),
+        0
+    );
     drop(store);
     fixture.close().await;
 }

@@ -190,7 +190,7 @@ async fn malformed_prefix_preserves_unknown_custody_and_unblocks_neighbor(fixtur
             row.get::<String>(1).expect("options"),
             String::from(&options)
         );
-        assert!(row.get::<String>(2).expect("cause").contains("sender"));
+        assert_eq!(row.get::<String>(2).expect("cause"), "malformed");
     }
     drop(rows);
     store

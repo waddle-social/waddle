@@ -52,6 +52,7 @@ pub use payload::{
     build_xep0357_notification_payload, publish_options_form_type_is_xep0060,
     target_from_subscription, RichSummary, WADDLE_PUSH_CONTEXT_NS, XEP0357_SUMMARY_FORM_TYPE,
 };
+pub(crate) use publish::retire_registration_outbox_tx;
 pub(crate) use types::SuppressedReason;
 pub use types::{
     NotificationCandidateInsertOutcome, NotificationClass, NotificationOutboxError,

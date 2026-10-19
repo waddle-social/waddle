@@ -28,6 +28,8 @@ pub(crate) const ATTEMPT_STATUS_APNS_DELIVERED: &str = "apns-delivered";
 /// The only APNs status that disables the device (XEP-0357 §6).
 pub(crate) const ATTEMPT_STATUS_APNS_GONE: &str = "apns-gone";
 pub(crate) const ATTEMPT_STATUS_APNS_RATE_LIMITED: &str = "apns-rate-limited";
+pub(crate) const ATTEMPT_STATUS_APNS_SERVER_ERROR: &str = "apns-server-error";
+pub(crate) const ATTEMPT_STATUS_APNS_PROVIDER_REFUSED: &str = "apns-provider-refused";
 pub(crate) const ATTEMPT_STATUS_APNS_TRANSIENT: &str = "apns-transient";
 /// Provider token rejected again after a refresh, or rejected while too
 /// young to refresh (Apple's 20-minute floor): the `.p8` key, key id, team
@@ -292,6 +294,14 @@ pub(super) fn outcome_to_attempt_status(outcome: &ApnsOutcome) -> &'static str {
             ..
         } => ATTEMPT_STATUS_APNS_RATE_LIMITED,
         ApnsOutcome::Transient {
+            cause: ApnsTransient::Refused { .. },
+            ..
+        } => ATTEMPT_STATUS_APNS_PROVIDER_REFUSED,
+        ApnsOutcome::Transient {
+            cause: ApnsTransient::Failure(TransientFailure::ServerError { .. }),
+            ..
+        } => ATTEMPT_STATUS_APNS_SERVER_ERROR,
+        ApnsOutcome::Transient {
             cause: ApnsTransient::Failure(_),
             ..
         } => ATTEMPT_STATUS_APNS_TRANSIENT,
@@ -312,6 +322,9 @@ fn outcome_diagnostic(outcome: &ApnsOutcome) -> Option<String> {
             let cause = match cause {
                 ApnsTransient::RateLimited { reason } => {
                     format!("rate limited HTTP 429 {}", reason.as_str())
+                }
+                ApnsTransient::Refused { status, reason } => {
+                    format!("provider refused HTTP {status} {}", reason.as_str())
                 }
                 ApnsTransient::Failure(TransientFailure::ServerError { status }) => {
                     format!("transient: HTTP {status}")
@@ -355,6 +368,34 @@ mod tests {
     use waddle_xmpp::push::apns::ApnsReason;
 
     use super::*;
+
+    #[test]
+    fn persisted_retry_status_distinguishes_failure_contracts() {
+        assert_eq!(
+            outcome_to_attempt_status(&ApnsOutcome::Transient {
+                cause: ApnsTransient::Refused {
+                    status: 503,
+                    reason: ApnsReason::Shutdown
+                },
+                retry_after: None
+            }),
+            ATTEMPT_STATUS_APNS_PROVIDER_REFUSED
+        );
+        assert_eq!(
+            outcome_to_attempt_status(&ApnsOutcome::Transient {
+                cause: ApnsTransient::Failure(TransientFailure::ServerError { status: 503 }),
+                retry_after: None
+            }),
+            ATTEMPT_STATUS_APNS_SERVER_ERROR
+        );
+        assert_eq!(
+            outcome_to_attempt_status(&ApnsOutcome::Transient {
+                cause: ApnsTransient::Failure(TransientFailure::Timeout),
+                retry_after: None
+            }),
+            ATTEMPT_STATUS_APNS_TRANSIENT
+        );
+    }
 
     #[test]
     fn outcome_to_attempt_status_covers_every_variant() {

@@ -171,7 +171,7 @@ async fn prune_disabled_nodes_for_owner_tx(
         super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx(tx, owner_bare_jid, &node)
             .await?;
         tx.execute(
-            "DELETE FROM push_nodes WHERE owner_bare_jid = ? AND node = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM push_publish_jobs WHERE push_publish_jobs.node = push_nodes.node AND (push_publish_jobs.status IN ('queued', 'in-progress') OR push_publish_jobs.ancestry_job_id IS NOT NULL OR push_publish_jobs.updated_at_ms > ?))",
+            "DELETE FROM push_nodes WHERE owner_bare_jid = ? AND node = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM push_publish_jobs WHERE push_publish_jobs.node = push_nodes.node AND (push_publish_jobs.status IN ('queued', 'in-progress') OR (push_publish_jobs.uncertain_send = 1 AND push_publish_jobs.terminal_disposition IS NULL) OR push_publish_jobs.ancestry_job_id IS NOT NULL OR push_publish_jobs.updated_at_ms > ?))",
             crate::db_params![owner_bare_jid.to_string(), node, NODE_STATUS_DISABLED, crate::time::now_ms().saturating_sub(8 * 24 * 60 * 60 * 1_000)],
         )
         .await
@@ -405,9 +405,18 @@ impl DatabasePushServiceStore {
                 {
                     vec![node.to_string()]
                 } else {
+                    crate::notification_outbox::retire_registration_outbox_tx(
+                        &mut tx,
+                        owner_bare_jid,
+                        None,
+                        Some(node),
+                    )
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
                     tx.commit()
                         .await
                         .map_err(|error| XmppError::internal(error.to_string()))?;
+                    super::publish_jobs::record_registration_revoked();
                     return Ok(0);
                 }
             }
@@ -457,9 +466,20 @@ impl DatabasePushServiceStore {
             .await?;
         }
 
+        crate::notification_outbox::retire_registration_outbox_tx(
+            &mut tx,
+            owner_bare_jid,
+            None,
+            node,
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        for _ in &nodes {
+            super::publish_jobs::record_registration_revoked();
+        }
         Ok(affected_devices)
     }
 }

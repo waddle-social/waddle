@@ -42,13 +42,9 @@ pub(super) const PUBLISH_JOB_RETRY_DELAY_MS: i64 = 60_000;
 /// accept the Foundation delivery key as an idempotency contract.
 pub(super) const PUBLISH_JOB_CLAIM_TIMEOUT_MS: i64 = 30 * 60 * 1_000; // 30 minutes
 
-/// Ceiling on transient retries before a publish job is marked
-/// `failed`. XEP-0357 §6 explicitly contemplates this: "a server MAY
-/// choose to keep a service enabled if the error is deemed recoverable
-/// or transient, until a sufficient number of errors have been received
-/// in a row." 24 attempts × 60s = a 24-minute upper bound on retry
-/// noise per job before the operator's `last_error` audit reveals the
-/// underlying problem.
+/// Automatic attempt budget, including expired claims. At exhaustion,
+/// `failed` + `uncertain_send = 1` is parked custody, not terminal proof.
+/// Only confirmed completion or explicit revocation can release uncertainty.
 pub(super) const PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS: i64 = 24;
 
 /// Hard ceiling on `Retry-After`-derived backoff to prevent a
@@ -117,6 +113,18 @@ pub(super) async fn claim_publish_job_tx(
     job_id: &str,
     now_ms: i64,
 ) -> Result<Option<PushPublishJob>, XmppError> {
+    // Upgrade/replay defense: old queued rows may already exceed the budget.
+    // Do not start another provider send merely to discover that at finalize.
+    let exhausted = tx.execute(
+        "UPDATE push_publish_jobs SET status = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, last_error = 'automatic push retry budget exhausted', updated_at_ms = ? WHERE job_id = ? AND status = ? AND attempt_count >= ?",
+        crate::db_params![PUBLISH_JOB_STATUS_FAILED, now_ms, job_id, PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS],
+    ).await.map_err(|error| XmppError::internal(error.to_string()))?;
+    if exhausted > 0 {
+        if let Some(job) = get_publish_job_tx(tx, job_id).await? {
+            settle_terminal_notification_ancestry_tx(tx, &job).await?;
+        }
+        return Ok(None);
+    }
     // Mint a fresh claim_token on every claim. Phase 3's UPDATE gates
     // on this token so a stale-claim recovery + concurrent re-claim
     // can never persist attempts from the original worker — the
@@ -313,10 +321,10 @@ pub(super) async fn record_known_publish_job_failure_tx(
         .query(
             r#"
         UPDATE push_publish_jobs
-        SET status = CASE WHEN uncertain_send = 1 THEN ? ELSE ? END,
+        SET status = CASE WHEN uncertain_send = 1 AND attempt_count + 1 < ? THEN ? ELSE ? END,
             attempt_count = attempt_count + 1,
             last_error = ?,
-            next_retry_at_ms = CASE WHEN uncertain_send = 1 THEN ? ELSE NULL END,
+            next_retry_at_ms = CASE WHEN uncertain_send = 1 AND attempt_count + 1 < ? THEN ? ELSE NULL END,
             claimed_at_ms = NULL,
             claim_token = NULL,
             updated_at_ms = ?
@@ -324,9 +332,11 @@ pub(super) async fn record_known_publish_job_failure_tx(
         RETURNING status
         "#,
             crate::db_params![
+                PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                 PUBLISH_JOB_STATUS_QUEUED,
                 PUBLISH_JOB_STATUS_FAILED,
                 error,
+                PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                 retry_at_ms(now_ms),
                 now_ms,
                 job.job_id(),
@@ -348,7 +358,7 @@ pub(super) async fn record_known_publish_job_failure_tx(
         .map_err(|error| XmppError::internal(error.to_string()))?;
     drop(rows);
     if status == PUBLISH_JOB_STATUS_FAILED {
-        settle_notification_ancestry_tx(tx, job).await?;
+        settle_terminal_notification_ancestry_tx(tx, job).await?;
     }
     Ok(())
 }
@@ -560,7 +570,7 @@ pub(super) async fn prune_delivery_attempts_tx(
                   SELECT job_id
                   FROM push_publish_jobs
                   WHERE node = ?
-                    AND status IN (?, ?)
+                    AND (status IN (?, ?) OR (uncertain_send = 1 AND terminal_disposition IS NULL))
               )
           )
         "#,
@@ -645,6 +655,7 @@ pub(super) async fn prune_publish_jobs_tx(
         WHERE node = ?
           {ancestry_guard}
           AND (acceptance_scope != 'canonical' OR upstream_completed = 1)
+          AND (uncertain_send = 0 OR terminal_disposition IS NOT NULL OR status = 'published')
           AND status IN (?, ?)
           AND updated_at_ms <= ?
           AND job_id IN (
@@ -653,6 +664,7 @@ pub(super) async fn prune_publish_jobs_tx(
               WHERE node = ?
                 {ancestry_guard}
                 AND (acceptance_scope != 'canonical' OR upstream_completed = 1)
+                AND (uncertain_send = 0 OR terminal_disposition IS NOT NULL OR status = 'published')
                 AND status IN (?, ?)
                 AND updated_at_ms <= ?
               ORDER BY created_at_ms ASC, job_id ASC
@@ -731,7 +743,7 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
     node: &str,
 ) -> Result<(), XmppError> {
     let mut rows = tx.query(
-        "SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send FROM push_publish_jobs WHERE owner_bare_jid = ? AND node = ? AND status IN (?, ?) ORDER BY job_id",
+        "SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send FROM push_publish_jobs WHERE owner_bare_jid = ? AND node = ? AND (status IN (?, ?) OR (status = 'failed' AND terminal_disposition IS NULL)) ORDER BY job_id",
         crate::db_params![owner_bare_jid.to_string(), node, PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
     ).await.map_err(|error| XmppError::internal(error.to_string()))?;
     let mut jobs = Vec::new();
@@ -746,7 +758,7 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
         // Node/owner locks are already held by revocation. NOWAIT avoids
         // reversing Foundation's canonical-before-scheduler lock order.
         lock_notification_ancestry_tx(tx, &job).await?;
-        let changed = tx.execute("UPDATE push_publish_jobs SET status = ?, terminal_disposition = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status IN (?, ?)",
+        let changed = tx.execute("UPDATE push_publish_jobs SET status = ?, terminal_disposition = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND (status IN (?, ?) OR (status = 'failed' AND terminal_disposition IS NULL))",
             crate::db_params![PUBLISH_JOB_STATUS_FAILED, REGISTRATION_REVOKED_DISPOSITION, "notification registration revoked", crate::time::now_ms(), job.job_id(), PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
         ).await.map_err(|error| XmppError::internal(error.to_string()))?;
         if changed > 0 {
@@ -754,6 +766,21 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
         }
     }
     Ok(())
+}
+
+/// One committed endpoint-retirement operation, independent of queued job count.
+pub(super) fn record_registration_revoked() {
+    use waddle_xmpp::telemetry::attributes::{PushDisposition, PushFailureClass, PushRetryReason};
+    waddle_xmpp::telemetry::reliability::increment_push_disposition(
+        PushRetryReason::RegistrationGone,
+        PushFailureClass::ProvenRefusal,
+        PushDisposition::RegistrationRevoked,
+    );
+    tracing::info!(
+        push_stage = "registration_revoked",
+        disposition = PushDisposition::RegistrationRevoked.as_str(),
+        "push provider transition"
+    );
 }
 
 pub(super) fn retry_at_ms(now_ms: i64) -> i64 {
@@ -1132,6 +1159,21 @@ impl DatabasePushServiceStore {
                 .map_err(|error| XmppError::internal(error.to_string()))?
                 >= MAX_PUBLISH_JOBS_PER_NODE
             {
+                use waddle_xmpp::telemetry::attributes::{
+                    PushDisposition, PushFailureClass, PushRetryReason,
+                };
+                waddle_xmpp::telemetry::reliability::increment_push_disposition(
+                    PushRetryReason::Capacity,
+                    PushFailureClass::PreSend,
+                    PushDisposition::Backpressure,
+                );
+                tracing::warn!(
+                    push_stage = "admission_refused",
+                    retry_reason = PushRetryReason::Capacity.as_str(),
+                    failure_class = PushFailureClass::PreSend.as_str(),
+                    disposition = PushDisposition::Backpressure.as_str(),
+                    "push provider capacity pressure"
+                );
                 return Err(XmppError::Stanza {
                     condition: waddle_xmpp::StanzaErrorCondition::ResourceConstraint,
                     error_type: waddle_xmpp::StanzaErrorType::Wait,
@@ -1215,77 +1257,88 @@ impl DatabasePushServiceStore {
     }
 
     pub(super) async fn recover_stale_publish_job_claims(&self) -> Result<(), XmppError> {
-        let now_ms = crate::time::now_ms();
-        let retry_at_ms = retry_at_ms(now_ms);
-        // Clear the `claim_token` as part of recovery: a new claim
-        // will mint a fresh token, and the original worker's stale
-        // token can no longer match in phase 3's gating UPDATE — so
-        // even if the original phase 2 eventually completes its HTTP
-        // round-trip, its completion writes are fenced. An unknown provider
-        // send can still be delivered twice when the recovered job retries.
-        self.execute(
-            r#"
-            UPDATE push_publish_jobs
-            SET status = ?,
-                last_error = ?,
-                next_retry_at_ms = ?,
-                claimed_at_ms = NULL,
-                claim_token = NULL,
-                uncertain_send = 1,
-                updated_at_ms = ?
-            WHERE status = ?
-              AND claimed_at_ms IS NOT NULL
-              AND claimed_at_ms <= ?
-            "#,
-            crate::db_params![
-                PUBLISH_JOB_STATUS_QUEUED,
-                "Push publish job claim expired before completion",
-                retry_at_ms,
-                now_ms,
-                PUBLISH_JOB_STATUS_IN_PROGRESS,
-                now_ms - PUBLISH_JOB_CLAIM_TIMEOUT_MS,
-            ],
-        )
-        .await?;
-        Ok(())
+        self.recover_expired_publish_claims(None).await
     }
 
     pub(super) async fn recover_stale_publish_job_claim_by_id(
         &self,
         job_id: &str,
     ) -> Result<(), XmppError> {
+        self.recover_expired_publish_claims(Some(job_id)).await
+    }
+
+    /// Each expired claim consumes an attempt: repeated worker crashes cannot
+    /// bypass the scheduler budget. Recovery only parks; it never settles custody.
+    async fn recover_expired_publish_claims(&self, job_id: Option<&str>) -> Result<(), XmppError> {
+        use waddle_xmpp::telemetry::attributes::{
+            PushDisposition, PushFailureClass, PushRetryReason,
+        };
         let now_ms = crate::time::now_ms();
-        self.execute(
-            r#"
+        let mut rows = self
+            .query(
+                r#"
             UPDATE push_publish_jobs
-            SET status = ?,
-                last_error = ?,
-                next_retry_at_ms = NULL,
+            SET status = CASE WHEN attempt_count + 1 >= ? THEN 'failed' ELSE 'queued' END,
+                attempt_count = attempt_count + 1,
+                last_error = 'Push publish job claim expired before completion',
+                next_retry_at_ms = CASE WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END,
                 claimed_at_ms = NULL,
                 claim_token = NULL,
                 uncertain_send = 1,
                 updated_at_ms = ?
-            WHERE job_id = ?
-              AND status = ?
+            WHERE status = 'in-progress'
               AND claimed_at_ms IS NOT NULL
               AND claimed_at_ms <= ?
+              AND (? = 0 OR job_id = ?)
+            RETURNING status
             "#,
-            crate::db_params![
-                PUBLISH_JOB_STATUS_QUEUED,
-                "Push publish job claim expired before direct publish retry",
-                now_ms,
-                job_id,
-                PUBLISH_JOB_STATUS_IN_PROGRESS,
-                now_ms - PUBLISH_JOB_CLAIM_TIMEOUT_MS,
-            ],
-        )
-        .await?;
+                crate::db_params![
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
+                    if job_id.is_some() {
+                        None
+                    } else {
+                        Some(retry_at_ms(now_ms))
+                    },
+                    now_ms,
+                    now_ms - PUBLISH_JOB_CLAIM_TIMEOUT_MS,
+                    i64::from(job_id.is_some()),
+                    job_id.unwrap_or_default()
+                ],
+            )
+            .await?;
+        while let Some(row) = rows
+            .next()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?
+        {
+            let status: String = row
+                .get(0)
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            let disposition = if status == PUBLISH_JOB_STATUS_FAILED {
+                PushDisposition::Parked
+            } else {
+                PushDisposition::Retry
+            };
+            waddle_xmpp::telemetry::reliability::increment_push_disposition(
+                PushRetryReason::UnknownAfterSend,
+                PushFailureClass::UnknownAfterSend,
+                disposition,
+            );
+            tracing::warn!(
+                push_stage = "claim_expired",
+                failure_class = PushFailureClass::UnknownAfterSend.as_str(),
+                retry_reason = PushRetryReason::UnknownAfterSend.as_str(),
+                disposition = disposition.as_str(),
+                "push provider transition"
+            );
+        }
         Ok(())
     }
 
     /// Bound known pre-dispatch failures without claiming a send occurred.
     /// An outer processing error carries no claim capability: in-progress and
-    /// previously uncertain sends retain their leases or retryable custody.
+    /// previously uncertain sends retain their leases or parked custody.
     pub(super) async fn record_publish_job_failure_by_id(
         &self,
         job_id: &str,
@@ -1296,10 +1349,11 @@ impl DatabasePushServiceStore {
         // requires ancestry locks; this atomic update excludes that case.
         const REPAIR_SQL: &str = r#"
             UPDATE push_publish_jobs
-            SET uncertain_send = CASE WHEN status = 'in-progress' THEN 1 ELSE uncertain_send END,
+            SET status = CASE WHEN status = 'queued' AND attempt_count + 1 >= ? THEN 'failed' ELSE status END,
+                uncertain_send = CASE WHEN status = 'in-progress' THEN 1 ELSE uncertain_send END,
                 attempt_count = CASE WHEN status = 'queued' THEN attempt_count + 1 ELSE attempt_count END,
                 last_error = CASE WHEN status = 'queued' THEN ? ELSE last_error END,
-                next_retry_at_ms = CASE WHEN status = 'queued' THEN ? ELSE next_retry_at_ms END,
+                next_retry_at_ms = CASE WHEN status = 'queued' AND attempt_count + 1 >= ? THEN NULL WHEN status = 'queued' THEN ? ELSE next_retry_at_ms END,
                 updated_at_ms = CASE WHEN status = 'queued' THEN ? ELSE updated_at_ms END
             WHERE job_id = ? AND status IN (?, ?)
               AND (? = 1 OR status = 'in-progress' OR uncertain_send = 1 OR attempt_count < ?)
@@ -1310,7 +1364,9 @@ impl DatabasePushServiceStore {
             .execute(
                 REPAIR_SQL,
                 crate::db_params![
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                     error,
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                     retry_at,
                     now_ms,
                     job_id,
@@ -1336,15 +1392,17 @@ impl DatabasePushServiceStore {
             Ok(()) => {}
             Err(NotificationAncestryLockError::Contended) => {
                 // Release every partial lock before scheduling another retry.
-                // Contention defers the cap; it cannot discharge custody or
-                // prevent the drain from processing unrelated queued jobs.
+                // A contended parent cannot discharge custody. The atomic repair
+                // still stops scheduling at the budget and retains its evidence.
                 tx.rollback()
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
                 self.execute(
                     REPAIR_SQL,
                     crate::db_params![
+                        PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                         error,
+                        PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                         retry_at,
                         now_ms,
                         job_id,
@@ -1403,7 +1461,9 @@ impl DatabasePushServiceStore {
             tx.execute(
                 REPAIR_SQL,
                 crate::db_params![
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                     error,
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                     retry_at,
                     now_ms,
                     job_id,
@@ -1474,6 +1534,10 @@ impl DatabasePushServiceStore {
 #[cfg(test)]
 #[path = "publish_jobs_quota_tests.rs"]
 mod quota_tests;
+
+#[cfg(test)]
+#[path = "publish_retry_policy_tests.rs"]
+mod retry_policy_tests;
 
 #[cfg(test)]
 mod tests {

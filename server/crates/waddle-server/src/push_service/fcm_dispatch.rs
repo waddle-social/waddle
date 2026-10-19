@@ -44,6 +44,8 @@ pub(crate) const ATTEMPT_STATUS_FCM_INVALID_KEYS: &str = "fcm-invalid-keys";
 pub(crate) const ATTEMPT_STATUS_FCM_RATE_LIMITED: &str = "fcm-rate-limited";
 /// Network failure, timeout or an FCM 5xx: FCM may have accepted the
 /// message, so the retry is a possible duplicate.
+pub(crate) const ATTEMPT_STATUS_FCM_SERVER_ERROR: &str = "fcm-server-error";
+pub(crate) const ATTEMPT_STATUS_FCM_PROVIDER_REFUSED: &str = "fcm-provider-refused";
 pub(crate) const ATTEMPT_STATUS_FCM_TRANSIENT: &str = "fcm-transient";
 /// The OAuth token endpoint was unreachable. FCM was never contacted, so
 /// the retry cannot duplicate a delivery.
@@ -423,6 +425,14 @@ pub(super) fn outcome_to_attempt_status(outcome: &FcmOutcome) -> &'static str {
             ..
         } => ATTEMPT_STATUS_FCM_RATE_LIMITED,
         FcmOutcome::Transient {
+            cause: FcmTransient::Unavailable,
+            ..
+        } => ATTEMPT_STATUS_FCM_PROVIDER_REFUSED,
+        FcmOutcome::Transient {
+            cause: FcmTransient::Failure(TransientFailure::ServerError { .. }),
+            ..
+        } => ATTEMPT_STATUS_FCM_SERVER_ERROR,
+        FcmOutcome::Transient {
             cause: FcmTransient::Failure(_),
             ..
         } => ATTEMPT_STATUS_FCM_TRANSIENT,
@@ -457,6 +467,7 @@ fn outcome_diagnostic(outcome: &FcmOutcome) -> Option<String> {
         FcmOutcome::Transient { cause, retry_after } => {
             let cause = match cause {
                 FcmTransient::RateLimited => "rate limited".to_string(),
+                FcmTransient::Unavailable => "provider refused HTTP 503 UNAVAILABLE".to_string(),
                 FcmTransient::Failure(TransientFailure::ServerError { status }) => {
                     format!("transient: HTTP {status}")
                 }
@@ -554,6 +565,31 @@ mod tests {
         assert_eq!(
             outcome_to_attempt_status(&provider.settle(unattributed())),
             ATTEMPT_STATUS_FCM_INVALID_TOKEN
+        );
+    }
+
+    #[test]
+    fn persisted_retry_status_distinguishes_failure_contracts() {
+        assert_eq!(
+            outcome_to_attempt_status(&FcmOutcome::Transient {
+                cause: FcmTransient::Unavailable,
+                retry_after: None
+            }),
+            ATTEMPT_STATUS_FCM_PROVIDER_REFUSED
+        );
+        assert_eq!(
+            outcome_to_attempt_status(&FcmOutcome::Transient {
+                cause: FcmTransient::Failure(TransientFailure::ServerError { status: 503 }),
+                retry_after: None
+            }),
+            ATTEMPT_STATUS_FCM_SERVER_ERROR
+        );
+        assert_eq!(
+            outcome_to_attempt_status(&FcmOutcome::Transient {
+                cause: FcmTransient::Failure(TransientFailure::Timeout),
+                retry_after: None
+            }),
+            ATTEMPT_STATUS_FCM_TRANSIENT
         );
     }
 

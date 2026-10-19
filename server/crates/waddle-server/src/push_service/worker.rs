@@ -8,7 +8,9 @@ use jid::BareJid;
 use waddle_xmpp::push::types::VapidSub;
 use waddle_xmpp::push::vapid::VapidSigner;
 use waddle_xmpp::push::WebPushSender;
-use waddle_xmpp::telemetry::attributes::MetricAttribute;
+use waddle_xmpp::telemetry::attributes::{
+    MetricAttribute, PushDisposition, PushFailureClass, PushRetryReason,
+};
 use waddle_xmpp::XmppError;
 
 use super::apns_dispatch;
@@ -291,6 +293,11 @@ fn attempt_status_is_transient(status: &str) -> bool {
     matches!(
         status,
         dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
+            | dispatch::ATTEMPT_STATUS_WEB_SERVER_ERROR
+            | apns_dispatch::ATTEMPT_STATUS_APNS_SERVER_ERROR
+            | apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_REFUSED
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_SERVER_ERROR
+            | fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_REFUSED
             | dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED
             | dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW
             | ATTEMPT_STATUS_WEB_NOT_CONFIGURED
@@ -305,6 +312,44 @@ fn attempt_status_is_transient(status: &str) -> bool {
     // identically on retry. Classifying them as permanent means an
     // operator sees the failure in `push_delivery_attempts` and can
     // act, instead of the job spinning in a 60s loop forever.
+}
+
+/// Persisted status preserves the boundary between a received server error,
+/// an explicit refusal, and a request whose response was lost. A generic 5xx
+/// cannot establish that the provider rejected the notification.
+fn attempt_failure_class(status: &str) -> PushFailureClass {
+    match status {
+        dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
+        | dispatch::ATTEMPT_STATUS_WEB_SERVER_ERROR
+        | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
+        | apns_dispatch::ATTEMPT_STATUS_APNS_SERVER_ERROR
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_SERVER_ERROR => PushFailureClass::UnknownAfterSend,
+        dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED
+        | dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW
+        | apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED
+        | apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_REFUSED
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_RATE_LIMITED
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_REFUSED => PushFailureClass::ProvenRefusal,
+        _ => PushFailureClass::PreSend,
+    }
+}
+
+fn attempt_retry_reason(status: &str) -> PushRetryReason {
+    match status {
+        dispatch::ATTEMPT_STATUS_WEB_SERVER_ERROR
+        | apns_dispatch::ATTEMPT_STATUS_APNS_SERVER_ERROR
+        | apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_REFUSED
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_SERVER_ERROR
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_REFUSED => PushRetryReason::ProviderServerError,
+        dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED
+        | apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_RATE_LIMITED => PushRetryReason::RateLimited,
+        dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
+        | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
+        | fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT => PushRetryReason::UnknownAfterSend,
+        _ => PushRetryReason::PreSend,
+    }
 }
 
 /// XEP-0357 §6: which attempt outcomes mean the underlying device row
@@ -582,6 +627,9 @@ impl DatabasePushServiceStore {
         lock_owner_tx(&mut tx, lock_target.owner_bare_jid(), now_ms).await?;
         lock_node_tx(&mut tx, lock_target.node(), now_ms).await?;
         let Some(job) = claim_publish_job_tx(&mut tx, job_id, now_ms).await? else {
+            tx.commit()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
             return Ok(Phase1Outcome::ShortCircuit(None));
         };
         let Some(push_node) = get_node_tx(&mut tx, job.node()).await? else {
@@ -651,7 +699,17 @@ impl DatabasePushServiceStore {
         let sealed_devices =
             active_devices_with_subscription_for_node_tx(&mut tx, job.node()).await?;
         if sealed_devices.is_empty() {
-            let retry_at_ms = retry_at_ms(now_ms);
+            let exhausted = read_publish_job_attempt_count_tx(&mut tx, job.job_id())
+                .await?
+                .unwrap_or(0)
+                + 1
+                >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS;
+            let status = if exhausted {
+                PUBLISH_JOB_STATUS_FAILED
+            } else {
+                PUBLISH_JOB_STATUS_QUEUED
+            };
+            let retry_at_ms = (!exhausted).then(|| retry_at_ms(now_ms));
             tx.execute(
                 r#"
                 UPDATE push_publish_jobs
@@ -665,7 +723,7 @@ impl DatabasePushServiceStore {
                 WHERE job_id = ? AND status = ?
                 "#,
                 crate::db_params![
-                    PUBLISH_JOB_STATUS_QUEUED,
+                    status,
                     PUBLISH_JOB_ERROR_NO_ACTIVE_DEVICES,
                     retry_at_ms,
                     now_ms,
@@ -679,6 +737,17 @@ impl DatabasePushServiceStore {
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
+            waddle_xmpp::telemetry::reliability::increment_push_disposition(
+                PushRetryReason::PreSend,
+                PushFailureClass::PreSend,
+                if !exhausted {
+                    PushDisposition::Retry
+                } else if job.uncertain_send {
+                    PushDisposition::Parked
+                } else {
+                    PushDisposition::DeadLetter
+                },
+            );
             return Ok(Phase1Outcome::ShortCircuit(Some(PushFanoutResult {
                 item_id: job.item_id().to_string(),
                 attempted_devices: 0,
@@ -1004,12 +1073,13 @@ impl DatabasePushServiceStore {
     }
 
     /// Phase 3: open a fresh tx, record one row per attempt, and either
-    /// requeue the job (any transient outcome) or mark it published.
+    /// requeue within budget, park unresolved work, or persist terminal outcome.
     /// Prunes the per-node attempts/jobs tail so retention stays bounded.
     ///
     /// Completion writes are fenced by the `claim_token` UUID
-    /// column. Unknown provider sends remain retryable and duplicate-possible:
-    /// phase 1 mints a fresh token; phase 3's state-transition
+    /// column. Unknown provider sends are duplicate-possible until their bounded
+    /// retry budget expires; then they remain parked with custody retained.
+    /// Phase 1 mints a fresh token; phase 3's state-transition
     /// UPDATEs gate on `claim_token = ?` so a stale worker (whose
     /// claim was reset by `recover_stale_publish_job_claims`) sees 0
     /// rows changed and the *current* claim-holder owns the final
@@ -1162,6 +1232,7 @@ impl DatabasePushServiceStore {
         let any_transient = attempts
             .iter()
             .any(|attempt| attempt_status_is_transient(attempt.status));
+        let mut retry_disposition = None;
         if any_transient {
             // Read the current `attempt_count` so we can enforce the
             // §6.1 "sufficient number of errors" cap. The row is
@@ -1170,30 +1241,52 @@ impl DatabasePushServiceStore {
             let attempt_count_so_far = read_publish_job_attempt_count_tx(&mut tx, job.job_id())
                 .await?
                 .unwrap_or(0);
-            // Surface the first transient diagnostic so an operator can
-            // see why this job is waiting to retry.
-            let transient_error = attempts
+            // Classify evidence from the current pass independently of sticky
+            // uncertainty from earlier sends. Prefer the least definitive
+            // current failure when the fan-out has mixed transient outcomes.
+            let retry_attempt = attempts
                 .iter()
-                .find(|attempt| attempt_status_is_transient(attempt.status))
+                .filter(|attempt| attempt_status_is_transient(attempt.status))
+                .max_by_key(|attempt| match attempt_failure_class(attempt.status) {
+                    PushFailureClass::PreSend => 0,
+                    PushFailureClass::ProvenRefusal => 1,
+                    PushFailureClass::UnknownAfterSend => 2,
+                });
+            let transient_error = retry_attempt
                 .and_then(|attempt| attempt.last_error.clone())
                 .unwrap_or_else(|| "Web Push transient failure".to_string());
-            // Only a send the provider may have accepted is uncertain.
-            // `fcm-token-transient` never reached FCM, and rate limits
-            // are explicit refusals.
-            let unknown_send = prior_uncertainty
-                || attempts.iter().any(|attempt| {
-                    matches!(
-                        attempt.status,
-                        dispatch::ATTEMPT_STATUS_WEB_TRANSIENT
-                            | apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT
-                            | fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT
-                    )
-                });
-            if !unknown_send && attempt_count_so_far + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS {
+            let failure_class = retry_attempt.map_or(PushFailureClass::PreSend, |attempt| {
+                attempt_failure_class(attempt.status)
+            });
+            // Prior uncertainty controls custody; a later pre-send failure or
+            // proven refusal cannot erase an earlier possible acceptance.
+            let unknown_send =
+                prior_uncertainty || failure_class == PushFailureClass::UnknownAfterSend;
+            let reason = retry_attempt.map_or(PushRetryReason::Unknown, |attempt| {
+                attempt_retry_reason(attempt.status)
+            });
+            let exhausted = attempt_count_so_far + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS;
+            let disposition = if !exhausted {
+                PushDisposition::Retry
+            } else if unknown_send {
+                PushDisposition::Parked
+            } else {
+                PushDisposition::DeadLetter
+            };
+            retry_disposition = Some((
+                reason,
+                failure_class,
+                disposition,
+                attempt_count_so_far + 1,
+                unknown_send,
+                transient_error.clone(),
+            ));
+            if exhausted {
                 // XEP-0357 §6.1: "until a sufficient number of errors
-                // have been received in a row." Past the ceiling, mark
-                // the job permanently FAILED so it stops occupying the
-                // queue. The operator's audit trail
+                // have been received in a row." The ceiling always removes
+                // the job from dispatch. Unknown sends retain uncertain_send:
+                // their failed status is parked custody, not terminal proof.
+                // The operator's audit trail
                 // (`push_delivery_attempts`) preserves every attempt.
                 //
                 // The `claim_token = ?` predicate is the at-most-once
@@ -1210,6 +1303,7 @@ impl DatabasePushServiceStore {
                     SET status = ?,
                         attempt_count = attempt_count + 1,
                         last_error = ?,
+                        uncertain_send = ?,
                         next_retry_at_ms = NULL,
                         claimed_at_ms = NULL,
                         claim_token = NULL,
@@ -1221,6 +1315,7 @@ impl DatabasePushServiceStore {
                         truncate_last_error(&format!(
                             "transient retry cap exceeded ({PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS}); last: {transient_error}"
                         )),
+                        i64::from(unknown_send),
                         now_ms,
                         job.job_id().to_string(),
                         PUBLISH_JOB_STATUS_IN_PROGRESS,
@@ -1371,11 +1466,21 @@ impl DatabasePushServiceStore {
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        if let Some((reason, failure_class, disposition, attempt_count, uncertain_send, error)) =
+            retry_disposition
+        {
+            waddle_xmpp::telemetry::reliability::increment_push_disposition(
+                reason,
+                failure_class,
+                disposition,
+            );
+            tracing::warn!(reason = reason.as_str(), failure_class = failure_class.as_str(), disposition = disposition.as_str(), attempt_count, uncertain_send, error = %error, "push provider retry disposition");
+        }
         Ok(())
     }
 
     /// Record a pre-send failure using the claim captured by phase 1. Earlier
-    /// uncertainty remains retryable; a successor claim cannot be mutated.
+    /// uncertainty remains retained; a successor claim cannot be mutated.
     async fn mark_publish_job_failed_after_phase1(
         &self,
         job: &PushPublishJob,
@@ -1735,7 +1840,15 @@ mod tests {
             .await
             .expect("load")
             .expect("first job");
-        assert_eq!(first_job.status(), PUBLISH_JOB_STATUS_QUEUED);
+        let capped = attempt_count + 1 >= PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS;
+        assert_eq!(
+            first_job.status(),
+            if capped {
+                PUBLISH_JOB_STATUS_FAILED
+            } else {
+                PUBLISH_JOB_STATUS_QUEUED
+            }
+        );
         assert!(!first_job.uncertain_send);
         assert!(push
             .delivery_attempts_for_node(first.node())
@@ -1765,7 +1878,11 @@ mod tests {
             .expect("retry");
         let row = rows.next().await.expect("row").expect("retry row");
         assert_eq!(row.get::<i64>(0).expect("count"), attempt_count + 1);
-        assert!(row.get::<Option<i64>>(1).expect("retry deadline").is_some());
+        assert_eq!(
+            row.get::<Option<i64>>(1).expect("retry deadline").is_some(),
+            !capped,
+            "exhausted known work stops scheduling while contended custody remains retained"
+        );
         drop(rows);
 
         let claim = uuid::Uuid::new_v4().to_string();
@@ -1820,7 +1937,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_unknown_send_past_cap_survives_known_transient_and_settles_only_disposition() {
+    async fn expired_unknown_send_past_cap_is_parked_until_explicit_disposition() {
         let (store, _fcm) = store_with_fake_fcm().await;
         let owner = owner();
         let node = store
@@ -1852,46 +1969,32 @@ mod tests {
             .process_publish_job_with_retention_limit(&accepted.job_id().to_string(), 10_000)
             .await
             .expect("known not-configured transient");
-        let queued = store.queued_publish_jobs().await.expect("queued");
-        assert_eq!(
-            queued.len(),
-            1,
-            "a later known transient cannot erase prior uncertain delivery"
-        );
-        assert!(queued[0].uncertain_send);
-        store
-            .disable_device_for_owner(
-                &owner,
-                node.node(),
-                "web-device",
-                Some("explicit device revocation"),
-            )
+        assert!(store
+            .queued_publish_jobs()
             .await
-            .expect("revoke unavailable device");
+            .expect("queued")
+            .is_empty());
+        let parked = store
+            .load_publish_job(&accepted.job_id().to_string())
+            .await
+            .expect("load")
+            .expect("parked");
+        assert_eq!(parked.status(), PUBLISH_JOB_STATUS_FAILED);
+        assert!(
+            parked.uncertain_send,
+            "exhaustion parks the earlier unknown send"
+        );
+        // New healthy devices do not turn a parked record into fresh work.
         store
             .upsert_device(&owner, fcm_registration("known-device", node.node()))
             .await
-            .expect("known dispatcher fixture");
-        store
-            .execute(
-                "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
-                crate::db_params![accepted.job_id().to_string()],
-            )
-            .await
-            .expect("retry now");
-        store
+            .expect("healthy device");
+        assert!(store
             .process_publish_job_with_retention_limit(&accepted.job_id().to_string(), 10_000)
             .await
-            .expect("known successful disposition");
-        assert_eq!(
-            store
-                .load_publish_job(&accepted.job_id().to_string())
-                .await
-                .expect("load")
-                .expect("job")
-                .status(),
-            PUBLISH_JOB_STATUS_PUBLISHED
-        );
+            .expect("parked retry")
+            .is_none());
+        assert_eq!(_fcm.sent(), 0, "parked uncertainty must not send again");
         let refused = store
             .enqueue_notification_publish_job_from_user_server(
                 node.node(),
@@ -1956,6 +2059,41 @@ mod tests {
         assert_eq!(store.current_apns_badge_count(&recipient).await, Some(5));
     }
 
+    #[test]
+    fn provider_failure_class_describes_current_attempt_evidence() {
+        for status in [
+            dispatch::ATTEMPT_STATUS_WEB_SERVER_ERROR,
+            apns_dispatch::ATTEMPT_STATUS_APNS_SERVER_ERROR,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_SERVER_ERROR,
+            dispatch::ATTEMPT_STATUS_WEB_TRANSIENT,
+            apns_dispatch::ATTEMPT_STATUS_APNS_TRANSIENT,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TRANSIENT,
+        ] {
+            assert_eq!(
+                attempt_failure_class(status),
+                PushFailureClass::UnknownAfterSend
+            );
+        }
+        for status in [
+            dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_RATE_LIMITED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_RATE_LIMITED,
+            apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_REFUSED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_REFUSED,
+        ] {
+            assert_eq!(
+                attempt_failure_class(status),
+                PushFailureClass::ProvenRefusal
+            );
+        }
+        for status in [
+            ATTEMPT_STATUS_WEB_NOT_CONFIGURED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_TOKEN_TRANSIENT,
+        ] {
+            assert_eq!(attempt_failure_class(status), PushFailureClass::PreSend);
+        }
+    }
+
     #[tokio::test]
     async fn attempt_status_is_transient_matches_retry_intent() {
         // Lock the matrix down so a future enum reorganization can't
@@ -1966,6 +2104,11 @@ mod tests {
         // transient burns 24 attempts before surfacing.
         for transient in [
             dispatch::ATTEMPT_STATUS_WEB_TRANSIENT,
+            dispatch::ATTEMPT_STATUS_WEB_SERVER_ERROR,
+            apns_dispatch::ATTEMPT_STATUS_APNS_SERVER_ERROR,
+            apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_REFUSED,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_SERVER_ERROR,
+            fcm_dispatch::ATTEMPT_STATUS_FCM_PROVIDER_REFUSED,
             dispatch::ATTEMPT_STATUS_WEB_RATE_LIMITED,
             dispatch::ATTEMPT_STATUS_WEB_CLOCK_SKEW,
             ATTEMPT_STATUS_WEB_NOT_CONFIGURED,

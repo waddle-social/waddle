@@ -160,6 +160,9 @@ impl DatabasePushServiceStore {
         service_jid: &str,
         node: Option<&str>,
     ) -> Result<u64, XmppError> {
+        let service: BareJid = service_jid
+            .parse()
+            .map_err(|_| XmppError::bad_request(Some("invalid push service JID".to_string())))?;
         if let Some(node) = node {
             validate_len("Push Service node", node, MAX_NODE_ID_LEN)?;
         }
@@ -180,9 +183,18 @@ impl DatabasePushServiceStore {
         .await
         .map_err(push_error_to_xmpp_error)?;
         if registered_nodes.is_empty() {
+            crate::notification_outbox::retire_registration_outbox_tx(
+                &mut tx,
+                owner_bare_jid,
+                Some(&service),
+                node,
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
+            super::publish_jobs::record_registration_revoked();
             return Ok(0);
         }
 
@@ -197,6 +209,14 @@ impl DatabasePushServiceStore {
             lock_node_tx(&mut tx, node, now_ms).await?;
             cancel_retryable_publish_jobs_for_node_tx(&mut tx, owner_bare_jid, node).await?;
         }
+        crate::notification_outbox::retire_registration_outbox_tx(
+            &mut tx,
+            owner_bare_jid,
+            Some(&service),
+            node,
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
         let removed = crate::push_registrations::remove_subscription_tx(
             &mut tx,
             owner_bare_jid,
@@ -209,6 +229,9 @@ impl DatabasePushServiceStore {
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        for _ in &registered_push_nodes {
+            super::publish_jobs::record_registration_revoked();
+        }
         Ok(removed)
     }
 }

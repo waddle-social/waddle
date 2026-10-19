@@ -491,23 +491,72 @@ impl MetricAttribute for PushSuppressReason {
     }
 }
 
-/// `reason` — why an XEP-0357 push outbox job was scheduled for retry.
-///
-/// The legacy text family only ever rendered
-/// `waddle_push_outbox_retry_scheduled_total{reason="unknown"}`, so the
-/// OTel successor carries the same closed label shape through the alias
-/// cutover. Gains real variants if the outbox ever classifies retry
-/// causes; until then `Unknown` is the whole set.
+/// `reason` — bounded failure classification for XEP-0357 outbox transitions.
+/// Raw error text belongs in logs, never in metric attributes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushRetryReason {
-    /// The retry cause was not classified.
     Unknown,
+    Storage,
+    PolicyLookup,
+    RegistrationLookup,
+    InboxLookup,
+    InvalidTarget,
+    Blocked,
+    RegistrationGone,
+    ClaimLost,
+    QueueRefused,
+    QueueUnknown,
+    Malformed,
+    Capacity,
+    ProviderServerError,
+    RateLimited,
+    PreSend,
+    UnknownAfterSend,
 }
 
 impl PushRetryReason {
-    /// Every allowed value. Startup zero-registration (#1436) iterates
-    /// this so every label value exists before the first real retry.
-    pub const ALL: [Self; 1] = [Self::Unknown];
+    /// Every allowed value, including the legacy fallback.
+    pub const ALL: [Self; 17] = [
+        Self::Unknown,
+        Self::Storage,
+        Self::PolicyLookup,
+        Self::RegistrationLookup,
+        Self::InboxLookup,
+        Self::InvalidTarget,
+        Self::Blocked,
+        Self::RegistrationGone,
+        Self::ClaimLost,
+        Self::QueueRefused,
+        Self::QueueUnknown,
+        Self::Malformed,
+        Self::Capacity,
+        Self::ProviderServerError,
+        Self::RateLimited,
+        Self::PreSend,
+        Self::UnknownAfterSend,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Storage => "storage",
+            Self::PolicyLookup => "policy_lookup",
+            Self::RegistrationLookup => "registration_lookup",
+            Self::InboxLookup => "inbox_lookup",
+            Self::InvalidTarget => "invalid_target",
+            Self::Blocked => "blocked",
+            Self::RegistrationGone => "registration_gone",
+            Self::ClaimLost => "claim_lost",
+            Self::QueueRefused => "queue_refused",
+            Self::QueueUnknown => "queue_unknown",
+            Self::Malformed => "malformed",
+            Self::Capacity => "capacity",
+            Self::ProviderServerError => "provider_server_error",
+            Self::RateLimited => "rate_limited",
+            Self::PreSend => "pre_send",
+            Self::UnknownAfterSend => "unknown_after_send",
+        }
+    }
 }
 
 impl sealed::Sealed for PushRetryReason {}
@@ -515,11 +564,72 @@ impl MetricAttribute for PushRetryReason {
     fn key(&self) -> &'static str {
         "reason"
     }
-
     fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// Whether an attempted push may already have crossed its send boundary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushFailureClass {
+    PreSend,
+    ProvenRefusal,
+    UnknownAfterSend,
+}
+impl PushFailureClass {
+    pub const ALL: [Self; 3] = [Self::PreSend, Self::ProvenRefusal, Self::UnknownAfterSend];
+    pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Unknown => "unknown",
+            Self::PreSend => "pre_send",
+            Self::ProvenRefusal => "proven_refusal",
+            Self::UnknownAfterSend => "unknown_after_send",
         }
+    }
+}
+impl sealed::Sealed for PushFailureClass {}
+impl MetricAttribute for PushFailureClass {
+    fn key(&self) -> &'static str {
+        "failure_class"
+    }
+    fn value(&self) -> &'static str {
+        self.as_str()
+    }
+}
+
+/// Scheduling disposition; parking never proves failed delivery.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushDisposition {
+    Retry,
+    Parked,
+    DeadLetter,
+    RegistrationRevoked,
+    Backpressure,
+}
+impl PushDisposition {
+    pub const ALL: [Self; 5] = [
+        Self::Retry,
+        Self::Parked,
+        Self::DeadLetter,
+        Self::RegistrationRevoked,
+        Self::Backpressure,
+    ];
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Retry => "retry",
+            Self::Parked => "parked",
+            Self::DeadLetter => "dead_letter",
+            Self::RegistrationRevoked => "registration_revoked",
+            Self::Backpressure => "backpressure",
+        }
+    }
+}
+impl sealed::Sealed for PushDisposition {}
+impl MetricAttribute for PushDisposition {
+    fn key(&self) -> &'static str {
+        "disposition"
+    }
+    fn value(&self) -> &'static str {
+        self.as_str()
     }
 }
 

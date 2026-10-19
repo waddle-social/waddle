@@ -53,7 +53,7 @@ const ATTEMPT_STATUS_APNS_DELIVERED: &str = "apns-delivered";
 const ATTEMPT_STATUS_APNS_GONE: &str = "apns-gone";
 const ATTEMPT_STATUS_APNS_TOPIC_MISMATCH: &str = "apns-topic-mismatch";
 const ATTEMPT_STATUS_APNS_PROVIDER_AUTH: &str = "apns-provider-auth";
-const ATTEMPT_STATUS_APNS_TRANSIENT: &str = "apns-transient";
+const ATTEMPT_STATUS_APNS_SERVER_ERROR: &str = "apns-server-error";
 
 /// One request as the fake APNs endpoint saw it.
 #[derive(Debug, Clone)]
@@ -822,7 +822,7 @@ async fn apns_transient_failure_requeues_without_resending_to_delivered_siblings
     let statuses = attempt_statuses(&store, node.node()).await;
     assert!(statuses.contains(&(
         "flaky-phone".to_string(),
-        ATTEMPT_STATUS_APNS_TRANSIENT.to_string()
+        ATTEMPT_STATUS_APNS_SERVER_ERROR.to_string()
     )));
 
     // The queued job retains its XEP-0357 payload, but the APNs app-icon

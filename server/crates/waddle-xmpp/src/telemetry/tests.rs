@@ -535,3 +535,73 @@ fn attribute_enums_expose_stable_keys_and_values() {
         "muji_action"
     );
 }
+
+#[tokio::test]
+async fn classified_outbox_transitions_export_only_allowlisted_reasons() {
+    use super::attributes::{PushDisposition, PushFailureClass, PushRetryReason};
+    let guard = test_support::acquire().await;
+    for reason in PushRetryReason::ALL {
+        super::reliability::increment_push_outbox_retry_scheduled(reason);
+        super::reliability::increment_push_disposition(
+            reason,
+            PushFailureClass::PreSend,
+            PushDisposition::DeadLetter,
+        );
+    }
+    for reason in PushRetryReason::ALL {
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.push.outbox_retry_scheduled",
+                &[("reason", reason.as_str())]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.push.failure_reason", &[("reason", reason.as_str())]),
+            Some(1)
+        );
+    }
+    assert_eq!(
+        guard.counter_sum("xmpp.push.failure_class", &[("failure_class", "pre_send")]),
+        Some(17)
+    );
+    assert_eq!(
+        guard.counter_sum("xmpp.push.disposition", &[("disposition", "dead_letter")]),
+        Some(17)
+    );
+    for (metric, key) in [
+        ("xmpp.push.disposition", "disposition"),
+        ("xmpp.push.failure_class", "failure_class"),
+        ("xmpp.push.failure_reason", "reason"),
+    ] {
+        for (_, attributes) in guard.counter_samples(metric).expect("exported samples") {
+            assert_eq!(attributes.len(), 1, "bounded independent metric dimension");
+            assert_eq!(attributes[0].0, key);
+        }
+    }
+}
+
+#[tokio::test]
+async fn capacity_backpressure_exports_separately_from_accepted_work() {
+    use super::attributes::{PushDisposition, PushFailureClass, PushRetryReason};
+    let guard = test_support::acquire().await;
+    super::reliability::increment_push_disposition(
+        PushRetryReason::Capacity,
+        PushFailureClass::PreSend,
+        PushDisposition::Backpressure,
+    );
+    assert_eq!(
+        guard.counter_sum("xmpp.push.disposition", &[("disposition", "backpressure")]),
+        Some(1)
+    );
+    assert_eq!(
+        guard
+            .counter_sum("xmpp.push.disposition", &[("disposition", "dead_letter")])
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        guard.counter_sum("xmpp.push.failure_reason", &[("reason", "capacity")]),
+        Some(1)
+    );
+}

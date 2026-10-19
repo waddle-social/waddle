@@ -313,9 +313,16 @@ pub fn register_reliability_counters() {
     add_push_outbox_dead_lettered(0);
     for reason in PushRetryReason::ALL {
         add_push_outbox_retry_scheduled(0, reason);
+        add_push_failure_reason(0, reason);
     }
     for reason in PushSuppressReason::ALL {
         add_push_suppressed(0, reason);
+    }
+    for class in super::attributes::PushFailureClass::ALL {
+        add_push_failure_class(0, class);
+    }
+    for disposition in super::attributes::PushDisposition::ALL {
+        add_push_disposition(0, disposition);
     }
     super::push_pipeline::register_pipeline_stages();
     super::call::register_call_setup_counters();
@@ -407,6 +414,48 @@ fn add_push_outbox_dead_lettered(count: u64) {
 pub fn increment_push_outbox_dead_lettered() {
     add_push_outbox_dead_lettered(1);
     super::push_pipeline::increment_dead_lettered();
+}
+
+fn add_push_disposition(count: u64, disposition: super::attributes::PushDisposition) {
+    crate::counter_add!(
+        "xmpp.push.disposition",
+        "{notification}",
+        "Push scheduling and custody dispositions.",
+        count,
+        disposition
+    );
+}
+
+fn add_push_failure_class(count: u64, class: super::attributes::PushFailureClass) {
+    crate::counter_add!(
+        "xmpp.push.failure_class",
+        "{notification}",
+        "Push failures by send certainty.",
+        count,
+        class
+    );
+}
+
+fn add_push_failure_reason(count: u64, reason: PushRetryReason) {
+    crate::counter_add!(
+        "xmpp.push.failure_reason",
+        "{notification}",
+        "Push failures by bounded cause.",
+        count,
+        reason
+    );
+}
+
+/// Record orthogonal dimensions separately to preserve the per-instrument
+/// cardinality budget. Structured logs retain their event-level correlation.
+pub fn increment_push_disposition(
+    reason: PushRetryReason,
+    class: super::attributes::PushFailureClass,
+    disposition: super::attributes::PushDisposition,
+) {
+    add_push_failure_reason(1, reason);
+    add_push_failure_class(1, class);
+    add_push_disposition(1, disposition);
 }
 
 fn add_push_suppressed(count: u64, reason: PushSuppressReason) {
