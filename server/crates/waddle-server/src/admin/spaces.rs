@@ -39,14 +39,14 @@ use waddle_xmpp::pubsub::{Affiliation as PubSubAffiliation, PubSubItem};
 use waddle_xmpp::xep::xep0004::{DataForm, Field, FieldType, FormType};
 use waddle_xmpp::{ChannelInfo, ChannelType, XmppError};
 
-use crate::admin::channels::forget_extension_bot_room;
+use crate::admin::channels::{forget_extension_bot_room, restore_channel_catalog_record};
 use crate::admin::is_community_owner;
 use crate::channel_space_links::ChannelSpaceLink;
 use crate::permissions::{
     DeleteTuple, Object, ObjectType, PermissionError, Relation, Subject, SubjectType, Tuple,
     WriteTuple,
 };
-use crate::server::xmpp_state::get_xmpp_channel;
+use crate::server::xmpp_state::{delete_xmpp_channel, get_xmpp_channel};
 use crate::server::AppState;
 use crate::space_identity::{
     canonical_space_projection, space_jid_for_node, SpaceNode, SpaceProjectionError,
@@ -863,48 +863,28 @@ async fn rollback_channel_bookmark_item(
     room_jid: &BareJid,
     channel_id: &str,
 ) -> Option<PubSubItem> {
-    let actor = match state
-        .room_registry
-        .ask(GetRoom {
-            room_jid: room_jid.clone(),
-        })
-        .await
-    {
-        Ok(Some(actor)) => actor,
-        Ok(None) => return None,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                room = %room_jid,
-                "spaces:delete rollback could not snapshot room for missing channel bookmark",
-            );
-            return None;
-        }
-    };
-    let config = match actor.ask(GetConfig).await {
-        Ok(config) => config,
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                room = %room_jid,
-                "spaces:delete rollback could not snapshot room config for missing channel bookmark",
-            );
-            return None;
-        }
-    };
     let catalog_snapshot = match get_xmpp_channel(state.db_pool.global_actor().clone(), channel_id)
         .await
     {
         Ok(snapshot) => snapshot,
         Err(error) => {
-            tracing::warn!(
-                error = %error,
-                room = %room_jid,
-                channel_id,
-                "spaces:delete rollback could not load channel catalog for missing channel bookmark",
-            );
+            tracing::warn!(%error, %room_jid, "spaces:delete rollback could not load channel catalog");
             return None;
         }
+    };
+    // Dormant channels still need a bookmark snapshot for rollback. A catalog
+    // row is authoritative even when this node has no room actor.
+    let config = if let Some(record) = catalog_snapshot.as_ref() {
+        record.room_config()
+    } else {
+        let actor = state
+            .room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .ok()??;
+        actor.ask(GetConfig).await.ok()?
     };
     let channel_type = channel_type_from_catalog_or_room_config(
         catalog_snapshot
@@ -1304,31 +1284,7 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         // `DurableWipeFailed` means the registry kept the room because
         // its fenced clustering wipe failed — the cascade must fail
         // and roll back, not record the room as destroyed (#1261).
-        let failure = match state
-            .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {
-                room_jid: room_jid.clone(),
-                reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::Destroy,
-            })
-            .await
-        {
-            Ok(
-                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
-                | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
-            ) => None,
-            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
-                Some(format!(
-                    "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
-                ))
-            }
-            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
-                Some(format!(
-                    "cascade destroy refused for room {room_jid}: exact-release retry backlog is full; retry deletion"
-                ))
-            }
-            Err(error) => Some(format!("cascade destroy failed for room {room_jid}: {error}")),
-        };
-        if let Some(message) = failure {
+        if let Err(error) = destroy_space_channel(state, room_jid).await {
             let failed_restores =
                 restore_space_node_items(state, &node_name, &retracted_items, &destroyed_rooms)
                     .await;
@@ -1342,10 +1298,9 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
             .await;
             tracing::warn!(
                 room = %room_jid,
-                message = %message,
                 "cascade destroy: room registry destroy did not complete",
             );
-            return Err(internal_err(message));
+            return Err(error);
         }
         destroyed_rooms.insert(room_jid.clone());
         forget_extension_bot_room(state, room_jid).await;
@@ -1369,6 +1324,66 @@ async fn run_delete(state: &AppState, args: &SpacesDeleteArgs) -> Result<(), Adm
         .await
         .map_err(map_metadata_err)?;
 
+    Ok(())
+}
+
+/// Delete catalog membership before destroying the room, so discovery cannot
+/// recreate a successfully deleted dormant channel. Failed destruction restores
+/// this target; the caller restores its relationships and unprocessed targets.
+async fn destroy_space_channel(state: &AppState, room_jid: &BareJid) -> Result<(), AdminErr> {
+    // Legacy space bookmarks may point at other MUC services. Their localpart
+    // must never be used to delete an unrelated channel in our own catalog.
+    let channel_id = if room_jid.domain().as_str() == state.muc_domain.as_str() {
+        waddle_xmpp::parse_managed_room_jid(room_jid)
+    } else {
+        None
+    };
+    let catalog_snapshot = match channel_id.as_deref() {
+        Some(channel_id) => get_xmpp_channel(state.db_pool.global_actor().clone(), channel_id)
+            .await
+            .map_err(|error| {
+                internal_err(format!("cascade channel catalog lookup failed: {error}"))
+            })?,
+        None => None,
+    };
+    if let Some(channel_id) = channel_id.as_deref() {
+        delete_xmpp_channel(state.db_pool.global_actor().clone(), channel_id)
+            .await
+            .map_err(|error| {
+                internal_err(format!("cascade channel catalog delete failed: {error}"))
+            })?;
+    }
+    let failure = match state
+            .room_registry
+            .ask(waddle_xmpp::muc::room_registry_actor::DestroyRoom {
+                room_jid: room_jid.clone(),
+                reason: waddle_xmpp::muc::room_registry_actor::DestroyRoomReason::Destroy,
+            })
+            .await
+        {
+            Ok(
+                waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::Destroyed
+                | waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::NotRegistered,
+            ) => None,
+            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::DurableWipeFailed) => {
+                Some(format!(
+                    "cascade destroy refused for room {room_jid}: durable room-state wipe failed"
+                ))
+            }
+            Ok(waddle_xmpp::muc::room_registry_actor::DestroyRoomOutcome::ReleaseBacklogFull) => {
+                Some(format!(
+                    "cascade destroy refused for room {room_jid}: exact-release retry backlog is full; retry deletion"
+                ))
+            }
+            Err(error) => Some(format!("cascade destroy failed for room {room_jid}: {error}")),
+        };
+
+    if let Some(message) = failure {
+        if let Some(snapshot) = catalog_snapshot.as_ref() {
+            restore_channel_catalog_record(state, snapshot).await;
+        }
+        return Err(internal_err(message));
+    }
     Ok(())
 }
 
@@ -1733,3 +1748,7 @@ mod tests {
         assert!(lp.starts_with("space-"), "got: {lp}");
     }
 }
+
+#[cfg(test)]
+#[path = "space_catalog_cascade_tests.rs"]
+mod space_catalog_cascade_tests;

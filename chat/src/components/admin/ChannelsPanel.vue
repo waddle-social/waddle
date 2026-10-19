@@ -219,8 +219,8 @@ const dialogSpaces = computed(() =>
         <div class="flex flex-col gap-1">
           <h2 id="channels-panel-heading" class="type-pane-title">Channels</h2>
           <p class="type-caption text-muted-foreground max-w-prose">
-            All MUC rooms on this server. Click a row to edit
-            config, manage affiliations, or kick occupants.
+            Stored channels and locally active rooms. Click a row to edit
+            config, manage affiliations, or kick occupants. Counts reflect available local room snapshots.
           </p>
         </div>
         <button
@@ -300,7 +300,7 @@ const dialogSpaces = computed(() =>
             <span v-if="entry.topic" class="type-caption text-muted-foreground truncate">{{ entry.topic }}</span>
           </div>
           <div class="flex items-center gap-2 flex-shrink-0">
-            <span class="type-caption rounded-full bg-muted px-2 py-0.5">{{ entry.occupant_count }} live</span>
+            <span class="type-caption rounded-full bg-muted px-2 py-0.5">{{ entry.occupant_count }} local</span>
             <span class="type-caption rounded-full bg-muted px-2 py-0.5">{{ entry.member_count }} mem</span>
           </div>
         </button>
