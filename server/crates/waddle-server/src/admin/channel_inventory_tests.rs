@@ -1,6 +1,7 @@
 //! Regression tests for durable admin inventory and filtered pagination.
 use super::*;
 use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
 use waddle_xmpp::muc::room_actor::{Join, OccupancySessionGeneration};
 
 async fn fresh_state() -> AppState {
@@ -100,8 +101,8 @@ async fn catalog_metadata_wins_while_live_counts_and_instant_rooms_are_preserved
         .room_registry
         .ask(CreateRoomWithInitialAffiliations {
             room_jid: jid.clone(),
-            waddle_id: "test".into(),
-            channel_id: "stored".into(),
+            waddle_id: WaddleId::new("test".to_owned()),
+            channel_id: ChannelId::new("stored".to_owned()),
             config: RoomConfig {
                 name: "Stale local name".to_owned(),
                 ..Default::default()
