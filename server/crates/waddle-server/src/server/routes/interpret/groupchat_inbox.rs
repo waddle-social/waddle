@@ -3,7 +3,7 @@ use super::groupchat_archive::{
 };
 use super::*;
 #[cfg(test)]
-use crate::notification_outbox::groupchat_class::*;
+use crate::notification::outbox::groupchat_class::*;
 
 pub(super) struct ProjectGroupchatInboxEvent<'a, 'deps> {
     pub deps: &'a Deps<'deps>,
@@ -328,9 +328,9 @@ async fn enqueue_groupchat_notification_candidate(
     let thread_id = thread
         .as_ref()
         .map(|thread| {
-            crate::notification_outbox::NotificationThreadId::new(thread.thread_id.clone())
+            crate::notification::outbox::NotificationThreadId::new(thread.thread_id.clone())
         })
-        .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root);
+        .unwrap_or_else(crate::notification::outbox::NotificationThreadId::root);
     insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
         deps: Some(deps),
         recovery: notification_recovery,
@@ -360,7 +360,7 @@ struct GroupchatNotificationCandidateSeed<'a> {
     room: &'a BareJid,
     message: &'a Message,
     sender_jid: Jid,
-    thread_id: crate::notification_outbox::NotificationThreadId,
+    thread_id: crate::notification::outbox::NotificationThreadId,
     archive_stanza_id: Xep0359StanzaId,
     is_live_occupant: bool,
     /// `room_members_only` is known message-locally on this T0 path
@@ -396,9 +396,9 @@ async fn insert_groupchat_notification_candidate(
         room_members_only,
         sender_can_broadcast_channel_mention,
     } = seed;
-    let candidate = match crate::notification_outbox::candidate_from_envelope(
+    let candidate = match crate::notification::outbox::candidate_from_envelope(
         message,
-        crate::notification_outbox::GroupchatCandidateIdentity {
+        crate::notification::outbox::GroupchatCandidateIdentity {
             owner,
             room,
             sender: &sender_jid,
@@ -437,8 +437,8 @@ async fn insert_groupchat_notification_candidate(
         }
     };
     match outcome {
-        crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. } => {}
-        crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
+        crate::notification::outbox::T1PushDispatchOutcome::Deliver { .. } => {}
+        crate::notification::outbox::T1PushDispatchOutcome::Suppressed { reason } => {
             info!(
                 recipient = %candidate.recipient_bare_jid(),
                 conversation = %candidate.conversation_jid(),
@@ -452,7 +452,7 @@ async fn insert_groupchat_notification_candidate(
             );
             return GroupchatNotificationCandidateQueueOutcome::Completed;
         }
-        crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+        crate::notification::outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
             warn!(
                 recipient = %owner,
                 room = %room,
@@ -502,7 +502,7 @@ async fn insert_groupchat_notification_candidate(
         .insert_candidate(&candidate)
         .await
     {
-        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
+        Ok(crate::notification::outbox::NotificationCandidateInsertOutcome::Inserted) => {
             if let Some(deps) = deps {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),
@@ -522,7 +522,7 @@ async fn insert_groupchat_notification_candidate(
             );
             GroupchatNotificationCandidateQueueOutcome::Completed
         }
-        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
+        Ok(crate::notification::outbox::NotificationCandidateInsertOutcome::Duplicate) => {
             if let Some(deps) = deps {
                 deps.capture_intent(IngressEffectIntent::NotificationActivityPreview {
                     owner: owner.clone(),
@@ -630,7 +630,7 @@ pub(crate) async fn reconcile_groupchat_notification_candidates_for_sweep(
 pub(crate) async fn reconcile_groupchat_notification_recovery(
     state: &WebSocketState,
     recovery: &waddle_xmpp::inbox::storage::GroupchatNotificationRecovery,
-) -> Result<crate::ingress::RecoverySweepOutcome, crate::ingress_uow::IngressUowError> {
+) -> Result<crate::ingress::RecoverySweepOutcome, crate::ingress::uow::IngressUowError> {
     use crate::ingress::{RecoveryPolicyDecision, RecoveryPreparation, RecoverySweepOutcome};
     let authority = &state.deps.protocol.ingress;
     let preparation = authority.prepare_notification_recovery(recovery).await?;
@@ -646,9 +646,9 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
     let policy = if completed {
         RecoveryPolicyDecision::AlreadyCompleted
     } else if deferred_policy || candidate_required {
-        let candidate = match crate::notification_outbox::candidate_from_envelope(
+        let candidate = match crate::notification::outbox::candidate_from_envelope(
             envelope.message(),
-            crate::notification_outbox::GroupchatCandidateIdentity {
+            crate::notification::outbox::GroupchatCandidateIdentity {
                 owner: &recovery.key.recipient,
                 room: &recovery.key.room,
                 sender: &recovery.sender_jid,
@@ -656,8 +656,8 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
                     .key
                     .thread_id
                     .clone()
-                    .map(crate::notification_outbox::NotificationThreadId::new)
-                    .unwrap_or_else(crate::notification_outbox::NotificationThreadId::root),
+                    .map(crate::notification::outbox::NotificationThreadId::new)
+                    .unwrap_or_else(crate::notification::outbox::NotificationThreadId::root),
                 archive_stanza_id: &recovery.key.archive_stanza_id,
                 is_live_occupant: recovery.is_live_occupant,
                 sender_can_broadcast_channel_mention: recovery.sender_can_broadcast_channel_mention,
@@ -679,13 +679,13 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
             )
             .await
             {
-                Ok(crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. }) => {
+                Ok(crate::notification::outbox::T1PushDispatchOutcome::Deliver { .. }) => {
                     RecoveryPolicyDecision::Deliver(Box::new(candidate))
                 }
-                Ok(crate::notification_outbox::T1PushDispatchOutcome::Suppressed { .. }) => {
+                Ok(crate::notification::outbox::T1PushDispatchOutcome::Suppressed { .. }) => {
                     RecoveryPolicyDecision::Suppressed
                 }
-                Ok(crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy)
+                Ok(crate::notification::outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy)
                 | Err(_) => RecoveryPolicyDecision::RetryLater,
             }
         } else {
@@ -701,12 +701,12 @@ pub(crate) async fn reconcile_groupchat_notification_recovery(
 
 async fn evaluate_recovery_policy(
     state: &WebSocketState,
-    candidate: &crate::notification_outbox::NotificationCandidate,
+    candidate: &crate::notification::outbox::NotificationCandidate,
     room: &BareJid,
     room_members_only: bool,
 ) -> Result<
-    crate::notification_outbox::T1PushDispatchOutcome,
-    crate::notification_outbox::NotificationOutboxError,
+    crate::notification::outbox::T1PushDispatchOutcome,
+    crate::notification::outbox::NotificationOutboxError,
 > {
     // T0 push-gate evaluation — compliance: suppressed
     // outcomes leave no row in `notification_candidates`. The same
@@ -721,32 +721,32 @@ async fn evaluate_recovery_policy(
     // is held only to satisfy the trait-object signature; if the
     // cache ever misses (it won't, given the pre-insert) it would
     // surface as `DeferUnknownRoomPolicy` rather than a silent default.
-    let room_policy = crate::notification_outbox::NoopRoomPolicy;
+    let room_policy = crate::notification::outbox::NoopRoomPolicy;
     let mut room_policy_cache = std::collections::BTreeMap::<
         BareJid,
-        crate::notification_outbox::RoomPolicyCacheEntry,
+        crate::notification::outbox::RoomPolicyCacheEntry,
     >::new();
     room_policy_cache.insert(
         room.clone(),
         if room_members_only {
-            crate::notification_outbox::RoomPolicyCacheEntry::Private
+            crate::notification::outbox::RoomPolicyCacheEntry::Private
         } else {
-            crate::notification_outbox::RoomPolicyCacheEntry::Public
+            crate::notification::outbox::RoomPolicyCacheEntry::Public
         },
     );
-    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let dnd_reader = crate::notification::outbox::NoopDndReader;
     let mut dnd_cache =
-        std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
+        std::collections::BTreeMap::<BareJid, crate::notification::outbox::DndState>::new();
     // T0 emission deliberately skips the XEP-0513 `<active/>` filter
     // — current activity is a T1 read per the recipient-state
     // contract. `NoopActivityReader` satisfies the typed signature
     // without persisting a row at T0; T1 then runs the real read.
-    let activity_reader = crate::notification_activity::NoopActivityReader;
+    let activity_reader = crate::notification::activity::NoopActivityReader;
     let mut activity_cache = std::collections::BTreeMap::<
         (BareJid, BareJid),
-        Option<crate::notification_activity::NotificationActivity>,
+        Option<crate::notification::activity::NotificationActivity>,
     >::new();
-    let eval_deps = crate::notification_outbox::PushEvalDeps {
+    let eval_deps = crate::notification::outbox::PushEvalDeps {
         settings_projection: state
             .deps
             .protocol
@@ -761,17 +761,17 @@ async fn evaluate_recovery_policy(
         // the default-in-ms as a typed placeholder; T1 (which DOES
         // consult the TTL) reads the env-driven value at the drain
         // site (Copilot review on PR #731).
-        active_mention_ttl_ms: (crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS
+        active_mention_ttl_ms: (crate::notification::outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS
             as i64)
             * 1_000,
     };
-    let mut eval_caches = crate::notification_outbox::PushEvalCaches {
+    let mut eval_caches = crate::notification::outbox::PushEvalCaches {
         room_policy: &mut room_policy_cache,
         dnd: &mut dnd_cache,
         activity: &mut activity_cache,
     };
-    crate::notification_outbox::evaluate_push_gate_at_dispatch(
-        crate::notification_outbox::PushEvalStage::T0Emit,
+    crate::notification::outbox::evaluate_push_gate_at_dispatch(
+        crate::notification::outbox::PushEvalStage::T0Emit,
         eval_deps,
         candidate,
         &mut eval_caches,
@@ -880,7 +880,7 @@ mod tests {
 
     #[test]
     fn groupchat_message_classification_matrix() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         // Post-#526 slice 1: the T0 classifier is purely message-derived
         // (personal mention, channel mention scope, live-occupant gate).
@@ -1028,7 +1028,7 @@ mod tests {
     /// class changes — that is the entire scope of the permission gate.
     #[test]
     fn xep0513_channel_mention_downgrades_to_notify_all_for_unpermitted_sender() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1086,7 +1086,7 @@ mod tests {
     /// does NOT confer permission to broadcast.
     #[test]
     fn xep0513_active_channel_mention_downgrades_for_unpermitted_sender() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1207,7 +1207,7 @@ mod tests {
     /// PersonalMention; only `urn:xmpp:mentions:0#channel` is gated.
     #[test]
     fn xep0513_personal_mention_unaffected_by_channel_broadcast_permission() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1247,7 +1247,7 @@ mod tests {
     /// behavior here.
     #[test]
     fn xep0513_mixed_attribute_mention_does_not_bypass_channel_gate() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1320,7 +1320,7 @@ mod tests {
     /// boundary (slice 3b of #525).
     #[test]
     fn xep0513_mention_count_exceeded_ignores_all_mentions() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1379,7 +1379,7 @@ mod tests {
     /// the boundary value is inclusive.
     #[test]
     fn xep0513_mention_count_at_threshold_is_honored() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1434,7 +1434,7 @@ mod tests {
     /// wire shape.
     #[test]
     fn xep0513_mention_count_includes_xep0372_references() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1608,7 +1608,7 @@ mod tests {
     /// observable `mentions_overflowed` field — locked in here.
     #[test]
     fn xep0513_channel_mention_with_count_exceeded_composes_to_notify_all_with_overflow_bit() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1664,7 +1664,7 @@ mod tests {
     /// §304 × XEP-0203 composition.
     #[test]
     fn xep0513_delayed_message_with_count_exceeded_still_downgrades_to_notify_all() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1736,7 +1736,7 @@ mod tests {
     /// permission gate held constant (slice 3d of #525).
     #[test]
     fn xep0513_active_qualifier_distinguishes_channel_mention_classification() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1863,7 +1863,7 @@ mod tests {
     /// this test pins ONLY the push-class boundary.
     #[test]
     fn xep0513_unsupported_group_uris_do_not_elevate_notification_class() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -1963,7 +1963,7 @@ mod tests {
     /// §303-alignment review on PR #756).
     #[test]
     fn xep0513_mixed_attribute_unsupported_group_does_not_elevate_to_personal() {
-        use crate::notification_outbox::NotificationClass;
+        use crate::notification::outbox::NotificationClass;
 
         let owner = bare("charlie@example.com");
         let room = bare("team@muc.example.com");
@@ -2135,7 +2135,7 @@ mod audience_tests {
         .await;
 
         assert_eq!(queued, GroupchatNotificationCandidateQueueOutcome::Planned);
-        let classes: Vec<crate::notification_outbox::NotificationClass> = sink
+        let classes: Vec<crate::notification::outbox::NotificationClass> = sink
             .snapshot()
             .into_iter()
             .filter_map(|planned| match planned.effect {
@@ -2151,7 +2151,7 @@ mod audience_tests {
             .collect();
         assert_eq!(
             classes,
-            vec![crate::notification_outbox::NotificationClass::PersonalMention]
+            vec![crate::notification::outbox::NotificationClass::PersonalMention]
         );
     }
 

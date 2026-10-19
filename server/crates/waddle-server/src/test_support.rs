@@ -35,11 +35,11 @@ pub async fn websocket_state_with_ingress(
         .expect("database-backed pending delivery test storage"),
     );
     let notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+        crate::notification::settings_projection::NotificationSettingsProjectionStore::new(
             database.clone(),
         ),
     );
-    crate::notification_outbox::NotificationOutboxStore::new(database)
+    crate::notification::outbox::NotificationOutboxStore::new(database)
         .await
         .expect("notification outbox test schema");
     create_test_websocket_state_with_extension_manager(

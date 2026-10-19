@@ -439,16 +439,16 @@ async fn groupchat_inbox_boundary_skips_notification_intent_when_t0_policy_suppr
         .deps
         .protocol
         .notification_settings_projection
-        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&crate::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: owner.clone(),
             conversation_jid: room.clone(),
             conversation_kind:
-                crate::notification_settings_projection::ConversationKind::PrivateGroup,
+                crate::notification::settings_projection::ConversationKind::PrivateGroup,
             mode: waddle_xmpp::xep::NotificationLevel::Never,
             rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: 1,
-            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source: crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: owner.clone(),
         })
         .await

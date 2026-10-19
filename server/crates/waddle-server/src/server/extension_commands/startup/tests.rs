@@ -1,6 +1,6 @@
 use super::*;
 use crate::ingress::test_support::IngressFixture;
-use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
+use crate::ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use waddle_extensions::{ExtensionCapability, ExtensionConfig, ExtensionModuleConfig, PluginId};
 
 fn config(can_send: bool, rooms: &[&str]) -> ExtensionConfig {

@@ -311,8 +311,8 @@ async fn postgres_relay_full_jid_delivery_receipts_direct_route_and_terminalizes
 
 #[tokio::test]
 async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
-    use crate::ingress_substrate::MessageEnvelope;
-    use crate::ingress_uow::{
+    use crate::ingress::substrate::MessageEnvelope;
+    use crate::ingress::uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget,
         EffectIntentRepository,
     };
@@ -427,7 +427,7 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
 }
 
 async fn archived_reflection_rechecks_completed_receipt(fixture: IngressFixture) {
-    use crate::ingress_uow::{
+    use crate::ingress::uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget,
     };
     let mut submission = fixture.submission(Some("delayed-reflection"), "original room message");

@@ -17,7 +17,7 @@ use waddle_xmpp::{
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::decision::EffectReceiptKey;
-use crate::{ingress_substrate::IngressSubstrateError, ingress_uow::IngressUowError};
+use crate::{ingress::substrate::IngressSubstrateError, ingress::uow::IngressUowError};
 
 /// One actor snapshot, captured before the handled frontier advances.
 #[derive(Debug, Clone, PartialEq, Eq)]

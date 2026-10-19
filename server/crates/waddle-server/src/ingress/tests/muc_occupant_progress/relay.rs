@@ -67,7 +67,7 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
     let (target_tx, target_rx) = tokio::sync::mpsc::channel(16);
     socket_tests::register_test_connection(&state, &target, target_tx).await;
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -225,7 +225,7 @@ async fn relay_progress(fixture: IngressFixture, case: Case) {
             resource: target.clone(),
         };
         assert!(
-            crate::sm_persistence::ingress_append::get(&fixture.db, &append_key)
+            crate::sm::persistence::ingress_append::get(&fixture.db, &append_key)
                 .await
                 .expect("ledger")
                 .is_some(),

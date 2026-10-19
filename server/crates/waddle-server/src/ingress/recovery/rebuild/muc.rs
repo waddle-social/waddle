@@ -2,8 +2,8 @@
 use super::RecoveryInput;
 use crate::{
     ingress::room_canonical::{self, CanonicalSourceError},
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::IngressUowError,
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::IngressUowError,
     server::routes::interpret::effects::{
         delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan, PlannedEffect,
     },

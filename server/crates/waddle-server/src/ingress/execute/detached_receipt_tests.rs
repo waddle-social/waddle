@@ -18,7 +18,7 @@ fn capture_delivery(deps: &Deps<'_>, effect: ExternalDeliveryEffect) -> Vec<Plan
 
 async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_second: bool) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -111,7 +111,7 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
         .expect("receipt lookup"),
         !missing_second
     );
-    let progress = crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, &receipt)
+    let progress = crate::ingress::uow::DeliveryProgressRepository::load(&mut tx, key, &receipt)
         .await
         .expect("resource progress");
     assert!(progress.contains(&first));

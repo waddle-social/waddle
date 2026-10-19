@@ -208,7 +208,7 @@ async fn seed_initial_xmpp_topology(
     // the existing publisher gates accept their publishes. Mirrors
     // the spaces seed below but scoped to the community service.
     for owner in state.server_owner_jids.iter() {
-        crate::spaces_pubsub_seed::seed_owner_on_all_nodes(pubsub_storage, &community_jid, owner)
+        crate::spaces::pubsub_seed::seed_owner_on_all_nodes(pubsub_storage, &community_jid, owner)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("failed to seed community service owner affiliations: {error}")
@@ -371,7 +371,7 @@ async fn seed_spaces_admin_affiliations(
         }
     };
     for node in &nodes {
-        crate::spaces_pubsub_seed::seed_owners_on_node(
+        crate::spaces::pubsub_seed::seed_owners_on_node(
             pubsub_storage,
             spaces_jid,
             node,

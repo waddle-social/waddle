@@ -636,9 +636,9 @@ pub(crate) fn restore_recorded_muc_decline(
     plan: &mut crate::ingress::IngressPlan,
     recorded: &[IngressEffectIntent],
     pending: &[IngressEffectIntent],
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &crate::ingress::substrate::MessageEnvelope,
     received_at: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, crate::ingress_uow::IngressUowError> {
+) -> Result<bool, crate::ingress::uow::IngressUowError> {
     use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
     use waddle_xmpp::{
         ingress::PendingDeliveryMutation,
@@ -656,7 +656,7 @@ pub(crate) fn restore_recorded_muc_decline(
     };
     let incoming = envelope.message();
     let decline = mediated_decline(incoming)
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        .ok_or(crate::ingress::uow::IngressUowError::EffectIntentMessageMissing)?;
     let invite = crate::server::routes::websocket::muc_invites::OutstandingInvite {
         room: mutation.room.clone(),
         invitee: mutation.invitee.clone(),
@@ -692,7 +692,7 @@ pub(crate) fn restore_recorded_muc_decline(
             } if recipient == &invite.inviter => Some(row_id.clone()),
             _ => None,
         }) else {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing);
+            return Err(crate::ingress::uow::IngressUowError::EffectIntentMessageMissing);
         };
         // A completed fallback is reconciled into the route receipt before this hook.
         let message = mediated_decline_message(

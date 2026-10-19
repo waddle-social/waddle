@@ -240,7 +240,7 @@ async fn extension_host_boundary_known_rejection_survives_receipt_failure() {
                 rejection: Some(
                     crate::server::routes::interpret::offline_delivery::offline_quota_error(),
                 ),
-                terminal: Err(crate::ingress_uow::IngressUowError::AuthorityStopped.into()),
+                terminal: Err(crate::ingress::uow::IngressUowError::AuthorityStopped.into()),
             }
         }),
     };

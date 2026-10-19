@@ -9,7 +9,7 @@ use super::super::{
 };
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
-    ingress_uow::{DeliveryProgressRepository, EffectReceiptRepository},
+    ingress::uow::{DeliveryProgressRepository, EffectReceiptRepository},
     server::routes::{
         interpret::interpret,
         websocket::{interpret_loop::build_interpret_deps, tests as socket_tests},
@@ -257,7 +257,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
     }
     if retry_case == RetryCase::MissingProvenance {
         let mut tx = fixture.uow.begin().await.expect("old row");
-        let legacy = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        let legacy = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load pre-fix fixture")
             .expect("pre-fix envelope");
@@ -265,10 +265,10 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
             legacy.room_manifest().is_none(),
             "the pre-fix fixture must never replace a sealed canonical source"
         );
-        crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
+        crate::ingress::uow::CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
-            &crate::ingress_substrate::MessageEnvelope::new(message.clone()),
+            &crate::ingress::substrate::MessageEnvelope::new(message.clone()),
         )
         .await
         .expect("pre-fix real-sender envelope");
@@ -345,7 +345,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
         assert_eq!(failure.class(), IngressDecisionClass::IntentContradiction);
         let original = frozen_archive.as_ref().expect("archive");
         let mut tx = fixture.uow.begin().await.expect("legacy context read");
-        let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load")
             .expect("envelope");
@@ -492,7 +492,7 @@ async fn partial_broadcast(fixture: IngressFixture, bodyless: bool, retry_case: 
                 .expect("old row pending")
         );
         let mut tx = fixture.uow.begin().await.expect("old source");
-        let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load")
             .expect("envelope");
@@ -640,7 +640,7 @@ async fn assert_unverifiable_archive_rejected(
     key: waddle_xmpp::ingress::MessageKey,
 ) {
     let mut tx = fixture.uow.begin().await.expect("legacy source read");
-    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("load")
         .expect("envelope");
@@ -648,7 +648,7 @@ async fn assert_unverifiable_archive_rejected(
         envelope.message().id.is_none(),
         "original generated wire id is unrecoverable"
     );
-    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let intents = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("intents");
     let route = intents
@@ -669,7 +669,7 @@ async fn assert_unverifiable_archive_rejected(
     assert_eq!(failure.class(), IngressDecisionClass::IntentContradiction);
     assert!(matches!(
         failure.source,
-        crate::ingress_uow::IngressUowError::MamStore(
+        crate::ingress::uow::IngressUowError::MamStore(
             waddle_xmpp::mam::MamTxStoreError::ProjectionConflict { .. }
         )
     ));

@@ -63,7 +63,7 @@ pub(super) async fn handle_spaces_disco_info<'a>(
             .deps
             .app_state
             .spaces_metadata_store
-            .get_by_node(&crate::space_identity::SpaceNode::from(node))
+            .get_by_node(&crate::spaces::identity::SpaceNode::from(node))
             .await
         {
             space.name = metadata.name;

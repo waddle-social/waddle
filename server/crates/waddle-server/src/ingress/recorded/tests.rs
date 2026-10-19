@@ -582,7 +582,7 @@ fn recorded_subject_bounce_reconstructs_exact_frame_without_transient_reply() {
             "saved-archive-id",
             &room.clone().into(),
         ));
-    let envelope = crate::ingress_substrate::MessageEnvelope::new(message.clone());
+    let envelope = crate::ingress::substrate::MessageEnvelope::new(message.clone());
     let error = FrozenStanzaError::new(
         FrozenStanzaErrorType::Wait,
         StanzaErrorCondition::ResourceConstraint,

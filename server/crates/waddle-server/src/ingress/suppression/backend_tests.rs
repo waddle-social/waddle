@@ -1,9 +1,9 @@
 use super::*;
 use crate::{
-    ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture},
-    ingress_uow::{
+    ingress::uow::{
         CanonicalMessageRepository, DeliveryProgressRepository, EffectReceiptRepository,
     },
+    ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture},
     server::routes::interpret::effects::delivery::PeerDeliveryKind,
 };
 use waddle_xmpp::ingress::{

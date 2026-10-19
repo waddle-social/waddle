@@ -1,6 +1,6 @@
 use super::*;
 use crate::ingress::commit::commit_hooks;
-use crate::ingress_uow::IngressUowError;
+use crate::ingress::uow::IngressUowError;
 use waddle_xmpp::stream_management::{DetachedSession, DetachedSessionSnapshot};
 
 async fn row_count(state: &WebSocketState, table: &str) -> i64 {

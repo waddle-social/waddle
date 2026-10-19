@@ -1,8 +1,8 @@
 use super::*;
 
 async fn receipts_terminalization(fixture: IngressFixture) {
+    use waddle_server::ingress::uow::EffectReceiptRepository;
     use waddle_server::ingress::{execute::terminalize_if_complete, ExternalEffect};
-    use waddle_server::ingress_uow::EffectReceiptRepository;
     use waddle_xmpp::{ingress::FrozenStanzaError, Stanza};
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;

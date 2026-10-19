@@ -424,7 +424,7 @@ async fn fan_out_event(state: &WebSocketState, req: EventFanOutRequest<'_>) {
 /// access model suppresses the implicit XEP-0163 §3 roster fan-out,
 /// not deliveries the owner explicitly authorized.
 ///
-/// Delegates to `pubsub_authz::can_subscribe_with_config` — the same
+/// Delegates to `pubsub::authz::can_subscribe_with_config` — the same
 /// decision arm as the subscribe/read gate — so the fan-out
 /// entitlement can never diverge from it: the XEP-0402 bookmarks
 /// owner-only carve-out and the Authorize arm apply identically here.
@@ -445,7 +445,7 @@ async fn private_node_subscriber_allowed(
     if subscriber == owner {
         return true;
     }
-    match crate::pubsub_authz::effective_affiliation(
+    match crate::pubsub::authz::effective_affiliation(
         &state.deps.protocol.pubsub_storage,
         owner,
         node,
@@ -454,7 +454,7 @@ async fn private_node_subscriber_allowed(
     )
     .await
     {
-        Ok(affiliation) => crate::pubsub_authz::can_subscribe_with_config(
+        Ok(affiliation) => crate::pubsub::authz::can_subscribe_with_config(
             node_cfg,
             affiliation,
             owner,

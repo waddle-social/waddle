@@ -10,8 +10,8 @@ use waddle_xmpp::protocol::Blocklist;
 
 use crate::{
     db::Database,
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::{
         CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
         EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
     },
@@ -402,7 +402,7 @@ async fn record_discarded_receipts(
                 && super::super::receipt_key(intent).ok().as_ref() == Some(receipt)
         }) {
             EffectReceiptRepository::record_policy_discard(&mut tx, key, receipt,
-                crate::ingress_uow::PolicyDiscardReason::RecipientBlocked).await?;
+                crate::ingress::uow::PolicyDiscardReason::RecipientBlocked).await?;
             continue;
         }
         EffectReceiptRepository::record_receipt(
@@ -499,7 +499,7 @@ async fn freeze(
                 .iter()
                 .all(|target| route.completed.contains(target));
         if (!route.is_direct() && route.fanout.is_empty()) || prepared_complete {
-            crate::ingress_uow::settle_recorded(&mut tx, key, &[route.settle_evidence()]).await?;
+            crate::ingress::uow::settle_recorded(&mut tx, key, &[route.settle_evidence()]).await?;
             settled_routes.push(route.settle_evidence());
         } else {
             route_progress.push(route);

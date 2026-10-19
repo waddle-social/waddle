@@ -6,13 +6,13 @@ use tokio::time::Instant;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 
 use crate::{
-    ingress::{receipt_key, RouteProgress},
-    ingress_substrate::RecoveryEvidence,
-    ingress_uow::{
+    ingress::substrate::RecoveryEvidence,
+    ingress::uow::{
         CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
         EffectReceiptRepository, IngressUnitOfWork, IngressUowError, SendAttemptRepository,
         SendAttemptStatus, SendObligation,
     },
+    ingress::{receipt_key, RouteProgress},
 };
 
 pub(super) async fn known_wait(

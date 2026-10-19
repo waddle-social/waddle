@@ -5,7 +5,7 @@ use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::*;
 use crate::server::routes::websocket::handlers::pubsub_fanout;
 use crate::server::routes::websocket::ResolvedPrincipal;
-use crate::space_identity::{space_jid_for_node, SpaceNode};
+use crate::spaces::identity::{space_jid_for_node, SpaceNode};
 
 pub(super) async fn handle_spaces_publish(
     iq: &xmpp_parsers::iq::Iq,

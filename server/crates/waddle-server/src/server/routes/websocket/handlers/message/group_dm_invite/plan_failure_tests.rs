@@ -1,10 +1,10 @@
 //! Invitation prerequisite failures preserve the resumable ingress position.
 use super::*;
+use crate::ingress::uow::SmIngressStreamRepository;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
     IngressStreamIdentity, IngressSubmission,
 };
-use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::interpret::effects::{EffectSink, IngressPlan, PlanSink};
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
@@ -465,7 +465,7 @@ async fn membership_cancel_replay(fixture: IngressFixture, cancel_after: CancelA
             .iter()
             .filter(|_| cancel_after == CancelAfter::LedgerReceipt)
         {
-            crate::ingress_uow::EffectReceiptRepository::record_receipt_pooled(
+            crate::ingress::uow::EffectReceiptRepository::record_receipt_pooled(
                 &fixture.db,
                 accepted.message_key.expect("canonical"),
                 receipt.kind,
@@ -771,7 +771,7 @@ async fn full_history_timestamp_replay(fixture: IngressFixture) {
         &offered,
         &recorded,
         &recorded,
-        &crate::ingress_substrate::MessageEnvelope::new(message),
+        &crate::ingress::substrate::MessageEnvelope::new(message),
     )
     .expect("restore full history invitation"));
     assert!(restored.plan.iter().any(|effect| matches!(&effect.effect,

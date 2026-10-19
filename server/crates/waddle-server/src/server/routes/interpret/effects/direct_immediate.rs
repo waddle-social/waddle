@@ -242,7 +242,7 @@ async fn notification_activity(
                 .record_chat_state(
                     owner,
                     &conversation,
-                    crate::notification_activity::NotificationChatState::from_xep0085(state),
+                    crate::notification::activity::NotificationChatState::from_xep0085(state),
                     committed_at_ms,
                 )
                 .await

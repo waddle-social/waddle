@@ -14,13 +14,13 @@ use waddle_xmpp::{
 };
 
 use crate::{
-    ingress::{recorded::RouteProgress, recovery::rebuild},
-    ingress_uow::{
+    ingress::uow::{
         settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
         DeliveryProgressRepository, EffectIntentRepository, EffectReceiptRepository,
         IngressUnitOfWork, IngressUowError, PendingReceiptRepository, RecoveryReceiptRepository,
         SendAttemptRepository, SendAttemptStatus, SendObligation,
     },
+    ingress::{recorded::RouteProgress, recovery::rebuild},
     server::routes::interpret::Deps,
 };
 

@@ -2,7 +2,7 @@
 //! a socket copy, and is never a peer for direct messages, private messages or subscriptions.
 use super::*;
 use crate::ingress::test_support::IngressFixture;
-use crate::ingress_uow::{
+use crate::ingress::uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};

@@ -22,7 +22,7 @@ const NS_WADDLE_PUSH_CONTEXT: &str = "urn:waddle:push:context:0";
 const STANZA_ERROR_NS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 
 /// XEP-0050 node identifier for push device registration. Mirrors
-/// `crate::push_service::commands::REGISTER_DEVICE_NODE`.
+/// `crate::push::service::commands::REGISTER_DEVICE_NODE`.
 const REGISTER_DEVICE_NODE: &str = "register-device";
 /// XEP-0050 node identifier for push device deregistration.
 const DISABLE_DEVICE_NODE: &str = "disable-device";

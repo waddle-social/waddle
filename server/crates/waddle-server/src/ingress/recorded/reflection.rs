@@ -1,7 +1,7 @@
 //! Separate this attempt's reflection from repair of its historical occupant copy.
 use super::{single_target, RouteProgress};
 use crate::{
-    ingress_substrate::MessageEnvelope,
+    ingress::substrate::MessageEnvelope,
     server::routes::interpret::effects::{
         delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
         PlanSuppressionPolicy, PlannedEffect,

@@ -12,7 +12,7 @@ use waddle_xmpp::{
 
 use super::{identity::IngressAppendObligationRef, IngressAuthority};
 use crate::{
-    ingress_uow::{
+    ingress::uow::{
         ArchiveDispatchRepository, CanonicalMessageRepository, DeliveryProgressRepository,
         EffectIntentRepository, EffectReceiptRepository, IngressFencing, IngressUnitOfWork,
         IngressUowError, IngressUowTransaction, SendAttemptRepository, SendAttemptStatus,

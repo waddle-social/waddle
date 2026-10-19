@@ -52,7 +52,7 @@ pub struct DatabasePendingDeliveryStorage {
     /// when clustering is enabled AND this storage's `db` is co-located
     /// with the clustering global database (checked once, before
     /// construction, by [`open_for_cluster_mode`] — mirroring
-    /// `sm_persistence::open_for_cluster_mode`'s identical invariant for
+    /// `sm::persistence::open_for_cluster_mode`'s identical invariant for
     /// `PostgresFencedSmPersistence`, one table over). `insert_fenced`
     /// uses this to run the Q6 promotion insert under the origin SM
     /// session's claim fence; `None` means this storage falls back to the
@@ -121,7 +121,7 @@ impl<'a> PendingInsertFence<'a> {
 
 /// Map a [`ClaimError`] to the [`PendingStorageError`] `insert_fenced`'s
 /// callers expect — mirrors
-/// `sm_persistence_fenced::claim_error_to_sm_persistence_error` exactly,
+/// `sm::persistence::fenced::claim_error_to_sm_persistence_error` exactly,
 /// one error type over: only a genuine ownership loss
 /// ([`ClaimError::AlreadyClaimed`]/[`ClaimError::Conflict`]) becomes
 /// [`PendingStorageError::NotOwner`]; a transient backend outage or a

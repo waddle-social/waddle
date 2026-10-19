@@ -43,7 +43,7 @@
 //! `tests/xep0492_push_enforcement_ws.rs` (it never touches storage)
 //! connects.
 
-use waddle_server::notification_settings_projection::{
+use waddle_server::notification::settings_projection::{
     ConversationKind, NotificationSettingsProjectionStore, NotificationSettingsSource,
     PushDispatchDecision,
 };

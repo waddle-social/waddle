@@ -1,6 +1,6 @@
 use super::*;
+use crate::ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use crate::ingress::{effects::Effect, test_support::IngressFixture, PlannedEffect};
-use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use waddle_extensions::PluginId;
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent, TransportGeneration};
 

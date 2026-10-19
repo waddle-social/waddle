@@ -2,6 +2,7 @@
 mod prepared_direct;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
+    ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository},
     ingress::{
         commit::commit_submission,
         effects::{delivery::ExternalDeliveryEffect, Effect, PlanSink},
@@ -14,7 +15,6 @@ use crate::{
         test_support::IngressFixture,
         Deps, ExternalEffect, ImmediateSink, IngressSubmission, RecoveryEnvironment,
     },
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
     server::routes::websocket::{
         interpret_loop::build_interpret_deps, tests as socket_tests, WebSocketState,
     },
@@ -117,7 +117,7 @@ async fn assert_pending(f: &IngressFixture, key: MessageKey) {
 }
 async fn persistent_sm(f: &IngressFixture) -> Arc<InMemorySmSessionRegistry> {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(f.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(f.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -430,7 +430,7 @@ async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, head
         CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
-            &crate::ingress_substrate::MessageEnvelope::new(
+            &crate::ingress::substrate::MessageEnvelope::new(
                 submission.plan.sanitized_message.clone(),
             ),
         )
@@ -540,6 +540,7 @@ async fn registered_remote_direct_route_stays_pending(f: IngressFixture) {
 }
 mod family_tests {
     use crate::{
+        ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository},
         ingress::{
             commit::commit_submission,
             effects::{
@@ -555,8 +556,7 @@ mod family_tests {
             test_support::IngressFixture,
             ExternalEffect, ImmediateSink, IngressSubmission, PlannedEffect, RecoveryEnvironment,
         },
-        ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-        notification_outbox::{NotificationCandidate, NotificationOutboxStore},
+        notification::outbox::{NotificationCandidate, NotificationOutboxStore},
         pending_delivery::DatabasePendingDeliveryStorage,
         server::routes::websocket::{interpret_loop::build_interpret_deps, WebSocketState},
     };
@@ -590,7 +590,7 @@ mod family_tests {
             .deps
             .protocol;
         protocol.notification_settings_projection = Arc::new(
-            crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+            crate::notification::settings_projection::NotificationSettingsProjectionStore::new(
                 fixture.db.clone(),
             ),
         );
@@ -1251,6 +1251,7 @@ mod family_tests {
     }
 }
 mod pin_tests {
+    use crate::ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository};
     use crate::ingress::{
         commit::commit_submission,
         execute::uow::STALL_DELIVERY_RESOURCE,
@@ -1262,7 +1263,6 @@ mod pin_tests {
         test_support::IngressFixture,
         IngressDecision, IngressEffectCapture, IngressSubmission, RecoveryEnvironment,
     };
-    use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
     use crate::server::routes::{
         interpret::{
             effects::{EffectSink, ImmediateSink, PlanSink},
@@ -2322,7 +2322,7 @@ async fn groupchat_inbox_push_expires_without_replaying_stale_projection(fixture
         }
         assert!(rx.try_recv().is_err(), "no inbox push or repeated MUC copy");
         let mut tx = fixture.uow.begin().await.expect("pending inbox");
-        let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        let recorded = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
             .await
             .expect("intents");
         let receipted = EffectReceiptRepository::keys(&mut tx, key)
@@ -2475,7 +2475,7 @@ async fn postgres_groupchat_inbox_push_expires_without_replaying_stale_projectio
 /// Freeze reads delivery progress for the whole row at once; the grouped
 /// result must equal the per-obligation reads it replaced.
 async fn bulk_delivery_progress_matches_per_receipt_reads(f: IngressFixture) {
-    use crate::ingress_uow::DeliveryProgressRepository;
+    use crate::ingress::uow::DeliveryProgressRepository;
     let resources: Vec<jid::FullJid> = ["juliet@example.com/phone", "juliet@example.com/desk"]
         .iter()
         .map(|r| r.parse().expect("resource"))
@@ -2586,7 +2586,7 @@ fn recovery_report_requires_proven_execution_and_persistence() {
     report.terminalization_failure = None;
     report.receipt_failures.push((
         crate::ingress::EffectReceiptKey {
-            kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+            kind: crate::ingress::substrate::EffectReceiptKind::from_storage(
                 waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
             ),
             semantic_identity_hash: [0; 32],

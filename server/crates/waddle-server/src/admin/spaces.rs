@@ -14,7 +14,7 @@
 //! 1. ACL-check via [`crate::admin::is_community_owner`].
 //! 2. Parse the typed `<x type='submit'>` data form into a Rust struct.
 //! 3. Delegate to the typed dependencies on `AppState`
-//!    ([`crate::spaces_metadata::SpacesMetadataStore`] + the pubsub storage
+//!    ([`crate::spaces::metadata::SpacesMetadataStore`] + the pubsub storage
 //!    trait + the MUC room registry actor for cascade-destroy).
 //! 4. Return a typed `<x type='result'>` data form.
 //!
@@ -48,10 +48,10 @@ use crate::permissions::{
 };
 use crate::server::xmpp_state::{delete_xmpp_channel, get_xmpp_channel};
 use crate::server::AppState;
-use crate::space_identity::{
+use crate::spaces::identity::{
     canonical_space_projection, space_jid_for_node, SpaceNode, SpaceProjectionError,
 };
-use crate::spaces_metadata::{SpaceMetadata, SpacesMetadataError};
+use crate::spaces::metadata::{SpaceMetadata, SpacesMetadataError};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -972,8 +972,8 @@ async fn run_create(state: &AppState, args: &SpacesCreateArgs) -> Result<SpaceRe
     }
 
     // Seed server-owners as PubSub owners on the new node so they can
-    // administer it. Mirrors `spaces_pubsub_seed::seed_owners_on_node`.
-    crate::spaces_pubsub_seed::seed_owners_on_node(
+    // administer it. Mirrors `spaces::pubsub_seed::seed_owners_on_node`.
+    crate::spaces::pubsub_seed::seed_owners_on_node(
         &state.pubsub_storage,
         &state.spaces_jid,
         &localpart,
@@ -1691,7 +1691,7 @@ mod tests {
         let projected = space_jid_for_node(&spaces_jid, &node).expect("projected jid");
         assert_eq!(projected.to_string(), "music\\2fa@spaces.localhost");
         assert_eq!(
-            crate::space_identity::space_node_name(&projected).as_deref(),
+            crate::spaces::identity::space_node_name(&projected).as_deref(),
             Some("music/a")
         );
     }

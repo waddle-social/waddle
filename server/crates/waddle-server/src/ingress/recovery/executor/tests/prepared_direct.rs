@@ -172,7 +172,7 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
             envelope.message(),
             Hint::NoStore
         ));
-        let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        let intents = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
             .await
             .expect("recorded intents");
         let route = intents
@@ -332,7 +332,7 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                 .await
                 .expect("canonical lock");
             if matches!(recipient_state, RecipientState::AlreadyDelivered) {
-                crate::ingress_uow::DeliveryProgressRepository::record(
+                crate::ingress::uow::DeliveryProgressRepository::record(
                     &mut tx,
                     key,
                     &progress.receipt,
@@ -341,13 +341,13 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                 .await
                 .expect("record direct proof");
             } else {
-                let obligation = crate::ingress_uow::SendObligation {
+                let obligation = crate::ingress::uow::SendObligation {
                     message: key,
                     receipt: progress.receipt.clone(),
                     recipient: target.clone(),
                 };
-                let crate::ingress_uow::SendClaim::Acquired(lease) =
-                    crate::ingress_uow::SendAttemptRepository::claim(
+                let crate::ingress::uow::SendClaim::Acquired(lease) =
+                    crate::ingress::uow::SendAttemptRepository::claim(
                         &mut tx,
                         &obligation,
                         &waddle_xmpp::ownership::NodeIdentity::local(),
@@ -359,7 +359,7 @@ async fn prepared_no_store_recovery(fixture: IngressFixture, recipient_state: Re
                     panic!("new claim")
                 };
                 assert!(
-                    crate::ingress_uow::SendAttemptRepository::start(&mut tx, &lease)
+                    crate::ingress::uow::SendAttemptRepository::start(&mut tx, &lease)
                         .await
                         .expect("start")
                 );
@@ -524,8 +524,8 @@ async fn postgres_xep0191_prepared_full_temporary_storage_blocked_target_discard
 }
 
 async fn oversized_prepared_copy(fixture: IngressFixture) {
+    use crate::ingress::uow::{IngressUowError, SmIngressStreamRepository};
     use crate::ingress::IngressStreamIdentity;
-    use crate::ingress_uow::{IngressUowError, SmIngressStreamRepository};
     use waddle_xmpp::ingress::{
         EffectIntentCodecError, WireHandledCount, MAX_EFFECT_INTENT_PAYLOAD_BYTES,
     };
@@ -764,7 +764,7 @@ async fn transient_live_carbons_or_offline(fixture: IngressFixture, initial: Ini
         envelope.message(),
         Hint::NoStore
     ));
-    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let intents = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("intents");
     for intent in &intents {

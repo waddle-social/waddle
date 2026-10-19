@@ -2,10 +2,10 @@ use super::*;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     config::{IngressConfig, LineageConfig},
+    ingress::uow::IngressLineage,
     ingress::{
         commit::commit_submission, execute::terminalize_if_complete, test_support::IngressFixture,
     },
-    ingress_uow::IngressLineage,
     server::routes::interpret::{
         effects::{Effect, ExternalEffect, ImmediateSink, PlannedEffect},
         Deps,

@@ -117,7 +117,7 @@ async fn host_owned_progress(fixture: IngressFixture) {
         "the frozen non-reflection audience is exactly bot, A and B"
     );
     let mut tx = fixture.uow.begin().await.expect("inspect frozen route");
-    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("load envelope")
         .expect("canonical envelope");
@@ -221,9 +221,9 @@ async fn host_owned_progress(fixture: IngressFixture) {
     .await
     .expect("aggregate receipt"));
     assert_eq!(
-        crate::ingress_uow::SendAttemptRepository::status(
+        crate::ingress::uow::SendAttemptRepository::status(
             &mut tx,
-            &crate::ingress_uow::SendObligation {
+            &crate::ingress::uow::SendObligation {
                 message: key,
                 receipt: receipt.clone(),
                 recipient: bot.clone(),
@@ -303,9 +303,9 @@ async fn host_owned_progress(fixture: IngressFixture) {
     .await
     .expect("aggregate receipt"));
     assert_eq!(
-        crate::ingress_uow::SendAttemptRepository::status(
+        crate::ingress::uow::SendAttemptRepository::status(
             &mut tx,
-            &crate::ingress_uow::SendObligation {
+            &crate::ingress::uow::SendObligation {
                 message: key,
                 receipt: receipt.clone(),
                 recipient: bot.clone(),

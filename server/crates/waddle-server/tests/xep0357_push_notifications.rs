@@ -17,7 +17,7 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use std::env;
 use tokio::sync::{Mutex, MutexGuard};
 use waddle_server::db::Database;
-use waddle_server::push_service::vapid_storage::VapidStorage;
+use waddle_server::push::service::vapid_storage::VapidStorage;
 
 /// Serializes tests that mutate `WADDLE_VAPID_PRIVATE_KEY`. The env is
 /// process-global; cargo runs tests in parallel by default. We use
@@ -204,7 +204,7 @@ async fn sign_and_verify_round_trip_under_loaded_key() {
 /// A lost Phase C rebuild keeps canonical push preview and processing hints.
 #[test]
 fn recovery_envelope_preserves_push_body_and_hints() {
-    use waddle_server::notification_outbox::{
+    use waddle_server::notification::outbox::{
         candidate_from_envelope, GroupchatCandidateIdentity, NotificationThreadId,
     };
     use waddle_xmpp::xep::{xep0334, xep0421::OccupantIdSecret};

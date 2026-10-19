@@ -742,7 +742,7 @@ impl ClaimStore for PostgresClaimStore {
                 // because it never authorizes a write itself; the
                 // authoritative gate over any actual write stays the
                 // per-write `FOR SHARE` fence inside that write's own
-                // transaction (`sm_persistence_fenced::assert_fenced`). This
+                // transaction (`sm::persistence::fenced::assert_fenced`). This
                 // method only decides which `ClaimEpoch` value the caller
                 // should cache to bind into that later fence.
                 let conn = self.db.control_plane_guard().await.map_err(db_err)?;
@@ -2972,7 +2972,7 @@ mod tests {
         .expect("open test postgres");
         let store = PostgresClaimStore::new(db.clone());
         store.ensure_schema().await.expect("ensure schema");
-        crate::sm_persistence_fenced::PostgresFencedSmPersistence::open(
+        crate::sm::persistence::fenced::PostgresFencedSmPersistence::open(
             db.clone(),
             Arc::new(PostgresClaimStore::new(db.clone())),
             SharedNodeIdentity::new(node_identity()),

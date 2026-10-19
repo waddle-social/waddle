@@ -1,6 +1,6 @@
 use super::*;
 use crate::ingress::suppression::external_effect_indices;
-use crate::ingress_uow::ReconcileVerdict;
+use crate::ingress::uow::ReconcileVerdict;
 use crate::server::routes::interpret::effects::{
     invite::MucUserRoute, PlanEffectDependency, PlanSuppressionPolicy, RoomExecutionPath,
 };

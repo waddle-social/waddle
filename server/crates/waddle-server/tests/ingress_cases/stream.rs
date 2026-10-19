@@ -2,8 +2,8 @@ use super::*;
 
 async fn resumable_wire_binding(fixture: IngressFixture) {
     use waddle_server::{
+        ingress::uow::{SmIngressRepository, SmIngressStreamRepository},
         ingress::IngressStreamIdentity,
-        ingress_uow::{SmIngressRepository, SmIngressStreamRepository},
     };
     use waddle_xmpp::{
         ingress::{IngressOrdinal, WireHandledCount},
@@ -146,8 +146,8 @@ async fn ingress_wire_binding_postgres() {
 
 async fn committed_rejection_wire_replay(fixture: IngressFixture) {
     use waddle_server::{
+        ingress::uow::{EffectIntentRepository, SmIngressStreamRepository},
         ingress::IngressStreamIdentity,
-        ingress_uow::{EffectIntentRepository, SmIngressStreamRepository},
     };
     use waddle_xmpp::{
         ingress::{FrozenStanzaError, IngressOrdinal, WireHandledCount},
@@ -270,8 +270,8 @@ async fn ingress_committed_rejection_wire_replay_postgres() {
 
 async fn ordinal_collision_rolls_back(fixture: IngressFixture) {
     use waddle_server::{
+        ingress::uow::{SmIngressRepository, SmIngressStreamRepository},
         ingress::IngressStreamIdentity,
-        ingress_uow::{SmIngressRepository, SmIngressStreamRepository},
     };
     use waddle_xmpp::{
         ingress::{IngressOrdinal, MessageKey, WireHandledCount},

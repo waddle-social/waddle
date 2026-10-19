@@ -9,7 +9,7 @@ use waddle_xmpp::{
 
 use crate::{
     db::Database,
-    ingress_uow::{
+    ingress::uow::{
         CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
         IngressUowTransaction,
     },
@@ -238,7 +238,7 @@ impl ExecutionReport {
         let mut reports: Vec<Self> = Vec::new();
         for receipt in receipts {
             let key = EffectReceiptKey {
-                kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+                kind: crate::ingress::substrate::EffectReceiptKind::from_storage(
                     receipt.kind.to_storage(),
                 ),
                 semantic_identity_hash: receipt.semantic_identity_hash,
@@ -561,12 +561,12 @@ pub async fn execute_effects(
                         return outcome;
                     }
                     let dispatch_stream = match super::archive_dispatch::effect_ready(uow, decision, index, effect, deps).await {
-                        Ok((crate::ingress_uow::DispatchReadiness::Ready, stream)) => stream,
-                        Ok((crate::ingress_uow::DispatchReadiness::Blocked(predecessors), _)) => return EffectOutcome::Settled(SettledOutcome {
+                        Ok((crate::ingress::uow::DispatchReadiness::Ready, stream)) => stream,
+                        Ok((crate::ingress::uow::DispatchReadiness::Blocked(predecessors), _)) => return EffectOutcome::Settled(SettledOutcome {
                             refusal: None, persisted: Vec::new(), detached: None,
                             completion: if predecessors.is_empty() { SettledCompletion::DeferredPending } else { SettledCompletion::Deferred },
                         }),
-                        Ok((crate::ingress_uow::DispatchReadiness::Completed, _)) => return EffectOutcome::Settled(SettledOutcome {
+                        Ok((crate::ingress::uow::DispatchReadiness::Completed, _)) => return EffectOutcome::Settled(SettledOutcome {
                             refusal: None, persisted: Vec::new(), detached: None, completion: SettledCompletion::Complete,
                         }),
                         Err(error) => {
@@ -1192,8 +1192,8 @@ pub async fn terminalize_if_complete(
     Ok(matches!(
         terminalize_if_complete_outcome(uow, message_key, phase).await?,
         Some(
-            crate::ingress_substrate::TerminalizeOutcome::Terminalized
-                | crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
+            crate::ingress::substrate::TerminalizeOutcome::Terminalized
+                | crate::ingress::substrate::TerminalizeOutcome::AlreadyTerminal
         )
     ))
 }
@@ -1202,7 +1202,7 @@ pub(crate) async fn terminalize_if_complete_outcome(
     uow: &IngressUnitOfWork,
     message_key: MessageKey,
     phase: IngressEffectExecutionPhase,
-) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
+) -> Result<Option<crate::ingress::substrate::TerminalizeOutcome>, IngressUowError> {
     #[cfg(test)]
     if test_hooks::take_terminalization_timeout(message_key) {
         return Err(IngressUowError::Timeout);
@@ -1226,8 +1226,8 @@ pub(super) async fn terminalize_if_complete_in_transaction(
     Ok(matches!(
         terminalize_if_complete_outcome_in_transaction(transaction, message_key, phase).await?,
         Some(
-            crate::ingress_substrate::TerminalizeOutcome::Terminalized
-                | crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
+            crate::ingress::substrate::TerminalizeOutcome::Terminalized
+                | crate::ingress::substrate::TerminalizeOutcome::AlreadyTerminal
         )
     ))
 }
@@ -1236,10 +1236,10 @@ async fn terminalize_if_complete_outcome_in_transaction(
     transaction: &mut IngressUowTransaction<'_>,
     message_key: MessageKey,
     phase: IngressEffectExecutionPhase,
-) -> Result<Option<crate::ingress_substrate::TerminalizeOutcome>, IngressUowError> {
+) -> Result<Option<crate::ingress::substrate::TerminalizeOutcome>, IngressUowError> {
     if !CanonicalMessageRepository::lock(transaction, message_key).await? {
         return Ok(Some(
-            crate::ingress_substrate::TerminalizeOutcome::MessageVanished,
+            crate::ingress::substrate::TerminalizeOutcome::MessageVanished,
         ));
     }
     if !EffectReceiptRepository::receipts_complete(transaction, message_key).await? {
@@ -1267,8 +1267,8 @@ mod settlement_tests;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ingress::substrate::EffectReceiptKind;
     use crate::ingress::{decision::AliasOutcomeClass, decision::IngressDecisionClass};
-    use crate::ingress_substrate::EffectReceiptKind;
     use xmpp_parsers::message::Message;
 
     fn frame() -> ExternalEffect {

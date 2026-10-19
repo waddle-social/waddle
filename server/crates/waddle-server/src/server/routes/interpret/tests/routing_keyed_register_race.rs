@@ -22,7 +22,7 @@ async fn keyed_fallback_never_enters_an_actor_registered_after_socket_lookup() {
         let context = SmIngressAppendContext {
             message_key: waddle_xmpp::ingress::MessageKey::new(),
             receipt: crate::ingress::EffectReceiptKey {
-                kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+                kind: crate::ingress::substrate::EffectReceiptKind::from_storage(
                     waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
                 ),
                 semantic_identity_hash: [1; 32],

@@ -1,6 +1,6 @@
 use super::*;
 use crate::ingress::test_support::IngressFixture;
-use crate::ingress_uow::PendingReceiptRepository;
+use crate::ingress::uow::PendingReceiptRepository;
 use waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal;
 
 fn archived(id: PendingRowId, label: &str) -> PendingRow {

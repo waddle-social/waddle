@@ -70,7 +70,7 @@ use crate::server::xmpp_state::{
     XmppChannelRecord, XmppChannelUpsert,
 };
 use crate::server::AppState;
-use crate::space_identity::{canonical_space_projection, SpaceNode, SpaceProjectionError};
+use crate::spaces::identity::{canonical_space_projection, SpaceNode, SpaceProjectionError};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -3006,7 +3006,7 @@ fn arm_config_effect_reservation(
 #[derive(Clone)]
 enum CancelledConfigAskRecoveryAction {
     ArmReservation {
-        arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+        arm_supervisor: crate::room::effect_outbox::RoomEffectArmSupervisor,
     },
     DeferMembersOnly(PendingAdminMembersOnlyEnforcementSeed),
 }
@@ -3017,7 +3017,7 @@ struct PendingAdminMembersOnlyEnforcementSeed {
     config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
     room_jid: BareJid,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: crate::room::effect_outbox::RoomEffectArmSupervisor,
 }
 
 impl PendingAdminMembersOnlyEnforcementSeed {
@@ -3090,13 +3090,13 @@ pub(crate) async fn reacquire_config_actor(
 /// Retain every inert config row since the ask began: a later identical
 /// config commit may advance coordinates without producing a new outbox row.
 pub(crate) async fn staged_config_reservations_since(
-    outbox: &crate::room_effect_outbox::RoomEffectOutboxStore,
+    outbox: &crate::room::effect_outbox::RoomEffectOutboxStore,
     previous: &waddle_xmpp::muc::room_actor::RoomSnapshot,
     coordinates: waddle_xmpp::muc::RoomCommittedCoordinates,
     include_latest: bool,
 ) -> Result<
     Vec<waddle_xmpp::muc::RoomEffectReservation>,
-    crate::room_effect_outbox::RoomEffectOutboxError,
+    crate::room::effect_outbox::RoomEffectOutboxError,
 > {
     let latest = if include_latest {
         outbox
@@ -3127,7 +3127,7 @@ struct CancelledConfigAskRecoveryGuard {
     intended_config: RoomConfig,
     previous_snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
     registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    outbox: Arc<crate::room::effect_outbox::RoomEffectOutboxStore>,
     action: CancelledConfigAskRecoveryAction,
     disarmed: bool,
 }
@@ -3199,7 +3199,7 @@ impl CancelledConfigAskRecoveryGuard {
                 .await
             {
                 timeout_attempt = timeout_attempt.saturating_add(1);
-                let backoff_ms = crate::room_effect_outbox::retry_delay_ms(timeout_attempt);
+                let backoff_ms = crate::room::effect_outbox::retry_delay_ms(timeout_attempt);
                 tracing::warn!(room = %self.room_jid, timeout_attempt, backoff_ms,
                         "cancelled admin/group-DM config recovery snapshot timed out; retrying");
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
@@ -3231,7 +3231,7 @@ impl CancelledConfigAskRecoveryGuard {
                     "cancelled config recovery cannot restore the original lifecycle; retrying"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(
-                crate::room_effect_outbox::retry_delay_ms(1) as u64,
+                crate::room::effect_outbox::retry_delay_ms(1) as u64,
             ))
             .await;
         };
@@ -3264,7 +3264,7 @@ impl CancelledConfigAskRecoveryGuard {
                     // is capped at MAX_RETRY_DELAY_MS and this task is detached.
                     Err(error) => {
                         lookup_attempt += 1;
-                        let backoff_ms = crate::room_effect_outbox::retry_delay_ms(lookup_attempt);
+                        let backoff_ms = crate::room::effect_outbox::retry_delay_ms(lookup_attempt);
                         tracing::warn!(
                             room = %self.room_jid,
                             %error,
@@ -3341,7 +3341,7 @@ struct PendingAdminMembersOnlyEnforcement {
     config_status_codes: Vec<waddle_xmpp::muc::MucConfigStatusCode>,
     room_jid: BareJid,
     sfu: Option<Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: crate::room::effect_outbox::RoomEffectArmSupervisor,
 }
 
 impl PendingAdminMembersOnlyEnforcement {
@@ -5582,8 +5582,8 @@ pub fn build_kick_form(result: &ChannelsKickResult) -> DataForm {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::room_effect_outbox::drain::drain_due_effects;
-    use crate::room_effect_outbox::{
+    use crate::room::effect_outbox::drain::drain_due_effects;
+    use crate::room::effect_outbox::{
         RoomEffectEnqueue, RoomEffectKey, RoomEffectOriginInstanceId, RoomEffectProducingNode,
     };
     use crate::server::routes::websocket::tests::{
@@ -6323,7 +6323,7 @@ mod group_dm_durable_reconciliation_tests {
 
     struct TestGroupDmDurableStore {
         mode: DurableMode,
-        outbox: Option<Arc<crate::room_effect_outbox::RoomEffectOutboxStore>>,
+        outbox: Option<Arc<crate::room::effect_outbox::RoomEffectOutboxStore>>,
         admin_receipts: Mutex<
             HashMap<
                 (BareJid, waddle_xmpp::muc::AdminMutationId),
@@ -6345,14 +6345,14 @@ mod group_dm_durable_reconciliation_tests {
 
         fn with_outbox(
             mode: DurableMode,
-            outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+            outbox: Arc<crate::room::effect_outbox::RoomEffectOutboxStore>,
         ) -> Arc<Self> {
             Self::with_optional_outbox(mode, Some(outbox))
         }
 
         fn with_optional_outbox(
             mode: DurableMode,
-            outbox: Option<Arc<crate::room_effect_outbox::RoomEffectOutboxStore>>,
+            outbox: Option<Arc<crate::room::effect_outbox::RoomEffectOutboxStore>>,
         ) -> Arc<Self> {
             Arc::new(Self {
                 mode,
@@ -6547,12 +6547,12 @@ mod group_dm_durable_reconciliation_tests {
                 if !exact {
                     return Err(RoomCommitError::NotOwner);
                 }
-                let effect_origin = crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                let effect_origin = crate::room::effect_outbox::RoomEffectOriginInstanceId::new(
                     "admin-channel-test-origin".to_owned(),
                 )
                 .expect("test origin instance");
                 let producing_node =
-                    crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
+                    crate::room::effect_outbox::RoomEffectProducingNode::from_node_identity(
                         NodeIdentity::new("admin-channel-test-node", "admin-channel-test-epoch"),
                     );
                 let is_affiliation = matches!(intent, RoomDurableMutation::Affiliation(_));
@@ -6579,7 +6579,7 @@ mod group_dm_durable_reconciliation_tests {
                         outbox
                             .enqueue_in_tx(
                                 &mut tx,
-                                crate::room_effect_outbox::RoomEffectEnqueue {
+                                crate::room::effect_outbox::RoomEffectEnqueue {
                                     lifecycle: coordinates.lifecycle,
                                     revision: coordinates.revision,
                                     effects: &effects,
@@ -6876,7 +6876,7 @@ mod group_dm_durable_reconciliation_tests {
 
     async fn wait_for_room_effect_to_arm(
         websocket_state: &crate::server::routes::websocket::WebSocketState,
-        key: &crate::room_effect_outbox::RoomEffectKey,
+        key: &crate::room::effect_outbox::RoomEffectKey,
     ) {
         tokio::time::timeout(std::time::Duration::from_secs(1), async {
             loop {
@@ -7427,7 +7427,7 @@ mod group_dm_durable_reconciliation_tests {
         );
         let _ = channel_id;
 
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: config_lifecycle,
             revision: config_revision,
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
@@ -7581,7 +7581,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("committed room state")
             .config_coordinates
             .expect("committed config coordinates");
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: coordinates.lifecycle,
             revision: coordinates.revision,
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
@@ -7603,7 +7603,7 @@ mod group_dm_durable_reconciliation_tests {
 
         let drain_state = Arc::clone(&websocket_state);
         let drain = tokio::spawn(async move {
-            crate::room_effect_outbox::drain::drain_due_effects(
+            crate::room::effect_outbox::drain::drain_due_effects(
                 drain_state.as_ref(),
                 crate::time::now_ms(),
                 8,
@@ -7695,7 +7695,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("coordinates lock")
             .get(&room_jid)
             .expect("committed coordinates");
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle,
             revision: RoomRevision::from_stored(revision).expect("revision"),
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
@@ -7918,7 +7918,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("commit config");
 
         let superseded_reservation = applied.reservation.expect("staged config reservation");
-        let superseded_key = crate::room_effect_outbox::RoomEffectKey {
+        let superseded_key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: superseded_reservation.lifecycle,
             revision: superseded_reservation.revision,
             ordinal: superseded_reservation.ordinals[0],
@@ -7937,7 +7937,7 @@ mod group_dm_durable_reconciliation_tests {
         let latest_reservation = latest_applied
             .reservation
             .expect("latest staged config reservation");
-        let latest_key = crate::room_effect_outbox::RoomEffectKey {
+        let latest_key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: latest_reservation.lifecycle,
             revision: latest_reservation.revision,
             ordinal: latest_reservation.ordinals[0],
@@ -8022,7 +8022,7 @@ mod group_dm_durable_reconciliation_tests {
         let previous_exact_reservation = previous_exact
             .reservation
             .expect("earlier exact staged reservation");
-        let previous_exact_key = crate::room_effect_outbox::RoomEffectKey {
+        let previous_exact_key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: previous_exact_reservation.lifecycle,
             revision: previous_exact_reservation.revision,
             ordinal: previous_exact_reservation.ordinals[0],
@@ -8045,7 +8045,7 @@ mod group_dm_durable_reconciliation_tests {
         let exact_reservation = exact_applied
             .reservation
             .expect("exact staged config reservation");
-        let exact_key = crate::room_effect_outbox::RoomEffectKey {
+        let exact_key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: exact_reservation.lifecycle,
             revision: exact_reservation.revision,
             ordinal: exact_reservation.ordinals[0],
@@ -8152,7 +8152,7 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("member config commit");
         let reservation = applied.reservation.expect("staged config reservation");
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: reservation.lifecycle,
             revision: reservation.revision,
             ordinal: reservation.ordinals[0],
@@ -8263,7 +8263,7 @@ mod group_dm_durable_reconciliation_tests {
             .expect("coordinates lock")
             .get(&room_jid)
             .expect("committed coordinates");
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle,
             revision: RoomRevision::from_stored(revision).expect("revision"),
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
@@ -8354,7 +8354,7 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("config commit");
         let reservation = applied.reservation.expect("staged config reservation");
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: reservation.lifecycle,
             revision: reservation.revision,
             ordinal: reservation.ordinals[0],
@@ -8463,7 +8463,7 @@ mod group_dm_durable_reconciliation_tests {
             .await
             .expect("commit exact config");
         let exact_reservation = exact_applied.reservation.expect("exact staged reservation");
-        let exact_key = crate::room_effect_outbox::RoomEffectKey {
+        let exact_key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: exact_reservation.lifecycle,
             revision: exact_reservation.revision,
             ordinal: exact_reservation.ordinals[0],
@@ -8530,7 +8530,7 @@ mod group_dm_durable_reconciliation_tests {
         let superseded_reservation = superseded_applied
             .reservation
             .expect("superseded staged reservation");
-        let superseded_key = crate::room_effect_outbox::RoomEffectKey {
+        let superseded_key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: superseded_reservation.lifecycle,
             revision: superseded_reservation.revision,
             ordinal: superseded_reservation.ordinals[0],
@@ -8549,7 +8549,7 @@ mod group_dm_durable_reconciliation_tests {
         let latest_reservation = latest_applied
             .reservation
             .expect("latest staged reservation");
-        let latest_key = crate::room_effect_outbox::RoomEffectKey {
+        let latest_key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: latest_reservation.lifecycle,
             revision: latest_reservation.revision,
             ordinal: latest_reservation.ordinals[0],
@@ -9291,7 +9291,7 @@ mod group_dm_durable_reconciliation_tests {
         .expect("admin command must not wait for write acceptance")
         .unwrap_or_else(|_| panic!("affiliation command succeeds"));
 
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: seeded_coordinates.0,
             revision: RoomRevision::from_stored(seeded_coordinates.1 + 1).expect("revision"),
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
@@ -9312,10 +9312,10 @@ mod group_dm_durable_reconciliation_tests {
                 {
                     return frame.expect("caller connection remains open");
                 }
-                let _ = crate::room_effect_outbox::drain::drain_due_effects(
+                let _ = crate::room::effect_outbox::drain::drain_due_effects(
                     websocket_state.as_ref(),
                     crate::time::now_ms()
-                        .saturating_add(crate::room_effect_outbox::MAX_RETRY_DELAY_MS),
+                        .saturating_add(crate::room::effect_outbox::MAX_RETRY_DELAY_MS),
                     8,
                 )
                 .await;
@@ -9456,7 +9456,7 @@ mod group_dm_durable_reconciliation_tests {
             )
             .await
             .expect("insert committed lifecycle");
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: coordinates.0,
             revision: RoomRevision::from_stored(coordinates.1).expect("revision"),
             ordinal: waddle_xmpp::muc::RoomEffectOrdinal::first(),
@@ -9482,7 +9482,7 @@ mod group_dm_durable_reconciliation_tests {
 
         let drain_state = Arc::clone(&websocket_state);
         let drain = tokio::spawn(async move {
-            crate::room_effect_outbox::drain::drain_due_effects(
+            crate::room::effect_outbox::drain::drain_due_effects(
                 drain_state.as_ref(),
                 crate::time::now_ms(),
                 8,
@@ -9584,7 +9584,7 @@ mod group_dm_durable_reconciliation_tests {
                 .deps
                 .protocol
                 .room_effect_outbox
-                .find(&crate::room_effect_outbox::RoomEffectKey {
+                .find(&crate::room::effect_outbox::RoomEffectKey {
                     lifecycle: reservation.lifecycle,
                     revision: reservation.revision,
                     ordinal: reservation.ordinals[0],
@@ -9595,7 +9595,7 @@ mod group_dm_durable_reconciliation_tests {
             "RollbackConfigIfRevision deletes only the reservation from the failed outer operation"
         );
         assert_eq!(
-            crate::room_effect_outbox::drain::drain_due_effects(
+            crate::room::effect_outbox::drain::drain_due_effects(
                 websocket_state.as_ref(),
                 crate::time::now_ms(),
                 8,

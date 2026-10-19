@@ -18,7 +18,7 @@ use super::{
         websocket_stream_open_element,
     },
 };
-use crate::room_effect_outbox::drain::RoomEffectCompletion;
+use crate::room::effect_outbox::drain::RoomEffectCompletion;
 use crate::server::routes::auth_telemetry::AuthFailure;
 use std::str::FromStr;
 use xmpp_parsers::minidom::Element;

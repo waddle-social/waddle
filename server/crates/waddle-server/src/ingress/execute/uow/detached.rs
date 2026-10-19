@@ -3,7 +3,7 @@ use jid::FullJid;
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 
 use crate::{
-    ingress_uow::{
+    ingress::uow::{
         run_with_retry, settle_recorded, CanonicalMessageRepository, DeliveryPolicyDiscardReason,
         DeliveryProgressRepository, IngressUnitOfWork, IngressUowError,
     },
@@ -119,15 +119,15 @@ pub(super) async fn execute(
         )
         .await
         {
-            Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
-            Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+            Ok(crate::ingress::uow::DispatchReadiness::Ready) => {}
+            Ok(crate::ingress::uow::DispatchReadiness::Completed) => {
                 // Another executor may have completed this same copy since
                 // this decision was frozen. Its durable proof supersedes the
                 // stale snapshot; never enqueue an older copy behind successors.
                 destinations.push((resource.clone(), FullJidDeliveryOutcome::Delivered));
                 continue;
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Blocked(predecessors)) => {
+            Ok(crate::ingress::uow::DispatchReadiness::Blocked(predecessors)) => {
                 if completion != SettledCompletion::Uncertain {
                     if !predecessors.is_empty() {
                         completion = SettledCompletion::Deferred;
@@ -569,9 +569,9 @@ async fn record_progress(
         // the store-side proof the caller already took stands alone there.
         if matches!(
             tx.fencing(),
-            crate::ingress_uow::IngressFencing::Clustered(_)
+            crate::ingress::uow::IngressFencing::Clustered(_)
         ) {
-            crate::ingress_uow::ClaimRepository::assert_room_claim(
+            crate::ingress::uow::ClaimRepository::assert_room_claim(
                 &mut tx,
                 room,
                 &fence.owner,
@@ -614,7 +614,7 @@ async fn record_progress(
         .unwrap_or(false)
     {
         return Err(IngressUowError::Database {
-            retry_class: crate::ingress_uow::DbRetryClass::SqliteContention,
+            retry_class: crate::ingress::uow::DbRetryClass::SqliteContention,
         });
     }
     #[cfg(test)]

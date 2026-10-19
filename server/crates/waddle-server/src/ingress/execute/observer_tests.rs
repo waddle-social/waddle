@@ -217,7 +217,7 @@ async fn observer_maximum_body_envelope(fixture: IngressFixture) {
         .expect("maximum admitted body commits");
     let key = first.message_key.expect("canonical key");
     let mut tx = fixture.uow.begin().await.expect("inspect envelope");
-    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("load envelope")
         .expect("persisted envelope");
@@ -345,7 +345,7 @@ async fn non_room_envelope(fixture: IngressFixture) {
         .await
         .expect("commit");
     let mut tx = fixture.uow.begin().await.expect("inspect envelope");
-    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+    let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(
         &mut tx,
         decision.message_key.expect("key"),
     )

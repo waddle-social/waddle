@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_uow::EffectIntentRepository;
+use crate::ingress::uow::EffectIntentRepository;
 use waddle_xmpp::{
     mam::{MamStorage, SqlxMamStorage},
     muc::pin::PinChangeRequest,
@@ -103,7 +103,7 @@ async fn pin_recovery(f: IngressFixture, case: PinCase) {
         CanonicalMessageRepository::lock(&mut tx, key)
             .await
             .expect("lock");
-        crate::ingress_uow::settle_recorded(&mut tx, key, &[other])
+        crate::ingress::uow::settle_recorded(&mut tx, key, &[other])
             .await
             .expect("other archive complete");
         tx.commit().await.expect("other receipt");

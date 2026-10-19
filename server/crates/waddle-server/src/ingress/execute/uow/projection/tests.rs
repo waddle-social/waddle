@@ -221,7 +221,7 @@ async fn xep0045_sealed_inbox_push_preserves_an_empty_original_audience() {
 async fn activity_atomicity(fixture: IngressFixture) {
     let owner = fixture.principal.bare_jid().clone();
     let conversation: jid::BareJid = "juliet@example.com".parse().expect("conversation");
-    let store = crate::notification_activity::NotificationActivityStore::new(fixture.db.clone())
+    let store = crate::notification::activity::NotificationActivityStore::new(fixture.db.clone())
         .await
         .expect("activity schema");
     let mut submission = fixture.submission(Some("atomic-activity"), "activity");
@@ -337,7 +337,7 @@ async fn activity_atomicity(fixture: IngressFixture) {
         .record_chat_state(
             &owner,
             &conversation,
-            crate::notification_activity::NotificationChatState::Active,
+            crate::notification::activity::NotificationChatState::Active,
             350,
         )
         .await

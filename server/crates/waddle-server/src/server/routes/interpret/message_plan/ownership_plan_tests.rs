@@ -139,7 +139,7 @@ async fn ownership_failure(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("ownership-retry"), "recipient body");
     let stream_id = SmSessionId::new("ownership-read-stream");
     let mut tx = fixture.uow.begin().await.expect("stream transaction");
-    let sm_ingress_id = crate::ingress_uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
+    let sm_ingress_id = crate::ingress::uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
         .await
         .expect("stream");
     tx.commit().await.expect("mint stream");

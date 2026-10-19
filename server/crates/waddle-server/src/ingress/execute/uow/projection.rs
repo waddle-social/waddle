@@ -1,7 +1,7 @@
 //! Apply approved local projections and their completion under one canonical lock.
 use crate::{
     ingress::decision::IngressDecision,
-    ingress_uow::{
+    ingress::uow::{
         settle_recorded, CanonicalMessageRepository, DeliveryEffectRepository,
         EffectDeliveryBinding, EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork,
         IngressUowError, ProjectionRepository,
@@ -36,7 +36,7 @@ pub(super) async fn execute_sealed_inbox_push(
         .message_key
         .ok_or(IngressUowError::EffectIntentMessageMissing)?;
     let (envelope, recorded) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(uow.database(), key).await?;
+        crate::ingress::uow::CarbonReceiptRepository::load_authority(uow.database(), key).await?;
     let Some(manifest) = envelope.room_manifest() else {
         return Ok(None);
     };

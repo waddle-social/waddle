@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_uow::CanonicalMessageRepository;
+use crate::ingress::uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::effects::Effect;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 
@@ -402,7 +402,7 @@ async fn postgres_muc_canonical_old_sender_envelope_never_rebuilds() {
 
 async fn system_sources_keep_separate_payloads(fixture: IngressFixture) {
     use crate::ingress::room_canonical::{occupant_copy_message, source, CanonicalSourceError};
-    use crate::ingress_uow::EffectIntentRepository;
+    use crate::ingress::uow::EffectIntentRepository;
     use waddle_xmpp::ingress::{EffectMessageIdentity, EntityGeneration, StoredMessagePayload};
     let room: jid::BareJid = "system@muc.example.com".parse().expect("room");
     let occupant: jid::FullJid = "juliet@example.com/laptop".parse().expect("occupant");

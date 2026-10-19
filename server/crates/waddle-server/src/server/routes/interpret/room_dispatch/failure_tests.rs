@@ -1,11 +1,11 @@
 //! Phase-A room infrastructure failures must leave the origin-id retryable.
 use super::super::effects::{PlanFailure, PlanSink};
 use super::*;
+use crate::ingress::uow::SmIngressStreamRepository;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
     IngressStreamIdentity, IngressSubmission,
 };
-use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::websocket::tests::create_test_websocket_state;
 use kameo::actor::Spawn;
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget, WireHandledCount};

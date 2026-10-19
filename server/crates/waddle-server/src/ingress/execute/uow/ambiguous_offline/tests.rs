@@ -1,6 +1,6 @@
 use super::*;
+use crate::ingress::uow::{EffectReceiptRepository, SendClaim};
 use crate::ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture};
-use crate::ingress_uow::{EffectReceiptRepository, SendClaim};
 use crate::server::routes::interpret::{
     effects::{
         delivery::ExternalDeliveryEffect, Effect, ExternalEffect, ImmediateSink, PlannedEffect,
@@ -161,7 +161,7 @@ async fn run_handoff(
             .begin()
             .await
             .expect("concurrent resource settlement");
-        crate::ingress_uow::DeliveryProgressRepository::record(
+        crate::ingress::uow::DeliveryProgressRepository::record(
             &mut tx,
             key,
             &progress.receipt,
@@ -325,7 +325,7 @@ async fn run_handoff(
     );
     let mut tx = fixture.uow.begin().await.expect("proof");
     let completed =
-        crate::ingress_uow::DeliveryProgressRepository::load(&mut tx, key, &progress.receipt)
+        crate::ingress::uow::DeliveryProgressRepository::load(&mut tx, key, &progress.receipt)
             .await
             .expect("resource proof");
     assert!(

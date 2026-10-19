@@ -37,7 +37,7 @@ async fn handle_muc_join_with_occupancy_session(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
     connection: (OccupancySessionGeneration, &Option<crate::auth::Session>),
 ) -> Vec<String> {
     let (occupancy_session, authenticated_session) = connection;

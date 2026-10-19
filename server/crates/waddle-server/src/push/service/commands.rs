@@ -1,0 +1,1021 @@
+//! XEP-0050 ad-hoc command handlers for the push.<domain> service.
+//!
+//! Two commands live here:
+//!
+//! - `register-device` (multi-step): stage 1 returns
+//!   `status='executing'` + a XEP-0004 form prompt; stage 3 receives a
+//!   submitted form carrying typed provider credentials and persists a
+//!   `push_devices` row. Stage 4 returns `status='completed'` + a
+//!   result form whose `node` field carries the assigned XEP-0357 node
+//!   id.
+//! - `disable-device` (multi-step): stage 3 receives a submitted form
+//!   carrying `node` + the Push Service-assigned `device-id` and
+//!   flips ONLY that single row to `status='disabled'` for the
+//!   calling owner. Sibling devices on the same node keep receiving
+//!   fan-out — multi-platform installs (Apple + Android + Web)
+//!   routinely share a node, and a per-device opt-out from one MUST
+//!   NOT take down push for the others.
+//!
+//! ## Wire contract — `register-device`
+//!
+//! Submit form FORM_TYPE = [`REGISTER_DEVICE_FORM_TYPE`]
+//! (`urn:waddle:push-service:commands:register-device:0`). Required
+//! fields:
+//!
+//! - `platform` ∈ {`web`, `apns`, `fcm`}.
+//! - `environment` ∈ {`prod`, `sandbox`}.
+//! - `app-id` — caller-supplied app namespace.
+//! - Platform-discriminated provider credentials:
+//!   - Web Push: `web-push-endpoint`, `web-push-p256dh`, `web-push-auth`.
+//!   - APNs: `apns-token`.
+//!   - FCM: `fcm-token`, `fcm-p256dh`, `fcm-auth`. The two keys are the
+//!     client's RFC 8291 envelope-encryption keys: the Push Service
+//!     encrypts the v1 push envelope to them so FCM only ever carries
+//!     ciphertext.
+//!
+//! Result form FORM_TYPE matches the submit form. Two fields:
+//! `node` (the assigned XEP-0357 push-service node id, feeds the
+//! user-server `<enable/>` IQ) and `device-id` (the per-device handle
+//! the caller persists so it can later opt this device out via
+//! `disable-device`).
+//!
+//! ## Wire contract — `disable-device`
+//!
+//! Submit form FORM_TYPE = [`DISABLE_DEVICE_FORM_TYPE`]
+//! (`urn:waddle:push-service:commands:disable-device:0`). Required
+//! fields: `node` (the XEP-0357 push node id) and `device-id` (the
+//! Push Service-assigned device row id returned by the
+//! `register-device` result form). Disables ONLY that single device
+//! row, leaving sibling devices on the same node intact — multiple
+//! platforms (Apple + Android + Web) routinely share a node, and
+//! per-device opt-out from one of them MUST NOT take push down on
+//! the others. The all-devices retirement flow is the user-server
+//! XEP-0357 `<disable jid='…' node='…'/>` IQ (different boundary).
+//! Result form is empty on success.
+//!
+//! ## Authorization
+//!
+//! Both handlers derive the owner BareJID from
+//! [`waddle_xmpp::commands::CommandContext::from`]. The underlying
+//! storage layer (`crate::push::service`) enforces the
+//! owner-binds-to-node invariant via SQL — a caller cannot register a
+//! device against another user's node nor disable foreign devices.
+
+use std::sync::Arc;
+
+use uuid::Uuid;
+use waddle_xmpp::commands::{CommandContext, CommandResult};
+use waddle_xmpp::push::apns::ApnsDeviceToken;
+use waddle_xmpp::push::fcm::FcmRegistrationToken;
+use waddle_xmpp::push::types::SubscriptionKeys;
+use waddle_xmpp::xep::xep0004::{DataForm, Field, FormType};
+use waddle_xmpp::xep::xep0050::AdHocCommandCondition;
+use waddle_xmpp::XmppError;
+
+use crate::push::service::{DatabasePushServiceStore, PushDeviceRegistration};
+
+/// XEP-0050 node identifier for the push device-registration command.
+pub const REGISTER_DEVICE_NODE: &str = "register-device";
+/// XEP-0050 node identifier for the push device-deregistration command.
+pub const DISABLE_DEVICE_NODE: &str = "disable-device";
+
+/// XEP-0004 `FORM_TYPE` value pinning the submit/result form for
+/// [`REGISTER_DEVICE_NODE`]. Kept in lockstep with the client-side
+/// constant `waddle_xmpp_client::push::REGISTER_DEVICE_FORM_TYPE`.
+pub const REGISTER_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:register-device:0";
+/// XEP-0004 `FORM_TYPE` value pinning the submit form for
+/// [`DISABLE_DEVICE_NODE`].
+pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:disable-device:0";
+
+/// XEP-0004 form field carrying the assigned XEP-0357 node id in the
+/// stage-4 `register-device` result form.
+pub const FIELD_NODE: &str = "node";
+/// XEP-0004 form field carrying the platform discriminator
+/// (`web` / `apns` / `fcm`).
+pub const FIELD_PLATFORM: &str = "platform";
+/// XEP-0004 form field carrying the deployment environment
+/// (`prod` / `sandbox`).
+pub const FIELD_ENVIRONMENT: &str = "environment";
+/// XEP-0004 form field carrying the caller's app namespace.
+/// Uses the kebab-case form-var convention shared with every other
+/// field in this FORM_TYPE (`device-id`, `web-push-endpoint`,
+/// `apns-token`, etc.). XEP-0068 §4.3 doesn't mandate one casing
+/// but a single FORM_TYPE MUST be consistent across submit and
+/// result forms; mixing snake_case `app_id` with kebab-case
+/// siblings would trip generic form-aware clients.
+pub const FIELD_APP_ID: &str = "app-id";
+/// XEP-0004 form field carrying the Web Push subscription endpoint
+/// URL (RFC 8030 §5).
+pub const FIELD_WEB_PUSH_ENDPOINT: &str = "web-push-endpoint";
+/// XEP-0004 form field carrying the Web Push subscription's
+/// SEC1-encoded P-256 public key (RFC 8291 §3.4).
+pub const FIELD_WEB_PUSH_P256DH: &str = "web-push-p256dh";
+/// XEP-0004 form field carrying the Web Push subscription's
+/// 16-byte auth secret (RFC 8291 §3.4).
+pub const FIELD_WEB_PUSH_AUTH: &str = "web-push-auth";
+/// XEP-0004 form field carrying an APNs device token.
+pub const FIELD_APNS_TOKEN: &str = "apns-token";
+/// XEP-0004 form field carrying an FCM registration token.
+pub const FIELD_FCM_TOKEN: &str = "fcm-token";
+/// XEP-0004 form field carrying the Android client's base64url P-256
+/// public key for RFC 8291 envelope encryption.
+pub const FIELD_FCM_P256DH: &str = "fcm-p256dh";
+/// XEP-0004 form field carrying the Android client's base64url 16-byte
+/// RFC 8291 auth secret.
+pub const FIELD_FCM_AUTH: &str = "fcm-auth";
+/// XEP-0004 form field carrying the Push Service-assigned device-id
+/// (returned in the `register-device` result form, persisted by the
+/// caller so it can later opt this device out).
+pub const FIELD_DEVICE_ID: &str = "device-id";
+
+/// Wire string for Web Push on [`FIELD_PLATFORM`].
+const PLATFORM_WIRE_WEB: &str = "web";
+/// Wire string for APNs on [`FIELD_PLATFORM`].
+const PLATFORM_WIRE_APNS: &str = "apns";
+/// Wire string for FCM on [`FIELD_PLATFORM`].
+const PLATFORM_WIRE_FCM: &str = "fcm";
+
+/// Wire string for production environment on [`FIELD_ENVIRONMENT`].
+const ENVIRONMENT_WIRE_PROD: &str = "prod";
+/// Wire string for sandbox / development environment on
+/// [`FIELD_ENVIRONMENT`].
+const ENVIRONMENT_WIRE_SANDBOX: &str = "sandbox";
+
+/// Deployment environment for a push device. Mirrors
+/// `waddle_xmpp_client::push::PushEnvironment` at the server boundary
+/// so the protocol-constrained `prod`/`sandbox` choice never escapes
+/// [`parse_register_request`] as a raw `String` (CLAUDE.md
+/// typed-payloads hard rule). Serialized back to the wire / storage
+/// string via [`PushDeviceEnvironment::as_wire_str`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushDeviceEnvironment {
+    Production,
+    Sandbox,
+}
+
+impl PushDeviceEnvironment {
+    /// Parse the wire / storage spelling (`prod` / `sandbox`).
+    pub fn from_wire_str(value: &str) -> Option<Self> {
+        match value {
+            ENVIRONMENT_WIRE_PROD => Some(Self::Production),
+            ENVIRONMENT_WIRE_SANDBOX => Some(Self::Sandbox),
+            _ => None,
+        }
+    }
+
+    pub fn as_wire_str(self) -> &'static str {
+        match self {
+            Self::Production => ENVIRONMENT_WIRE_PROD,
+            Self::Sandbox => ENVIRONMENT_WIRE_SANDBOX,
+        }
+    }
+}
+
+/// Typed parse of the [`REGISTER_DEVICE_NODE`] submit form. Discriminates
+/// on `FIELD_PLATFORM`; each variant carries exactly the provider
+/// fields its platform needs. Constructed by [`parse_register_request`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisterDeviceRequest {
+    /// Web Push (RFC 8030 + RFC 8291) registration.
+    WebPush {
+        app_id: String,
+        environment: PushDeviceEnvironment,
+        endpoint: String,
+        p256dh: String,
+        auth: String,
+    },
+    /// Apple Push Notification service registration.
+    Apns {
+        app_id: String,
+        environment: PushDeviceEnvironment,
+        /// Hex APNs token, validated at the form boundary so the Push
+        /// Service never stores a token APNs would reject as malformed.
+        device_token: ApnsDeviceToken,
+    },
+    /// Firebase Cloud Messaging registration.
+    Fcm {
+        app_id: String,
+        environment: PushDeviceEnvironment,
+        /// Validated at the form boundary so the Push Service never
+        /// stores a token FCM would reject as malformed.
+        registration_token: FcmRegistrationToken,
+        /// The envelope-encryption keys, validated at the form boundary.
+        keys: FcmRegisteredKeys,
+    },
+}
+
+/// The base64url `p256dh` / `auth` pair an FCM device registers for
+/// envelope encryption (RFC 8291), checked to decode as a P-256 point
+/// and a 16-byte secret. Kept in its submitted base64url form because
+/// that is what the store seals; `Debug` never prints the auth secret.
+#[derive(Clone, PartialEq, Eq)]
+pub struct FcmRegisteredKeys {
+    p256dh: String,
+    auth: String,
+}
+
+impl FcmRegisteredKeys {
+    /// Validate a submitted pair.
+    pub fn parse(p256dh: &str, auth: &str) -> Result<Self, String> {
+        SubscriptionKeys::from_base64url(p256dh, auth).map_err(|error| error.to_string())?;
+        Ok(Self {
+            p256dh: p256dh.to_owned(),
+            auth: auth.to_owned(),
+        })
+    }
+
+    pub fn p256dh(&self) -> &str {
+        &self.p256dh
+    }
+
+    pub fn auth(&self) -> &str {
+        &self.auth
+    }
+}
+
+impl std::fmt::Debug for FcmRegisteredKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FcmRegisteredKeys")
+            .field("p256dh", &self.p256dh)
+            .field("auth", &"<redacted>")
+            .finish()
+    }
+}
+
+/// Typed parse of the [`DISABLE_DEVICE_NODE`] submit form. Per-device
+/// scope — the storage layer flips ONLY the `(node, device_id)` row
+/// to `disabled` for the calling owner; sibling devices on the same
+/// node keep receiving fan-out.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DisableDeviceRequest {
+    pub node: String,
+    pub device_id: String,
+}
+
+/// Register both push-service ad-hoc commands on `registry`. Invoked
+/// once at startup from `http.rs`.
+pub async fn register(
+    registry: &waddle_xmpp::commands::CommandRegistry,
+    push_service: Arc<DatabasePushServiceStore>,
+) {
+    let store_for_register = Arc::clone(&push_service);
+    registry
+        .register(REGISTER_DEVICE_NODE, "Push · Register device", move |ctx| {
+            let store = Arc::clone(&store_for_register);
+            async move { handle_register_device(ctx, store).await }
+        })
+        .await;
+
+    let store_for_disable = Arc::clone(&push_service);
+    registry
+        .register(DISABLE_DEVICE_NODE, "Push · Disable device", move |ctx| {
+            let store = Arc::clone(&store_for_disable);
+            async move { handle_disable_device(ctx, store).await }
+        })
+        .await;
+}
+
+async fn handle_register_device(
+    ctx: CommandContext,
+    push_service: Arc<DatabasePushServiceStore>,
+) -> CommandResult {
+    // Stage 1 → 2: `action='execute'` with no submitted form ⇒ return
+    // the form prompt. The registry has already minted a session id by
+    // the time the handler sees the context, so the executing arm
+    // simply echoes back the prompt with an empty `session_id` and
+    // the registry rewrites it (`registry.rs` Executing branch).
+    //
+    // Stage 3 → 4: `action='complete'` carrying the submitted form ⇒
+    // parse, persist, return the result form.
+    let submitted = ctx.command.form.as_ref();
+    let Some(submitted) = submitted else {
+        return CommandResult::Executing {
+            form: build_register_device_form_prompt(),
+            session_id: String::new(),
+            notes: vec![],
+            // XEP-0050 §5.2: advertise that `complete` is the only
+            // follow-up action so a generic XEP-0050 client knows the
+            // wizard finishes here rather than expecting `next`.
+            actions: Some(
+                waddle_xmpp::xep::xep0050::AllowedActions::new(
+                    waddle_xmpp::xep::xep0050::Action::Complete,
+                )
+                .with_complete(),
+            ),
+        };
+    };
+
+    if !matches!(submitted.form_type, FormType::Submit) {
+        // §4.4 bad-payload: the submitted form is the wrong type.
+        return CommandResult::Error(XmppError::ad_hoc_command(
+            AdHocCommandCondition::BadPayload,
+            Some("register-device requires a submit form".to_string()),
+        ));
+    }
+
+    let request = match parse_register_request(submitted) {
+        Ok(request) => request,
+        // §4.4 bad-payload: required form fields missing/invalid.
+        Err(error) => {
+            return CommandResult::Error(XmppError::ad_hoc_command(
+                AdHocCommandCondition::BadPayload,
+                Some(error),
+            ))
+        }
+    };
+
+    // `ctx.from` carries the bound full JID — `not_authorized` is
+    // already enforced by the dispatcher in
+    // `…/handlers/iq/commands.rs:13-21`, so we just project to the
+    // bare JID here. The previous `Option<BareJid>` shim was
+    // unreachable dead code (PR-comment fix).
+    let owner = ctx.from.to_bare();
+
+    // Allocate (or reuse) the XEP-0357 push node bound to (owner,
+    // app_id), then register the device in the same write transaction.
+    // The custom-namespace handler used a separate `ensure-node`
+    // round-trip; the XEP-0050 dance folds that step into stage 3 so
+    // the chat client never sees the node id until the result form
+    // returns it. Storage layout is unchanged.
+    let app_id = request.app_id().to_string();
+    let device_id = generate_device_id();
+    let (_push_node, device) = match push_service
+        .register_device_for_owner(&owner, &app_id, |node| {
+            build_registration(&request, &device_id, node)
+        })
+        .await
+    {
+        Ok(registered) => registered,
+        Err(error) => return CommandResult::Error(error),
+    };
+
+    CommandResult::Completed {
+        session_id: None,
+        form: Some(build_register_device_result_form(
+            device.node(),
+            device.device_id(),
+        )),
+        notes: vec![],
+    }
+}
+
+async fn handle_disable_device(
+    ctx: CommandContext,
+    push_service: Arc<DatabasePushServiceStore>,
+) -> CommandResult {
+    let submitted = ctx.command.form.as_ref();
+    let Some(submitted) = submitted else {
+        return CommandResult::Executing {
+            form: build_disable_device_form_prompt(),
+            session_id: String::new(),
+            notes: vec![],
+            // XEP-0050 §5.2 — single follow-up via `complete`.
+            actions: Some(
+                waddle_xmpp::xep::xep0050::AllowedActions::new(
+                    waddle_xmpp::xep::xep0050::Action::Complete,
+                )
+                .with_complete(),
+            ),
+        };
+    };
+
+    if !matches!(submitted.form_type, FormType::Submit) {
+        // §4.4 bad-payload: the submitted form is the wrong type.
+        return CommandResult::Error(XmppError::ad_hoc_command(
+            AdHocCommandCondition::BadPayload,
+            Some("disable-device requires a submit form".to_string()),
+        ));
+    }
+
+    let request = match parse_disable_request(submitted) {
+        Ok(request) => request,
+        // §4.4 bad-payload: required form fields missing/invalid.
+        Err(error) => {
+            return CommandResult::Error(XmppError::ad_hoc_command(
+                AdHocCommandCondition::BadPayload,
+                Some(error),
+            ))
+        }
+    };
+
+    // Dispatcher already gates unauthenticated callers; project to
+    // the bare JID for the per-owner storage call. PR-comment fix:
+    // the previous `Option<BareJid>` match was dead code.
+    let owner = ctx.from.to_bare();
+
+    match push_service
+        .disable_device_for_owner(&owner, &request.node, &request.device_id, None)
+        .await
+    {
+        // `Ok(())` means a matching `(node, device-id)` row existed and
+        // is now `disabled` (idempotent on re-disable). Both the
+        // "node-not-found" and "device-id-not-found" paths return
+        // `Err(item-not-found)` from the storage helper and surface as a
+        // typed IQ stanza error — so a stale/typo'd device-id is reported
+        // honestly instead of as a false success.
+        Ok(()) => CommandResult::Completed {
+            session_id: None,
+            form: None,
+            notes: vec![],
+        },
+        Err(error) => CommandResult::Error(error),
+    }
+}
+
+/// Build the stage-2 `<x type='form'>` prompt the service returns when
+/// the caller executes `register-device`. The form documents the
+/// required fields so a generic XEP-0050 client can prompt the user
+/// with no out-of-band knowledge.
+pub fn build_register_device_form_prompt() -> DataForm {
+    use waddle_xmpp::xep::xep0004::FieldType;
+
+    DataForm::new(FormType::Form)
+        .with_title("Register push device")
+        .add_instructions(
+            "Submit the platform-specific provider credentials to register a new push device.",
+        )
+        .add_field(Field::form_type(REGISTER_DEVICE_FORM_TYPE))
+        .add_field(
+            Field::new(FIELD_PLATFORM, FieldType::ListSingle)
+                .with_label("Provider platform")
+                .with_required()
+                .add_option(waddle_xmpp::xep::xep0004::FieldOption::with_label(
+                    "Web Push",
+                    PLATFORM_WIRE_WEB,
+                ))
+                .add_option(waddle_xmpp::xep::xep0004::FieldOption::with_label(
+                    "Apple Push (APNs)",
+                    PLATFORM_WIRE_APNS,
+                ))
+                .add_option(waddle_xmpp::xep::xep0004::FieldOption::with_label(
+                    "Firebase Cloud Messaging",
+                    PLATFORM_WIRE_FCM,
+                )),
+        )
+        .add_field(
+            Field::new(FIELD_ENVIRONMENT, FieldType::ListSingle)
+                .with_label("Deployment environment")
+                .with_required()
+                .add_option(waddle_xmpp::xep::xep0004::FieldOption::with_label(
+                    "Production",
+                    ENVIRONMENT_WIRE_PROD,
+                ))
+                .add_option(waddle_xmpp::xep::xep0004::FieldOption::with_label(
+                    "Sandbox / development",
+                    ENVIRONMENT_WIRE_SANDBOX,
+                )),
+        )
+        .add_field(
+            Field::new(FIELD_APP_ID, FieldType::TextSingle)
+                .with_label("Application identifier")
+                .with_required(),
+        )
+        .add_field(
+            Field::new(FIELD_WEB_PUSH_ENDPOINT, FieldType::TextSingle)
+                .with_label("Web Push endpoint URL (web only)"),
+        )
+        .add_field(
+            Field::new(FIELD_WEB_PUSH_P256DH, FieldType::TextSingle)
+                .with_label("Web Push P-256 public key (web only)"),
+        )
+        .add_field(
+            Field::new(FIELD_WEB_PUSH_AUTH, FieldType::TextSingle)
+                .with_label("Web Push auth secret (web only)"),
+        )
+        .add_field(
+            Field::new(FIELD_APNS_TOKEN, FieldType::TextSingle)
+                .with_label("APNs token (apns only)"),
+        )
+        .add_field(
+            Field::new(FIELD_FCM_TOKEN, FieldType::TextSingle)
+                .with_label("FCM registration token (fcm only)"),
+        )
+        .add_field(
+            Field::new(FIELD_FCM_P256DH, FieldType::TextSingle)
+                .with_label("FCM envelope P-256 public key (fcm only)"),
+        )
+        .add_field(
+            Field::new(FIELD_FCM_AUTH, FieldType::TextSingle)
+                .with_label("FCM envelope auth secret (fcm only)"),
+        )
+}
+
+/// Build the stage-2 `<x type='form'>` prompt the service returns when
+/// the caller executes `disable-device`. Required fields: `node` (the
+/// XEP-0357 push node id) and `device-id` (the Push Service-assigned
+/// device row id). Per-device scope.
+pub fn build_disable_device_form_prompt() -> DataForm {
+    use waddle_xmpp::xep::xep0004::FieldType;
+
+    DataForm::new(FormType::Form)
+        .with_title("Disable push device")
+        .add_instructions(
+            "Submit the push node id and the Push Service-assigned device id of \
+             the device that should be disabled.",
+        )
+        .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
+        .add_field(
+            Field::new(FIELD_NODE, FieldType::TextSingle)
+                .with_label("Push node id")
+                .with_required(),
+        )
+        .add_field(
+            Field::new(FIELD_DEVICE_ID, FieldType::TextSingle)
+                .with_label("Device id (returned by register-device)")
+                .with_required(),
+        )
+}
+
+/// Build the stage-4 `<x type='result'>` form the service returns
+/// after a successful `register-device` round. Carries the assigned
+/// XEP-0357 node id under [`FIELD_NODE`] AND the server-assigned
+/// device row id under [`FIELD_DEVICE_ID`]. The caller persists both
+/// — node feeds the user-server XEP-0357 `<enable/>` IQ, device-id
+/// is the per-device handle for [`DISABLE_DEVICE_NODE`] opt-out.
+pub fn build_register_device_result_form(node: &str, device_id: &str) -> DataForm {
+    DataForm::new(FormType::Result)
+        .add_field(Field::form_type(REGISTER_DEVICE_FORM_TYPE))
+        .add_field(Field::text_single(FIELD_NODE, node))
+        .add_field(Field::text_single(FIELD_DEVICE_ID, device_id))
+}
+
+/// Parse a submitted [`REGISTER_DEVICE_NODE`] form into the typed
+/// request enum. All validation lives here so the handler never sees a
+/// `&str` carrying protocol semantics.
+pub fn parse_register_request(form: &DataForm) -> Result<RegisterDeviceRequest, String> {
+    // PR-comment fix: pin the FORM_TYPE so a foreign / drifted form
+    // can't slip through to the platform-discriminated parser below.
+    // XEP-0004 §3.2 + XEP-0068 §4.1: the FORM_TYPE is the schema
+    // identifier; rejecting wrong values catches client/server drift.
+    require_form_type(form, REGISTER_DEVICE_FORM_TYPE)?;
+    let app_id = require_value(form, FIELD_APP_ID)?.to_string();
+    let environment_raw = require_value(form, FIELD_ENVIRONMENT)?;
+    let environment = PushDeviceEnvironment::from_wire_str(environment_raw).ok_or_else(|| {
+        format!(
+            "{FIELD_ENVIRONMENT} must be '{ENVIRONMENT_WIRE_PROD}' or '{ENVIRONMENT_WIRE_SANDBOX}', got '{environment_raw}'"
+        )
+    })?;
+    let platform_raw = require_value(form, FIELD_PLATFORM)?;
+    match platform_raw {
+        PLATFORM_WIRE_WEB => {
+            let endpoint = require_value(form, FIELD_WEB_PUSH_ENDPOINT)?.to_string();
+            let p256dh = require_value(form, FIELD_WEB_PUSH_P256DH)?.to_string();
+            let auth = require_value(form, FIELD_WEB_PUSH_AUTH)?.to_string();
+            Ok(RegisterDeviceRequest::WebPush {
+                app_id,
+                environment,
+                endpoint,
+                p256dh,
+                auth,
+            })
+        }
+        PLATFORM_WIRE_APNS => {
+            let device_token = ApnsDeviceToken::parse(require_value(form, FIELD_APNS_TOKEN)?)
+                .map_err(|error| format!("{FIELD_APNS_TOKEN}: {error}"))?;
+            Ok(RegisterDeviceRequest::Apns {
+                app_id,
+                environment,
+                device_token,
+            })
+        }
+        PLATFORM_WIRE_FCM => {
+            let registration_token =
+                FcmRegistrationToken::parse(require_value(form, FIELD_FCM_TOKEN)?)
+                    .map_err(|error| format!("{FIELD_FCM_TOKEN}: {error}"))?;
+            let keys = FcmRegisteredKeys::parse(
+                require_value(form, FIELD_FCM_P256DH)?,
+                require_value(form, FIELD_FCM_AUTH)?,
+            )
+            .map_err(|error| format!("{FIELD_FCM_P256DH}/{FIELD_FCM_AUTH}: {error}"))?;
+            Ok(RegisterDeviceRequest::Fcm {
+                app_id,
+                environment,
+                registration_token,
+                keys,
+            })
+        }
+        other => Err(format!(
+            "{FIELD_PLATFORM} must be one of '{PLATFORM_WIRE_WEB}', '{PLATFORM_WIRE_APNS}', '{PLATFORM_WIRE_FCM}', got '{other}'"
+        )),
+    }
+}
+
+/// Parse a submitted [`DISABLE_DEVICE_NODE`] form into the typed
+/// request. Both `node` and `device-id` are required so the handler
+/// can scope disable to a single row instead of nuking every device
+/// on the node.
+pub fn parse_disable_request(form: &DataForm) -> Result<DisableDeviceRequest, String> {
+    require_form_type(form, DISABLE_DEVICE_FORM_TYPE)?;
+    let node = require_value(form, FIELD_NODE)?.to_string();
+    let device_id = require_value(form, FIELD_DEVICE_ID)?.to_string();
+    Ok(DisableDeviceRequest { node, device_id })
+}
+
+impl RegisterDeviceRequest {
+    pub fn app_id(&self) -> &str {
+        match self {
+            Self::WebPush { app_id, .. } | Self::Apns { app_id, .. } | Self::Fcm { app_id, .. } => {
+                app_id
+            }
+        }
+    }
+
+    pub fn environment(&self) -> PushDeviceEnvironment {
+        match self {
+            Self::WebPush { environment, .. }
+            | Self::Apns { environment, .. }
+            | Self::Fcm { environment, .. } => *environment,
+        }
+    }
+}
+
+fn build_registration(
+    request: &RegisterDeviceRequest,
+    device_id: &str,
+    node: &str,
+) -> PushDeviceRegistration {
+    match request {
+        RegisterDeviceRequest::WebPush {
+            environment,
+            endpoint,
+            p256dh,
+            auth,
+            ..
+        } => PushDeviceRegistration::new(
+            device_id,
+            node,
+            crate::push::service::PushDevicePlatform::Web,
+            environment.as_wire_str(),
+        )
+        .with_provider_endpoint(Some(endpoint.clone()))
+        .with_provider_token(Some(auth.clone()))
+        .with_provider_key_material(Some(p256dh.clone())),
+        RegisterDeviceRequest::Apns {
+            environment,
+            device_token,
+            ..
+        } => PushDeviceRegistration::new(
+            device_id,
+            node,
+            crate::push::service::PushDevicePlatform::Apns,
+            environment.as_wire_str(),
+        )
+        .with_provider_token(Some(device_token.as_str().to_owned())),
+        RegisterDeviceRequest::Fcm {
+            environment,
+            registration_token,
+            keys,
+            ..
+        } => PushDeviceRegistration::new(
+            device_id,
+            node,
+            crate::push::service::PushDevicePlatform::Fcm,
+            environment.as_wire_str(),
+        )
+        .with_provider_token(Some(registration_token.as_str().to_owned()))
+        .with_provider_key_material(Some(keys.p256dh().to_owned()))
+        .with_provider_auth(Some(keys.auth().to_owned())),
+    }
+}
+
+fn require_value<'a>(form: &'a DataForm, var: &str) -> Result<&'a str, String> {
+    form.get_value(var)
+        .filter(|value| !value.is_empty())
+        .ok_or_else(|| format!("missing required form field '{var}'"))
+}
+
+/// Reject a submitted form whose FORM_TYPE doesn't match the expected
+/// schema id. XEP-0004 §3.2 + XEP-0068 §4.1 — the FORM_TYPE is the
+/// schema identifier; a wrong value indicates either client drift or
+/// an attempt to coerce the parser with a foreign form shape.
+fn require_form_type(form: &DataForm, expected: &str) -> Result<(), String> {
+    match form.get_form_type_value() {
+        Some(value) if value == expected => Ok(()),
+        Some(other) => Err(format!(
+            "form FORM_TYPE='{other}' does not match expected '{expected}'"
+        )),
+        None => Err(format!("form is missing FORM_TYPE; expected '{expected}'")),
+    }
+}
+
+/// Mint a fresh device id. The service owns the id under the
+/// XEP-0050 cutover so the chat / mobile client never has to invent
+/// one before the server accepts the registration. The minted value
+/// is persisted in `push_devices.device_id`, returned to the caller
+/// inside the stage-4 result form's `device-id` field, and the chat
+/// MUST persist it: the matching `disable-device` round trip uses
+/// it to scope the opt-out to a single row (sibling devices on the
+/// same `(owner, app_id)` node keep receiving fan-out).
+fn generate_device_id() -> String {
+    format!("urn:waddle:push-device:{}", Uuid::new_v4())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn submit_form_with(fields: Vec<Field>) -> DataForm {
+        let mut form =
+            DataForm::new(FormType::Submit).add_field(Field::form_type(REGISTER_DEVICE_FORM_TYPE));
+        for field in fields {
+            form = form.add_field(field);
+        }
+        form
+    }
+
+    #[test]
+    fn parse_web_push_request_carries_required_provider_fields() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_WEB),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "web-app"),
+            Field::text_single(FIELD_WEB_PUSH_ENDPOINT, "https://relay.example/wp/1"),
+            Field::text_single(FIELD_WEB_PUSH_P256DH, "p256-key"),
+            Field::text_single(FIELD_WEB_PUSH_AUTH, "auth-secret"),
+        ]);
+        let request = parse_register_request(&form).expect("parses");
+        match request {
+            RegisterDeviceRequest::WebPush {
+                app_id,
+                environment,
+                endpoint,
+                p256dh,
+                auth,
+            } => {
+                assert_eq!(app_id, "web-app");
+                assert_eq!(environment, PushDeviceEnvironment::Production);
+                assert_eq!(endpoint, "https://relay.example/wp/1");
+                assert_eq!(p256dh, "p256-key");
+                assert_eq!(auth, "auth-secret");
+            }
+            other => panic!("expected WebPush, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_web_push_request_rejects_missing_endpoint() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_WEB),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "web-app"),
+            Field::text_single(FIELD_WEB_PUSH_P256DH, "p256-key"),
+            Field::text_single(FIELD_WEB_PUSH_AUTH, "auth-secret"),
+        ]);
+        let err = parse_register_request(&form).expect_err("missing endpoint must reject");
+        assert!(err.contains(FIELD_WEB_PUSH_ENDPOINT), "{err}");
+    }
+
+    #[test]
+    fn parse_apns_request_carries_only_apns_token() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_APNS),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_SANDBOX),
+            Field::text_single(FIELD_APP_ID, "ios-app"),
+            Field::text_single(FIELD_APNS_TOKEN, "0A1B2C3D4E5F"),
+        ]);
+        let request = parse_register_request(&form).expect("parses");
+        match request {
+            RegisterDeviceRequest::Apns {
+                app_id,
+                environment,
+                device_token,
+            } => {
+                assert_eq!(app_id, "ios-app");
+                assert_eq!(environment, PushDeviceEnvironment::Sandbox);
+                // Normalized to the lowercase hex APNs expects.
+                assert_eq!(device_token.as_str(), "0a1b2c3d4e5f");
+            }
+            other => panic!("expected Apns, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_apns_request_rejects_a_non_hex_token() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_APNS),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "ios-app"),
+            Field::text_single(FIELD_APNS_TOKEN, "apns-device-token"),
+        ]);
+        let err = parse_register_request(&form).expect_err("non-hex token must reject");
+        assert!(err.contains(FIELD_APNS_TOKEN), "{err}");
+    }
+
+    fn fcm_form(token: &str, p256dh: &str, auth: &str) -> DataForm {
+        submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_FCM),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "social.waddle.android"),
+            Field::text_single(FIELD_FCM_TOKEN, token),
+            Field::text_single(FIELD_FCM_P256DH, p256dh),
+            Field::text_single(FIELD_FCM_AUTH, auth),
+        ])
+    }
+
+    #[test]
+    fn parse_fcm_request_carries_token_and_envelope_keys() {
+        let keys = crate::push::service::test_support::FcmEnvelopeKeys::generate();
+        let request = parse_register_request(&fcm_form("fcm-reg-token", &keys.p256dh, &keys.auth))
+            .expect("parses");
+        match request {
+            RegisterDeviceRequest::Fcm {
+                app_id,
+                environment,
+                registration_token,
+                keys: registered,
+            } => {
+                assert_eq!(app_id, "social.waddle.android");
+                assert_eq!(environment, PushDeviceEnvironment::Production);
+                assert_eq!(registration_token.as_str(), "fcm-reg-token");
+                assert_eq!(registered.p256dh(), keys.p256dh);
+                assert_eq!(registered.auth(), keys.auth);
+                let debug = format!("{registered:?}");
+                assert!(!debug.contains(&keys.auth), "{debug}");
+            }
+            other => panic!("expected Fcm, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn parse_fcm_request_requires_both_envelope_keys() {
+        let keys = crate::push::service::test_support::FcmEnvelopeKeys::generate();
+        let without_keys = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_FCM),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "social.waddle.android"),
+            Field::text_single(FIELD_FCM_TOKEN, "fcm-reg-token"),
+            Field::text_single(FIELD_FCM_P256DH, &keys.p256dh),
+        ]);
+        let err = parse_register_request(&without_keys).expect_err("auth is required");
+        assert!(err.contains(FIELD_FCM_AUTH), "{err}");
+    }
+
+    #[test]
+    fn parse_fcm_request_rejects_malformed_token_and_keys() {
+        let keys = crate::push::service::test_support::FcmEnvelopeKeys::generate();
+        let err = parse_register_request(&fcm_form("not a token", &keys.p256dh, &keys.auth))
+            .expect_err("token with a space must reject");
+        assert!(err.contains(FIELD_FCM_TOKEN), "{err}");
+        let err = parse_register_request(&fcm_form("fcm-reg-token", "p256-key", &keys.auth))
+            .expect_err("p256dh must be a P-256 point");
+        assert!(err.contains(FIELD_FCM_P256DH), "{err}");
+        let err = parse_register_request(&fcm_form("fcm-reg-token", &keys.p256dh, "c2hvcnQ"))
+            .expect_err("auth must be 16 bytes");
+        assert!(err.contains(FIELD_FCM_AUTH), "{err}");
+    }
+
+    #[test]
+    fn fcm_registration_seals_token_p256dh_and_auth_separately() {
+        let keys = crate::push::service::test_support::FcmEnvelopeKeys::generate();
+        let request = parse_register_request(&fcm_form("fcm-reg-token", &keys.p256dh, &keys.auth))
+            .expect("parses");
+        let registration = build_registration(&request, "device-1", "node-1");
+        assert_eq!(
+            registration.provider_token.as_deref(),
+            Some("fcm-reg-token")
+        );
+        assert_eq!(
+            registration.provider_key_material.as_deref(),
+            Some(keys.p256dh.as_str())
+        );
+        assert_eq!(
+            registration.provider_auth.as_deref(),
+            Some(keys.auth.as_str())
+        );
+        assert_eq!(registration.provider_endpoint, None);
+    }
+
+    #[test]
+    fn parse_register_request_rejects_unknown_platform() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, "telegram"),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_PROD),
+            Field::text_single(FIELD_APP_ID, "any"),
+        ]);
+        let err = parse_register_request(&form).expect_err("unknown platform must reject");
+        assert!(err.contains(FIELD_PLATFORM), "{err}");
+    }
+
+    #[test]
+    fn parse_register_request_rejects_unknown_environment() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_WEB),
+            Field::text_single(FIELD_ENVIRONMENT, "staging"),
+            Field::text_single(FIELD_APP_ID, "any"),
+            Field::text_single(FIELD_WEB_PUSH_ENDPOINT, "https://x.example/wp"),
+            Field::text_single(FIELD_WEB_PUSH_P256DH, "p"),
+            Field::text_single(FIELD_WEB_PUSH_AUTH, "a"),
+        ]);
+        let err = parse_register_request(&form).expect_err("unknown environment must reject");
+        assert!(err.contains(FIELD_ENVIRONMENT), "{err}");
+    }
+
+    #[test]
+    fn push_device_environment_wire_round_trip() {
+        assert_eq!(
+            PushDeviceEnvironment::Production.as_wire_str(),
+            ENVIRONMENT_WIRE_PROD
+        );
+        assert_eq!(
+            PushDeviceEnvironment::Sandbox.as_wire_str(),
+            ENVIRONMENT_WIRE_SANDBOX
+        );
+    }
+
+    #[test]
+    fn parsed_request_exposes_typed_environment() {
+        let form = submit_form_with(vec![
+            Field::text_single(FIELD_PLATFORM, PLATFORM_WIRE_APNS),
+            Field::text_single(FIELD_ENVIRONMENT, ENVIRONMENT_WIRE_SANDBOX),
+            Field::text_single(FIELD_APP_ID, "ios-app"),
+            Field::text_single(FIELD_APNS_TOKEN, "abcdef01"),
+        ]);
+        let request = parse_register_request(&form).expect("parses");
+        assert_eq!(request.environment(), PushDeviceEnvironment::Sandbox);
+    }
+
+    #[test]
+    fn parse_disable_request_round_trip() {
+        let form = DataForm::new(FormType::Submit)
+            .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
+            .add_field(Field::text_single(FIELD_NODE, "node-xyz"))
+            .add_field(Field::text_single(FIELD_DEVICE_ID, "device-1"));
+        let request = parse_disable_request(&form).expect("parses");
+        assert_eq!(request.node, "node-xyz");
+        assert_eq!(request.device_id, "device-1");
+    }
+
+    #[test]
+    fn parse_disable_request_rejects_missing_node() {
+        let form = DataForm::new(FormType::Submit)
+            .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
+            .add_field(Field::text_single(FIELD_DEVICE_ID, "device-1"));
+        let err = parse_disable_request(&form).expect_err("missing node must reject");
+        assert!(err.contains(FIELD_NODE), "{err}");
+    }
+
+    #[test]
+    fn parse_disable_request_rejects_missing_device_id() {
+        let form = DataForm::new(FormType::Submit)
+            .add_field(Field::form_type(DISABLE_DEVICE_FORM_TYPE))
+            .add_field(Field::text_single(FIELD_NODE, "node-xyz"));
+        let err = parse_disable_request(&form).expect_err("missing device-id must reject");
+        assert!(err.contains(FIELD_DEVICE_ID), "{err}");
+    }
+
+    #[test]
+    fn register_device_result_form_carries_node_and_device_id_fields() {
+        let form = build_register_device_result_form(
+            "urn:waddle:push-node:abc",
+            "urn:waddle:push-device:1",
+        );
+        assert!(matches!(form.form_type, FormType::Result));
+        assert_eq!(form.get_form_type_value(), Some(REGISTER_DEVICE_FORM_TYPE));
+        assert_eq!(form.get_value(FIELD_NODE), Some("urn:waddle:push-node:abc"));
+        assert_eq!(
+            form.get_value(FIELD_DEVICE_ID),
+            Some("urn:waddle:push-device:1")
+        );
+    }
+
+    #[test]
+    fn generate_device_id_is_unique_per_call() {
+        let a = generate_device_id();
+        let b = generate_device_id();
+        assert_ne!(a, b);
+        assert!(a.starts_with("urn:waddle:push-device:"));
+    }
+
+    #[test]
+    fn register_device_form_prompt_carries_form_type_and_required_fields() {
+        let form = build_register_device_form_prompt();
+        assert!(matches!(form.form_type, FormType::Form));
+        assert_eq!(form.get_form_type_value(), Some(REGISTER_DEVICE_FORM_TYPE));
+        for var in [
+            FIELD_PLATFORM,
+            FIELD_ENVIRONMENT,
+            FIELD_APP_ID,
+            FIELD_WEB_PUSH_ENDPOINT,
+            FIELD_WEB_PUSH_P256DH,
+            FIELD_WEB_PUSH_AUTH,
+            FIELD_APNS_TOKEN,
+            FIELD_FCM_TOKEN,
+            FIELD_FCM_P256DH,
+            FIELD_FCM_AUTH,
+        ] {
+            assert!(
+                form.field(var).is_some(),
+                "register-device form prompt missing field '{var}'"
+            );
+        }
+    }
+
+    #[test]
+    fn disable_device_form_prompt_carries_node_and_device_id_fields() {
+        let form = build_disable_device_form_prompt();
+        assert!(matches!(form.form_type, FormType::Form));
+        assert_eq!(form.get_form_type_value(), Some(DISABLE_DEVICE_FORM_TYPE));
+        assert!(form.field(FIELD_NODE).is_some());
+        assert!(form.field(FIELD_DEVICE_ID).is_some());
+    }
+}

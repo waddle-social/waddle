@@ -35,7 +35,7 @@ pub struct DatabaseInboxStorage {
 
 /// Typed failures while decoding an inbox row from the database.
 ///
-/// Public deliberately: [`crate::ingress_uow::IngressUowError`] carries
+/// Public deliberately: [`crate::ingress::uow::IngressUowError`] carries
 /// [`InboxTxError`] (and through it this type) transparently, so the
 /// unit-of-work error surface can stay fully typed instead of collapsing
 /// to stringly diagnostics at the repository boundary.

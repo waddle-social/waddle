@@ -15,8 +15,8 @@ use crate::{
         RelayAskError, RelayExtensionRoomSend, RelayExtensionRoomSendReply, RelaySendEffect,
         RelaySendFailure,
     },
+    ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     server::{
         extension_host_adapter::{
             relayed_room_send,

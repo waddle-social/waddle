@@ -83,7 +83,7 @@ async fn ingress_retraction_tombstone_postgres() {
 
 async fn tombstoned_retry_does_not_recreate_inbox(fixture: IngressFixture) {
     use waddle_server::ingress::effects::PlanEffectDependency;
-    use waddle_server::ingress_uow::MamArchiveRepository;
+    use waddle_server::ingress::uow::MamArchiveRepository;
     use waddle_xmpp::{
         inbox::{ConversationKind, InboxEntry},
         ingress::InboxProjectionMutation,

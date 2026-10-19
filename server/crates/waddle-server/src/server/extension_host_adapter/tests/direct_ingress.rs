@@ -1,11 +1,11 @@
 use super::super::*;
 use crate::{
     ingress::test_support::IngressFixture,
-    ingress_uow::{
+    ingress::uow::{
         CanonicalMessageRepository, ConfiguredPluginGrants, EffectIntentRepository,
         EffectReceiptRepository, ExtensionGrantRepository,
     },
-    notification_outbox::NotificationOutboxStore,
+    notification::outbox::NotificationOutboxStore,
     pending_delivery::DatabasePendingDeliveryStorage,
 };
 use std::time::Duration;
@@ -54,7 +54,7 @@ pub(super) async fn node(f: &IngressFixture) -> ExtensionHostAdapter {
             .expect("pending storage"),
     );
     protocol.notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+        crate::notification::settings_projection::NotificationSettingsProjectionStore::new(
             f.db.clone(),
         ),
     );

@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use jid::BareJid;
 
 use super::{ChannelSpaceLink, ChannelSpaceLinkError, ChannelSpaceLinkStore};
-use crate::space_identity::SpaceNode;
+use crate::spaces::identity::SpaceNode;
 
 #[derive(Debug, Default)]
 pub struct InMemoryChannelSpaceLinkStore {

@@ -459,7 +459,7 @@ mod tests {
         assert!(!failure.class().advances());
         assert!(matches!(
             failure.source,
-            crate::ingress_uow::IngressUowError::Plan(PlanFailure::InboxSnapshotRead)
+            crate::ingress::uow::IngressUowError::Plan(PlanFailure::InboxSnapshotRead)
         ));
         assert_eq!(fixture.count("ingress_messages").await, 0);
         assert_eq!(fixture.count("ingress_effect_intents").await, 0);

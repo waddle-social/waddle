@@ -2,8 +2,8 @@ use super::*;
 use chrono::{Duration, Utc};
 use waddle_server::{
     ingress::execute::terminalize_if_complete,
-    ingress_substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress, TerminalizeOutcome},
-    ingress_uow::{EffectIntentRepository, EffectReceiptRepository},
+    ingress::substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress, TerminalizeOutcome},
+    ingress::uow::{EffectIntentRepository, EffectReceiptRepository},
 };
 use waddle_xmpp::ingress::{EffectMessageIdentity, MessageKey};
 

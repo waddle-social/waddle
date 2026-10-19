@@ -81,7 +81,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
         .await
         .expect("sender join");
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -178,7 +178,7 @@ async fn local_progress(fixture: IngressFixture, case: Case) {
         .await
         .expect("empty MUC settled in commit"));
         assert!(
-            crate::ingress_uow::CanonicalMessageRepository::is_terminal(&mut tx, key)
+            crate::ingress::uow::CanonicalMessageRepository::is_terminal(&mut tx, key)
                 .await
                 .expect("terminal"),
             "sender-only aggregate settles inside commit before reflection executes"

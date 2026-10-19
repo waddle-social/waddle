@@ -1,7 +1,7 @@
 //! Store a frozen system archive only after its authorizing room mutation.
 use crate::ingress::decision::IngressDecision;
 use crate::{
-    ingress_uow::{
+    ingress::uow::{
         settle_recorded, CanonicalMessageRepository, EffectIntentRepository, IngressUnitOfWork,
         IngressUowError, MamArchiveRepository,
     },
@@ -99,7 +99,7 @@ async fn store(
             {
                 return Err(IngressUowError::RoomGenerationStale);
             }
-            let proof = crate::ingress_uow::ClaimRepository::assert_room_claim(
+            let proof = crate::ingress::uow::ClaimRepository::assert_room_claim(
                 &mut tx,
                 room,
                 &context.owner,
@@ -118,7 +118,7 @@ async fn store(
         crate::server::routes::interpret::effects::room::RoomFenceRequirement::Unfenced => {
             if matches!(
                 tx.fencing(),
-                crate::ingress_uow::IngressFencing::Clustered(_)
+                crate::ingress::uow::IngressFencing::Clustered(_)
             ) {
                 return Err(IngressUowError::ClaimFenceMissing);
             }

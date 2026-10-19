@@ -27,7 +27,7 @@ use crate::db::blocking::DatabaseBlockingStorage;
 use crate::db::roster::{
     DatabaseRosterStorage, RosterItemRow, RosterRowChange, RosterStorageError,
 };
-use crate::notification_activity::NotificationPresenceShow;
+use crate::notification::activity::NotificationPresenceShow;
 use crate::permissions::{CheckPermission, Object, ObjectType, Permission, Subject};
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 use crate::server::xmpp_state::{get_xmpp_channel, XmppChannelRecord};

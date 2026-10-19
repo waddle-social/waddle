@@ -78,7 +78,7 @@ async fn accepted_alias_precedes_denial(fixture: IngressFixture) {
     assert!(report.receipt_failures.is_empty());
     let receipt = crate::ingress::durable::receipt_key(&intent).expect("receipt");
     let mut tx = fixture.uow.begin().await.expect("receipt read");
-    assert!(crate::ingress_uow::EffectReceiptRepository::contains(
+    assert!(crate::ingress::uow::EffectReceiptRepository::contains(
         &mut tx,
         key,
         receipt.kind,
@@ -111,8 +111,8 @@ async fn postgres_accepted_alias_denial_retry_repairs_recorded_unpin() {
 /// new wire position after the account is created must re-emit the recorded
 /// bounce, never plan the delivery today's policy would now allow.
 async fn account_bounce_replay(fixture: IngressFixture, lookup_failure: bool) {
+    use crate::ingress::uow::SmIngressStreamRepository;
     use crate::ingress::IngressStreamIdentity;
-    use crate::ingress_uow::SmIngressStreamRepository;
     use crate::server::routes::interpret::effects::ExternalEffect;
     use waddle_xmpp::ingress::{DigestContext, DigestInput, WireHandledCount};
 

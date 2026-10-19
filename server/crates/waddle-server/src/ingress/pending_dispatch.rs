@@ -6,7 +6,7 @@ use jid::FullJid;
 use waddle_xmpp::pending_delivery::{storage::PendingStorageError, PendingRow};
 
 use crate::{
-    ingress_uow::{ArchiveDispatchRepository, DispatchReadiness, IngressUowError},
+    ingress::uow::{ArchiveDispatchRepository, DispatchReadiness, IngressUowError},
     pending_delivery::{PendingDispatchGate, PendingDispatchReadiness},
 };
 

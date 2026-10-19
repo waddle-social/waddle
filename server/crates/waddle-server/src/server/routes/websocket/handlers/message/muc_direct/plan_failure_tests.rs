@@ -1,9 +1,9 @@
 //! XEP-0045 prerequisite outages must leave the original ingress identity retryable.
+use crate::ingress::uow::SmIngressStreamRepository;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
     IngressStreamIdentity, IngressSubmission,
 };
-use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{effects::PlanFailure, plan_message_dispatch};
 use crate::server::routes::websocket::{
@@ -483,7 +483,7 @@ async fn decline_claim_crash_replay(fixture: IngressFixture, receipt: bool, two_
     ));
     if receipt {
         for proof in &accepted.external_receipts[index] {
-            crate::ingress_uow::EffectReceiptRepository::record_receipt_pooled(
+            crate::ingress::uow::EffectReceiptRepository::record_receipt_pooled(
                 &fixture.db,
                 accepted.message_key.expect("key"),
                 proof.kind,

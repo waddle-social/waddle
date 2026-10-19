@@ -9,12 +9,12 @@ use waddle_xmpp::{
 
 use crate::ingress::append_authority::AppendAuthority;
 use crate::{
-    ingress::{decision::IngressDecision, live_delivery},
-    ingress_uow::{
+    ingress::uow::{
         settle_recorded, ArchiveDispatchRepository, CanonicalMessageRepository,
         EffectIntentRepository, EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
         IngressUowTransaction, PendingReceiptRepository, SendAttemptRepository, SendObligation,
     },
+    ingress::{decision::IngressDecision, live_delivery},
     server::routes::interpret::{
         deliver_direct_to_full_locally, deliver_registered_remote_resource,
         effects::{invite::MucUserRoute, EffectOutcome, SettledCompletion, SettledOutcome},

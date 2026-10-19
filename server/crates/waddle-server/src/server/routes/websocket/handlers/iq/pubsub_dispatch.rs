@@ -99,7 +99,7 @@ pub(super) async fn handle_pubsub_iq(
                 }
 
                 let is_pep = is_pep_self_or_to(iq, &target_jid, &user_jid);
-                match crate::pubsub_authz::can_publish(
+                match crate::pubsub::authz::can_publish(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
                     &node,
@@ -351,7 +351,7 @@ pub(super) async fn handle_pubsub_iq(
                         }
                     }
                 }
-                match crate::pubsub_authz::can_subscribe(
+                match crate::pubsub::authz::can_subscribe(
                     &state.deps.protocol.pubsub_storage,
                     &target_jid,
                     &node,
@@ -370,7 +370,7 @@ pub(super) async fn handle_pubsub_iq(
                             .await
                             .ok()
                             .flatten();
-                        let is_outcast = crate::pubsub_authz::effective_affiliation(
+                        let is_outcast = crate::pubsub::authz::effective_affiliation(
                             &state.deps.protocol.pubsub_storage,
                             &target_jid,
                             &node,

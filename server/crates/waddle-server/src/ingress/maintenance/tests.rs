@@ -4,6 +4,7 @@ use super::{
 };
 use crate::{
     db::DatabaseDriver,
+    ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository},
     ingress::{
         commit::commit_submission,
         effects::{
@@ -15,7 +16,6 @@ use crate::{
         test_support::IngressFixture,
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
     },
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
 };
 use std::{sync::Arc, time::Duration};
 use tokio::sync::Notify;
@@ -581,11 +581,11 @@ async fn unreceipted_page_selects_only_recoverable_pending_rows(fixture: Ingress
         .expect("carbons commit")
         .message_key
         .expect("key");
-    let route_kind = crate::ingress_substrate::EffectReceiptKind::from_storage(
+    let route_kind = crate::ingress::substrate::EffectReceiptKind::from_storage(
         waddle_xmpp::ingress::IngressEffectKind::RouteDirect.storage_tag(),
     );
     let mut tx = fixture.db.begin().await.expect("scan transaction");
-    let page = crate::ingress_substrate::unreceipted_nonterminal_candidates(
+    let page = crate::ingress::substrate::unreceipted_nonterminal_candidates(
         &mut tx,
         None,
         chrono::Utc::now() + chrono::Duration::seconds(1),
@@ -594,7 +594,7 @@ async fn unreceipted_page_selects_only_recoverable_pending_rows(fixture: Ingress
     )
     .await
     .expect("unreceipted page");
-    let empty = crate::ingress_substrate::unreceipted_nonterminal_candidates(
+    let empty = crate::ingress::substrate::unreceipted_nonterminal_candidates(
         &mut tx,
         None,
         chrono::Utc::now() + chrono::Duration::seconds(1),
@@ -677,7 +677,7 @@ impl super::RecoveryEnvironment for StateEnvironment {
 
 async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -816,7 +816,7 @@ fn failed_accounting_reads_are_requeued_ahead_and_bounded() {
 #[tokio::test(start_paused = true)]
 async fn the_sample_interval_measures_attempt_times_not_accounting_times() {
     let key = MessageKey::new();
-    let evidence = crate::ingress_substrate::RecoveryEvidence {
+    let evidence = crate::ingress::substrate::RecoveryEvidence {
         intents: 1,
         receipts: 0,
         progress: 0,
@@ -868,7 +868,7 @@ fn accounting_attempt(key: MessageKey, generation: u64) -> super::RecoveryAttemp
     super::RecoveryAttempt {
         key,
         attempted_at: tokio::time::Instant::now(),
-        observed: crate::ingress_substrate::RecoveryEvidence {
+        observed: crate::ingress::substrate::RecoveryEvidence {
             intents: 1,
             receipts: 0,
             progress: 0,
@@ -1116,11 +1116,11 @@ async fn sqlite_replica_progress_rearms_parked_row_and_counts_a_new_episode() {
         .expect("old evidence");
     // A second replica records one recipient, without the aggregate receipt.
     let mut tx = fixture.uow.begin().await.expect("replica transaction");
-    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let intents = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("intents");
     let receipt = super::super::durable::receipt_key(&intents[0]).expect("receipt key");
-    crate::ingress_uow::DeliveryProgressRepository::record(
+    crate::ingress::uow::DeliveryProgressRepository::record(
         &mut tx,
         key,
         &receipt,
@@ -1135,11 +1135,11 @@ async fn sqlite_replica_progress_rearms_parked_row_and_counts_a_new_episode() {
     assert_eq!(fresh.progress, old.progress + 1);
     assert_eq!(fresh.receipts, old.receipts);
     let mut tx = fixture.db.begin().await.expect("scan");
-    let page = crate::ingress_substrate::unreceipted_nonterminal_candidates(
+    let page = crate::ingress::substrate::unreceipted_nonterminal_candidates(
         &mut tx,
         None,
         chrono::Utc::now() + chrono::Duration::seconds(1),
-        &[crate::ingress_substrate::EffectReceiptKind::from_storage(
+        &[crate::ingress::substrate::EffectReceiptKind::from_storage(
             IngressEffectKind::RouteDirect.storage_tag(),
         )],
         10,

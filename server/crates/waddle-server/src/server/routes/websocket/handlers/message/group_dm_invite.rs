@@ -399,8 +399,8 @@ pub(crate) fn restore_recorded_group_dm_invite(
     offered: &crate::server::routes::interpret::effects::IngressPlan,
     recorded: &[IngressEffectIntent],
     pending: &[IngressEffectIntent],
-    envelope: &crate::ingress_substrate::MessageEnvelope,
-) -> Result<bool, crate::ingress_uow::IngressUowError> {
+    envelope: &crate::ingress::substrate::MessageEnvelope,
+) -> Result<bool, crate::ingress::uow::IngressUowError> {
     use crate::server::routes::interpret::effects::{
         early::RoomMembershipMutation, invite::MucUserRoute, PlanEffectDependency,
         PlanSuppressionPolicy,
@@ -441,7 +441,7 @@ pub(crate) fn restore_recorded_group_dm_invite(
     });
     let incoming = envelope.message().clone();
     let (_, inbound_invite) = super::muc_invite::mediated_invitee(&incoming)
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        .ok_or(crate::ingress::uow::IngressUowError::EffectIntentMessageMissing)?;
     let mut mutation = (**template).clone();
     mutation.grant = grant.clone();
     mutation.incoming = incoming.clone();
@@ -465,7 +465,7 @@ pub(crate) fn restore_recorded_group_dm_invite(
             IngressEffectIntent::MucInviteLedger { mutation } => mutation.recorded_at,
             _ => None,
         })
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        .ok_or(crate::ingress::uow::IngressUowError::EffectIntentMessageMissing)?;
     let ledger_pending = pending.iter().any(|intent| {
         matches!(intent,
         IngressEffectIntent::GroupDmInviteLedger { grant: saved } if saved == grant)
@@ -517,7 +517,7 @@ pub(crate) fn restore_recorded_group_dm_invite(
                 } if recipient == &grant.invitee => Some(row_id.clone()),
                 _ => None,
             })
-            .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+            .ok_or(crate::ingress::uow::IngressUowError::EffectIntentMessageMissing)?;
         let message = recorded_invite_message(&incoming, grant, &inbound_invite);
         let route = MucUserRoute {
             route_identity: Some(route_identity.clone()),

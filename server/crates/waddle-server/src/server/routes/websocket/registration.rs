@@ -151,9 +151,9 @@ pub(crate) async fn complete_bind_retirements(
             // Enter promotion's cancellation-safe custody guard before any
             // other await. Never accumulate handed-off batches across another
             // generation's storage operation.
-            crate::sm_promotion::promote_displaced_sessions(
+            crate::sm::promotion::promote_displaced_sessions(
                 removed.clone(),
-                crate::sm_promotion::DisplacedPromotionDeps {
+                crate::sm::promotion::DisplacedPromotionDeps {
                     sm_registry: &state.deps.protocol.sm_session_registry,
                     connection_registry: registry,
                     user_registry: &state.deps.protocol.user_registry,

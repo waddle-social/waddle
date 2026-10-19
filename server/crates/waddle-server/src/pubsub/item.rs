@@ -5,8 +5,8 @@ use waddle_xmpp::xep::xep_waddle_dm_bookmarks::{is_dm_bookmarks_node, DmBookmark
 use waddle_xmpp::XmppError;
 
 use super::DatabasePubSubStorage;
-use crate::dnd_projection::{delete_dnd_projection_tx, upsert_dnd_projection_tx, DndProjection};
-use crate::notification_settings_projection::{
+use crate::dnd::projection::{delete_dnd_projection_tx, upsert_dnd_projection_tx, DndProjection};
+use crate::notification::settings_projection::{
     derive_dm_bookmark_projection_mutation, derive_validated_bookmark_projection_mutation,
     validate_dm_bookmark_publish, validate_xep0402_bookmark_publish, ConversationKind,
     NotificationSettingsProjectionMutation, NotificationSettingsSource,
@@ -392,7 +392,7 @@ impl DatabasePubSubStorage {
             // while `pubsub_items` still committed. Switching to a
             // singleton counter (same pattern as the bookmarks
             // projection) closes that hole — see
-            // `dnd_projection::upsert_dnd_projection_tx` for the
+            // `dnd::projection::upsert_dnd_projection_tx` for the
             // ON CONFLICT guard the counter is paired with.
             let source_version = next_dnd_projection_source_version_tx(&mut tx).await?;
             let projection = DndProjection {

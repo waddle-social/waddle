@@ -1,11 +1,11 @@
 use super::*;
+use crate::ingress::uow::{EffectReceiptRepository, SmIngressStreamRepository};
 use crate::ingress::{
     commit::commit_submission,
     execute::{execute_effects, terminalize_if_complete},
     test_support::IngressFixture,
     IngressDecisionClass, IngressStreamIdentity, IngressSubmission,
 };
-use crate::ingress_uow::{EffectReceiptRepository, SmIngressStreamRepository};
 use crate::server::routes::interpret::effects::{EffectSink, ImmediateSink, PlanSink};
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::websocket::tests::{

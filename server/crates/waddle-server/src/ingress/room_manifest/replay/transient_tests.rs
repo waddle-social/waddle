@@ -1,11 +1,11 @@
 //! XEP-0045 sender echoes retain XEP-0334's one live attempt.
 use super::*;
+use crate::ingress::uow::{
+    CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
+};
 use crate::ingress::{
     commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
     tests::xep0045_room_manifest::room_submission, IngressSubmission, RoomManifestSnapshot,
-};
-use crate::ingress_uow::{
-    CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
 use crate::server::routes::interpret::{
     effects::{

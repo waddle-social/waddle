@@ -11,13 +11,13 @@ use chrono::{DateTime, Utc};
 use ingress_support::IngressFixture;
 use jid::BareJid;
 use waddle_server::{
+    ingress::substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress, ALIAS_RETENTION},
+    ingress::uow::{EffectIntentRepository, MamArchiveRepository, ReconcileVerdict},
     ingress::{
         commit::commit_submission,
         effects::{direct::DurableDirectEffect, Effect},
         DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
     },
-    ingress_substrate::{gc_expired_aliases, AliasGcBudget, AliasGcProgress, ALIAS_RETENTION},
-    ingress_uow::{EffectIntentRepository, MamArchiveRepository, ReconcileVerdict},
 };
 use waddle_xmpp::{
     ingress::IngressEffectIntent,
@@ -381,7 +381,7 @@ async fn counter_lock_order_and_contention(fixture: IngressFixture) {
     assert!(
         matches!(
             contended,
-            Err(waddle_server::ingress_uow::IngressUowError::Timeout)
+            Err(waddle_server::ingress::uow::IngressUowError::Timeout)
         ),
         "contended counter is a bounded timeout, got {contended:?}"
     );
@@ -452,7 +452,7 @@ async fn reconciliation(fixture: IngressFixture) {
         matches!(&divergent.verdict, Some(ReconcileVerdict::Divergent { kinds }) if kinds.len() == 1)
     );
     let mut tx = fixture.uow.begin().await.expect("read recorded audience");
-    let recorded = waddle_server::ingress_uow::EffectIntentRepository::load(
+    let recorded = waddle_server::ingress::uow::EffectIntentRepository::load(
         &mut tx,
         first.message_key.expect("key"),
     )
@@ -827,7 +827,7 @@ backend_tests!(
 /// authorize the inbox effect. Repairing the row lets unfinished receipts finish
 /// without replaying the already-applied unread mutation.
 async fn projection_conflict_receipts(fixture: IngressFixture) {
-    use waddle_server::ingress_uow::IngressUowError;
+    use waddle_server::ingress::uow::IngressUowError;
     use waddle_xmpp::{
         inbox::{ConversationKind, InboxEntry},
         ingress::InboxProjectionMutation,

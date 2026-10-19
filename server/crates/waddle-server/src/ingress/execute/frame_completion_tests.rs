@@ -2,7 +2,7 @@
 //! when the follow-up terminalization cannot acquire the canonical row.
 use super::*;
 use crate::ingress::test_support::IngressFixture;
-use crate::ingress_uow::CanonicalMessageRepository;
+use crate::ingress::uow::CanonicalMessageRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
 

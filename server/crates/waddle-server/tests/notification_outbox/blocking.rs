@@ -5,7 +5,7 @@
 use crate::support::*;
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification::outbox::*;
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::xep0191::BlockingStorage;
 
@@ -38,13 +38,13 @@ async fn drain_dm_outbox_with_sender_jid(
     let recipient = bare("alice@example.com");
     let sender = sender_jid.to_bare();
     let push_db_name = format!("push-service-{archive_id}");
-    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+    let push_service = waddle_server::push::service::DatabasePushServiceStore::new_with_secret_key(
         Database::in_memory(&push_db_name).await.unwrap(),
         b"waddle-push-service-test-secret-key",
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
+    waddle_server::push::registrations::DatabasePushRegistrationStore::new(push_service.database())
         .await
         .expect("push registration schema");
     let push_node = push_service
@@ -54,10 +54,10 @@ async fn drain_dm_outbox_with_sender_jid(
     push_service
         .upsert_device(
             &recipient,
-            waddle_server::push_service::PushDeviceRegistration::new(
+            waddle_server::push::service::PushDeviceRegistration::new(
                 "web-1",
                 push_node.node(),
-                waddle_server::push_service::PushDevicePlatform::Web,
+                waddle_server::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -222,7 +222,7 @@ async fn xep0191_full_jid_block_added_after_coalescing_suppresses_dm_push_job() 
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
     let projection = settings_projection().await;
     let room_policy = StubRoomPolicy::new();
-    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+    let push_service = waddle_server::push::service::DatabasePushServiceStore::new_with_secret_key(
         Database::in_memory("push-service-coalesced-full-jid-block")
             .await
             .unwrap(),
@@ -230,7 +230,7 @@ async fn xep0191_full_jid_block_added_after_coalescing_suppresses_dm_push_job() 
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
+    waddle_server::push::registrations::DatabasePushRegistrationStore::new(push_service.database())
         .await
         .expect("push registration schema");
     let push_node = push_service
@@ -240,10 +240,10 @@ async fn xep0191_full_jid_block_added_after_coalescing_suppresses_dm_push_job() 
     push_service
         .upsert_device(
             &recipient,
-            waddle_server::push_service::PushDeviceRegistration::new(
+            waddle_server::push::service::PushDeviceRegistration::new(
                 "web-1",
                 push_node.node(),
-                waddle_server::push_service::PushDevicePlatform::Web,
+                waddle_server::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )

@@ -12,8 +12,8 @@ use ingress_support::IngressFixture;
 use jid::{BareJid, FullJid, Jid};
 use waddle_server::{
     db::blocking::DatabaseBlockingStorage,
+    ingress::uow::EffectReceiptRepository,
     ingress::{Deps, IngressAuthority, IngressDecision, IngressDecisionClass, RecoveryEnvironment},
-    ingress_uow::EffectReceiptRepository,
 };
 use waddle_xmpp::{
     ingress::{DigestContext, DigestInput, NormalizedTarget},

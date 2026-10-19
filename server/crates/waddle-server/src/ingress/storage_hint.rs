@@ -39,7 +39,7 @@ pub(super) fn protects_plan(plan: &super::IngressPlan) -> bool {
 /// the admitted plan continues to carry `prepared: None` into persistence.
 pub(super) fn validate_capture(
     plan: &super::IngressPlan,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), crate::ingress::uow::IngressUowError> {
     use crate::server::routes::interpret::effects::{delivery::ExternalDeliveryEffect, Effect};
     use waddle_xmpp::{
         ingress::{IngressEffectIntent, StoredMessagePayload},
@@ -79,7 +79,7 @@ pub(super) fn validate_capture(
             let mut validation = intent.clone();
             if let IngressEffectIntent::RouteDirect { prepared, .. } = &mut validation {
                 *prepared = Some(StoredMessagePayload::new(message.clone()).map_err(|_| {
-                    crate::ingress_uow::IngressUowError::Plan(
+                    crate::ingress::uow::IngressUowError::Plan(
                         super::effects::PlanFailure::InvalidPreparedMessage,
                     )
                 })?);
@@ -91,12 +91,12 @@ pub(super) fn validate_capture(
 }
 
 pub(super) async fn received_at(
-    uow: &crate::ingress_uow::IngressUnitOfWork,
+    uow: &crate::ingress::uow::IngressUnitOfWork,
     key: waddle_xmpp::ingress::MessageKey,
-) -> Result<chrono::DateTime<chrono::Utc>, crate::ingress_uow::IngressUowError> {
+) -> Result<chrono::DateTime<chrono::Utc>, crate::ingress::uow::IngressUowError> {
     let mut tx = uow.begin().await?;
     let received_at =
-        crate::ingress_uow::CanonicalMessageRepository::created_at(&mut tx, key).await?;
+        crate::ingress::uow::CanonicalMessageRepository::created_at(&mut tx, key).await?;
     tx.commit().await?;
     Ok(received_at)
 }
@@ -111,13 +111,13 @@ pub(crate) fn forbids_direct_handoff(message: &Message, fanout: &[FullJid]) -> b
     })
 }
 
-pub(super) fn envelope(message: &Message) -> crate::ingress_substrate::MessageEnvelope {
+pub(super) fn envelope(message: &Message) -> crate::ingress::substrate::MessageEnvelope {
     let mut metadata = Message::new(message.to.clone());
     metadata.from = message.from.clone();
     metadata.id = message.id.clone();
     metadata.type_ = message.type_.clone();
     add_hint(&mut metadata, Hint::NoStore);
-    crate::ingress_substrate::MessageEnvelope::new(metadata)
+    crate::ingress::substrate::MessageEnvelope::new(metadata)
 }
 
 pub(super) fn protects_intent(
@@ -131,12 +131,12 @@ pub(super) fn protects_intent(
 
 /// Preserve actual delivery/custody evidence before recording policy completion.
 pub(super) async fn settle(
-    tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    tx: &mut crate::ingress::uow::IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,
     intent: &waddle_xmpp::ingress::IngressEffectIntent,
     receipt: &super::EffectReceiptKey,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
-    use crate::ingress_uow::{
+) -> Result<(), crate::ingress::uow::IngressUowError> {
+    use crate::ingress::uow::{
         DeliveryProgressRepository, EffectReceiptRepository, PolicyDiscardReason,
         SendAttemptRepository, SendAttemptStatus, SendObligation,
     };
@@ -157,7 +157,7 @@ pub(super) async fn settle(
                 );
         }
         if proven {
-            crate::ingress_uow::settle_recorded(tx, key, std::slice::from_ref(intent)).await?;
+            crate::ingress::uow::settle_recorded(tx, key, std::slice::from_ref(intent)).await?;
             return Ok(());
         }
     }

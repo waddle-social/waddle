@@ -14,7 +14,7 @@ use chrono::{Duration, Utc};
 use jid::Jid;
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_substrate::{
+    ingress::substrate::{
         AliasGcBudget, AliasGcProgress, PostgresIngressSubstrate, ALIAS_RETENTION,
     },
 };

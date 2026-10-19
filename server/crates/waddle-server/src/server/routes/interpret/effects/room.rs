@@ -89,7 +89,7 @@ pub enum ExternalRoomEffect {
         room: BareJid,
         archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId,
         /// None completes recovery for a candidate suppressed by the planning-time gate.
-        candidate: Option<Box<crate::notification_outbox::NotificationCandidate>>,
+        candidate: Option<Box<crate::notification::outbox::NotificationCandidate>>,
         recovery: Option<PlannedGroupchatNotificationRecovery>,
     },
     #[cfg(feature = "clustering")]

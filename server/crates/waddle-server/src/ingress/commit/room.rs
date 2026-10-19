@@ -1,15 +1,15 @@
 use super::super::submission::IngressSubmission;
-use crate::ingress_uow::{IngressUowError, IngressUowTransaction};
+use crate::ingress::uow::{IngressUowError, IngressUowTransaction};
 
 /// Cluster integration stays dark until remote children can complete. The
 /// test-only scope exercises guarded manifests without enabling production.
 pub(in crate::ingress) fn new_manifests_enabled(
-    uow: &crate::ingress_uow::IngressUnitOfWork,
+    uow: &crate::ingress::uow::IngressUnitOfWork,
 ) -> bool {
     match uow.fencing() {
-        crate::ingress_uow::IngressFencing::SingleNode => true,
+        crate::ingress::uow::IngressFencing::SingleNode => true,
         #[cfg(feature = "clustering")]
-        crate::ingress_uow::IngressFencing::Clustered(_) => {
+        crate::ingress::uow::IngressFencing::Clustered(_) => {
             super::super::commit::commit_hooks::allow_clustered_room_manifests()
         }
     }
@@ -40,7 +40,7 @@ pub(in crate::ingress) async fn assert_snapshot_coordinates(
             Ok(())
         };
     };
-    crate::ingress_uow::CanonicalMessageRepository::assert_room_snapshot(tx, room, coordinates)
+    crate::ingress::uow::CanonicalMessageRepository::assert_room_snapshot(tx, room, coordinates)
         .await
 }
 
@@ -49,7 +49,7 @@ pub(in crate::ingress) async fn seal(
     key: waddle_xmpp::ingress::MessageKey,
     submission: &IngressSubmission,
 ) -> Result<Option<super::super::FrozenRoomManifest>, IngressUowError> {
-    use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
+    use crate::ingress::uow::{CanonicalMessageRepository, EffectIntentRepository};
     use crate::server::routes::interpret::effects::{
         room::RoomFenceRequirement, RoomExecutionPath,
     };
@@ -209,7 +209,7 @@ pub(in crate::ingress) fn child_receipts(
 }
 
 #[cfg(feature = "clustering")]
-pub(in crate::ingress) type RoomProof<'a> = Option<crate::ingress_uow::RoomClaimFence<'a>>;
+pub(in crate::ingress) type RoomProof<'a> = Option<crate::ingress::uow::RoomClaimFence<'a>>;
 #[cfg(not(feature = "clustering"))]
 pub(in crate::ingress) type RoomProof<'a> = std::marker::PhantomData<&'a ()>;
 
@@ -231,7 +231,7 @@ pub(in crate::ingress) async fn assert_room<'a>(
         {
             validate_room_context(room, room_fence)?;
             proof = Some(
-                crate::ingress_uow::ClaimRepository::assert_room_claim(
+                crate::ingress::uow::ClaimRepository::assert_room_claim(
                     tx,
                     room,
                     &room_fence.owner,
@@ -252,7 +252,7 @@ pub(in crate::ingress) async fn assert_room<'a>(
                 RoomFenceRequirement::Guarded(context) => {
                     validate_room_context(room, context)?;
                     proof = Some(
-                        crate::ingress_uow::ClaimRepository::assert_room_claim(
+                        crate::ingress::uow::ClaimRepository::assert_room_claim(
                             tx,
                             room,
                             &context.owner,
@@ -270,7 +270,7 @@ pub(in crate::ingress) async fn assert_room<'a>(
                 RoomFenceRequirement::Unfenced
                     if matches!(
                         tx.fencing(),
-                        crate::ingress_uow::IngressFencing::Clustered(_)
+                        crate::ingress::uow::IngressFencing::Clustered(_)
                     ) =>
                 {
                     return Err(IngressUowError::ClaimFenceMissing)

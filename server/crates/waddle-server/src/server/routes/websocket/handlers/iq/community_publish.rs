@@ -76,7 +76,7 @@ pub(super) async fn community_member_publisher(
     let user_domain = state.deps.auth_state.xmpp_domain.as_str();
     let entity = session_bare_jid(session, user_domain)
         .map_err(|_| "invalid session JID for community publish".to_string())?;
-    let allowed = crate::pubsub_authz::can_publish(
+    let allowed = crate::pubsub::authz::can_publish(
         &state.deps.protocol.pubsub_storage,
         community_jid,
         node,

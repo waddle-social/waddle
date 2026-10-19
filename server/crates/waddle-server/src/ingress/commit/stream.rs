@@ -1,6 +1,6 @@
 use super::super::identity::IngressStreamIdentity;
-use crate::ingress_substrate::{FrontierOutcome, MessageWriteOutcome};
-use crate::ingress_uow::{
+use crate::ingress::substrate::{FrontierOutcome, MessageWriteOutcome};
+use crate::ingress::uow::{
     IngressFencing, IngressUowError, IngressUowTransaction, SmIngressRepository,
     SmIngressStreamRepository,
 };
@@ -44,7 +44,7 @@ pub(in crate::ingress) async fn lock_stream(
             unreachable!()
         };
         Some(
-            crate::ingress_uow::ClaimRepository::assert_sm_claim(
+            crate::ingress::uow::ClaimRepository::assert_sm_claim(
                 tx,
                 stream_id,
                 owner,

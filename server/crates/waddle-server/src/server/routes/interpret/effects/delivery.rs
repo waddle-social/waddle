@@ -76,7 +76,7 @@ pub enum ExternalDeliveryEffect {
 /// Frozen T0 decision; post-commit insertion does not recompute message policy.
 #[derive(Debug, Clone)]
 pub enum PreparedOfflineNotification {
-    Prepared(Box<crate::notification_outbox::NotificationCandidate>),
+    Prepared(Box<crate::notification::outbox::NotificationCandidate>),
     Suppressed,
     RetryLater,
 }

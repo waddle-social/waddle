@@ -807,10 +807,10 @@ async fn invite_quota_recovers_generated_notification(
         .begin()
         .await
         .expect("durable recovery snapshot");
-    let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let recorded = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("recorded intents");
-    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("envelope")
         .expect("canonical envelope");
@@ -1175,7 +1175,7 @@ mod pending_exclusion;
 
 #[tokio::test]
 async fn sqlite_invite_expired_partial_start_hands_off_without_repeating_live_sibling() {
-    use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
+    use crate::ingress::uow::{SendAttemptRepository, SendClaim, SendObligation};
     let fixture = IngressFixture::sqlite().await;
     let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
     let registry = ConnectionRegistry::new();
@@ -1293,7 +1293,7 @@ async fn sqlite_invite_expired_partial_start_hands_off_without_repeating_live_si
 
 #[tokio::test]
 async fn sqlite_invite_expired_partial_claim_without_start_hands_off() {
-    use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
+    use crate::ingress::uow::{SendAttemptRepository, SendClaim, SendObligation};
     let fixture = IngressFixture::sqlite().await;
     let storage = invite_pending_storage(&fixture, QuotaPolicy::Unlimited).await;
     let registry = ConnectionRegistry::new();

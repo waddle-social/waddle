@@ -1,11 +1,11 @@
 use super::*;
 use crate::{
+    ingress::uow::{
+        ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget, SendClaim,
+    },
     ingress::{
         commit::commit_submission, receipt_key, recovery::rebuild::RecoveryInput,
         test_support::IngressFixture,
-    },
-    ingress_uow::{
-        ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget, SendClaim,
     },
     server::routes::{
         interpret::{
@@ -337,7 +337,7 @@ async fn recovered_attempt_notification_with_delay(
         let PendingPayload::Archived(stamp) = &rows[0].payload else {
             panic!("archived copy")
         };
-        let candidate = crate::notification_outbox::direct_candidate_from_envelope(
+        let candidate = crate::notification::outbox::direct_candidate_from_envelope(
             &submission.plan.sanitized_message,
             &recipient.to_bare(),
             &submission.sender.clone().into(),
@@ -909,10 +909,10 @@ async fn sqlite_ambiguous_recovery_no_permanent_store_cannot_create_push_candida
 
 async fn assert_sources_survive_gc(fixture: &IngressFixture) {
     for days in [9, 18] {
-        let gc = crate::ingress_substrate::gc_expired_aliases(
+        let gc = crate::ingress::substrate::gc_expired_aliases(
             &fixture.db,
             chrono::Utc::now() + chrono::Duration::days(days),
-            crate::ingress_substrate::AliasGcBudget {
+            crate::ingress::substrate::AliasGcBudget {
                 deadline: tokio::time::Instant::now() + Duration::from_secs(5),
                 lock_timeout: Duration::from_millis(100),
                 statement_timeout: Duration::from_secs(2),

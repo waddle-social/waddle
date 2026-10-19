@@ -1,7 +1,7 @@
 //! A grant resolved before planning must still be valid at durable admission.
 use super::super::ExtensionHostAdapterError;
 use super::direct_ingress::{adapter, invocation, request};
-use crate::{ingress::test_support::IngressFixture, ingress_uow::ExtensionGrantRepository};
+use crate::{ingress::test_support::IngressFixture, ingress::uow::ExtensionGrantRepository};
 use jid::{BareJid, Jid};
 use std::{
     sync::{
@@ -221,7 +221,7 @@ async fn extension_direct_commit_overlaps_revocation_postgres() {
 }
 
 async fn assert_complete_offline_obligations(f: &IngressFixture) {
-    use crate::ingress_uow::{EffectIntentRepository, EffectReceiptRepository};
+    use crate::ingress::uow::{EffectIntentRepository, EffectReceiptRepository};
     use waddle_xmpp::ingress::{
         IngressEffectIntent, MessageKey, NotificationActivityMutation, NotificationCandidateOutcome,
     };

@@ -26,7 +26,7 @@ async fn state_for(fixture: &IngressFixture) -> Arc<WebSocketState> {
         Err(_) => panic!("fresh state is uniquely owned"),
     };
     state.deps.protocol.notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+        crate::notification::settings_projection::NotificationSettingsProjectionStore::new(
             fixture.db.clone(),
         ),
     );
@@ -98,7 +98,7 @@ async fn deferred_policy_restart(fixture: IngressFixture, deliver: bool) {
         room: &recovery.key.room,
         message: &submission.plan.sanitized_message,
         sender_jid: recovery.sender_jid.clone(),
-        thread_id: crate::notification_outbox::NotificationThreadId::root(),
+        thread_id: crate::notification::outbox::NotificationThreadId::root(),
         archive_stanza_id: recovery.key.archive_stanza_id.clone(),
         is_live_occupant: recovery.is_live_occupant,
         room_members_only: recovery.room_members_only,
@@ -198,7 +198,7 @@ async fn recorded_candidate_sweep(fixture: IngressFixture) {
         evaluate_recovery_policy(&state, candidate, candidate.conversation_jid(), false)
             .await
             .expect("today policy"),
-        crate::notification_outbox::T1PushDispatchOutcome::Suppressed { .. }
+        crate::notification::outbox::T1PushDispatchOutcome::Suppressed { .. }
     ));
     let archived = waddle_xmpp::mam::ArchivedMessage {
         ordinal: None,

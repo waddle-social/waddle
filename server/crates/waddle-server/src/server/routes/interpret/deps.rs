@@ -211,7 +211,7 @@ pub struct Deps<'a> {
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
     /// Canonical authority of the current post-commit execution.
-    pub(crate) ingress_delivery_uow: Option<crate::ingress_uow::IngressUnitOfWork>,
+    pub(crate) ingress_delivery_uow: Option<crate::ingress::uow::IngressUnitOfWork>,
     /// Forced shutdown fence retained from the execution admission.
     pub(crate) ingress_delivery_stop: Option<tokio_util::sync::CancellationToken>,
     /// Resources whose planned frames are consumed by an extension host.

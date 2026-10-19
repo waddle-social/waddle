@@ -3,7 +3,7 @@ use super::permissions::{
 };
 use super::spaces_bookmark_cleanup::cleanup_stale_space_bookmarks;
 use super::*;
-use crate::space_identity::SpaceNode;
+use crate::spaces::identity::SpaceNode;
 
 pub(super) async fn handle_spaces_items(
     iq: &xmpp_parsers::iq::Iq,
@@ -17,7 +17,7 @@ pub(super) async fn handle_spaces_items(
     let Ok(spaces_jid) = spaces_service_bare_jid(spaces_domain) else {
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::InvalidJid))];
     };
-    match crate::pubsub_authz::can_subscribe(
+    match crate::pubsub::authz::can_subscribe(
         &state.deps.protocol.pubsub_storage,
         &spaces_jid,
         node,
@@ -36,7 +36,7 @@ pub(super) async fn handle_spaces_items(
                 .await
                 .ok()
                 .flatten();
-            let is_outcast = crate::pubsub_authz::effective_affiliation(
+            let is_outcast = crate::pubsub::authz::effective_affiliation(
                 &state.deps.protocol.pubsub_storage,
                 &spaces_jid,
                 node,

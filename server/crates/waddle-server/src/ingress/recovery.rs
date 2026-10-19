@@ -10,14 +10,14 @@ pub(crate) mod tests;
 use super::IngressAuthority;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::{
         settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
         EffectReceiptRepository, IngressUowError, IngressUowTransaction,
         PendingNotificationPreparation, PendingNotificationRecovery, RecoveryCompletion,
         RecoveryReceiptRepository,
     },
-    notification_outbox::{NotificationCandidate, NotificationCandidateInsertOutcome},
+    notification::outbox::{NotificationCandidate, NotificationCandidateInsertOutcome},
 };
 use waddle_xmpp::{
     inbox::storage::GroupchatNotificationRecovery,
@@ -64,7 +64,7 @@ impl IngressAuthority {
         if self.cancellation.is_cancelled() || !*admission {
             return Err(IngressUowError::AuthorityStopped);
         }
-        super::super::ingress_uow::run_with_retry(5, || async {
+        super::super::ingress::uow::run_with_retry(5, || async {
             let mut tx = self
                 .uow
                 .begin_read_committed_with_timeouts(
@@ -98,7 +98,7 @@ impl IngressAuthority {
         if self.cancellation.is_cancelled() || !*admission {
             return Err(IngressUowError::AuthorityStopped);
         }
-        super::super::ingress_uow::run_with_retry(5, || async {
+        super::super::ingress::uow::run_with_retry(5, || async {
             let mut tx = self
                 .uow
                 .begin_read_committed_with_timeouts(

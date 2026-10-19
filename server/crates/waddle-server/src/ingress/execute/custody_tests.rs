@@ -1,10 +1,10 @@
 //! #1760: settled route progress never owns the last recoverable delivery payload.
 use super::*;
+use crate::ingress::uow::DeliveryProgressRepository;
 use crate::ingress::{
     commit::commit_submission, execute::uow::FAIL_DELIVERY_PROGRESS_TX,
     test_support::IngressFixture,
 };
-use crate::ingress_uow::DeliveryProgressRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
@@ -34,7 +34,7 @@ async fn retirement_authority(fixture: &IngressFixture) -> crate::ingress::Ingre
             .await
             .expect("retirement claim schema");
         let tx = fixture.uow.begin().await.expect("read attested lineage");
-        let crate::ingress_uow::IngressLineage::Attested(lineage) = tx.lineage() else {
+        let crate::ingress::uow::IngressLineage::Attested(lineage) = tx.lineage() else {
             panic!("Postgres fixture must attest its durable lineage");
         };
         let config = crate::config::LineageConfig {
@@ -59,7 +59,7 @@ async fn retirement_authority(fixture: &IngressFixture) -> crate::ingress::Ingre
 
 async fn custody_survives_transition(fixture: IngressFixture, transition: CustodyTransition) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );

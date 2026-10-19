@@ -367,7 +367,7 @@ async fn first_active_device_for_owner_node(
     state: &WebSocketState,
     owner: &BareJid,
     node: &str,
-) -> crate::push_service::PushServiceDevice {
+) -> crate::push::service::PushServiceDevice {
     let devices = state
         .deps
         .protocol
@@ -1998,8 +1998,8 @@ async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_insid
     // still carries the platform credentials inside the service
     // boundary — the chat client only ever sees the assigned node id in
     // the stage-4 result form, never the provider secrets.
-    use crate::push_service::commands::{DISABLE_DEVICE_FORM_TYPE, REGISTER_DEVICE_FORM_TYPE};
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{DISABLE_DEVICE_FORM_TYPE, REGISTER_DEVICE_FORM_TYPE};
+    use crate::push::service::commands::{
         DISABLE_DEVICE_NODE, FIELD_APP_ID, FIELD_DEVICE_ID, FIELD_ENVIRONMENT, FIELD_NODE,
         FIELD_PLATFORM, FIELD_WEB_PUSH_AUTH, FIELD_WEB_PUSH_ENDPOINT, FIELD_WEB_PUSH_P256DH,
         REGISTER_DEVICE_NODE,
@@ -2130,7 +2130,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
     // unsubscribing one browser MUST NOT take down push for sibling
     // Apple / Android / other-browser installations on the same
     // `(user, app_id)` node.
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2155,10 +2155,10 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
             .push_service
             .upsert_device(
                 &owner,
-                crate::push_service::PushDeviceRegistration::new(
+                crate::push::service::PushDeviceRegistration::new(
                     device_id,
                     shared_node.node(),
-                    crate::push_service::PushDevicePlatform::Web,
+                    crate::push::service::PushDevicePlatform::Web,
                     "test",
                 ),
             )
@@ -2244,7 +2244,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
 /// second call resurrecting or otherwise mutating active state.
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2265,10 +2265,10 @@ async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 device_id,
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2331,7 +2331,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
 /// device-id is reported honestly (adversarial finding B2).
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found() {
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2353,10 +2353,10 @@ async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "real-device",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2417,7 +2417,7 @@ async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found
 /// storage layer with a single owner) — adversarial finding M3.
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2436,10 +2436,10 @@ async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
         .push_service
         .upsert_device(
             &alice,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "alice-device",
                 alice_node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2502,7 +2502,7 @@ async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
 /// real path (adversarial conformance finding B1).
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_sessionid() {
-    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+    use crate::push::service::commands::REGISTER_DEVICE_NODE;
 
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -2549,7 +2549,7 @@ async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_s
 /// finding — the `MalformedAction` variant was previously dead).
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_unknown_action_is_malformed_action() {
-    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+    use crate::push::service::commands::REGISTER_DEVICE_NODE;
 
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -2603,10 +2603,10 @@ async fn handle_iq_xep0357_disable_removes_registration_without_retiring_push_se
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             )
             .with_provider_token(Some("provider-secret".to_string())),
@@ -2732,10 +2732,10 @@ async fn handle_iq_xep0357_disable_without_node_removes_registrations_only() {
             .push_service
             .upsert_device(
                 &owner,
-                crate::push_service::PushDeviceRegistration::new(
+                crate::push::service::PushDeviceRegistration::new(
                     format!("device-{node}"),
                     node,
-                    crate::push_service::PushDevicePlatform::Web,
+                    crate::push::service::PushDevicePlatform::Web,
                     "test",
                 )
                 .with_provider_token(Some("provider-secret".to_string())),
@@ -2862,10 +2862,10 @@ async fn handle_iq_pubsub_publish_to_push_service_rejects_client_origin_publish(
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -3121,7 +3121,7 @@ async fn handle_iq_pubsub_items_spaces_node_backfills_linked_channel_bookmarks()
         .set(&crate::channel_space_links::ChannelSpaceLink {
             channel_jid: channel_jid.clone(),
             space_jid: "team@spaces.example.com".parse().expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("team"),
+            space_node: crate::spaces::identity::SpaceNode::from("team"),
             created_at: 0,
         })
         .await
@@ -3229,7 +3229,7 @@ async fn handle_iq_pubsub_items_spaces_node_requires_authorization_before_backfi
             space_jid: "private-team@spaces.example.com"
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("private-team"),
+            space_node: crate::spaces::identity::SpaceNode::from("private-team"),
             created_at: 0,
         })
         .await
@@ -3595,7 +3595,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
             space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("alpha"),
+            space_node: crate::spaces::identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -3722,7 +3722,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
             space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("alpha"),
+            space_node: crate::spaces::identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -3940,7 +3940,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
             space_jid: format!("alpha@{}", spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("alpha"),
+            space_node: crate::spaces::identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -4539,7 +4539,7 @@ async fn xep0402_bookmark_publish_updates_xep0492_projection() {
     assert_eq!(projection.mode, waddle_xmpp::xep::NotificationLevel::Never);
     assert_eq!(
         projection.conversation_kind,
-        crate::notification_settings_projection::ConversationKind::PrivateGroup
+        crate::notification::settings_projection::ConversationKind::PrivateGroup
     );
 }
 
@@ -4750,16 +4750,16 @@ async fn xep0402_bookmark_publish_without_notify_deletes_xep0492_projection() {
         .protocol
         .notification_settings_projection
         .upsert(
-            &crate::notification_settings_projection::NotificationSettingsProjection {
+            &crate::notification::settings_projection::NotificationSettingsProjection {
                 owner_bare_jid: owner.clone(),
                 conversation_jid: conversation.clone(),
                 conversation_kind:
-                    crate::notification_settings_projection::ConversationKind::PrivateGroup,
+                    crate::notification::settings_projection::ConversationKind::PrivateGroup,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
                 rich_payload_opt_in: false,
                 source_version: 1,
                 updated_at_ms: 1,
-                source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source: crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: conversation.clone(),
             },
         )

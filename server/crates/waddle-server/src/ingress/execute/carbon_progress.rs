@@ -1,7 +1,7 @@
 //! Retain completed remote carbon targets independently of the final fanout ACK.
 use super::*;
 use crate::ingress::append_authority::AppendAuthority;
-use crate::ingress_uow::CarbonReceiptRepository;
+use crate::ingress::uow::CarbonReceiptRepository;
 use waddle_xmpp::ingress::IngressEffectIntent;
 
 /// Stamp the exact recorded carbon obligation onto every resulting socket copy.
@@ -47,14 +47,14 @@ pub(super) async fn append_context(
         return Err(IngressUowError::EffectIntentConflict);
     }
     let mut tx = uow.begin().await?;
-    let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, message_key).await?;
+    let recorded = crate::ingress::uow::EffectIntentRepository::load(&mut tx, message_key).await?;
     if !recorded.contains(&intent) {
         return Err(IngressUowError::EffectIntentConflict);
     }
     let received_at =
-        crate::ingress_uow::CanonicalMessageRepository::created_at(&mut tx, message_key).await?;
+        crate::ingress::uow::CanonicalMessageRepository::created_at(&mut tx, message_key).await?;
     let archive_positions =
-        crate::ingress_uow::ArchiveDispatchRepository::positions(&mut tx, message_key, &receipt)
+        crate::ingress::uow::ArchiveDispatchRepository::positions(&mut tx, message_key, &receipt)
             .await?;
     tx.commit().await?;
     Ok(Some(SmIngressAppendContext {

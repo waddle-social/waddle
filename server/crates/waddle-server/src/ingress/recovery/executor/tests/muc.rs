@@ -1,7 +1,7 @@
 //! Real room planning followed by maintenance, without client retransmission.
 use super::*;
+use crate::ingress::uow::DeliveryProgressRepository;
 use crate::ingress::{execute::ExternalOutcome, receipt_key, IngressEffectCapture};
-use crate::ingress_uow::DeliveryProgressRepository;
 use waddle_xmpp::{
     muc::{room_actor::Join, room_registry_actor::CreateRoom},
     protocol::OutboundEvent,
@@ -247,7 +247,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
         CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
-            &crate::ingress_substrate::MessageEnvelope::new(
+            &crate::ingress::substrate::MessageEnvelope::new(
                 submission.plan.sanitized_message.clone(),
             ),
         )
@@ -299,7 +299,7 @@ async fn muc_recovery(f: IngressFixture, case: Case) {
     }
     if matches!(case, Case::Lost | Case::SenderOnly) {
         let mut tx = f.uow.begin().await.expect("pending kinds");
-        let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+        let recorded = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
             .await
             .expect("recorded");
         let keys = EffectReceiptRepository::keys(&mut tx, key)

@@ -1,4 +1,10 @@
 //! Durable ingress authority: immutable planning, atomic commit, bounded execution.
+/// Durable ingress authority for message identity, effects, and SM frontiers.
+/// Dark Postgres-only ingress identity substrate (#1653), consumed by tests
+/// now and by #1654 repositories later.
+pub mod substrate;
+/// Atomic PostgreSQL ingress transaction seam (#1654).
+pub mod uow;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 pub(crate) mod append_authority;
 mod archive_authority;
@@ -58,7 +64,7 @@ use crate::db::DatabaseDriver;
 use crate::{
     config::{IngressConfig, IngressConfigError, LineageConfig},
     db::{Database, DatabaseConfig, DatabaseError},
-    ingress_uow::{
+    ingress::uow::{
         IngressUnitOfWork, IngressUowError, SmIngressRepository, SmIngressStreamRepository,
     },
 };
@@ -99,7 +105,7 @@ const RETIREMENT_BATCH_SIZE: u32 = 256;
 
 /// Boot-owned handle. Shutdown blocks new work and joins admitted operations and GC.
 pub struct IngressAuthority {
-    observers: std::sync::OnceLock<Arc<crate::room_observation::RoomObservationActors>>,
+    observers: std::sync::OnceLock<Arc<crate::room::observation::RoomObservationActors>>,
     database: Database,
     uow: IngressUnitOfWork,
     config: IngressConfig,
@@ -122,7 +128,7 @@ pub struct IngressAuthority {
 impl IngressAuthority {
     pub(crate) fn bind_room_observers(
         &self,
-        actors: Arc<crate::room_observation::RoomObservationActors>,
+        actors: Arc<crate::room::observation::RoomObservationActors>,
     ) {
         let _ = self.observers.set(actors);
         self.uow.enable_room_observations();
@@ -130,13 +136,13 @@ impl IngressAuthority {
 
     pub(crate) fn room_observers(
         &self,
-    ) -> Option<&Arc<crate::room_observation::RoomObservationActors>> {
+    ) -> Option<&Arc<crate::room::observation::RoomObservationActors>> {
         self.observers.get()
     }
 
     pub(crate) async fn observation_transaction(
         &self,
-    ) -> Result<crate::ingress_uow::IngressUowTransaction<'_>, IngressUowError> {
+    ) -> Result<crate::ingress::uow::IngressUowTransaction<'_>, IngressUowError> {
         self.uow
             .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
             .await
@@ -153,7 +159,7 @@ impl IngressAuthority {
         room: &jid::BareJid,
     ) -> Result<Option<waddle_xmpp::auth::ExtensionGrantRef>, IngressUowError> {
         let mut transaction = self.uow.begin().await?;
-        let grant = crate::ingress_uow::ExtensionGrantRepository::active_room_grant(
+        let grant = crate::ingress::uow::ExtensionGrantRepository::active_room_grant(
             &mut transaction,
             plugin,
             room,
@@ -169,7 +175,7 @@ impl IngressAuthority {
         plugin: &waddle_extensions::PluginId,
     ) -> Result<Option<waddle_xmpp::auth::ExtensionGrantRef>, IngressUowError> {
         let mut transaction = self.uow.begin().await?;
-        let grant = crate::ingress_uow::ExtensionGrantRepository::active_send_grant(
+        let grant = crate::ingress::uow::ExtensionGrantRepository::active_send_grant(
             &mut transaction,
             plugin,
         )
@@ -748,7 +754,7 @@ mod lifecycle_tests {
         position: u32,
         receipt_complete: bool,
     ) -> waddle_xmpp::ingress::MessageKey {
-        use crate::ingress_uow::{
+        use crate::ingress::uow::{
             CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
         };
         use waddle_xmpp::ingress::{

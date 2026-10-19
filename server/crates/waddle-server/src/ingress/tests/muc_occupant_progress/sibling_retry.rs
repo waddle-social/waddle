@@ -126,7 +126,7 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         .await
         .expect("progress")
         .is_empty());
-    let frozen = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let frozen = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("source")
         .expect("envelope");
@@ -137,10 +137,10 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
             frozen.room_manifest().is_none(),
             "the pre-fix fixture must never replace a sealed canonical source"
         );
-        crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
+        crate::ingress::uow::CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
-            &crate::ingress_substrate::MessageEnvelope::new(message.clone()),
+            &crate::ingress::substrate::MessageEnvelope::new(message.clone()),
         )
         .await
         .expect("old real-sender envelope");
@@ -275,7 +275,7 @@ async fn sibling_retry(fixture: IngressFixture, subject: bool, canonical: bool) 
         canonical
     );
     if !canonical {
-        let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load")
             .expect("envelope");

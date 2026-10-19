@@ -17,12 +17,12 @@ use waddle_xmpp::telemetry::attributes::{
 };
 
 use crate::db::Database;
-use crate::ingress_substrate::{
+use crate::ingress::substrate::{
     receipt_complete_nonterminal_keys, set_local_transaction_timeouts,
     unreceipted_nonterminal_candidates, AliasGcProgress, EffectReceiptKind, IngressSubstrateError,
     RecoveryCandidate, RecoveryEvidence,
 };
-use crate::ingress_uow::{
+use crate::ingress::uow::{
     IngressUnitOfWork, IngressUowError, ObservationError, ObserverRetentionBatch,
     RoomObservationRepository,
 };
@@ -447,13 +447,13 @@ async fn terminalize_candidates(
             )
             .await
             {
-                Ok(Some(crate::ingress_substrate::TerminalizeOutcome::Terminalized)) => {
+                Ok(Some(crate::ingress::substrate::TerminalizeOutcome::Terminalized)) => {
                     waddle_xmpp::telemetry::reliability::add_ingress_maintenance_terminalized_messages(1);
                 }
                 Ok(
                     Some(
-                        crate::ingress_substrate::TerminalizeOutcome::AlreadyTerminal
-                        | crate::ingress_substrate::TerminalizeOutcome::MessageVanished,
+                        crate::ingress::substrate::TerminalizeOutcome::AlreadyTerminal
+                        | crate::ingress::substrate::TerminalizeOutcome::MessageVanished,
                     )
                     | None,
                 ) => {}
@@ -970,7 +970,7 @@ async fn evidence_now(
     database: &Database,
     key: MessageKey,
 ) -> Result<RecoveryEvidence, IngressUowError> {
-    crate::ingress_substrate::recovery_evidence_pooled(database, key)
+    crate::ingress::substrate::recovery_evidence_pooled(database, key)
         .await
         .map_err(Into::into)
 }

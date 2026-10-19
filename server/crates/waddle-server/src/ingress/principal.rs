@@ -12,7 +12,7 @@ pub struct ExtensionPrincipal {
 
 #[derive(Clone, Debug)]
 pub enum IngressPrincipal {
-    RoomResult(Box<crate::ingress_uow::RoomPublication>),
+    RoomResult(Box<crate::ingress::uow::RoomPublication>),
     Authenticated(AuthenticatedPrincipalRef),
     Extension(ExtensionPrincipal),
 }
@@ -28,11 +28,11 @@ impl IngressPrincipal {
 }
 
 pub(super) async fn assert_admission(
-    tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    tx: &mut crate::ingress::uow::IngressUowTransaction<'_>,
     submission: &super::submission::IngressSubmission,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), crate::ingress::uow::IngressUowError> {
     use super::identity::IngressStreamIdentity;
-    use crate::ingress_uow::{
+    use crate::ingress::uow::{
         ExtensionGrantRepository, IngressUowError, PrincipalAssertion, PrincipalRepository,
     };
     use waddle_xmpp::{

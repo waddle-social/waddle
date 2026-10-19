@@ -40,7 +40,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .await
         .expect("room");
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -162,7 +162,7 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
         .expect("new occupant");
     if matches!(case, ReplayCase::MissingProvenanceSubject) {
         let mut tx = fixture.uow.begin().await.expect("old subject row");
-        let legacy = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+        let legacy = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
             .await
             .expect("load pre-fix fixture")
             .expect("pre-fix envelope");
@@ -170,10 +170,10 @@ async fn partial_replay(fixture: IngressFixture, case: ReplayCase) {
             legacy.room_manifest().is_none(),
             "the pre-fix fixture must never replace a sealed canonical source"
         );
-        crate::ingress_uow::CanonicalMessageRepository::record_room_canonical_envelope(
+        crate::ingress::uow::CanonicalMessageRepository::record_room_canonical_envelope(
             &mut tx,
             key,
-            &crate::ingress_substrate::MessageEnvelope::new(message.clone()),
+            &crate::ingress::substrate::MessageEnvelope::new(message.clone()),
         )
         .await
         .expect("pre-fix source");

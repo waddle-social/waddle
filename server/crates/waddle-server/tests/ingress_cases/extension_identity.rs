@@ -2,8 +2,8 @@ use super::*;
 use jid::BareJid;
 use waddle_extensions::PluginId;
 use waddle_server::{
+    ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     ingress::{AliasOutcomeClass, ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
 };
 use waddle_xmpp::{
     auth::ExtensionGrantRef,
@@ -261,8 +261,8 @@ async fn requester_fence(fixture: IngressFixture) {
     assert_eq!(failure.class(), IngressDecisionClass::PrincipalMissing);
     assert!(matches!(
         failure.source,
-        waddle_server::ingress_uow::IngressUowError::ExtensionGrantAssertionFailed(
-            waddle_server::ingress_uow::GrantAssertionFailure::RequesterGone
+        waddle_server::ingress::uow::IngressUowError::ExtensionGrantAssertionFailed(
+            waddle_server::ingress::uow::GrantAssertionFailure::RequesterGone
         )
     ));
     assert_eq!(fixture.count("ingress_messages").await, 0);

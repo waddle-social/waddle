@@ -22,8 +22,8 @@ use waddle_xmpp::{
 };
 
 use crate::{
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::{
         CarbonReceiptRepository, DeliveryPolicyDiscardReason, IngressUnitOfWork, IngressUowError,
     },
     server::routes::interpret::SmIngressAppendContext,
@@ -105,15 +105,15 @@ async fn under_current_claim<R>(
         return Err(IngressUowError::ClaimFenceMissing);
     }
     match uow.fencing() {
-        crate::ingress_uow::IngressFencing::SingleNode if fence.is_none() => Ok(action.await),
-        crate::ingress_uow::IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
+        crate::ingress::uow::IngressFencing::SingleNode if fence.is_none() => Ok(action.await),
+        crate::ingress::uow::IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
         #[cfg(feature = "clustering")]
-        crate::ingress_uow::IngressFencing::Clustered(_) => {
+        crate::ingress::uow::IngressFencing::Clustered(_) => {
             let fence = fence.ok_or(IngressUowError::ClaimFenceMissing)?;
             let mut transaction = uow
                 .begin_with_timeouts(Duration::from_millis(100), PROBE_TIMEOUT)
                 .await?;
-            crate::ingress_uow::CanonicalMessageRepository::protect_room_acceptance(
+            crate::ingress::uow::CanonicalMessageRepository::protect_room_acceptance(
                 &mut transaction,
                 room,
                 fence,
@@ -134,10 +134,10 @@ async fn enqueue_under_current_node(
     action: impl FnOnce() -> BroadcastOutcome,
 ) -> Result<BroadcastOutcome, IngressUowError> {
     match uow.fencing() {
-        crate::ingress_uow::IngressFencing::SingleNode if fence.is_none() => Ok(action()),
-        crate::ingress_uow::IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
+        crate::ingress::uow::IngressFencing::SingleNode if fence.is_none() => Ok(action()),
+        crate::ingress::uow::IngressFencing::SingleNode => Err(IngressUowError::ClaimFenceMissing),
         #[cfg(feature = "clustering")]
-        crate::ingress_uow::IngressFencing::Clustered(identity) => {
+        crate::ingress::uow::IngressFencing::Clustered(identity) => {
             let expected = &fence.ok_or(IngressUowError::ClaimFenceMissing)?.owner;
             let _publication = identity
                 .guard_if_current(expected)
@@ -269,7 +269,7 @@ pub(in crate::ingress) async fn settle_superseded(
     };
     let allow_lost_occupancy = matches!(
         uow.fencing(),
-        crate::ingress_uow::IngressFencing::SingleNode
+        crate::ingress::uow::IngressFencing::SingleNode
     );
     if allow_lost_occupancy
         && !registry
@@ -305,7 +305,7 @@ pub(in crate::ingress) async fn settle_superseded(
                 room_jid: room,
                 action: Box::new(move || {
                     Box::pin(async move {
-                        crate::ingress_uow::run_with_retry(5, || {
+                        crate::ingress::uow::run_with_retry(5, || {
                             super::super::execute::uow::record_policy_progress(
                                 &uow_owned,
                                 key,
@@ -360,7 +360,7 @@ pub(in crate::ingress) async fn settle_superseded(
                     under_current_claim(&uow_owned, &room, fence.as_ref(), async {
                         #[cfg(feature = "clustering")]
                         let _publication = match uow_owned.fencing() {
-                            crate::ingress_uow::IngressFencing::Clustered(identity) => Some(
+                            crate::ingress::uow::IngressFencing::Clustered(identity) => Some(
                                 identity
                                     .guard_if_current(
                                         &fence
@@ -371,9 +371,9 @@ pub(in crate::ingress) async fn settle_superseded(
                                     .await
                                     .ok_or(IngressUowError::AuthorityStopped)?,
                             ),
-                            crate::ingress_uow::IngressFencing::SingleNode => None,
+                            crate::ingress::uow::IngressFencing::SingleNode => None,
                         };
-                        crate::ingress_uow::run_with_retry(5, || {
+                        crate::ingress::uow::run_with_retry(5, || {
                             super::super::execute::uow::record_policy_progress(
                                 &uow_owned,
                                 key,
@@ -452,7 +452,7 @@ pub(in crate::ingress) async fn release_transient_reflection(
     stanza: &Stanza,
     deps: &crate::server::routes::interpret::Deps<'_>,
 ) -> Result<Option<Stanza>, IngressUowError> {
-    use crate::ingress_uow::{
+    use crate::ingress::uow::{
         CanonicalMessageRepository, EffectReceiptRepository, PolicyDiscardReason,
     };
     use crate::server::routes::interpret::DeliveryExecutionContext;
@@ -651,13 +651,13 @@ mod tests {
     #[tokio::test]
     async fn xep0045_newer_same_incarnation_settles_old_child_without_delivering_to_rejoined_resource(
     ) {
+        use crate::ingress::uow::{
+            CanonicalMessageRepository, DeliveryProgressRepository, EffectReceiptRepository,
+            SendAttemptRepository, SendObligation,
+        };
         use crate::ingress::{
             commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
             tests::xep0045_room_manifest::room_submission, RoomManifestSnapshot,
-        };
-        use crate::ingress_uow::{
-            CanonicalMessageRepository, DeliveryProgressRepository, EffectReceiptRepository,
-            SendAttemptRepository, SendObligation,
         };
         use crate::server::routes::interpret::{
             effects::{
@@ -957,7 +957,7 @@ mod tests {
         };
         let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
         let fence = fixture.room_fence(&room).await;
-        let crate::ingress_uow::IngressFencing::Clustered(identity) = fixture.uow.fencing() else {
+        let crate::ingress::uow::IngressFencing::Clustered(identity) = fixture.uow.fencing() else {
             panic!("clustered fixture");
         };
         let identity = identity.clone();
@@ -1032,7 +1032,7 @@ mod tests {
         };
         let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
         let fence = fixture.room_fence(&room).await;
-        let crate::ingress_uow::IngressFencing::Clustered(identity) = fixture.uow.fencing() else {
+        let crate::ingress::uow::IngressFencing::Clustered(identity) = fixture.uow.fencing() else {
             panic!("clustered fixture");
         };
         let identity = identity.clone();

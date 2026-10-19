@@ -19,7 +19,7 @@ them.
 
 The #460 MAM filter was rechecked: `waddle-xmpp-core/src/mam.rs` requires a normal
 message without bodies, subjects, or thread, and exactly one valid MAM envelope.
-`sm_promotion::tests` exercises result and legacy fin rejection and preserves a
+`sm::promotion::tests` exercises result and legacy fin rejection and preserves a
 peer DM carrying a MAM extension. The new inbox tests call the actual query/push
 builders, including query replies both with and without the last-message result.
 

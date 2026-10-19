@@ -797,7 +797,7 @@ async fn sqlite_ordinary_disconnect_leave_carries_no_removal_status_code() {
 /// frozen original children without claiming a successful transport append.
 #[tokio::test]
 async fn sqlite_sealed_stalled_ghost_is_evicted_and_policy_retired() {
-    use crate::ingress_uow::EffectIntentRepository;
+    use crate::ingress::uow::EffectIntentRepository;
 
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let before_evicted = metrics.counter_sum(EVICTED, &[]).unwrap_or(0);
@@ -940,7 +940,7 @@ async fn sqlite_sealed_stalled_ghost_is_evicted_and_policy_retired() {
 /// Account-level inbox refreshes share a frozen endpoint and occupancy with a
 /// room child, but never acquire room retirement authority from that metadata.
 async fn sealed_ghost_skips_inbox_refresh_child(inbox_receipted: bool) {
-    use crate::ingress_uow::{settle_recorded, EffectIntentRepository};
+    use crate::ingress::uow::{settle_recorded, EffectIntentRepository};
     use waddle_xmpp::ingress::EffectMessageIdentity;
 
     let f = IngressFixture::sqlite().await;

@@ -122,7 +122,7 @@ async fn non_advancing_matrix_case(state: Arc<WebSocketState>) {
         ),
         (
             IngressUowError::Substrate(
-                crate::ingress_substrate::IngressSubstrateError::SmOrdinalConflict,
+                crate::ingress::substrate::IngressSubstrateError::SmOrdinalConflict,
             ),
             IngressDecisionClass::SmOrdinalConflict,
         ),

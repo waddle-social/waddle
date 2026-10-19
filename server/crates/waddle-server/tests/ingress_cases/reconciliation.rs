@@ -41,7 +41,7 @@ async fn intent_repair_and_divergence(fixture: IngressFixture) {
         .begin()
         .await
         .expect("inspect recorded audience");
-    let recorded = waddle_server::ingress_uow::EffectIntentRepository::load(
+    let recorded = waddle_server::ingress::uow::EffectIntentRepository::load(
         &mut tx,
         first.message_key.expect("key"),
     )

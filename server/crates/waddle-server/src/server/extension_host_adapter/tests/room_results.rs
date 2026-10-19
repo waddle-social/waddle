@@ -1,13 +1,13 @@
 //! Saved observation output follows the ordinary room ingress authority.
 use super::groupchat_ingress::GroupchatFixture;
 use crate::{
+    ingress::uow::{
+        initialize_room_observations, CanonicalMessageRepository, CapturedRoomSource,
+        EffectIntentRepository, RoomObservationRepository,
+    },
     ingress::{
         nested::{NestedContinuation, NestedOutcome},
         test_support::IngressFixture,
-    },
-    ingress_uow::{
-        initialize_room_observations, CanonicalMessageRepository, CapturedRoomSource,
-        EffectIntentRepository, RoomObservationRepository,
     },
     server::routes::{
         interpret::{
@@ -113,7 +113,7 @@ async fn saved_publication(
     room: &jid::BareJid,
     source_id: &str,
     origin_id: &str,
-) -> crate::ingress_uow::RoomPublication {
+) -> crate::ingress::uow::RoomPublication {
     let configured = observer(room);
     let subscription = subscription(&configured, room);
     let source = source_message(room, source_id, origin_id);
@@ -196,7 +196,7 @@ async fn saved_publication(
 
 async fn admit_result(
     fixture: &GroupchatFixture,
-    publication: crate::ingress_uow::RoomPublication,
+    publication: crate::ingress::uow::RoomPublication,
 ) -> NestedOutcome {
     let state = &fixture.adapter.state;
     let deps = build_interpret_deps(state, None);

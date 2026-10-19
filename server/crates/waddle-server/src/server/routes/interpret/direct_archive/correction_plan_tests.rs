@@ -1,10 +1,10 @@
 use super::super::effects::{EffectSink, PlanFailure, PlanSink};
 use super::*;
+use crate::ingress::uow::SmIngressStreamRepository;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
     IngressStreamIdentity,
 };
-use crate::ingress_uow::SmIngressStreamRepository;
 use waddle_xmpp::{
     ingress::WireHandledCount,
     mam::{MamStorage, SqlxMamStorage},

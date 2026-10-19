@@ -6,12 +6,12 @@ pub mod ingress_support;
 use ingress_support::IngressFixture;
 use waddle_server::{
     ingress::effects::{PlanRejection, SemanticMalformedReason},
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::{CanonicalMessageRepository, SmIngressRepository, SmIngressStreamRepository},
     ingress::{
         commit::commit_submission, execute::execute_effects, Deps, ImmediateSink,
         IngressDecisionClass, IngressStreamIdentity, IngressSubmission,
     },
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{CanonicalMessageRepository, SmIngressRepository, SmIngressStreamRepository},
 };
 use waddle_xmpp::{
     ingress::{

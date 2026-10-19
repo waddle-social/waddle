@@ -9,7 +9,7 @@ use crate::{
         test_support::IngressFixture,
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
     },
-    notification_outbox::NotificationOutboxStore,
+    notification::outbox::NotificationOutboxStore,
     pending_delivery::DatabasePendingDeliveryStorage,
 };
 use std::{sync::Arc, time::Duration};
@@ -123,7 +123,7 @@ async fn deferred_policy(fixture: IngressFixture) {
         Err(_) => panic!("fresh state is uniquely owned"),
     };
     state.deps.protocol.notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+        crate::notification::settings_projection::NotificationSettingsProjectionStore::new(
             fixture.db.clone(),
         ),
     );

@@ -2,7 +2,7 @@
 //! with task-local scopes, so concurrent connections remain independent.
 use super::IngressDecisionClass;
 #[cfg(not(test))]
-use crate::ingress_uow::IngressUowError;
+use crate::ingress::uow::IngressUowError;
 
 pub(super) fn observe_class(_class: IngressDecisionClass) {
     #[cfg(test)]
@@ -49,7 +49,7 @@ pub(super) fn ambiguous_commit() -> bool {
 pub(crate) use injected::*;
 #[cfg(test)]
 mod injected {
-    use crate::ingress_uow::IngressUowError;
+    use crate::ingress::uow::IngressUowError;
     tokio::task_local! {
         pub static SERIALIZATION_FAILURES: std::cell::Cell<usize>;
         pub static AMBIGUOUS_COMMIT: bool;

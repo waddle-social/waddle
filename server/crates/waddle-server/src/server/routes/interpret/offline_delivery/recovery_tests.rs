@@ -1,10 +1,10 @@
 use super::*;
-use crate::ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture};
-use crate::ingress_substrate::{gc_expired_aliases, AliasGcBudget};
-use crate::ingress_uow::{
+use crate::ingress::substrate::{gc_expired_aliases, AliasGcBudget};
+use crate::ingress::uow::{
     ArchiveDispatchObligation, ArchiveDispatchRepository, CanonicalMessageRepository,
     DispatchTarget, EffectReceiptRepository, PendingReceiptRepository,
 };
+use crate::ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture};
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey, PendingDeliveryMutation};
 use waddle_xmpp::pending_delivery::storage::PendingNotificationRecoveryOrdinal;
 use waddle_xmpp::pending_delivery::{PendingPayload, PendingRow, PendingRowId, QuotaPolicy};
@@ -43,10 +43,10 @@ async fn pending_recovery_fixture_with_row_id(
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "device",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -349,13 +349,13 @@ async fn collect_at(fixture: &IngressFixture, days: i64) -> usize {
 }
 
 fn frozen_candidate(
-    preparation: &crate::ingress_uow::PendingNotificationRecovery,
+    preparation: &crate::ingress::uow::PendingNotificationRecovery,
     row: &PendingRow,
-) -> crate::notification_outbox::NotificationCandidate {
+) -> crate::notification::outbox::NotificationCandidate {
     let PendingPayload::Archived(stamp) = &row.payload else {
         panic!("archived fixture")
     };
-    crate::notification_outbox::direct_candidate_from_envelope(
+    crate::notification::outbox::direct_candidate_from_envelope(
         preparation.envelope().message(),
         &row.recipient,
         preparation
@@ -379,7 +379,8 @@ async fn pending_recovery_mixed_parents_and_stale_source(fixture: IngressFixture
         .prepare_pending_notification_recovery(&recovery.row)
         .await
         .expect("prepare before parent change");
-    let crate::ingress_uow::PendingNotificationPreparation::Ready(preparation) = preparation else {
+    let crate::ingress::uow::PendingNotificationPreparation::Ready(preparation) = preparation
+    else {
         panic!("canonical source")
     };
     let second = add_coalesced_parent(&fixture, &recovery, "frozen canonical body").await;
@@ -421,7 +422,8 @@ async fn pending_recovery_live_parents_and_ambiguity(fixture: IngressFixture, co
         .prepare_pending_notification_recovery(&recovery.row)
         .await
         .expect("prepare before new live parent");
-    let crate::ingress_uow::PendingNotificationPreparation::Ready(preparation) = preparation else {
+    let crate::ingress::uow::PendingNotificationPreparation::Ready(preparation) = preparation
+    else {
         panic!("source")
     };
     add_coalesced_parent(
@@ -562,7 +564,8 @@ async fn pending_recovery_collected_preparation_is_not_recreated(fixture: Ingres
         .prepare_pending_notification_recovery(&recovery.row)
         .await
         .expect("prepare");
-    let crate::ingress_uow::PendingNotificationPreparation::Ready(preparation) = preparation else {
+    let crate::ingress::uow::PendingNotificationPreparation::Ready(preparation) = preparation
+    else {
         panic!("source")
     };
     recovery

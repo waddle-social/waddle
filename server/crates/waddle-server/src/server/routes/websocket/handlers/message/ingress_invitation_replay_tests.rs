@@ -150,7 +150,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
         .any(|intent| matches!(intent, IngressEffectIntent::ArchiveAuthoritative { .. })));
     let stream_id = SmSessionId::new("actual-invitation-stream");
     let mut tx = fixture.uow.begin().await.expect("stream transaction");
-    let sm_ingress_id = crate::ingress_uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
+    let sm_ingress_id = crate::ingress::uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
         .await
         .expect("stream");
     tx.commit().await.expect("mint stream");
@@ -267,7 +267,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
     );
     let mut tx = fixture.uow.begin().await.expect("read checkpoint");
     assert_eq!(
-        crate::ingress_uow::SmIngressStreamRepository::load_stream_checkpoint(
+        crate::ingress::uow::SmIngressStreamRepository::load_stream_checkpoint(
             &mut tx,
             sm_ingress_id
         )
@@ -412,7 +412,7 @@ async fn forged_room_stamp(
                     message,
                     ..
                 },
-            )) if archive == &room => Some(crate::ingress_substrate::MucArchiveContext {
+            )) if archive == &room => Some(crate::ingress::substrate::MucArchiveContext {
                 stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
                     message.id.clone(),
                     archive.clone().into(),
@@ -607,7 +607,7 @@ async fn forged_room_stamp(
     assert_eq!(fixture.count("ingress_messages").await, 1);
     assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
     let mut tx = fixture.uow.begin().await.expect("read canonical envelope");
-    let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+    let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(
         &mut tx,
         decision.message_key.expect("key"),
     )

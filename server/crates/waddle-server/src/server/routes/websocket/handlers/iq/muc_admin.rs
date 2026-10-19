@@ -221,11 +221,11 @@ async fn extend_batch_with_inline_room_effect_frames(
     reservation: &waddle_xmpp::muc::RoomEffectReservation,
     initiator: Option<&FullJid>,
 ) -> Result<
-    crate::room_effect_outbox::drain::InlineRoomEffectDrainSummary,
-    crate::room_effect_outbox::RoomEffectOutboxError,
+    crate::room::effect_outbox::drain::InlineRoomEffectDrainSummary,
+    crate::room::effect_outbox::RoomEffectOutboxError,
 > {
     let drained =
-        crate::room_effect_outbox::drain::drain_reservation_inline(state, reservation, initiator)
+        crate::room::effect_outbox::drain::drain_reservation_inline(state, reservation, initiator)
             .await?;
     let summary = drained.summary;
     let drained = response_batch_from_inline_room_effect_frames(drained);
@@ -396,7 +396,7 @@ async fn recover_committed_admin_effects_after_ambiguity(
     observed_coordinates: Option<waddle_xmpp::muc::RoomCommittedCoordinates>,
 ) -> Result<
     (waddle_xmpp::muc::room_actor::AdminItemsApplied, bool),
-    crate::room_effect_outbox::RoomEffectOutboxError,
+    crate::room::effect_outbox::RoomEffectOutboxError,
 > {
     let mut applied = recover_committed_admin_effects(
         room,
@@ -1890,7 +1890,7 @@ mod tests {
     use waddle_xmpp::ownership::NodeIdentity;
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
-    use crate::room_effect_outbox::RoomEffectEnqueue;
+    use crate::room::effect_outbox::RoomEffectEnqueue;
     use crate::server::routes::websocket::tests::{
         create_test_websocket_state, register_test_connection,
     };
@@ -1900,13 +1900,13 @@ mod tests {
             .expect("test secret meets minimum length")
     }
 
-    fn test_origin() -> crate::room_effect_outbox::RoomEffectOriginInstanceId {
-        crate::room_effect_outbox::RoomEffectOriginInstanceId::new("origin-instance".to_owned())
+    fn test_origin() -> crate::room::effect_outbox::RoomEffectOriginInstanceId {
+        crate::room::effect_outbox::RoomEffectOriginInstanceId::new("origin-instance".to_owned())
             .expect("origin instance")
     }
 
-    fn test_producing_node() -> crate::room_effect_outbox::RoomEffectProducingNode {
-        crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(NodeIdentity::new(
+    fn test_producing_node() -> crate::room::effect_outbox::RoomEffectProducingNode {
+        crate::room::effect_outbox::RoomEffectProducingNode::from_node_identity(NodeIdentity::new(
             "node-a", "epoch-a",
         ))
     }
@@ -2815,7 +2815,7 @@ mod tests {
             .pop()
             .expect("recovered inline completion");
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+            crate::room::effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
                 .await
                 .expect("complete recovered row"),
             "the drained recovered row must delete once written"
@@ -2861,7 +2861,7 @@ mod tests {
             &owner,
         )
         .await;
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: committed_coordinates.lifecycle,
             revision: committed_coordinates.revision,
             ordinal: reservation.ordinals[0],
@@ -2944,7 +2944,7 @@ mod tests {
         let reservation =
             enqueue_recovered_admin_reservation(state.as_ref(), &room_jid, coordinates, &owner)
                 .await;
-        let key = crate::room_effect_outbox::RoomEffectKey {
+        let key = crate::room::effect_outbox::RoomEffectKey {
             lifecycle: coordinates.lifecycle,
             revision: coordinates.revision,
             ordinal: reservation.ordinals[0],
@@ -3110,7 +3110,7 @@ mod tests {
         );
         let completion = batch.completions.pop().expect("inline completion");
         assert!(
-            !crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+            !crate::room::effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
                 .await
                 .expect("complete released self-kick retry"),
             "the released retry row must stay queued after the handler emits the success batch"
@@ -3211,7 +3211,7 @@ mod tests {
                 .deps
                 .protocol
                 .room_effect_outbox
-                .find(&crate::room_effect_outbox::RoomEffectKey {
+                .find(&crate::room::effect_outbox::RoomEffectKey {
                     lifecycle: later_coordinates.lifecycle,
                     revision: later_coordinates.revision,
                     ordinal: later_reservation.ordinals[0],

@@ -6,7 +6,7 @@
 //! the server. This module is the typed projection that records the
 //! association so the filter actually narrows results.
 //!
-//! Mirrors the [`crate::spaces_metadata`] pattern:
+//! Mirrors the [`crate::spaces::metadata`] pattern:
 //! - typed values (`ChannelSpaceLink`, `BareJid`, typed error enum) at
 //!   every boundary,
 //! - no `unwrap` in storage paths,
@@ -28,7 +28,7 @@ use thiserror::Error;
 use tracing::{info, instrument};
 
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams};
-use crate::space_identity::SpaceNode;
+use crate::spaces::identity::SpaceNode;
 
 mod schema;
 pub mod storage;
@@ -161,7 +161,7 @@ impl DatabaseChannelSpaceLinkStore {
 }
 
 /// Build a trait-object [`ChannelSpaceLinkStore`] for `AppState`.
-/// Mirrors [`crate::spaces_metadata::build_spaces_metadata_store`].
+/// Mirrors [`crate::spaces::metadata::build_spaces_metadata_store`].
 pub async fn build_channel_space_link_store(
     database_url: Option<String>,
 ) -> Result<Arc<dyn ChannelSpaceLinkStore>, ChannelSpaceLinkError> {

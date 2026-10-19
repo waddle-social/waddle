@@ -1,0 +1,884 @@
+//! `DatabasePushServiceStore`: construction, schema initialization,
+//! Web Push provider wiring, capability snapshot, and shared DB plumbing
+//! (raw execute/query plus per-owner and per-node advisory locks).
+
+use std::sync::Arc;
+
+use jid::BareJid;
+use waddle_xmpp::inbox::storage::InboxStorage;
+use waddle_xmpp::pubsub::PubSubStorage;
+use waddle_xmpp::push::apns::{ApnsProviderTokenSource, ApnsSender, ApnsTopic};
+use waddle_xmpp::push::fcm::{FcmAccessTokenSource, FcmAppId, FcmProjectId, FcmSender};
+use waddle_xmpp::push::types::VapidSub;
+use waddle_xmpp::push::vapid::VapidSigner;
+use waddle_xmpp::push::WebPushSender;
+use waddle_xmpp::XmppError;
+
+use crate::db::{Database, IntoParams};
+
+use super::apns_dispatch::ApnsProvider;
+use super::fcm_dispatch::FcmProvider;
+use super::secrets::PushSecretCipher;
+
+#[derive(Clone)]
+pub struct DatabasePushServiceStore {
+    pub(super) db: Database,
+    /// Shared unread projection used to refresh the APNs app badge at send
+    /// time, so queued retries do not replay a stale absolute count.
+    pub(super) inbox_storage: Option<Arc<dyn InboxStorage>>,
+    pub(super) secrets: Arc<PushSecretCipher>,
+    pub(super) pubsub_boundary: Option<PushServicePubSubBoundary>,
+    /// VAPID signer for outbound Web Push delivery. `None` when the
+    /// process boots without a configured push service (legacy test
+    /// path); the publish-job worker treats absence as
+    /// [`waddle_xmpp::push::WebPushCapability::Degraded`] and short-
+    /// circuits Web Push fan-out without falling back to plaintext.
+    pub(super) vapid_signer: Option<Arc<dyn VapidSigner>>,
+    /// Transport-layer sender for outbound Web Push HTTPS posts. Paired
+    /// with [`Self::vapid_signer`] — both Some or both None.
+    pub(super) web_push_sender: Option<Arc<dyn WebPushSender>>,
+    /// VAPID `sub` claim (RFC 8292 §2) used when minting JWTs for outbound
+    /// Web Push delivery. Set together with [`Self::vapid_signer`] and
+    /// [`Self::web_push_sender`]; all three are Some or all three are None.
+    pub(super) vapid_sub: Option<VapidSub>,
+    /// APNs provider (#529). `None` when `WADDLE_APNS_*` is unset:
+    /// Apple devices then record `apns-not-configured`.
+    pub(super) apns: Option<ApnsProvider>,
+    /// FCM provider (#530). `None` when `WADDLE_FCM_*` is unset:
+    /// Android devices then record `fcm-not-configured`.
+    pub(super) fcm: Option<FcmProvider>,
+}
+
+#[derive(Clone)]
+pub(super) struct PushServicePubSubBoundary {
+    pub(super) service_jid: BareJid,
+    pub(super) storage: Arc<dyn PubSubStorage>,
+}
+
+pub(super) async fn lock_owner_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &BareJid,
+    now_ms: i64,
+) -> Result<(), XmppError> {
+    tx.execute(
+        r#"
+        INSERT INTO push_owner_locks (owner_bare_jid, updated_at_ms)
+        VALUES (?, ?)
+        ON CONFLICT(owner_bare_jid) DO UPDATE SET updated_at_ms = excluded.updated_at_ms
+        "#,
+        crate::db_params![owner_bare_jid.to_string(), now_ms],
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+    Ok(())
+}
+
+pub(super) async fn lock_node_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    node: &str,
+    now_ms: i64,
+) -> Result<(), XmppError> {
+    tx.execute(
+        r#"
+        INSERT INTO push_node_locks (node, updated_at_ms)
+        VALUES (?, ?)
+        ON CONFLICT(node) DO UPDATE SET updated_at_ms = excluded.updated_at_ms
+        "#,
+        crate::db_params![node, now_ms],
+    )
+    .await
+    .map_err(|error| XmppError::internal(error.to_string()))?;
+    Ok(())
+}
+
+impl DatabasePushServiceStore {
+    #[cfg(test)]
+    pub async fn new(db: Database) -> Result<Self, XmppError> {
+        Self::new_with_secret_key(db, b"waddle-push-service-test-secret-key").await
+    }
+
+    pub async fn new_with_secret_key(db: Database, secret_key: &[u8]) -> Result<Self, XmppError> {
+        let store = Self {
+            db,
+            inbox_storage: None,
+            secrets: Arc::new(PushSecretCipher::new(secret_key)),
+            pubsub_boundary: None,
+            vapid_signer: None,
+            web_push_sender: None,
+            vapid_sub: None,
+            apns: None,
+            fcm: None,
+        };
+        store.initialize().await?;
+        Ok(store)
+    }
+
+    pub async fn new_with_secret_key_and_pubsub(
+        db: Database,
+        secret_key: &[u8],
+        service_jid: BareJid,
+        pubsub_storage: Arc<dyn PubSubStorage>,
+    ) -> Result<Self, XmppError> {
+        let store = Self {
+            db,
+            inbox_storage: None,
+            secrets: Arc::new(PushSecretCipher::new(secret_key)),
+            pubsub_boundary: Some(PushServicePubSubBoundary {
+                service_jid,
+                storage: pubsub_storage,
+            }),
+            vapid_signer: None,
+            web_push_sender: None,
+            vapid_sub: None,
+            apns: None,
+            fcm: None,
+        };
+        store.initialize().await?;
+        Ok(store)
+    }
+
+    /// Install the shared XMPP inbox projection used to calculate the
+    /// account-wide APNs badge immediately before provider dispatch.
+    pub fn with_inbox_storage(mut self, inbox_storage: Arc<dyn InboxStorage>) -> Self {
+        self.inbox_storage = Some(inbox_storage);
+        self
+    }
+
+    /// Install the VAPID signer + Web Push transport + VAPID `sub` claim
+    /// for outbound delivery. Called once at boot from `server::http`. All
+    /// three arguments are paired — Web Push cannot dispatch without any
+    /// of them, and the publish-job worker treats absence of any one as
+    /// [`waddle_xmpp::push::WebPushCapability::Degraded`].
+    pub fn with_web_push_provider(
+        mut self,
+        vapid_signer: Arc<dyn VapidSigner>,
+        web_push_sender: Arc<dyn WebPushSender>,
+        vapid_sub: VapidSub,
+    ) -> Self {
+        self.vapid_signer = Some(vapid_signer);
+        self.web_push_sender = Some(web_push_sender);
+        self.vapid_sub = Some(vapid_sub);
+        self
+    }
+
+    /// Install the APNs provider token source, HTTP/2 transport and the
+    /// configured bundle id (`apns-topic`). Called once at boot from
+    /// `server::http` when `WADDLE_APNS_*` is configured.
+    pub fn with_apns_provider(
+        mut self,
+        tokens: Arc<dyn ApnsProviderTokenSource>,
+        sender: Arc<dyn ApnsSender>,
+        topic: ApnsTopic,
+    ) -> Self {
+        self.apns = Some(ApnsProvider {
+            tokens,
+            sender,
+            topic,
+        });
+        self
+    }
+
+    /// Install the FCM OAuth access-token source, HTTP v1 transport, the
+    /// Firebase project id and the Android application id this server
+    /// delivers for. Called once at boot from `server::http` when
+    /// `WADDLE_FCM_*` is configured.
+    pub fn with_fcm_provider(
+        mut self,
+        tokens: Arc<dyn FcmAccessTokenSource>,
+        sender: Arc<dyn FcmSender>,
+        project_id: FcmProjectId,
+        app_id: FcmAppId,
+    ) -> Self {
+        self.fcm = Some(FcmProvider::new(tokens, sender, project_id, app_id));
+        self
+    }
+
+    pub fn database(&self) -> Database {
+        self.db.clone()
+    }
+
+    /// Typed advertisement of the Push Service's active VAPID public key.
+    /// Returned only when a [`VapidSigner`] is installed via
+    /// [`Self::with_web_push_provider`]; legacy test paths that boot the
+    /// store without a signer return `None`, and the disco handler
+    /// suppresses the XEP-0128 form rather than synthesizing a placeholder.
+    pub fn vapid_advertisement(&self) -> Option<waddle_xmpp::push::disco::VapidAdvertisement> {
+        let signer = self.vapid_signer.as_ref()?;
+        Some(waddle_xmpp::push::disco::VapidAdvertisement::new(
+            signer.current_public_key(),
+            signer.current_kid(),
+        ))
+    }
+
+    async fn initialize(&self) -> Result<(), XmppError> {
+        let i64_type = crate::db::i64_sql_type(self.db.driver());
+        self.execute(
+            &format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS push_owner_locks (
+                    owner_bare_jid TEXT PRIMARY KEY,
+                    updated_at_ms {i64_type} NOT NULL
+                )
+                "#
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            &format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS push_nodes (
+                    node TEXT PRIMARY KEY,
+                    owner_bare_jid TEXT NOT NULL,
+                    app_id TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+                    created_at_ms {i64_type} NOT NULL,
+                    updated_at_ms {i64_type} NOT NULL,
+                    UNIQUE (owner_bare_jid, app_id)
+                )
+                "#
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            &format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS push_node_locks (
+                    node TEXT PRIMARY KEY,
+                    updated_at_ms {i64_type} NOT NULL,
+                    FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
+                )
+                "#
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_nodes_owner \
+             ON push_nodes (owner_bare_jid, status)",
+            (),
+        )
+        .await?;
+        self.execute(
+            &format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS push_devices (
+                    device_id TEXT NOT NULL,
+                    node TEXT NOT NULL,
+                    platform TEXT NOT NULL CHECK (platform IN ('web', 'apns', 'fcm')),
+                    environment TEXT NOT NULL,
+                    provider_endpoint TEXT,
+                    provider_token TEXT,
+                    provider_key_material TEXT,
+                    status TEXT NOT NULL CHECK (status IN ('active', 'disabled')),
+                    failure_count INTEGER NOT NULL DEFAULT 0,
+                    last_error TEXT,
+                    created_at_ms {i64_type} NOT NULL,
+                    updated_at_ms {i64_type} NOT NULL,
+                    PRIMARY KEY (node, device_id),
+                    FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
+                )
+                "#
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_devices_node_status \
+             ON push_devices (node, status)",
+            (),
+        )
+        .await?;
+        // FCM (#530): the RFC 8291 `auth` secret of the Android client's
+        // envelope-encryption keys, sealed like every provider secret.
+        // The registration token lives in `provider_token` and the
+        // `p256dh` key in `provider_key_material`.
+        self.add_column_if_missing("push_devices", "provider_auth TEXT")
+            .await?;
+        self.execute(
+            &format!(
+                r#"
+                CREATE TABLE IF NOT EXISTS push_delivery_attempts (
+                    attempt_id TEXT PRIMARY KEY,
+                    node TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    platform TEXT NOT NULL,
+                    item_id TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    last_error TEXT,
+                    created_at_ms {i64_type} NOT NULL,
+                    FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE,
+                    FOREIGN KEY (node, device_id) REFERENCES push_devices(node, device_id) ON DELETE CASCADE
+                )
+                "#
+            ),
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_node_created \
+             ON push_delivery_attempts (node, created_at_ms)",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_device_created \
+             ON push_delivery_attempts (device_id, created_at_ms)",
+            (),
+        )
+        .await?;
+        // #1123 retry-path idempotency lookup:
+        // `delivery_attempts_for_node` retains this legacy wire-item index.
+        // Retry dedup uses the scoped acceptance index installed below.
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_item_status \
+             ON push_delivery_attempts (node, item_id, status, device_id)",
+            (),
+        )
+        .await?;
+        self.execute(
+            &push_publish_jobs_table_sql(i64_type, "push_publish_jobs", true),
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_status_created \
+             ON push_publish_jobs (status, created_at_ms)",
+            (),
+        )
+        .await?;
+        self.execute(
+            "CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_node_status \
+             ON push_publish_jobs (node, status)",
+            (),
+        )
+        .await?;
+        self.add_column_if_missing("push_publish_jobs", "publish_options_xml TEXT")
+            .await?;
+        self.add_column_if_missing("push_publish_jobs", "push_service_jid TEXT")
+            .await?;
+        // `claim_token` is the at-most-once delivery interlock: phase 1
+        // writes a fresh UUID; phase 3's UPDATE checks `claim_token = ?`
+        // so a recovered-and-re-claimed job (which holds a different
+        // token) cannot persist attempts from the original worker.
+        self.add_column_if_missing("push_publish_jobs", "claim_token TEXT")
+            .await?;
+        self.add_column_if_missing("push_publish_jobs", "ancestry_job_id TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "acceptance_scope TEXT NOT NULL DEFAULT 'legacy'",
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            &format!("backing_published_at_ms {i64_type}"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            &format!("publication_order {i64_type} NOT NULL DEFAULT 0"),
+        )
+        .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "backing_state TEXT NOT NULL DEFAULT 'pending'",
+        )
+        .await?;
+        self.execute(&format!("CREATE TABLE IF NOT EXISTS push_publication_orders (node TEXT PRIMARY KEY, next_order {i64_type} NOT NULL)"), ()).await?;
+        self.add_column_if_missing("push_delivery_attempts", "publish_job_id TEXT")
+            .await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "uncertain_send INTEGER NOT NULL DEFAULT 0",
+        )
+        .await?;
+        self.add_column_if_missing("push_publish_jobs", "terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked')").await?;
+        self.add_column_if_missing(
+            "push_publish_jobs",
+            "upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1))",
+        )
+        .await?;
+        self.migrate_publish_acceptance_scope().await?;
+        self.adopt_notification_ancestry().await?;
+        Ok(())
+    }
+
+    async fn migrate_publish_acceptance_scope(&self) -> Result<(), XmppError> {
+        let mut tx = self
+            .db
+            .begin_immediate()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        // The old unique node/item pair proves which pending acceptance owns
+        // legacy attempts. Preserve it before removing that uniqueness.
+        tx.execute("UPDATE push_delivery_attempts SET publish_job_id = (SELECT job_id FROM push_publish_jobs WHERE push_publish_jobs.node = push_delivery_attempts.node AND push_publish_jobs.item_id = push_delivery_attempts.item_id AND push_publish_jobs.acceptance_scope = 'legacy' LIMIT 1) WHERE publish_job_id IS NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            tx.execute("ALTER TABLE push_publish_jobs DROP CONSTRAINT IF EXISTS push_publish_jobs_node_item_id_key", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        } else {
+            let mut rows = tx.query("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'push_publish_jobs'", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            let legacy_unique = match rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+            {
+                Some(row) => row
+                    .get::<String>(0)
+                    .map_err(|error| XmppError::internal(error.to_string()))?
+                    .contains("UNIQUE (node, item_id)"),
+                None => false,
+            };
+            if legacy_unique {
+                tx.execute(
+                    &push_publish_jobs_table_sql("INTEGER", "push_publish_jobs_rebuild", false),
+                    (),
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("INSERT INTO push_publish_jobs_rebuild (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, terminal_disposition, upstream_completed, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms) SELECT job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, backing_published_at_ms, publication_order, backing_state, uncertain_send, terminal_disposition, upstream_completed, status, attempt_count, last_error, next_retry_at_ms, claimed_at_ms, claim_token, created_at_ms, updated_at_ms, published_at_ms FROM push_publish_jobs", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute("DROP TABLE push_publish_jobs", ())
+                    .await
+                    .map_err(|error| XmppError::internal(error.to_string()))?;
+                tx.execute(
+                    "ALTER TABLE push_publish_jobs_rebuild RENAME TO push_publish_jobs",
+                    (),
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        loop {
+            let mut rows = tx.query("SELECT job_id, node FROM push_publish_jobs WHERE publication_order = 0 ORDER BY created_at_ms, job_id LIMIT 128", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            let mut pending = Vec::new();
+            while let Some(row) = rows
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+            {
+                pending.push((
+                    row.get::<String>(0)
+                        .map_err(|error| XmppError::internal(error.to_string()))?,
+                    row.get::<String>(1)
+                        .map_err(|error| XmppError::internal(error.to_string()))?,
+                ));
+            }
+            if pending.is_empty() {
+                break;
+            }
+            for (job, node) in pending {
+                let order =
+                    super::publish_jobs::allocate_publication_order_tx(&mut tx, &node).await?;
+                tx.execute("UPDATE push_publish_jobs SET publication_order = ?, backing_state = CASE WHEN acceptance_scope = 'legacy' THEN 'published' ELSE backing_state END, backing_published_at_ms = CASE WHEN acceptance_scope = 'legacy' THEN created_at_ms ELSE backing_published_at_ms END WHERE job_id = ? AND publication_order = 0",
+                    crate::db_params![order, job]).await.map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        tx.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_push_publish_jobs_canonical_delivery ON push_publish_jobs (ancestry_job_id) WHERE ancestry_job_id IS NOT NULL", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_status_created ON push_publish_jobs (status, created_at_ms)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_publish_jobs_node_status ON push_publish_jobs (node, status)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.execute("CREATE INDEX IF NOT EXISTS idx_push_delivery_attempts_acceptance_status ON push_delivery_attempts (publish_job_id, status, device_id)", ()).await.map_err(|error| XmppError::internal(error.to_string()))?;
+        tx.commit()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+
+    async fn add_column_if_missing(&self, table: &str, column_def: &str) -> Result<(), XmppError> {
+        let alter_sql = match self.db.driver() {
+            crate::db::DatabaseDriver::Postgres => {
+                format!("ALTER TABLE {table} ADD COLUMN IF NOT EXISTS {column_def}")
+            }
+            crate::db::DatabaseDriver::Sqlite => {
+                format!("ALTER TABLE {table} ADD COLUMN {column_def}")
+            }
+        };
+        if let Err(error) = self.execute(&alter_sql, ()).await {
+            let msg = error.to_string().to_lowercase();
+            if msg.contains("duplicate column") || msg.contains("already exists") {
+                return Ok(());
+            }
+            return Err(error);
+        }
+        Ok(())
+    }
+
+    /// `true` when all three Web Push provider slots are wired
+    /// (`vapid_signer`, `web_push_sender`, `vapid_sub`). Without them,
+    /// Web devices record the transient `web-not-configured` marker.
+    pub(super) fn web_push_provider_ready(&self) -> bool {
+        self.vapid_signer.is_some() && self.web_push_sender.is_some() && self.vapid_sub.is_some()
+    }
+
+    /// `true` when any real provider (Web Push, APNs or FCM) is wired,
+    /// i.e. when the worker needs the parsed XEP-0357 payload to build a
+    /// provider request.
+    pub(super) fn any_provider_ready(&self) -> bool {
+        self.web_push_provider_ready() || self.apns.is_some() || self.fcm.is_some()
+    }
+
+    /// Public snapshot of the Web Push capability — `Ready` when the
+    /// store has a VAPID signer, transport, and sub all wired;
+    /// `Degraded { Xep0357PushServiceDegraded }` otherwise.
+    ///
+    /// The T1 push-gate (in `notification_outbox`) is expected to
+    /// consult this before falling back to any in-band channel, so a
+    /// degraded push service cannot accidentally leak content over a
+    /// plaintext path. No fallback path exists today, but the typed
+    /// suppression reason is plumbed end-to-end so the day someone
+    /// adds one, the safety invariant holds by construction.
+    pub fn web_push_capability(&self) -> waddle_xmpp::push::WebPushCapability {
+        if self.web_push_provider_ready() {
+            waddle_xmpp::push::WebPushCapability::Ready
+        } else {
+            waddle_xmpp::push::WebPushCapability::Degraded {
+                reason: waddle_xmpp::push::SuppressionReason::Xep0357PushServiceDegraded,
+            }
+        }
+    }
+
+    pub(super) async fn execute(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<u64, XmppError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        conn.execute(sql, params)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+
+    pub(super) async fn query(
+        &self,
+        sql: &str,
+        params: impl IntoParams,
+    ) -> Result<crate::db::Rows, XmppError> {
+        let conn = self
+            .db
+            .guard()
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+        conn.query(sql, params)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))
+    }
+}
+
+fn push_publish_jobs_table_sql(i64_type: &str, table: &str, if_not_exists: bool) -> String {
+    let exists = if if_not_exists { "IF NOT EXISTS " } else { "" };
+    format!(
+        r#"CREATE TABLE {exists}{table} (
+        job_id TEXT PRIMARY KEY,
+        owner_bare_jid TEXT NOT NULL,
+        push_service_jid TEXT,
+        node TEXT NOT NULL,
+        item_id TEXT NOT NULL,
+        payload_xml TEXT NOT NULL,
+        publish_options_xml TEXT,
+        ancestry_job_id TEXT,
+        acceptance_scope TEXT NOT NULL DEFAULT 'legacy' CHECK (acceptance_scope IN ('legacy', 'wire', 'canonical')),
+        backing_published_at_ms {i64_type},
+        publication_order {i64_type} NOT NULL DEFAULT 0,
+        backing_state TEXT NOT NULL DEFAULT 'pending' CHECK (backing_state IN ('pending', 'published', 'superseded', 'not-configured')),
+        uncertain_send INTEGER NOT NULL DEFAULT 0 CHECK (uncertain_send IN (0, 1)),
+        terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'),
+        upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1)),
+        status TEXT NOT NULL CHECK (status IN ('queued', 'in-progress', 'published', 'failed')),
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        next_retry_at_ms {i64_type},
+        claimed_at_ms {i64_type},
+        claim_token TEXT,
+        created_at_ms {i64_type} NOT NULL,
+        updated_at_ms {i64_type} NOT NULL,
+        published_at_ms {i64_type},
+        FOREIGN KEY (node) REFERENCES push_nodes(node) ON DELETE CASCADE
+    )"#
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use minidom::Element;
+    use tempfile::tempdir;
+
+    use crate::push::service::test_support::{
+        assert_item_not_found, fcm_registration, notification_item, owner, FCM_TEST_APP_ID,
+    };
+    use crate::push::service::types::PushNodeStatus;
+    use crate::push::service::{PushDevicePlatform, PushDeviceRegistration};
+
+    #[tokio::test]
+    async fn push_service_store_survives_reopen_with_disabled_cleanup() {
+        let dir = tempdir().expect("tempdir");
+        let path = dir.path().join("push-service.sqlite3");
+        let owner = owner();
+        let node_id;
+        {
+            let db = Database::open_local("push-service-reopen", &path)
+                .await
+                .expect("database");
+            let store = DatabasePushServiceStore::new(db).await.expect("store");
+            let node = store.ensure_node(&owner, "web").await.expect("node");
+            node_id = node.node().to_string();
+            store
+                .upsert_device(
+                    &owner,
+                    PushDeviceRegistration::new(
+                        "web-1",
+                        node.node(),
+                        PushDevicePlatform::Web,
+                        "test",
+                    )
+                    .with_provider_endpoint(Some("https://push.example.com/endpoint".to_string()))
+                    .with_provider_token(Some("provider-secret".to_string()))
+                    .with_provider_key_material(Some("provider-key".to_string())),
+                )
+                .await
+                .expect("device");
+            assert_eq!(
+                store
+                    .disable_nodes_for_owner(&owner, Some(node.node()))
+                    .await
+                    .expect("disable node"),
+                1
+            );
+        }
+
+        let reopened_db = Database::open_local("push-service-reopen-again", &path)
+            .await
+            .expect("reopened database");
+        let reopened = DatabasePushServiceStore::new(reopened_db)
+            .await
+            .expect("reopened store");
+        let node = reopened
+            .get_node(&node_id)
+            .await
+            .expect("node lookup")
+            .expect("node");
+        let device = reopened
+            .get_device_for_owner_on_node(&owner, &node_id, "web-1")
+            .await
+            .expect("device lookup")
+            .expect("device");
+        let publish_err = reopened
+            .publish_notification_from_user_server(
+                &node_id,
+                &notification_item("after-reopen"),
+                &owner,
+            )
+            .await
+            .expect_err("disabled node rejects publish after reopen");
+
+        assert_eq!(node.status, PushNodeStatus::Disabled);
+        assert_eq!(device.provider_endpoint(), None);
+        assert_eq!(device.provider_auth(), None);
+        assert_eq!(device.provider_token(), None);
+        assert_eq!(device.provider_key_material(), None);
+        assert_item_not_found(publish_err);
+    }
+    #[tokio::test]
+    async fn fcm_device_seals_its_auth_secret_and_disable_scrubs_every_secret() {
+        let store = DatabasePushServiceStore::new(
+            Database::in_memory("push-service-fcm-secrets")
+                .await
+                .expect("database"),
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
+        store
+            .upsert_device(&owner, fcm_registration("android-1", node.node()))
+            .await
+            .expect("device");
+
+        let device = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("device");
+        assert_eq!(device.provider_token(), Some("fcm-token-android-1"));
+        assert!(device.provider_key_material().is_some());
+        let auth = device
+            .provider_auth()
+            .expect("FCM auth secret is stored")
+            .to_string();
+        let mut rows = store
+            .query(
+                "SELECT provider_auth FROM push_devices WHERE node = ? AND device_id = ?",
+                crate::db_params![node.node(), "android-1"],
+            )
+            .await
+            .expect("sealed auth");
+        let sealed: String = rows
+            .next()
+            .await
+            .expect("row")
+            .expect("device row")
+            .get(0)
+            .expect("provider_auth column");
+        drop(rows);
+        assert!(
+            sealed.starts_with("waddle-push-secret-v1:"),
+            "provider_auth is sealed at rest"
+        );
+        assert!(!sealed.contains(&auth), "no plaintext auth secret at rest");
+
+        store
+            .disable_device_for_owner(&owner, node.node(), "android-1", Some("revoked"))
+            .await
+            .expect("disable device");
+        let disabled = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("disabled device");
+        assert_eq!(disabled.provider_token(), None);
+        assert_eq!(disabled.provider_key_material(), None);
+        assert_eq!(disabled.provider_auth(), None);
+    }
+
+    #[tokio::test]
+    async fn provider_disable_scrubs_every_secret_like_an_owner_disable() {
+        let store = DatabasePushServiceStore::new(
+            Database::in_memory("push-service-fcm-provider-disable")
+                .await
+                .expect("database"),
+        )
+        .await
+        .expect("store");
+        let owner = owner();
+        let node = store
+            .ensure_node(&owner, FCM_TEST_APP_ID)
+            .await
+            .expect("node");
+        store
+            .upsert_device(&owner, fcm_registration("android-1", node.node()))
+            .await
+            .expect("device");
+
+        // The worker's path when FCM reports the token gone.
+        let mut tx = store.db.begin().await.expect("tx");
+        crate::push::service::devices::mark_device_disabled_tx(
+            &mut tx,
+            node.node(),
+            "android-1",
+            "fcm-gone",
+            1,
+        )
+        .await
+        .expect("provider disable");
+        tx.commit().await.expect("commit");
+
+        let disabled = store
+            .get_device_for_owner_on_node(&owner, node.node(), "android-1")
+            .await
+            .expect("device lookup")
+            .expect("disabled device");
+        assert_eq!(disabled.provider_token(), None);
+        assert_eq!(disabled.provider_key_material(), None);
+        assert_eq!(disabled.provider_auth(), None);
+    }
+
+    async fn disposition_schema_upgrade(
+        fixture: crate::ingress::test_support::IngressFixture,
+        rebuild: bool,
+    ) {
+        let store = DatabasePushServiceStore::new_with_secret_key(
+            fixture.db.clone(),
+            &rand::random::<[u8; 32]>(),
+        )
+        .await
+        .expect("store");
+        let node = store
+            .ensure_node(&owner(), "upgrade-proof")
+            .await
+            .expect("node");
+        store
+            .execute("DROP TABLE push_publish_jobs", ())
+            .await
+            .expect("pre-upgrade table");
+        let i64_type = crate::db::i64_sql_type(fixture.db.driver());
+        let mut schema = push_publish_jobs_table_sql(i64_type, "push_publish_jobs", false);
+        if rebuild {
+            schema = schema.replace(
+                "FOREIGN KEY (node)",
+                "UNIQUE (node, item_id), FOREIGN KEY (node)",
+            );
+        } else {
+            schema = schema.replace("terminal_disposition TEXT CHECK (terminal_disposition IS NULL OR terminal_disposition = 'registration-revoked'),", "").replace("upstream_completed INTEGER NOT NULL DEFAULT 0 CHECK (upstream_completed IN (0, 1)),", "");
+        }
+        store.execute(&schema, ()).await.expect("old schema");
+        let payload = Element::builder("notification", waddle_xmpp::xep::xep0357::NS_PUSH).build();
+        let options = Element::builder("x", waddle_xmpp::xep::NS_DATA_FORMS).build();
+        store.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, publish_options_xml, ancestry_job_id, acceptance_scope, publication_order, status, created_at_ms, updated_at_ms) VALUES ('upgrade-proof', ?, 'push.example.com', ?, 'frozen-item', ?, ?, ?, 'canonical', 17, 'failed', 1, 1)", crate::db_params![owner().to_string(), node.node(), String::from(&payload), String::from(&options), uuid::Uuid::new_v4().to_string()]).await.expect("legacy proof");
+        if rebuild {
+            store.execute("UPDATE push_publish_jobs SET terminal_disposition = 'registration-revoked', upstream_completed = 1", ()).await.expect("durable fields before actual copy");
+        }
+        store.initialize().await.expect("upgrade");
+        store.initialize().await.expect("idempotent initialization");
+        let mut rows = store.query("SELECT terminal_disposition, upstream_completed, payload_xml, publish_options_xml, item_id, publication_order FROM push_publish_jobs WHERE job_id = 'upgrade-proof'", ()).await.expect("retained row");
+        let row = rows.next().await.expect("query").expect("proof survives");
+        assert_eq!(
+            row.get::<Option<String>>(0).expect("disposition"),
+            rebuild.then(|| "registration-revoked".to_owned())
+        );
+        assert_eq!(row.get::<i64>(1).expect("ACK"), i64::from(rebuild));
+        assert_eq!(
+            row.get::<String>(2).expect("payload"),
+            String::from(&payload)
+        );
+        assert_eq!(
+            row.get::<String>(3).expect("options"),
+            String::from(&options)
+        );
+        assert_eq!(row.get::<String>(4).expect("item"), "frozen-item");
+        assert_eq!(row.get::<i64>(5).expect("order"), 17);
+        drop(rows);
+        assert!(store
+            .execute(
+                "UPDATE push_publish_jobs SET terminal_disposition = 'generic-failed'",
+                ()
+            )
+            .await
+            .is_err());
+        assert!(store
+            .execute("UPDATE push_publish_jobs SET upstream_completed = 2", ())
+            .await
+            .is_err());
+        drop(store);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_disposition_upgrade_defaults_to_unresolved_and_reinitializes() {
+        disposition_schema_upgrade(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+            false,
+        )
+        .await;
+    }
+    #[tokio::test]
+    async fn postgres_disposition_upgrade_defaults_to_unresolved_and_reinitializes() {
+        if let Some(f) =
+            crate::ingress::test_support::IngressFixture::postgres("disposition_upgrade").await
+        {
+            disposition_schema_upgrade(f, false).await;
+        }
+    }
+    #[tokio::test]
+    async fn sqlite_unique_constraint_rebuild_preserves_disposition_ack_and_frozen_fields() {
+        disposition_schema_upgrade(
+            crate::ingress::test_support::IngressFixture::sqlite().await,
+            true,
+        )
+        .await;
+    }
+}

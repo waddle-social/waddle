@@ -9,7 +9,7 @@ use waddle_server::{
         execute::execute_effects,
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink, IngressDecision,
     },
-    notification_outbox::{NotificationCandidate, NotificationOutboxStore},
+    notification::outbox::{NotificationCandidate, NotificationOutboxStore},
     pending_delivery::DatabasePendingDeliveryStorage,
 };
 use waddle_xmpp::{
@@ -295,7 +295,7 @@ dialect_tests!(
 );
 
 async fn notification_only(fixture: IngressFixture) {
-    use waddle_server::ingress_uow::EffectReceiptRepository;
+    use waddle_server::ingress::uow::EffectReceiptRepository;
     let storage = storage(&fixture, QuotaPolicy::Unlimited).await;
     let submission = pending_plan(&fixture, "notification-only", true);
     let first = commit_submission(&fixture.uow, &submission, 5)

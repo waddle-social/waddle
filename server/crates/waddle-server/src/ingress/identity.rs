@@ -174,7 +174,7 @@ impl IngressAppendObligationRef {
             message_key: obligation.key.message_key,
             sender_bare: obligation.sender_bare,
             receipt: super::EffectReceiptKey {
-                kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+                kind: crate::ingress::substrate::EffectReceiptKind::from_storage(
                     obligation.key.kind.to_storage(),
                 ),
                 semantic_identity_hash: obligation.key.semantic_identity_hash,

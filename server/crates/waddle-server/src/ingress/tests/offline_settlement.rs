@@ -9,7 +9,7 @@ use crate::{
         test_support::IngressFixture,
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink, PlannedEffect,
     },
-    notification_outbox::{NotificationCandidate, NotificationOutboxStore},
+    notification::outbox::{NotificationCandidate, NotificationOutboxStore},
     pending_delivery::DatabasePendingDeliveryStorage,
 };
 use std::{sync::Arc, time::Duration};
@@ -24,7 +24,7 @@ use waddle_xmpp::{
     registry::ConnectionRegistry,
 };
 
-async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress_uow::DbRetryClass>) {
+async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress::uow::DbRetryClass>) {
     let storage: Arc<dyn PendingDeliveryStorage> = Arc::new(
         DatabasePendingDeliveryStorage::from_database(fixture.db.clone(), QuotaPolicy::Unlimited)
             .await
@@ -165,7 +165,7 @@ async fn offline_atomic_rollback_postgres() {
 async fn offline_atomic_contention_retry_rolls_back_sqlite() {
     rollback(
         IngressFixture::sqlite().await,
-        Some(crate::ingress_uow::DbRetryClass::SqliteContention),
+        Some(crate::ingress::uow::DbRetryClass::SqliteContention),
     )
     .await;
 }
@@ -173,7 +173,7 @@ async fn offline_atomic_contention_retry_rolls_back_sqlite() {
 #[tokio::test]
 async fn offline_atomic_deadlock_retry_rolls_back_postgres() {
     if let Some(fixture) = IngressFixture::postgres("offline_atomic_deadlock_retry").await {
-        rollback(fixture, Some(crate::ingress_uow::DbRetryClass::Deadlock)).await;
+        rollback(fixture, Some(crate::ingress::uow::DbRetryClass::Deadlock)).await;
     }
 }
 
@@ -284,11 +284,11 @@ impl crate::ingress::RecoveryEnvironment for QuotaEnvironment {
 }
 
 async fn quota_refusal(fixture: IngressFixture, capacity_returns: bool) {
+    use crate::ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository};
     use crate::ingress::{
         maintenance::{run_maintenance_pass, MaintenanceBudget, MaintenanceOutcome},
         RecoveryEnvironment,
     };
-    use crate::ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository};
 
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let baseline = metrics

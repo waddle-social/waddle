@@ -1,7 +1,7 @@
 use crate::channel_space_links::ChannelSpaceLinkStore;
 use crate::permissions::PermissionActor;
 use crate::server::bootstrap_membership;
-use crate::spaces_metadata::SpacesMetadataStore;
+use crate::spaces::metadata::SpacesMetadataStore;
 use jid::{BareJid, DomainPart};
 use kameo::actor::ActorRef;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -131,7 +131,7 @@ impl AppState {
             blob_storage,
             inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
             spaces_metadata_store: Arc::new(
-                crate::spaces_metadata::InMemorySpacesMetadataStore::new(),
+                crate::spaces::metadata::InMemorySpacesMetadataStore::new(),
             ),
             channel_space_link_store: Arc::new(
                 crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),

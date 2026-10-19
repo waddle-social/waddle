@@ -1,7 +1,7 @@
 //! Ordinary offline delivery requires the ingress transaction arm.
 use super::super::*;
 use crate::{
-    notification_outbox::{direct_candidate_from_envelope, NotificationOutboxStore},
+    notification::outbox::{direct_candidate_from_envelope, NotificationOutboxStore},
     pending_delivery::DatabasePendingDeliveryStorage,
     server::routes::websocket::tests as socket_tests,
 };

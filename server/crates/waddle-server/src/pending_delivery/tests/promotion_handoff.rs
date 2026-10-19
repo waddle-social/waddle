@@ -274,7 +274,7 @@ async fn portable_orphan_receipt_gc_proves_separate_source_absent() {
         .await
         .expect("independent pending database");
     let source = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(None)
+        crate::sm::persistence::DatabaseSmPersistence::open(None)
             .await
             .expect("independent canonical SM database"),
     );

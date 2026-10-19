@@ -869,7 +869,7 @@ advisory in the fenced impl. The portable impl and schema remain byte-identical 
 SQLite."*
 
 **Code research finding, confirming the ADR's premise**: the portable
-`DatabaseSmPersistence` (`server/crates/waddle-server/src/sm_persistence.rs`) uses
+`DatabaseSmPersistence` (`server/crates/waddle-server/src/sm/persistence.rs`) uses
 `Database::guard()` (pooled `ConnectionGuard`, one connection per statement) for every
 trait method **except** `store_session_atomic`, which already overrides the trait's
 default with a real `Database::begin()` transaction
@@ -913,7 +913,7 @@ fencing-SELECT SQL shape between `PostgresClaimStore`'s own methods and
 `PostgresFencedSmPersistence`'s inline usage, which is the accepted tradeoff of the two
 types living in the crate that actually owns the transaction.
 
-**Files**: new `server/crates/waddle-server/src/sm_persistence_fenced.rs` (mirrors
+**Files**: new `server/crates/waddle-server/src/sm/persistence/fenced.rs` (mirrors
 `sm_persistence.rs`'s module doc style; sibling file, not a submodule of the portable
 impl — "not a decorator" extends to file layout too), implementing `waddle_xmpp::
 stream_management::persistence::SmPersistenceStorage` for `PostgresFencedSmPersistence`.
@@ -1084,13 +1084,13 @@ janitor is the *guaranteed* flush path, the flush poke remains the optimization)
 > implementation), overridden by `DatabasePendingDeliveryStorage` only when clustering
 > is enabled AND this storage's own database is co-located with the clustering global
 > database (`pending_delivery::open_for_cluster_mode`, mirroring
-> `sm_persistence::open_for_cluster_mode`'s identical co-location-then-construct
+> `sm::persistence::open_for_cluster_mode`'s identical co-location-then-construct
 > pattern one table over — a mismatch fails startup with the new
 > `PendingStorageError::ClusterColocationMismatch`, never a silent unfenced fallback
 > under a misconfigured co-location). The fenced path runs the `SELECT ... FOR SHARE`
 > against `clustering_claims` and the `pending_delivery` INSERT in one
 > `Database::begin()` transaction — the exact shape
-> `sm_persistence_fenced::PostgresFencedSmPersistence::assert_fenced` already
+> `sm::persistence::fenced::PostgresFencedSmPersistence::assert_fenced` already
 > establishes, duplicated here (not shared via a generic helper) for the same
 > "the lock and the write it protects must share one connection, and this impl owns its
 > own inline fencing SQL" reason Slice 4's own design note gives. `origin_stream_id` is
@@ -1992,7 +1992,7 @@ line below names its module and test function(s).
    SELECT.**
    `muc::room_registry_actor::tests::restore_durable_room_state_applies_before_any_join`
    (restore-before-join, config/affiliations/subject) and
-   `muc_durable::tests::check_fenced_fanout_returns_false_immediately_after_a_steal_commits`
+   `muc::durable::tests::check_fenced_fanout_returns_false_immediately_after_a_steal_commits`
    (the deposed owner's very next fenced pre-fan-out SELECT returns false immediately
    after a steal commits — the plan's own Slice 7 Tests entry, quoted verbatim in that
    test's doc comment).
@@ -2446,7 +2446,7 @@ harness (it is a single-node concern).
     `WADDLE_XMPP_SM_DATABASE_URL` (or its `WADDLE_DATABASE_URL` fallback) — its fencing
     `SELECT ... FOR SHARE` targets `clustering_claims`, which lives in the clustering
     global database, so a second, independently-resolved database might not even have
-    that table. `sm_persistence::open_for_cluster_mode` now takes the same `Database`
+    that table. `sm::persistence::open_for_cluster_mode` now takes the same `Database`
     handle `clustering::start_if_enabled` itself received (`db_pool.global()`) and
     constructs `PostgresFencedSmPersistence` by cloning it, never by opening a fresh
     pool from the resolved SM URL. Before that clone happens, the resolved SM
@@ -3188,7 +3188,7 @@ same "as-landed" style, numbered onward from 43.
     tables/restore/fenced-backstop/Demote-ask machinery is wired only when
     `clustering::start_if_enabled` produces a live claim pair (clustering
     enabled, Postgres, the `clustering` Cargo feature compiled in), exactly
-    the same three-way gate `sm_persistence::open_for_cluster_mode`
+    the same three-way gate `sm::persistence::open_for_cluster_mode`
     already uses. Schema (PROPOSED, no ADR-locked DDL exists — following
     the `clustering_` prefix + ensure-schema-on-the-store convention Slice
     1's `clustering_nodes`/`clustering_claims` already establish, since no
@@ -3767,7 +3767,7 @@ record the retained work.
     it with a different mechanism that produces a weaker (but still
     loss-free) guarantee. **Scope correction (coordinator ruling):** this
     self-healing-via-`DroppedClosed` behaviour applies to the
-    `route_to_connection.rs` delivery path only. `sm_promotion::promote_one`
+    `route_to_connection.rs` delivery path only. `sm::promotion::promote_one`
     still delivers via `ConnectionRegistry::send_to` and does **not**
     self-evict ghosts on that path — but it is bounded by its own existing
     pending-storage (Archived/Transient) fallback, so this deviation

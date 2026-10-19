@@ -3,7 +3,7 @@ use waddle_xmpp::ingress::IngressEffectIntent;
 
 use super::{decision::EffectReceiptKey, durable::receipt_key};
 use crate::{
-    ingress_uow::IngressUowError,
+    ingress::uow::IngressUowError,
     server::routes::interpret::effects::{
         direct::ExternalDirectEffect,
         room::{ExternalRoomEffect, RoomActorMutation},

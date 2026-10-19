@@ -6,11 +6,11 @@ use super::super::{
     message_plan::finish_plan,
     Deps,
 };
+use crate::ingress::uow::SmIngressStreamRepository;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
     IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
 };
-use crate::ingress_uow::SmIngressStreamRepository;
 use std::sync::Arc;
 use waddle_xmpp::{
     inbox::{storage::InboxStorage, ConversationKind, InboxEntry},

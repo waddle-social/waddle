@@ -179,7 +179,7 @@ pub(super) async fn commit_legacy_roster_fixture(
     f: &IngressFixture,
     submission: &IngressSubmission,
 ) -> IngressDecision {
-    use crate::ingress_uow::EffectIntentRepository;
+    use crate::ingress::uow::EffectIntentRepository;
     use waddle_xmpp::ingress::{AliasOutcome, AliasResolution};
 
     let mut legacy = submission.clone();
@@ -232,7 +232,7 @@ pub(super) async fn commit_legacy_roster_fixture(
         &mut tx,
         key,
         &digest,
-        Some(&crate::ingress_substrate::MessageEnvelope::new(
+        Some(&crate::ingress::substrate::MessageEnvelope::new(
             source.clone(),
         )),
     )

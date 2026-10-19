@@ -104,7 +104,7 @@ use waddle_xmpp::{
 };
 
 use crate::{
-    ingress_uow::{IngressUnitOfWork, IngressUowError},
+    ingress::uow::{IngressUnitOfWork, IngressUowError},
     server::routes::interpret::Deps,
 };
 

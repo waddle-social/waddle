@@ -1,11 +1,11 @@
 //! Commit notification work and its recorded obligations under one canonical lock.
 use crate::{
     ingress::decision::IngressDecision,
-    ingress_uow::{
+    ingress::uow::{
         settle_recorded, CanonicalMessageRepository, EffectReceiptRepository, IngressUnitOfWork,
         IngressUowError, RecoveryCompletion, RecoveryReceiptRepository,
     },
-    notification_outbox::NotificationCandidateInsertOutcome,
+    notification::outbox::NotificationCandidateInsertOutcome,
     server::routes::interpret::effects::{
         room::ExternalRoomEffect, EffectOutcome, SettledCompletion, SettledOutcome,
     },

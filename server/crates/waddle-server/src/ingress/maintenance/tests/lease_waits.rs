@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_uow::{SendAttemptRepository, SendClaim, SendObligation};
+use crate::ingress::uow::{SendAttemptRepository, SendClaim, SendObligation};
 use waddle_xmpp::ownership::NodeIdentity;
 
 async fn waiting_route(

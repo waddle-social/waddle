@@ -463,7 +463,7 @@ async fn complete_destroy_snapshot(
                 .map_err(|error| {
                     warn!(room = %room_jid, %error, "Failed to arm terminal MUC destroy effect after durable wipe");
                 })?;
-            let drained = crate::room_effect_outbox::drain::drain_reservation_inline(
+            let drained = crate::room::effect_outbox::drain::drain_reservation_inline(
                 state,
                 &reservation,
                 inline_session,
@@ -2252,7 +2252,7 @@ mod destroy_completion_tests {
         let reservation = outbox
             .enqueue_in_tx(
                 &mut tx,
-                crate::room_effect_outbox::RoomEffectEnqueue {
+                crate::room::effect_outbox::RoomEffectEnqueue {
                     lifecycle,
                     revision: waddle_xmpp::muc::RoomRevision::initial(),
                     effects: &waddle_xmpp::muc::RoomMutationEffects::destroy(
@@ -2262,12 +2262,12 @@ mod destroy_completion_tests {
                         None,
                         recipients,
                     ),
-                    origin: &crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                    origin: &crate::room::effect_outbox::RoomEffectOriginInstanceId::new(
                         "destroy-completion-test-origin".to_string(),
                     )
                     .expect("valid room effect origin"),
                     producing_node:
-                        &crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
+                        &crate::room::effect_outbox::RoomEffectProducingNode::from_node_identity(
                             waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a"),
                         ),
                     now_ms: crate::time::now_ms(),
@@ -2534,7 +2534,7 @@ mod destroy_completion_tests {
             .deps
             .protocol
             .room_effect_outbox
-            .find(&crate::room_effect_outbox::RoomEffectKey {
+            .find(&crate::room::effect_outbox::RoomEffectKey {
                 lifecycle: success_reservation.lifecycle,
                 revision: success_reservation.revision,
                 ordinal: success_reservation.ordinals[0],
@@ -2590,7 +2590,7 @@ mod destroy_completion_tests {
                 .deps
                 .protocol
                 .room_effect_outbox
-                .find(&crate::room_effect_outbox::RoomEffectKey {
+                .find(&crate::room::effect_outbox::RoomEffectKey {
                     lifecycle: reservation.lifecycle,
                     revision: reservation.revision,
                     ordinal: reservation.ordinals[0],

@@ -1,7 +1,7 @@
 use super::groupchat_ingress::GroupchatFixture;
 use crate::{
     ingress::test_support::IngressFixture,
-    ingress_uow::{CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository},
+    ingress::uow::{CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository},
 };
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MessageKey},
@@ -147,16 +147,16 @@ async fn wire_and_receipts(f: IngressFixture) {
         IngressEffectIntent::RouteDirect { fanout, .. } if fanout.as_slice() == [host.clone()])
         })
         .expect("frozen host reflection child");
-    let host_obligation = crate::ingress_uow::SendObligation {
+    let host_obligation = crate::ingress::uow::SendObligation {
         message: key,
         receipt: crate::ingress::receipt_key(reflection).expect("host receipt"),
         recipient: host,
     };
     assert_eq!(
-        crate::ingress_uow::SendAttemptRepository::status(&mut tx, &host_obligation)
+        crate::ingress::uow::SendAttemptRepository::status(&mut tx, &host_obligation)
             .await
             .expect("host acceptance"),
-        Some(crate::ingress_uow::SendAttemptStatus::Completed),
+        Some(crate::ingress::uow::SendAttemptStatus::Completed),
         "the actual nested host consumer durably accepts its child before receipt completion"
     );
     assert!(EffectReceiptRepository::receipts_complete(&mut tx, key)

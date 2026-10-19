@@ -1,7 +1,7 @@
 //! Committed responsibility and the bounded post-commit work it authorizes.
 use crate::{
-    ingress_substrate::EffectReceiptKind,
-    ingress_uow::ReconcileVerdict,
+    ingress::substrate::EffectReceiptKind,
+    ingress::uow::ReconcileVerdict,
     server::routes::interpret::effects::{
         AppliedDurableEffects, ExternalEffect, PlanEffectDependency,
     },
@@ -59,7 +59,7 @@ pub(super) fn assemble_receipts(
     external: &[ExternalEffect],
     intents: &[waddle_xmpp::ingress::IngressEffectIntent],
     route_progress: &[super::recorded::RouteProgress],
-) -> Result<(Vec<Vec<EffectReceiptKey>>, Vec<EffectReceiptKey>), crate::ingress_uow::IngressUowError>
+) -> Result<(Vec<Vec<EffectReceiptKey>>, Vec<EffectReceiptKey>), crate::ingress::uow::IngressUowError>
 {
     let mut external_receipts = super::durable::external_receipts(external, intents)?;
     // A progress-aware arm can own a strict subset of the frozen fanout.

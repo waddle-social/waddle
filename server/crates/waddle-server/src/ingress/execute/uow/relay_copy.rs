@@ -13,13 +13,13 @@ pub(super) enum LegacyRemoteAttempt {
 /// live remote wire. Its ordered channel owns enqueue FIFO; this does not prove
 /// canonical archive ordering or authorize any durable manifest settlement.
 pub(super) async fn attempt_before_readiness(
-    uow: &crate::ingress_uow::IngressUnitOfWork,
+    uow: &crate::ingress::uow::IngressUnitOfWork,
     decision: &super::IngressDecision,
     index: usize,
     effect: &ExternalDeliveryEffect,
     resource: &jid::FullJid,
     deps: &Deps<'_>,
-) -> Result<Option<LegacyRemoteAttempt>, crate::ingress_uow::IngressUowError> {
+) -> Result<Option<LegacyRemoteAttempt>, crate::ingress::uow::IngressUowError> {
     use crate::server::routes::interpret::{
         effects::ExternalEffect, DeliveryExecutionContext, SmIngressAppendContext,
     };

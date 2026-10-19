@@ -45,7 +45,7 @@ async fn ingress_append_authority(
     cases: &[AuthorityCase],
 ) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -172,7 +172,7 @@ async fn ingress_append_authority(
             assert_eq!(canonical_reads::count() - reads_before, 1);
             assert!(rx.try_recv().is_err(), "no second live copy");
             assert!(
-                crate::sm_persistence::ingress_append::get(&fixture.db, &ledger_key)
+                crate::sm::persistence::ingress_append::get(&fixture.db, &ledger_key)
                     .await
                     .expect("ledger read")
                     .is_none()
@@ -449,7 +449,7 @@ async fn ingress_append_authority(
                 .expect("session read")
                 .is_none());
             assert!(
-                crate::sm_persistence::ingress_append::get(&fixture.db, &ledger_key)
+                crate::sm::persistence::ingress_append::get(&fixture.db, &ledger_key)
                     .await
                     .expect("live recipient ledger read")
                     .is_none()
@@ -488,7 +488,7 @@ async fn ingress_append_authority(
         assert_eq!(queued_message.type_, message.type_);
         assert_eq!(queued_message.bodies, message.bodies);
         assert_eq!(
-            crate::sm_persistence::ingress_append::get(&fixture.db, &ledger_key)
+            crate::sm::persistence::ingress_append::get(&fixture.db, &ledger_key)
                 .await
                 .expect("ledger read")
                 .is_some(),

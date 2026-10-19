@@ -15,7 +15,7 @@ use waddle_xmpp::{
 };
 
 use crate::{
-    ingress_uow::{
+    ingress::uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
         IngressUnitOfWork, IngressUowError, IngressUowTransaction,
     },

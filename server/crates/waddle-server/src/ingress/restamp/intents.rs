@@ -31,7 +31,7 @@ impl Replacements {
     pub(super) fn intent(
         &self,
         intent: &mut IngressEffectIntent,
-    ) -> Result<(), crate::ingress_uow::IngressUowError> {
+    ) -> Result<(), crate::ingress::uow::IngressUowError> {
         match intent {
             IngressEffectIntent::DmCallThreadState { state, .. } => {
                 if let Some(id) = state

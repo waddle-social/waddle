@@ -124,7 +124,7 @@ async fn handle_muc_join(
     room_jid: &jid::BareJid,
     sender_jid: &jid::FullJid,
     nick: &str,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
     authenticated_session: &Option<crate::auth::Session>,
 ) -> Vec<String> {
     handle_muc_join_with_occupancy_session(
@@ -148,7 +148,7 @@ async fn handle_muc_join_with_occupancy_session(
     room_jid: &jid::BareJid,
     sender_jid: &jid::FullJid,
     nick: &str,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
     connection: (
         waddle_xmpp_core::OccupancySessionGeneration,
         &Option<crate::auth::Session>,
@@ -325,7 +325,7 @@ pub(crate) async fn create_test_websocket_state_with_sm_registry_pending_and_blo
 
 /// Build a test [`WebSocketState`] with clustering-enabled
 /// [`crate::clustering::ClusteringHandles`] and a caller-supplied SM-session
-/// registry (e.g. one backed by [`crate::sm_persistence_fenced::PostgresFencedSmPersistence`]
+/// registry (e.g. one backed by [`crate::sm::persistence::fenced::PostgresFencedSmPersistence`]
 /// pointed at the same Postgres database as the clustering claims tables) —
 /// used by `session_janitors.rs`'s orphan-reaper Postgres-gated end-to-end
 /// test, the only fixture that needs `state.deps.app_state.clustering_claims`

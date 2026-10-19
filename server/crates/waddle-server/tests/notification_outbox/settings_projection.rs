@@ -7,7 +7,7 @@
 
 use jid::BareJid;
 use minidom::Element;
-use waddle_server::notification_settings_projection::*;
+use waddle_server::notification::settings_projection::*;
 use waddle_xmpp::xep::NotificationLevel;
 
 fn bare(value: &str) -> BareJid {

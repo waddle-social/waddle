@@ -6,8 +6,8 @@ use super::{
     identity::IngressStreamIdentity,
     submission::IngressSubmission,
 };
-use crate::ingress_substrate::MessageEnvelope;
-use crate::ingress_uow::{
+use crate::ingress::substrate::MessageEnvelope;
+use crate::ingress::uow::{
     run_with_retry, CanonicalMessageRepository, DbRetryClass, EffectIntentRepository,
     IngressUnitOfWork, IngressUowError, IngressUowTransaction, ReconcileVerdict,
 };
@@ -77,7 +77,7 @@ pub async fn commit_submission(
 }
 
 pub fn classify_failure(error: &IngressUowError) -> IngressDecisionClass {
-    use crate::ingress_substrate::IngressSubstrateError;
+    use crate::ingress::substrate::IngressSubstrateError;
     match error {
         IngressUowError::Timeout | IngressUowError::Substrate(IngressSubstrateError::Timeout) => {
             IngressDecisionClass::Timeout
@@ -310,7 +310,7 @@ async fn commit_attempt(
     let mut unreceipted = Vec::new();
     for intent in &recorded {
         let receipt = super::durable::receipt_key(intent)?;
-        if !crate::ingress_uow::EffectReceiptRepository::contains(
+        if !crate::ingress::uow::EffectReceiptRepository::contains(
             &mut tx,
             key,
             receipt.kind,
@@ -634,7 +634,7 @@ async fn commit_attempt(
     // the acceptance, not with the retransmission.
     let received_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
     let all_progress =
-        crate::ingress_uow::DeliveryProgressRepository::load_all(&mut tx, key).await?;
+        crate::ingress::uow::DeliveryProgressRepository::load_all(&mut tx, key).await?;
     if sealed_manifest.is_none() {
         super::recorded::prepare_attempt_reflections(&mut plan, &submission.sender);
     }
@@ -648,7 +648,7 @@ async fn commit_attempt(
             continue;
         };
         super::reflection_dispatch::classify_progress(&mut progress, &intents);
-        if crate::ingress_uow::EffectReceiptRepository::contains(
+        if crate::ingress::uow::EffectReceiptRepository::contains(
             &mut tx,
             key,
             progress.receipt.kind,
@@ -677,7 +677,7 @@ async fn commit_attempt(
                 .iter()
                 .all(|target| progress.completed.contains(target))
         {
-            crate::ingress_uow::settle_recorded(&mut tx, key, &[progress.settle_evidence()])
+            crate::ingress::uow::settle_recorded(&mut tx, key, &[progress.settle_evidence()])
                 .await?;
             empty_muc = true;
         } else {
@@ -696,7 +696,7 @@ async fn commit_attempt(
         let mut complete = Vec::new();
         for intent in manifest.recorded_intents() {
             let receipt = super::receipt_key(intent)?;
-            if crate::ingress_uow::EffectReceiptRepository::contains(
+            if crate::ingress::uow::EffectReceiptRepository::contains(
                 &mut tx,
                 key,
                 receipt.kind,
@@ -828,7 +828,7 @@ async fn commit_attempt(
     let mut pending = Vec::new();
     for intent in &intents {
         let receipt = super::durable::receipt_key(intent)?;
-        if !crate::ingress_uow::EffectReceiptRepository::contains(
+        if !crate::ingress::uow::EffectReceiptRepository::contains(
             &mut tx,
             key,
             receipt.kind,
@@ -1087,7 +1087,7 @@ mod alias_denial_replay_tests;
 /// Live invitation delivery and its offline fallback are mutually exclusive.
 /// Repair a partially persisted pair before rebuilding any delivery effects.
 pub(super) async fn reconcile_invitation_delivery_receipts(
-    tx: &mut crate::ingress_uow::IngressUowTransaction<'_>,
+    tx: &mut crate::ingress::uow::IngressUowTransaction<'_>,
     key: waddle_xmpp::ingress::MessageKey,
     recorded: &[IngressEffectIntent],
     pending: &mut Vec<IngressEffectIntent>,
@@ -1121,7 +1121,7 @@ pub(super) async fn reconcile_invitation_delivery_receipts(
         for intent in [route, fallback] {
             if pending.contains(intent) {
                 let receipt = super::durable::receipt_key(intent)?;
-                crate::ingress_uow::EffectReceiptRepository::record_receipt(
+                crate::ingress::uow::EffectReceiptRepository::record_receipt(
                     tx,
                     key,
                     receipt.kind,

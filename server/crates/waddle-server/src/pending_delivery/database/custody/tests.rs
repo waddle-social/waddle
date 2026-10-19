@@ -9,7 +9,7 @@ async fn fixture(
     quota: QuotaPolicy,
 ) -> (
     DatabasePendingDeliveryStorage,
-    crate::sm_persistence::DatabaseSmPersistence,
+    crate::sm::persistence::DatabaseSmPersistence,
     PendingRow,
     PersistedIngressAppend,
 ) {
@@ -21,11 +21,11 @@ async fn fixture_at(
     database_url: Option<&str>,
 ) -> (
     DatabasePendingDeliveryStorage,
-    crate::sm_persistence::DatabaseSmPersistence,
+    crate::sm::persistence::DatabaseSmPersistence,
     PendingRow,
     PersistedIngressAppend,
 ) {
-    let sm = crate::sm_persistence::DatabaseSmPersistence::open(database_url)
+    let sm = crate::sm::persistence::DatabaseSmPersistence::open(database_url)
         .await
         .expect("SM store");
     let pending = DatabasePendingDeliveryStorage::from_database(sm.database(), quota)
@@ -60,7 +60,7 @@ async fn fixture_at(
     };
     let database = sm.database();
     let mut tx = database.begin_immediate().await.expect("seed transaction");
-    crate::sm_persistence::ingress_append::insert(&mut tx, &append)
+    crate::sm::persistence::ingress_append::insert(&mut tx, &append)
         .await
         .expect("seed custody");
     tx.commit().await.expect("seed commit");

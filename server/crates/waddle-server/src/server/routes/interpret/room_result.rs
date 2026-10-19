@@ -2,8 +2,8 @@
 use super::effects::{EffectSink, PlanSink};
 use super::*;
 use crate::{
+    ingress::uow::RoomPublication,
     ingress::{IngressPrincipal, IngressStreamIdentity, IngressSubmission},
-    ingress_uow::RoomPublication,
 };
 use minidom::rxml::{xml_ncname, Namespace};
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget, TransportGeneration};
@@ -12,8 +12,8 @@ use waddle_xmpp_core::xep0359::{add_origin_id, StanzaId};
 pub(crate) async fn plan_room_result(
     deps: &Deps<'_>,
     publication: RoomPublication,
-) -> Result<IngressSubmission, crate::room_observation::ObservationRuntimeError> {
-    use crate::room_observation::ObservationRuntimeError;
+) -> Result<IngressSubmission, crate::room::observation::ObservationRuntimeError> {
+    use crate::room::observation::ObservationRuntimeError;
     let room = publication.source.room.clone();
     let sender = room
         .clone()

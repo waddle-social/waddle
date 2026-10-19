@@ -1504,13 +1504,13 @@ pub(crate) async fn deliver_ordered_local_copy(
             (None, None) => return Some(FullJidDeliveryOutcome::MaybeCommitted),
         };
         match readiness {
-            Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+            Ok(crate::ingress::uow::DispatchReadiness::Completed) => {
                 return Some(FullJidDeliveryOutcome::Delivered);
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
+            Ok(crate::ingress::uow::DispatchReadiness::Blocked(_)) | Err(_) => {
                 return Some(FullJidDeliveryOutcome::MaybeCommitted);
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
+            Ok(crate::ingress::uow::DispatchReadiness::Ready) => {}
         }
     }
     let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());

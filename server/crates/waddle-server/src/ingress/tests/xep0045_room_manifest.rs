@@ -1,6 +1,6 @@
 //! XEP-0045 frozen room acceptance and crash/retry authority.
 use super::super::{commit::commit_submission, test_support::IngressFixture, *};
-use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
+use crate::ingress::uow::{CanonicalMessageRepository, EffectIntentRepository};
 use crate::server::routes::interpret::effects::{room::RoomFenceRequirement, RoomExecutionPath};
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, EffectMessageIdentity, EntityGeneration, IngressEffectIntent,
@@ -175,7 +175,7 @@ async fn postgres_clustered_dark_manifest_remains_authoritative_without_test_opt
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn postgres_clustered_legacy_remote_completion_releases_local_successor() {
-    use crate::ingress_uow::{
+    use crate::ingress::uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchTarget,
     };
     use crate::server::routes::interpret::{
@@ -433,7 +433,7 @@ async fn crash_mid_manifest_rolls_back_canonical_authority_and_every_child() {
     let mut submission = room_submission(&fixture);
     let stream = waddle_xmpp::pending_delivery::SmSessionId::new("manifest-stream");
     let mut tx = fixture.uow.begin().await.expect("mint stream");
-    let id = crate::ingress_uow::SmIngressStreamRepository::mint(&mut tx, &stream)
+    let id = crate::ingress::uow::SmIngressStreamRepository::mint(&mut tx, &stream)
         .await
         .expect("stream");
     tx.commit().await.expect("mint commit");
@@ -469,7 +469,7 @@ async fn crash_mid_manifest_rolls_back_canonical_authority_and_every_child() {
             .expect("recorded");
     assert!(envelope.room_manifest().is_some());
     assert_eq!(
-        crate::ingress_uow::SmIngressStreamRepository::load_stream_checkpoint(&mut tx, id)
+        crate::ingress::uow::SmIngressStreamRepository::load_stream_checkpoint(&mut tx, id)
             .await
             .expect("h"),
         Some(waddle_xmpp::ingress::WireHandledCount::from_storage(1))
@@ -607,7 +607,7 @@ async fn a_sealed_child_key_cannot_authorize_replacing_the_canonical_room_payloa
     assert!(CanonicalMessageRepository::record_room_canonical_envelope(
         &mut tx,
         key,
-        &crate::ingress_substrate::MessageEnvelope::new(replacement)
+        &crate::ingress::substrate::MessageEnvelope::new(replacement)
     )
     .await
     .is_err());

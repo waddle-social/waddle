@@ -1,5 +1,5 @@
 //! Production ingestion sites for the
-//! [`crate::notification_activity::NotificationActivityStore`].
+//! [`crate::notification::activity::NotificationActivityStore`].
 //!
 //! The store's `record_*` writers are called from the typed interpreter
 //! arms so the per-(user, conversation) projection reflects real user
@@ -23,7 +23,7 @@
 //! Each helper records activity for the *acting* user keyed against the
 //! conversation they acted on — never for the conversation's peer. The
 //! T1 evaluator looks up `(recipient, conversation)` in
-//! [`crate::notification_outbox::evaluate_push_gate_at_dispatch`], so
+//! [`crate::notification::outbox::evaluate_push_gate_at_dispatch`], so
 //! the projection grows from the recipient's own typed signals and the
 //! XEP-0513 `<active/>` filter resolves against the recipient's own
 //! recent activity.
@@ -32,7 +32,7 @@ use jid::BareJid;
 use tracing::{debug, warn};
 use xmpp_parsers::message::Message;
 
-use crate::notification_activity::{NotificationChatState, NotificationPresenceShow};
+use crate::notification::activity::{NotificationChatState, NotificationPresenceShow};
 use crate::server::routes::websocket::WebSocketState;
 use waddle_xmpp::ingress::{IngressEffectIntent, NotificationActivityMutation};
 use waddle_xmpp::xep::xep0085::{ChatState, ChatStateCarrier};
@@ -41,13 +41,13 @@ use waddle_xmpp::xep::xep0203::has_delay;
 use super::Deps;
 
 /// The production
-/// [`crate::notification_activity::NotificationActivityStore`] for
+/// [`crate::notification::activity::NotificationActivityStore`] for
 /// `owner`'s activity. Activity belongs to accounts: an extension bot is
 /// server-spoken, so its posts, joins and leaves record none.
 fn account_activity_store<'a>(
     state: &'a WebSocketState,
     owner: &BareJid,
-) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
+) -> Option<&'a crate::notification::activity::NotificationActivityStore> {
     state
         .deps
         .service_domains
@@ -61,7 +61,7 @@ fn account_activity_store<'a>(
 fn activity_store<'a>(
     deps: &'a Deps<'_>,
     owner: &BareJid,
-) -> Option<&'a crate::notification_activity::NotificationActivityStore> {
+) -> Option<&'a crate::notification::activity::NotificationActivityStore> {
     deps.web_socket_state
         .and_then(|state| account_activity_store(state, owner))
 }

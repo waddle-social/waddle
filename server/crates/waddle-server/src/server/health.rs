@@ -609,7 +609,7 @@ mod readiness_generation_tests {
             blob_storage,
             inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
             spaces_metadata_store: Arc::new(
-                crate::spaces_metadata::InMemorySpacesMetadataStore::new(),
+                crate::spaces::metadata::InMemorySpacesMetadataStore::new(),
             ),
             channel_space_link_store: Arc::new(
                 crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),

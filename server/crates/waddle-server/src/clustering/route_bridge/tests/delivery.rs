@@ -1,6 +1,6 @@
 use super::*;
-use crate::room_effect_outbox::drain::drain_due_effects;
-use crate::room_effect_outbox::{
+use crate::room::effect_outbox::drain::drain_due_effects;
+use crate::room::effect_outbox::{
     RoomEffectEnqueue, RoomEffectKey, RoomEffectLastError, RoomEffectOriginInstanceId,
     RoomEffectProducingNode,
 };
@@ -340,12 +340,12 @@ enum RemotePredecessorCase {
 }
 
 async fn remote_socket_rechecks_archive_predecessor(case: RemotePredecessorCase) {
+    use crate::ingress::uow::{
+        ArchiveDispatchRepository, CanonicalMessageRepository, EffectReceiptRepository,
+    };
     use crate::ingress::{
         commit::commit_submission, execute::test_hooks, identity::IngressAppendObligationRef,
         test_support::IngressFixture,
-    };
-    use crate::ingress_uow::{
-        ArchiveDispatchRepository, CanonicalMessageRepository, EffectReceiptRepository,
     };
     use crate::server::routes::interpret::effects::{
         direct::DurableDirectEffect, DurableEffect, Effect, PlannedEffect,
@@ -548,8 +548,8 @@ async fn remote_socket_xep0313_rechecks_retain_the_original_connection_owner() {
 #[test]
 fn registered_remote_frame_carries_the_executors_ingress_obligation() {
     use super::super::delivery::remote_socket::remote_resource_frame;
+    use crate::ingress::substrate::EffectReceiptKind;
     use crate::ingress::EffectReceiptKey;
-    use crate::ingress_substrate::EffectReceiptKind;
     use crate::server::routes::interpret::SmIngressAppendContext;
     use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 

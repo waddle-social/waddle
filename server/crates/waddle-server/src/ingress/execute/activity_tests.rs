@@ -1,6 +1,6 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
-use crate::notification_activity::{
+use crate::notification::activity::{
     NotificationActivityReader, NotificationActivityStore, NotificationChatState,
 };
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;

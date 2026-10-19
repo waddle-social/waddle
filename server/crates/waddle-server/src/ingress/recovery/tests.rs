@@ -13,7 +13,7 @@ use waddle_server::{
         execute::execute_effects,
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink,
     },
-    notification_outbox::{
+    notification::outbox::{
         NotificationCandidate, NotificationClass, NotificationOutboxStore, NotificationThreadId,
     },
 };

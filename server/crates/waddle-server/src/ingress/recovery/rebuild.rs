@@ -4,8 +4,8 @@ use super::super::{
     recorded::RouteProgress,
 };
 use crate::{
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::{IngressUowError, ReconcileVerdict},
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::{IngressUowError, ReconcileVerdict},
     server::routes::{
         interpret::effects::{
             delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect, Effect, ExternalEffect,

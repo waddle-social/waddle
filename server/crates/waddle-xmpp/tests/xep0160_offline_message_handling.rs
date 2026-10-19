@@ -102,8 +102,8 @@ fn xep0160_treats_negative_priority_resources_as_unavailable_for_storage() {
 // covered by the storage-trait contract (`InsertOutcome::QuotaExceeded`
 // when over `QuotaPolicy::CountCap`) plus the dedicated server-side
 // integration test
-// `sm_promotion::tests::bounces_service_unavailable_when_quota_exceeded`
-// in `server/crates/waddle-server/src/sm_promotion.rs` (which exercises
+// `sm::promotion::tests::bounces_service_unavailable_when_quota_exceeded`
+// in `server/crates/waddle-server/src/sm/promotion.rs` (which exercises
 // the quota → bounce path through the actual flush/promotion pipeline).
 // See also the storage-layer tests
 // `pending_delivery::storage::tests::quota_exceeded_returns_outcome` and
@@ -612,8 +612,8 @@ fn xep0160_hints_in_error_stanzas_are_ignored() {
 
 // XEP-0160 SM-expiry promotion path (locked Q6 = B priority chain:
 // alt-resource → offline-storage → service-unavailable bounce) is
-// covered by the dedicated `sm_promotion::tests` module in
-// `server/crates/waddle-server/src/sm_promotion.rs`:
+// covered by the dedicated `sm::promotion::tests` module in
+// `server/crates/waddle-server/src/sm/promotion.rs`:
 //
 //   - `promotes_to_alt_resource_when_one_is_online` — Q6 step 1
 //   - `promotes_to_pending_delivery_when_no_alt_resource` — Q6 step 2
@@ -630,11 +630,11 @@ fn xep0160_hints_in_error_stanzas_are_ignored() {
 // pointer-comments the promotion half to its test home.
 
 // XEP-0160 Q6b "promotion filter delegates to classify_dm_intake" is
-// pinned by the structural fact that `sm_promotion::promote_one`
+// pinned by the structural fact that `sm::promotion::promote_one`
 // calls `classify_dm_intake(message, online, blocklist)` directly —
-// see `server/crates/waddle-server/src/sm_promotion.rs:155` (line
+// see `server/crates/waddle-server/src/sm/promotion.rs:155` (line
 // number stable since PR #346). Any Q6 promotion test in
-// `sm_promotion::tests::*` is therefore also a classifier-reuse
+// `sm::promotion::tests::*` is therefore also a classifier-reuse
 // test by construction. Trying to re-test it here would just be
 // asserting against a lint-suppressed re-export of the
 // classifier, which adds no value.

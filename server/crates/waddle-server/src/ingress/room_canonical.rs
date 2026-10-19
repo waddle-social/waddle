@@ -1,5 +1,5 @@
 //! Frozen room payloads and their provenance at the replay boundary.
-use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress::substrate::MessageEnvelope;
 use jid::{BareJid, FullJid};
 use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 use xmpp_parsers::message::{Message, MessageType};

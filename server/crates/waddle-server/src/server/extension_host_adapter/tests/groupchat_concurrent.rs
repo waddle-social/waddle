@@ -1,10 +1,10 @@
 use super::{direct_ingress, groupchat_ingress::GroupchatFixture};
 use crate::{
+    ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     ingress::{
         nested::{TestGate, TEST_BEFORE_SETTLEMENT},
         test_support::IngressFixture,
     },
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     server::routes::interpret,
 };
 use std::{

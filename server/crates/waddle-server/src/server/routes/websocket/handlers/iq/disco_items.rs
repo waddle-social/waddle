@@ -509,7 +509,7 @@ pub(super) async fn handle_disco_items_iq(
                                     continue;
                                 };
                                 let visible = match requester.as_ref() {
-                                    Some(requester) => crate::pubsub_authz::can_subscribe(
+                                    Some(requester) => crate::pubsub::authz::can_subscribe(
                                         &state.deps.protocol.pubsub_storage,
                                         &spaces_jid,
                                         &node,

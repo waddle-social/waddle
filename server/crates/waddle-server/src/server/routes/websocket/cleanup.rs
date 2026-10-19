@@ -1017,7 +1017,7 @@ async fn cleanup_connection_shutdown_inner(
                     outbound_rx,
                     &jid,
                     conn,
-                    vec![crate::sm_promotion::PromotionSessionGuard::new(
+                    vec![crate::sm::promotion::PromotionSessionGuard::new(
                         &state.deps.protocol.sm_session_registry,
                         detached,
                     )],
@@ -1035,7 +1035,7 @@ async fn cleanup_connection_shutdown_inner(
                         outbound_rx,
                         &jid,
                         conn,
-                        vec![crate::sm_promotion::PromotionSessionGuard::new(
+                        vec![crate::sm::promotion::PromotionSessionGuard::new(
                             &state.deps.protocol.sm_session_registry,
                             detached,
                         )],
@@ -1085,9 +1085,9 @@ async fn cleanup_connection_shutdown_inner(
                     // else in this arm — the early-return below must not
                     // skip it.
                     if !displaced.is_empty() {
-                        crate::sm_promotion::promote_displaced_sessions(
+                        crate::sm::promotion::promote_displaced_sessions(
                             displaced.clone(),
-                            crate::sm_promotion::DisplacedPromotionDeps {
+                            crate::sm::promotion::DisplacedPromotionDeps {
                                 sm_registry: &state.deps.protocol.sm_session_registry,
                                 connection_registry: &state.deps.protocol.connection_registry,
                                 user_registry: &state.deps.protocol.user_registry,
@@ -1130,9 +1130,9 @@ async fn cleanup_connection_shutdown_inner(
                             .await
                         {
                             Ok(Some(displaced)) => {
-                                let outcome = crate::sm_promotion::promote_displaced_sessions(
+                                let outcome = crate::sm::promotion::promote_displaced_sessions(
                                     vec![displaced],
-                                    crate::sm_promotion::DisplacedPromotionDeps {
+                                    crate::sm::promotion::DisplacedPromotionDeps {
                                         sm_registry: &state.deps.protocol.sm_session_registry,
                                         connection_registry: &state
                                             .deps
@@ -1349,9 +1349,9 @@ async fn cleanup_connection_shutdown_inner(
                         Ok(stranded) if !stranded.is_empty() => {
                             recovered_any = true;
                             let promotion_outcome =
-                                crate::sm_promotion::promote_displaced_sessions(
+                                crate::sm::promotion::promote_displaced_sessions(
                                     stranded.clone(),
-                                    crate::sm_promotion::DisplacedPromotionDeps {
+                                    crate::sm::promotion::DisplacedPromotionDeps {
                                         sm_registry: &state.deps.protocol.sm_session_registry,
                                         connection_registry: &state
                                             .deps
@@ -1642,7 +1642,7 @@ enum TerminalRouteRemoval {
 }
 
 struct TerminalRecoverySessionResult<'a> {
-    custody: crate::sm_promotion::PromotionSessionGuard<'a>,
+    custody: crate::sm::promotion::PromotionSessionGuard<'a>,
     released_pending_rows: bool,
     queued_pending_rows: bool,
     release_failed_pending_rows: bool,
@@ -1784,7 +1784,7 @@ async fn promote_terminal_recovery_inner(
     detached.promotion_custody = promotion_capture_custody(conn);
     // Capture every already-recorded terminal frame before any backend await.
     capture_terminal_recovery_backlog(conn, &mut detached, detached_snapshot);
-    let mut custody = crate::sm_promotion::PromotionSessionGuard::new(
+    let mut custody = crate::sm::promotion::PromotionSessionGuard::new(
         &state.deps.protocol.sm_session_registry,
         detached,
     );
@@ -1800,14 +1800,14 @@ async fn promote_terminal_recovery_inner(
         // The captured queue is durable and guarded before waiting for admitted
         // ingress commits to quiesce; no source is released or promoted yet.
         let _ = forget_terminal_ingress_stream_and_wait(state, &conn.sm_state).await;
-        crate::sm_promotion::release_row_backed_replay_copies(
+        crate::sm::promotion::release_row_backed_replay_copies(
             &state.deps.protocol.sm_session_registry,
             &state.deps.protocol.pending_delivery_storage,
             custody.session_mut(),
         )
         .await
     } else {
-        crate::sm_promotion::RowBackedReleaseOutcome {
+        crate::sm::promotion::RowBackedReleaseOutcome {
             ownership_unknown: true,
             ..Default::default()
         }
@@ -2283,7 +2283,7 @@ async fn terminal_recovery_session<'a>(
     state: &WebSocketState,
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     conn: &mut WsConnState,
-    mut custody: crate::sm_promotion::PromotionSessionGuard<'a>,
+    mut custody: crate::sm::promotion::PromotionSessionGuard<'a>,
     can_promote_incrementally: bool,
 ) -> TerminalRecoverySessionResult<'a> {
     outbound_rx.close();
@@ -2307,7 +2307,7 @@ async fn terminal_recovery_session<'a>(
             None
         }
     };
-    let recent_tombstones = crate::sm_promotion::recent_tombstones_for_promotion(
+    let recent_tombstones = crate::sm::promotion::recent_tombstones_for_promotion(
         &state.deps.protocol.sm_session_registry,
         "terminal recovery overflow promotion",
     )
@@ -2373,7 +2373,7 @@ pub(super) async fn persist_terminal_suffix_entry(
         .stanza_xml
         .parse::<xmpp_parsers::minidom::Element>()
         .ok()
-        .and_then(|element| crate::sm_persistence::codec::parse_stanza(element).ok())
+        .and_then(|element| crate::sm::persistence::codec::parse_stanza(element).ok())
     else {
         warn!(%stream_id, sequence = stanza.sequence,
             "terminal inventory entry is not a valid stanza");
@@ -2484,15 +2484,15 @@ async fn promote_terminal_recovery_prefix(
                     continue;
                 }
             };
-        let item_tombstones = crate::sm_promotion::recent_tombstones_for_promotion(
+        let item_tombstones = crate::sm::promotion::recent_tombstones_for_promotion(
             &state.deps.protocol.sm_session_registry,
             "terminal recovery prefix promotion",
         )
         .unwrap_or_else(|_| recent_tombstones.to_vec());
-        let summary = crate::sm_promotion::promote_terminal_overflow_entry(
+        let summary = crate::sm::promotion::promote_terminal_overflow_entry(
             detached,
             entry.clone(),
-            crate::sm_promotion::TerminalOverflowPromotionDeps {
+            crate::sm::promotion::TerminalOverflowPromotionDeps {
                 sm_registry: &state.deps.protocol.sm_session_registry,
                 registry: &state.deps.protocol.connection_registry,
                 user_registry: &state.deps.protocol.user_registry,
@@ -2509,7 +2509,7 @@ async fn promote_terminal_recovery_prefix(
                 .unacked_stanzas
                 .retain(|queued| queued.sequence != entry.sequence);
         }
-        crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+        crate::sm::promotion::scrub_pending_for_tombstones_recorded_during_promotion(
             &state.deps.protocol.sm_session_registry,
             &state.deps.protocol.pending_delivery_storage,
             &item_tombstones,
@@ -2582,7 +2582,7 @@ async fn refuse_detach_without_principal(
     outbound_rx: &mut mpsc::Receiver<OutboundStanza>,
     jid: &FullJid,
     conn: &mut WsConnState,
-    mut detached_sessions: Vec<crate::sm_promotion::PromotionSessionGuard<'_>>,
+    mut detached_sessions: Vec<crate::sm::promotion::PromotionSessionGuard<'_>>,
     row_recovery: TerminalRowRecovery,
     terminal_route_removal: TerminalRouteRemoval,
 ) -> ConnectionShutdownOutcome {
@@ -2651,7 +2651,7 @@ async fn refuse_detach_without_principal(
                 .stream_id
                 .as_deref()
                 .is_some_and(|stream_id| stream_id == session.stream_id);
-            let retained = if crate::sm_promotion::reinsert_failed_session_for_retry(
+            let retained = if crate::sm::promotion::reinsert_failed_session_for_retry(
                 &state.deps.protocol.sm_session_registry,
                 session,
             )
@@ -2666,9 +2666,9 @@ async fn refuse_detach_without_principal(
         }
         (conn_stream_retrying, false)
     } else {
-        let outcome = crate::sm_promotion::promote_guarded_sessions(
+        let outcome = crate::sm::promotion::promote_guarded_sessions(
             detached_sessions,
-            crate::sm_promotion::DisplacedPromotionDeps {
+            crate::sm::promotion::DisplacedPromotionDeps {
                 sm_registry: &state.deps.protocol.sm_session_registry,
                 connection_registry: &state.deps.protocol.connection_registry,
                 user_registry: &state.deps.protocol.user_registry,

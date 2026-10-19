@@ -50,7 +50,7 @@ async fn handle_muc_join(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
     authenticated_session: &Option<Session>,
 ) -> Vec<String> {
     super::handle_muc_join_with_occupancy_session(
@@ -4963,7 +4963,7 @@ async fn managed_space_bookmark_join_repairs_only_projected_parent_tuple() {
             space_jid: format!("beta@{}", spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("beta"),
+            space_node: crate::spaces::identity::SpaceNode::from("beta"),
             created_at: 0,
         })
         .await
@@ -7026,7 +7026,7 @@ async fn same_nick_active_leave_broadcasts_departed_clear_before_preparing_sibli
 /// nothing in production called it. The test guards the wire-in.
 #[tokio::test]
 async fn handle_muc_join_records_notification_activity_for_sender() {
-    use crate::notification_activity::NotificationActivityReader;
+    use crate::notification::activity::NotificationActivityReader;
 
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -7052,7 +7052,7 @@ async fn handle_muc_join_records_notification_activity_for_sender() {
         &room_jid,
         &alice,
         "alice",
-        Some(crate::notification_activity::NotificationPresenceShow::Away),
+        Some(crate::notification::activity::NotificationPresenceShow::Away),
         &Some(owner_session),
     )
     .await;
@@ -7072,7 +7072,7 @@ async fn handle_muc_join_records_notification_activity_for_sender() {
     );
     assert_eq!(
         after.presence_show,
-        Some(crate::notification_activity::NotificationPresenceShow::Away),
+        Some(crate::notification::activity::NotificationPresenceShow::Away),
         "join MUST persist the typed `<show/>` token; got {:?}",
         after.presence_show,
     );
@@ -7083,7 +7083,7 @@ async fn handle_muc_join_records_notification_activity_for_sender() {
 /// `<show/>` (an explicit unavailable has no available presence).
 #[tokio::test]
 async fn handle_muc_leave_records_notification_activity_and_clears_show() {
-    use crate::notification_activity::NotificationActivityReader;
+    use crate::notification::activity::NotificationActivityReader;
 
     let state = create_test_websocket_state().await;
     let owner_session = create_test_server_owner_session(state.as_ref(), "alice").await;
@@ -7096,7 +7096,7 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         &room_jid,
         &alice,
         "alice",
-        Some(crate::notification_activity::NotificationPresenceShow::Chat),
+        Some(crate::notification::activity::NotificationPresenceShow::Chat),
         &Some(owner_session),
     )
     .await;
@@ -7110,7 +7110,7 @@ async fn handle_muc_leave_records_notification_activity_and_clears_show() {
         .expect("activity post-join");
     assert_eq!(
         after_join.presence_show,
-        Some(crate::notification_activity::NotificationPresenceShow::Chat)
+        Some(crate::notification::activity::NotificationPresenceShow::Chat)
     );
 
     // No sleep needed: the monotonic UPSERTs in

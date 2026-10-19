@@ -3,7 +3,7 @@ use super::permissions::{
 };
 use super::*;
 use crate::server::routes::websocket::ResolvedPrincipal;
-use crate::space_identity::{space_jid_for_node, SpaceNode};
+use crate::spaces::identity::{space_jid_for_node, SpaceNode};
 
 fn is_pubsub_attachment_or_summary_node(node: &str) -> bool {
     node.starts_with(&format!(
@@ -137,7 +137,7 @@ pub(super) async fn handle_pubsub_admin_request(
 
         PubSubRequest::ConfigureNode { node } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            if !crate::pubsub_authz::can_administer(
+            if !crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -166,7 +166,7 @@ pub(super) async fn handle_pubsub_admin_request(
 
         PubSubRequest::DeleteNode { node } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            if !crate::pubsub_authz::can_administer(
+            if !crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -214,7 +214,7 @@ pub(super) async fn handle_pubsub_admin_request(
             }
 
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            match crate::pubsub_authz::can_subscribe(
+            match crate::pubsub::authz::can_subscribe(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -300,7 +300,7 @@ pub(super) async fn handle_pubsub_admin_request(
         }
         PubSubRequest::PurgeNode { node } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            match crate::pubsub_authz::can_administer(
+            match crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -342,7 +342,7 @@ pub(super) async fn handle_pubsub_admin_request(
             config: config_patch,
         } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            if !crate::pubsub_authz::can_administer(
+            if !crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -451,7 +451,7 @@ pub(super) async fn handle_pubsub_admin_request(
 
         PubSubRequest::AffiliationsGet { node } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            if !crate::pubsub_authz::can_administer(
+            if !crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -476,7 +476,7 @@ pub(super) async fn handle_pubsub_admin_request(
 
         PubSubRequest::AffiliationsSet { node, changes } => {
             let is_pep = is_pep_self_or_to(iq, target_jid, user_jid);
-            if !crate::pubsub_authz::can_administer(
+            if !crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -517,7 +517,7 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
             }
-            if !crate::pubsub_authz::can_administer(
+            if !crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,
@@ -554,7 +554,7 @@ pub(super) async fn handle_pubsub_admin_request(
             {
                 return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::NodeNotFound))];
             }
-            if !crate::pubsub_authz::can_administer(
+            if !crate::pubsub::authz::can_administer(
                 &state.deps.protocol.pubsub_storage,
                 target_jid,
                 &node,

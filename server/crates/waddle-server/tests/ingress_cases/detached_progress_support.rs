@@ -10,7 +10,7 @@ use waddle_server::{
         Deps, ExternalEffect, ImmediateSink, IngressDecision, IngressDecisionClass,
         IngressSubmission, PlannedEffect,
     },
-    sm_persistence::DatabaseSmPersistence,
+    sm::persistence::DatabaseSmPersistence,
 };
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, IngressEffectIntent},

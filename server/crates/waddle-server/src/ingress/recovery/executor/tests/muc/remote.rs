@@ -35,7 +35,7 @@ async fn settle_legacy_initial_effects(
     super::departed::settle_non_delivery_effects(f, state, decision).await;
     let key = decision.message_key.expect("key");
     let mut tx = f.uow.begin().await.expect("remaining original obligation");
-    let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let recorded = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("recorded");
     let receipts = EffectReceiptRepository::keys(&mut tx, key)
@@ -88,7 +88,7 @@ async fn owned_recovery(f: IngressFixture, recovering_local: bool) {
         .await
         .expect("load")
         .expect("envelope");
-    let recorded = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let recorded = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("recorded");
     let receipt_keys = EffectReceiptRepository::keys(&mut tx, key)
@@ -1743,7 +1743,7 @@ async fn legacy_unrebuildable_row(
     CanonicalMessageRepository::record_room_canonical_envelope(
         &mut tx,
         key,
-        &crate::ingress_substrate::MessageEnvelope::new(submission.plan.sanitized_message.clone()),
+        &crate::ingress::substrate::MessageEnvelope::new(submission.plan.sanitized_message.clone()),
     )
     .await
     .expect("old real-sender envelope");

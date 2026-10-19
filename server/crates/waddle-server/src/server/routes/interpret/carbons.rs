@@ -317,7 +317,7 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
         if let (Some(database), Some(context)) =
             (database, delivery.ingress_append_context.as_ref())
         {
-            match crate::ingress_uow::CarbonReceiptRepository::attempted_resources(
+            match crate::ingress::uow::CarbonReceiptRepository::attempted_resources(
                 database,
                 context.message_key,
                 &context.receipt,

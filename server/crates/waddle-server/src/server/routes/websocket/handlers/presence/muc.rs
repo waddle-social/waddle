@@ -25,7 +25,7 @@ pub async fn handle_muc_join(
     room_jid: &BareJid,
     sender_jid: &FullJid,
     nick: &str,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
     connection: MucJoinConnectionContext<'_>,
 ) -> Vec<String> {
     handle_muc_join_with_ordered_relay(
@@ -78,7 +78,7 @@ pub struct MucJoinRequest<'a> {
     pub room_jid: &'a BareJid,
     pub sender_jid: &'a FullJid,
     pub nick: &'a str,
-    pub presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    pub presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     pub authenticated_session: &'a Option<Session>,
     pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -90,7 +90,7 @@ struct MucJoinWork<'a> {
     room_jid: &'a BareJid,
     sender_jid: &'a FullJid,
     nick: String,
-    presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+    presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     authenticated_session: &'a Option<Session>,
@@ -3426,7 +3426,7 @@ mod occupancy_projection_handler_tests {
         room_jid: &BareJid,
         sender_jid: &FullJid,
         nick: &str,
-        presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
+        presence_show: Option<crate::notification::activity::NotificationPresenceShow>,
         authenticated_session: &Option<Session>,
     ) -> Vec<String> {
         super::handle_muc_join(

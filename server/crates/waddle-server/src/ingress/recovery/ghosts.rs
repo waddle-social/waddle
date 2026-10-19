@@ -115,7 +115,7 @@ use waddle_xmpp::{
 use waddle_xmpp_core::OccupancySessionGeneration;
 
 use crate::{
-    ingress_uow::{
+    ingress::uow::{
         CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
         EffectReceiptRepository, IngressUnitOfWork, IngressUowError,
     },

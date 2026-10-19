@@ -1,7 +1,7 @@
 //! Exact routing for effects that commit their work and receipts together.
 use crate::{
     db::Database,
-    ingress_uow::IngressUnitOfWork,
+    ingress::uow::IngressUnitOfWork,
     server::routes::interpret::{
         effects::{
             delivery::ExternalDeliveryEffect, direct::ExternalDirectEffect,
@@ -177,7 +177,7 @@ pub(in crate::ingress) async fn execute_with_uow(
             let Some(key) = decision.message_key else {
                 return Some(EffectOutcome::Unavailable);
             };
-            let (envelope, _) = match crate::ingress_uow::CarbonReceiptRepository::load_authority(
+            let (envelope, _) = match crate::ingress::uow::CarbonReceiptRepository::load_authority(
                 uow.database(),
                 key,
             )

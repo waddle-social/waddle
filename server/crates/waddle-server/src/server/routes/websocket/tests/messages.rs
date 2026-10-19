@@ -27,7 +27,7 @@ fn dm_call_message(from: &str, to: &str, payload: Element) -> xmpp_parsers::mess
 
 #[tokio::test]
 async fn muc_pm_sender_archive_uses_typed_tuple_for_ancillary_projections() {
-    use crate::notification_activity::NotificationActivityReader;
+    use crate::notification::activity::NotificationActivityReader;
 
     let state = create_test_websocket_state().await;
     let sender: BareJid = "alice@example.com".parse().expect("sender bare jid");
@@ -534,11 +534,12 @@ async fn drain_notification_candidates_for_test(state: &WebSocketState) -> usize
         .push
         .parse()
         .expect("push service jid");
-    let room_policy =
-        crate::room_policy::RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
-    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let room_policy = crate::room::policy::RoomRegistryActorPolicy::new(
+        state.deps.protocol.room_registry.clone(),
+    );
+    let dnd_reader = crate::notification::outbox::NoopDndReader;
     let activity_reader = state.deps.protocol.notification_activity.as_ref();
-    let deps = crate::notification_outbox::NotificationDrainDeps::new(
+    let deps = crate::notification::outbox::NotificationDrainDeps::new(
         &room_policy,
         &dnd_reader,
         activity_reader,
@@ -601,10 +602,10 @@ async fn register_first_party_push_for_test(
         .push_service
         .upsert_device(
             recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 device_id,
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -651,10 +652,10 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -867,7 +868,7 @@ async fn queue_offline_delivery_publishes_first_party_xep0357_notification_witho
     }));
     assert!(stored_payload.children().any(|child| child.is(
         "context",
-        crate::notification_outbox::WADDLE_PUSH_CONTEXT_NS
+        crate::notification::outbox::WADDLE_PUSH_CONTEXT_NS
     )));
 
     let registrations = state
@@ -924,10 +925,10 @@ async fn queue_offline_delivery_persists_candidate_before_xep0357_registration_e
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -1027,10 +1028,10 @@ async fn queue_offline_delivery_preserves_frozen_candidate_when_mam_row_is_missi
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -1140,10 +1141,10 @@ async fn drive_xep0492_direct_chat_push_gate_with_state(
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -1160,15 +1161,15 @@ async fn drive_xep0492_direct_chat_push_gate_with_state(
         .deps
         .protocol
         .notification_settings_projection
-        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&crate::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: recipient.clone(),
             conversation_jid: sender.clone(),
-            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            conversation_kind: crate::notification::settings_projection::ConversationKind::Direct,
             mode: level,
             rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
-            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source: crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: sender.clone(),
         })
         .await
@@ -1337,10 +1338,10 @@ async fn drive_xep0492_direct_chat_emission_shape_with_state(
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -1357,15 +1358,15 @@ async fn drive_xep0492_direct_chat_emission_shape_with_state(
         .deps
         .protocol
         .notification_settings_projection
-        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&crate::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: recipient.clone(),
             conversation_jid: sender.clone(),
-            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            conversation_kind: crate::notification::settings_projection::ConversationKind::Direct,
             mode: level,
             rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
-            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source: crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: sender.clone(),
         })
         .await
@@ -1600,7 +1601,7 @@ async fn groupchat_personal_mention_pushes_affiliated_non_live_member() {
     );
     assert_eq!(
         jobs[0].class(),
-        crate::notification_outbox::NotificationClass::PersonalMention
+        crate::notification::outbox::NotificationClass::PersonalMention
     );
 }
 
@@ -1689,7 +1690,7 @@ async fn groupchat_xep0513_occupant_id_mention_pushes_affiliated_member() {
     assert_eq!(jobs[0].recipient_bare_jid(), &recipient);
     assert_eq!(
         jobs[0].class(),
-        crate::notification_outbox::NotificationClass::PersonalMention
+        crate::notification::outbox::NotificationClass::PersonalMention
     );
 }
 
@@ -1741,17 +1742,17 @@ async fn groupchat_xep0492_never_suppresses_personal_mentions_and_plain_messages
             .deps
             .protocol
             .notification_settings_projection
-            .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+            .upsert(&crate::notification::settings_projection::NotificationSettingsProjection {
                 owner_bare_jid: recipient.clone(),
                 conversation_jid: room_jid.clone(),
                 conversation_kind:
-                    crate::notification_settings_projection::ConversationKind::PublicGroup,
+                    crate::notification::settings_projection::ConversationKind::PublicGroup,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
                 rich_payload_opt_in: false,
                 source_version: 1,
                 updated_at_ms: crate::time::now_ms(),
                 source:
-                    crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                    crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: room_jid.clone(),
             })
             .await
@@ -1996,17 +1997,17 @@ async fn groupchat_public_default_suppresses_plain_push_until_always() {
                 .protocol
                 .notification_settings_projection
                 .upsert(
-                    &crate::notification_settings_projection::NotificationSettingsProjection {
+                    &crate::notification::settings_projection::NotificationSettingsProjection {
                         owner_bare_jid: recipient.clone(),
                         conversation_jid: room_jid.clone(),
                         conversation_kind:
-                            crate::notification_settings_projection::ConversationKind::PublicGroup,
+                            crate::notification::settings_projection::ConversationKind::PublicGroup,
                         mode: level,
                         rich_payload_opt_in: false,
                         source_version: 1,
                         updated_at_ms: crate::time::now_ms(),
                         source:
-                            crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                            crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                         source_item_jid: room_jid.clone(),
                     },
                 )
@@ -2252,7 +2253,7 @@ async fn groupchat_active_channel_mention_pushes_live_occupants_only() {
     assert_eq!(jobs[0].conversation_jid(), &room_jid);
     assert_eq!(
         jobs[0].class(),
-        crate::notification_outbox::NotificationClass::ActiveChannelMention
+        crate::notification::outbox::NotificationClass::ActiveChannelMention
     );
 }
 
@@ -2459,7 +2460,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         .expect("bob active-channel job");
     assert_eq!(
         bob_job.class(),
-        crate::notification_outbox::NotificationClass::ActiveChannelMention
+        crate::notification::outbox::NotificationClass::ActiveChannelMention
     );
     let charlie_job = jobs
         .iter()
@@ -2467,7 +2468,7 @@ async fn groupchat_active_channel_mention_preserves_notify_all_for_non_live_alwa
         .expect("charlie notify-all job");
     assert_eq!(
         charlie_job.class(),
-        crate::notification_outbox::NotificationClass::NotifyAll
+        crate::notification::outbox::NotificationClass::NotifyAll
     );
 }
 
@@ -2506,10 +2507,10 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2526,15 +2527,15 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
         .deps
         .protocol
         .notification_settings_projection
-        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&crate::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: recipient.clone(),
             conversation_jid: sender.clone(),
-            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            conversation_kind: crate::notification::settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::Never,
             rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
-            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source: crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: sender.clone(),
         })
         .await
@@ -2612,7 +2613,7 @@ async fn queue_offline_delivery_suppresses_xep0357_when_xep0492_direct_chat_is_n
 /// different crates / fixture styles; one wire-level shot is the
 /// economical place to assert the joint invariant. Per-XEP unit
 /// coverage of the audit + suppression decisions lives in
-/// `notification_outbox::tests` (slice 2a storage-preservation
+/// `notification::outbox::tests` (slice 2a storage-preservation
 /// suite).
 #[tokio::test]
 async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit() {
@@ -2643,15 +2644,15 @@ async fn xep0357_suppression_preserves_mam_inbox_pending_delivery_and_audit_scen
         .deps
         .protocol
         .notification_settings_projection
-        .upsert(&crate::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&crate::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: recipient.clone(),
             conversation_jid: sender.clone(),
-            conversation_kind: crate::notification_settings_projection::ConversationKind::Direct,
+            conversation_kind: crate::notification::settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::Never,
             rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: crate::time::now_ms(),
-            source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+            source: crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: sender.clone(),
         })
         .await
@@ -2872,10 +2873,10 @@ async fn queue_offline_delivery_suppresses_xep0357_for_transient_no_permanent_st
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2957,10 +2958,10 @@ async fn notification_candidate_recovery_rebuilds_from_committed_pending_deliver
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -3060,10 +3061,10 @@ async fn notification_candidate_recovery_preserves_sender_resource_from_archived
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -3163,10 +3164,10 @@ async fn notification_candidate_recovery_skips_full_mam_sender_when_stanza_sende
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -3282,10 +3283,10 @@ async fn notification_candidate_recovery_skips_bare_stanza_sender_even_with_full
         .push_service
         .upsert_device(
             &recipient,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )

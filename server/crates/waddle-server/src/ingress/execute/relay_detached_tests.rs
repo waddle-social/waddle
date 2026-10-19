@@ -13,7 +13,7 @@ use waddle_xmpp::{
 
 async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: bool) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -148,7 +148,7 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: boo
         resource: recipient.clone(),
     };
     assert!(
-        crate::sm_persistence::ingress_append::get(&fixture.db, &append_key)
+        crate::sm::persistence::ingress_append::get(&fixture.db, &append_key)
             .await
             .expect("ledger lookup")
             .is_some(),
@@ -425,7 +425,7 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
     use waddle_xmpp::ownership::{Entity, EntityType};
     let fixture = IngressFixture::sqlite().await;
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -678,7 +678,7 @@ async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending()
 #[tokio::test]
 async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_without_retirement() {
     use crate::ingress::tests::xep0045_room_manifest::room_submission;
-    use crate::ingress_uow::{
+    use crate::ingress::uow::{
         ArchiveDispatchObligation, ArchiveDispatchRepository, DispatchReadiness, DispatchTarget,
     };
     use crate::server::routes::interpret::{
@@ -905,8 +905,8 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
 #[cfg(feature = "clustering")]
 #[tokio::test]
 async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_wire_attempt() {
+    use crate::ingress::uow::{CanonicalMessageRepository, DeliveryProgressRepository};
     use crate::ingress::{tests::xep0045_room_manifest::room_submission, RoomManifestSnapshot};
-    use crate::ingress_uow::{CanonicalMessageRepository, DeliveryProgressRepository};
     use crate::server::routes::interpret::{
         effects::delivery::PeerDeliveryKind, CONTROLLED_REGISTERED_REMOTE_DELIVERY,
     };

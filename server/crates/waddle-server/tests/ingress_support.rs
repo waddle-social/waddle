@@ -3,8 +3,8 @@ use uuid::Uuid;
 use waddle_server::{
     config::LineageConfig,
     db::{lineage, Database, DatabaseConfig, DatabaseDriver, IntoParams, MigrationRunner},
+    ingress::uow::IngressUnitOfWork,
     ingress::{IngressStreamIdentity, IngressSubmission},
-    ingress_uow::IngressUnitOfWork,
 };
 use waddle_xmpp::{
     auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},
@@ -85,7 +85,7 @@ impl IngressFixture {
         waddle_server::inbox::DatabaseInboxStorage::open(Some(db.database_url()))
             .await
             .expect("inbox schema");
-        waddle_server::notification_activity::NotificationActivityStore::new(db.clone())
+        waddle_server::notification::activity::NotificationActivityStore::new(db.clone())
             .await
             .expect("activity schema");
         MigrationRunner::single()

@@ -193,7 +193,7 @@ const WEEKDAYS_MON_TO_SUN: [Weekday; 7] = [
 
 /// Result of evaluating a [`WaddleDnd`] state against a wall-clock
 /// instant. Mirrors the server-side
-/// `notification_outbox::DndState` enum so the integration boundary
+/// `notification::outbox::DndState` enum so the integration boundary
 /// is trivial.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DndEvaluation {

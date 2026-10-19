@@ -7,7 +7,7 @@ pub(crate) use remote_owner::remote_owner_mirror_ticker;
 #[cfg(feature = "clustering")]
 pub(crate) use remote_owner::spawn_remote_owner_mirror_janitor;
 
-use crate::room_policy::RoomRegistryActorPolicy;
+use crate::room::policy::RoomRegistryActorPolicy;
 use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
 use std::sync::Arc;
@@ -1065,7 +1065,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
 /// as expiry instead of leaving pre-cutover sessions stranded until timeout.
 async fn drain_noncurrent_occupancy_sessions(
     state: &WebSocketState,
-    promotion_batch: &mut crate::sm_promotion::PromotionBatchGuard<'_>,
+    promotion_batch: &mut crate::sm::promotion::PromotionBatchGuard<'_>,
 ) -> bool {
     let registry = &state.deps.protocol.sm_session_registry;
     let candidates = match registry.detached_occupancy_inventory() {
@@ -1141,7 +1141,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             );
 
         }
-        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+        let mut promotion_batch = crate::sm::promotion::PromotionBatchGuard::new(
             &state.deps.protocol.sm_session_registry,
             drained,
         );
@@ -1149,7 +1149,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             sweep_failed = true;
         }
         while let Some(pending_session) = promotion_batch.pop() {
-            let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+            let mut promotion_guard = crate::sm::promotion::PromotionSessionGuard::new(
                 &state.deps.protocol.sm_session_registry,
                 pending_session,
             );
@@ -1161,7 +1161,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             // redelivery and strip the copies BEFORE promotion; promoting a
             // copy whose row still exists duplicates a Transient payload or
             // collides with the Archived uniqueness key.
-            let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+            let row_release = crate::sm::promotion::release_row_backed_replay_copies(
                 &state.deps.protocol.sm_session_registry,
                 &state.deps.protocol.pending_delivery_storage,
                 promotion_guard.session_mut(),
@@ -1203,7 +1203,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 && !row_release.ownership_unknown
                 && !row_release.release_failed_known_rows
             {
-                if crate::sm_promotion::reinsert_failed_session_for_retry(
+                if crate::sm::promotion::reinsert_failed_session_for_retry(
                     &state.deps.protocol.sm_session_registry,
                     session.clone(),
                 ).await {
@@ -1241,7 +1241,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                              record_promotion_failure also failed; preserving \
                              session state for retry"
                         );
-                        if crate::sm_promotion::reinsert_failed_session_for_retry(
+                        if crate::sm::promotion::reinsert_failed_session_for_retry(
                             &state.deps.protocol.sm_session_registry,
                             session.clone(),
                         )
@@ -1315,7 +1315,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                      SKIPPING this session so replay traffic cannot overtake or \
                      duplicate its durable rows. Retried on the next janitor pass."
                 );
-                if crate::sm_promotion::reinsert_failed_session_for_retry(
+                if crate::sm::promotion::reinsert_failed_session_for_retry(
                     &state.deps.protocol.sm_session_registry,
                     session.clone(),
                 )
@@ -1353,7 +1353,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                                  record_promotion_failure also failed; preserving \
                                  session state for retry"
                             );
-                            if crate::sm_promotion::reinsert_failed_session_for_retry(
+                            if crate::sm::promotion::reinsert_failed_session_for_retry(
                                 &state.deps.protocol.sm_session_registry,
                                 session.clone(),
                             )
@@ -1391,7 +1391,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     // Make the retry promise true: drain_expired scans only
                     // memory, so the drained session must go back into the
                     // map for the next tick to see it.
-                    if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    if crate::sm::promotion::reinsert_failed_session_for_retry(
                         &state.deps.protocol.sm_session_registry,
                         session.clone(),
                     )
@@ -1408,7 +1408,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             // recent-tombstone record PER SESSION, immediately
             // before this session's promotion, so even a retraction
             // landing mid-batch is still seen.
-            let recent_tombstones = match crate::sm_promotion::recent_tombstones_for_promotion(
+            let recent_tombstones = match crate::sm::promotion::recent_tombstones_for_promotion(
                 &state.deps.protocol.sm_session_registry,
                 "SM janitor",
             ) {
@@ -1418,9 +1418,9 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     Vec::new()
                 }
             };
-            let summary = crate::sm_promotion::promote_session_with_custody(
+            let summary = crate::sm::promotion::promote_session_with_custody(
                 &session,
-                crate::sm_promotion::TerminalOverflowPromotionDeps {
+                crate::sm::promotion::TerminalOverflowPromotionDeps {
                     sm_registry: &state.deps.protocol.sm_session_registry,
                     registry: &state.deps.protocol.connection_registry,
                     user_registry: &state.deps.protocol.user_registry,
@@ -1436,14 +1436,14 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             // retraction recorded after the snapshot above raced
             // this session's promotion — re-scrub the pending rows
             // it may have just inserted BEFORE confirm_drained.
-            if crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+            if crate::sm::promotion::scrub_pending_for_tombstones_recorded_during_promotion(
                 &state.deps.protocol.sm_session_registry,
                 &state.deps.protocol.pending_delivery_storage,
                 &recent_tombstones,
                 "SM janitor",
             )
             .await
-                == crate::sm_promotion::PromotionScrubOutcome::Failed
+                == crate::sm::promotion::PromotionScrubOutcome::Failed
             {
                 sweep_failed = true;
             }
@@ -1484,7 +1484,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                             "SM janitor: record_promotion_failure failed; \
                              preserving session state for retry"
                         );
-                        if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                        if crate::sm::promotion::prune_promoted_then_reinsert_for_retry(
                             &state.deps.protocol.sm_session_registry,
                             session.clone(),
                             &summary,
@@ -1519,7 +1519,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     "SM janitor: promotion had storage failures; \
                      preserving session state for retry"
                 );
-                if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                if crate::sm::promotion::prune_promoted_then_reinsert_for_retry(
                     &state.deps.protocol.sm_session_registry,
                     session.clone(),
                     &summary,
@@ -1848,7 +1848,7 @@ async fn confirm_expired_ingress_stream(
     {
         return false;
     }
-    crate::sm_promotion::confirm_pending_promotion(
+    crate::sm::promotion::confirm_pending_promotion(
         &state.deps.protocol.pending_delivery_storage,
         stream_id,
     )
@@ -6689,7 +6689,7 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
 ///
 /// Skipped (not failed) when `WADDLE_TEST_POSTGRES_URL` is unset, mirroring
 /// every other Postgres-gated test in this crate (`clustering::claims`,
-/// `clustering::self_fence`, `sm_persistence_fenced::tests`).
+/// `clustering::self_fence`, `sm::persistence::fenced::tests`).
 #[cfg(all(test, feature = "clustering"))]
 mod orphan_reaper_sweep_tests {
     use super::*;
@@ -6698,9 +6698,9 @@ mod orphan_reaper_sweep_tests {
     };
     use crate::clustering::ClusteringHandles;
     use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
-    use crate::muc_durable::PostgresMucRoomStore;
+    use crate::muc::durable::PostgresMucRoomStore;
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
-    use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use crate::sm::persistence::fenced::PostgresFencedSmPersistence;
     use chrono::{TimeZone, Utc};
     use waddle_xmpp::muc::room_actor::GetConfig;
     use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
@@ -6730,7 +6730,7 @@ mod orphan_reaper_sweep_tests {
 
     /// Deliberately in the past: [`PostgresFencedSmPersistence`] always
     /// overwrites `detached_at` with the database's own `now()` at write
-    /// time (mirrors `sm_persistence_fenced::tests`'s identical fixture
+    /// time (mirrors `sm::persistence::fenced::tests`'s identical fixture
     /// helper), so the exact value here is never asserted against.
     fn stale_caller_supplied_time() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
@@ -7800,15 +7800,15 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
     // TTL once at startup so operators can read the clamped value
     // without grepping the codebase or re-deriving the env var
     // resolution chain.
-    let active_mention_ttl_ms = crate::notification_outbox::active_mention_ttl_ms_from_env();
+    let active_mention_ttl_ms = crate::notification::outbox::active_mention_ttl_ms_from_env();
     let active_mention_ttl_secs = active_mention_ttl_ms / 1_000;
     info!(
         "Push active-mention TTL: {active_mention_ttl_secs}s \
          (default {}s, env WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS, \
          clamp [{}s, {}s])",
-        crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
-        crate::notification_outbox::MIN_ACTIVE_MENTION_TTL_SECONDS,
-        crate::notification_outbox::MAX_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification::outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification::outbox::MIN_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification::outbox::MAX_ACTIVE_MENTION_TTL_SECONDS,
     );
     tokio::spawn(async move {
         let mut pending_notification_cursor =
@@ -7889,7 +7889,7 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
     async {
         let store = &state.deps.protocol.room_effect_outbox;
         let mut failed = false;
-        match crate::room_effect_outbox::drain::drain_due_effects(
+        match crate::room::effect_outbox::drain::drain_due_effects(
             state,
             crate::time::now_ms(),
             batch_size,
@@ -7959,7 +7959,7 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
             }
         } else if let Err(error) = store
             .arm_predecessor_inert(
-                &crate::room_effect_outbox::room_effect_origin_instance_id(),
+                &crate::room::effect_outbox::room_effect_origin_instance_id(),
                 crate::time::now_ms(),
             )
             .await
@@ -7970,7 +7970,7 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
         #[cfg(not(feature = "clustering"))]
         if let Err(error) = store
             .arm_predecessor_inert(
-                &crate::room_effect_outbox::room_effect_origin_instance_id(),
+                &crate::room::effect_outbox::room_effect_origin_instance_id(),
                 crate::time::now_ms(),
             )
             .await
@@ -8102,7 +8102,7 @@ pub(crate) async fn run_notification_outbox_sweep(
         let room_policy = RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
         let dnd_reader = state.deps.protocol.dnd_reader.as_ref();
         let activity_reader = state.deps.protocol.notification_activity.as_ref();
-        let deps = crate::notification_outbox::NotificationDrainDeps::new(
+        let deps = crate::notification::outbox::NotificationDrainDeps::new(
             &room_policy,
             dnd_reader,
             activity_reader,
@@ -8354,7 +8354,7 @@ impl Drop for RemainingSmDrainOutcomes<'_> {
 
 async fn abandon_shutdown_session_with_loss(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut crate::sm::promotion::PromotionSessionGuard<'_>,
     loss: &waddle_xmpp::stream_management::ShutdownSmClaimLoss,
 ) {
     let session = promotion_guard.session();
@@ -8379,7 +8379,7 @@ async fn abandon_shutdown_session_with_loss(
 
 async fn abandon_shutdown_session_if_claim_lost(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut crate::sm::promotion::PromotionSessionGuard<'_>,
 ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
     let stream_id = promotion_guard.session().stream_id.clone();
     let loss = match registry.shutdown_drain_claim_lost(&stream_id).await {
@@ -8400,7 +8400,7 @@ async fn abandon_shutdown_session_if_claim_lost(
 /// abandoned. Keep this policy identical at every shutdown await boundary.
 async fn shutdown_promotion_should_stop(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut crate::sm::promotion::PromotionSessionGuard<'_>,
     remaining: &mut RemainingSmDrainOutcomes<'_>,
 ) -> bool {
     match abandon_shutdown_session_if_claim_lost(registry, promotion_guard).await {
@@ -8593,7 +8593,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
         let drained = drained.sessions;
         remaining_outcomes.observe_drained(&drained);
         let drained_count = drained.len();
-        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+        let mut promotion_batch = crate::sm::promotion::PromotionBatchGuard::new(
             &websocket_state.deps.protocol.sm_session_registry,
             drained,
         );
@@ -8640,7 +8640,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // The session guard restores the already-popped session;
                 // `PromotionBatchGuard::Drop` restores the rest of the batch.
                 // Both keep promotion ownership and its claim intact.
-                let _promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                let _promotion_guard = crate::sm::promotion::PromotionSessionGuard::new(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
@@ -8648,7 +8648,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 continue 'drain;
             }
             let promotion_work = async {
-                let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                let mut promotion_guard = crate::sm::promotion::PromotionSessionGuard::new(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
@@ -8679,7 +8679,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 {
                     return;
                 }
-                let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+                let row_release = crate::sm::promotion::release_row_backed_replay_copies(
                     &websocket_state.deps.protocol.sm_session_registry,
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     promotion_guard.session_mut(),
@@ -8764,7 +8764,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // recent-tombstone fetch so a retraction landing
                 // mid-batch during the shutdown drain is still seen.
                 let mut recent_tombstones = Vec::new();
-                if let Ok(records) = crate::sm_promotion::recent_tombstones_for_promotion(
+                if let Ok(records) = crate::sm::promotion::recent_tombstones_for_promotion(
                     &websocket_state.deps.protocol.sm_session_registry,
                     "Graceful shutdown",
                 ) {
@@ -8776,9 +8776,9 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     .clustering_claims
                     .node_identity
                     .is_some();
-                let summary = crate::sm_promotion::promote_session_with_custody(
+                let summary = crate::sm::promotion::promote_session_with_custody(
                     &session,
-                    crate::sm_promotion::TerminalOverflowPromotionDeps {
+                    crate::sm::promotion::TerminalOverflowPromotionDeps {
                         sm_registry: &websocket_state.deps.protocol.sm_session_registry,
                         registry: &websocket_state.deps.protocol.connection_registry,
                         user_registry: &websocket_state.deps.protocol.user_registry,
@@ -8794,7 +8794,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // re-scrub pending rows for tombstones recorded during
                 // this session's promotion window before confirming.
                 let _ =
-                    crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                    crate::sm::promotion::scrub_pending_for_tombstones_recorded_during_promotion(
                         &websocket_state.deps.protocol.sm_session_registry,
                         &websocket_state.deps.protocol.pending_delivery_storage,
                         &recent_tombstones,
@@ -8843,7 +8843,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                         "Graceful shutdown: promotion or pending redrive incomplete; \
                          preserving durable SM row for restart-time retry"
                     );
-                    crate::sm_promotion::prune_promoted_sequences(
+                    crate::sm::promotion::prune_promoted_sequences(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session_mut(),
                         &summary,
@@ -8871,7 +8871,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                             "Graceful shutdown: parking promotion after policy deferral or retry budget exhaustion"
                         );
                         parked_sessions.push(promotion_guard);
-                    } else if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    } else if crate::sm::promotion::reinsert_failed_session_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session().clone(),
                     )
@@ -8908,13 +8908,13 @@ pub(crate) async fn run_graceful_shutdown_drain(
                         "Graceful shutdown: durable SM confirmation failed; retaining \
                          promotion ownership and pending-delivery claim for retry"
                     );
-                    crate::sm_promotion::prune_promoted_sequences(
+                    crate::sm::promotion::prune_promoted_sequences(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session_mut(),
                         &summary,
                     )
                     .await;
-                    if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    if crate::sm::promotion::reinsert_failed_session_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session().clone(),
                     )
@@ -8931,7 +8931,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 remaining_outcomes.account(&metric_stream_id);
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
-                crate::sm_promotion::confirm_pending_promotion(
+                crate::sm::promotion::confirm_pending_promotion(
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     &session_id,
                 )
@@ -14037,7 +14037,7 @@ mod graceful_shutdown_drain_tests {
             .sessions
             .pop()
             .expect("one session");
-        let mut guard = crate::sm_promotion::PromotionSessionGuard::new(&registry, session);
+        let mut guard = crate::sm::promotion::PromotionSessionGuard::new(&registry, session);
         identity.disable().await;
         assert!(registry.forget_claim_locally(stream_id).await);
 

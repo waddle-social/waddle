@@ -1,6 +1,6 @@
 //! A carbon wrapper cannot borrow another message's durable append identity.
 use super::AppendAuthorityRejection;
-use crate::{ingress::identity::IngressAppendObligationRef, ingress_uow::CarbonReceiptRepository};
+use crate::{ingress::identity::IngressAppendObligationRef, ingress::uow::CarbonReceiptRepository};
 use jid::{BareJid, FullJid};
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, IngressEffectKind},

@@ -57,7 +57,7 @@ pub use state::{resolve_server_owner_jids, AppState, AppStateDeps};
 use crate::config::ServerConfig;
 use crate::db::DatabasePool;
 use crate::permissions::PermissionActor;
-use crate::spaces_metadata::DatabaseSpacesMetadataStore;
+use crate::spaces::metadata::DatabaseSpacesMetadataStore;
 use acme::start_acme_runtime;
 use anyhow::Result;
 use fixed_account::{ensure_fixed_test_account, fixed_test_account_enabled};
@@ -139,7 +139,7 @@ pub async fn start_with_config(
 
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
-    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
+    crate::muc::destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
         db_pool.global().clone(),
     )
     .await
@@ -181,7 +181,7 @@ pub async fn start_with_config(
                 anyhow::anyhow!("Failed to initialize spaces metadata storage: {}", error)
             })?,
     );
-    let spaces_metadata_store: Arc<dyn crate::spaces_metadata::SpacesMetadataStore> =
+    let spaces_metadata_store: Arc<dyn crate::spaces::metadata::SpacesMetadataStore> =
         spaces_metadata_database_store.clone();
     let channel_space_link_database_store = Arc::new(
         crate::channel_space_links::DatabaseChannelSpaceLinkStore::open(

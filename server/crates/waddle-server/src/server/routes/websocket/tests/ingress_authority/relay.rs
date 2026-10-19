@@ -7,7 +7,7 @@ use crate::clustering::{
     },
     ClusteringHandles,
 };
-use crate::ingress_uow::{CanonicalMessageRepository, EffectIntentRepository};
+use crate::ingress::uow::{CanonicalMessageRepository, EffectIntentRepository};
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MessageKey},
     ownership::{Entity, EntityType, NodeIdentity},
@@ -154,7 +154,7 @@ async fn assert_durable(
     room: &jid::BareJid,
     message: &xmpp_parsers::message::Message,
 ) {
-    let uow = crate::ingress_uow::IngressUnitOfWork::open(
+    let uow = crate::ingress::uow::IngressUnitOfWork::open(
         state.deps.app_state.db_pool.global().clone(),
         crate::ingress::test_lineage_config(),
     )
@@ -166,7 +166,7 @@ async fn assert_durable(
         .expect("durable envelope");
     assert_eq!(
         envelope,
-        crate::ingress_substrate::MessageEnvelope::new(message.clone())
+        crate::ingress::substrate::MessageEnvelope::new(message.clone())
     );
     let intents = EffectIntentRepository::load(&mut tx, key)
         .await

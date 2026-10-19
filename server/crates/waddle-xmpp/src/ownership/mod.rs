@@ -538,7 +538,7 @@ pub trait ClaimStore: Send + Sync {
     /// This is what the Postgres-fenced `SmPersistenceStorage`'s
     /// first-fenced-write-per-stream path (ADR-0017 Phase 3 Slice 4) calls
     /// instead of a bare `acquire`, layered under a caller-side per-key
-    /// single-flight (see `sm_persistence_fenced::claim_epoch_for`) so that:
+    /// single-flight (see `sm::persistence::fenced::claim_epoch_for`) so that:
     /// (a) two concurrent first writes for the same not-yet-claimed
     /// stream_id never spuriously conflict with each other (both observe
     /// `me`'s own successful acquire, one via the CAS, the other via this

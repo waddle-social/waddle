@@ -12,7 +12,7 @@ use waddle_xmpp::{
 };
 
 use super::{AttemptClassification, MaintenanceBudget};
-use crate::ingress_substrate::RecoveryEvidence;
+use crate::ingress::substrate::RecoveryEvidence;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct RecoveryAttempt {

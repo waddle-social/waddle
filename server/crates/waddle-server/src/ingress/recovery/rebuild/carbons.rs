@@ -1,7 +1,7 @@
 //! Restore the frozen carbon audience without re-running XEP-0280 selection.
 use super::{decision::EffectReceiptKey, RecoveryInput};
 use crate::{
-    ingress_uow::IngressUowError,
+    ingress::uow::IngressUowError,
     server::routes::interpret::effects::{
         delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
         PlanEffectDependency, PlannedEffect,

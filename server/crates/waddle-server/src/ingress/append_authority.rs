@@ -285,7 +285,7 @@ pub(crate) async fn check_canonical_obligation(
     }
     let positions = tokio::time::timeout(
         AUTHORIZATION_READ_TIMEOUT,
-        crate::ingress_uow::ArchiveDispatchRepository::positions_pooled(
+        crate::ingress::uow::ArchiveDispatchRepository::positions_pooled(
             db,
             obligation.message_key,
             &obligation.receipt,
@@ -306,7 +306,7 @@ async fn authorize_direct_sender(
     obligation: &super::identity::IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {
     let (envelope, intents) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
+        crate::ingress::uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
             .await
             .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
     if let Some(intent) = intents.iter().find(|intent| {
@@ -366,7 +366,7 @@ async fn authorize_room_route(
         return Err(AppendAuthorityRejection::NotMessage);
     };
     let (envelope, intents) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
+        crate::ingress::uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
             .await
             .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
     let target = message
@@ -425,7 +425,7 @@ pub(crate) async fn check_canonical_sender(
 ) -> Result<(), AppendAuthorityRejection> {
     let sender = tokio::time::timeout(
         AUTHORIZATION_READ_TIMEOUT,
-        crate::ingress_substrate::canonical_sender_pooled(db, message_key),
+        crate::ingress::substrate::canonical_sender_pooled(db, message_key),
     )
     .await
     .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)?

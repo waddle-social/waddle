@@ -686,8 +686,8 @@ pub(crate) async fn execute_dm_pin(mutation: DmPinMutation, deps: &Deps<'_>) -> 
 pub(crate) fn restore_recorded_dm_pin_effects(
     plan: &mut IngressPlan,
     recorded: &[IngressEffectIntent],
-    envelope: &crate::ingress_substrate::MessageEnvelope,
-) -> Result<bool, crate::ingress_uow::IngressUowError> {
+    envelope: &crate::ingress::substrate::MessageEnvelope,
+) -> Result<bool, crate::ingress::uow::IngressUowError> {
     let mutations: Vec<_> = recorded
         .iter()
         .filter_map(|intent| {
@@ -791,10 +791,10 @@ pub(crate) fn restore_recorded_dm_pin_effects(
 /// receive the peer-addressed message, including the sender's own resources.
 /// Live authorization and recovery must use the same frozen payload semantics.
 pub(crate) fn recorded_pin_message(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &crate::ingress::substrate::MessageEnvelope,
     mutation: &DmPinMutation,
     stanza_id: &StanzaId,
-) -> Result<xmpp_parsers::message::Message, crate::ingress_uow::IngressUowError> {
+) -> Result<xmpp_parsers::message::Message, crate::ingress::uow::IngressUowError> {
     use waddle_xmpp::ingress::DmPinMutationAction;
     let (sender, peer) = recorded_pin_participants(envelope, mutation)?;
     let (action, by, preview) = match &mutation.action {
@@ -821,10 +821,10 @@ pub(crate) fn recorded_pin_message(
 }
 
 fn recorded_pin_participants(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &crate::ingress::substrate::MessageEnvelope,
     mutation: &DmPinMutation,
-) -> Result<(jid::BareJid, jid::BareJid), crate::ingress_uow::IngressUowError> {
-    use crate::ingress_uow::IngressUowError;
+) -> Result<(jid::BareJid, jid::BareJid), crate::ingress::uow::IngressUowError> {
+    use crate::ingress::uow::IngressUowError;
     let message = envelope.message();
     let sender = message
         .from

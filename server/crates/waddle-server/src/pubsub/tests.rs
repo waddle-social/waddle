@@ -1241,7 +1241,7 @@ async fn dnd_publish_source_version_is_strictly_monotonic_per_publish() {
         .await
         .expect("storage");
     let bob = jid("bob@example.com");
-    let projection_store = crate::dnd_projection::DndProjectionStore::new(storage.database());
+    let projection_store = crate::dnd::projection::DndProjectionStore::new(storage.database());
 
     let item = waddle_xmpp::pubsub::PubSubItem {
         id: Some(waddle_xmpp::xep::xep_waddle_dnd::ITEM_ID_CURRENT.to_string()),
@@ -1376,7 +1376,7 @@ fn dm_bookmark_payload(inner: &str) -> minidom::Element {
 /// contact JID, and retracting that item clears the row in the same tx.
 #[tokio::test]
 async fn dm_bookmark_publish_then_retract_round_trips_direct_projection() {
-    use crate::notification_settings_projection::{
+    use crate::notification::settings_projection::{
         ConversationKind, NotificationSettingsProjectionStore, NotificationSettingsSource,
     };
     use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
@@ -1446,7 +1446,7 @@ async fn dm_bookmark_publish_then_retract_round_trips_direct_projection() {
 /// behavior.
 #[tokio::test]
 async fn dm_bookmark_publish_without_notify_clears_direct_projection() {
-    use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+    use crate::notification::settings_projection::NotificationSettingsProjectionStore;
     use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
@@ -1621,7 +1621,7 @@ async fn dm_bookmark_publish_without_item_id_is_bad_request() {
 /// `source_node`, not the conversation JID).
 #[tokio::test]
 async fn dm_bookmark_purge_clears_only_direct_projection_rows() {
-    use crate::notification_settings_projection::{
+    use crate::notification::settings_projection::{
         ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
         NotificationSettingsSource,
     };
@@ -1733,7 +1733,7 @@ fn conference_with_notify(fallback: &str) -> minidom::Element {
 /// wrongly wipe the MUC row.
 #[tokio::test]
 async fn dm_retract_does_not_clobber_muc_projection_row_for_same_jid() {
-    use crate::notification_settings_projection::{
+    use crate::notification::settings_projection::{
         NotificationSettingsProjectionStore, NotificationSettingsSource,
     };
     use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
@@ -1843,7 +1843,7 @@ async fn dm_retract_does_not_clobber_muc_projection_row_for_same_jid() {
 /// path an earlier fix missed (Copilot/Codex review).
 #[tokio::test]
 async fn dm_publish_clearing_override_does_not_clobber_muc_projection_row_for_same_jid() {
-    use crate::notification_settings_projection::{
+    use crate::notification::settings_projection::{
         NotificationSettingsProjectionStore, NotificationSettingsSource,
     };
     use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
@@ -1936,7 +1936,7 @@ async fn dm_publish_clearing_override_does_not_clobber_muc_projection_row_for_sa
 /// rejected publish writes no `pubsub_items` and no projection row.
 #[tokio::test]
 async fn dm_bookmark_publish_from_non_owner_is_forbidden() {
-    use crate::notification_settings_projection::NotificationSettingsProjectionStore;
+    use crate::notification::settings_projection::NotificationSettingsProjectionStore;
     use waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS;
 
     let storage = DatabasePubSubStorage::open(Some("sqlite::memory:"))
@@ -2021,7 +2021,7 @@ async fn dm_bookmark_publish_from_non_owner_is_forbidden() {
 /// with no wire way to clear it).
 #[tokio::test]
 async fn dm_bookmark_node_delete_clears_only_direct_projection_rows() {
-    use crate::notification_settings_projection::{
+    use crate::notification::settings_projection::{
         ConversationKind, NotificationSettingsProjection, NotificationSettingsProjectionStore,
         NotificationSettingsSource,
     };

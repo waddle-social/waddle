@@ -119,7 +119,7 @@ const OWNER_CONFIG_RECOVERY_ASK_TIMEOUT: std::time::Duration = std::time::Durati
 #[derive(Clone)]
 enum CancelledOwnerConfigAskRecoveryAction {
     ArmReservation {
-        arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+        arm_supervisor: crate::room::effect_outbox::RoomEffectArmSupervisor,
     },
     DeferMembersOnly(PendingMembersOnlyEnforcementSeed),
 }
@@ -130,7 +130,7 @@ struct PendingMembersOnlyEnforcementSeed {
     room_jid: BareJid,
     connections: std::sync::Arc<waddle_xmpp::registry::ConnectionRegistry>,
     sfu: Option<std::sync::Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: crate::room::effect_outbox::RoomEffectArmSupervisor,
 }
 
 impl PendingMembersOnlyEnforcementSeed {
@@ -159,7 +159,7 @@ struct CancelledOwnerConfigAskRecoveryGuard {
     intended_config: waddle_xmpp::muc::RoomConfig,
     previous_snapshot: waddle_xmpp::muc::room_actor::RoomSnapshot,
     registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
-    outbox: std::sync::Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    outbox: std::sync::Arc<crate::room::effect_outbox::RoomEffectOutboxStore>,
     action: CancelledOwnerConfigAskRecoveryAction,
     disarmed: bool,
 }
@@ -197,7 +197,7 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                 // is capped at MAX_RETRY_DELAY_MS and this task is detached.
                 Err(error) => {
                     lookup_attempt += 1;
-                    let backoff_ms = crate::room_effect_outbox::retry_delay_ms(lookup_attempt);
+                    let backoff_ms = crate::room::effect_outbox::retry_delay_ms(lookup_attempt);
                     tracing::warn!(
                         room = %self.room_jid,
                         %error,
@@ -270,7 +270,7 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                 .await
             {
                 timeout_attempt = timeout_attempt.saturating_add(1);
-                let backoff_ms = crate::room_effect_outbox::retry_delay_ms(timeout_attempt);
+                let backoff_ms = crate::room::effect_outbox::retry_delay_ms(timeout_attempt);
                 tracing::warn!(room = %self.room_jid, timeout_attempt, backoff_ms,
                         "cancelled owner config recovery snapshot timed out; retrying");
                 tokio::time::sleep(std::time::Duration::from_millis(backoff_ms.max(0) as u64))
@@ -302,7 +302,7 @@ impl CancelledOwnerConfigAskRecoveryGuard {
                     "cancelled owner config recovery cannot restore the original lifecycle; retrying"),
             }
             tokio::time::sleep(std::time::Duration::from_millis(
-                crate::room_effect_outbox::retry_delay_ms(1) as u64,
+                crate::room::effect_outbox::retry_delay_ms(1) as u64,
             ))
             .await;
         };
@@ -371,7 +371,7 @@ struct PendingMembersOnlyEnforcement {
     room_jid: BareJid,
     connections: std::sync::Arc<waddle_xmpp::registry::ConnectionRegistry>,
     sfu: Option<std::sync::Arc<dyn waddle_sfu::SfuService>>,
-    arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    arm_supervisor: crate::room::effect_outbox::RoomEffectArmSupervisor,
 }
 
 #[derive(Clone)]
@@ -1029,7 +1029,7 @@ async fn drain_or_broadcast_config_change(
             request_config_reservation_arm(state, Some(reservation));
             return ResponseBatch::default();
         }
-        match crate::room_effect_outbox::drain::drain_reservation_inline(
+        match crate::room::effect_outbox::drain::drain_reservation_inline(
             state,
             reservation,
             initiator,
@@ -1173,7 +1173,7 @@ mod tests {
         CommittedConfigReservationGuard, PendingMembersOnlyEnforcement,
         PendingMembersOnlyEnforcementRequest, OWNER_CONFIG_RECOVERY_ASK_TIMEOUT,
     };
-    use crate::room_effect_outbox::{
+    use crate::room::effect_outbox::{
         RoomEffectEnqueue, RoomEffectKey, RoomEffectOriginInstanceId, RoomEffectProducingNode,
     };
     use crate::server::routes::websocket::{
@@ -1267,7 +1267,7 @@ mod tests {
     }
 
     struct PausableConfigDurableStore {
-        outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+        outbox: Arc<crate::room::effect_outbox::RoomEffectOutboxStore>,
         admin_receipts: Mutex<
             HashMap<
                 (BareJid, waddle_xmpp::muc::AdminMutationId),
@@ -1282,7 +1282,7 @@ mod tests {
     }
 
     impl PausableConfigDurableStore {
-        fn new(outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>) -> Arc<Self> {
+        fn new(outbox: Arc<crate::room::effect_outbox::RoomEffectOutboxStore>) -> Arc<Self> {
             Arc::new(Self {
                 outbox,
                 admin_receipts: Mutex::new(HashMap::new()),
@@ -1876,7 +1876,7 @@ mod tests {
     async fn cancelled_owner_config_recovery_keeps_retrying_lookup_failures_until_success() {
         async fn recover_and_wait(
             guard: super::CancelledOwnerConfigAskRecoveryGuard,
-            store: &crate::room_effect_outbox::RoomEffectOutboxStore,
+            store: &crate::room::effect_outbox::RoomEffectOutboxStore,
             keys: &[RoomEffectKey],
             context: &'static str,
         ) {

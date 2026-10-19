@@ -3,7 +3,7 @@ mod intents;
 #[cfg(test)]
 mod tests;
 
-use crate::ingress_uow::IngressUowError;
+use crate::ingress::uow::IngressUowError;
 use crate::server::routes::interpret::effects::{
     delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
     direct::{DurableDirectEffect, ExternalDirectEffect},
@@ -377,7 +377,7 @@ impl Replacements {
         Ok(())
     }
 
-    fn candidate(&self, candidate: &mut crate::notification_outbox::NotificationCandidate) {
+    fn candidate(&self, candidate: &mut crate::notification::outbox::NotificationCandidate) {
         if let Some(recorded) = self.replacement(candidate.archive_stanza_id()) {
             candidate.restamp_archive_id(recorded);
         }

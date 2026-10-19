@@ -8,7 +8,7 @@ use std::{sync::Arc, time::Duration};
 use waddle_server::{
     ingress::Deps,
     ingress::{IngressDecisionClass, IngressSubmission, RecoveryEnvironment},
-    notification_outbox::NotificationOutboxStore,
+    notification::outbox::NotificationOutboxStore,
     pending_delivery::DatabasePendingDeliveryStorage,
 };
 use waddle_xmpp::{

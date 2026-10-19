@@ -9,7 +9,7 @@
 
 use jid::BareJid;
 use waddle_server::db::Database;
-use waddle_server::notification_activity::*;
+use waddle_server::notification::activity::*;
 
 fn bare(value: &str) -> BareJid {
     value.parse().expect("valid bare jid")

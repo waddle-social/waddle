@@ -332,7 +332,7 @@ pub(super) async fn seed_spaces_node_owners(
     if owners.is_empty() {
         return;
     }
-    crate::spaces_pubsub_seed::seed_owners_on_node(
+    crate::spaces::pubsub_seed::seed_owners_on_node(
         &state.deps.protocol.pubsub_storage,
         spaces_jid,
         node,

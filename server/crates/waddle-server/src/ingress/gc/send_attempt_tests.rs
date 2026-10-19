@@ -1,10 +1,10 @@
 use super::{run_retention_gc_with_budget, AliasGcProgress, RetentionGcBudget};
 use crate::{
-    ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture},
-    ingress_uow::{
+    ingress::uow::{
         settle_recorded, CanonicalMessageRepository, SendAttemptRepository, SendClaim,
         SendObligation,
     },
+    ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture},
 };
 use chrono::{Duration as ChronoDuration, Utc};
 use std::time::Duration;

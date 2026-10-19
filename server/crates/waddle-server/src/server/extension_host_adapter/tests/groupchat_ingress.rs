@@ -2,7 +2,7 @@
 use super::super::*;
 use super::{super::groupchat::BOT_LINGER, direct_ingress};
 use crate::ingress::test_support::IngressFixture;
-use crate::ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
+use crate::ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository};
 use std::time::Duration;
 use tokio::sync::mpsc;
 use waddle_xmpp::{

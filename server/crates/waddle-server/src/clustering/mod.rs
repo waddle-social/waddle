@@ -688,7 +688,7 @@ pub enum ClusteringError {
     /// every steal), not a degraded-but-safe mode. Previously logged and
     /// treated as non-fatal; corrected here to match the co-location
     /// discipline every other clustering-durability store already enforces
-    /// at startup (`sm_persistence::open_for_cluster_mode`,
+    /// at startup (`sm::persistence::open_for_cluster_mode`,
     /// `pending_delivery::open_for_cluster_mode`).
     #[cfg(feature = "clustering")]
     #[error("clustering MUC durable store initialization failed: {0}")]
@@ -864,7 +864,7 @@ pub struct ClusteringHandles {
 impl ClusteringHandles {
     /// `Some((claim_store, node_identity))` only when both handles are
     /// present; `None` otherwise. Convenience for callers (e.g.
-    /// `sm_persistence::open_for_cluster_mode`) that only ever want the
+    /// `sm::persistence::open_for_cluster_mode`) that only ever want the
     /// pair together — a `ClaimStore` with no live identity to bind into
     /// its CAS calls (or vice versa) is not a usable combination.
     pub fn claim_pair(
@@ -1136,7 +1136,7 @@ pub async fn start_if_enabled(
         // `open_for_cluster_mode` already enforce at startup for their own
         // durability stores.
         let muc_durable_store: Arc<dyn waddle_xmpp::muc::MucDurableStore> = Arc::new(
-            crate::muc_durable::PostgresMucRoomStore::open(
+            crate::muc::durable::PostgresMucRoomStore::open(
                 db.clone(),
                 clustering_stop.clone(),
                 live_identity.clone(),

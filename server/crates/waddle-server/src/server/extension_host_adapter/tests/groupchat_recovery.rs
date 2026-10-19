@@ -3,9 +3,9 @@ use super::groupchat_ingress::GroupchatFixture;
 use super::groupchat_receipts::{intents, key};
 use crate::{
     db::DatabaseDriver,
+    ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository},
     ingress::{test_support::IngressFixture, RecoverySweepOutcome},
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
-    notification_settings_projection::{
+    notification::settings_projection::{
         ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
     },
     server::routes::interpret::reconcile_groupchat_notification_recovery,

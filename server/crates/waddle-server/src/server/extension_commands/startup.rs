@@ -1,6 +1,6 @@
 //! Reconcile durable extension authority before accepting extension invocations.
 
-use crate::ingress_uow::{
+use crate::ingress::uow::{
     ConfiguredPluginGrants, ExtensionGrantRepository, GrantSync, IngressUnitOfWork, IngressUowError,
 };
 use waddle_extensions::{ExtensionCapability, ExtensionManager};

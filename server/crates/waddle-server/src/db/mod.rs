@@ -186,7 +186,7 @@ pub struct Database {
     /// The DSN this handle was opened against (ADR-0017 Phase 3 Slice 4
     /// FIX 4): lets a caller compare "does this other resolved URL point
     /// at the same database as this handle" — e.g.
-    /// `sm_persistence::open_for_cluster_mode`'s co-location check, which
+    /// `sm::persistence::open_for_cluster_mode`'s co-location check, which
     /// must refuse to start a Postgres-fenced `SmPersistenceStorage`
     /// against a database URL different from the clustering global
     /// database's own. Deliberately **not** exposed via `Debug` (this

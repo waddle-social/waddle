@@ -8,11 +8,11 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 
 use crate::db::Database;
-use crate::ingress_substrate::{
+use crate::ingress::substrate::{
     gc_expired_aliases, AliasGcBudget, AliasGcError, AliasGcFailure, AliasGcOutcome,
     AliasGcProgress,
 };
-use crate::ingress_uow::IngressUnitOfWork;
+use crate::ingress::uow::IngressUnitOfWork;
 
 use super::maintenance::{
     run_maintenance_pass_with_cursor, MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome,
@@ -279,13 +279,13 @@ mod tests {
     use super::super::maintenance::run_maintenance_pass;
     use super::*;
     use crate::db::MigrationRunner;
-    use crate::ingress_substrate::{record_message, terminalize_message};
+    use crate::ingress::substrate::{record_message, terminalize_message};
     use waddle_xmpp::ingress::{MessageKey, SemanticDigest};
     use waddle_xmpp::telemetry::attributes::IngressGcOutcome;
 
     #[tokio::test]
     async fn retention_gc_reports_orphan_proofs_separately_for_every_outcome() {
-        use crate::ingress_substrate::{DatabaseTimeoutKind, IngressSubstrateError};
+        use crate::ingress::substrate::{DatabaseTimeoutKind, IngressSubstrateError};
 
         let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
         let cases = [

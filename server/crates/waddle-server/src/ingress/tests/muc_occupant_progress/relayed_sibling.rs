@@ -42,7 +42,7 @@ fn guard_plan(plan: &mut effects::IngressPlan, fence: &waddle_xmpp::muc::RoomCla
 
 async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destination) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -240,7 +240,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
     )
     .await
     .expect("lost dispatch receipt"));
-    let frozen = crate::ingress_uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
+    let frozen = crate::ingress::uow::CanonicalMessageRepository::load_envelope(&mut tx, key)
         .await
         .expect("source")
         .expect("envelope");
@@ -395,7 +395,7 @@ async fn relayed_sibling_retry(mut fixture: IngressFixture, destination: Destina
                 resource: sibling.clone(),
             };
             assert!(
-                crate::sm_persistence::ingress_append::get(&fixture.db, &append_key)
+                crate::sm::persistence::ingress_append::get(&fixture.db, &append_key)
                     .await
                     .expect("append ledger")
                     .is_some(),

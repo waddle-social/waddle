@@ -7,32 +7,32 @@
 use jid::BareJid;
 use minidom::Element;
 use waddle_server::db::Database;
-use waddle_server::push_service::{
+use waddle_server::push::service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::pubsub::PubSubItem;
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
 
-/// Mirrors `MAX_PUSH_NODES_PER_OWNER` in `waddle_server::push_service`.
+/// Mirrors `MAX_PUSH_NODES_PER_OWNER` in `waddle_server::push::service`.
 const MAX_PUSH_NODES_PER_OWNER: i64 = 16;
-/// Mirrors `MAX_PUSH_DEVICES_PER_NODE` in `waddle_server::push_service`.
+/// Mirrors `MAX_PUSH_DEVICES_PER_NODE` in `waddle_server::push::service`.
 const MAX_PUSH_DEVICES_PER_NODE: i64 = 32;
-/// Mirrors `MAX_APP_ID_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_APP_ID_LEN` in `waddle_server::push::service`.
 const MAX_APP_ID_LEN: usize = 128;
-/// Mirrors `MAX_NODE_ID_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_NODE_ID_LEN` in `waddle_server::push::service`.
 const MAX_NODE_ID_LEN: usize = 256;
-/// Mirrors `MAX_DEVICE_ID_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_DEVICE_ID_LEN` in `waddle_server::push::service`.
 const MAX_DEVICE_ID_LEN: usize = 128;
-/// Mirrors `MAX_ENVIRONMENT_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_ENVIRONMENT_LEN` in `waddle_server::push::service`.
 const MAX_ENVIRONMENT_LEN: usize = 64;
-/// Mirrors `MAX_PROVIDER_ENDPOINT_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_PROVIDER_ENDPOINT_LEN` in `waddle_server::push::service`.
 const MAX_PROVIDER_ENDPOINT_LEN: usize = 2_048;
-/// Mirrors `MAX_PROVIDER_TOKEN_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_PROVIDER_TOKEN_LEN` in `waddle_server::push::service`.
 const MAX_PROVIDER_TOKEN_LEN: usize = 4_096;
-/// Mirrors `MAX_PROVIDER_KEY_MATERIAL_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_PROVIDER_KEY_MATERIAL_LEN` in `waddle_server::push::service`.
 const MAX_PROVIDER_KEY_MATERIAL_LEN: usize = 4_096;
-/// Mirrors `MAX_PUBSUB_ITEM_ID_LEN` in `waddle_server::push_service`.
+/// Mirrors `MAX_PUBSUB_ITEM_ID_LEN` in `waddle_server::push::service`.
 const MAX_PUBSUB_ITEM_ID_LEN: usize = 256;
 
 async fn store() -> DatabasePushServiceStore {

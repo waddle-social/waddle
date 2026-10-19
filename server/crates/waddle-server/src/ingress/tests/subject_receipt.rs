@@ -355,7 +355,7 @@ async fn subject_broadcast_after_actor_commit(
         .begin()
         .await
         .expect("read recorded subject intents");
-    let recorded = crate::ingress_uow::EffectIntentRepository::load(
+    let recorded = crate::ingress::uow::EffectIntentRepository::load(
         &mut tx,
         decision.message_key.expect("canonical subject key"),
     )

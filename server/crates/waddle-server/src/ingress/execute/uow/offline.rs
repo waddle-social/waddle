@@ -9,12 +9,12 @@ use waddle_xmpp::{
 
 use crate::ingress::decision::{EffectReceiptKey, IngressDecision};
 use crate::{
-    ingress_uow::{
+    ingress::uow::{
         run_with_retry, settle_recorded, CanonicalMessageRepository, EffectIntentRepository,
         EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
         PendingReceiptRepository, RecoveryReceiptRepository,
     },
-    notification_outbox::NotificationCandidateInsertOutcome,
+    notification::outbox::NotificationCandidateInsertOutcome,
     server::routes::interpret::{
         effects::{
             delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
@@ -53,7 +53,7 @@ pub(crate) fn fail_before_offline_settlement(key: waddle_xmpp::ingress::MessageK
 #[cfg(test)]
 pub(crate) fn retry_before_offline_settlement(
     key: waddle_xmpp::ingress::MessageKey,
-    retry_class: crate::ingress_uow::DbRetryClass,
+    retry_class: crate::ingress::uow::DbRetryClass,
 ) {
     FAIL_BEFORE_SETTLEMENT
         .lock()

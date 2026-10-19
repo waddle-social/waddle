@@ -4,8 +4,8 @@ use super::{
     groupchat_ingress::{seen, GroupchatFixture, Seen},
 };
 use crate::{
+    ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     ingress::{commit::commit_race_gate::Registration, test_support::IngressFixture},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     server::extension_host_adapter::{ExtensionHostAdapter, ExtensionHostAdapterError},
 };
 use std::{sync::Arc, time::Duration};

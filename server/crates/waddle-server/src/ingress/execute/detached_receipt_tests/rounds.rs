@@ -1,7 +1,7 @@
 //! A retry round cannot repeat the accepted half of a direct resource fanout.
 use super::*;
+use crate::ingress::uow::DeliveryProgressRepository;
 use crate::ingress::DispatchProbeBudget;
-use crate::ingress_uow::DeliveryProgressRepository;
 use crate::server::routes::interpret::effects::{
     direct::DurableDirectEffect, DurableEffect, Effect,
 };
@@ -12,7 +12,7 @@ use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
 async fn sqlite_partial_detached_fanout_rechecks_preserve_accepted_resource() {
     let fixture = IngressFixture::sqlite().await;
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );

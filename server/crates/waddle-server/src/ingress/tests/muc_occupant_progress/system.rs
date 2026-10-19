@@ -1,8 +1,8 @@
 //! Pin system broadcasts freeze the archived payload for each pending occupant.
 use super::*;
 use crate::ingress::execute::uow::STALL_DELIVERY_RESOURCE;
-use crate::ingress_substrate::MessageEnvelope;
-use crate::ingress_uow::EffectIntentRepository;
+use crate::ingress::substrate::MessageEnvelope;
+use crate::ingress::uow::EffectIntentRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::{atomic::AtomicBool, Arc};
 use waddle_xmpp::{

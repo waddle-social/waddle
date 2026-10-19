@@ -4,11 +4,11 @@ use super::super::{
     message_plan::{build_plan_deps, finish_plan},
     Deps,
 };
+use crate::ingress::uow::SmIngressStreamRepository;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressDecisionClass,
     IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
 };
-use crate::ingress_uow::SmIngressStreamRepository;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{

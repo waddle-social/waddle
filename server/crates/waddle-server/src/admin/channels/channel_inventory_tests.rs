@@ -256,8 +256,8 @@ async fn exact_space_filter_includes_dormant_channels_before_page_limit() {
     let node = SpaceNode::from("Engineering");
     let other_node = SpaceNode::from("engineering");
     let space_jid =
-        crate::space_identity::space_jid_for_node(&state.spaces_jid, &node).expect("space JID");
-    let other_jid = crate::space_identity::space_jid_for_node(&state.spaces_jid, &other_node)
+        crate::spaces::identity::space_jid_for_node(&state.spaces_jid, &node).expect("space JID");
+    let other_jid = crate::spaces::identity::space_jid_for_node(&state.spaces_jid, &other_node)
         .expect("other space JID");
     for (channel_jid, space_node, space_jid) in [
         (one.clone(), node.clone(), space_jid.clone()),

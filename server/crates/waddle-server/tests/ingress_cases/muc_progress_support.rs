@@ -327,7 +327,7 @@ async fn replay_case(
         .expect("accept");
     if occupant_case == OccupantCase::Missing {
         let mut tx = fixture.uow.begin().await.expect("inspect frozen source");
-        let envelope = waddle_server::ingress_uow::CanonicalMessageRepository::load_envelope(
+        let envelope = waddle_server::ingress::uow::CanonicalMessageRepository::load_envelope(
             &mut tx,
             first.message_key.expect("accepted message key"),
         )

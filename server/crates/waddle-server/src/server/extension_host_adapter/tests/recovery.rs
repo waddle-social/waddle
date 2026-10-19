@@ -3,9 +3,9 @@ use super::super::ExtensionHostAdapter;
 use super::direct_ingress::{adapter, invocation, request};
 use crate::{
     db::DatabaseDriver,
+    ingress::uow::EffectIntentRepository,
     ingress::{test_support::IngressFixture, RecoveryEnvironment},
-    ingress_uow::EffectIntentRepository,
-    notification_settings_projection::{
+    notification::settings_projection::{
         ConversationKind, NotificationSettingsProjection, NotificationSettingsSource,
     },
 };

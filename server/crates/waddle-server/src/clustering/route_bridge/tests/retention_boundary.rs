@@ -1,7 +1,7 @@
 use super::*;
+use crate::ingress::substrate::{gc_expired_aliases, AliasGcBudget, ALIAS_RETENTION};
 use crate::ingress::test_support::IngressFixture;
-use crate::ingress_substrate::{gc_expired_aliases, AliasGcBudget, ALIAS_RETENTION};
-use crate::ingress_uow::{
+use crate::ingress::uow::{
     CanonicalMessageRepository, DeliveryEffectRepository, EffectDeliveryBinding,
     EffectDescendantRepository, EffectIntentRepository, EffectReceiptRepository,
     SmIngressStreamRepository,

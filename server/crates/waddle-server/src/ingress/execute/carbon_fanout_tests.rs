@@ -8,7 +8,7 @@ use crate::{
     },
     ingress::{commit::commit_submission, test_support::IngressFixture},
     server::routes::interpret::carbons::{remote_carbon_delivery, CarbonFanoutFailure},
-    sm_persistence::DatabaseSmPersistence,
+    sm::persistence::DatabaseSmPersistence,
 };
 use std::sync::Arc;
 use waddle_xmpp::{
@@ -470,7 +470,7 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
                     &empty_success
                 )
                 .await,
-                Err(crate::ingress_uow::IngressUowError::UnresolvedCarbonSend)
+                Err(crate::ingress::uow::IngressUowError::UnresolvedCarbonSend)
             ));
         } else {
             assert_eq!(

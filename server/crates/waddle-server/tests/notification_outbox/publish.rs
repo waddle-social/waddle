@@ -5,7 +5,7 @@
 use crate::support::*;
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification::outbox::*;
 use waddle_xmpp::push::PushSubscriptionStore;
 
 fn foreign_target() -> NotificationOutboxTarget {
@@ -500,13 +500,13 @@ async fn stale_claim_does_not_enqueue_push_service_publish_job() {
     let store = store().await;
     let recipient = bare("alice@example.com");
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
-    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+    let push_service = waddle_server::push::service::DatabasePushServiceStore::new_with_secret_key(
         Database::in_memory("push-service").await.unwrap(),
         b"waddle-push-service-test-secret-key",
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
+    waddle_server::push::registrations::DatabasePushRegistrationStore::new(push_service.database())
         .await
         .expect("push registration schema");
     let push_node = push_service
@@ -516,10 +516,10 @@ async fn stale_claim_does_not_enqueue_push_service_publish_job() {
     push_service
         .upsert_device(
             &recipient,
-            waddle_server::push_service::PushDeviceRegistration::new(
+            waddle_server::push::service::PushDeviceRegistration::new(
                 "web-1",
                 push_node.node(),
-                waddle_server::push_service::PushDevicePlatform::Web,
+                waddle_server::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -591,17 +591,17 @@ async fn stale_claim_does_not_enqueue_push_service_publish_job() {
 async fn first_party_push_setup(
     recipient: &jid::BareJid,
 ) -> (
-    waddle_server::push_service::DatabasePushServiceStore,
+    waddle_server::push::service::DatabasePushServiceStore,
     waddle_xmpp::push::InMemoryPushStore,
     NotificationOutboxTarget,
 ) {
-    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+    let push_service = waddle_server::push::service::DatabasePushServiceStore::new_with_secret_key(
         Database::in_memory("push-service").await.unwrap(),
         b"waddle-push-service-test-secret-key",
     )
     .await
     .expect("push service");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_service.database())
+    waddle_server::push::registrations::DatabasePushRegistrationStore::new(push_service.database())
         .await
         .expect("push registration schema");
     let push_node = push_service
@@ -611,10 +611,10 @@ async fn first_party_push_setup(
     push_service
         .upsert_device(
             recipient,
-            waddle_server::push_service::PushDeviceRegistration::new(
+            waddle_server::push::service::PushDeviceRegistration::new(
                 "web-1",
                 push_node.node(),
-                waddle_server::push_service::PushDevicePlatform::Web,
+                waddle_server::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -1028,13 +1028,13 @@ async fn publish_rejects_non_first_party_outbox_target() {
     let store = store().await;
     enqueue_jobs_for_test(&store, &candidate("archive-1"), &[foreign_target()]).await;
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
-    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+    let push_service = waddle_server::push::service::DatabasePushServiceStore::new_with_secret_key(
         Database::in_memory("push-service").await.unwrap(),
         b"waddle-push-service-test-secret-key",
     )
     .await
     .expect("push service");
-    let push_store = waddle_server::push_registrations::DatabasePushRegistrationStore::new(
+    let push_store = waddle_server::push::registrations::DatabasePushRegistrationStore::new(
         Database::in_memory("push-regs").await.unwrap(),
     )
     .await
@@ -1078,7 +1078,7 @@ async fn push_registration_lookup_error_retries_each_claimed_outbox_job() {
     )
     .await;
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
-    let push_service = waddle_server::push_service::DatabasePushServiceStore::new_with_secret_key(
+    let push_service = waddle_server::push::service::DatabasePushServiceStore::new_with_secret_key(
         Database::in_memory("push-service").await.unwrap(),
         b"waddle-push-service-test-secret-key",
     )

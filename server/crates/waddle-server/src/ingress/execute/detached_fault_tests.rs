@@ -2,12 +2,12 @@
 use super::*;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
+    ingress::uow::DeliveryProgressRepository,
     ingress::{
         commit::commit_submission,
         execute::uow::{FAIL_DELIVERY_PROGRESS_TX, STALL_DELIVERY_RESOURCE},
         test_support::IngressFixture,
     },
-    ingress_uow::DeliveryProgressRepository,
 };
 use std::sync::{
     atomic::{AtomicBool, Ordering},
@@ -66,7 +66,7 @@ async fn detached_delivery_fault(
     single: bool,
 ) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -293,7 +293,7 @@ async fn postgres_detached_progress_timeout_preserves_completed_resource() {
 
 async fn detached_muc_records_occupant_progress(fixture: IngressFixture) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -431,7 +431,7 @@ async fn postgres_planned_live_detached_progress_rollback() {
 
 async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -585,7 +585,7 @@ async fn postgres_mixed_direct_muc_detached_context_isolation() {
 async fn sqlite_present_detached_session_append_failure_is_uncertain() {
     let fixture = IngressFixture::sqlite().await;
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );

@@ -29,13 +29,13 @@ async fn recorded_obligations(state: &WebSocketState) -> Vec<IngressEffectIntent
         );
         key
     };
-    let uow = crate::ingress_uow::IngressUnitOfWork::open(
+    let uow = crate::ingress::uow::IngressUnitOfWork::open(
         state.deps.app_state.db_pool.global().clone(),
         crate::ingress::test_lineage_config(),
     )
     .expect("read UoW");
     let mut tx = uow.begin().await.expect("read authority");
-    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let intents = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("recorded obligations");
     tx.commit().await.expect("close read");

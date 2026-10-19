@@ -9,7 +9,7 @@ use waddle_xmpp::{
 };
 
 use crate::{
-    ingress_substrate::MessageEnvelope,
+    ingress::substrate::MessageEnvelope,
     server::routes::interpret::effects::{
         delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
         Effect, ExternalEffect, IngressPlan, PlannedEffect,
@@ -146,7 +146,7 @@ pub(super) fn restore_recorded_offline_deliveries(
                 .from
                 .as_ref()
                 .and_then(|sender| {
-                    crate::notification_outbox::direct_candidate_from_envelope(
+                    crate::notification::outbox::direct_candidate_from_envelope(
                         envelope.message(),
                         recipient,
                         sender,

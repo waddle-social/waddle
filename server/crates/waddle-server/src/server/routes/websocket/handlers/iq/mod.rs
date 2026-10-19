@@ -183,7 +183,7 @@ pub(super) use errors::{
 };
 
 pub(super) fn response_batch_from_inline_room_effect_frames(
-    frames: crate::room_effect_outbox::drain::InlineRoomEffectDrain,
+    frames: crate::room::effect_outbox::drain::InlineRoomEffectDrain,
 ) -> ResponseBatch {
     let mut batch = ResponseBatch::default();
     for frame in frames.frames {

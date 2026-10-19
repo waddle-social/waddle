@@ -2,7 +2,7 @@
 use super::{direct_ingress, groupchat_ingress::GroupchatFixture};
 use crate::{
     ingress::test_support::IngressFixture,
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
+    ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository},
 };
 use waddle_extensions::{host_tools as host, DisplayText, WaddleId};
 

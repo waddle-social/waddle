@@ -1,9 +1,9 @@
 use super::*;
+use crate::ingress::uow::SmIngressStreamRepository;
 use crate::ingress::{
     commit::commit_submission, execute::execute_effects, test_support::IngressFixture,
     IngressStreamIdentity,
 };
-use crate::ingress_uow::SmIngressStreamRepository;
 use std::{sync::Arc, time::Duration};
 use waddle_xmpp::{
     ingress::WireHandledCount,

@@ -254,7 +254,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
     assert!(decision.class.advances());
     let original_manifest = if !fail_pin {
         let mut tx = fixture.uow.begin().await.expect("read pre-h pin manifest");
-        let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+        let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(
             &mut tx,
             decision.message_key.expect("canonical key"),
         )
@@ -414,7 +414,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                 );
                 assert!(matches!(
                     duplicate.verdict,
-                    Some(crate::ingress_uow::ReconcileVerdict::Divergent { .. })
+                    Some(crate::ingress::uow::ReconcileVerdict::Divergent { .. })
                 ));
                 let replay = execute_effects(
                     &fixture.uow,
@@ -452,7 +452,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                 assert_eq!(unchanged.timestamp, original_archive.timestamp);
                 assert_eq!(unchanged.ordinal, original_archive.ordinal);
                 let mut tx = fixture.uow.begin().await.expect("read immutable pin seal");
-                let envelope = crate::ingress_uow::CanonicalMessageRepository::load_envelope(
+                let envelope = crate::ingress::uow::CanonicalMessageRepository::load_envelope(
                     &mut tx,
                     duplicate.message_key.expect("same canonical key"),
                 )
@@ -461,7 +461,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                 .expect("canonical row");
                 assert_eq!(envelope.room_manifest(), original_manifest.as_ref(),
                     "derived archive position and changed retry metadata cannot rewrite the pre-h seal");
-                let recorded = crate::ingress_uow::EffectIntentRepository::load(
+                let recorded = crate::ingress::uow::EffectIntentRepository::load(
                     &mut tx,
                     duplicate.message_key.expect("key"),
                 )
@@ -499,9 +499,9 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                         *ordinal = ordinal.next().expect("different supplied position");
                     }
                 }
-                assert!(matches!(crate::ingress_uow::EffectIntentRepository::reconcile(
+                assert!(matches!(crate::ingress::uow::EffectIntentRepository::reconcile(
                     &mut tx, duplicate.message_key.expect("key"), &wrong_position, true,
-                ).await, Err(crate::ingress_uow::IngressUowError::EffectIntentConflict)),
+                ).await, Err(crate::ingress::uow::IngressUowError::EffectIntentConflict)),
                     "an optional ordinal in the frozen seal cannot authorize an arbitrary proposed position");
                 let mut unfinalized_position = recorded;
                 for intent in &mut unfinalized_position {
@@ -510,7 +510,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                     }
                 }
                 assert_eq!(
-                    crate::ingress_uow::EffectIntentRepository::reconcile(
+                    crate::ingress::uow::EffectIntentRepository::reconcile(
                         &mut tx,
                         duplicate.message_key.expect("key"),
                         &unfinalized_position,
@@ -518,7 +518,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
                     )
                     .await
                     .expect("unfinalized replan uses authoritative position"),
-                    crate::ingress_uow::ReconcileVerdict::Consistent
+                    crate::ingress::uow::ReconcileVerdict::Consistent
                 );
                 tx.commit().await.expect("immutable seal read commit");
             }
@@ -540,7 +540,7 @@ async fn assert_generated_archive_ordinal(
         .begin()
         .await
         .expect("read generated archive authority");
-    let intents = crate::ingress_uow::EffectIntentRepository::load(&mut tx, key)
+    let intents = crate::ingress::uow::EffectIntentRepository::load(&mut tx, key)
         .await
         .expect("recorded effects");
     tx.commit().await.expect("close authority read");
@@ -924,7 +924,7 @@ impl EffectSink for BlockAfterRoomEffect {
 }
 
 async fn secondary_room_snapshot_failure(fixture: IngressFixture, subject: bool, unpin: bool) {
-    use crate::ingress_uow::SmIngressStreamRepository;
+    use crate::ingress::uow::SmIngressStreamRepository;
     use waddle_xmpp::{ingress::WireHandledCount, pending_delivery::SmSessionId};
     let room: BareJid = "secondary-snapshot@muc.example.com".parse().expect("room");
     let sender: FullJid = "romeo@example.com/phone".parse().expect("sender");
@@ -1233,7 +1233,7 @@ async fn room_pin_preview_lookup_failure(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("pin-preview-retry"), "pin");
     let stream_id = waddle_xmpp::pending_delivery::SmSessionId::new("pin-preview-stream");
     let mut tx = fixture.uow.begin().await.expect("stream transaction");
-    let sm_ingress_id = crate::ingress_uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
+    let sm_ingress_id = crate::ingress::uow::SmIngressStreamRepository::mint(&mut tx, &stream_id)
         .await
         .expect("stream");
     tx.commit().await.expect("stream commit");

@@ -60,7 +60,7 @@ async fn room_authority(fixture: IngressFixture, archived: bool) {
     for (recipient, intent) in [(&occupant, &route), (&target, &reflection)] {
         let receipt = crate::ingress::receipt_key(intent).expect("receipt");
         let message_key = decision.message_key.expect("key");
-        let archive_positions = crate::ingress_uow::ArchiveDispatchRepository::positions_pooled(
+        let archive_positions = crate::ingress::uow::ArchiveDispatchRepository::positions_pooled(
             &fixture.db,
             message_key,
             &receipt,
