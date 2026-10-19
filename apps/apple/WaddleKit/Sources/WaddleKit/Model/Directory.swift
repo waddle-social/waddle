@@ -119,10 +119,15 @@ public struct RoomBot: Hashable, Sendable, Identifiable {
 public struct UserSearchResult: Hashable, Sendable, Identifiable {
     public var id: BareJID { jid }
     public let jid: BareJID
+    /// The Waddle username (the XEP-0055 `<nick/>` field): what an `@`
+    /// mention inserts. Falls back to the JID's localpart when blank.
+    public let username: String
     public let displayName: String?
 
-    public init(jid: BareJID, displayName: String?) {
+    public init(jid: BareJID, username: String? = nil, displayName: String?) {
         self.jid = jid
+        let trimmed = username?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.username = trimmed.isEmpty ? (jid.localpart ?? jid.domain) : trimmed
         self.displayName = displayName
     }
 }

@@ -45,7 +45,7 @@ Apple rebuild; "Now" is the state after the rebuild (PR #1822).
 | --- | --- | --- | --- | --- |
 | Pinned messages | urn:waddle:pin:0 | ❌ | ✅ | Pin/unpin, pinned list, live pin events |
 | `/me` actions | 0245 | ❌ | ✅ | Rendered as "* Name action" in italics, keeping the action's markup, mentions and links; conversation-list, reply and VoiceOver previews match |
-| @-mentions | 0372 | 🟡 | ✅ | Autocomplete sends XEP-0372 references; self-mentions highlighted and alerted. Baseline: regex highlight only; no references sent |
+| @-mentions | 0372 | 🟡 | ✅ | Autocomplete sends XEP-0372 references and, in rooms, offers people with no presence from the XEP-0055 user directory; self-mentions highlighted and alerted. Baseline: regex highlight only; no references sent |
 | Nick colors | 0392 | ❌ | ✅ | Shared Rust hue, HSL 55%/45% like web |
 | Notify modes / mute | 0492 | ❌ | ✅ | Per conversation, drives local notifications |
 | Inbox / unread counts | 0430 | ❌ | ✅ | Server-authoritative with read-clear barrier; mention badges; app badge. Baseline: unread counts were hardcoded to 0 |

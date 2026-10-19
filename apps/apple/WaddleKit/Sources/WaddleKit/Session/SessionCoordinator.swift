@@ -92,6 +92,9 @@ public final class SessionCoordinator {
     /// stanza id that read covered. The row is not read again automatically
     /// while the server still reports that id; a newer message retries.
     @ObservationIgnored var refusedInboxReads: [InboxReadKey: PendingInboxRead] = [:]
+    /// XEP-0055 results from `@` mention searches, per room. Users found
+    /// there stay addressable by username in that room's sends.
+    @ObservationIgnored var mentionSearches = MentionDirectorySearch()
     @ObservationIgnored var visibleConversation: ConversationID?
     /// The room thread on screen, if any.
     @ObservationIgnored var visibleThread: ThreadKey?
@@ -360,6 +363,7 @@ public final class SessionCoordinator {
         unreadOverview.reset()
         onDemandRooms.removeAll()
         extensionCommands.removeAll()
+        mentionSearches.clear()
     }
 
     // MARK: - Events
