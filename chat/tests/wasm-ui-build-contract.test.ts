@@ -137,6 +137,7 @@ describe("UI WASM build contract", () => {
       "../server/.cargo/**",
       "../server/Cargo.lock",
       "../server/Cargo.toml",
+      "../server/vendor/**",
       "../server/crates/waddle-xmpp-client-wasm/**",
       "../server/crates/waddle-xmpp-client/**",
       "../server/crates/waddle-xmpp-core/**",

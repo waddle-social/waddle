@@ -4,6 +4,8 @@ use crate::ownership::{
     ResumeIdentityProof, SharedNodeIdentity, StalePredicate,
 };
 use crate::registry::connection_registry::{ConnectionEntry, ForceDetachOutcome, OutboundStanza};
+use crate::registry::user_actor::delivery::GetConnectionEntry;
+use crate::registry::user_actor::GetResources;
 use async_trait::async_trait;
 use kameo::actor::Spawn;
 use kameo::error::SendError;
@@ -886,6 +888,280 @@ async fn test_register_refuses_live_foreign_user_actor_claim() {
         "register must fail closed when another live node owns the bare JID: {result:?}"
     );
     assert_eq!(registry.ask(UserCount).await.expect("count"), 0);
+}
+
+#[tokio::test]
+async fn revoked_authority_refuses_reuse_without_retiring_same_incarnation() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(RecordingClaimStore::empty());
+    let shared_identity = SharedNodeIdentity::new(this_identity());
+    let bare_jid = bare("revoked-authority");
+    let jid = full("revoked-authority", "phone");
+    wire_shared_claims(&registry, claim_store.clone(), shared_identity.clone()).await;
+    let (tx, _rx) = outbound_channel();
+    let entry = ConnectionEntry::new(tx);
+    let mut force_detach_rx = entry.take_force_detach_rx().expect("force-detach receiver");
+    registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry,
+        })
+        .await
+        .expect("register resource");
+    let actor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("lookup user")
+        .expect("user actor");
+
+    shared_identity.disable().await;
+
+    assert!(matches!(
+        registry.ask(GetUser { bare_jid: bare_jid.clone() }).await,
+        Err(SendError::HandlerError(UserRegistryError::ClaimUnavailable(ref jid)))
+            if *jid == bare_jid
+    ));
+    assert!(matches!(
+        registry.ask(GetOrCreateUser { bare_jid: bare_jid.clone() }).await,
+        Err(SendError::HandlerError(UserRegistryError::ClaimUnavailable(ref jid)))
+            if *jid == bare_jid
+    ));
+    let (tx, _rx) = outbound_channel();
+    assert!(matches!(
+        registry.ask(RegisterUserResource {
+            jid: full("revoked-authority", "laptop"),
+            entry: ConnectionEntry::new(tx),
+        }).await,
+        Err(SendError::HandlerError(UserRegistryError::ClaimUnavailable(ref jid)))
+            if *jid == bare_jid
+    ));
+    tokio::time::sleep(STALE_RETIREMENT_RETRY_DELAY.saturating_mul(2)).await;
+    assert!(matches!(
+        force_detach_rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    assert_eq!(
+        registry
+            .ask(GetUserForLocalClaim { bare_jid })
+            .await
+            .expect("local lookup")
+            .map(|registered| registered.id()),
+        Some(actor.id())
+    );
+    assert_eq!(actor.ask(GetResources).await.expect("resources"), vec![jid]);
+    assert!(actor.is_alive());
+    assert!(claim_store.release_owners().is_empty());
+}
+
+#[tokio::test]
+async fn changed_epoch_lookup_retires_asynchronously_without_blocking_another_user() {
+    let registry = spawn_registry().await;
+    let shared_identity = SharedNodeIdentity::new(this_identity());
+    wire_shared_claims(
+        &registry,
+        Arc::new(InProcessClaimStore::new()),
+        shared_identity.clone(),
+    )
+    .await;
+    let bare_jid = bare("stale-lookup");
+    let (tx, _rx) = outbound_channel();
+    let entry = ConnectionEntry::new(tx);
+    let mut force_detach_rx = entry.take_force_detach_rx().expect("force-detach receiver");
+    registry
+        .ask(RegisterUserResource {
+            jid: full("stale-lookup", "phone"),
+            entry,
+        })
+        .await
+        .expect("register resource");
+    let old_actor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("lookup old actor")
+        .expect("old actor");
+    shared_identity
+        .rotate(NodeIdentity::new("node-this", "rotated-epoch"))
+        .await;
+    let other_jid = bare("responsive-lookup");
+    let other_actor = registry
+        .ask(GetOrCreateUser {
+            bare_jid: other_jid.clone(),
+        })
+        .await
+        .expect("create user under new epoch");
+
+    let lookup = {
+        let registry = registry.clone();
+        let bare_jid = bare_jid.clone();
+        tokio::spawn(async move { registry.ask(GetUser { bare_jid }).await })
+    };
+    let detach = tokio::time::timeout(Duration::from_millis(250), force_detach_rx.recv())
+        .await
+        .expect("stale actor detach is queued")
+        .expect("detach request");
+    assert_eq!(
+        detach.origin,
+        ForceDetachOrigin::RegistryStaleActorRetirement
+    );
+    assert_eq!(detach.requester_bare_jid, bare_jid);
+
+    // Hold the acknowledgement as a slow connection would. Other lookups
+    // must still finish while this retirement remains in flight.
+    let other_lookup = tokio::time::timeout(
+        Duration::from_millis(250),
+        registry.ask(GetUser {
+            bare_jid: other_jid,
+        }),
+    )
+    .await
+    .expect("another user's lookup must not wait for the stale detach")
+    .expect("other lookup")
+    .expect("other actor");
+    assert_eq!(other_lookup.id(), other_actor.id());
+    assert!(matches!(
+        lookup.await.expect("lookup task"),
+        Err(SendError::HandlerError(UserRegistryError::UserActorBusy(ref jid)))
+            if *jid == bare_jid
+    ));
+    assert!(matches!(
+        tokio::time::timeout(
+            Duration::from_millis(250),
+            registry.ask(GetOrCreateUser { bare_jid: bare_jid.clone() }),
+        ).await.expect("creation must refuse promptly during retirement"),
+        Err(SendError::HandlerError(UserRegistryError::UserActorBusy(ref jid)))
+            if *jid == bare_jid
+    ));
+    assert!(old_actor.is_alive());
+    detach
+        .ack
+        .send(ForceDetachOutcome::NotPersisted)
+        .expect("acknowledge detach");
+    tokio::time::timeout(Duration::from_millis(250), old_actor.wait_for_shutdown())
+        .await
+        .expect("changed-epoch actor retires after acknowledgement");
+    assert!(registry
+        .ask(GetUser { bare_jid })
+        .await
+        .expect("lookup retired actor")
+        .is_none());
+}
+
+#[tokio::test]
+async fn stale_retirement_ack_cannot_retire_a_successor_with_the_same_jid() {
+    let registry = spawn_registry().await;
+    let claim_store = Arc::new(InProcessClaimStore::new());
+    let shared_identity = SharedNodeIdentity::new(this_identity());
+    wire_shared_claims(&registry, claim_store.clone(), shared_identity.clone()).await;
+    let bare_jid = bare("retirement-successor");
+    let jid = full("retirement-successor", "phone");
+    let entity = user_entity(&bare_jid);
+    let (tx, _rx) = outbound_channel();
+    let entry = ConnectionEntry::new(tx);
+    let mut old_detach_rx = entry.take_force_detach_rx().expect("old detach receiver");
+    registry
+        .ask(RegisterUserResource {
+            jid: jid.clone(),
+            entry,
+        })
+        .await
+        .expect("register old resource");
+    let old_claim = claim_store
+        .current_claim(&entity)
+        .await
+        .expect("old claim lookup")
+        .expect("old claim");
+    shared_identity
+        .rotate(NodeIdentity::new("node-this", "successor-epoch"))
+        .await;
+    assert!(matches!(
+        registry
+            .ask(GetUser {
+                bare_jid: bare_jid.clone()
+            })
+            .await,
+        Err(SendError::HandlerError(UserRegistryError::UserActorBusy(_)))
+    ));
+    let old_detach = tokio::time::timeout(Duration::from_millis(250), old_detach_rx.recv())
+        .await
+        .expect("old retirement starts")
+        .expect("old detach request");
+
+    // A separate exact-owner cleanup can remove the old actor while its
+    // acknowledgement waiter is still alive, then publish a successor.
+    assert!(registry
+        .ask(DemoteUserActorIfOwner {
+            bare_jid: bare_jid.clone(),
+            owner: old_claim.owner.clone(),
+        })
+        .await
+        .expect("demote old owner")
+        .is_some());
+    claim_store
+        .release(&entity, &old_claim.owner, old_claim.claim_epoch)
+        .await
+        .expect("release old claim after exact cleanup");
+    let (tx, _rx) = outbound_channel();
+    let entry = ConnectionEntry::new(tx);
+    let mut successor_detach_rx = entry
+        .take_force_detach_rx()
+        .expect("successor detach receiver");
+    registry
+        .ask(RegisterUserResource { jid, entry })
+        .await
+        .expect("register successor resource");
+    let successor = registry
+        .ask(GetUser {
+            bare_jid: bare_jid.clone(),
+        })
+        .await
+        .expect("get successor")
+        .expect("successor actor");
+    shared_identity
+        .rotate(NodeIdentity::new("node-this", "third-epoch"))
+        .await;
+    assert!(matches!(
+        registry
+            .ask(GetUser {
+                bare_jid: bare_jid.clone()
+            })
+            .await,
+        Err(SendError::HandlerError(UserRegistryError::UserActorBusy(_)))
+    ));
+    let successor_detach =
+        tokio::time::timeout(Duration::from_millis(250), successor_detach_rx.recv())
+            .await
+            .expect("successor retirement starts")
+            .expect("successor detach request");
+
+    old_detach
+        .ack
+        .send(ForceDetachOutcome::NotPersisted)
+        .expect("old acknowledgement");
+    assert!(
+        tokio::time::timeout(Duration::from_millis(100), successor.wait_for_shutdown())
+            .await
+            .is_err(),
+        "an old retirement acknowledgement must not retire a successor"
+    );
+    assert_eq!(
+        registry
+            .ask(GetUserForLocalClaim { bare_jid })
+            .await
+            .expect("local successor lookup")
+            .map(|actor| actor.id()),
+        Some(successor.id())
+    );
+    successor_detach
+        .ack
+        .send(ForceDetachOutcome::NotPersisted)
+        .expect("successor acknowledgement");
+    tokio::time::timeout(Duration::from_millis(250), successor.wait_for_shutdown())
+        .await
+        .expect("successor retires after its own acknowledgement");
 }
 
 #[tokio::test]

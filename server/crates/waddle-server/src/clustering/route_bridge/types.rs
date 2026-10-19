@@ -355,6 +355,8 @@ impl From<RemoteResourceRouteOutcome> for FullJidDeliveryOutcome {
 pub(crate) enum RemoteResourceRegisterOutcome {
     Registered,
     NotRemote,
+    /// The remote owner is temporarily unreachable or ownership is converging.
+    Retryable,
     Failed,
 }
 
