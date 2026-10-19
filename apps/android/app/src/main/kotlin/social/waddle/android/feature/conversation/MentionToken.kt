@@ -46,6 +46,29 @@ fun filterMentionCandidates(
         .take(MENTION_RESULT_LIMIT)
 }
 
+/**
+ * The popover rows for [query]: [filterMentionCandidates] over the room
+ * candidates (broadcasts first, then matching occupants), followed by
+ * the XEP-0055 directory hits for this query that are not already
+ * listed (deduped by bare JID, case-insensitively), all within the same
+ * row limit. Directory hits are the server's matches, so they are not
+ * re-filtered by label.
+ */
+fun mentionPopoverResults(
+    candidates: List<MentionCandidate>,
+    query: String,
+    directoryHits: List<MentionCandidate>,
+): List<MentionCandidate> {
+    val local = filterMentionCandidates(candidates, query)
+    if (query.isEmpty() || directoryHits.isEmpty()) return local
+    val listed = local.mapNotNullTo(mutableSetOf()) { it.jid?.lowercase() }
+    val extra = directoryHits.filter { hit ->
+        val jid = hit.jid?.lowercase()
+        !hit.isBroadcast && jid != null && listed.add(jid)
+    }
+    return (local + extra).take(MENTION_RESULT_LIMIT)
+}
+
 private fun foldDiacritics(value: String): String =
     Normalizer.normalize(value, Normalizer.Form.NFD)
         .replace(COMBINING_MARKS, "")

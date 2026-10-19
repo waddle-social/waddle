@@ -164,6 +164,7 @@ private fun ConversationScaffold(
     val state by viewModel.uiState.collectAsStateWithLifecycle()
     val typing by viewModel.typing.collectAsStateWithLifecycle()
     val mentionCandidates by viewModel.mentionCandidates.collectAsStateWithLifecycle()
+    val mentionDirectoryHits by viewModel.mentionDirectoryHits.collectAsStateWithLifecycle()
     val composerMode by viewModel.composerMode.collectAsStateWithLifecycle()
     val uploadState by viewModel.uploadState.collectAsStateWithLifecycle()
     val clipboard = LocalClipboardManager.current
@@ -334,6 +335,8 @@ private fun ConversationScaffold(
                 MessageComposer(
                     onSend = viewModel::send,
                     mentionCandidates = mentionCandidates,
+                    mentionDirectoryHits = mentionDirectoryHits,
+                    onMentionQuery = viewModel::onMentionQueryChanged,
                     onDraftChanged = viewModel::onDraftChanged,
                     editing = composerMode as? ComposerMode.Editing,
                     onCancelEdit = viewModel::cancelEdit,

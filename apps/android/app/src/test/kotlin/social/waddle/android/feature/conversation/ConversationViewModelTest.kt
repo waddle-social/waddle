@@ -7,6 +7,7 @@ import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.test.StandardTestDispatcher
+import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.resetMain
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
@@ -33,6 +34,7 @@ import social.waddle.android.client.testMamPage
 import social.waddle.android.client.testMessage
 import social.waddle.client.ffi.WaddleMamPage
 import social.waddle.client.ffi.WaddleSendMessageOutcome
+import social.waddle.client.ffi.WaddleUserSearchEntry
 
 @OptIn(ExperimentalCoroutinesApi::class)
 class ConversationViewModelTest {
@@ -597,6 +599,100 @@ class ConversationViewModelTest {
         runCurrent()
 
         assertEquals(candidates, viewModel.mentionCandidates.value)
+    }
+
+    private fun mentionSearchViewModel(
+        search: suspend (String) -> List<WaddleUserSearchEntry>?,
+    ) = ConversationViewModel(
+        feedDispatcher = Dispatchers.Main,
+        conversationJid = ROOM_JID,
+        isGroupchat = true,
+        timeline = store.timeline(ROOM_JID),
+        events = events,
+        unreadStore = unreadStore,
+        io = io,
+        mentionDirectorySearch = search,
+        selfBareJid = OWN_JID,
+        clock = { 1_000L },
+    )
+
+    @Test
+    fun `mention directory search debounces and the latest query wins`() = runTest {
+        val queries = mutableListOf<String>()
+        val viewModel = mentionSearchViewModel { query ->
+            queries += query
+            listOf(
+                WaddleUserSearchEntry(jid = "carol@waddle.test", username = "carol", displayName = "Carol"),
+                WaddleUserSearchEntry(jid = OWN_JID, username = "icepuma", displayName = null),
+            )
+        }
+        runCurrent()
+
+        viewModel.onMentionQueryChanged("c")
+        advanceTimeBy(100)
+        viewModel.onMentionQueryChanged("ca")
+        advanceTimeBy(100)
+        viewModel.onMentionQueryChanged("car")
+        advanceTimeBy(199)
+        runCurrent()
+        assertTrue(queries.isEmpty())
+
+        advanceTimeBy(2)
+        runCurrent()
+        assertEquals(listOf("car"), queries)
+        val hit = viewModel.mentionDirectoryHits.value.getValue("car").single()
+        assertEquals(
+            MentionCandidate(
+                display = "carol",
+                uri = "xmpp:carol@waddle.test",
+                isBroadcast = false,
+                jid = "carol@waddle.test",
+            ),
+            hit,
+        )
+        assertEquals(setOf("car"), viewModel.mentionDirectoryHits.value.keys)
+    }
+
+    @Test
+    fun `mention directory answers are cached per query`() = runTest {
+        val queries = mutableListOf<String>()
+        val viewModel = mentionSearchViewModel { query ->
+            queries += query
+            emptyList()
+        }
+        runCurrent()
+
+        viewModel.onMentionQueryChanged("car")
+        advanceTimeBy(250)
+        viewModel.onMentionQueryChanged(null)
+        advanceTimeBy(250)
+        viewModel.onMentionQueryChanged("car")
+        advanceTimeBy(250)
+        viewModel.onMentionQueryChanged("")
+        advanceTimeBy(250)
+
+        assertEquals(listOf("car"), queries)
+        assertEquals(mapOf("car" to emptyList<MentionCandidate>()), viewModel.mentionDirectoryHits.value)
+    }
+
+    @Test
+    fun `mention directory failures fall back silently and retry later`() = runTest {
+        var calls = 0
+        val viewModel = mentionSearchViewModel {
+            calls += 1
+            if (calls == 1) error("boom") else null
+        }
+        runCurrent()
+
+        viewModel.onMentionQueryChanged("car")
+        advanceTimeBy(250)
+        viewModel.onMentionQueryChanged("ca")
+        advanceTimeBy(250)
+        viewModel.onMentionQueryChanged("car")
+        advanceTimeBy(250)
+
+        assertEquals(3, calls)
+        assertTrue(viewModel.mentionDirectoryHits.value.isEmpty())
     }
 
     private fun archived(

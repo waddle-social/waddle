@@ -5,6 +5,7 @@ import social.waddle.android.client.store.SessionStores
 import social.waddle.client.ffi.WaddleMentionDirectory
 import social.waddle.client.ffi.WaddleMentionTarget
 import social.waddle.client.ffi.WaddlePresence
+import social.waddle.client.ffi.WaddleUserSearchEntry
 
 /**
  * XEP-0372 mention primitives, mirroring the web client's
@@ -95,22 +96,65 @@ fun mentionCandidatesOf(occupants: Map<String, WaddlePresence>): List<MentionCan
 }
 
 /**
- * The room's mention directory for the Rust send builder, which turns
- * typed `@nick` tokens into XEP-0372 mention references. Same people the
- * `@` popover offers ([mentionCandidatesOf]), plus the room broadcasts, so
- * a nick typed without the popover still addresses its occupant.
+ * Popover rows for XEP-0055 directory hits (people who may have no MUC
+ * presence): label = directory username, URI = `xmpp:<barejid>` exactly
+ * like an occupant row. Drops [selfBareJid], JIDs without a localpart,
+ * blank usernames, and repeated JIDs (case-insensitive).
  */
-fun roomMentionDirectoryOf(occupants: Map<String, WaddlePresence>): WaddleMentionDirectory =
-    WaddleMentionDirectory(
-        targets = mentionCandidatesOf(occupants).mapNotNull { candidate ->
-            candidate.jid?.let { jid -> WaddleMentionTarget(label = candidate.display, jid = jid) }
-        },
-        broadcasts = true,
-    )
+fun directoryMentionCandidatesOf(
+    entries: List<WaddleUserSearchEntry>,
+    selfBareJid: String? = null,
+): List<MentionCandidate> {
+    val self = selfBareJid?.let(::normalizedBareJid)
+    val seen = mutableSetOf<String>()
+    return entries
+        .filter { entry -> entry.username.isNotBlank() }
+        .mapNotNull { entry ->
+            val jid = normalizedBareJid(entry.jid)
+            val mentionable = jid.contains('@') && jid != self
+            if (mentionable && seen.add(jid)) {
+                MentionCandidate(display = entry.username, uri = mentionUriFor(jid), isBroadcast = false, jid = jid)
+            } else {
+                null
+            }
+        }
+}
 
-/** [roomMentionDirectoryOf] for the current occupants of [roomJid]. */
+/**
+ * The room's mention directory for the Rust send builder, which turns
+ * typed `@label` tokens into XEP-0372 mention references. Same occupants
+ * the `@` popover offers ([mentionCandidatesOf]), then every directory
+ * user seen by this room's mention searches ([directoryUsers], label =
+ * username), plus the room broadcasts. Occupant labels always win: a
+ * directory username colliding (case-insensitively) with an occupant
+ * nick, a broadcast or an earlier directory label is skipped.
+ */
+fun roomMentionDirectoryOf(
+    occupants: Map<String, WaddlePresence>,
+    directoryUsers: List<WaddleUserSearchEntry> = emptyList(),
+): WaddleMentionDirectory {
+    val occupantTargets = mentionCandidatesOf(occupants).mapNotNull { candidate ->
+        candidate.jid?.let { jid -> WaddleMentionTarget(label = candidate.display, jid = jid) }
+    }
+    val labels = (BROADCAST_MENTIONS.keys + occupantTargets.map { canonicalMentionIdentifier(it.label) })
+        .toMutableSet()
+    val directoryTargets = directoryMentionCandidatesOf(directoryUsers).mapNotNull { candidate ->
+        val jid = candidate.jid
+        if (jid == null || !labels.add(canonicalMentionIdentifier(candidate.display))) {
+            null
+        } else {
+            WaddleMentionTarget(label = candidate.display, jid = jid)
+        }
+    }
+    return WaddleMentionDirectory(targets = occupantTargets + directoryTargets, broadcasts = true)
+}
+
+/** [roomMentionDirectoryOf] for the current occupants of [roomJid] and its seen directory users. */
 internal fun SessionStores.roomMentionDirectory(roomJid: String): WaddleMentionDirectory =
-    roomMentionDirectoryOf(presenceStore.occupants.value[roomJid].orEmpty())
+    roomMentionDirectoryOf(
+        occupants = presenceStore.occupants.value[roomJid].orEmpty(),
+        directoryUsers = mentionDirectoryStore.usersIn(roomJid),
+    )
 
 /**
  * One accepted composer mention: [begin] inclusive / [end] exclusive,

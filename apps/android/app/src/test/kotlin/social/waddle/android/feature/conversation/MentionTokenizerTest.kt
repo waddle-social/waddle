@@ -65,6 +65,44 @@ class MentionTokenizerTest {
         assertEquals(listOf("José"), filterMentionCandidates(candidates, "jose").map { it.display })
     }
 
+    @Test
+    fun `directory hits follow matching room candidates without duplicates`() {
+        val room = listOf(
+            MentionCandidate("everyone", "xmpp:@everyone", isBroadcast = true),
+            person("carl", "carl@waddle.test"),
+            person("bob", "bob@waddle.test"),
+        )
+        val hits = listOf(
+            person("carl", "Carl@Waddle.Test"),
+            person("carol", "carol@waddle.test"),
+            person("caro", "caro@waddle.test"),
+        )
+
+        assertEquals(
+            listOf("carl", "carol", "caro"),
+            mentionPopoverResults(room, "car", hits).map { it.display },
+        )
+    }
+
+    @Test
+    fun `directory hits are ignored for an empty query and respect the row limit`() {
+        val room = (1..6).map { person("car$it", "car$it@waddle.test") }
+        val hits = (1..6).map { person("carx$it", "carx$it@waddle.test") }
+
+        assertEquals(room, mentionPopoverResults(room, "", hits).take(6))
+        assertEquals(6, mentionPopoverResults(room, "", hits).size)
+        val results = mentionPopoverResults(room, "car", hits)
+        assertEquals(8, results.size)
+        assertEquals(room + hits.take(2), results)
+    }
+
+    private fun person(display: String, jid: String) = MentionCandidate(
+        display = display,
+        uri = "xmpp:${jid.lowercase()}",
+        isBroadcast = false,
+        jid = jid,
+    )
+
     private fun candidate(display: String) = MentionCandidate(
         display = display,
         uri = "xmpp:${display.lowercase()}@waddle.test",
