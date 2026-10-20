@@ -104,3 +104,37 @@ fn spicedb_schema_does_not_reuse_relation_names_as_permissions() {
         }
     }
 }
+
+#[test]
+fn spicedb_schema_defines_bot() {
+    assert!(SPICEDB_SCHEMA.contains("definition bot {"));
+    assert!(SPICEDB_SCHEMA.contains("permission manage = owner"));
+    assert!(SPICEDB_SCHEMA.contains("permission create_bot = owner + admin + member"));
+}
+
+#[test]
+fn local_schema_has_bot_type() {
+    let schema = PermissionSchema::default();
+    let bot_schema = schema.get_schema(ObjectType::Bot).expect("bot schema");
+
+    assert!(bot_schema.is_valid_relation("owner"));
+    assert!(!bot_schema.is_valid_relation("member"));
+    assert_eq!(
+        bot_schema.get_permission("manage"),
+        Some(&ComputedPermission::direct("owner"))
+    );
+}
+
+#[test]
+fn local_server_schema_has_create_bot() {
+    let schema = PermissionSchema::default();
+
+    assert_eq!(
+        schema.get_permission(ObjectType::Server, "create_bot"),
+        Some(&ComputedPermission::union(vec![
+            ComputedPermission::direct("member"),
+            ComputedPermission::direct("admin"),
+            ComputedPermission::direct("owner"),
+        ]))
+    );
+}

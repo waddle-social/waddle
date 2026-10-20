@@ -16,6 +16,21 @@ pub enum ObjectType {
     Message,
     Dm,
     Role,
+    Bot,
+}
+
+impl ObjectType {
+    /// Every object type, for operations that must visit each one (for
+    /// example purging every tuple held by a subject).
+    pub const ALL: [ObjectType; 7] = [
+        ObjectType::Server,
+        ObjectType::Space,
+        ObjectType::Channel,
+        ObjectType::Message,
+        ObjectType::Dm,
+        ObjectType::Role,
+        ObjectType::Bot,
+    ];
 }
 
 impl fmt::Display for ObjectType {
@@ -27,6 +42,7 @@ impl fmt::Display for ObjectType {
             ObjectType::Message => write!(f, "message"),
             ObjectType::Dm => write!(f, "direct_message"),
             ObjectType::Role => write!(f, "role"),
+            ObjectType::Bot => write!(f, "bot"),
         }
     }
 }
@@ -42,6 +58,7 @@ impl FromStr for ObjectType {
             "message" => Ok(ObjectType::Message),
             "direct_message" => Ok(ObjectType::Dm),
             "role" => Ok(ObjectType::Role),
+            "bot" => Ok(ObjectType::Bot),
             _ => Err(PermissionError::InvalidObject(format!(
                 "Unknown object type: {}",
                 s

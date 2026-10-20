@@ -59,6 +59,20 @@ channel:general#parent@waddle:penguin-club
 channel:general#viewer@waddle:penguin-club#member
 ```
 
+User-owned bots add a `bot` definition whose only relation is `owner`, with
+`permission manage = owner`; `server#create_bot` (owner, admin or member)
+decides who may create one. A bot acts as an ordinary `user:<bot bare jid>`
+subject, so it holds only the grants written for that subject explicitly and
+never inherits its owner's relations. Bot actions are authorized by the
+intersection of both subjects: an action is allowed only when `user:<bot>` and
+`user:<owner>` each hold the permission on the object, so a bot can never
+exceed its owner's access.
+
+```
+bot:rawkode+standup@bots.example.com#owner@user:rawkode@example.com
+channel:general#member@user:rawkode+standup@bots.example.com
+```
+
 ## Related
 
 - [RFC-0001: Waddles](../rfcs/0001-waddles.md)

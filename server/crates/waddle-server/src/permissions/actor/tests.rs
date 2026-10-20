@@ -497,3 +497,191 @@ async fn replacement_serializes_with_rollback_across_postgres_actors() {
         .await
         .expect("drop schema");
 }
+
+const BOT_SERVER: &str = "localhost";
+const BOT_OWNER: &str = "rawkode@localhost";
+const BOT_JID: &str = "rawkode+standup@bots.localhost";
+
+async fn write_tuple(
+    actor: &ActorRef<PermissionActor>,
+    object: Object,
+    relation: &str,
+    subject: Subject,
+) {
+    actor
+        .ask(WriteTuple {
+            tuple: Tuple::new(object, Relation::new(relation), subject),
+        })
+        .await
+        .expect("write tuple");
+}
+
+async fn is_allowed(
+    actor: &ActorRef<PermissionActor>,
+    subject: &str,
+    permission: Permission,
+    object: Object,
+) -> bool {
+    actor
+        .ask(CheckPermission {
+            subject: Subject::user(subject),
+            permission,
+            object,
+        })
+        .await
+        .expect("check should succeed")
+        .allowed
+}
+
+#[tokio::test]
+async fn create_bot_allowed_for_member_admin_owner() {
+    let actor = spawn_test_actor().await;
+    let server = Object::new(ObjectType::Server, BOT_SERVER);
+    for (user, relation) in [
+        ("member@localhost", "member"),
+        ("admin@localhost", "admin"),
+        ("owner@localhost", "owner"),
+    ] {
+        write_tuple(&actor, server.clone(), relation, Subject::user(user)).await;
+        assert!(
+            is_allowed(&actor, user, Permission::CreateBot, server.clone()).await,
+            "server {relation} should hold create_bot"
+        );
+    }
+}
+
+#[tokio::test]
+async fn create_bot_denied_for_non_member() {
+    let actor = spawn_test_actor().await;
+    let server = Object::new(ObjectType::Server, BOT_SERVER);
+    write_tuple(
+        &actor,
+        server.clone(),
+        "member",
+        Subject::user("member@localhost"),
+    )
+    .await;
+
+    assert!(!is_allowed(&actor, "stranger@localhost", Permission::CreateBot, server).await);
+}
+
+#[tokio::test]
+async fn bot_owner_has_manage() {
+    let actor = spawn_test_actor().await;
+    let bot = Object::new(ObjectType::Bot, BOT_JID);
+    write_tuple(&actor, bot.clone(), "owner", Subject::user(BOT_OWNER)).await;
+
+    assert!(is_allowed(&actor, BOT_OWNER, Permission::Manage, bot).await);
+}
+
+#[tokio::test]
+async fn non_owner_lacks_manage() {
+    let actor = spawn_test_actor().await;
+    let bot = Object::new(ObjectType::Bot, BOT_JID);
+    write_tuple(&actor, bot.clone(), "owner", Subject::user(BOT_OWNER)).await;
+
+    assert!(!is_allowed(&actor, "mallory@localhost", Permission::Manage, bot.clone()).await);
+    // The bot does not manage itself either.
+    assert!(!is_allowed(&actor, BOT_JID, Permission::Manage, bot).await);
+}
+
+#[tokio::test]
+async fn bot_without_grants_cannot_read_channel_owner_can() {
+    let actor = spawn_test_actor().await;
+    let channel = Object::new(ObjectType::Channel, "general@muc.localhost");
+    write_tuple(
+        &actor,
+        Object::new(ObjectType::Bot, BOT_JID),
+        "owner",
+        Subject::user(BOT_OWNER),
+    )
+    .await;
+    write_tuple(&actor, channel.clone(), "member", Subject::user(BOT_OWNER)).await;
+
+    assert!(is_allowed(&actor, BOT_OWNER, Permission::Read, channel.clone()).await);
+    assert!(is_allowed(&actor, BOT_OWNER, Permission::SendMessage, channel.clone()).await);
+    // Owning a bot never lends the bot the owner's access.
+    assert!(!is_allowed(&actor, BOT_JID, Permission::Read, channel.clone()).await);
+    assert!(!is_allowed(&actor, BOT_JID, Permission::SendMessage, channel).await);
+}
+
+#[tokio::test]
+async fn bot_with_explicit_member_grant_can_read() {
+    let actor = spawn_test_actor().await;
+    let channel = Object::new(ObjectType::Channel, "general@muc.localhost");
+    assert!(!is_allowed(&actor, BOT_JID, Permission::Read, channel.clone()).await);
+
+    write_tuple(&actor, channel.clone(), "member", Subject::user(BOT_JID)).await;
+
+    assert!(is_allowed(&actor, BOT_JID, Permission::Read, channel.clone()).await);
+    assert!(is_allowed(&actor, BOT_JID, Permission::SendMessage, channel).await);
+}
+
+#[tokio::test]
+async fn delete_subject_tuples_removes_all_bot_grants() {
+    let actor = spawn_test_actor().await;
+    let bot = Object::new(ObjectType::Bot, BOT_JID);
+    let channel = Object::new(ObjectType::Channel, "general@muc.localhost");
+    let space = Object::new(ObjectType::Space, "penguin-club");
+    write_tuple(&actor, bot.clone(), "owner", Subject::user(BOT_OWNER)).await;
+    write_tuple(&actor, channel.clone(), "member", Subject::user(BOT_OWNER)).await;
+    write_tuple(&actor, channel.clone(), "member", Subject::user(BOT_JID)).await;
+    write_tuple(&actor, space.clone(), "member", Subject::user(BOT_JID)).await;
+
+    // Warm the local checker cache so the purge must invalidate it.
+    assert!(is_allowed(&actor, BOT_JID, Permission::Read, channel.clone()).await);
+    assert!(is_allowed(&actor, BOT_JID, Permission::View, space.clone()).await);
+
+    let deleted = actor
+        .ask(DeleteSubjectTuples {
+            subject: Subject::user(BOT_JID),
+        })
+        .await
+        .expect("purge should succeed");
+    assert_eq!(deleted, 2);
+
+    assert!(!is_allowed(&actor, BOT_JID, Permission::Read, channel.clone()).await);
+    assert!(!is_allowed(&actor, BOT_JID, Permission::View, space).await);
+    // Tuples held by other subjects, including the bot's owner tuple, survive.
+    assert!(is_allowed(&actor, BOT_OWNER, Permission::Read, channel).await);
+    assert!(is_allowed(&actor, BOT_OWNER, Permission::Manage, bot).await);
+}
+
+#[tokio::test]
+async fn list_subject_tuples_returns_channel_and_space_grants() {
+    let actor = spawn_test_actor().await;
+    let channel = Object::new(ObjectType::Channel, "general@muc.localhost");
+    let space = Object::new(ObjectType::Space, "penguin-club");
+    write_tuple(
+        &actor,
+        Object::new(ObjectType::Bot, BOT_JID),
+        "owner",
+        Subject::user(BOT_OWNER),
+    )
+    .await;
+    write_tuple(&actor, channel.clone(), "member", Subject::user(BOT_OWNER)).await;
+    write_tuple(&actor, channel.clone(), "member", Subject::user(BOT_JID)).await;
+    write_tuple(&actor, space.clone(), "member", Subject::user(BOT_JID)).await;
+
+    let mut grants = actor
+        .ask(ListSubjectTuples {
+            subject: Subject::user(BOT_JID),
+        })
+        .await
+        .expect("list should succeed")
+        .into_iter()
+        .map(|tuple| {
+            assert_eq!(tuple.subject, Subject::user(BOT_JID));
+            (tuple.object, tuple.relation.name)
+        })
+        .collect::<Vec<_>>();
+    grants.sort_by_key(|(object, _)| object.to_string());
+
+    assert_eq!(
+        grants,
+        vec![
+            (channel, "member".to_string()),
+            (space, "member".to_string()),
+        ]
+    );
+}
