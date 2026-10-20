@@ -761,6 +761,57 @@ CREATE TABLE extension_bot_rooms (
 );
 "#;
 
+/// User-owned bot accounts and their bearer tokens. A bot is a `users` row
+/// with `kind = 'bot'` and its owner's bare JID in `owner_jid`; the server
+/// enforces `kind = 'bot'` iff `owner_jid IS NOT NULL` because SQLite cannot
+/// add a table-level CHECK. `owner_jid` has no FK: a missing owner disables
+/// the bot instead of deleting it. `disabled_*` is written only by the bot
+/// lifecycle janitor. `bot_tokens` stores only token hashes, and every
+/// timestamp is bound from Rust.
+pub const V0016_USER_BOTS: &str = r#"
+ALTER TABLE users ADD COLUMN kind TEXT NOT NULL DEFAULT 'human' CHECK (kind IN ('human', 'bot'));
+ALTER TABLE users ADD COLUMN owner_jid TEXT;
+ALTER TABLE users ADD COLUMN disabled_at TEXT;
+ALTER TABLE users ADD COLUMN disabled_reason TEXT CHECK (disabled_reason IS NULL OR disabled_reason IN ('owner_missing', 'owner_not_member'));
+CREATE INDEX idx_users_owner_jid ON users(owner_jid) WHERE owner_jid IS NOT NULL;
+CREATE INDEX idx_users_kind ON users(kind);
+CREATE TABLE bot_tokens (
+    id TEXT PRIMARY KEY,
+    bot_jid TEXT NOT NULL REFERENCES users(jid) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE INDEX idx_bot_tokens_bot_jid ON bot_tokens(bot_jid);
+CREATE INDEX idx_bot_tokens_expires_at ON bot_tokens(expires_at);
+"#;
+
+/// Postgres form of [`V0016_USER_BOTS`]. Idempotent throughout so replicas
+/// racing the migration converge (see [`V0009_AUTH_HANDSHAKE_STATE`]).
+pub const V0016_USER_BOTS_POSTGRES: &str = r#"
+ALTER TABLE users ADD COLUMN IF NOT EXISTS kind TEXT NOT NULL DEFAULT 'human' CHECK (kind IN ('human', 'bot'));
+ALTER TABLE users ADD COLUMN IF NOT EXISTS owner_jid TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_at TEXT;
+ALTER TABLE users ADD COLUMN IF NOT EXISTS disabled_reason TEXT CHECK (disabled_reason IS NULL OR disabled_reason IN ('owner_missing', 'owner_not_member'));
+CREATE INDEX IF NOT EXISTS idx_users_owner_jid ON users(owner_jid) WHERE owner_jid IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_users_kind ON users(kind);
+CREATE TABLE IF NOT EXISTS bot_tokens (
+    id TEXT PRIMARY KEY,
+    bot_jid TEXT NOT NULL REFERENCES users(jid) ON DELETE CASCADE,
+    token_hash TEXT NOT NULL UNIQUE,
+    label TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    last_used_at TEXT,
+    expires_at TEXT NOT NULL,
+    revoked_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_bot_tokens_bot_jid ON bot_tokens(bot_jid);
+CREATE INDEX IF NOT EXISTS idx_bot_tokens_expires_at ON bot_tokens(expires_at);
+"#;
+
 /// Get all global migrations in order
 pub fn all() -> Vec<Migration> {
     vec![
@@ -856,6 +907,14 @@ pub fn all() -> Vec<Migration> {
             description: "Record rooms where extension bots have posted".to_string(),
             sql_sqlite: V0015_EXTENSION_BOT_ROOMS,
             sql_postgres: V0015_EXTENSION_BOT_ROOMS,
+        },
+        Migration {
+            version: 16,
+            description:
+                "User bots: users.kind/owner_jid/disabled_at/disabled_reason and bot_tokens"
+                    .to_string(),
+            sql_sqlite: V0016_USER_BOTS,
+            sql_postgres: V0016_USER_BOTS_POSTGRES,
         },
     ]
 }
