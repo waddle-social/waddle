@@ -25,6 +25,8 @@ const QUICK_REACTIONS: [&str; 6] = ["👍", "❤️", "😂", "🎉", "😮", "�
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MessageAction {
     Reply,
+    OpenThread,
+    Subthread,
     Copy,
     Edit,
     Delete,
@@ -34,6 +36,8 @@ impl MessageAction {
     fn presentation(self) -> (&'static str, &'static str) {
         match self {
             Self::Reply => ("mail-reply-sender-symbolic", "Reply"),
+            Self::OpenThread => ("chat-bubbles-text-symbolic", "Open Thread"),
+            Self::Subthread => ("chat-bubbles-text-symbolic", "Start Subthread"),
             Self::Copy => ("edit-copy-symbolic", "Copy Text"),
             Self::Edit => ("document-edit-symbolic", "Edit"),
             Self::Delete => ("user-trash-symbolic", "Delete"),
@@ -180,7 +184,7 @@ impl WaddleWindow {
                 Err(message) => {
                     // Give the caption and reply back, unless the user has
                     // moved on to another conversation or started typing.
-                    let same = imp.current.borrow().as_deref() == Some(conversation.jid.as_str());
+                    let same = imp.current.borrow().as_deref() == Some(conversation.key().as_str());
                     if same && imp.composer_entry.text().is_empty() {
                         imp.composer_entry.set_text(&caption);
                         if let Some(quote) = quote {
@@ -207,13 +211,16 @@ impl WaddleWindow {
                     .map(|file| file.attachment.clone())
                     .collect(),
             };
-            window.edit_conversation(&conversation.jid, |timeline| timeline.add_local_echo(echo));
+            window.edit_conversation(&conversation.key(), |timeline| {
+                timeline.add_local_echo(echo)
+            });
             window.scroll_to_end();
             let wire = uploaded.into_iter().map(|file| file.wire).collect();
             let draft = Draft {
                 body: caption,
                 origin_id: origin.clone(),
                 quote,
+                thread: conversation.thread.clone(),
                 files: wire,
                 // Occupants as of now, not when the upload began.
                 mentionable: window.mention_targets(&conversation),
@@ -222,7 +229,7 @@ impl WaddleWindow {
                 .send(&conversation.jid, conversation.kind, draft)
                 .await;
             if !sent {
-                window.edit_conversation(&conversation.jid, |timeline| {
+                window.edit_conversation(&conversation.key(), |timeline| {
                     timeline.set_delivery(&origin, Delivery::Failed)
                 });
                 window.toast("The message could not be sent.");
@@ -360,7 +367,7 @@ impl WaddleWindow {
             if body.is_empty() || body == original.body {
                 return;
             }
-            let jid = conversation.jid.clone();
+            let jid = conversation.key();
             self.edit_conversation(&jid, |timeline| {
                 timeline.apply_live(IncomingMessage {
                     replaces_id: Some(correction_id.clone()),
@@ -416,7 +423,9 @@ impl WaddleWindow {
             }),
             attachments: Vec::new(),
         };
-        self.edit_conversation(&conversation.jid, |timeline| timeline.add_local_echo(echo));
+        self.edit_conversation(&conversation.key(), |timeline| {
+            timeline.add_local_echo(echo)
+        });
         self.scroll_to_end();
 
         let window = self.clone();
@@ -430,6 +439,7 @@ impl WaddleWindow {
                         body,
                         origin_id: origin.clone(),
                         quote,
+                        thread: conversation.thread.clone(),
                         files: Vec::new(),
                         mentionable,
                     },
@@ -440,7 +450,7 @@ impl WaddleWindow {
             }
             if !sent {
                 window.imp().outbound.borrow_mut().remove(&origin);
-                window.edit_conversation(&conversation.jid, |timeline| {
+                window.edit_conversation(&conversation.key(), |timeline| {
                     timeline.set_delivery(&origin, Delivery::Failed)
                 });
                 window.toast("The message could not be sent.");
@@ -469,7 +479,7 @@ impl WaddleWindow {
         let previous = imp
             .timelines
             .borrow()
-            .get(&conversation.jid)
+            .get(&conversation.key())
             .map(|timeline| timeline.own_reactions(target))
             .unwrap_or_default();
         let mut next = previous.clone();
@@ -481,7 +491,7 @@ impl WaddleWindow {
         }
         let now = chrono::Utc::now().timestamp_millis();
         let nick = session.me.nick.clone();
-        self.edit_conversation(&conversation.jid, |timeline| {
+        self.edit_conversation(&conversation.key(), |timeline| {
             timeline.apply_own_reaction(target, &nick, &next, now)
         });
 
@@ -496,7 +506,7 @@ impl WaddleWindow {
                 return;
             }
             // Roll back, stamped after the optimistic set so it wins.
-            window.edit_conversation(&conversation.jid, |timeline| {
+            window.edit_conversation(&conversation.key(), |timeline| {
                 timeline.apply_own_reaction(&target, &nick, &previous, now + 1)
             });
             window.toast("The reaction could not be sent.");
@@ -554,7 +564,7 @@ impl WaddleWindow {
         };
         let nick = session.me.nick.clone();
         let original = item.clone();
-        self.edit_conversation(&conversation.jid, |timeline| {
+        self.edit_conversation(&conversation.key(), |timeline| {
             timeline.apply_live(IncomingMessage {
                 retracts_id: Some(reference.clone()),
                 sender: nick,
@@ -571,7 +581,8 @@ impl WaddleWindow {
                 .await
                 && window.imp().generation.get() == generation
             {
-                window.edit_conversation(&conversation.jid, |timeline| timeline.restore(&original));
+                window
+                    .edit_conversation(&conversation.key(), |timeline| timeline.restore(&original));
                 window.toast("The message could not be deleted.");
             }
         });
@@ -604,7 +615,7 @@ impl WaddleWindow {
                     self.imp()
                         .timelines
                         .borrow()
-                        .get(&conversation.jid)
+                        .get(&conversation.key())
                         .map(|timeline| timeline.own_reactions(&reference))
                 })
                 .unwrap_or_default();
@@ -628,6 +639,13 @@ impl WaddleWindow {
         let mut actions = Vec::new();
         if item.reference_id.is_some() {
             actions.push(MessageAction::Reply);
+            actions.push(MessageAction::OpenThread);
+            if self
+                .current_conversation()
+                .is_some_and(|conversation| conversation.thread.is_some())
+            {
+                actions.push(MessageAction::Subthread);
+            }
         }
         actions.push(MessageAction::Copy);
         if item.own && item.correction_id.is_some() && item.delivery != Delivery::Failed {
@@ -656,6 +674,8 @@ impl WaddleWindow {
                 popover.popdown();
                 match action {
                     MessageAction::Reply => window.reply_to(&item),
+                    MessageAction::OpenThread => window.open_message_thread(&item, false),
+                    MessageAction::Subthread => window.open_message_thread(&item, true),
                     MessageAction::Copy => window.clipboard().set_text(&item.body),
                     MessageAction::Edit => window.edit(&item),
                     MessageAction::Delete => window.confirm_delete(&item),

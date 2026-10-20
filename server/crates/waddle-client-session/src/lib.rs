@@ -8,6 +8,7 @@
 //! This first slice holds the conversation timeline. The connection
 //! controller, outbox, presence and read state follow ADR-0019's order.
 
+pub mod judgments;
 pub mod timeline;
 
 pub use timeline::{

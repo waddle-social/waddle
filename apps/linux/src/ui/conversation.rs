@@ -190,6 +190,8 @@ impl WaddleWindow {
         self.clear_directory_search();
         imp.conversations.replace(Vec::new());
         imp.timelines.replace(Default::default());
+        imp.thread_roots.replace(Default::default());
+        imp.thread_updates.replace(Default::default());
         imp.unread.replace(Default::default());
         imp.current.replace(None);
         imp.read_pending.replace(Default::default());
@@ -268,18 +270,7 @@ impl WaddleWindow {
                     self.on_arrival(arrival);
                 }
             }
-            SessionEvent::Inbox(entry) => {
-                if entry.thread_id.is_some() {
-                    return;
-                }
-                if entry.kind == "direct" {
-                    self.ensure_direct(&entry.partner);
-                }
-                if !self.is_reading(&entry.partner) {
-                    imp.unread.borrow_mut().insert(entry.partner, entry.unread);
-                    self.render_conversations();
-                }
-            }
+            SessionEvent::Inbox(entry) => self.update_inbox(&entry),
             SessionEvent::Presence(presence) => self.on_room_presence(*presence),
             SessionEvent::Rejected { id, from, to } => self.on_message_rejected(id, from, to),
             SessionEvent::DeliveryAcked(id) => self.set_delivery(&id, Delivery::Sent),
@@ -295,10 +286,30 @@ impl WaddleWindow {
             message,
             mentions_me,
             delayed,
+            thread,
         } = arrival;
         if kind == Kind::Direct {
             self.ensure_direct(&conversation);
         }
+        let base = imp
+            .conversations
+            .borrow()
+            .iter()
+            .find(|known| known.jid == conversation && known.thread.is_none())
+            .cloned();
+        let Some(base) = base else {
+            return;
+        };
+        if is_fastening(&message) {
+            self.broadcast_fastening(&conversation, message);
+            return;
+        }
+        self.remember_thread_root(&base, &message);
+        let destination = match thread {
+            Some(thread) => self.ensure_thread(&base, thread, None),
+            None => base,
+        };
+        let conversation = destination.key();
         let notice = (!message.own && !is_fastening(&message))
             .then(|| {
                 let body = message
@@ -316,7 +327,9 @@ impl WaddleWindow {
             .borrow_mut()
             .entry(conversation.clone())
             .or_default()
-            .apply_live(message);
+            .apply_live(message.clone());
+        self.refresh_thread_context();
+        self.render_conversations();
         let added = diffs
             .iter()
             .any(|diff| matches!(diff, TimelineDiff::Append { .. }));
@@ -369,16 +382,15 @@ impl WaddleWindow {
         }
         // Keep DMs that arrived live but are not in the inbox yet.
         for known in imp.conversations.borrow().iter() {
-            if known.kind == Kind::Direct && !conversations.iter().any(|c| c.jid == known.jid) {
+            if (known.kind == Kind::Direct || known.thread.is_some())
+                && !conversations.iter().any(|c| c.key() == known.key())
+            {
                 conversations.push(known.clone());
             }
         }
         imp.conversations.replace(conversations);
-        {
-            let mut unread = imp.unread.borrow_mut();
-            for entry in inbox.iter().filter(|entry| entry.thread_id.is_none()) {
-                unread.insert(entry.partner.clone(), entry.unread);
-            }
+        for entry in &inbox {
+            self.update_inbox(entry);
         }
         self.render_conversations();
         self.refresh_composer();
@@ -389,19 +401,14 @@ impl WaddleWindow {
             .pending_open
             .take()
             .or_else(|| imp.current.borrow().clone())
-            .or_else(|| {
-                imp.conversations
-                    .borrow()
-                    .first()
-                    .map(|conversation| conversation.jid.clone())
-            });
+            .or_else(|| imp.conversations.borrow().first().map(Conversation::key));
         if let Some(jid) = target {
             self.open_conversation(&jid);
         }
     }
 
     /// Add a DM conversation the sidebar does not show yet.
-    fn ensure_direct(&self, peer: &str) {
+    pub(super) fn ensure_direct(&self, peer: &str) {
         let imp = self.imp();
         if imp
             .conversations
@@ -417,7 +424,7 @@ impl WaddleWindow {
         }
     }
 
-    fn render_conversations(&self) {
+    pub(super) fn render_conversations(&self) {
         let imp = self.imp();
         while let Some(row) = imp.room_list.first_child() {
             imp.room_list.remove(&row);
@@ -425,10 +432,10 @@ impl WaddleWindow {
         let current = imp.current.borrow().clone();
         let unread = imp.unread.borrow();
         for conversation in imp.conversations.borrow().iter() {
-            let unread = unread.get(&conversation.jid).copied().unwrap_or(0);
+            let unread = unread.get(&conversation.key()).copied().unwrap_or(0);
             let row = conversation_row(conversation, unread);
             imp.room_list.append(&row);
-            if current.as_deref() == Some(conversation.jid.as_str()) {
+            if current.as_deref() == Some(conversation.key().as_str()) {
                 imp.room_list.select_row(Some(&row));
             }
         }
@@ -445,7 +452,7 @@ impl WaddleWindow {
         imp.conversations
             .borrow()
             .iter()
-            .find(|conversation| conversation.jid == current)
+            .find(|conversation| conversation.key() == current)
             .cloned()
     }
 
@@ -456,14 +463,15 @@ impl WaddleWindow {
             .conversations
             .borrow()
             .iter()
-            .find(|conversation| conversation.jid == jid)
+            .find(|conversation| conversation.key() == jid)
             .cloned()
         else {
             imp.pending_open.replace(Some(jid.to_string()));
             return;
         };
         let switching = imp.current.borrow().as_deref() != Some(jid);
-        imp.current.replace(Some(conversation.jid.clone()));
+        imp.current.replace(Some(conversation.key()));
+        imp.thread_back.set_visible(conversation.thread.is_some());
         if switching {
             self.cancel_compose();
         }
@@ -482,9 +490,10 @@ impl WaddleWindow {
         let needs_history = imp
             .timelines
             .borrow()
-            .get(&conversation.jid)
+            .get(&conversation.key())
             .is_none_or(|timeline| timeline.older_cursor().is_none());
         self.rebuild_rows();
+        self.refresh_thread_context();
         self.scroll_to_end();
         if needs_history {
             self.load_history(conversation, None);
@@ -492,12 +501,12 @@ impl WaddleWindow {
     }
 
     /// Whether the user is looking at this conversation right now.
-    fn is_reading(&self, jid: &str) -> bool {
+    pub(super) fn is_reading(&self, jid: &str) -> bool {
         self.is_active() && self.is_visible() && self.imp().current.borrow().as_deref() == Some(jid)
     }
 
     /// Clear the open conversation's unread state, here and on the server.
-    fn read_current(&self) {
+    pub(super) fn read_current(&self) {
         let imp = self.imp();
         let Some(jid) = imp.current.borrow().clone() else {
             return;
@@ -533,8 +542,16 @@ impl WaddleWindow {
             let Some(session) = imp.session.borrow().clone() else {
                 return;
             };
-            for jid in pending {
-                session.mark_read(&jid);
+            for key in pending {
+                let conversation = imp
+                    .conversations
+                    .borrow()
+                    .iter()
+                    .find(|known| known.key() == key)
+                    .cloned();
+                if let Some(conversation) = conversation {
+                    session.mark_read(&conversation);
+                }
             }
         });
     }
@@ -551,7 +568,7 @@ impl WaddleWindow {
                     .conversations
                     .borrow()
                     .iter()
-                    .find(|conversation| conversation.jid == jid)
+                    .find(|conversation| conversation.key() == jid)
                     .map(|conversation| conversation.name.clone())
                     .unwrap_or_default();
                 format!("{sender} in #{room}")
@@ -571,7 +588,7 @@ impl WaddleWindow {
         };
         let cursor = {
             let timelines = imp.timelines.borrow();
-            let Some(timeline) = timelines.get(&conversation.jid) else {
+            let Some(timeline) = timelines.get(&conversation.key()) else {
                 return;
             };
             if timeline.history_complete() {
@@ -586,32 +603,67 @@ impl WaddleWindow {
 
     fn load_history(&self, conversation: Conversation, before: Option<String>) {
         let imp = self.imp();
-        if !imp
-            .loading_history
-            .borrow_mut()
-            .insert(conversation.jid.clone())
-        {
+        let key = conversation.key();
+        if !imp.loading_history.borrow_mut().insert(key.clone()) {
             return;
         }
         let Some(session) = imp.session.borrow().clone() else {
-            imp.loading_history.borrow_mut().remove(&conversation.jid);
+            imp.loading_history.borrow_mut().remove(&key);
             return;
         };
         let initial = before.is_none();
+        let generation = imp.generation.get();
         let window = self.clone();
         glib::spawn_future_local(async move {
-            let (messages, first_id, complete) = session
-                .history(&conversation.jid, conversation.kind, before)
-                .await;
+            let requested_cursor = before.clone();
+            let result = session.history(&conversation, before).await;
             let imp = window.imp();
-            imp.loading_history.borrow_mut().remove(&conversation.jid);
+            if imp.generation.get() != generation {
+                return;
+            }
+            imp.loading_history.borrow_mut().remove(&key);
+            let page = match result {
+                Ok(page) => page,
+                Err(message) => {
+                    window.toast(&message);
+                    return;
+                }
+            };
+            // Remember originals before discovering threads: a root can be
+            // earlier in this page than its replies.
+            for entry in &page.messages {
+                window.remember_thread_root(&conversation, &entry.message);
+            }
+            let mut selected = Vec::new();
+            for entry in page.messages {
+                if is_fastening(&entry.message) {
+                    window.broadcast_fastening(&conversation.jid, entry.message.clone());
+                    selected.push(entry.message);
+                    continue;
+                }
+                let destination = match entry.thread.as_ref() {
+                    Some(thread) => window.ensure_thread(&conversation, thread.clone(), None),
+                    None => {
+                        let mut base = conversation.clone();
+                        base.thread = None;
+                        base
+                    }
+                };
+                if destination.key() == key {
+                    selected.push(entry.message);
+                }
+            }
+            let had_content = selected.iter().any(|message| !is_fastening(message));
+            let advanced = page.first_id.is_some() && page.first_id != requested_cursor;
             let diffs = imp
                 .timelines
                 .borrow_mut()
-                .entry(conversation.jid.clone())
+                .entry(key.clone())
                 .or_default()
-                .apply_history_page(messages, first_id, complete);
-            if imp.current.borrow().as_deref() != Some(conversation.jid.as_str()) {
+                .apply_history_page(selected, page.first_id, page.complete);
+            window.render_conversations();
+            window.refresh_thread_context();
+            if imp.current.borrow().as_deref() != Some(key.as_str()) {
                 return;
             }
             let pushed = diffs.iter().find_map(|diff| match diff {
@@ -622,8 +674,12 @@ impl WaddleWindow {
             if initial {
                 window.scroll_to_end();
             } else if let Some(pushed) = pushed {
-                // Keep the row the user was reading in place.
                 window.scroll_to(pushed);
+            }
+            // A page can contain only other DM threads, even when older
+            // replies are requested below an already loaded window.
+            if !page.complete && !had_content && advanced {
+                window.load_older();
             }
         });
     }
@@ -792,14 +848,18 @@ pub fn notification_id(jid: &str) -> String {
     format!("conversation:{jid}")
 }
 
-fn is_fastening(message: &waddle_client_session::IncomingMessage) -> bool {
-    message.reaction.is_some()
+pub(super) fn is_fastening(message: &waddle_client_session::IncomingMessage) -> bool {
+    message.safety_scores.is_some()
+        || message.reaction.is_some()
         || message.replaces_id.is_some()
         || message.retracts_id.is_some()
         || message.moderates_id.is_some()
 }
 
 fn sidebar_title(conversation: &Conversation) -> String {
+    if conversation.thread.is_some() {
+        return format!("Thread: {}", conversation.name);
+    }
     match conversation.kind {
         Kind::Room => format!("# {}", conversation.name),
         Kind::Direct => conversation.name.clone(),
@@ -809,11 +869,14 @@ fn sidebar_title(conversation: &Conversation) -> String {
 /// A room's `#` tile or a DM's avatar, the name, and any unread count.
 fn conversation_row(conversation: &Conversation, unread: u32) -> adw::ActionRow {
     let row = adw::ActionRow::builder()
-        .title(conversation.name.as_str())
+        .title(glib::markup_escape_text(&conversation.name))
         .title_lines(1)
         .activatable(true)
         .build();
     row.add_css_class("conversation");
+    if conversation.thread.is_some() {
+        row.set_subtitle("Thread");
+    }
     let icon: gtk::Widget = match conversation.kind {
         Kind::Room => {
             let tile = gtk::Label::builder()
@@ -1013,6 +1076,15 @@ fn row_widget() -> gtk::Box {
     content.append(&media);
     content.append(&attachments);
     content.append(&reactions);
+    let judgments = gtk::Box::new(gtk::Orientation::Vertical, 4);
+    content.append(&judgments);
+    let thread = gtk::Button::builder()
+        .label("Reply in Thread")
+        .halign(gtk::Align::Start)
+        .build();
+    thread.add_css_class("flat");
+    thread.add_css_class("caption");
+    content.append(&thread);
     row.append(&gutter);
     row.append(&content);
     outer.append(&day);
@@ -1039,6 +1111,8 @@ struct RowParts {
     media: gtk::Box,
     attachments: gtk::Box,
     reactions: gtk::Box,
+    judgments: gtk::Box,
+    thread: gtk::Button,
 }
 
 fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
@@ -1052,6 +1126,8 @@ fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
     let media = body.next_sibling().and_downcast::<gtk::Box>()?;
     let attachments = media.next_sibling().and_downcast::<gtk::Box>()?;
     let reactions = attachments.next_sibling().and_downcast::<gtk::Box>()?;
+    let judgments = reactions.next_sibling().and_downcast::<gtk::Box>()?;
+    let thread = judgments.next_sibling().and_downcast::<gtk::Button>()?;
     Some(RowParts {
         day_label: day.first_child()?.next_sibling().and_downcast()?,
         avatar: gutter.child_by_name("avatar").and_downcast()?,
@@ -1068,6 +1144,8 @@ fn row_parts(widget: &gtk::Widget) -> Option<RowParts> {
         media,
         attachments,
         reactions,
+        judgments,
+        thread,
     })
 }
 
@@ -1125,6 +1203,32 @@ fn bind_row(window: &glib::WeakRef<WaddleWindow>, widget: &gtk::Widget, row: &Ro
     parts.row.remove_css_class("sending");
     super::media::bind(&parts.media, &item.body, item.retracted);
     bind_reactions(window, &parts.reactions, item);
+    super::judgments::bind(&parts.judgments, item);
+    // Replace the button on each bind so recycled rows retain no old target.
+    let button = gtk::Button::builder()
+        .label("Reply in Thread")
+        .halign(gtk::Align::Start)
+        .build();
+    button.add_css_class("flat");
+    button.add_css_class("caption");
+    button.set_visible(
+        !item.retracted
+            && item.reference_id.is_some()
+            && window
+                .upgrade()
+                .and_then(|window| window.current_conversation())
+                .is_some_and(|conversation| conversation.thread.is_none()),
+    );
+    let (owner, target) = (window.clone(), item.clone());
+    button.connect_clicked(move |_| {
+        if let Some(window) = owner.upgrade() {
+            window.open_message_thread(&target, false);
+        }
+    });
+    if let Some(parent) = parts.thread.parent().and_downcast::<gtk::Box>() {
+        parent.remove(&parts.thread);
+        parent.append(&button);
+    }
     match window.upgrade() {
         Some(window) => bind_attachments(&window, &parts.attachments, item),
         None => parts.attachments.set_visible(false),

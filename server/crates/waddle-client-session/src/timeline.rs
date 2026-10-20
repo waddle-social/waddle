@@ -20,6 +20,8 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
+use crate::judgments::{SafetyScores, SafetyScoresFastening, ScoreTarget, StampedScores};
+
 /// Same-author messages closer than this group under one header
 /// (inclusive; ADR-0019 behaviour table).
 pub const GROUPING_WINDOW_MS: i64 = 5 * 60 * 1000;
@@ -159,6 +161,11 @@ pub struct TimelineItem {
     /// Tallies in emoji order.
     pub reactions: Vec<Reaction>,
     pub attachments: Vec<Attachment>,
+    /// Server judgments for this exact body revision.
+    pub scores: Option<SafetyScores>,
+    score_target: Option<ScoreTarget>,
+    source_revision_id: Option<String>,
+    scores_at: Option<i64>,
     /// When the applied correction was sent, so an older one arriving later
     /// cannot undo a newer one.
     edited_at: Option<i64>,
@@ -195,6 +202,10 @@ pub struct IncomingMessage {
     pub tombstone: bool,
     pub reply_to: Option<ReplyTo>,
     pub reaction: Option<ReactionUpdate>,
+    /// Verified room archive identity; absent for unverified IDs and DMs.
+    pub score_target: Option<ScoreTarget>,
+    /// Trusted room-authored XEP-0422 judgment update, never occupant data.
+    pub safety_scores: Option<SafetyScoresFastening>,
     pub attachments: Vec<Attachment>,
 }
 
@@ -255,6 +266,7 @@ struct Reacted {
 
 #[derive(Debug, Clone)]
 struct Edit {
+    source_revision_id: Option<String>,
     author_id: Option<String>,
     body: String,
     at: i64,
@@ -301,6 +313,9 @@ pub struct Timeline {
     pending_moderations: HashSet<String>,
     /// Every sender's latest reaction set, by target id.
     reactions: HashMap<String, HashMap<Author, Reacted>>,
+    /// Latest trusted batch per target and accepted body revision. Keep
+    /// unseen targets/revisions for newest-first archive pagination.
+    judgments: HashMap<(ScoreTarget, String), StampedScores>,
     /// Target id to the serials of rows that reply to it.
     replies: HashMap<String, Vec<u64>>,
     /// Oldest archive id seen, the cursor for the next older page.
@@ -460,6 +475,10 @@ impl Timeline {
             reply: echo.reply_to.map(unresolved_preview),
             reactions: Vec::new(),
             attachments: echo.attachments,
+            scores: None,
+            score_target: None,
+            source_revision_id: None,
+            scores_at: None,
             edited_at: None,
         };
         self.append(item, ids)
@@ -530,6 +549,10 @@ impl Timeline {
         item.edited_at = previous.edited_at;
         item.retracted = previous.retracted;
         item.attachments.clone_from(&previous.attachments);
+        item.scores.clone_from(&previous.scores);
+        item.source_revision_id
+            .clone_from(&previous.source_revision_id);
+        item.scores_at = previous.scores_at;
         let mut touched = BTreeSet::from([at]);
         self.refresh_replies_to(at, &mut touched);
         self.sets(touched)
@@ -678,6 +701,12 @@ impl Timeline {
         if item.reference_id.is_none() {
             item.reference_id.clone_from(&message.reference_id);
         }
+        if item.score_target.is_none() {
+            item.score_target.clone_from(&message.score_target);
+        }
+        if !item.edited {
+            item.source_revision_id.clone_from(&message.stanza_id);
+        }
         item.delivery = Delivery::Sent;
         self.delivery_evidence
             .insert(self.serials[at], DeliveryEvidence::Reflected);
@@ -757,6 +786,7 @@ impl Timeline {
             }
         }
         self.refresh_replies_to(at, touched);
+        self.settle_judgments(at, touched);
     }
 
     /// Apply a correction, retraction, moderation or reaction. False when
@@ -767,6 +797,26 @@ impl Timeline {
         touched: &mut BTreeSet<usize>,
     ) -> bool {
         let author = Author::of(message);
+        if let Some(update) = &message.safety_scores {
+            let key = (update.target.clone(), update.source_revision_id.clone());
+            if self
+                .judgments
+                .get(&key)
+                .is_none_or(|held| message.timestamp_ms >= held.at)
+            {
+                self.judgments.insert(
+                    key,
+                    StampedScores {
+                        at: message.timestamp_ms,
+                        scores: update.scores.clone(),
+                    },
+                );
+                for at in 0..self.items.len() {
+                    self.settle_judgments(at, touched);
+                }
+            }
+            return true;
+        }
         if let Some(update) = &message.reaction {
             self.react(
                 &update.target_id,
@@ -813,6 +863,7 @@ impl Timeline {
                 return true;
             };
             let edit = Edit {
+                source_revision_id: message.stanza_id.clone(),
                 author_id: message.author_id.clone(),
                 body,
                 at: message.timestamp_ms,
@@ -822,6 +873,7 @@ impl Timeline {
                     if self.apply_edit_at(at, &author, &edit) {
                         touched.insert(at);
                         self.refresh_replies_to(at, touched);
+                        self.settle_judgments(at, touched);
                     }
                 }
                 None => {
@@ -834,6 +886,35 @@ impl Timeline {
             return true;
         }
         false
+    }
+
+    fn settle_judgments(&mut self, at: usize, touched: &mut BTreeSet<usize>) {
+        let item = &self.items[at];
+        let (Some(target), Some(revision)) = (&item.score_target, &item.source_revision_id) else {
+            return;
+        };
+        if item.retracted
+            || self
+                .items
+                .iter()
+                .filter(|item| item.score_target.as_ref() == Some(target))
+                .count()
+                != 1
+        {
+            return;
+        }
+        let Some(batch) = self.judgments.get(&(target.clone(), revision.clone())) else {
+            return;
+        };
+        if item.scores_at.is_some_and(|held| held > batch.at) {
+            return;
+        }
+        if item.scores.as_ref() != Some(&batch.scores) || item.scores_at != Some(batch.at) {
+            let item = &mut self.items[at];
+            item.scores = Some(batch.scores.clone());
+            item.scores_at = Some(batch.at);
+            touched.insert(at);
+        }
     }
 
     fn react(
@@ -921,12 +1002,17 @@ impl Timeline {
             return false;
         }
         item.edited_at = Some(edit.at);
-        if item.edited && item.body == edit.body {
-            return false;
+        let changed = !item.edited
+            || item.body != edit.body
+            || item.source_revision_id != edit.source_revision_id;
+        if changed {
+            item.body.clone_from(&edit.body);
+            item.edited = true;
+            item.source_revision_id.clone_from(&edit.source_revision_id);
+            item.scores = None;
+            item.scores_at = None;
         }
-        item.body.clone_from(&edit.body);
-        item.edited = true;
-        true
+        changed
     }
 
     /// Retract the row: by its sender (`Some`), or by the room (`None`).
@@ -943,6 +1029,8 @@ impl Timeline {
         item.retracted = true;
         item.body.clear();
         item.attachments.clear();
+        item.scores = None;
+        item.scores_at = None;
         true
     }
 
@@ -1099,7 +1187,8 @@ fn snippet(body: &str) -> String {
 }
 
 fn is_fastening(message: &IncomingMessage) -> bool {
-    message.reaction.is_some()
+    message.safety_scores.is_some()
+        || message.reaction.is_some()
         || message.moderates_id.is_some()
         || message.retracts_id.is_some()
         || message.replaces_id.is_some()
@@ -1168,6 +1257,10 @@ fn content_item(message: &IncomingMessage) -> Option<TimelineItem> {
         } else {
             message.attachments.clone()
         },
+        scores: None,
+        score_target: message.score_target.clone(),
+        source_revision_id: message.stanza_id.clone(),
+        scores_at: None,
         edited_at: None,
     })
 }
@@ -1919,5 +2012,184 @@ mod tests {
             ..message("s2", "ann", "", 2)
         });
         assert!(timeline.items()[0].attachments.is_empty());
+    }
+}
+
+#[cfg(test)]
+mod judgment_tests {
+    use super::*;
+    use crate::judgments::{Probability, SafetyCategory, SafetyScore};
+
+    fn target() -> ScoreTarget {
+        ScoreTarget {
+            origin_id: "origin".into(),
+            stanza_id: "original".into(),
+            stanza_by: "room@rooms.example".parse().unwrap(),
+        }
+    }
+    fn original() -> IncomingMessage {
+        IncomingMessage {
+            stanza_id: Some("original".into()),
+            origin_id: Some("origin".into()),
+            reference_id: Some("original".into()),
+            sender: "alice".into(),
+            body: Some("A question?".into()),
+            timestamp_ms: 1,
+            score_target: Some(target()),
+            ..IncomingMessage::default()
+        }
+    }
+    fn batch(revision: &str, probability: f64, at: i64) -> IncomingMessage {
+        IncomingMessage {
+            timestamp_ms: at,
+            safety_scores: Some(SafetyScoresFastening {
+                target: target(),
+                source_revision_id: revision.into(),
+                scores: SafetyScores {
+                    model_version: "model-v1".into(),
+                    scores: vec![SafetyScore {
+                        category: SafetyCategory::IsQuestion,
+                        probability: Probability::new(probability).unwrap(),
+                        taxonomy_version: "question-v1".into(),
+                    }],
+                },
+            }),
+            ..IncomingMessage::default()
+        }
+    }
+    fn correction() -> IncomingMessage {
+        IncomingMessage {
+            stanza_id: Some("revision-2".into()),
+            replaces_id: Some("origin".into()),
+            sender: "alice".into(),
+            body: Some("Now an answer.".into()),
+            timestamp_ms: 5,
+            ..IncomingMessage::default()
+        }
+    }
+    fn probability(timeline: &Timeline) -> Option<f64> {
+        timeline.items()[0]
+            .scores
+            .as_ref()
+            .map(|batch| batch.scores[0].probability.value())
+    }
+    #[test]
+    fn xep0422_scores_wait_for_original_and_newest_batch_wins() {
+        let mut timeline = Timeline::new();
+        assert!(timeline.apply_live(batch("original", 0.9, 10)).is_empty());
+        assert!(timeline.items().is_empty());
+        timeline.apply_history_page(
+            vec![original(), batch("original", 0.6, 4)],
+            Some("page-1".into()),
+            true,
+        );
+        assert_eq!(timeline.items().len(), 1);
+        assert_eq!(probability(&timeline), Some(0.9));
+        assert!(timeline.apply_live(batch("original", 0.5, 3)).is_empty());
+        assert_eq!(probability(&timeline), Some(0.9));
+    }
+    #[test]
+    fn xep0422_full_archive_identity_and_revision_must_match() {
+        let mut timeline = Timeline::new();
+        timeline.apply_live(original());
+        for corrupt in 0..4 {
+            let mut message = batch("original", 0.95, 10);
+            let fastening = message.safety_scores.as_mut().unwrap();
+            match corrupt {
+                0 => fastening.target.origin_id = "other-origin".into(),
+                1 => fastening.target.stanza_id = "other-stanza".into(),
+                2 => fastening.target.stanza_by = "other@rooms.example".parse().unwrap(),
+                _ => fastening.source_revision_id = "other-revision".into(),
+            }
+            assert!(timeline.apply_live(message).is_empty());
+            assert_eq!(probability(&timeline), None);
+        }
+        assert!(!timeline.apply_live(batch("original", 0.95, 10)).is_empty());
+        assert_eq!(probability(&timeline), Some(0.95));
+    }
+    #[test]
+    fn xep0422_correction_invalidates_scores_and_requires_accepted_revision() {
+        let mut timeline = Timeline::new();
+        timeline.apply_live(original());
+        timeline.apply_live(batch("original", 0.9, 2));
+        timeline.apply_live(correction());
+        assert_eq!(probability(&timeline), None);
+        timeline.apply_live(batch("original", 0.99, 20));
+        assert_eq!(probability(&timeline), None);
+        timeline.apply_live(batch("revision-2", 0.8, 8));
+        assert_eq!(probability(&timeline), Some(0.8));
+        let mut stale = correction();
+        stale.stanza_id = Some("stale-revision".into());
+        stale.timestamp_ms = 3;
+        timeline.apply_live(stale);
+        assert_eq!(probability(&timeline), Some(0.8));
+        let mut spoof = correction();
+        spoof.sender = "mallory".into();
+        spoof.body = Some("spoof".into());
+        timeline.apply_live(spoof);
+        assert_eq!(probability(&timeline), Some(0.8));
+    }
+    #[test]
+    fn xep0422_corrections_and_scores_paged_before_target_settle_on_revision() {
+        let mut timeline = Timeline::new();
+        timeline.apply_history_page(
+            vec![correction(), batch("revision-2", 0.8, 8)],
+            Some("new-page".into()),
+            false,
+        );
+        assert!(timeline.items().is_empty());
+        timeline.apply_history_page(
+            vec![original(), batch("original", 0.99, 4)],
+            Some("old-page".into()),
+            true,
+        );
+        assert_eq!(probability(&timeline), Some(0.8));
+        assert_eq!(timeline.items()[0].body, "Now an answer.");
+    }
+    #[test]
+    fn xep0422_replayed_own_reflection_cannot_restore_old_revision_scores() {
+        let mut timeline = Timeline::new();
+        timeline.add_local_echo(LocalEcho {
+            origin_id: "origin".into(),
+            sender: "alice".into(),
+            body: "A question?".into(),
+            timestamp_ms: 1,
+            reference_id: None,
+            reply_to: None,
+            attachments: vec![],
+        });
+        let mut reflection = original();
+        reflection.own = true;
+        timeline.apply_live(reflection.clone());
+        timeline.apply_live(batch("original", 0.9, 2));
+        assert_eq!(probability(&timeline), Some(0.9));
+        let mut edit = correction();
+        edit.own = true;
+        timeline.apply_live(edit);
+        timeline.apply_live(batch("revision-2", 0.8, 8));
+        timeline.apply_live(reflection);
+        assert_eq!(probability(&timeline), Some(0.8));
+        assert_eq!(timeline.items()[0].body, "Now an answer.");
+    }
+
+    #[test]
+    fn xep0422_removal_hides_scores_and_failed_edit_restores_body_revision() {
+        let mut timeline = Timeline::new();
+        timeline.apply_live(original());
+        timeline.apply_live(batch("original", 0.9, 2));
+        let previous = timeline.items()[0].clone();
+        timeline.apply_live(IncomingMessage {
+            moderates_id: Some("original".into()),
+            ..IncomingMessage::default()
+        });
+        assert_eq!(probability(&timeline), None);
+        timeline.apply_live(batch("original", 0.99, 20));
+        assert_eq!(probability(&timeline), None);
+        timeline.restore(&previous);
+        assert_eq!(probability(&timeline), Some(0.9));
+        timeline.apply_live(correction());
+        assert_eq!(probability(&timeline), None);
+        timeline.restore(&previous);
+        assert_eq!(probability(&timeline), Some(0.9));
     }
 }

@@ -310,7 +310,7 @@ impl WaddleWindow {
             return;
         }
         imp.outbound.borrow_mut().remove(&id);
-        self.edit_conversation(&conversation.jid, |timeline| timeline.reject_send(&id));
+        self.edit_conversation(&conversation.key(), |timeline| timeline.reject_send(&id));
         self.toast("The server rejected the message.");
     }
 }
@@ -346,6 +346,7 @@ mod tests {
     fn outbound_retention_is_bounded_and_removal_releases_the_slot() {
         let mut sends = OutboundSends::default();
         let conversation = Conversation {
+            thread: None,
             jid: "room@example.com".into(),
             name: "room".into(),
             kind: Kind::Room,

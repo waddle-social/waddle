@@ -257,6 +257,25 @@ template $WaddleWindow: Adw.ApplicationWindow {
                 title-widget: Adw.WindowTitle room_title {
                   title: _("Waddle");
                 };
+
+                [start]
+                Button thread_back {
+                  visible: false;
+                  icon-name: "go-previous-symbolic";
+                  tooltip-text: _("Back to conversation");
+                  clicked => $on_thread_back() swapped;
+                }
+              }
+
+              [top]
+              Box thread_context {
+                visible: false;
+                orientation: vertical;
+                spacing: 4;
+                margin-start: 16;
+                margin-end: 16;
+                margin-top: 8;
+                margin-bottom: 8;
               }
 
               content: Stack content_stack {
