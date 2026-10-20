@@ -140,7 +140,7 @@ async fn configured_store(fixture: &IngressFixture, service: &BareJid) -> Databa
     );
     DatabasePushServiceStore::new_with_secret_key_and_pubsub(
         fixture.db.clone(),
-        b"retirement-scope-test-key",
+        &rand::random::<[u8; 32]>(),
         service.clone(),
         backing,
     )

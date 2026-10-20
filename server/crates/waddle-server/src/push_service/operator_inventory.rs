@@ -282,9 +282,14 @@ mod tests {
             IngressEffectIntent, MessageKey, NotificationActivityMutation, SemanticDigest,
         };
 
-        let push = DatabasePushServiceStore::new(fixture.db.clone())
-            .await
-            .expect("provider");
+        let push = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+            fixture.db.clone(),
+            &rand::random::<[u8; 32]>(),
+            "push.example.com".parse().expect("push service"),
+            std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
+        )
+        .await
+        .expect("configured provider");
         crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
             .await
             .expect("outbox");
