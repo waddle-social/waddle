@@ -362,7 +362,7 @@ pub(crate) async fn search_local_accounts(
             .and_then(ValueExt::as_string)
             .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
         // Parse the stored localpart as a JID; username slug generation would
-        // change valid native names such as `alice+work` into another account.
+        // change valid native names such as `alice~work` into another account.
         let jid = jid::BareJid::new(&format!("{localpart}@{domain}"))
             .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
         if !seen.insert(jid.clone()) {

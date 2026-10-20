@@ -75,7 +75,7 @@ async fn websocket_xep0055_searches_both_stores_with_canonical_unique_exact_resu
         &url,
         &[
             ("native.member", "native-password-123"),
-            ("alice+work", "plus-password-123"),
+            ("alice~work", "tilde-password-123"),
             ("shared.member", "shared-password-123"),
         ],
     );
@@ -118,7 +118,7 @@ async fn websocket_xep0055_searches_both_stores_with_canonical_unique_exact_resu
     for (query, expected) in [
         ("visible.member", "immutable.member@localhost"),
         ("immutable.member@localhost", "immutable.member@localhost"),
-        ("ALICE+WORK", "alice+work@localhost"),
+        ("ALICE~WORK", "alice~work@localhost"),
         ("x", "x@localhost"),
     ] {
         assert_eq!(
