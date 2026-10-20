@@ -19,7 +19,7 @@ schema.#Project & {
 		wc.#Nix,
 		wc.#FlakeHubCache,
 		wc.#Hestia,
-		c.#CuenvRelease,
+		wc.#CuenvRelease,
 		c.#OnePassword,
 		c.#BunWorkspace,
 	]

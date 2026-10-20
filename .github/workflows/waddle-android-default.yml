@@ -81,7 +81,7 @@ jobs:
       with:
         fetch-depth: 2
     - name: Cache Android SDK and Gradle on Namespace volume
-      uses: namespacelabs/nscloud-cache-action@v1
+      uses: namespacelabs/nscloud-cache-action@1124a6f3ce44e5cf84cc22111530961f4d2a15f9
       with:
         path: |-
           /home/runner/.android-sdk
@@ -117,7 +117,7 @@ jobs:
         else
           cuenv_url="https://github.com/cuenv/cuenv/releases/download/${cuenv_version}/${cuenv_asset}"
         fi
-        curl -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync -A
+        curl --proto '=https' --proto-redir '=https' -fsSL -o /usr/local/bin/cuenv "$cuenv_url" && chmod +x /usr/local/bin/cuenv && /usr/local/bin/cuenv sync vcs -p .
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     - name: 'Run pipeline: default'
