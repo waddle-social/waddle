@@ -1,3 +1,4 @@
+use jid::DomainPart;
 use kameo::actor::ActorRef;
 use tracing::{debug, warn};
 use waddle_xmpp::XmppError;
@@ -58,12 +59,17 @@ pub(crate) async fn register_native_user(
         email: email.map(|s| s.to_string()),
     };
 
+    let primary_domain = DomainPart::new(domain).map_err(|err| {
+        XmppError::internal(format!("Invalid server domain for membership: {err}"))
+    })?;
+
     match native_user_store.register(request).await {
         Ok(user_id) => {
             let subject_user_id = format!("{}@{}", username, domain);
             provision_user_membership(
                 permission_actor,
                 &BootstrapMembershipConfig::from_env(),
+                &primary_domain,
                 &subject_user_id,
                 username,
             )

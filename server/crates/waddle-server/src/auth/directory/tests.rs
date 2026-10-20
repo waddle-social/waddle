@@ -236,3 +236,61 @@ async fn periodic_backfill_keys_rows_written_without_keys() {
     .await
     .expect("the periodic pass keys both accounts");
 }
+
+/// Insert a user bot row the way bot creation does: the full
+/// `<owner>+<name>` localpart on the bots domain, owned by a human.
+async fn seed_bot_user(actor: &ActorRef<DbActor>, localpart: &str, display_name: &str) {
+    actor
+        .ask(DbExecute {
+            sql: "INSERT INTO users \
+                  (jid, username, xmpp_localpart, localpart_key, display_name, kind, owner_jid, created_at, updated_at) \
+                  VALUES (?, ?, ?, ?, ?, 'bot', ?, ?, ?)"
+                .to_string(),
+            params: vec![
+                format!("{localpart}@bots.localhost").into(),
+                localpart.into(),
+                localpart.into(),
+                localpart.into(),
+                display_name.into(),
+                "rawkode@localhost".into(),
+                "2026-01-01T00:00:00Z".into(),
+                "2026-01-01T00:00:00Z".into(),
+            ],
+        })
+        .await
+        .expect("seed bot user");
+}
+
+/// Bot rows share `users` with human accounts but are never local accounts
+/// on the primary domain.
+#[tokio::test]
+async fn local_account_exists_ignores_bot_rows() {
+    let actor = test_actor().await;
+    seed_bot_user(&actor, "rawkode+standup", "Standup").await;
+
+    let exists = local_account_exists(&actor, "rawkode+standup", "waddle.social")
+        .await
+        .expect("directory lookup");
+    assert!(!exists, "a bot row must not resolve as a local account");
+}
+
+#[tokio::test]
+async fn directory_search_excludes_bots() {
+    let actor = test_actor().await;
+    seed_oidc_user(&actor, "standup.human").await;
+    seed_bot_user(&actor, "rawkode+standup", "Standup Bot").await;
+
+    for term in ["standup", "rawkode+standup", "Standup Bot"] {
+        let entries = super::search_local_accounts(&actor, "localhost", term, 50)
+            .await
+            .expect("directory search");
+        let jids: Vec<String> = entries.iter().map(|entry| entry.jid.to_string()).collect();
+        assert!(
+            jids.iter().all(|jid| !jid.contains("rawkode+standup")),
+            "bot row leaked into directory search for {term:?}: {jids:?}"
+        );
+        if term == "standup" {
+            assert_eq!(jids, vec!["standup.human@localhost".to_string()]);
+        }
+    }
+}

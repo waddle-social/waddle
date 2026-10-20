@@ -989,6 +989,7 @@ async fn create_websocket_state(
             state.db_pool.global_actor(),
             &state.permission_actor,
             &crate::server::bootstrap_membership::BootstrapMembershipConfig::from_env(),
+            auth_state.caps_server_domain.as_jid().domain(),
         )
         .await;
         if let Err(error) = bootstrap_fresh_xmpp_topology(

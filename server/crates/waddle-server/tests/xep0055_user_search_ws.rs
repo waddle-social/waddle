@@ -169,3 +169,57 @@ async fn websocket_xep0055_searches_both_stores_with_canonical_unique_exact_resu
     client.close().await.expect("close connection");
     pool.close().await;
 }
+
+/// Bot accounts share the `users` table but are not directory entries, so a
+/// XEP-0055 search never lists them under any of their names.
+#[tokio::test]
+async fn websocket_xep0055_search_excludes_bot_rows() {
+    let directory = tempfile::tempdir().expect("database directory");
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        directory.path().join("search-bots.sqlite3").display()
+    );
+    let server = TestServer::start_persistent_with_extra_accounts(&url, &[]);
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        "localhost",
+        "admin",
+        server.fixed_account_password(),
+        "search-bots",
+    )
+    .await
+    .expect("authenticated client");
+    let pool = SqlitePool::connect(&url).await.expect("seed database");
+    seed_oidc(&pool, "standup.human", "standup.human").await;
+    sqlx::query("INSERT INTO users (jid, username, xmpp_localpart, localpart_key, display_name, kind, owner_jid, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'bot', ?, ?, ?)")
+        .bind("admin+standup@bots.localhost")
+        .bind("admin+standup")
+        .bind("admin+standup")
+        .bind("admin+standup")
+        .bind("Standup Bot")
+        .bind("admin@localhost")
+        .bind("2026-01-01T00:00:00Z")
+        .bind("2026-01-01T00:00:00Z")
+        .execute(&pool)
+        .await
+        .expect("seed bot account");
+
+    for (query, expected) in [
+        ("standup", vec!["standup.human@localhost"]),
+        ("admin", vec!["admin@localhost"]),
+        ("admin+standup", vec![]),
+        ("Standup Bot", vec![]),
+    ] {
+        let expected: Vec<jid::BareJid> = expected
+            .into_iter()
+            .map(|jid| jid.parse().expect("expected JID"))
+            .collect();
+        assert_eq!(
+            result_jids(search(&mut client, query).await),
+            expected,
+            "query {query:?}"
+        );
+    }
+    client.close().await.expect("close connection");
+    pool.close().await;
+}

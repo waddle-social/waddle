@@ -1,3 +1,4 @@
+use jid::{BareJid, DomainRef};
 use kameo::actor::ActorRef;
 use kameo::error::SendError;
 use tracing::{debug, info, warn};
@@ -11,6 +12,16 @@ use crate::permissions::{
 
 pub const DEPLOYMENT_SERVER_ID: &str = "deployment";
 const OWNER_ENV: &str = "WADDLE_SERVER_OWNER_LOCALPARTS";
+
+#[derive(Debug, thiserror::Error)]
+pub enum BootstrapMembershipError {
+    /// Only human accounts on the primary domain receive server membership;
+    /// bot accounts live on `bots.<domain>` and never hold `server#member`.
+    #[error("account is not a human account on the primary domain")]
+    NotHumanAccount,
+    #[error("{0}")]
+    Permission(String),
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BootstrapMembershipConfig {
@@ -83,12 +94,25 @@ fn normalize_localpart(value: &str) -> Option<String> {
     }
 }
 
+fn ensure_human_account(
+    primary_domain: &DomainRef,
+    user_jid: &str,
+) -> Result<(), BootstrapMembershipError> {
+    let jid = BareJid::new(user_jid).map_err(|_| BootstrapMembershipError::NotHumanAccount)?;
+    if jid.node().is_none() || jid.domain() != primary_domain {
+        return Err(BootstrapMembershipError::NotHumanAccount);
+    }
+    Ok(())
+}
+
 pub async fn provision_user_membership(
     permission_actor: &ActorRef<PermissionActor>,
     config: &BootstrapMembershipConfig,
+    primary_domain: &DomainRef,
     user_jid: &str,
     xmpp_localpart: &str,
-) -> Result<(), String> {
+) -> Result<(), BootstrapMembershipError> {
+    ensure_human_account(primary_domain, user_jid)?;
     let subject = Subject::user(user_jid);
     if config.is_owner(xmpp_localpart) {
         let object = Object::new(ObjectType::Server, config.server_id.as_str());
@@ -120,11 +144,20 @@ pub async fn provision_user_membership(
 pub async fn reconcile_user_membership(
     permission_actor: &ActorRef<PermissionActor>,
     config: &BootstrapMembershipConfig,
+    primary_domain: &DomainRef,
     user_jid: &str,
     xmpp_localpart: &str,
-) -> Result<(), String> {
+) -> Result<(), BootstrapMembershipError> {
+    ensure_human_account(primary_domain, user_jid)?;
     if config.is_owner(xmpp_localpart) {
-        return provision_user_membership(permission_actor, config, user_jid, xmpp_localpart).await;
+        return provision_user_membership(
+            permission_actor,
+            config,
+            primary_domain,
+            user_jid,
+            xmpp_localpart,
+        )
+        .await;
     }
 
     let subject = Subject::user(user_jid);
@@ -137,43 +170,51 @@ pub async fn reconcile_user_membership(
                 object: object.clone(),
             })
             .await
-            .map_err(|err| format!("failed checking membership: {err}"))?;
+            .map_err(|err| {
+                BootstrapMembershipError::Permission(format!("failed checking membership: {err}"))
+            })?;
         if response.allowed {
             return Ok(());
         }
     }
 
-    provision_user_membership(permission_actor, config, user_jid, xmpp_localpart).await
+    provision_user_membership(
+        permission_actor,
+        config,
+        primary_domain,
+        user_jid,
+        xmpp_localpart,
+    )
+    .await
 }
 
 async fn write_tuple_if_absent(
     permission_actor: &ActorRef<PermissionActor>,
     tuple: Tuple,
-) -> Result<(), String> {
-    match permission_actor.ask(WriteTuple { tuple }).await {
-        Ok(()) => Ok(()),
+) -> Result<(), BootstrapMembershipError> {
+    let message = match permission_actor.ask(WriteTuple { tuple }).await {
+        Ok(()) | Err(SendError::HandlerError(PermissionError::TupleAlreadyExists)) => return Ok(()),
         Err(SendError::ActorNotRunning(_)) => {
-            Err("permission actor is not running while writing membership tuple".to_string())
+            "permission actor is not running while writing membership tuple".to_string()
         }
-        Err(SendError::HandlerError(PermissionError::TupleAlreadyExists)) => Ok(()),
-        Err(SendError::HandlerError(err)) => Err(format!("failed writing membership tuple: {err}")),
+        Err(SendError::HandlerError(err)) => format!("failed writing membership tuple: {err}"),
         Err(SendError::Timeout(_)) => {
-            Err("timed out writing membership tuple through permission actor".to_string())
+            "timed out writing membership tuple through permission actor".to_string()
         }
-        Err(err) => Err(format!(
-            "permission actor failed writing membership tuple: {err}"
-        )),
-    }
+        Err(err) => format!("permission actor failed writing membership tuple: {err}"),
+    };
+    Err(BootstrapMembershipError::Permission(message))
 }
 
 pub async fn reconcile_existing_accounts(
     db_actor: &ActorRef<DbActor>,
     permission_actor: &ActorRef<PermissionActor>,
     config: &BootstrapMembershipConfig,
+    primary_domain: &DomainRef,
 ) -> Result<(), String> {
     let users = db_actor
         .ask(DbQuery {
-            sql: "SELECT jid, xmpp_localpart FROM users".to_string(),
+            sql: "SELECT jid, xmpp_localpart FROM users WHERE kind = 'human'".to_string(),
             params: vec![],
         })
         .await
@@ -186,7 +227,14 @@ pub async fn reconcile_existing_accounts(
         let localpart = row_value(&row, 1)
             .and_then(ValueExt::as_string)
             .map_err(|err| format!("failed decoding user localpart: {err}"))?;
-        reconcile_user_membership(permission_actor, config, &user_jid, &localpart).await?;
+        reconcile_existing_account(
+            permission_actor,
+            config,
+            primary_domain,
+            &user_jid,
+            &localpart,
+        )
+        .await?;
     }
 
     let native_users = db_actor
@@ -205,19 +253,59 @@ pub async fn reconcile_existing_accounts(
             .and_then(ValueExt::as_string)
             .map_err(|err| format!("failed decoding native domain: {err}"))?;
         let user_jid = format!("{username}@{domain}");
-        reconcile_user_membership(permission_actor, config, &user_jid, &username).await?;
+        reconcile_existing_account(
+            permission_actor,
+            config,
+            primary_domain,
+            &user_jid,
+            &username,
+        )
+        .await?;
     }
 
     info!("Reconciled bootstrap memberships for existing accounts");
     Ok(())
 }
 
+/// Reconciles one stored account. A row that is not a human account on the
+/// primary domain is skipped rather than aborting the whole sweep.
+async fn reconcile_existing_account(
+    permission_actor: &ActorRef<PermissionActor>,
+    config: &BootstrapMembershipConfig,
+    primary_domain: &DomainRef,
+    user_jid: &str,
+    xmpp_localpart: &str,
+) -> Result<(), String> {
+    match reconcile_user_membership(
+        permission_actor,
+        config,
+        primary_domain,
+        user_jid,
+        xmpp_localpart,
+    )
+    .await
+    {
+        Ok(()) => Ok(()),
+        Err(BootstrapMembershipError::NotHumanAccount) => {
+            debug!(
+                xmpp_localpart = %xmpp_localpart,
+                "Skipping membership bootstrap for non-human or foreign-domain account"
+            );
+            Ok(())
+        }
+        Err(error) => Err(error.to_string()),
+    }
+}
+
 pub async fn reconcile_existing_accounts_or_warn(
     db_actor: &ActorRef<DbActor>,
     permission_actor: &ActorRef<PermissionActor>,
     config: &BootstrapMembershipConfig,
+    primary_domain: &DomainRef,
 ) {
-    if let Err(error) = reconcile_existing_accounts(db_actor, permission_actor, config).await {
+    if let Err(error) =
+        reconcile_existing_accounts(db_actor, permission_actor, config, primary_domain).await
+    {
         warn!(error = %error, "Failed to reconcile bootstrap memberships");
     }
 }
@@ -225,10 +313,37 @@ pub async fn reconcile_existing_accounts_or_warn(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::actor::DbExecute;
     use crate::db::{Database, MigrationRunner};
     use crate::permissions::{CheckPermission, Permission};
+    use jid::DomainPart;
     use kameo::actor::Spawn;
     use std::sync::Arc;
+
+    fn primary_domain() -> DomainPart {
+        "localhost".parse().expect("primary domain")
+    }
+
+    async fn migrated_database(name: &str) -> Arc<Database> {
+        let db = Arc::new(Database::in_memory(name).await.expect("database"));
+        MigrationRunner::global()
+            .run(&db)
+            .await
+            .expect("migrations");
+        db
+    }
+
+    async fn is_member(actor: &ActorRef<PermissionActor>, user_jid: &str) -> bool {
+        actor
+            .ask(CheckPermission {
+                subject: Subject::user(user_jid),
+                permission: Permission::Member,
+                object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+            })
+            .await
+            .expect("member check")
+            .allowed
+    }
 
     #[test]
     fn parses_owner_localparts_from_env_style_list() {
@@ -252,16 +367,28 @@ mod tests {
         let actor = PermissionActor::spawn(PermissionActor::new_for_tests(db));
         let config = BootstrapMembershipConfig::new(vec!["rawkode".to_string()]);
 
-        provision_user_membership(&actor, &config, "user-owner", "rawkode")
-            .await
-            .expect("owner");
-        provision_user_membership(&actor, &config, "user-member", "alice")
-            .await
-            .expect("member");
+        provision_user_membership(
+            &actor,
+            &config,
+            &primary_domain(),
+            "rawkode@localhost",
+            "rawkode",
+        )
+        .await
+        .expect("owner");
+        provision_user_membership(
+            &actor,
+            &config,
+            &primary_domain(),
+            "alice@localhost",
+            "alice",
+        )
+        .await
+        .expect("member");
 
         let owner = actor
             .ask(CheckPermission {
-                subject: Subject::user("user-owner"),
+                subject: Subject::user("rawkode@localhost"),
                 permission: Permission::Owner,
                 object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
             })
@@ -269,7 +396,7 @@ mod tests {
             .expect("owner check");
         let member = actor
             .ask(CheckPermission {
-                subject: Subject::user("user-member"),
+                subject: Subject::user("alice@localhost"),
                 permission: Permission::Member,
                 object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
             })
@@ -298,19 +425,25 @@ mod tests {
                 tuple: Tuple::new(
                     Object::new(ObjectType::Space, "space"),
                     Relation::new("admin"),
-                    Subject::user("user-admin"),
+                    Subject::user("alice@localhost"),
                 ),
             })
             .await
             .expect("write admin");
 
-        reconcile_user_membership(&actor, &config, "user-admin", "alice")
-            .await
-            .expect("reconcile");
+        reconcile_user_membership(
+            &actor,
+            &config,
+            &primary_domain(),
+            "alice@localhost",
+            "alice",
+        )
+        .await
+        .expect("reconcile");
 
         let admin = actor
             .ask(CheckPermission {
-                subject: Subject::user("user-admin"),
+                subject: Subject::user("alice@localhost"),
                 permission: Permission::Admin,
                 object: Object::new(ObjectType::Space, "space"),
             })
@@ -318,5 +451,89 @@ mod tests {
             .expect("admin check");
 
         assert!(admin.allowed);
+    }
+
+    #[tokio::test]
+    async fn reconcile_skips_bot_rows() {
+        let db = migrated_database("bootstrap-membership-bot-rows").await;
+        let db_actor = DbActor::spawn(DbActor::new((*db).clone()));
+        let actor = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::clone(&db)));
+        let config = BootstrapMembershipConfig::new(vec!["rawkode".to_string()]);
+        for (jid, localpart, kind, owner) in [
+            ("alice@localhost", "alice", "human", None),
+            (
+                "alice+standup@bots.localhost",
+                "alice+standup",
+                "bot",
+                Some("alice@localhost"),
+            ),
+        ] {
+            db_actor
+                .ask(DbExecute {
+                    sql: "INSERT INTO users \
+                          (jid, username, xmpp_localpart, kind, owner_jid, created_at, updated_at) \
+                          VALUES (?, ?, ?, ?, ?, ?, ?)"
+                        .to_string(),
+                    params: vec![
+                        jid.into(),
+                        localpart.into(),
+                        localpart.into(),
+                        kind.into(),
+                        owner.map_or(crate::db::Value::NullText, Into::into),
+                        "2026-01-01T00:00:00Z".into(),
+                        "2026-01-01T00:00:00Z".into(),
+                    ],
+                })
+                .await
+                .expect("seed account");
+        }
+
+        reconcile_existing_accounts(&db_actor, &actor, &config, &primary_domain())
+            .await
+            .expect("reconcile");
+
+        assert!(is_member(&actor, "alice@localhost").await);
+        assert!(!is_member(&actor, "alice+standup@bots.localhost").await);
+    }
+
+    #[tokio::test]
+    async fn provision_rejects_bots_domain() {
+        let db = migrated_database("bootstrap-membership-bots-domain").await;
+        let actor = PermissionActor::spawn(PermissionActor::new_for_tests(db));
+        let config = BootstrapMembershipConfig::new(vec!["alice".to_string()]);
+
+        for result in [
+            provision_user_membership(
+                &actor,
+                &config,
+                &primary_domain(),
+                "alice+standup@bots.localhost",
+                "alice+standup",
+            )
+            .await,
+            reconcile_user_membership(
+                &actor,
+                &config,
+                &primary_domain(),
+                "alice+standup@bots.localhost",
+                "alice+standup",
+            )
+            .await,
+        ] {
+            assert!(matches!(
+                result,
+                Err(BootstrapMembershipError::NotHumanAccount)
+            ));
+        }
+        assert!(!is_member(&actor, "alice+standup@bots.localhost").await);
+        let owner = actor
+            .ask(CheckPermission {
+                subject: Subject::user("alice+standup@bots.localhost"),
+                permission: Permission::Owner,
+                object: Object::new(ObjectType::Server, DEPLOYMENT_SERVER_ID),
+            })
+            .await
+            .expect("owner check");
+        assert!(!owner.allowed);
     }
 }
