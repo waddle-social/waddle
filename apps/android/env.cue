@@ -249,10 +249,13 @@ schema.#Project & {
 		// API 34: the aosp-atd image line trails the newest platform; 34
 		// matches minSdk and has stable ATD images. Configuration cache is
 		// off for GMD runs: the emulator lifecycle interacts badly with
-		// cached configuration.
+		// cached configuration. The Kotlin compiler runs in-process: a
+		// separate Kotlin daemon inherits the Gradle heap, and two such
+		// JVMs plus the booting emulator exceeded the 16 GB runner, which
+		// SIGKILLed the job (exit 137) during :core:client compilation.
 		gmdCheck: schema.#Task & {
 			command: "bash"
-			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache --no-parallel --max-workers=2 '-Dorg.gradle.jvmargs=-Xmx4g -XX:+UseParallelGC' :app:atdApi34FossDebugAndroidTest"]
+			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache --no-parallel --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process '-Dorg.gradle.jvmargs=-Xmx5g -XX:+UseParallelGC' :app:atdApi34FossDebugAndroidTest"]
 			dependsOn: [setupSdk, buildRustJni]
 			// Include this definition so GMD-only changes are selected by affectedness.
 			inputs: list.Concat([_gradleInputs, ["env.cue"]])
