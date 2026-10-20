@@ -6,6 +6,7 @@
 //! - Local session management with UUID principals
 //! - Optional native XMPP auth (XEP-0077/SCRAM)
 
+pub mod bots;
 pub mod directory;
 pub mod identity;
 pub mod jid;

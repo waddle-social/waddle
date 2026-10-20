@@ -8,6 +8,10 @@ use sqlx::query;
 
 use super::{Database, DatabaseError};
 
+mod bots;
+
+pub use bots::{CreateBotAccount, CreateBotOutcome, MintBotToken, MintOutcome};
+
 fn mark_actor_result<T>(result: Result<T, DatabaseError>) -> Result<T, DatabaseError> {
     if result.is_err() {
         crate::telemetry::mark_span_error("database actor operation failed");

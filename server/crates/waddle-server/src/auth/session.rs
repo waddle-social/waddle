@@ -146,6 +146,12 @@ impl SessionManager {
         self.actor.clone()
     }
 
+    /// The hasher keyed like this manager's sessions, for other bearer
+    /// token stores that share the server key.
+    pub(crate) fn token_hasher(&self) -> TokenHasher {
+        self.hasher.clone()
+    }
+
     /// Convert an actor ask error into an AuthError.
     fn ask_err(e: impl std::fmt::Display) -> AuthError {
         AuthError::DatabaseError(e.to_string())

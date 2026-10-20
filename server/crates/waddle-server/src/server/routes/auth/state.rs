@@ -42,6 +42,10 @@ pub struct AuthState {
     pub dynamic_oidc_client_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
     pub permission_actor: ActorRef<PermissionActor>,
     pub bootstrap_membership: BootstrapMembershipConfig,
+    /// User bot accounts (`users` rows with `kind = 'bot'`).
+    pub bot_store: crate::auth::bots::BotStore,
+    /// Bot API tokens, hashed with the session key.
+    pub bot_tokens: crate::auth::bots::BotTokenStore,
     /// Set once at startup after `WebSocketState` exists. The callback
     /// handler reads it via `profile_publish_hook()` and spawns it on
     /// every successful OIDC login.
@@ -58,6 +62,14 @@ impl AuthState {
         let session_manager =
             SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         let identity_service = IdentityService::new(app_state.db_pool.global_actor().clone());
+        let bootstrap_membership = BootstrapMembershipConfig::from_env();
+        let bot_store = crate::auth::bots::BotStore::new(app_state.db_pool.global_actor().clone());
+        let bot_tokens = crate::auth::bots::BotTokenStore::new(
+            app_state.db_pool.global_actor().clone(),
+            app_state.permission_actor.clone(),
+            bootstrap_membership.server_id.clone(),
+            session_manager.token_hasher(),
+        );
         let providers = ProviderRegistry::new(server_config.auth.providers.clone())
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
@@ -83,7 +95,9 @@ impl AuthState {
             dynamic_oidc_clients: Arc::new(DashMap::new()),
             dynamic_oidc_client_locks: Arc::new(DashMap::new()),
             permission_actor: app_state.permission_actor.clone(),
-            bootstrap_membership: BootstrapMembershipConfig::from_env(),
+            bootstrap_membership,
+            bot_store,
+            bot_tokens,
             profile_publish_hook: OnceLock::new(),
         }
     }
