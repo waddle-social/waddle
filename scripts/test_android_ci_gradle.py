@@ -183,6 +183,76 @@ class AndroidCiGradleTests(unittest.TestCase):
         )
         self.assertEqual(result.returncode, 0, result.stderr)
 
+    def test_generated_workflows_bound_parent_evaluator_before_bootstrap(self):
+        workflows = (
+            "waddle-android-default.yml",
+            "waddle-android-pullrequest.yml",
+            "waddle-android-devicetests.yml",
+        )
+        for workflow in workflows:
+            with self.subTest(workflow=workflow):
+                lines = (REPO_ROOT / ".github/workflows" / workflow).read_text().splitlines()
+                # This deliberately reads the generated emitter's fixed step
+                # indentation, not arbitrary YAML. Only this one step's run
+                # body may execute; installers and publishing never execute.
+                steps = []
+                for index, line in enumerate(lines):
+                    if line.startswith("    - name: "):
+                        name = line.removeprefix("    - name: ")
+                        if name.startswith("'") and name.endswith("'"):
+                            name = name[1:-1].replace("''", "'")
+                        steps.append((index, name))
+                names = [name for _, name in steps]
+                bootstrap_name = "Bound CUE evaluator memory"
+                self.assertIn(bootstrap_name, names)
+                self.assertEqual(names.count(bootstrap_name), 1)
+                bootstrap_position = names.index(bootstrap_name)
+                self.assertLess(bootstrap_position, names.index("Install Determinate Nix"))
+                self.assertLess(bootstrap_position, names.index("Setup cuenv (release)"))
+                pipeline_positions = [
+                    index for index, name in enumerate(names) if name.startswith("Run pipeline:")
+                ]
+                self.assertTrue(pipeline_positions, "Missing generated pipeline step")
+                for position in pipeline_positions:
+                    self.assertLess(bootstrap_position, position)
+
+                start = steps[bootstrap_position][0] + 1
+                end = steps[bootstrap_position + 1][0]
+                run_lines = lines[start:end]
+                run_position = next(
+                    (index for index, line in enumerate(run_lines) if line.startswith("      run: ")),
+                    None,
+                )
+                self.assertIsNotNone(run_position, "Bootstrap must have a generated run script")
+                run_value = run_lines[run_position].removeprefix("      run: ")
+                if run_value in ("|-", "|"):
+                    body = []
+                    for line in run_lines[run_position + 1 :]:
+                        if line and not line.startswith("        "):
+                            break
+                        body.append(line[8:] if line else "")
+                    script = "\n".join(body)
+                else:
+                    # The generator may emit a single shell line as a plain
+                    # YAML scalar. Quoted scalars are intentionally unsupported.
+                    self.assertFalse(run_value.startswith(("'", '"')))
+                    script = run_value
+                self.assertTrue(script.strip(), "Bootstrap script must not be empty")
+
+                with tempfile.TemporaryDirectory(prefix="waddle-android-bootstrap-contract-") as directory:
+                    github_env = Path(directory) / "github-env"
+                    github_env.write_text("EXISTING=kept\n")
+                    result = subprocess.run(
+                        ["bash", "-e", "-c", script],
+                        cwd=directory,
+                        env={**os.environ, "GITHUB_ENV": str(github_env)},
+                        capture_output=True,
+                        text=True,
+                        timeout=10,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertEqual(github_env.read_text(), "EXISTING=kept\nGOGC=100\n")
+
 
 if __name__ == "__main__":
     unittest.main()

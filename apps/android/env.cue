@@ -7,6 +7,22 @@ import (
 	wc "github.com/waddle-social/waddle/ci/contributors"
 )
 
+// cuenv 0.57.2 otherwise uses GOGC=800 for its embedded CUE evaluator.
+// Restore normal collection before starting the long-lived CI parent so its
+// evaluated workspace does not compete with Gradle for the 16 GiB runner.
+let _AndroidCiMemory = schema.#Contributor & {
+	id: "androidCiMemory"
+	tasks: [{
+		id:       "android.cueMemory"
+		label:    "Bound CUE evaluator memory"
+		priority: 1
+		script: #"""
+			# GITHUB_ENV applies to subsequent steps, including cuenv startup.
+			printf '%s\n' 'GOGC=100' >> "$GITHUB_ENV"
+			"""#
+	}]
+}
+
 // Caches the sdkmanager-provisioned Android SDK/NDK and the Gradle caches
 // across runs; without it every CI run re-downloads ~2 GB of SDK packages.
 let _NamespaceAndroidCache = schema.#Contributor & {
@@ -102,6 +118,7 @@ schema.#Project & {
 		wc.#Hestia,
 		_NamespaceAndroidCache,
 		_AndroidTestReports,
+		_AndroidCiMemory,
 		wc.#CuenvRelease,
 	]
 
@@ -252,7 +269,7 @@ schema.#Project & {
 		ciGradleContract: schema.#Task & {
 			command: "python3"
 			args: ["../../scripts/test_android_ci_gradle.py"]
-			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/test_android_ci_gradle.py"]
+			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/test_android_ci_gradle.py", "../../.github/workflows/waddle-android-*.yml"]
 		}
 
 		// KVM probe + headless ATD emulator suite (deviceTests pipeline).
