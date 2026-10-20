@@ -222,12 +222,12 @@ class PublisherChartTests(unittest.TestCase):
                 self.assert_stopped(self.run_chart_step('malformed'))
                 self.assertEqual(self.pushes(), [])
 
-    def run_helper(self, package: Path, **overrides: str) -> subprocess.CompletedProcess[str]:
+    def run_helper(self, package: Path, *args: str, **overrides: str) -> subprocess.CompletedProcess[str]:
         env = os.environ.copy()
         env.update({'PATH': str(self.bin) + os.pathsep + env['PATH'],
                     'CHART_FIXTURE_LOG': str(self.log), 'CHART_FIXTURE_MODE': 'same',
                     'CHART_FIXTURE_REMOTE': str(self.remote), **overrides})
-        return subprocess.run([sys.executable, str(SERVER / 'scripts' / 'publish_chart.py'), str(package)],
+        return subprocess.run([sys.executable, str(SERVER / 'scripts' / 'publish_chart.py'), str(package), *args],
                               cwd=self.root, env=env, capture_output=True, text=True, timeout=20)
 
     def test_package_outside_chart_directory_is_rejected_before_helm(self) -> None:
@@ -277,6 +277,41 @@ class PublisherChartTests(unittest.TestCase):
         self.log.unlink()
         self.assert_stopped(self.run_helper(self.local, CHART_FIXTURE_VERSION='0.4.8'))
         self.assertTrue(all(call[:2] == ['show', 'chart'] for call in self.commands()))
+
+    def test_check_accepts_identical_or_unpublished_version_without_push(self) -> None:
+        for mode in ('same', 'missing'):
+            with self.subTest(mode=mode):
+                self.log.unlink(missing_ok=True)
+                result = self.run_helper(self.local, '--check', CHART_FIXTURE_MODE=mode)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(self.pushes(), [])
+
+    def test_check_rejects_changed_existing_version_without_push(self) -> None:
+        archive(self.remote, b'kind: ChangedDeployment\n', 2)
+        result = self.run_helper(self.local, '--check', CHART_FIXTURE_MODE='different')
+        self.assert_stopped(result)
+        self.assertIn('bump', result.stderr)
+        self.assertEqual(self.pushes(), [])
+
+    def test_check_fails_closed_on_unknown_registry_failure(self) -> None:
+        self.assert_stopped(self.run_helper(self.local, '--check', CHART_FIXTURE_MODE='pull-unknown'))
+        self.assertEqual(self.pushes(), [])
+
+    def test_render_deployment_rejects_changed_chart_before_merge(self) -> None:
+        lines = (SERVER / 'env.cue').read_text().splitlines()
+        start = next(i for i, line in enumerate(lines) if line.lstrip().startswith('check_chart_package='))
+        script = 'set -euo pipefail\n' + '\n'.join(line.lstrip('\t') for line in lines[start:start + 2])
+        self.assertIn('publish_chart.py --check', script)
+        archive(self.remote, b'kind: ChangedDeployment\n', 2)
+        env = os.environ.copy()
+        env.update({'PATH': str(self.bin) + os.pathsep + env['PATH'], 'CHART_FIXTURE_MODE': 'different',
+                    'CHART_FIXTURE_LOG': str(self.log), 'CHART_FIXTURE_LOCAL': str(self.local),
+                    'CHART_FIXTURE_REMOTE': str(self.remote)})
+        result = subprocess.run(['bash', '-c', script], cwd=self.root, env=env, text=True,
+                                capture_output=True, timeout=20)
+        self.assert_stopped(result)
+        self.assertIn('bump', result.stderr)
+        self.assertEqual(self.pushes(), [])
 
 
 if __name__ == '__main__':
