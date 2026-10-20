@@ -1123,11 +1123,11 @@ pub struct ServerConfig {
     /// APNs provider configuration from `WADDLE_APNS_*` (#529). `None`
     /// when unset: the Push Service then records `apns-not-configured`
     /// for Apple devices instead of sending.
-    pub apns: Option<crate::push_service::ApnsConfig>,
+    pub apns: Option<crate::push::service::ApnsConfig>,
     /// FCM provider configuration from `WADDLE_FCM_*` (#530). `None`
     /// when unset: the Push Service then records `fcm-not-configured`
     /// for Android devices instead of sending.
-    pub fcm: Option<crate::push_service::FcmConfig>,
+    pub fcm: Option<crate::push::service::FcmConfig>,
     /// Origins a browser sign-in may return to: the origin of `base_url`
     /// plus every origin in `WADDLE_CORS_ORIGINS`.
     pub trusted_web_origins: crate::auth::redirect::TrustedWebOrigins,
@@ -1636,8 +1636,8 @@ impl ServerConfig {
 
         let clustering = ClusteringConfig::from_env()?;
         let apns =
-            crate::push_service::ApnsConfig::from_env().map_err(|error| error.to_string())?;
-        let fcm = crate::push_service::FcmConfig::from_env().map_err(|error| error.to_string())?;
+            crate::push::service::ApnsConfig::from_env().map_err(|error| error.to_string())?;
+        let fcm = crate::push::service::FcmConfig::from_env().map_err(|error| error.to_string())?;
         let trusted_web_origins = crate::auth::redirect::TrustedWebOrigins::new(
             &base_url,
             std::env::var("WADDLE_CORS_ORIGINS").ok().as_deref(),

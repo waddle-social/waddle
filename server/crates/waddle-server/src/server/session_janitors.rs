@@ -7,13 +7,13 @@ pub(crate) use remote_owner::remote_owner_mirror_ticker;
 #[cfg(feature = "clustering")]
 pub(crate) use remote_owner::spawn_remote_owner_mirror_janitor;
 
-use crate::room_policy::RoomRegistryActorPolicy;
+use crate::room::policy::RoomRegistryActorPolicy;
 use crate::server::routes;
 use crate::server::routes::websocket::WebSocketState;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn, Instrument};
-use waddle_xmpp::muc::room_actor::LeaveSessionSelector;
+use waddle_xmpp::muc::room::actor::LeaveSessionSelector;
 
 use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome};
 
@@ -130,7 +130,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
         maybe_evict_empty_room, LeaveFanOutProgress, LocalDepartureItem, PendingLocalDeparture,
     };
     use waddle_xmpp::muc::durable::OccupancyLeaveCause;
-    use waddle_xmpp::muc::room_actor::{LeaveByRealJid, LeaveDisposition};
+    use waddle_xmpp::muc::room::actor::{LeaveByRealJid, LeaveDisposition};
 
     let mut batch = state
         .deps
@@ -346,7 +346,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                             cause,
                             session: selector,
                             attempt,
-                            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::RetainedRetry,
+                            origin: waddle_xmpp::muc::room::actor::LeaveOrigin::RetainedRetry,
                         },
                     )
                     .await
@@ -370,11 +370,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         // since, so it is no evidence about the current
                                         // registration (#1703).
                                         (
-                                            waddle_xmpp::muc::room_actor::DepartureProvenance::ReplayedReceipt,
+                                            waddle_xmpp::muc::room::actor::DepartureProvenance::ReplayedReceipt,
                                             LeaveSessionSelector::Generation(_),
                                         ) => {}
                                         (
-                                            waddle_xmpp::muc::room_actor::DepartureProvenance::Live,
+                                            waddle_xmpp::muc::room::actor::DepartureProvenance::Live,
                                             LeaveSessionSelector::Generation(occupant),
                                         ) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
@@ -485,11 +485,11 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                         // since, so it is no evidence about the current
                                         // registration (#1703).
                                         (
-                                            waddle_xmpp::muc::room_actor::DepartureProvenance::ReplayedReceipt,
+                                            waddle_xmpp::muc::room::actor::DepartureProvenance::ReplayedReceipt,
                                             LeaveSessionSelector::Generation(_),
                                         ) => {}
                                         (
-                                            waddle_xmpp::muc::room_actor::DepartureProvenance::Live,
+                                            waddle_xmpp::muc::room::actor::DepartureProvenance::Live,
                                             LeaveSessionSelector::Generation(occupant),
                                         ) => {
                                             let _ = routes::websocket::muc_call_sfu::unregister_participant_from_room_if_occupant_matches(
@@ -763,7 +763,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                     .destroy_room_if_inactive(
                         room.clone(),
                         occupancy_revision,
-                        waddle_xmpp::muc::room_actor::SealGuard::EmptyNonPersistent,
+                        waddle_xmpp::muc::room::actor::SealGuard::EmptyNonPersistent,
                     )
                     .await
                     {
@@ -1065,7 +1065,7 @@ pub(crate) async fn run_sm_expiry_sweep(state: &Arc<WebSocketState>) {
 /// as expiry instead of leaving pre-cutover sessions stranded until timeout.
 async fn drain_noncurrent_occupancy_sessions(
     state: &WebSocketState,
-    promotion_batch: &mut crate::sm_promotion::PromotionBatchGuard<'_>,
+    promotion_batch: &mut crate::sm::promotion::PromotionBatchGuard<'_>,
 ) -> bool {
     let registry = &state.deps.protocol.sm_session_registry;
     let candidates = match registry.detached_occupancy_inventory() {
@@ -1141,7 +1141,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             );
 
         }
-        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+        let mut promotion_batch = crate::sm::promotion::PromotionBatchGuard::new(
             &state.deps.protocol.sm_session_registry,
             drained,
         );
@@ -1149,7 +1149,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             sweep_failed = true;
         }
         while let Some(pending_session) = promotion_batch.pop() {
-            let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+            let mut promotion_guard = crate::sm::promotion::PromotionSessionGuard::new(
                 &state.deps.protocol.sm_session_registry,
                 pending_session,
             );
@@ -1161,7 +1161,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             // redelivery and strip the copies BEFORE promotion; promoting a
             // copy whose row still exists duplicates a Transient payload or
             // collides with the Archived uniqueness key.
-            let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+            let row_release = crate::sm::promotion::release_row_backed_replay_copies(
                 &state.deps.protocol.sm_session_registry,
                 &state.deps.protocol.pending_delivery_storage,
                 promotion_guard.session_mut(),
@@ -1203,7 +1203,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                 && !row_release.ownership_unknown
                 && !row_release.release_failed_known_rows
             {
-                if crate::sm_promotion::reinsert_failed_session_for_retry(
+                if crate::sm::promotion::reinsert_failed_session_for_retry(
                     &state.deps.protocol.sm_session_registry,
                     session.clone(),
                 ).await {
@@ -1241,7 +1241,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                              record_promotion_failure also failed; preserving \
                              session state for retry"
                         );
-                        if crate::sm_promotion::reinsert_failed_session_for_retry(
+                        if crate::sm::promotion::reinsert_failed_session_for_retry(
                             &state.deps.protocol.sm_session_registry,
                             session.clone(),
                         )
@@ -1315,7 +1315,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                      SKIPPING this session so replay traffic cannot overtake or \
                      duplicate its durable rows. Retried on the next janitor pass."
                 );
-                if crate::sm_promotion::reinsert_failed_session_for_retry(
+                if crate::sm::promotion::reinsert_failed_session_for_retry(
                     &state.deps.protocol.sm_session_registry,
                     session.clone(),
                 )
@@ -1353,7 +1353,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                                  record_promotion_failure also failed; preserving \
                                  session state for retry"
                             );
-                            if crate::sm_promotion::reinsert_failed_session_for_retry(
+                            if crate::sm::promotion::reinsert_failed_session_for_retry(
                                 &state.deps.protocol.sm_session_registry,
                                 session.clone(),
                             )
@@ -1391,7 +1391,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     // Make the retry promise true: drain_expired scans only
                     // memory, so the drained session must go back into the
                     // map for the next tick to see it.
-                    if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    if crate::sm::promotion::reinsert_failed_session_for_retry(
                         &state.deps.protocol.sm_session_registry,
                         session.clone(),
                     )
@@ -1408,7 +1408,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             // recent-tombstone record PER SESSION, immediately
             // before this session's promotion, so even a retraction
             // landing mid-batch is still seen.
-            let recent_tombstones = match crate::sm_promotion::recent_tombstones_for_promotion(
+            let recent_tombstones = match crate::sm::promotion::recent_tombstones_for_promotion(
                 &state.deps.protocol.sm_session_registry,
                 "SM janitor",
             ) {
@@ -1418,9 +1418,9 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     Vec::new()
                 }
             };
-            let summary = crate::sm_promotion::promote_session_with_custody(
+            let summary = crate::sm::promotion::promote_session_with_custody(
                 &session,
-                crate::sm_promotion::TerminalOverflowPromotionDeps {
+                crate::sm::promotion::TerminalOverflowPromotionDeps {
                     sm_registry: &state.deps.protocol.sm_session_registry,
                     registry: &state.deps.protocol.connection_registry,
                     user_registry: &state.deps.protocol.user_registry,
@@ -1436,14 +1436,14 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
             // retraction recorded after the snapshot above raced
             // this session's promotion — re-scrub the pending rows
             // it may have just inserted BEFORE confirm_drained.
-            if crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+            if crate::sm::promotion::scrub_pending_for_tombstones_recorded_during_promotion(
                 &state.deps.protocol.sm_session_registry,
                 &state.deps.protocol.pending_delivery_storage,
                 &recent_tombstones,
                 "SM janitor",
             )
             .await
-                == crate::sm_promotion::PromotionScrubOutcome::Failed
+                == crate::sm::promotion::PromotionScrubOutcome::Failed
             {
                 sweep_failed = true;
             }
@@ -1484,7 +1484,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                             "SM janitor: record_promotion_failure failed; \
                              preserving session state for retry"
                         );
-                        if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                        if crate::sm::promotion::prune_promoted_then_reinsert_for_retry(
                             &state.deps.protocol.sm_session_registry,
                             session.clone(),
                             &summary,
@@ -1519,7 +1519,7 @@ async fn run_sm_expiry_sweep_with_custody_cursor(
                     "SM janitor: promotion had storage failures; \
                      preserving session state for retry"
                 );
-                if crate::sm_promotion::prune_promoted_then_reinsert_for_retry(
+                if crate::sm::promotion::prune_promoted_then_reinsert_for_retry(
                     &state.deps.protocol.sm_session_registry,
                     session.clone(),
                     &summary,
@@ -1848,7 +1848,7 @@ async fn confirm_expired_ingress_stream(
     {
         return false;
     }
-    crate::sm_promotion::confirm_pending_promotion(
+    crate::sm::promotion::confirm_pending_promotion(
         &state.deps.protocol.pending_delivery_storage,
         stream_id,
     )
@@ -1868,8 +1868,8 @@ mod sm_expiry_tests {
     };
     use jid::{BareJid, FullJid};
     use tokio::sync::mpsc;
-    use waddle_xmpp::muc::room_actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::{GetSnapshot, JoinAffiliationGrant, JoinWithAffiliation};
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::stream_management::{DetachedSession, SmSessionRegistry};
     use waddle_xmpp::Affiliation;
@@ -1927,7 +1927,7 @@ mod sm_expiry_tests {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
@@ -2914,7 +2914,9 @@ enum CriticalRegistryArm {
 }
 
 fn spawn_room_registry_lifetime_watch(
-    room_registry: kameo::actor::ActorRef<waddle_xmpp::muc::room_registry_actor::RoomRegistryActor>,
+    room_registry: kameo::actor::ActorRef<
+        waddle_xmpp::muc::room::registry_actor::RoomRegistryActor,
+    >,
     node_lifecycle: crate::clustering::NodeLifecycle,
     process_stop: tokio_util::sync::CancellationToken,
 ) -> tokio::sync::oneshot::Receiver<CriticalRegistryArm> {
@@ -3132,7 +3134,7 @@ struct OrphanReaperWorkers {
         std::sync::Mutex<
             std::collections::HashMap<
                 (jid::BareJid, waddle_xmpp::muc::RoomClaimFenceContext),
-                waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom,
+                waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom,
             >,
         >,
     >,
@@ -3412,7 +3414,7 @@ impl OrphanReaperWorkers {
 
     fn remember_room_handoff(
         &self,
-        pending: waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom,
+        pending: waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom,
     ) {
         let key = (pending.room_jid.clone(), pending.claim_fence.clone());
         let mut handoffs = self
@@ -3452,7 +3454,7 @@ impl OrphanReaperWorkers {
 
     fn pending_room_handoffs(
         &self,
-    ) -> Vec<waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom> {
+    ) -> Vec<waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom> {
         self.room_handoff_pending
             .lock()
             .unwrap_or_else(|e| e.into_inner())
@@ -3853,7 +3855,7 @@ impl OrphanReaperSupervisor {
 
     async fn shutdown_terminal(
         mut self,
-    ) -> Vec<waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom> {
+    ) -> Vec<waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom> {
         let hydrations = self.workers.pending_hydrations();
         let unwon_reservations = self.workers.pending_unwon_hydration_reservations();
         let releases = self.workers.pending_releases();
@@ -4012,7 +4014,7 @@ struct ReclaimedRegistrationContext<'a> {
 #[cfg(feature = "clustering")]
 async fn register_reclaimed_epoch_or_cleanup(
     context: ReclaimedRegistrationContext<'_>,
-    pending: waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom,
+    pending: waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom,
 ) -> ReclaimedRegistration {
     let room_jid = &pending.room_jid;
     let claim_fence = &pending.claim_fence;
@@ -4104,7 +4106,7 @@ async fn reconcile_registered_room_or_self_fence(
     claim_fence: waddle_xmpp::muc::RoomClaimFenceContext,
     previous_owner: waddle_xmpp::ownership::NodeIdentity,
 ) -> Result<
-    waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome,
+    waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome,
     waddle_xmpp::muc::RoomRegistryError,
 > {
     let result = room_registry
@@ -4150,7 +4152,7 @@ async fn stopped_registry_after_steal_exactly_releases_the_won_claim() {
         Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()),
         tokio_util::sync::CancellationToken::new(),
     );
-    let pending = waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
+    let pending = waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom {
         room_jid: room_jid.clone(),
         claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(
             entity.clone(),
@@ -4202,7 +4204,7 @@ async fn terminal_shutdown_transfers_a_post_cas_room_handoff_into_registry_drain
     registry
         .actor_ref()
         .ask(
-            waddle_xmpp::muc::room_registry_actor::WireClusteringClaims {
+            waddle_xmpp::muc::room::registry_actor::WireClusteringClaims {
                 claim_store: claim_store.clone(),
                 node_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(me.clone()),
                 durable_store: None,
@@ -4225,7 +4227,7 @@ async fn terminal_shutdown_transfers_a_post_cas_room_handoff_into_registry_drain
         tokio_util::sync::CancellationToken::new(),
     );
     supervisor.workers.remember_room_handoff(
-        waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
+        waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom {
             room_jid: room_jid.clone(),
             claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(entity.clone(), me, epoch),
             previous_owner: previous,
@@ -4271,7 +4273,7 @@ async fn cancelled_after_known_steal_still_registers_the_exact_room_fence() {
     registry
         .actor_ref()
         .ask(
-            waddle_xmpp::muc::room_registry_actor::WireClusteringClaims {
+            waddle_xmpp::muc::room::registry_actor::WireClusteringClaims {
                 claim_store: claim_store.clone(),
                 node_identity: waddle_xmpp::ownership::SharedNodeIdentity::new(me.clone()),
                 durable_store: None,
@@ -4292,7 +4294,7 @@ async fn cancelled_after_known_steal_still_registers_the_exact_room_fence() {
     );
     cancel.cancel();
 
-    let pending = waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
+    let pending = waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom {
         room_jid: room_jid.clone(),
         claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(
             entity.clone(),
@@ -4344,7 +4346,7 @@ async fn cancelled_after_known_steal_still_registers_the_exact_room_fence() {
     .expect("typed reconciliation");
     assert_eq!(
         reconciliation,
-        waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released
+        waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::Released
     );
     assert!(supervisor.workers.pending_room_handoffs().is_empty());
     assert!(claim_store
@@ -4390,7 +4392,7 @@ async fn registry_death_after_mailbox_acceptance_self_fences_the_node() {
         fatal_fence.clone(),
         node_lifecycle,
     );
-    let pending = waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
+    let pending = waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom {
         room_jid: room_jid.clone(),
         claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(
             entity.clone(),
@@ -5118,7 +5120,7 @@ async fn worker_restart_self_fences_when_an_uncertain_sm_claim_is_unobserved() {
         .await
         .expect("room claim");
     supervisor.workers.remember_room_handoff(
-        waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
+        waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom {
             room_jid: room_jid.clone(),
             claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(
                 room_entity.clone(),
@@ -5151,7 +5153,7 @@ async fn worker_restart_self_fences_when_an_uncertain_sm_claim_is_unobserved() {
     room_registry
         .actor_ref()
         .ask(
-            waddle_xmpp::muc::room_registry_actor::WireClusteringClaims {
+            waddle_xmpp::muc::room::registry_actor::WireClusteringClaims {
                 claim_store: room_claim_store.clone(),
                 node_identity: SharedNodeIdentity::new(room_owner),
                 durable_store: None,
@@ -6109,21 +6111,21 @@ async fn run_orphan_reaper_sweep_with_workers(
                     )
                     .await
                     {
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
+                        Ok(waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::Hydrated) => {
                             room_hydrated += 1;
                         }
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
+                        Ok(waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::Released) => {
                             room_released += 1;
                         }
                         Ok(
-                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
+                            waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::AlreadyLive,
                         ) => room_already_live += 1,
                         Ok(
-                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
+                            waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::PendingRetry,
                         ) => {
                             room_pending_retry += 1;
                         }
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
+                        Ok(waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::LostRace) => {
                             room_lost_race += 1;
                         }
                         Err(error) => {
@@ -6255,7 +6257,7 @@ async fn run_orphan_reaper_sweep_with_workers(
                 .await
             {
                 Ok(new_epoch) => {
-                    let pending_handoff = waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom {
+                    let pending_handoff = waddle_xmpp::muc::room::registry_actor::PendingReclaimedRoom {
                         room_jid: room_jid.clone(),
                         claim_fence: waddle_xmpp::muc::RoomClaimFenceContext::new(
                             candidate.entity.clone(),
@@ -6304,7 +6306,7 @@ async fn run_orphan_reaper_sweep_with_workers(
                     .await;
                     let notify_previous_owner = !matches!(
                         reconciliation,
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace)
+                        Ok(waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::LostRace)
                             | Err(_)
                     );
                     if notify_previous_owner {
@@ -6328,19 +6330,19 @@ async fn run_orphan_reaper_sweep_with_workers(
                         }
                     }
                     match reconciliation {
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Hydrated) => {
+                        Ok(waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::Hydrated) => {
                             room_hydrated += 1;
                         }
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::Released) => {
+                        Ok(waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::Released) => {
                             room_released += 1;
                         }
                         Ok(
-                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::AlreadyLive,
+                            waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::AlreadyLive,
                         ) => room_already_live += 1,
                         Ok(
-                            waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::PendingRetry,
+                            waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::PendingRetry,
                         ) => room_pending_retry += 1,
-                        Ok(waddle_xmpp::muc::room_registry_actor::ReclaimedRoomOutcome::LostRace) => {
+                        Ok(waddle_xmpp::muc::room::registry_actor::ReclaimedRoomOutcome::LostRace) => {
                             room_lost_race += 1;
                         }
                         Err(error) => {
@@ -6689,7 +6691,7 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
 ///
 /// Skipped (not failed) when `WADDLE_TEST_POSTGRES_URL` is unset, mirroring
 /// every other Postgres-gated test in this crate (`clustering::claims`,
-/// `clustering::self_fence`, `sm_persistence_fenced::tests`).
+/// `clustering::self_fence`, `sm::persistence::fenced::tests`).
 #[cfg(all(test, feature = "clustering"))]
 mod orphan_reaper_sweep_tests {
     use super::*;
@@ -6698,12 +6700,12 @@ mod orphan_reaper_sweep_tests {
     };
     use crate::clustering::ClusteringHandles;
     use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
-    use crate::muc_durable::PostgresMucRoomStore;
+    use crate::muc::durable::PostgresMucRoomStore;
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
-    use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use crate::sm::persistence::fenced::PostgresFencedSmPersistence;
     use chrono::{TimeZone, Utc};
-    use waddle_xmpp::muc::room_actor::GetConfig;
-    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::muc::room::actor::GetConfig;
+    use waddle_xmpp::muc::room::registry_actor::WireClusteringClaims;
     use waddle_xmpp::muc::{MucDurableStore, RoomConfig, RoomRegistry};
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
@@ -6730,7 +6732,7 @@ mod orphan_reaper_sweep_tests {
 
     /// Deliberately in the past: [`PostgresFencedSmPersistence`] always
     /// overwrites `detached_at` with the database's own `now()` at write
-    /// time (mirrors `sm_persistence_fenced::tests`'s identical fixture
+    /// time (mirrors `sm::persistence::fenced::tests`'s identical fixture
     /// helper), so the exact value here is never asserted against.
     fn stale_caller_supplied_time() -> chrono::DateTime<Utc> {
         Utc.with_ymd_and_hms(2020, 1, 1, 0, 0, 0)
@@ -7800,15 +7802,15 @@ pub(crate) fn spawn_notification_outbox_janitor(websocket_state: &Arc<WebSocketS
     // TTL once at startup so operators can read the clamped value
     // without grepping the codebase or re-deriving the env var
     // resolution chain.
-    let active_mention_ttl_ms = crate::notification_outbox::active_mention_ttl_ms_from_env();
+    let active_mention_ttl_ms = crate::notification::outbox::active_mention_ttl_ms_from_env();
     let active_mention_ttl_secs = active_mention_ttl_ms / 1_000;
     info!(
         "Push active-mention TTL: {active_mention_ttl_secs}s \
          (default {}s, env WADDLE_PUSH_ACTIVE_MENTION_TTL_SECONDS, \
          clamp [{}s, {}s])",
-        crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
-        crate::notification_outbox::MIN_ACTIVE_MENTION_TTL_SECONDS,
-        crate::notification_outbox::MAX_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification::outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification::outbox::MIN_ACTIVE_MENTION_TTL_SECONDS,
+        crate::notification::outbox::MAX_ACTIVE_MENTION_TTL_SECONDS,
     );
     tokio::spawn(async move {
         let mut pending_notification_cursor =
@@ -7889,7 +7891,7 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
     async {
         let store = &state.deps.protocol.room_effect_outbox;
         let mut failed = false;
-        match crate::room_effect_outbox::drain::drain_due_effects(
+        match crate::room::effect_outbox::drain::drain_due_effects(
             state,
             crate::time::now_ms(),
             batch_size,
@@ -7959,7 +7961,7 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
             }
         } else if let Err(error) = store
             .arm_predecessor_inert(
-                &crate::room_effect_outbox::room_effect_origin_instance_id(),
+                &crate::room::effect_outbox::room_effect_origin_instance_id(),
                 crate::time::now_ms(),
             )
             .await
@@ -7970,7 +7972,7 @@ async fn run_room_effect_outbox_sweep(state: &WebSocketState, batch_size: usize)
         #[cfg(not(feature = "clustering"))]
         if let Err(error) = store
             .arm_predecessor_inert(
-                &crate::room_effect_outbox::room_effect_origin_instance_id(),
+                &crate::room::effect_outbox::room_effect_origin_instance_id(),
                 crate::time::now_ms(),
             )
             .await
@@ -8102,7 +8104,7 @@ pub(crate) async fn run_notification_outbox_sweep(
         let room_policy = RoomRegistryActorPolicy::new(state.deps.protocol.room_registry.clone());
         let dnd_reader = state.deps.protocol.dnd_reader.as_ref();
         let activity_reader = state.deps.protocol.notification_activity.as_ref();
-        let deps = crate::notification_outbox::NotificationDrainDeps::new(
+        let deps = crate::notification::outbox::NotificationDrainDeps::new(
             &room_policy,
             dnd_reader,
             activity_reader,
@@ -8354,7 +8356,7 @@ impl Drop for RemainingSmDrainOutcomes<'_> {
 
 async fn abandon_shutdown_session_with_loss(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut crate::sm::promotion::PromotionSessionGuard<'_>,
     loss: &waddle_xmpp::stream_management::ShutdownSmClaimLoss,
 ) {
     let session = promotion_guard.session();
@@ -8379,7 +8381,7 @@ async fn abandon_shutdown_session_with_loss(
 
 async fn abandon_shutdown_session_if_claim_lost(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut crate::sm::promotion::PromotionSessionGuard<'_>,
 ) -> Result<bool, waddle_xmpp::ownership::ClaimError> {
     let stream_id = promotion_guard.session().stream_id.clone();
     let loss = match registry.shutdown_drain_claim_lost(&stream_id).await {
@@ -8400,7 +8402,7 @@ async fn abandon_shutdown_session_if_claim_lost(
 /// abandoned. Keep this policy identical at every shutdown await boundary.
 async fn shutdown_promotion_should_stop(
     registry: &waddle_xmpp::stream_management::InMemorySmSessionRegistry,
-    promotion_guard: &mut crate::sm_promotion::PromotionSessionGuard<'_>,
+    promotion_guard: &mut crate::sm::promotion::PromotionSessionGuard<'_>,
     remaining: &mut RemainingSmDrainOutcomes<'_>,
 ) -> bool {
     match abandon_shutdown_session_if_claim_lost(registry, promotion_guard).await {
@@ -8593,7 +8595,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
         let drained = drained.sessions;
         remaining_outcomes.observe_drained(&drained);
         let drained_count = drained.len();
-        let mut promotion_batch = crate::sm_promotion::PromotionBatchGuard::new(
+        let mut promotion_batch = crate::sm::promotion::PromotionBatchGuard::new(
             &websocket_state.deps.protocol.sm_session_registry,
             drained,
         );
@@ -8640,7 +8642,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // The session guard restores the already-popped session;
                 // `PromotionBatchGuard::Drop` restores the rest of the batch.
                 // Both keep promotion ownership and its claim intact.
-                let _promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                let _promotion_guard = crate::sm::promotion::PromotionSessionGuard::new(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
@@ -8648,7 +8650,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 continue 'drain;
             }
             let promotion_work = async {
-                let mut promotion_guard = crate::sm_promotion::PromotionSessionGuard::new(
+                let mut promotion_guard = crate::sm::promotion::PromotionSessionGuard::new(
                     &websocket_state.deps.protocol.sm_session_registry,
                     session,
                 );
@@ -8679,7 +8681,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 {
                     return;
                 }
-                let row_release = crate::sm_promotion::release_row_backed_replay_copies(
+                let row_release = crate::sm::promotion::release_row_backed_replay_copies(
                     &websocket_state.deps.protocol.sm_session_registry,
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     promotion_guard.session_mut(),
@@ -8764,7 +8766,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // recent-tombstone fetch so a retraction landing
                 // mid-batch during the shutdown drain is still seen.
                 let mut recent_tombstones = Vec::new();
-                if let Ok(records) = crate::sm_promotion::recent_tombstones_for_promotion(
+                if let Ok(records) = crate::sm::promotion::recent_tombstones_for_promotion(
                     &websocket_state.deps.protocol.sm_session_registry,
                     "Graceful shutdown",
                 ) {
@@ -8776,9 +8778,9 @@ pub(crate) async fn run_graceful_shutdown_drain(
                     .clustering_claims
                     .node_identity
                     .is_some();
-                let summary = crate::sm_promotion::promote_session_with_custody(
+                let summary = crate::sm::promotion::promote_session_with_custody(
                     &session,
-                    crate::sm_promotion::TerminalOverflowPromotionDeps {
+                    crate::sm::promotion::TerminalOverflowPromotionDeps {
                         sm_registry: &websocket_state.deps.protocol.sm_session_registry,
                         registry: &websocket_state.deps.protocol.connection_registry,
                         user_registry: &websocket_state.deps.protocol.user_registry,
@@ -8794,7 +8796,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 // re-scrub pending rows for tombstones recorded during
                 // this session's promotion window before confirming.
                 let _ =
-                    crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+                    crate::sm::promotion::scrub_pending_for_tombstones_recorded_during_promotion(
                         &websocket_state.deps.protocol.sm_session_registry,
                         &websocket_state.deps.protocol.pending_delivery_storage,
                         &recent_tombstones,
@@ -8843,7 +8845,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                         "Graceful shutdown: promotion or pending redrive incomplete; \
                          preserving durable SM row for restart-time retry"
                     );
-                    crate::sm_promotion::prune_promoted_sequences(
+                    crate::sm::promotion::prune_promoted_sequences(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session_mut(),
                         &summary,
@@ -8871,7 +8873,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                             "Graceful shutdown: parking promotion after policy deferral or retry budget exhaustion"
                         );
                         parked_sessions.push(promotion_guard);
-                    } else if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    } else if crate::sm::promotion::reinsert_failed_session_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session().clone(),
                     )
@@ -8908,13 +8910,13 @@ pub(crate) async fn run_graceful_shutdown_drain(
                         "Graceful shutdown: durable SM confirmation failed; retaining \
                          promotion ownership and pending-delivery claim for retry"
                     );
-                    crate::sm_promotion::prune_promoted_sequences(
+                    crate::sm::promotion::prune_promoted_sequences(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session_mut(),
                         &summary,
                     )
                     .await;
-                    if crate::sm_promotion::reinsert_failed_session_for_retry(
+                    if crate::sm::promotion::reinsert_failed_session_for_retry(
                         &websocket_state.deps.protocol.sm_session_registry,
                         promotion_guard.session().clone(),
                     )
@@ -8931,7 +8933,7 @@ pub(crate) async fn run_graceful_shutdown_drain(
                 remaining_outcomes.account(&metric_stream_id);
                 let session_id =
                     waddle_xmpp::pending_delivery::SmSessionId::new(session.stream_id.clone());
-                crate::sm_promotion::confirm_pending_promotion(
+                crate::sm::promotion::confirm_pending_promotion(
                     &websocket_state.deps.protocol.pending_delivery_storage,
                     &session_id,
                 )
@@ -9178,8 +9180,8 @@ pub(crate) struct DormancySweepCounts {
 pub(crate) async fn sweep_dormant_rooms_once(
     websocket_state: &WebSocketState,
 ) -> DormancySweepCounts {
-    use waddle_xmpp::muc::room_actor::{IsDormant, SealGuard};
-    use waddle_xmpp::muc::room_registry_actor::{DestroyRoomIfInactive, ListRooms, RoomCount};
+    use waddle_xmpp::muc::room::actor::{IsDormant, SealGuard};
+    use waddle_xmpp::muc::room::registry_actor::{DestroyRoomIfInactive, ListRooms, RoomCount};
     let mut counts = DormancySweepCounts::default();
     let rooms = match websocket_state
         .deps
@@ -9201,7 +9203,7 @@ pub(crate) async fn sweep_dormant_rooms_once(
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
                 room_jid: room_jid.clone(),
             })
             .await
@@ -9568,11 +9570,11 @@ mod room_dormancy_tests {
     use super::{run_room_dormancy_sweep, sweep_dormant_rooms_once};
     use crate::server::routes::websocket::tests::create_test_websocket_state;
     use waddle_xmpp::muc::{
-        room_actor::{
+        room::actor::{
             ChangeAffiliation, GetOccupantByJid, Join, JoinAffiliationGrant, JoinWithAffiliation,
             LeaveByRealJid,
         },
-        room_registry_actor::{CreateRoom, GetOrCreateRoom, RoomCount},
+        room::registry_actor::{CreateRoom, GetOrCreateRoom, RoomCount},
         RoomConfig,
     };
     use waddle_xmpp_core::{Affiliation, Role};
@@ -9761,13 +9763,13 @@ mod room_dormancy_tests {
             })
             .await
             .expect("join");
-        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = actor
+        let waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome) = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -9778,12 +9780,12 @@ mod room_dormancy_tests {
         // receipt now legitimately vetoes dormancy/eviction.
         assert_eq!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                .ask(waddle_xmpp::muc::room::actor::AckDepartureReceipt {
                     attempt: outcome.acknowledge,
                 })
                 .await
                 .expect("ack ask"),
-            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+            waddle_xmpp::muc::room::actor::AckDepartureOutcome::Acknowledged
         );
 
         let counts = sweep_dormant_rooms_once(&state).await;
@@ -9823,13 +9825,13 @@ mod room_dormancy_tests {
             })
             .await
             .expect("resolver-derived member join");
-        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = actor
+        let waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome) = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice,
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -9840,12 +9842,12 @@ mod room_dormancy_tests {
         // receipt now legitimately vetoes dormancy/eviction.
         assert_eq!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                .ask(waddle_xmpp::muc::room::actor::AckDepartureReceipt {
                     attempt: outcome.acknowledge,
                 })
                 .await
                 .expect("ack ask"),
-            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+            waddle_xmpp::muc::room::actor::AckDepartureOutcome::Acknowledged
         );
 
         let counts = sweep_dormant_rooms_once(&state).await;
@@ -9888,13 +9890,13 @@ mod room_dormancy_tests {
             })
             .await
             .expect("first join");
-        let waddle_xmpp::muc::room_actor::LeaveDisposition::Left(outcome) = actor
+        let waddle_xmpp::muc::room::actor::LeaveDisposition::Left(outcome) = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice.clone(),
                 cause: waddle_xmpp::muc::durable::OccupancyLeaveCause::Disconnect,
-                session: waddle_xmpp::muc::room_actor::LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                session: waddle_xmpp::muc::room::actor::LeaveSessionSelector::Any,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -9905,12 +9907,12 @@ mod room_dormancy_tests {
         // receipt now legitimately vetoes dormancy/eviction.
         assert_eq!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::AckDepartureReceipt {
+                .ask(waddle_xmpp::muc::room::actor::AckDepartureReceipt {
                     attempt: outcome.acknowledge,
                 })
                 .await
                 .expect("ack ask"),
-            waddle_xmpp::muc::room_actor::AckDepartureOutcome::Acknowledged
+            waddle_xmpp::muc::room::actor::AckDepartureOutcome::Acknowledged
         );
         let counts = sweep_dormant_rooms_once(&state).await;
         assert_eq!(counts.evicted, 1, "room evicted while dormant");
@@ -10402,12 +10404,12 @@ mod local_muc_departure_tests {
         ChannelId, DurableRoomState, MucDurableFuture, MucDurableStore, OccupancyLeaveCause,
         RoomClaimFenceContext, WaddleId,
     };
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         GetSnapshot, Join, LeaveByRealJid, LeaveDisposition, LeaveSessionSelector,
         OccupancyWatermark, RestoreLiveRoster, SealForDestroy, SealGuard, SealIfInactive,
         SealIfInactiveOutcome, UnsealInactive,
     };
-    use waddle_xmpp::muc::room_registry_actor::{
+    use waddle_xmpp::muc::room::registry_actor::{
         CreateRoom, GetOrCreateRoomWithLiveRoster, ReapSealedRoom, WireClusteringClaims,
     };
     use waddle_xmpp::muc::{
@@ -10433,7 +10435,7 @@ mod local_muc_departure_tests {
     async fn create_room(
         state: &crate::server::routes::websocket::WebSocketState,
         room_jid: &BareJid,
-    ) -> kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+    ) -> kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor> {
         state
             .deps
             .protocol
@@ -10449,7 +10451,7 @@ mod local_muc_departure_tests {
     }
 
     async fn join_member(
-        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+        actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
         jid: &FullJid,
         nick: &str,
     ) {
@@ -10668,7 +10670,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -10726,7 +10728,7 @@ mod local_muc_departure_tests {
         register_test_connection(state.as_ref(), &bob, bob_tx).await;
         while bob_rx.try_recv().is_ok() {}
 
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         store.set_leave_mode(LeaveProjectionMode::Delay(std::time::Duration::from_secs(
             6,
         )));
@@ -10797,7 +10799,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -10854,10 +10856,10 @@ mod local_muc_departure_tests {
         // the same nick: the existing-session rejoin path advances the
         // session watermark past the deferred attempt's.
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: jid.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -10872,7 +10874,7 @@ mod local_muc_departure_tests {
                 jid: jid.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::JoinedAtOrBefore(watermark),
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -10913,10 +10915,10 @@ mod local_muc_departure_tests {
             .expect("initial snapshot")
             .admission_revision;
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: jid.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -10940,10 +10942,10 @@ mod local_muc_departure_tests {
             .expect("replacement snapshot")
             .admission_revision;
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: jid.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -10958,7 +10960,7 @@ mod local_muc_departure_tests {
                 jid: jid.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Generation(first_generation),
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -11014,7 +11016,7 @@ mod local_muc_departure_tests {
                     })
                     .await
                     .expect("join departed generation");
-                let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+                let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
                 assert!(matches!(
                     actor
                         .ask(LeaveByRealJid {
@@ -11022,7 +11024,7 @@ mod local_muc_departure_tests {
                             cause: OccupancyLeaveCause::Disconnect,
                             session: LeaveSessionSelector::Generation(generation),
                             attempt,
-                            origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                            origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                         })
                         .await
                         .expect("commit departure with lost reply"),
@@ -11041,7 +11043,7 @@ mod local_muc_departure_tests {
                         cause: OccupancyLeaveCause::Disconnect,
                         session: LeaveSessionSelector::Generation(generation),
                         attempt,
-                        origin: waddle_xmpp::muc::room_actor::LeaveOrigin::RetainedRetry,
+                        origin: waddle_xmpp::muc::room::actor::LeaveOrigin::RetainedRetry,
                     })
                     .await
                     .expect("consume superseded departure receipt"),
@@ -11110,10 +11112,10 @@ mod local_muc_departure_tests {
             .expect("initial snapshot")
             .admission_revision;
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: jid.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -11125,7 +11127,7 @@ mod local_muc_departure_tests {
         let call_id = waddle_sfu::CallId::new(room.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(jid.clone());
 
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         assert!(matches!(
             actor
                 .ask(LeaveByRealJid {
@@ -11133,7 +11135,7 @@ mod local_muc_departure_tests {
                     cause: OccupancyLeaveCause::Explicit,
                     session: LeaveSessionSelector::Generation(generation),
                     attempt,
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("committed leave whose response was lost"),
@@ -11145,10 +11147,10 @@ mod local_muc_departure_tests {
             .expect("replacement snapshot")
             .admission_revision;
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: jid.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -11218,10 +11220,10 @@ mod local_muc_departure_tests {
             .expect("initial snapshot")
             .admission_revision;
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: jid.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -11239,7 +11241,7 @@ mod local_muc_departure_tests {
                 jid: jid.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Generation(generation),
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -11276,14 +11278,14 @@ mod local_muc_departure_tests {
         // The departure completes and its effects run on the caller side, but
         // the acknowledgement cannot be handed to the actor: a stopped actor
         // stands in for a mailbox that stays saturated past the ack bound.
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let disposition = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave");
@@ -11322,7 +11324,7 @@ mod local_muc_departure_tests {
         );
         assert_eq!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
                 .await
                 .expect("snapshot")
                 .departures
@@ -11341,7 +11343,7 @@ mod local_muc_departure_tests {
         );
         assert!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+                .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
                 .await
                 .expect("snapshot")
                 .departures
@@ -11356,8 +11358,8 @@ mod local_muc_departure_tests {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("later leave");
@@ -11390,14 +11392,14 @@ mod local_muc_departure_tests {
 
         // Departure A: reply delivered, effects ran, acknowledgement failed
         // (stopped actor stands in for a saturated mailbox) and is retained.
-        let attempt_a = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt_a = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let first = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: attempt_a,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave A");
@@ -11440,7 +11442,7 @@ mod local_muc_departure_tests {
                     jid: alice.clone(),
                     cause: OccupancyLeaveCause::Explicit,
                     selector: LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     notified: std::collections::HashSet::new(),
                     removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
@@ -11470,7 +11472,7 @@ mod local_muc_departure_tests {
             "the acknowledgement was delivered first and B converged as NotOccupant"
         );
         assert!(actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("snapshot")
             .departures
@@ -11495,14 +11497,14 @@ mod local_muc_departure_tests {
         register_test_connection(state.as_ref(), &bob, bob_tx).await;
         while bob_rx.try_recv().is_ok() {}
 
-        let attempt_a = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt_a = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let first = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt: attempt_a,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave A");
@@ -11548,7 +11550,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -11566,7 +11568,7 @@ mod local_muc_departure_tests {
             "the barrier delivered the backed-off acknowledgement and B converged"
         );
         assert!(actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("snapshot")
             .departures
@@ -11600,14 +11602,14 @@ mod local_muc_departure_tests {
         // departure retry.
         let mut retained_acks = Vec::new();
         for _ in 0..2 {
-            let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+            let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
             let left = actor
                 .ask(LeaveByRealJid {
                     sender_jid: alice.clone(),
                     cause: OccupancyLeaveCause::Explicit,
                     session: LeaveSessionSelector::Any,
                     attempt,
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("leave");
@@ -11656,7 +11658,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -11672,7 +11674,7 @@ mod local_muc_departure_tests {
             "both acknowledgements delivered, departure converged"
         );
         assert!(actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("snapshot")
             .departures
@@ -11689,7 +11691,7 @@ mod local_muc_departure_tests {
         let state = clustered_state_with_store(store.clone()).await;
         let room = room_jid("ack-absent-room");
         let alice = full_jid("alice@example.com/web");
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let ack = || LocalDepartureItem::AckReceipt {
             room: room.clone(),
             jid: alice.clone(),
@@ -11769,7 +11771,7 @@ mod local_muc_departure_tests {
 
         // The explicit-leave task: write-ahead, ask, then it is cancelled
         // before fan-out and acknowledgement.
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let in_flight = LocalDepartureItem::InFlight {
             room: room.clone(),
             jid: alice.clone(),
@@ -11790,7 +11792,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave");
@@ -11828,7 +11830,7 @@ mod local_muc_departure_tests {
         assert_eq!(presence.type_, xmpp_parsers::presence::Type::Unavailable);
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
         assert!(actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("snapshot")
             .departures
@@ -11845,7 +11847,7 @@ mod local_muc_departure_tests {
         let alice = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         join_member(&actor, &alice, "alice").await;
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let in_flight = LocalDepartureItem::InFlight {
             room: room.clone(),
             jid: alice.clone(),
@@ -11882,7 +11884,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             });
@@ -11900,7 +11902,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -11926,7 +11928,7 @@ mod local_muc_departure_tests {
 
         // Live task: write-ahead, ask, effects ran (simulated), then it
         // converts its entry into the owed ack and dies before awaiting it.
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let in_flight = LocalDepartureItem::InFlight {
             room: room.clone(),
             jid: alice.clone(),
@@ -11947,7 +11949,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -11992,7 +11994,7 @@ mod local_muc_departure_tests {
         );
         assert_eq!(state.deps.protocol.pending_local_muc_departures.len(), 0);
         assert!(actor
-            .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+            .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
             .await
             .expect("snapshot")
             .departures
@@ -12021,7 +12023,7 @@ mod local_muc_departure_tests {
         while carol_rx.try_recv().is_ok() {}
 
         // The live task committed the departure and notified bob, then died.
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let in_flight = LocalDepartureItem::InFlight {
             room: room.clone(),
             jid: alice.clone(),
@@ -12042,7 +12044,7 @@ mod local_muc_departure_tests {
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
                 attempt,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave")
@@ -12153,7 +12155,7 @@ mod local_muc_departure_tests {
                 .deps
                 .protocol
                 .room_registry
-                .ask(waddle_xmpp::muc::room_registry_actor::GetRoom {
+                .ask(waddle_xmpp::muc::room::registry_actor::GetRoom {
                     room_jid: room.clone(),
                 })
                 .await
@@ -12194,14 +12196,14 @@ mod local_muc_departure_tests {
         let alice = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         join_member(&actor, &alice, "alice").await;
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let first = actor
             .ask(LeaveByRealJid {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
                 attempt,
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("leave");
@@ -12211,8 +12213,8 @@ mod local_muc_departure_tests {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("later fresh leave");
@@ -12225,8 +12227,8 @@ mod local_muc_departure_tests {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Explicit,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::RetainedRetry,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::RetainedRetry,
             })
             .await
             .expect("retained retry");
@@ -12257,7 +12259,7 @@ mod local_muc_departure_tests {
             })
             .await
             .expect("seal destroying");
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         assert!(matches!(
             actor
                 .ask(LeaveByRealJid {
@@ -12265,7 +12267,7 @@ mod local_muc_departure_tests {
                     cause: OccupancyLeaveCause::Explicit,
                     session: LeaveSessionSelector::Any,
                     attempt,
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("suppressed explicit leave"),
@@ -12333,8 +12335,8 @@ mod local_muc_departure_tests {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("first disconnect")
@@ -12348,16 +12350,16 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::JoinedAtOrBefore(first),
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
         );
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: alice.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -12375,8 +12377,8 @@ mod local_muc_departure_tests {
                 sender_jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 session: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
             })
             .await
             .expect("second disconnect")
@@ -12394,7 +12396,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::JoinedAtOrBefore(second),
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -12438,10 +12440,10 @@ mod local_muc_departure_tests {
             .expect("snapshot before join")
             .admission_revision;
         actor
-            .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+            .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
                 sender_jid: alice.clone(),
                 nick: "alice".to_string(),
-                affiliation_grant: waddle_xmpp::muc::room_actor::JoinAffiliationGrant::Resolver(
+                affiliation_grant: waddle_xmpp::muc::room::actor::JoinAffiliationGrant::Resolver(
                     Affiliation::Member,
                 ),
                 local_domain: "example.com".to_string(),
@@ -12458,7 +12460,7 @@ mod local_muc_departure_tests {
                 jid: alice,
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Generation(generation),
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -12493,49 +12495,49 @@ mod local_muc_departure_tests {
         let jid = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         join_member(&actor, &jid, "old-nick").await;
-        let old_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let old_attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         assert!(matches!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::LeaveByRealJid {
+                .ask(waddle_xmpp::muc::room::actor::LeaveByRealJid {
                     sender_jid: jid.clone(),
                     cause: OccupancyLeaveCause::Explicit,
                     session: LeaveSessionSelector::Any,
                     attempt: old_attempt,
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("old-nick leave"),
-            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+            waddle_xmpp::muc::room::actor::LeaveDisposition::Left(_)
         ));
         join_member(&actor, &jid, "new-nick").await;
-        let new_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let new_attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         assert!(matches!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::LeaveByRealJid {
+                .ask(waddle_xmpp::muc::room::actor::LeaveByRealJid {
                     sender_jid: jid.clone(),
                     cause: OccupancyLeaveCause::Explicit,
                     session: LeaveSessionSelector::Any,
                     attempt: new_attempt,
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("new-nick leave"),
-            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+            waddle_xmpp::muc::room::actor::LeaveDisposition::Left(_)
         ));
         join_member(&actor, &jid, "third-nick").await;
-        let third_attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let third_attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         assert!(matches!(
             actor
-                .ask(waddle_xmpp::muc::room_actor::LeaveByRealJid {
+                .ask(waddle_xmpp::muc::room::actor::LeaveByRealJid {
                     sender_jid: jid.clone(),
                     cause: OccupancyLeaveCause::Explicit,
                     session: LeaveSessionSelector::Any,
                     attempt: third_attempt,
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 })
                 .await
                 .expect("third-nick leave"),
-            waddle_xmpp::muc::room_actor::LeaveDisposition::Left(_)
+            waddle_xmpp::muc::room::actor::LeaveDisposition::Left(_)
         ));
         // Another account re-takes the OLDEST nick before the retry: its
         // receipt is unreplayable (Superseded consumes it), and the drain
@@ -12593,7 +12595,7 @@ mod local_muc_departure_tests {
         join_member(&stale_actor, &jid, "alice").await;
         // The original disconnect cleanup mints the sweep ceiling, then fails
         // room enumeration (simulated by recording the sweep directly).
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         // A replacement connection claims the same full JID and joins a room
         // AFTER the ceiling.
         let (tx, _rx) = mpsc::channel(4);
@@ -12658,7 +12660,7 @@ mod local_muc_departure_tests {
                 jid: jid.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -12690,7 +12692,7 @@ mod local_muc_departure_tests {
         let jid = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         let actor_id = actor.id();
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let notified_bob: HashSet<FullJid> = HashSet::from([full_jid("bob@example.com/phone")]);
         state.deps.protocol.pending_local_muc_departures.record(
             crate::server::routes::websocket::LocalDepartureItem::ConfirmRetired {
@@ -12739,7 +12741,7 @@ mod local_muc_departure_tests {
                     .await
                     .expect("snapshot")
                     .occupancy_revision,
-                waddle_xmpp::muc::room_actor::SealGuard::Dormant,
+                waddle_xmpp::muc::room::actor::SealGuard::Dormant,
             )
             .await
             .expect("destroy dormant room");
@@ -12786,12 +12788,12 @@ mod local_muc_departure_tests {
                     sender_jid: alice.clone(),
                     cause: OccupancyLeaveCause::Disconnect,
                     session: LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
-                    origin: waddle_xmpp::muc::room_actor::LeaveOrigin::Fresh,
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
+                    origin: waddle_xmpp::muc::room::actor::LeaveOrigin::Fresh,
                 })
                 .await,
             Err(kameo::error::SendError::HandlerError(
-                waddle_xmpp::muc::room_actor::RoomActorError::RoomSealed
+                waddle_xmpp::muc::room::actor::RoomActorError::RoomSealed
             ))
         ));
 
@@ -12842,7 +12844,7 @@ mod local_muc_departure_tests {
                 actor: actor.id(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 // The dead task had already notified bob before the retirement
                 // watch: the successor's resumed fan-out must skip bob.
                 notified: HashSet::from([bob.clone()]),
@@ -12921,7 +12923,7 @@ mod local_muc_departure_tests {
                 jid: alice.clone(),
                 cause: OccupancyLeaveCause::Disconnect,
                 selector: LeaveSessionSelector::Any,
-                attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                 notified: std::collections::HashSet::new(),
                 removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
             },
@@ -12970,7 +12972,7 @@ mod local_muc_departure_tests {
         let jid = full_jid("alice@example.com/web");
         let actor = create_room(state.as_ref(), &room).await;
         // The ceiling predates the replacement's join.
-        let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
+        let attempt = waddle_xmpp::muc::room::actor::LeaveAttemptId::generate();
         let (tx, _rx) = mpsc::channel(4);
         register_test_connection(state.as_ref(), &jid, tx).await;
         join_member(&actor, &jid, "alice").await;
@@ -13025,7 +13027,7 @@ mod local_muc_departure_tests {
                 crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                     jid: jid.clone(),
                     selector: LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
                     removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
@@ -13069,7 +13071,7 @@ mod local_muc_departure_tests {
                 item: crate::server::routes::websocket::LocalDepartureItem::FullJidSweep {
                     jid: jid.clone(),
                     selector: LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     remote_ceiling: u64::MAX,
                     removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
@@ -13126,7 +13128,7 @@ mod local_muc_departure_tests {
                     actor: actor.id(),
                     cause: OccupancyLeaveCause::Disconnect,
                     selector: LeaveSessionSelector::Any,
-                    attempt: waddle_xmpp::muc::room_actor::LeaveAttemptId::generate(),
+                    attempt: waddle_xmpp::muc::room::actor::LeaveAttemptId::generate(),
                     notified: std::collections::HashSet::new(),
                     removal: waddle_xmpp::muc::MucRemovalCause::Voluntary,
                 },
@@ -14037,7 +14039,7 @@ mod graceful_shutdown_drain_tests {
             .sessions
             .pop()
             .expect("one session");
-        let mut guard = crate::sm_promotion::PromotionSessionGuard::new(&registry, session);
+        let mut guard = crate::sm::promotion::PromotionSessionGuard::new(&registry, session);
         identity.disable().await;
         assert!(registry.forget_claim_locally(stream_id).await);
 

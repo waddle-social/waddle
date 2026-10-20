@@ -185,7 +185,7 @@ pub(super) async fn drain_outbound_into_replay(
                     // Use the persistence stanza decoder rather than the inbound
                     // frame parser: generated frames have no inbound size limit.
                     let stanza = xml.parse::<Element>().ok().and_then(|element| {
-                        crate::sm_persistence::codec::parse_stanza(element).ok()
+                        crate::sm::persistence::codec::parse_stanza(element).ok()
                     });
                     if stanza.is_none() {
                         warn!("recipient pass emitted a non-stanza frame during detach; excluding it from SM replay");
@@ -697,15 +697,15 @@ async fn record_drained_terminal_xml(
     // pending rows recorded during that single-item promotion span. Reusing
     // the batch-start snapshot here leaves a TOCTOU where a retraction lands
     // after the prefix promotion but before this later overflow item commits.
-    let recent_tombstones = crate::sm_promotion::recent_tombstones_for_promotion(
+    let recent_tombstones = crate::sm::promotion::recent_tombstones_for_promotion(
         &state.deps.protocol.sm_session_registry,
         "terminal recovery overflow promotion",
     )
     .unwrap_or_else(|_| terminal.recent_tombstones.to_vec());
-    let summary = crate::sm_promotion::promote_terminal_overflow_entry(
+    let summary = crate::sm::promotion::promote_terminal_overflow_entry(
         terminal.session,
         entry.clone(),
-        crate::sm_promotion::TerminalOverflowPromotionDeps {
+        crate::sm::promotion::TerminalOverflowPromotionDeps {
             sm_registry: &state.deps.protocol.sm_session_registry,
             registry: &state.deps.protocol.connection_registry,
             user_registry: &state.deps.protocol.user_registry,
@@ -717,7 +717,7 @@ async fn record_drained_terminal_xml(
         },
     )
     .await;
-    crate::sm_promotion::scrub_pending_for_tombstones_recorded_during_promotion(
+    crate::sm::promotion::scrub_pending_for_tombstones_recorded_during_promotion(
         &state.deps.protocol.sm_session_registry,
         &state.deps.protocol.pending_delivery_storage,
         &recent_tombstones,

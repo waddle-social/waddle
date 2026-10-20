@@ -114,7 +114,7 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 
 ## PR #349 — `original_receipt_at` plumbing through `DetachedSession` (planned)
 
-**Goal:** replace the `Utc::now()` fallback in `sm_promotion::promote_session_unacked` with the actual server-receipt time of each unacked stanza, so the XEP-0203 `<delay/>` advertised on Q6-promoted offline replays is the real failed-delivery time.
+**Goal:** replace the `Utc::now()` fallback in `sm::promotion::promote_session_unacked` with the actual server-receipt time of each unacked stanza, so the XEP-0203 `<delay/>` advertised on Q6-promoted offline replays is the real failed-delivery time.
 
 ### Acceptance
 
@@ -127,7 +127,7 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 
 - `server/crates/waddle-xmpp/src/stream_management/session_registry.rs` — struct shape + `record_detached_outbound`, `record_detached_outbound_at`, `record_outbound_for_detached_stream*`, `record_stanza_for_detached_*`.
 - `server/crates/waddle-xmpp/src/stream_management/persistence.rs` — `PersistedUnackedStanza::original_receipt_at` already exists; just ensure it's populated correctly on append (not on read).
-- `server/crates/waddle-server/src/sm_promotion.rs` — drop the `original_receipt_fallback` parameter; use `row.original_receipt_at` directly.
+- `server/crates/waddle-server/src/sm/promotion.rs` — drop the `original_receipt_fallback` parameter; use `row.original_receipt_at` directly.
 - Cross-cutting: every site that constructs a `DetachedSession` (production + tests) gets the new field. Estimated 20+ touch sites.
 
 ### Test plan
@@ -153,7 +153,7 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 
 - `xep0160_pending_delivery_survives_server_restart` — drop `#[ignore]`, exercise via `DatabasePendingDeliveryStorage` with a temp file + restart.
 - `xep0160_sm_session_resumable_after_server_restart` — drop `#[ignore]`, exercise via `DatabaseSmPersistence` round-trip.
-- `xep0160_sm_expired_unacked_promoted_to_alt_resource_when_available` — drop `#[ignore]`, exercise via `sm_promotion::promote_session_unacked`.
+- `xep0160_sm_expired_unacked_promoted_to_alt_resource_when_available` — drop `#[ignore]`, exercise via `sm::promotion::promote_session_unacked`.
 - `xep0160_sm_expired_unacked_promoted_to_pending_delivery_when_no_alt_resource` — same.
 - `xep0160_sm_expired_unacked_returns_service_unavailable_when_storage_refuses` — same.
 - `xep0160_sm_expiry_promotion_reuses_intake_classifier` — verify by introspecting the `sm_promotion` module's classifier delegation (or via a property test).
@@ -196,9 +196,9 @@ Tracking doc for the multi-PR implementation of issue [#209](https://github.com/
 
 ### Files to touch
 
-- `server/crates/waddle-server/src/db/mod.rs` — add transaction support (driver-aware; `BEGIN`/`COMMIT` for both SQLite and Postgres).
+- `server/crates/waddle-server/src/db.rs` — add transaction support (driver-aware; `BEGIN`/`COMMIT` for both SQLite and Postgres).
 - `server/crates/waddle-xmpp/src/stream_management/persistence.rs` — extend trait with the JOIN method.
-- `server/crates/waddle-server/src/sm_persistence.rs` — implement the JOIN query.
+- `server/crates/waddle-server/src/sm/persistence.rs` — implement the JOIN query.
 - `server/crates/waddle-xmpp/src/stream_management/session_registry.rs` — use the transaction in `store_session`'s persistence write.
 
 ### Risks

@@ -3,6 +3,24 @@
 //! This module implements the `waddle_xmpp::AppState` trait by delegating to
 //! the existing auth/session services and PermissionActor-backed permission
 //! actor in waddle-server.
+#[cfg(test)]
+pub(super) mod account;
+#[cfg(test)]
+pub(super) mod app;
+#[cfg(test)]
+pub(super) mod auth;
+#[cfg(test)]
+pub(super) mod permission;
+#[cfg(test)]
+pub(super) mod profile;
+#[cfg(test)]
+pub(super) mod roster;
+#[cfg(test)]
+pub(super) mod space;
+#[cfg(test)]
+pub(super) mod upload;
+#[cfg(test)]
+pub(super) mod user_storage;
 
 #[cfg(test)]
 use waddle_xmpp::inbox::InboxEntry;
@@ -10,7 +28,7 @@ use waddle_xmpp::inbox::InboxEntry;
 use waddle_xmpp::{Session as XmppSession, XmppError};
 
 #[cfg(test)]
-pub use super::xmpp_app_state::XmppAppState;
+pub use super::xmpp_state::app::XmppAppState;
 
 pub(crate) use super::xmpp_channels::{
     delete_xmpp_channel, get_xmpp_channel, list_xmpp_channels, upsert_xmpp_channel,
@@ -28,7 +46,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::Jid,
         token: &str,
     ) -> Result<XmppSession, XmppError> {
-        super::xmpp_auth_state::validate_session(&self.session_manager, jid, token).await
+        super::xmpp_state::auth::validate_session(&self.session_manager, jid, token).await
     }
 
     /// Check if a subject has permission to perform an action on a resource.
@@ -41,7 +59,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         action: &str,
         subject: &str,
     ) -> Result<bool, XmppError> {
-        super::xmpp_permission_state::check_permission(
+        super::xmpp_state::permission::check_permission(
             &self.permission_actor,
             resource,
             action,
@@ -55,7 +73,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// The token is expected to be a session ID. The JID is derived from the
     /// session's immutable localpart after validation.
     async fn validate_session_token(&self, token: &str) -> Result<XmppSession, XmppError> {
-        super::xmpp_auth_state::validate_session_token(&self.session_manager, &self.domain, token)
+        super::xmpp_state::auth::validate_session_token(&self.session_manager, &self.domain, token)
             .await
     }
 
@@ -68,7 +86,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     ///
     /// Returns the RFC 8414 OAuth authorization server metadata endpoint URL.
     fn oauth_discovery_url(&self) -> String {
-        super::xmpp_auth_state::oauth_discovery_url(&self.domain)
+        super::xmpp_state::auth::oauth_discovery_url(&self.domain)
     }
 
     /// List all relations a subject has on an object.
@@ -79,7 +97,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         resource: &str,
         subject: &str,
     ) -> Result<Vec<String>, XmppError> {
-        super::xmpp_permission_state::list_relations(&self.permission_actor, resource, subject)
+        super::xmpp_state::permission::list_relations(&self.permission_actor, resource, subject)
             .await
     }
 
@@ -91,12 +109,12 @@ impl waddle_xmpp::AppState for XmppAppState {
         resource: &str,
         relation: &str,
     ) -> Result<Vec<String>, XmppError> {
-        super::xmpp_permission_state::list_subjects(&self.permission_actor, resource, relation)
+        super::xmpp_state::permission::list_subjects(&self.permission_actor, resource, relation)
             .await
     }
 
     async fn resolve_subject_jid(&self, subject: &str) -> Result<Option<jid::BareJid>, XmppError> {
-        super::xmpp_permission_state::resolve_subject_jid(subject)
+        super::xmpp_state::permission::resolve_subject_jid(subject)
     }
 
     async fn search_users(
@@ -120,7 +138,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::BareJid,
         affiliation: waddle_xmpp::Affiliation,
     ) -> Result<(), XmppError> {
-        super::xmpp_permission_state::set_room_affiliation(
+        super::xmpp_state::permission::set_room_affiliation(
             &self.permission_actor,
             channel_id,
             jid,
@@ -137,7 +155,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         username: &str,
     ) -> Result<Option<waddle_xmpp::ScramCredentials>, XmppError> {
-        super::xmpp_account_state::lookup_scram_credentials(
+        super::xmpp_state::account::lookup_scram_credentials(
             &self.native_user_store,
             &self.domain,
             username,
@@ -154,7 +172,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         password: &str,
         email: Option<&str>,
     ) -> Result<(), XmppError> {
-        super::xmpp_account_state::register_native_user(
+        super::xmpp_state::account::register_native_user(
             &self.native_user_store,
             &self.permission_actor,
             &self.domain,
@@ -167,7 +185,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Check if a native user exists.
     async fn native_user_exists(&self, username: &str) -> Result<bool, XmppError> {
-        super::xmpp_account_state::native_user_exists(
+        super::xmpp_state::account::native_user_exists(
             &self.native_user_store,
             &self.domain,
             username,
@@ -180,7 +198,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         jid: &jid::BareJid,
     ) -> Result<Option<xmpp_parsers::minidom::Element>, XmppError> {
-        super::xmpp_profile_state::get_vcard(&self.vcard_store, jid).await
+        super::xmpp_state::profile::get_vcard(&self.vcard_store, jid).await
     }
 
     /// Store/update the vCard for a user (XEP-0054).
@@ -189,7 +207,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::BareJid,
         vcard: &xmpp_parsers::minidom::Element,
     ) -> Result<(), XmppError> {
-        super::xmpp_profile_state::set_vcard(&self.vcard_store, jid, vcard).await
+        super::xmpp_state::profile::set_vcard(&self.vcard_store, jid, vcard).await
     }
 
     /// Look up the externally-hosted avatar URL for a JID (XEP-0084 `url=`).
@@ -198,7 +216,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     /// captured during OIDC login (e.g. a GitHub avatar). Missing or empty
     /// values return `Ok(None)`.
     async fn get_user_avatar_url(&self, jid: &jid::BareJid) -> Result<Option<String>, XmppError> {
-        super::xmpp_profile_state::get_user_avatar_url(&self.global_db_actor, jid).await
+        super::xmpp_state::profile::get_user_avatar_url(&self.global_db_actor, jid).await
     }
 
     /// Create an upload slot for XEP-0363 HTTP File Upload.
@@ -209,7 +227,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         size: u64,
         content_type: Option<&str>,
     ) -> Result<waddle_xmpp::UploadSlotInfo, XmppError> {
-        super::xmpp_upload_state::create_upload_slot(
+        super::xmpp_state::upload::create_upload_slot(
             &self.global_db_actor,
             &self.domain,
             requester_jid,
@@ -234,7 +252,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Vec<waddle_xmpp::roster::RosterItem>, XmppError> {
-        super::xmpp_roster_state::get_roster(self.global_database().await?, user_jid).await
+        super::xmpp_state::roster::get_roster(self.global_database().await?, user_jid).await
     }
 
     /// Get a single roster item by JID.
@@ -243,7 +261,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         contact_jid: &jid::BareJid,
     ) -> Result<Option<waddle_xmpp::roster::RosterItem>, XmppError> {
-        super::xmpp_roster_state::get_roster_item(
+        super::xmpp_state::roster::get_roster_item(
             self.global_database().await?,
             user_jid,
             contact_jid,
@@ -257,7 +275,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         item: &waddle_xmpp::roster::RosterItem,
     ) -> Result<waddle_xmpp::roster::RosterSetResult, XmppError> {
-        super::xmpp_roster_state::set_roster_item(self.global_database().await?, user_jid, item)
+        super::xmpp_state::roster::set_roster_item(self.global_database().await?, user_jid, item)
             .await
     }
 
@@ -267,7 +285,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         contact_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        super::xmpp_roster_state::remove_roster_item(
+        super::xmpp_state::roster::remove_roster_item(
             self.global_database().await?,
             user_jid,
             contact_jid,
@@ -280,7 +298,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Option<String>, XmppError> {
-        super::xmpp_roster_state::get_roster_version(self.global_database().await?, user_jid).await
+        super::xmpp_state::roster::get_roster_version(self.global_database().await?, user_jid).await
     }
 
     /// Update the subscription state for a roster item.
@@ -291,7 +309,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         subscription: waddle_xmpp::roster::Subscription,
         ask: Option<waddle_xmpp::roster::AskType>,
     ) -> Result<waddle_xmpp::roster::RosterItem, XmppError> {
-        super::xmpp_roster_state::update_roster_subscription(
+        super::xmpp_state::roster::update_roster_subscription(
             self.global_database().await?,
             user_jid,
             contact_jid,
@@ -306,7 +324,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Vec<jid::BareJid>, XmppError> {
-        super::xmpp_roster_state::get_presence_subscribers(self.global_database().await?, user_jid)
+        super::xmpp_state::roster::get_presence_subscribers(self.global_database().await?, user_jid)
             .await
     }
 
@@ -315,7 +333,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         user_jid: &jid::BareJid,
     ) -> Result<Vec<jid::BareJid>, XmppError> {
-        super::xmpp_roster_state::get_presence_subscriptions(
+        super::xmpp_state::roster::get_presence_subscriptions(
             self.global_database().await?,
             user_jid,
         )
@@ -328,7 +346,8 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get all blocked JIDs for a user.
     async fn get_blocklist(&self, user_jid: &jid::BareJid) -> Result<Vec<jid::Jid>, XmppError> {
-        super::xmpp_user_storage_state::get_blocklist(self.global_database().await?, user_jid).await
+        super::xmpp_state::user_storage::get_blocklist(self.global_database().await?, user_jid)
+            .await
     }
 
     /// Check if a JID is blocked by a user.
@@ -337,7 +356,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jid: &jid::BareJid,
     ) -> Result<bool, XmppError> {
-        super::xmpp_user_storage_state::is_blocked(
+        super::xmpp_state::user_storage::is_blocked(
             self.global_database().await?,
             user_jid,
             blocked_jid,
@@ -351,7 +370,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[jid::Jid],
     ) -> Result<usize, XmppError> {
-        super::xmpp_user_storage_state::add_blocks(
+        super::xmpp_state::user_storage::add_blocks(
             self.global_database().await?,
             user_jid,
             blocked_jids,
@@ -365,7 +384,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         user_jid: &jid::BareJid,
         blocked_jids: &[jid::Jid],
     ) -> Result<usize, XmppError> {
-        super::xmpp_user_storage_state::remove_blocks(
+        super::xmpp_state::user_storage::remove_blocks(
             self.global_database().await?,
             user_jid,
             blocked_jids,
@@ -375,7 +394,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Remove all JIDs from a user's blocklist.
     async fn remove_all_blocks(&self, user_jid: &jid::BareJid) -> Result<usize, XmppError> {
-        super::xmpp_user_storage_state::remove_all_blocks(self.global_database().await?, user_jid)
+        super::xmpp_state::user_storage::remove_all_blocks(self.global_database().await?, user_jid)
             .await
     }
 
@@ -389,7 +408,8 @@ impl waddle_xmpp::AppState for XmppAppState {
         jid: &jid::BareJid,
         namespace: &str,
     ) -> Result<Option<String>, XmppError> {
-        super::xmpp_user_storage_state::get_private_xml(&self.global_db_actor, jid, namespace).await
+        super::xmpp_state::user_storage::get_private_xml(&self.global_db_actor, jid, namespace)
+            .await
     }
 
     /// Store/update private XML data for a user by namespace.
@@ -399,7 +419,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         namespace: &str,
         xml_content: &str,
     ) -> Result<(), XmppError> {
-        super::xmpp_user_storage_state::set_private_xml(
+        super::xmpp_state::user_storage::set_private_xml(
             &self.global_db_actor,
             jid,
             namespace,
@@ -413,7 +433,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     // =========================================================================
 
     async fn list_inbox(&self, user_jid: &jid::BareJid) -> Result<Vec<InboxEntry>, XmppError> {
-        super::xmpp_user_storage_state::list_inbox(self.inbox_storage.as_deref(), user_jid).await
+        super::xmpp_state::user_storage::list_inbox(self.inbox_storage.as_deref(), user_jid).await
     }
 
     async fn upsert_inbox_entry(
@@ -422,7 +442,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         entry: InboxEntry,
         increment_unread: bool,
     ) -> Result<(), XmppError> {
-        super::xmpp_user_storage_state::upsert_inbox_entry(
+        super::xmpp_state::user_storage::upsert_inbox_entry(
             self.inbox_storage.as_deref(),
             user_jid,
             entry,
@@ -432,7 +452,7 @@ impl waddle_xmpp::AppState for XmppAppState {
     }
 
     async fn inbox_total_unread(&self, user_jid: &jid::BareJid) -> Result<u64, XmppError> {
-        super::xmpp_user_storage_state::inbox_total_unread(self.inbox_storage.as_deref(), user_jid)
+        super::xmpp_state::user_storage::inbox_total_unread(self.inbox_storage.as_deref(), user_jid)
             .await
     }
 
@@ -442,7 +462,7 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// List all channels in the canonical space.
     async fn list_space_channels(&self) -> Result<Vec<waddle_xmpp::ChannelInfo>, XmppError> {
-        super::xmpp_space_state::list_space_channels(self.space_db_actor.as_ref()).await
+        super::xmpp_state::space::list_space_channels(self.space_db_actor.as_ref()).await
     }
 
     /// Look up a channel-backed room by channel ID.
@@ -450,7 +470,7 @@ impl waddle_xmpp::AppState for XmppAppState {
         &self,
         channel_id: &str,
     ) -> Result<Option<waddle_xmpp::ChannelRoomInfo>, XmppError> {
-        super::xmpp_space_state::get_channel_room_info(self.space_db_actor.as_ref(), channel_id)
+        super::xmpp_state::space::get_channel_room_info(self.space_db_actor.as_ref(), channel_id)
             .await
     }
 
@@ -460,12 +480,11 @@ impl waddle_xmpp::AppState for XmppAppState {
 
     /// Get detailed information about the canonical space.
     async fn get_space_details(&self) -> Result<Option<waddle_xmpp::SpaceDetails>, XmppError> {
-        Ok(Some(super::xmpp_space_state::get_space_details(
+        Ok(Some(super::xmpp_state::space::get_space_details(
             &self.domain,
         )))
     }
 }
 
 #[cfg(test)]
-#[path = "xmpp_state_tests.rs"]
 mod tests;

@@ -5,7 +5,7 @@
 use crate::support::*;
 use jid::Jid;
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification::outbox::*;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 #[tokio::test]

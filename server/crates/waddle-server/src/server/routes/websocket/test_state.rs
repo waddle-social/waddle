@@ -16,7 +16,7 @@ use std::sync::Arc;
 use tokio::sync::mpsc;
 use waddle_extensions::{ExtensionConfig, ExtensionManager};
 use waddle_xmpp::{
-    commands::CommandRegistry, mam::MamStorage, muc::room_registry_actor::RoomRegistryActor,
+    commands::CommandRegistry, mam::MamStorage, muc::room::registry_actor::RoomRegistryActor,
     protocol::StanzaDispatcher, registry::ConnectionRegistry,
     stream_management::InMemorySmSessionRegistry,
 };
@@ -34,7 +34,7 @@ pub(crate) struct TestStateOverrides {
         Option<Arc<dyn waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage>>,
     pub(crate) ingress: Option<Arc<crate::ingress::IngressAuthority>>,
     pub(crate) notification_settings_projection:
-        Option<Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>>,
+        Option<Arc<crate::notification::settings_projection::NotificationSettingsProjectionStore>>,
     /// Wire `deps.protocol.room_registry` to the app-state registry, as
     /// production does, for tests that drive admin commands and janitors
     /// against the same rooms.
@@ -104,7 +104,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
 
     let runner = MigrationRunner::single();
     runner.run(db_pool.global()).await.expect("migrations");
-    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
+    crate::muc::destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
         db_pool.global().clone(),
     )
     .await
@@ -157,26 +157,26 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
     let notification_settings_projection = notification_settings_projection_override
         .unwrap_or_else(|| {
             Arc::new(
-                crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+                crate::notification::settings_projection::NotificationSettingsProjectionStore::new(
                     pubsub_storage.database(),
                 ),
             )
         });
-    let dnd_projection = Arc::new(crate::dnd_projection::DndProjectionStore::new(
+    let dnd_projection = Arc::new(crate::dnd::projection::DndProjectionStore::new(
         pubsub_storage.database(),
     ));
-    let dnd_reader = Arc::new(crate::dnd_reader::PepDndReader::with_system_clock(
+    let dnd_reader = Arc::new(crate::dnd::reader::PepDndReader::with_system_clock(
         Arc::clone(&dnd_projection),
     ));
     let notification_activity = Arc::new(
-        crate::notification_activity::NotificationActivityStore::new(
+        crate::notification::activity::NotificationActivityStore::new(
             app_state.db_pool.global().clone(),
         )
         .await
         .expect("notification activity store"),
     );
     let push_service = Arc::new(
-        crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+        crate::push::service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             app_state.db_pool.global().clone(),
             test_push_service_secret(),
             "push.example.com".parse().expect("push service jid"),
@@ -186,7 +186,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         .expect("push service"),
     );
     let notification_outbox = Arc::new(
-        crate::notification_outbox::NotificationOutboxStore::new(
+        crate::notification::outbox::NotificationOutboxStore::new(
             app_state.db_pool.global().clone(),
         )
         .await
@@ -219,11 +219,11 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
             tokio::runtime::Handle::current(),
         );
     let room_effect_outbox = Arc::new(
-        crate::room_effect_outbox::RoomEffectOutboxStore::new(app_state.db_pool.global().clone())
+        crate::room::effect_outbox::RoomEffectOutboxStore::new(app_state.db_pool.global().clone())
             .await
             .expect("room effect outbox"),
     );
-    let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
+    let room_effect_arm_supervisor = crate::room::effect_outbox::RoomEffectArmSupervisor::new(
         Arc::clone(&room_effect_outbox),
         tokio::runtime::Handle::current(),
     );
@@ -237,7 +237,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         community: "community.example.com".to_string(),
     };
     // Mirror `http.rs`: the bot hat is server-assigned for every bot JID.
-    crate::server::extension_bot::install_bot_hats(
+    crate::server::extension::bot::install_bot_hats(
         &app_state.server_hats,
         service_domains.clone(),
         Arc::clone(&extension_manager),
@@ -288,7 +288,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                         // `item-not-found` arm (XEP-0050 §4.4) and shadow
                         // the actual handler behaviour we want to assert.
                         let registry = Arc::new(CommandRegistry::new());
-                        crate::push_service::commands::register(
+                        crate::push::service::commands::register(
                             &registry,
                             Arc::clone(&push_service),
                         )
@@ -297,7 +297,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     },
                     extension_manager,
                     bot_avatars: Arc::new(
-                        crate::server::extension_bot_avatar::BotAvatars::loopback(),
+                        crate::server::extension::bot::avatar::BotAvatars::loopback(),
                     ),
                     dispatcher: Arc::new(dispatcher),
                     muji_pre_dispatch_terminate_rate_limit: Arc::new(
@@ -308,7 +308,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     ),
                     pubsub_storage,
                     push_store: Arc::new(
-                        crate::push_registrations::DatabasePushRegistrationStore::new(
+                        crate::push::registrations::DatabasePushRegistrationStore::new(
                             app_state.db_pool.global().clone(),
                         )
                         .await

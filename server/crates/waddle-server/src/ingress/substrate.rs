@@ -1,0 +1,4668 @@
+//! Transactional ingress identity storage for PostgreSQL and SQLite.
+
+mod authority;
+pub(crate) use authority::MucArchiveContext;
+// Not clustering-only: besides the clustering receivers (#1778), the websocket
+// detach drain authorizes relayed append obligations with it (#1789), and that
+// drain is compiled in every build.
+mod canonical_sender;
+pub(crate) use canonical_sender::canonical_sender_pooled;
+mod maintenance;
+mod retention;
+pub use maintenance::{
+    receipt_complete_nonterminal_keys, recovery_evidence_pooled,
+    unreceipted_nonterminal_candidates, RecoveryCandidate, RecoveryEvidence,
+};
+pub(crate) use retention::{
+    invalidate_retention, refresh_retention, refresh_retention_with_db_clock,
+};
+#[cfg(test)]
+mod authority_tests;
+pub use authority::{
+    advance_frontier, flush_checkpoint, load_envelope, load_stream_checkpoint, lookup_wire_binding,
+    receipts_complete, record_receipt, record_receipt_pooled, record_room_canonical_envelope,
+    EffectReceiptKind, EnvelopeVersion, FrontierOutcome, MessageEnvelope,
+};
+
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::Duration as StdDuration;
+
+use chrono::{DateTime, Duration, Utc};
+use jid::BareJid;
+use sha2::{Digest, Sha256};
+use thiserror::Error;
+use tokio::time::Instant;
+use uuid::Uuid;
+use waddle_xmpp::ingress::{
+    resolve_alias, AliasResolution, DeliveryKey, IngressOrdinal, MessageKey, NormalizedTarget,
+    NormalizedTargetStorage, ProtocolEpoch, SemanticDigest, SmIngressId, StoredAlias,
+    WireHandledCount,
+};
+use waddle_xmpp::stream_management::{SmIngressAppendKey, SmIngressReceiptKind};
+use waddle_xmpp_core::xep0359::OriginId;
+
+use crate::db::{Database, DatabaseDriver, DatabaseError, Row, Transaction};
+use crate::ingress::uow::DbRetryClass;
+
+/// The time an origin-id alias remains available after its message becomes
+/// terminal.  The garbage collector receives `now` and binds the derived
+/// cutoff, keeping wall-clock decisions at its caller boundary.
+pub const ALIAS_RETENTION: Duration = Duration::days(8);
+
+/// Highest protocol epoch whose write semantics this binary implements:
+/// the substrate's retention, locking, and proof contracts are built for
+/// the epoch-1 activation this slice installs.
+///
+/// The GC's self-installed proof claims at most this epoch; a live epoch
+/// beyond it fails closed so a future activation fences old collectors
+/// instead of being claimed automatically.  Bump only in the slice that
+/// teaches the substrate the new epoch's semantics.
+pub fn supported_protocol_epoch() -> ProtocolEpoch {
+    ProtocolEpoch::from_storage(1)
+}
+
+/// Ingress tables protected by the epoch-proof triggers from migration V1009.
+///
+/// Keep this list in lock-step with the migration manifest: tests query the
+/// live catalog to ensure a newly-added ingress table cannot accidentally be
+/// left outside the activation boundary.
+pub const EPOCH_GUARDED_TABLES: [&str; 12] = [
+    "ingress_messages",
+    "ingress_origin_aliases",
+    "ingress_sm_refs",
+    "ingress_deliveries",
+    "ingress_sm_streams",
+    "ingress_effect_intents",
+    "ingress_effect_receipts",
+    "ingress_carbon_receipts",
+    "ingress_delivery_receipts",
+    "ingress_archive_dispatch",
+    "ingress_send_attempts",
+    "ingress_effect_descendants",
+];
+
+/// Fail-closed errors for the dark ingress substrate.
+///
+/// The database adapter error is intentionally not retained as a source:
+/// database diagnostics can include SQL values, while an origin-id is an
+/// opaque client value that must never appear in Debug or Display output.
+#[derive(Debug, Error)]
+pub enum IngressSubstrateError {
+    #[error("ingress storage transaction timed out")]
+    Timeout,
+    #[error("malformed stored envelope")]
+    InvalidStoredEnvelope,
+    #[error("message key is already bound to a different digest or envelope")]
+    MessageContentConflict,
+    #[error("malformed stored stream binding or checkpoint")]
+    InvalidStoredStream,
+    #[error("ingress stream is missing")]
+    StreamMissing,
+    #[error("ingress substrate database operation failed")]
+    Database { retry_class: DbRetryClass },
+    #[error("ingress substrate returned a malformed stored message key")]
+    InvalidStoredMessageKey,
+    #[error("ingress substrate returned a malformed stored timestamp")]
+    InvalidStoredTimestamp,
+    #[error("ingress substrate returned a malformed semantic digest")]
+    InvalidStoredDigest,
+    #[error("ingress alias disappeared during concurrent resolution")]
+    AliasMissingAfterConflict,
+    #[error("ingress sm ordinal is already bound to a different message")]
+    SmOrdinalConflict,
+    #[error("ingress delivery key is already bound to a different message")]
+    DeliveryKeyConflict,
+    #[error("live ingress protocol epoch exceeds what this binary supports")]
+    UnsupportedLiveEpoch,
+}
+
+/// Outcome of adding a child identity that requires a live message row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MessageWriteOutcome {
+    Recorded,
+    /// The identical identity pair was already durable (ambiguous-commit
+    /// retry); nothing was written.
+    AlreadyRecorded,
+    MessageVanished,
+}
+
+/// Outcome of recording a terminal proof for a message.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TerminalizeOutcome {
+    Terminalized,
+    AlreadyTerminal,
+    MessageVanished,
+}
+
+/// Work completed by one alias garbage-collection pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AliasGcOutcome {
+    pub deleted_messages: usize,
+    pub deleted_orphan_proofs: usize,
+    pub completed: bool,
+}
+
+/// Per-operation bounds and cooperative deadline for one alias GC run.
+#[derive(Debug, Clone)]
+pub struct AliasGcBudget {
+    pub deadline: Instant,
+    pub lock_timeout: StdDuration,
+    /// Bound on each single-row statement of a candidate transaction.
+    pub statement_timeout: StdDuration,
+    /// Bound on the candidate scan, which walks retained history.
+    pub scan_timeout: StdDuration,
+    /// Committed deletions, observable by the caller even when the run is
+    /// cancelled from outside before it can return its outcome.
+    pub progress: AliasGcProgress,
+}
+
+/// Messages and orphan proofs committed as deleted so far by one alias GC run.
+#[derive(Debug, Clone, Default)]
+pub struct AliasGcProgress {
+    messages: Arc<AtomicUsize>,
+    orphan_proofs: Arc<AtomicUsize>,
+    orphan_cursor: Arc<tokio::sync::Mutex<Option<SmIngressAppendKey>>>,
+    /// When the orphan sweep last COMPLETED a traversal, shared across passes.
+    /// `None` until the first one, so a fresh process sweeps once promptly.
+    orphan_swept_at: Arc<tokio::sync::Mutex<Option<Instant>>>,
+    /// A sweep is owed and has not finished yet. Shared across passes so the
+    /// trigger survives a pass that ends before the traversal does: a retry
+    /// carries fresh pass-local counters, so neither `deleted_messages` nor the
+    /// interval can be re-derived from it.
+    orphan_sweep_pending: Arc<AtomicBool>,
+}
+
+impl AliasGcBudget {
+    /// A new pass over the same shared traversal and sweep schedule.
+    #[cfg(test)]
+    fn fresh_progress_pass(&self) -> Self {
+        Self {
+            progress: self.progress.fresh_pass(),
+            ..self.clone()
+        }
+    }
+}
+
+impl AliasGcProgress {
+    /// Start fresh accounting while retaining the traversal position across passes.
+    pub(crate) fn fresh_pass(&self) -> Self {
+        Self {
+            orphan_cursor: self.orphan_cursor.clone(),
+            orphan_swept_at: self.orphan_swept_at.clone(),
+            orphan_sweep_pending: self.orphan_sweep_pending.clone(),
+            ..Self::default()
+        }
+    }
+
+    pub fn committed(&self) -> usize {
+        self.messages.load(Ordering::Acquire)
+    }
+
+    pub fn committed_orphan_proofs(&self) -> usize {
+        self.orphan_proofs.load(Ordering::Acquire)
+    }
+
+    /// Record that a sweep is owed. Survives until a traversal finishes.
+    fn mark_orphan_sweep_pending(&self) {
+        self.orphan_sweep_pending.store(true, Ordering::Release);
+    }
+
+    fn record(&self, deleted_messages: usize) {
+        if deleted_messages == 0 {
+            return;
+        }
+        self.messages.fetch_add(deleted_messages, Ordering::AcqRel);
+        // Arm the sweep HERE, at the commit, not from the pass outcome. A
+        // reclaimed canonical row is exactly when a cross-node append can be
+        // orphaned, and a pass can still fail, be cancelled, or run out of
+        // budget on a later candidate -- after this deletion is durable. Those
+        // exits never reach the end of the pass, and the retry's counters are
+        // fresh, so anything derived from the outcome would lose the trigger.
+        self.mark_orphan_sweep_pending();
+    }
+}
+
+/// PostgreSQL timeout category surfaced by alias GC.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DatabaseTimeoutKind {
+    Lock,
+    Statement,
+}
+
+/// Typed reason an alias GC run failed.
+#[derive(Debug, Error)]
+pub enum AliasGcError {
+    #[error("ingress alias GC database operation timed out ({kind:?})")]
+    DatabaseTimeout { kind: DatabaseTimeoutKind },
+    #[error(transparent)]
+    Substrate(#[from] IngressSubstrateError),
+}
+
+/// Alias GC failure with all successfully committed progress retained.
+#[derive(Debug, Error)]
+#[error("ingress alias GC failed after deleting {deleted_messages} messages and {deleted_orphan_proofs} orphan proofs: {error}")]
+pub struct AliasGcFailure {
+    pub deleted_messages: usize,
+    pub deleted_orphan_proofs: usize,
+    #[source]
+    pub error: AliasGcError,
+}
+
+/// Handle for the ingress substrate on either supported database backend.
+///
+/// The per-operation functions below accept a caller-owned transaction so a
+/// future repository can compose ingress writes with its own atomic work.
+#[derive(Clone)]
+pub struct PostgresIngressSubstrate {
+    db: Database,
+}
+
+impl PostgresIngressSubstrate {
+    /// Open the substrate against the global database.
+    pub fn open(db: Database) -> Result<Self, IngressSubstrateError> {
+        Ok(Self { db })
+    }
+
+    /// Start a transaction, taking SQLite's write reservation immediately.
+    pub async fn begin(&self) -> Result<Transaction<'_>, IngressSubstrateError> {
+        self.db
+            .begin_immediate()
+            .await
+            .map_err(discard_database_error)
+    }
+
+    pub async fn record_message(
+        &self,
+        tx: &mut Transaction<'_>,
+        message_key: MessageKey,
+        digest: &SemanticDigest,
+        envelope: Option<&MessageEnvelope>,
+    ) -> Result<(), IngressSubstrateError> {
+        record_message(tx, message_key, digest, envelope).await
+    }
+
+    pub async fn resolve_and_record_alias(
+        &self,
+        tx: &mut Transaction<'_>,
+        sender: &BareJid,
+        target: &NormalizedTarget,
+        origin_id: &OriginId,
+        digest: &SemanticDigest,
+        mint: impl FnOnce() -> MessageKey,
+    ) -> Result<AliasResolution, IngressSubstrateError> {
+        resolve_and_record_alias(tx, sender, target, origin_id, digest, mint).await
+    }
+
+    pub async fn insert_sm_ref(
+        &self,
+        tx: &mut Transaction<'_>,
+        sm_ingress_id: SmIngressId,
+        ordinal: IngressOrdinal,
+        wire_h: WireHandledCount,
+        message_key: MessageKey,
+    ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+        insert_sm_ref(tx, sm_ingress_id, ordinal, wire_h, message_key).await
+    }
+
+    pub async fn record_delivery(
+        &self,
+        tx: &mut Transaction<'_>,
+        delivery_key: DeliveryKey,
+        message_key: MessageKey,
+    ) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+        record_delivery(tx, delivery_key, message_key).await
+    }
+
+    pub async fn terminalize_message(
+        &self,
+        tx: &mut Transaction<'_>,
+        message_key: MessageKey,
+        proven_terminal_at: DateTime<Utc>,
+    ) -> Result<TerminalizeOutcome, IngressSubstrateError> {
+        terminalize_message(tx, message_key, proven_terminal_at).await
+    }
+
+    pub async fn gc_expired_aliases(
+        &self,
+        now: DateTime<Utc>,
+        budget: AliasGcBudget,
+    ) -> Result<AliasGcOutcome, AliasGcFailure> {
+        gc_expired_aliases(&self.db, now, budget).await
+    }
+}
+
+/// Acquire the singleton epoch row `FOR SHARE` as the first lock of a
+/// substrate write transaction.
+///
+/// Global lock order: **epoch row, then message row, then child rows**.
+/// The V1009 guard trigger requests the epoch row `FOR SHARE` during every
+/// protected write; taking it up front keeps that request already granted,
+/// so a write path that first locked a message row can never wait on the
+/// epoch behind a queued activation while GC (epoch-first by construction)
+/// waits on that same message row — the three-party deadlock cycle.
+pub(crate) async fn acquire_epoch_lock_first(
+    tx: &mut Transaction<'_>,
+) -> Result<ProtocolEpoch, IngressSubstrateError> {
+    read_live_epoch_for_share(tx)
+        .await
+        .map_err(|error| match error {
+            EpochLockError::Database(error) => discard_database_error(error),
+            EpochLockError::MissingRow => IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            },
+            EpochLockError::UnsupportedLiveEpoch => IngressSubstrateError::UnsupportedLiveEpoch,
+        })
+}
+
+/// Why the singleton epoch row could not be read `FOR SHARE`.  Kept as the
+/// raw driver error so callers can classify Postgres timeouts before
+/// discarding the diagnostic.
+enum EpochLockError {
+    Database(DatabaseError),
+    MissingRow,
+    UnsupportedLiveEpoch,
+}
+
+async fn read_live_epoch_for_share(
+    tx: &mut Transaction<'_>,
+) -> Result<ProtocolEpoch, EpochLockError> {
+    let mut rows = tx
+        .query(
+            dialect_sql(tx.driver(), READ_EPOCH_POSTGRES, READ_EPOCH_SQLITE),
+            (),
+        )
+        .await
+        .map_err(EpochLockError::Database)?;
+    let live_epoch: i64 = rows
+        .next()
+        .await
+        .map_err(EpochLockError::Database)?
+        .ok_or(EpochLockError::MissingRow)?
+        .get(0)
+        .map_err(EpochLockError::Database)?;
+    u32::try_from(live_epoch)
+        .map(ProtocolEpoch::from_storage)
+        .map_err(|_| EpochLockError::UnsupportedLiveEpoch)
+}
+
+/// Insert immutable message content, or fill an alias-created empty envelope.
+/// Retries preserve existing content and reject contradictory digests/envelopes.
+pub async fn record_message(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+    digest: &SemanticDigest,
+    envelope: Option<&MessageEnvelope>,
+) -> Result<(), IngressSubstrateError> {
+    acquire_epoch_lock_first(tx).await?;
+    if !insert_message(tx, message_key, digest, envelope).await? {
+        authority::complete_message_envelope(tx, message_key, digest, envelope).await?;
+    }
+    Ok(())
+}
+
+async fn insert_message(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+    digest: &SemanticDigest,
+    envelope: Option<&MessageEnvelope>,
+) -> Result<bool, IngressSubstrateError> {
+    let (digest_version, digest_bytes) = digest.to_storage();
+    let inserted = tx
+        .execute(
+            dialect_sql(tx.driver(), INSERT_MESSAGE_POSTGRES, INSERT_MESSAGE_SQLITE),
+            crate::db_params![
+                message_key.to_storage().to_string(),
+                i32::from(digest_version),
+                digest_bytes.to_vec(),
+                envelope.map(|value| value.version().to_storage()),
+                envelope.map(authority::serialize_envelope).transpose()?,
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    Ok(inserted == 1)
+}
+
+/// Resolve and atomically persist one sender/target/origin-id alias.
+///
+/// An existing alias is read with its message digest in one joined locked
+/// query.  On a concurrent first-insert loss, the unreferenced candidate is
+/// removed before repeating that same query, so neither outcome observes an
+/// impossible alias/digest split.
+pub async fn resolve_and_record_alias(
+    tx: &mut Transaction<'_>,
+    sender: &BareJid,
+    target: &NormalizedTarget,
+    origin_id: &OriginId,
+    digest: &SemanticDigest,
+    mint: impl FnOnce() -> MessageKey,
+) -> Result<AliasResolution, IngressSubstrateError> {
+    let _ = acquire_epoch_lock_first(tx).await?;
+    let alias_key = AliasStorageKey::new(sender, target, origin_id);
+    if let Some(stored) = locked_alias(tx, &alias_key).await? {
+        return Ok(resolve_alias(true, digest, Some(&stored), mint));
+    }
+
+    let candidate = resolve_alias(true, digest, None, mint);
+    let candidate_key = match candidate {
+        AliasResolution::Aliased(waddle_xmpp::ingress::AliasOutcome::Inserted(key)) => key,
+        _ => return Err(IngressSubstrateError::AliasMissingAfterConflict),
+    };
+    if !insert_message(tx, candidate_key, digest, None).await? {
+        return Err(IngressSubstrateError::MessageContentConflict);
+    }
+    let inserted = tx
+        .execute(
+            dialect_sql(tx.driver(), INSERT_ALIAS_POSTGRES, INSERT_ALIAS_SQLITE),
+            crate::db_params![
+                alias_key.hash.to_vec(),
+                alias_key.sender.to_string(),
+                alias_key.target.kind(),
+                alias_key.target.jid(),
+                alias_key.origin_id.as_str(),
+                candidate_key.to_storage().to_string(),
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    if inserted == 1 {
+        return Ok(candidate);
+    }
+
+    tx.execute(
+        dialect_sql(
+            tx.driver(),
+            DELETE_CANDIDATE_POSTGRES,
+            DELETE_CANDIDATE_SQLITE,
+        ),
+        crate::db_params![candidate_key.to_storage().to_string()],
+    )
+    .await
+    .map_err(discard_database_error)?;
+
+    let stored = locked_alias(tx, &alias_key)
+        .await?
+        .ok_or(IngressSubstrateError::AliasMissingAfterConflict)?;
+    Ok(resolve_alias(true, digest, Some(&stored), || candidate_key))
+}
+
+/// Attach a stream-management ordinal to a live message.
+///
+/// Idempotent for ambiguous-commit retries: replaying the identical
+/// `(SmIngressId, ordinal) -> MessageKey` reference reports
+/// [`MessageWriteOutcome::AlreadyRecorded`], while the same ordinal bound
+/// to a DIFFERENT message is the typed [`IngressSubstrateError::SmOrdinalConflict`].
+pub async fn insert_sm_ref(
+    tx: &mut Transaction<'_>,
+    sm_ingress_id: SmIngressId,
+    ordinal: IngressOrdinal,
+    wire_h: WireHandledCount,
+    message_key: MessageKey,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    let _ = acquire_epoch_lock_first(tx).await?;
+    if !lock_message_for_child(tx, message_key).await? {
+        return Ok(MessageWriteOutcome::MessageVanished);
+    }
+    let generation = authority::wire_generation(tx, sm_ingress_id, wire_h).await?;
+    let inserted = tx
+        .execute(
+            dialect_sql(tx.driver(), INSERT_SM_REF_POSTGRES, INSERT_SM_REF_SQLITE),
+            crate::db_params![
+                sm_ingress_id.to_storage().to_string(),
+                ordinal.to_storage().to_string(),
+                i64::from(wire_h.to_storage()),
+                generation,
+                message_key.to_storage().to_string(),
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    if inserted == 1 {
+        invalidate_retention(tx, message_key).await?;
+        return Ok(MessageWriteOutcome::Recorded);
+    }
+    let existing = stored_child_message_key(
+        tx,
+        dialect_sql(tx.driver(), READ_SM_REF_POSTGRES, READ_SM_REF_SQLITE),
+        crate::db_params![
+            sm_ingress_id.to_storage().to_string(),
+            ordinal.to_storage().to_string(),
+        ],
+    )
+    .await?;
+    if existing == Some(message_key)
+        && lookup_wire_binding(tx, sm_ingress_id, wire_h).await? == Some((message_key, ordinal))
+    {
+        Ok(MessageWriteOutcome::AlreadyRecorded)
+    } else {
+        Err(IngressSubstrateError::SmOrdinalConflict)
+    }
+}
+
+/// Record a delivery/effect identity for a live message.
+///
+/// Idempotent for ambiguous-commit retries, mirroring [`insert_sm_ref`]:
+/// the identical `DeliveryKey -> MessageKey` pair reports
+/// [`MessageWriteOutcome::AlreadyRecorded`]; the same key bound to a
+/// different message is [`IngressSubstrateError::DeliveryKeyConflict`].
+pub async fn record_delivery(
+    tx: &mut Transaction<'_>,
+    delivery_key: DeliveryKey,
+    message_key: MessageKey,
+) -> Result<MessageWriteOutcome, IngressSubstrateError> {
+    let _ = acquire_epoch_lock_first(tx).await?;
+    if !lock_message_for_child(tx, message_key).await? {
+        return Ok(MessageWriteOutcome::MessageVanished);
+    }
+    let inserted = tx
+        .execute(
+            dialect_sql(
+                tx.driver(),
+                INSERT_DELIVERY_POSTGRES,
+                INSERT_DELIVERY_SQLITE,
+            ),
+            crate::db_params![
+                delivery_key.to_storage().to_string(),
+                message_key.to_storage().to_string(),
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    if inserted == 1 {
+        return Ok(MessageWriteOutcome::Recorded);
+    }
+    let existing = stored_child_message_key(
+        tx,
+        dialect_sql(tx.driver(), READ_DELIVERY_POSTGRES, READ_DELIVERY_SQLITE),
+        crate::db_params![delivery_key.to_storage().to_string()],
+    )
+    .await?;
+    if existing == Some(message_key) {
+        Ok(MessageWriteOutcome::AlreadyRecorded)
+    } else {
+        Err(IngressSubstrateError::DeliveryKeyConflict)
+    }
+}
+
+/// Record a terminal proof once; later calls preserve the first proof time.
+pub async fn terminalize_message(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+    proven_terminal_at: DateTime<Utc>,
+) -> Result<TerminalizeOutcome, IngressSubstrateError> {
+    let _ = acquire_epoch_lock_first(tx).await?;
+    if !lock_message_for_child(tx, message_key).await? {
+        return Ok(TerminalizeOutcome::MessageVanished);
+    }
+    let changed = tx
+        .execute(
+            dialect_sql(
+                tx.driver(),
+                TERMINALIZE_MESSAGE_POSTGRES,
+                TERMINALIZE_MESSAGE_SQLITE,
+            ),
+            crate::db_params![
+                proven_terminal_at.to_rfc3339(),
+                message_key.to_storage().to_string(),
+            ],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    if changed == 1 {
+        refresh_retention(tx, message_key, proven_terminal_at).await?;
+        return Ok(TerminalizeOutcome::Terminalized);
+    }
+    if message_exists(tx, message_key).await? {
+        Ok(TerminalizeOutcome::AlreadyTerminal)
+    } else {
+        Ok(TerminalizeOutcome::MessageVanished)
+    }
+}
+
+/// Garbage collect terminal messages whose alias retention has elapsed.
+///
+/// Each candidate is locked before checking children.  That lock interlocks
+/// with child writes and alias resolution, whose first statement on a live
+/// message is `FOR UPDATE`.
+pub async fn gc_expired_aliases(
+    db: &Database,
+    now: DateTime<Utc>,
+    budget: AliasGcBudget,
+) -> Result<AliasGcOutcome, AliasGcFailure> {
+    // Committed deletions arm the sweep inside `AliasGcProgress::record`, at the
+    // commit itself, so `?` here cannot discard the trigger even though the
+    // failure carries committed progress.
+    let mut outcome = gc_canonical_candidates(db, now, &budget).await?;
+    if !outcome.completed {
+        return Ok(outcome);
+    }
+    // A cross-node ledger writer can insert after its canonical parent was
+    // reclaimed: authorization and append are separate transactions. Sweep
+    // independently to reclaim those late proofs. Cursor-page the examined
+    // rows: a filter-limited scan of healthy proofs can repeatedly hit the scan
+    // timeout without ever advancing to an orphan later in retained history.
+    //
+    // Only sweep when it can plausibly find something. An orphan appears when a
+    // canonical row is reclaimed while a cross-node append for it is still in
+    // flight, so a pass that reclaimed nothing has created no new ones; the
+    // interval still catches those in-flight races and anything predating this
+    // code. Sweeping on every pass would add a transaction to every maintenance
+    // cycle for work that is almost always absent, and the ledger is not
+    // load-bearing -- nothing waits on an orphan being collected.
+    if !should_sweep_orphans(&budget).await {
+        return Ok(outcome);
+    }
+    //
+    // Drain as many windows as the cooperative budget allows rather than one per
+    // pass. A mid-traversal pass reports `Partial`, and the coordinator answers
+    // that with its doubling failure backoff (to 30s) while consuming coalesced
+    // triggers, so one window per pass would traverse at ~256 rows / 30s. Message
+    // keys are time-ordered UUIDv7s, so a sustained append rate above that would
+    // extend the ordered tail faster than the cursor advances: the sweep would
+    // never wrap, and a late proof for an older key would stay orphaned
+    // indefinitely.
+    loop {
+        if Instant::now() >= budget.deadline {
+            outcome.completed = false;
+            return Ok(outcome);
+        }
+        // Never fail the pass from here. Canonical collection has already
+        // succeeded, and the maintenance pass that wraps this one maps a failed
+        // GC phase to `MaintenanceOutcome::Failed`, which also governs the
+        // recovery phase's accounting and backoff. This sweep is opportunistic
+        // cleanup of rows nothing is waiting on, so a scan timeout or a
+        // transient database error reports the pass incomplete -- it retries --
+        // rather than dragging unrelated recovery work down with it.
+        let step = match gc_orphan_proof_batch(db, &budget).await {
+            Ok(step) => step,
+            Err(error) => {
+                tracing::warn!(%error, "ingress orphan proof sweep failed; pass stays incomplete");
+                waddle_xmpp::counter_add!(
+                    "waddle.ingress.gc.orphan_sweep_failed",
+                    "{sweep}",
+                    "Orphan append-proof sweeps that failed without failing their \
+                     maintenance pass.",
+                    1,
+                );
+                outcome.completed = false;
+                return Ok(outcome);
+            }
+        };
+        let deleted = match step {
+            OrphanSweepStep::Advanced { deleted }
+            | OrphanSweepStep::Finished { deleted }
+            | OrphanSweepStep::BudgetExpired { deleted } => deleted,
+        };
+        budget
+            .progress
+            .orphan_proofs
+            .fetch_add(deleted, Ordering::AcqRel);
+        outcome.deleted_orphan_proofs += deleted;
+        match step {
+            OrphanSweepStep::Advanced { .. } => {}
+            OrphanSweepStep::Finished { .. } => {
+                budget
+                    .progress
+                    .orphan_sweep_pending
+                    .store(false, Ordering::Release);
+                *budget.progress.orphan_swept_at.lock().await = Some(Instant::now());
+                return Ok(outcome);
+            }
+            OrphanSweepStep::BudgetExpired { .. } => {
+                outcome.completed = false;
+                return Ok(outcome);
+            }
+        }
+    }
+}
+
+/// Outcome of examining one bounded orphan-sweep window.
+///
+/// The cursor alone cannot express this: it is `None` both when a short window
+/// ended the traversal and when the budget expired before the first window
+/// advanced it, and treating the second as completion would report a pass that
+/// examined nothing as complete.
+#[derive(Debug)]
+enum OrphanSweepStep {
+    /// A full window was examined; the cursor advanced past it.
+    Advanced { deleted: usize },
+    /// A short window ended the traversal; the cursor reset to the start.
+    Finished { deleted: usize },
+    /// The cooperative budget expired with the traversal unfinished.
+    BudgetExpired { deleted: usize },
+}
+
+/// How long the sweep may go unrun when canonical collection is reclaiming
+/// nothing. Orphans are rare and nothing waits on them, so this trades
+/// reclamation latency for keeping ordinary maintenance passes free of an extra
+/// transaction.
+const ORPHAN_SWEEP_INTERVAL: StdDuration = StdDuration::from_secs(300);
+
+/// Whether this pass should examine the append ledger at all.
+///
+/// The answer is deliberately sticky. A pass that is admitted but ends before
+/// the traversal finishes leaves the sweep owed, and the retry cannot re-derive
+/// that from its own fresh counters, so the flag -- not this pass's state --
+/// decides.
+async fn should_sweep_orphans(budget: &AliasGcBudget) -> bool {
+    if budget.progress.orphan_sweep_pending.load(Ordering::Acquire) {
+        return true;
+    }
+    // Mid-traversal always continues: leaving a cursor parked would defeat the
+    // paging that keeps each window bounded.
+    if budget.progress.orphan_cursor.lock().await.is_some() {
+        budget.progress.mark_orphan_sweep_pending();
+        return true;
+    }
+    let swept_at = budget.progress.orphan_swept_at.lock().await;
+    let due = swept_at.is_none_or(|at| at.elapsed() >= ORPHAN_SWEEP_INTERVAL);
+    if due {
+        // Arm, do not consume: the interval restarts when a traversal FINISHES,
+        // so a pass that dies early does not silently buy another five minutes.
+        budget.progress.mark_orphan_sweep_pending();
+    }
+    due
+}
+
+#[cfg(test)]
+tokio::task_local! {
+    /// Forces the orphan sweep's error path so the decoupling from
+    /// `MaintenanceOutcome::Failed` can be asserted deterministically.
+    pub(crate) static FAIL_ORPHAN_SWEEP: bool;
+}
+
+async fn gc_orphan_proof_batch(
+    db: &Database,
+    budget: &AliasGcBudget,
+) -> Result<OrphanSweepStep, AliasGcError> {
+    #[cfg(test)]
+    if FAIL_ORPHAN_SWEEP.try_with(|fail| *fail).unwrap_or(false) {
+        return Err(AliasGcError::Substrate(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::SerializationFailure,
+        }));
+    }
+    // Serialize windows sharing a traversal so a slower pass cannot rewind it.
+    let mut cursor = budget.progress.orphan_cursor.lock().await;
+    let mut tx = db.begin_immediate().await.map_err(gc_error_from_database)?;
+    install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
+    if Instant::now() >= budget.deadline {
+        return Ok(OrphanSweepStep::BudgetExpired { deleted: 0 });
+    }
+    let mut rows = if let Some(after) = cursor.as_ref() {
+        tx.query(
+            dialect_sql(
+                tx.driver(),
+                GC_ORPHAN_WINDOW_AFTER_POSTGRES,
+                GC_ORPHAN_WINDOW_AFTER_SQLITE,
+            ),
+            crate::db_params![
+                after.message_key.to_storage().to_string(),
+                i64::from(after.kind.to_storage()),
+                after.semantic_identity_hash.to_vec(),
+                after.resource.to_string(),
+                GC_BATCH_LIMIT as i64,
+            ],
+        )
+        .await
+    } else {
+        tx.query(
+            dialect_sql(
+                tx.driver(),
+                GC_ORPHAN_WINDOW_POSTGRES,
+                GC_ORPHAN_WINDOW_SQLITE,
+            ),
+            crate::db_params![GC_BATCH_LIMIT as i64],
+        )
+        .await
+    }
+    .map_err(gc_error_from_database)?;
+    let mut window = Vec::new();
+    while let Some(row) = rows.next().await.map_err(gc_error_from_database)? {
+        let message_key: String = row.get(0).map_err(gc_error_from_database)?;
+        let kind: i64 = row.get(1).map_err(gc_error_from_database)?;
+        let hash: Vec<u8> = row.get(2).map_err(gc_error_from_database)?;
+        let resource: String = row.get(3).map_err(gc_error_from_database)?;
+        let key = SmIngressAppendKey {
+            message_key: message_key
+                .parse::<Uuid>()
+                .map(MessageKey::from_storage)
+                .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)?,
+            kind: SmIngressReceiptKind::from_storage(
+                i32::try_from(kind).map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?,
+            ),
+            semantic_identity_hash: hash
+                .try_into()
+                .map_err(|_| IngressSubstrateError::InvalidStoredDigest)?,
+            resource: resource
+                .parse()
+                .map_err(|_| IngressSubstrateError::InvalidStoredEnvelope)?,
+        };
+        let orphan: bool = row.get(4).map_err(gc_error_from_database)?;
+        window.push((key, orphan));
+    }
+    drop(rows);
+    install_gc_timeouts(&mut tx, budget, budget.statement_timeout).await?;
+    let mut deleted = 0;
+    let mut finished_window = true;
+    for (key, orphan) in &window {
+        if Instant::now() >= budget.deadline {
+            // Keep committed deletions useful even when the cooperative budget
+            // cannot drain a whole window. Retry the remaining window next pass.
+            finished_window = false;
+            break;
+        }
+        if !orphan {
+            continue;
+        }
+        let affected = tx
+            .execute(
+                dialect_sql(
+                    tx.driver(),
+                    GC_DELETE_ORPHAN_PROOFS_POSTGRES,
+                    GC_DELETE_ORPHAN_PROOFS_SQLITE,
+                ),
+                crate::db_params![
+                    key.message_key.to_storage().to_string(),
+                    i64::from(key.kind.to_storage()),
+                    key.semantic_identity_hash.to_vec(),
+                    key.resource.to_string(),
+                ],
+            )
+            .await
+            .map_err(gc_error_from_database)?;
+        deleted += usize::try_from(affected).map_err(|_| {
+            AliasGcError::Substrate(IngressSubstrateError::Database {
+                retry_class: DbRetryClass::NotRetryable,
+            })
+        })?;
+    }
+    tx.commit().await.map_err(gc_error_from_database)?;
+    // Cursor advancement and the caller's accounting immediately follow commit
+    // without an intervening suspension point.
+    if !finished_window {
+        return Ok(OrphanSweepStep::BudgetExpired { deleted });
+    }
+    if window.len() == GC_BATCH_LIMIT {
+        *cursor = window.last().map(|(key, _)| key.clone());
+        return Ok(OrphanSweepStep::Advanced { deleted });
+    }
+    *cursor = None;
+    Ok(OrphanSweepStep::Finished { deleted })
+}
+
+async fn gc_canonical_candidates(
+    db: &Database,
+    now: DateTime<Utc>,
+    budget: &AliasGcBudget,
+) -> Result<AliasGcOutcome, AliasGcFailure> {
+    let cutoff = (now - ALIAS_RETENTION).to_rfc3339();
+    let mut deleted_messages = 0usize;
+
+    loop {
+        if Instant::now() >= budget.deadline {
+            return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages,
+                completed: false,
+            });
+        }
+        // Bounded batches exclude live SM/descendant custody. Ready legacy
+        // rows are adopted under the same canonical lock as collection.
+        let candidates = expired_candidates(db, &cutoff, budget)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error))?;
+        if candidates.is_empty() {
+            return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages,
+                completed: true,
+            });
+        }
+        let batch_len = candidates.len();
+        let batch = match gc_candidate_batch(db, now, &cutoff, candidates, budget).await {
+            Ok(batch) => batch,
+            Err(mut failure) => {
+                failure.deleted_messages += deleted_messages;
+                return Err(failure);
+            }
+        };
+        deleted_messages += batch.deleted_messages;
+        if batch.deadline_reached {
+            return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages,
+                completed: false,
+            });
+        }
+        // A candidate held by another writer stays eligible and reappears at
+        // the head of every rescan, so the last batch's skips decide whether
+        // the backlog is drained; a batch that processed nothing would only
+        // rescan the same locked rows.
+        if batch_len < GC_BATCH_LIMIT || batch.processed == 0 {
+            return Ok(AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages,
+                completed: batch_len < GC_BATCH_LIMIT && batch.skipped_locked == 0,
+            });
+        }
+    }
+}
+
+/// Work done by one candidate batch.
+struct BatchOutcome {
+    deleted_messages: usize,
+    /// Candidates locked and collected (their aliases are gone).
+    processed: usize,
+    /// Candidates held by another writer, left eligible for a later run.
+    skipped_locked: usize,
+    /// The cooperative deadline stopped the batch early.
+    deadline_reached: bool,
+}
+
+/// Upper bound on messages examined per GC scan.
+const GC_BATCH_LIMIT: usize = 256;
+
+async fn gc_candidate_batch(
+    db: &Database,
+    now: DateTime<Utc>,
+    cutoff: &str,
+    candidates: Vec<MessageKey>,
+    budget: &AliasGcBudget,
+) -> Result<BatchOutcome, AliasGcFailure> {
+    let mut deleted_messages = 0usize;
+    let mut processed = 0usize;
+    let mut skipped_locked = 0usize;
+    for message_key in candidates {
+        if Instant::now() >= budget.deadline {
+            return Ok(BatchOutcome {
+                deleted_messages,
+                processed,
+                skipped_locked,
+                deadline_reached: true,
+            });
+        }
+        let mut tx = db
+            .begin_immediate()
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        // First statement: Postgres's default READ COMMITTED mode is required
+        // so every candidate lock/recheck sees the latest committed children.
+        if tx.driver() == DatabaseDriver::Postgres {
+            tx.execute("SET TRANSACTION ISOLATION LEVEL READ COMMITTED", ())
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        }
+        install_gc_timeouts(&mut tx, budget, budget.statement_timeout)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error))?;
+        // GC is an epoch-aware writer: install the transaction-bound proof
+        // for the live epoch so its deletes pass the V1009 guard at
+        // epoch >= 1 (a no-op at epoch 0).  The FOR SHARE epoch read holds
+        // to commit, so a concurrent activation waits and the proof cannot
+        // go stale mid-transaction.  The proof only claims epochs this
+        // binary was built for: a future activation past
+        // supported_protocol_epoch() must fence this GC, not be auto-claimed.
+        let live_epoch = acquire_gc_epoch_lock_first(&mut tx, deleted_messages).await?;
+        if live_epoch > supported_protocol_epoch() {
+            return Err(gc_failure(
+                deleted_messages,
+                IngressSubstrateError::UnsupportedLiveEpoch.into(),
+            ));
+        }
+        if tx.driver() == DatabaseDriver::Postgres {
+            let mut proof = tx
+                .query(
+                    r#"
+                SELECT
+                    set_config('waddle.protocol_epoch', ?, true),
+                    set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)
+                "#,
+                    crate::db_params![live_epoch.to_storage().to_string()],
+                )
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            proof
+                .next()
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?
+                .ok_or_else(|| {
+                    gc_failure(
+                        deleted_messages,
+                        IngressSubstrateError::Database {
+                            retry_class: DbRetryClass::NotRetryable,
+                        }
+                        .into(),
+                    )
+                })?;
+            drop(proof);
+        }
+        match lock_eligible_terminal_message(&mut tx, message_key, cutoff)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error))?
+        {
+            CandidateLock::Eligible => processed += 1,
+            CandidateLock::Skipped(reason) => {
+                if reason == SkipReason::LockedElsewhere {
+                    skipped_locked += 1;
+                }
+                tx.commit()
+                    .await
+                    .map_err(|error| gc_database_failure(deleted_messages, error))?;
+                continue;
+            }
+        }
+        // Recheck receipt completeness after acquiring the canonical lock: a
+        // reconciliation may have added intents since the candidate scan.
+        if !crate::ingress::uow::EffectReceiptRepository::receipts_complete_on_transaction(
+            &mut tx,
+            message_key,
+        )
+        .await
+        .map_err(|error| gc_failure(deleted_messages, error.into()))?
+        {
+            tx.commit()
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            continue;
+        }
+        // Adoption and reference settlement start a fresh full tail; aliases
+        // and key bindings remain available throughout that tail.
+        refresh_retention(&mut tx, message_key, now)
+            .await
+            .map_err(|error| gc_failure(deleted_messages, error.into()))?;
+        let expired_sql = dialect_sql(tx.driver(),
+            "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ?::timestamptz FROM ingress_messages WHERE message_key = ?::uuid",
+            "SELECT retention_eligible_at IS NOT NULL AND retention_eligible_at <= ? FROM ingress_messages WHERE message_key = ?");
+        let mut rows = tx
+            .query(
+                expired_sql,
+                crate::db_params![cutoff, message_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let expired = match rows
+            .next()
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?
+        {
+            Some(row) => row
+                .get::<bool>(0)
+                .map_err(|error| gc_database_failure(deleted_messages, error))?,
+            None => false,
+        };
+        drop(rows);
+        if !expired {
+            tx.commit()
+                .await
+                .map_err(|error| gc_database_failure(deleted_messages, error))?;
+            continue;
+        }
+        tx.execute(
+            dialect_sql(tx.driver(), DELETE_ALIASES_POSTGRES, DELETE_ALIASES_SQLITE),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        // Remove the complete dedup evidence together under the canonical lock.
+        tx.execute(
+            dialect_sql(
+                tx.driver(),
+                GC_DELETE_DELIVERIES_POSTGRES,
+                GC_DELETE_DELIVERIES_SQLITE,
+            ),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let delete_sql = gc_retained_child_sql(
+            &mut tx,
+            GC_DELETE_MESSAGE_POSTGRES,
+            GC_DELETE_MESSAGE_SQLITE,
+        )
+        .await
+        .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let deleted = tx
+            .execute(
+                &delete_sql,
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        // Only a reclaimed canonical row proves the obligation is unretryable.
+        // A message retained by live SM refs keeps its proofs, so a still
+        // possible retry cannot be granted a second durable allocation.
+        if deleted > 0 {
+            tx.execute(
+                dialect_sql(
+                    tx.driver(),
+                    GC_DELETE_INGRESS_APPENDS_POSTGRES,
+                    GC_DELETE_INGRESS_APPENDS_SQLITE,
+                ),
+                crate::db_params![message_key.to_storage().to_string()],
+            )
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| gc_database_failure(deleted_messages, error))?;
+        let deleted = usize::try_from(deleted).map_err(|_| {
+            gc_failure(
+                deleted_messages,
+                IngressSubstrateError::Database {
+                    retry_class: DbRetryClass::NotRetryable,
+                }
+                .into(),
+            )
+        })?;
+        budget.progress.record(deleted);
+        deleted_messages += deleted;
+    }
+
+    Ok(BatchOutcome {
+        deleted_messages,
+        processed,
+        skipped_locked,
+        deadline_reached: false,
+    })
+}
+
+async fn install_gc_timeouts(
+    tx: &mut Transaction<'_>,
+    budget: &AliasGcBudget,
+    statement_timeout: StdDuration,
+) -> Result<(), AliasGcError> {
+    if set_local_transaction_timeouts(tx, budget.lock_timeout, statement_timeout)
+        .await
+        .map_err(gc_error_from_database)?
+    {
+        Ok(())
+    } else {
+        Err(AliasGcError::Substrate(IngressSubstrateError::Database {
+            retry_class: DbRetryClass::NotRetryable,
+        }))
+    }
+}
+
+/// Install transaction-local PostgreSQL `lock_timeout` / `statement_timeout`
+/// bounds (`SET LOCAL` semantics: they revert at commit or rollback).
+/// Returns whether the driver confirmed the settings; `false` is a
+/// defensive signal for a missing `set_config` row.
+pub(crate) async fn set_local_transaction_timeouts(
+    tx: &mut Transaction<'_>,
+    lock_timeout: StdDuration,
+    statement_timeout: StdDuration,
+) -> Result<bool, DatabaseError> {
+    if tx.driver() == DatabaseDriver::Sqlite {
+        return Ok(true);
+    }
+    let mut proof = tx
+        .query(
+            r#"
+            SELECT
+                set_config('lock_timeout', ?, true),
+                set_config('statement_timeout', ?, true)
+            "#,
+            crate::db_params![
+                format!("{}ms", lock_timeout.as_millis()),
+                format!("{}ms", statement_timeout.as_millis()),
+            ],
+        )
+        .await?;
+    Ok(proof.next().await?.is_some())
+}
+
+/// Typed alias identity held until the driver binding edge: the sender and
+/// origin-id stay borrowed as their protocol types; textual forms are read
+/// only while hashing and inside `db_params!`.
+struct AliasStorageKey<'a> {
+    hash: [u8; 32],
+    sender: &'a BareJid,
+    target: NormalizedTargetStorage,
+    origin_id: &'a OriginId,
+}
+
+impl<'a> AliasStorageKey<'a> {
+    fn new(sender: &'a BareJid, target: &NormalizedTarget, origin_id: &'a OriginId) -> Self {
+        let target = target.to_storage();
+        // Uniqueness rides a fixed-width SHA-256 of the length-prefixed
+        // canonical encoding: a composite B-tree key over the raw columns
+        // can exceed PostgreSQL's index-row limit at maximum JID and
+        // origin-id lengths.  Length prefixes keep the encoding injective.
+        let sender_text = sender.to_string();
+        let mut hasher = Sha256::new();
+        hasher.update(b"waddle:ingress-alias-key:v1\0");
+        for part in [sender_text.as_str(), target.jid(), origin_id.as_str()] {
+            hasher.update(u32::try_from(part.len()).unwrap_or(u32::MAX).to_be_bytes());
+            hasher.update(part.as_bytes());
+        }
+        hasher.update(target.kind().to_be_bytes());
+        Self {
+            hash: hasher.finalize().into(),
+            sender,
+            target,
+            origin_id,
+        }
+    }
+}
+
+async fn locked_alias(
+    tx: &mut Transaction<'_>,
+    key: &AliasStorageKey<'_>,
+) -> Result<Option<StoredAlias>, IngressSubstrateError> {
+    let mut rows = tx
+        .query(
+            dialect_sql(tx.driver(), LOCK_ALIAS_POSTGRES, LOCK_ALIAS_SQLITE),
+            crate::db_params![key.hash.to_vec()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    match rows.next().await.map_err(discard_database_error)? {
+        Some(row) => decode_stored_alias(&row).map(Some),
+        None => Ok(None),
+    }
+}
+
+fn decode_stored_alias(row: &Row) -> Result<StoredAlias, IngressSubstrateError> {
+    let key_text: String = row.get(0).map_err(discard_database_error)?;
+    let digest_version: i64 = row.get(1).map_err(discard_database_error)?;
+    let digest: Vec<u8> = row.get(2).map_err(discard_database_error)?;
+    let key = key_text
+        .parse::<Uuid>()
+        .map(MessageKey::from_storage)
+        .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)?;
+    let digest_version =
+        u8::try_from(digest_version).map_err(|_| IngressSubstrateError::InvalidStoredDigest)?;
+    let digest: [u8; 32] = digest
+        .try_into()
+        .map_err(|_| IngressSubstrateError::InvalidStoredDigest)?;
+    let digest = SemanticDigest::from_storage(digest_version, digest)
+        .map_err(|_| IngressSubstrateError::InvalidStoredDigest)?;
+    Ok(StoredAlias { key, digest })
+}
+
+/// Read the message key a child row (sm ref / delivery) is bound to.
+async fn stored_child_message_key(
+    tx: &mut Transaction<'_>,
+    sql: &str,
+    params: impl crate::db::IntoParams,
+) -> Result<Option<MessageKey>, IngressSubstrateError> {
+    let mut rows = tx
+        .query(sql, params)
+        .await
+        .map_err(discard_database_error)?;
+    let Some(row) = rows.next().await.map_err(discard_database_error)? else {
+        return Ok(None);
+    };
+    let key_text: String = row.get(0).map_err(discard_database_error)?;
+    key_text
+        .parse::<Uuid>()
+        .map(MessageKey::from_storage)
+        .map(Some)
+        .map_err(|_| IngressSubstrateError::InvalidStoredMessageKey)
+}
+
+async fn lock_message_for_child(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+) -> Result<bool, IngressSubstrateError> {
+    let mut rows = tx
+        .query(
+            dialect_sql(tx.driver(), LOCK_MESSAGE_POSTGRES, LOCK_MESSAGE_SQLITE),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    Ok(rows.next().await.map_err(discard_database_error)?.is_some())
+}
+
+async fn message_exists(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+) -> Result<bool, IngressSubstrateError> {
+    let mut rows = tx
+        .query(
+            dialect_sql(tx.driver(), MESSAGE_EXISTS_POSTGRES, MESSAGE_EXISTS_SQLITE),
+            crate::db_params![message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(discard_database_error)?;
+    Ok(rows.next().await.map_err(discard_database_error)?.is_some())
+}
+
+/// Scan the next batch of candidates under the same statement bound as the
+/// per-candidate transactions, so a slow scan is classified as a statement
+/// timeout instead of being cancelled from outside.
+async fn expired_candidates(
+    db: &Database,
+    cutoff: &str,
+    budget: &AliasGcBudget,
+) -> Result<Vec<MessageKey>, AliasGcError> {
+    let mut tx = db.begin().await.map_err(gc_error_from_database)?;
+    install_gc_timeouts(&mut tx, budget, budget.scan_timeout).await?;
+    let candidate_sql =
+        gc_retained_child_sql(&mut tx, GC_CANDIDATES_POSTGRES, GC_CANDIDATES_SQLITE)
+            .await
+            .map_err(gc_error_from_database)?;
+    let mut rows = tx
+        .query(
+            &candidate_sql,
+            crate::db_params![cutoff, GC_BATCH_LIMIT as i64],
+        )
+        .await
+        .map_err(gc_error_from_database)?;
+    let mut candidates = Vec::new();
+    while let Some(row) = rows.next().await.map_err(gc_error_from_database)? {
+        let message_key: String = row.get(0).map_err(gc_error_from_database)?;
+        let message_key = message_key
+            .parse::<Uuid>()
+            .map(MessageKey::from_storage)
+            .map_err(|_| AliasGcError::Substrate(IngressSubstrateError::InvalidStoredMessageKey))?;
+        candidates.push(message_key);
+    }
+    drop(rows);
+    tx.commit().await.map_err(gc_error_from_database)?;
+    Ok(candidates)
+}
+
+/// Pending enqueue may terminalize ingress before its offline copy is sent.
+/// Retain its ordering authority just like a live SM reference. The pending
+/// store owns its schema and is absent in minimal installations; inspect the
+/// catalog before mentioning it in SQL. All dedup evidence remains protected,
+/// and the candidate scan omits protected rows, so a
+/// full batch of pending copies cannot starve collectable later messages.
+async fn gc_retained_child_sql(
+    tx: &mut Transaction<'_>,
+    postgres: &'static str,
+    sqlite: &'static str,
+) -> Result<String, DatabaseError> {
+    let base = dialect_sql(tx.driver(), postgres, sqlite);
+    let mut rows = tx
+        .query(
+            dialect_sql(
+                tx.driver(),
+                "SELECT 1 WHERE to_regclass('pending_delivery') IS NOT NULL",
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'pending_delivery'",
+            ),
+            (),
+        )
+        .await?;
+    let has_pending = rows.next().await?.is_some();
+    if !has_pending {
+        return Ok(base.to_owned());
+    }
+    Ok(base.replace(
+        "SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key",
+        "SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key UNION ALL SELECT 1 FROM ingress_archive_dispatch dispatch JOIN pending_delivery pending ON pending.row_id = dispatch.pending_row_id WHERE dispatch.message_key = m.message_key AND dispatch.pending_row_id <> ''",
+    ))
+}
+
+/// Why a candidate was not collected in this pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SkipReason {
+    /// Another writer holds the row; it stays eligible for the next run.
+    LockedElsewhere,
+    /// The row is gone, no longer terminal, or not yet past retention.
+    NotEligible,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CandidateLock {
+    Eligible,
+    Skipped(SkipReason),
+}
+
+/// Lock one candidate row and report whether its retention has elapsed.
+///
+/// A row held by another writer — a concurrent GC run or an in-flight child
+/// write — is skipped rather than waited on: the child write keeps the
+/// message alive anyway, and a skipped candidate stays eligible for the next
+/// run.  Only the epoch row is ever waited on, bounded by `lock_timeout`.
+async fn lock_eligible_terminal_message(
+    tx: &mut Transaction<'_>,
+    message_key: MessageKey,
+    cutoff: &str,
+) -> Result<CandidateLock, AliasGcError> {
+    let mut rows = tx
+        .query(
+            dialect_sql(
+                tx.driver(),
+                GC_LOCK_CANDIDATE_POSTGRES,
+                GC_LOCK_CANDIDATE_SQLITE,
+            ),
+            crate::db_params![cutoff, message_key.to_storage().to_string()],
+        )
+        .await
+        .map_err(gc_error_from_database)?;
+    let locked = rows.next().await.map_err(gc_error_from_database)?;
+    drop(rows);
+    match locked {
+        Some(row) => {
+            let expired: bool = row.get(0).map_err(gc_error_from_database)?;
+            Ok(if expired {
+                CandidateLock::Eligible
+            } else {
+                CandidateLock::Skipped(SkipReason::NotEligible)
+            })
+        }
+        None => {
+            // No row under SKIP LOCKED means either "held elsewhere" or
+            // "gone / not eligible"; tell them apart without locking.
+            let mut rows = tx
+                .query(
+                    dialect_sql(
+                        tx.driver(),
+                        GC_CHECK_CANDIDATE_POSTGRES,
+                        GC_CHECK_CANDIDATE_SQLITE,
+                    ),
+                    crate::db_params![message_key.to_storage().to_string(), cutoff],
+                )
+                .await
+                .map_err(gc_error_from_database)?;
+            let still_eligible = rows.next().await.map_err(gc_error_from_database)?.is_some();
+            Ok(CandidateLock::Skipped(if still_eligible {
+                SkipReason::LockedElsewhere
+            } else {
+                SkipReason::NotEligible
+            }))
+        }
+    }
+}
+
+fn discard_database_error(error: DatabaseError) -> IngressSubstrateError {
+    if crate::ingress::uow::is_database_timeout(&error) {
+        return IngressSubstrateError::Timeout;
+    }
+    IngressSubstrateError::Database {
+        retry_class: DbRetryClass::from_database_error(&error),
+    }
+}
+
+fn gc_failure(deleted_messages: usize, error: AliasGcError) -> AliasGcFailure {
+    AliasGcFailure {
+        deleted_orphan_proofs: 0,
+        deleted_messages,
+        error,
+    }
+}
+
+fn gc_database_failure(deleted_messages: usize, error: DatabaseError) -> AliasGcFailure {
+    gc_failure(deleted_messages, gc_error_from_database(error))
+}
+
+fn gc_error_from_database(error: DatabaseError) -> AliasGcError {
+    match database_timeout_kind(&error) {
+        Some(kind) => AliasGcError::DatabaseTimeout { kind },
+        None => AliasGcError::Substrate(discard_database_error(error)),
+    }
+}
+
+fn database_timeout_kind(error: &DatabaseError) -> Option<DatabaseTimeoutKind> {
+    let DatabaseError::Internal(sqlx::Error::Database(database_error)) = error else {
+        return None;
+    };
+    match database_error.code().as_deref() {
+        Some("55P03") => Some(DatabaseTimeoutKind::Lock),
+        Some("57014") => Some(DatabaseTimeoutKind::Statement),
+        _ => None,
+    }
+}
+
+async fn acquire_gc_epoch_lock_first(
+    tx: &mut Transaction<'_>,
+    deleted_messages: usize,
+) -> Result<ProtocolEpoch, AliasGcFailure> {
+    read_live_epoch_for_share(tx).await.map_err(|error| {
+        let error = match error {
+            EpochLockError::Database(error) => gc_error_from_database(error),
+            EpochLockError::MissingRow => {
+                AliasGcError::Substrate(IngressSubstrateError::Database {
+                    retry_class: DbRetryClass::NotRetryable,
+                })
+            }
+            EpochLockError::UnsupportedLiveEpoch => {
+                AliasGcError::Substrate(IngressSubstrateError::UnsupportedLiveEpoch)
+            }
+        };
+        gc_failure(deleted_messages, error)
+    })
+}
+
+fn dialect_sql(
+    driver: DatabaseDriver,
+    postgres: &'static str,
+    sqlite: &'static str,
+) -> &'static str {
+    match driver {
+        DatabaseDriver::Postgres => postgres,
+        DatabaseDriver::Sqlite => sqlite,
+    }
+}
+const READ_EPOCH_POSTGRES: &str =
+    r#"SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 FOR SHARE"#;
+const READ_EPOCH_SQLITE: &str = r#"SELECT epoch FROM ingress_protocol_epoch WHERE id = 1 "#;
+const INSERT_MESSAGE_POSTGRES: &str = r#"
+        INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope)
+        VALUES (?::uuid, ?, ?, ?, ?)
+        ON CONFLICT (message_key) DO NOTHING
+        "#;
+const INSERT_MESSAGE_SQLITE: &str = r#"
+        INSERT INTO ingress_messages (message_key, digest_version, digest, envelope_version, envelope)
+        VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT (message_key) DO NOTHING
+        "#;
+const INSERT_ALIAS_POSTGRES: &str = r#"
+            INSERT INTO ingress_origin_aliases
+                (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key)
+            VALUES (?, ?, ?, ?, ?, ?::uuid)
+            ON CONFLICT (alias_key_hash) DO NOTHING
+            "#;
+const INSERT_ALIAS_SQLITE: &str = r#"
+            INSERT INTO ingress_origin_aliases
+                (alias_key_hash, sender_bare_jid, target_kind, target_jid, origin_id, message_key)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT (alias_key_hash) DO NOTHING
+            "#;
+const DELETE_CANDIDATE_POSTGRES: &str =
+    r#"DELETE FROM ingress_messages WHERE message_key = ?::uuid"#;
+const DELETE_CANDIDATE_SQLITE: &str = r#"DELETE FROM ingress_messages WHERE message_key = ?"#;
+const INSERT_SM_REF_POSTGRES: &str = r#"
+            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key)
+            VALUES (?::uuid, ?::numeric, ?, ?, ?::uuid)
+            ON CONFLICT (sm_ingress_id, ingress_ordinal) DO NOTHING
+            "#;
+const INSERT_SM_REF_SQLITE: &str = r#"
+            INSERT INTO ingress_sm_refs (sm_ingress_id, ingress_ordinal, wire_h, wire_generation, message_key)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (sm_ingress_id, ingress_ordinal) DO NOTHING
+            "#;
+const READ_SM_REF_POSTGRES: &str = r#"
+        SELECT message_key::text FROM ingress_sm_refs
+        WHERE sm_ingress_id = ?::uuid AND ingress_ordinal = ?::numeric
+        "#;
+const READ_SM_REF_SQLITE: &str = r#"
+        SELECT message_key FROM ingress_sm_refs
+        WHERE sm_ingress_id = ? AND ingress_ordinal = ?
+        "#;
+const INSERT_DELIVERY_POSTGRES: &str = r#"
+            INSERT INTO ingress_deliveries (delivery_key, message_key)
+            VALUES (?::uuid, ?::uuid)
+            ON CONFLICT (delivery_key) DO NOTHING
+            "#;
+const INSERT_DELIVERY_SQLITE: &str = r#"
+            INSERT INTO ingress_deliveries (delivery_key, message_key)
+            VALUES (?, ?)
+            ON CONFLICT (delivery_key) DO NOTHING
+            "#;
+const READ_DELIVERY_POSTGRES: &str =
+    r#"SELECT message_key::text FROM ingress_deliveries WHERE delivery_key = ?::uuid"#;
+const READ_DELIVERY_SQLITE: &str =
+    r#"SELECT message_key FROM ingress_deliveries WHERE delivery_key = ?"#;
+const TERMINALIZE_MESSAGE_POSTGRES: &str = r#"
+            UPDATE ingress_messages
+            SET terminal_at = ?::timestamptz
+            WHERE message_key = ?::uuid AND terminal_at IS NULL
+            "#;
+const TERMINALIZE_MESSAGE_SQLITE: &str = r#"
+            UPDATE ingress_messages
+            SET terminal_at = ?
+            WHERE message_key = ? AND terminal_at IS NULL
+            "#;
+const DELETE_ALIASES_POSTGRES: &str =
+    r#"DELETE FROM ingress_origin_aliases WHERE message_key = ?::uuid"#;
+const DELETE_ALIASES_SQLITE: &str = r#"DELETE FROM ingress_origin_aliases WHERE message_key = ?"#;
+const GC_DELETE_DELIVERIES_POSTGRES: &str =
+    r#"DELETE FROM ingress_deliveries WHERE message_key = ?::uuid"#;
+// Pending custody owns its replay payload independently of both the session
+// and canonical ingress retention. Only positively discharged custody can be
+// reclaimed with its canonical row or by the orphan sweep (#1760).
+const GC_DELETE_INGRESS_APPENDS_POSTGRES: &str =
+    r#"DELETE FROM sm_ingress_appends WHERE message_key = ? AND disposition <> 0"#;
+const GC_DELETE_INGRESS_APPENDS_SQLITE: &str =
+    r#"DELETE FROM sm_ingress_appends WHERE message_key = ? AND disposition <> 0"#;
+const GC_ORPHAN_WINDOW_POSTGRES: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
+        ) AS orphan
+    FROM sm_ingress_appends a
+    WHERE a.disposition <> 0
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
+const GC_ORPHAN_WINDOW_SQLITE: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
+        ) AS orphan
+    FROM sm_ingress_appends a
+    WHERE a.disposition <> 0
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
+const GC_ORPHAN_WINDOW_AFTER_POSTGRES: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key::uuid
+        ) AS orphan
+    FROM sm_ingress_appends a
+    WHERE a.disposition <> 0 AND (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
+const GC_ORPHAN_WINDOW_AFTER_SQLITE: &str = r#"
+    SELECT a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource,
+        NOT EXISTS (
+            SELECT 1 FROM ingress_messages m WHERE m.message_key = a.message_key
+        ) AS orphan
+    FROM sm_ingress_appends a
+    WHERE a.disposition <> 0 AND (a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource) > (?, ?, ?, ?)
+    ORDER BY a.message_key, a.receipt_kind, a.semantic_identity_hash, a.resource
+    LIMIT ?
+"#;
+const GC_DELETE_ORPHAN_PROOFS_POSTGRES: &str = r#"
+    DELETE FROM sm_ingress_appends
+    WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?
+      AND disposition <> 0
+      AND NOT EXISTS (
+          SELECT 1 FROM ingress_messages m WHERE m.message_key = sm_ingress_appends.message_key::uuid
+      )
+"#;
+const GC_DELETE_ORPHAN_PROOFS_SQLITE: &str = r#"
+    DELETE FROM sm_ingress_appends
+    WHERE message_key = ? AND receipt_kind = ? AND semantic_identity_hash = ? AND resource = ?
+      AND disposition <> 0
+      AND NOT EXISTS (
+          SELECT 1 FROM ingress_messages m WHERE m.message_key = sm_ingress_appends.message_key
+      )
+"#;
+const GC_DELETE_DELIVERIES_SQLITE: &str = r#"DELETE FROM ingress_deliveries WHERE message_key = ?"#;
+const GC_DELETE_MESSAGE_POSTGRES: &str = r#"
+                DELETE FROM ingress_messages m
+                WHERE m.message_key = ?::uuid
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
+                  )
+                "#;
+const GC_DELETE_MESSAGE_SQLITE: &str = r#"
+                DELETE FROM ingress_messages AS m
+                WHERE m.message_key = ?
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
+                  )
+                  AND NOT EXISTS (
+                      SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key
+                  )
+                "#;
+const LOCK_ALIAS_POSTGRES: &str = r#"
+            SELECT m.message_key::text, m.digest_version, m.digest
+            FROM ingress_origin_aliases a
+            JOIN ingress_messages m USING (message_key)
+            WHERE a.alias_key_hash = ?
+            FOR UPDATE OF m
+            "#;
+const LOCK_ALIAS_SQLITE: &str = r#"
+            SELECT m.message_key, m.digest_version, m.digest
+            FROM ingress_origin_aliases a
+            JOIN ingress_messages m USING (message_key)
+            WHERE a.alias_key_hash = ?
+
+            "#;
+const LOCK_MESSAGE_POSTGRES: &str =
+    r#"SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid FOR UPDATE"#;
+const LOCK_MESSAGE_SQLITE: &str = r#"SELECT 1 FROM ingress_messages WHERE message_key = ? "#;
+const MESSAGE_EXISTS_POSTGRES: &str =
+    r#"SELECT 1 FROM ingress_messages WHERE message_key = ?::uuid"#;
+const MESSAGE_EXISTS_SQLITE: &str = r#"SELECT 1 FROM ingress_messages WHERE message_key = ?"#;
+// Eligibility is shared with the CNPG query; see the retention predicate in
+// docs/operations/ingress-authority.md and gc_monitoring_predicate_matches_collector.
+const GC_CANDIDATES_POSTGRES: &str = r#"
+            SELECT m.message_key::text
+            FROM ingress_messages m
+            WHERE m.terminal_at IS NOT NULL
+              AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= ?::timestamptz)
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
+                    AND NOT EXISTS (
+                        SELECT 1 FROM ingress_effect_receipts r
+                        WHERE r.message_key = i.message_key AND r.kind = i.kind
+                          AND r.semantic_identity_hash = i.semantic_identity_hash
+                    )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL
+              )
+            ORDER BY m.retention_eligible_at, m.message_key
+            LIMIT ?
+            "#;
+const GC_CANDIDATES_SQLITE: &str = r#"
+            SELECT m.message_key
+            FROM ingress_messages m
+            WHERE m.terminal_at IS NOT NULL
+              AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= ?)
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key
+                    AND NOT EXISTS (
+                        SELECT 1 FROM ingress_effect_receipts r
+                        WHERE r.message_key = i.message_key AND r.kind = i.kind
+                          AND r.semantic_identity_hash = i.semantic_identity_hash
+                    )
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key
+              )
+              AND NOT EXISTS (
+                  SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL
+              )
+            ORDER BY m.retention_eligible_at, m.message_key
+            LIMIT ?
+            "#;
+const GC_LOCK_CANDIDATE_POSTGRES: &str = r#"
+            SELECT retention_eligible_at IS NULL OR retention_eligible_at <= ?::timestamptz
+            FROM ingress_messages
+            WHERE message_key = ?::uuid AND terminal_at IS NOT NULL
+            FOR UPDATE SKIP LOCKED
+            "#;
+const GC_LOCK_CANDIDATE_SQLITE: &str = r#"
+            SELECT retention_eligible_at IS NULL OR retention_eligible_at <= ?
+            FROM ingress_messages
+            WHERE message_key = ? AND terminal_at IS NOT NULL
+
+            "#;
+const GC_CHECK_CANDIDATE_POSTGRES: &str = r#"
+                    SELECT 1
+                    FROM ingress_messages
+                    WHERE message_key = ?::uuid
+                      AND terminal_at IS NOT NULL
+                      AND (retention_eligible_at IS NULL OR retention_eligible_at <= ?::timestamptz)
+                    "#;
+const GC_CHECK_CANDIDATE_SQLITE: &str = r#"
+                    SELECT 1
+                    FROM ingress_messages
+                    WHERE message_key = ?
+                      AND terminal_at IS NOT NULL
+                      AND (retention_eligible_at IS NULL OR retention_eligible_at <= ?)
+                    "#;
+#[cfg(test)]
+mod tests {
+    use std::borrow::Cow;
+    use std::sync::Arc;
+
+    use chrono::{TimeZone, Utc};
+    use sqlx::Connection;
+    use tokio::sync::Barrier;
+    use waddle_xmpp::ingress::{AliasOutcome, AliasResolution};
+
+    use super::*;
+    use crate::db::{DatabaseConfig, MigrationRunner};
+
+    fn gc_budget() -> AliasGcBudget {
+        AliasGcBudget {
+            deadline: Instant::now() + StdDuration::from_secs(30),
+            lock_timeout: StdDuration::from_secs(5),
+            statement_timeout: StdDuration::from_secs(10),
+            scan_timeout: StdDuration::from_secs(10),
+            progress: AliasGcProgress::default(),
+        }
+    }
+
+    async fn seed_gc_proofs(db: &Database, key: MessageKey, count: usize) {
+        let mut tx = db.begin_immediate().await.expect("seed transaction");
+        for index in 0..count {
+            tx.execute(
+                "INSERT INTO sm_ingress_appends (message_key, receipt_kind, semantic_identity_hash, resource, accepting_stream_id, sequence, appended_at_ms, custody_payload, original_receipt_at_ms, disposition) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                crate::db_params![key.to_storage().to_string(), 1i64, vec![7u8; 32], format!("gc@example.test/resource-{index:04}"), "retired-stream", 1i64, 0i64, crate::sm::persistence::codec::serialize_stanza(&waddle_xmpp::Stanza::Message(xmpp_parsers::message::Message::new(None))).expect("serialize custody"), 0i64, 1i64],
+            ).await.expect("seed proof");
+        }
+        tx.commit().await.expect("commit proofs");
+    }
+
+    async fn gc_proof_count(db: &Database) -> i64 {
+        let connection = db.guard().await.expect("read proofs");
+        let mut rows = connection
+            .query("SELECT COUNT(*) FROM sm_ingress_appends", ())
+            .await
+            .expect("count proofs");
+        rows.next()
+            .await
+            .expect("read count")
+            .expect("count row")
+            .get(0)
+            .expect("decode count")
+    }
+
+    async fn orphan_gc_reclaims_bounded_batches(db: &Database) {
+        // Multiple proofs for the SAME message catch incorrectly bounding keys
+        // instead of proof rows, and force a second sweep batch.
+        seed_gc_proofs(db, MessageKey::new(), GC_BATCH_LIMIT + 1).await;
+        let budget = gc_budget();
+        assert!(matches!(
+            gc_orphan_proof_batch(db, &budget).await.expect("batch"),
+            OrphanSweepStep::Advanced { deleted } if deleted == GC_BATCH_LIMIT
+        ));
+        assert_eq!(gc_proof_count(db).await, 1);
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("GC");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                deleted_orphan_proofs: 1,
+                completed: true
+            }
+        );
+        assert_eq!(budget.progress.committed_orphan_proofs(), 1);
+        assert_eq!(gc_proof_count(db).await, 0);
+    }
+
+    async fn orphan_gc_preserves_live_parent(db: &Database) {
+        let key = MessageKey::new();
+        let mut tx = db.begin_immediate().await.expect("begin canonical insert");
+        record_message(&mut tx, key, &digest(1), None)
+            .await
+            .expect("live canonical parent");
+        tx.commit().await.expect("commit parent");
+        seed_gc_proofs(db, key, 1).await;
+        seed_gc_proofs(db, MessageKey::new(), 1).await;
+        let outcome = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("GC");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                deleted_orphan_proofs: 1,
+                completed: true
+            }
+        );
+        assert_eq!(gc_proof_count(db).await, 1);
+        let connection = db.guard().await.expect("read retained proof");
+        let mut rows = connection
+            .query("SELECT message_key FROM sm_ingress_appends", ())
+            .await
+            .expect("retained proof");
+        let retained: String = rows
+            .next()
+            .await
+            .expect("read row")
+            .expect("proof row")
+            .get(0)
+            .expect("message key");
+        assert_eq!(retained, key.to_storage().to_string());
+    }
+
+    async fn orphan_gc_expired_budget_preserves_proofs(db: &Database) {
+        seed_gc_proofs(db, MessageKey::new(), 1).await;
+        let budget = AliasGcBudget {
+            deadline: Instant::now(),
+            ..gc_budget()
+        };
+        assert!(matches!(
+            gc_orphan_proof_batch(db, &budget)
+                .await
+                .expect("expired batch"),
+            OrphanSweepStep::BudgetExpired { deleted: 0 }
+        ));
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("GC");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_messages: 0,
+                deleted_orphan_proofs: 0,
+                completed: false
+            }
+        );
+        assert_eq!(budget.progress.committed_orphan_proofs(), 0);
+        assert_eq!(gc_proof_count(db).await, 1);
+    }
+
+    async fn orphan_gc_retains_pending_custody(db: &Database) {
+        let key = MessageKey::new();
+        seed_gc_proofs(db, key, 1).await;
+        db.guard()
+            .await
+            .expect("connection")
+            .execute(
+                "UPDATE sm_ingress_appends SET disposition = 0 WHERE message_key = ?",
+                crate::db_params![key.to_storage().to_string()],
+            )
+            .await
+            .expect("pending custody");
+        let outcome = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("GC");
+        assert_eq!(outcome.deleted_orphan_proofs, 0);
+        assert_eq!(
+            gc_proof_count(db).await,
+            1,
+            "orphaned payload remains recoverable"
+        );
+        db.guard()
+            .await
+            .expect("connection")
+            .execute(
+                "UPDATE sm_ingress_appends SET disposition = 1 WHERE message_key = ?",
+                crate::db_params![key.to_storage().to_string()],
+            )
+            .await
+            .expect("ack custody");
+        let outcome = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("GC after ack");
+        assert_eq!(outcome.deleted_orphan_proofs, 1);
+        assert_eq!(gc_proof_count(db).await, 0);
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_retains_pending_custody() {
+        let db = Database::in_memory("custody-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_retains_pending_custody(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_retains_pending_custody() {
+        let Some(fixture) = Fixture::open("custody_gc").await else {
+            return;
+        };
+        orphan_gc_retains_pending_custody(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_reclaims_bounded_batches() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_reclaims_bounded_batches(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_reclaims_bounded_batches() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_reclaims_bounded_batches(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_preserves_live_parent() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_preserves_live_parent(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_preserves_live_parent() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_preserves_live_parent(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_expired_budget_preserves_proofs() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_expired_budget_preserves_proofs(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_expired_budget_preserves_proofs() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_expired_budget_preserves_proofs(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    async fn seed_healthy_gc_proofs(db: &Database, count: usize) -> MessageKey {
+        let key = MessageKey::from_storage(Uuid::from_u128(1));
+        let mut tx = db.begin_immediate().await.expect("begin healthy parent");
+        record_message(&mut tx, key, &digest(1), None)
+            .await
+            .expect("healthy parent");
+        tx.commit().await.expect("commit healthy parent");
+        seed_gc_proofs(db, key, count).await;
+        key
+    }
+
+    async fn orphan_gc_advances_across_healthy_windows(db: &Database) {
+        let healthy_count = GC_BATCH_LIMIT * 3;
+        seed_healthy_gc_proofs(db, healthy_count).await;
+        let late = MessageKey::from_storage(Uuid::from_u128(u128::MAX));
+        seed_gc_proofs(db, late, 1).await;
+        let budget = gc_budget();
+        // Each window examines at most `GC_BATCH_LIMIT` rows and advances the
+        // cursor by exactly that much, whether or not any of them were orphans.
+        // A filter-limited scan would instead examine the whole table looking
+        // for matches, which is what could never finish under the scan timeout.
+        for page in 0..3 {
+            let step = gc_orphan_proof_batch(db, &budget)
+                .await
+                .expect("healthy window");
+            assert!(matches!(step, OrphanSweepStep::Advanced { deleted: 0 }));
+            assert_eq!(gc_proof_count(db).await, healthy_count as i64 + 1);
+            let position = budget.progress.orphan_cursor.lock().await.clone();
+            let key = position.as_ref().expect("full window retains cursor");
+            assert_eq!(
+                key.resource.to_string(),
+                format!(
+                    "gc@example.test/resource-{:04}",
+                    (page + 1) * GC_BATCH_LIMIT - 1
+                )
+            );
+        }
+        let step = gc_orphan_proof_batch(db, &budget)
+            .await
+            .expect("late orphan window");
+        assert!(matches!(step, OrphanSweepStep::Finished { deleted: 1 }));
+        assert_eq!(gc_proof_count(db).await, healthy_count as i64);
+
+        // One pass drains the whole traversal within its budget rather than a
+        // single window. Windowing at one-per-pass would traverse at roughly
+        // `GC_BATCH_LIMIT` rows per coordinator backoff, which time-ordered
+        // UUIDv7 keys can outrun, leaving an orphan behind an ever-growing tail.
+        let late = MessageKey::from_storage(Uuid::from_u128(u128::MAX - 1));
+        seed_gc_proofs(db, late, 1).await;
+        let drained = gc_budget();
+        let outcome = gc_expired_aliases(db, timestamp(7), drained.clone())
+            .await
+            .expect("single draining pass");
+        assert_eq!(outcome.deleted_orphan_proofs, 1);
+        assert_eq!(outcome.deleted_messages, 0);
+        assert!(outcome.completed);
+        assert_eq!(drained.progress.committed_orphan_proofs(), 1);
+        assert_eq!(gc_proof_count(db).await, healthy_count as i64);
+    }
+
+    async fn orphan_gc_expired_first_window_is_not_traversal_completion(db: &Database) {
+        seed_healthy_gc_proofs(db, GC_BATCH_LIMIT).await;
+        let budget = AliasGcBudget {
+            deadline: Instant::now(),
+            ..gc_budget()
+        };
+        // The cursor is `None` here both because nothing ran and because a short
+        // window would have reset it. Only the step distinguishes them, and
+        // reporting completion would cost the coordinator its prompt partial
+        // continuation, leaving reclamation to the next periodic tick.
+        let step = gc_orphan_proof_batch(db, &budget)
+            .await
+            .expect("expired budget is not an error");
+        assert!(matches!(
+            step,
+            OrphanSweepStep::BudgetExpired { deleted: 0 }
+        ));
+        assert!(budget.progress.orphan_cursor.lock().await.is_none());
+    }
+
+    async fn orphan_sweep_is_skipped_when_it_cannot_find_anything(db: &Database) {
+        // First pass sweeps: a fresh process has never swept, so it is due.
+        let budget = gc_budget();
+        let first = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("first pass sweeps");
+        assert!(first.completed);
+
+        // An orphan appears after that sweep, with no canonical row reclaimed.
+        seed_gc_proofs(db, MessageKey::new(), 1).await;
+        let quiet = gc_expired_aliases(db, timestamp(7), budget.fresh_progress_pass())
+            .await
+            .expect("quiet pass");
+        assert!(quiet.completed);
+        assert_eq!(quiet.deleted_orphan_proofs, 0);
+        // Deliberate: nothing waits on an orphan, so an idle pass does not pay a
+        // transaction to look for one. The interval reclaims it later.
+        assert_eq!(gc_proof_count(db).await, 1);
+    }
+
+    #[tokio::test]
+    async fn orphan_sweep_gate_admits_only_passes_that_can_find_something() {
+        let budget = gc_budget();
+        // A fresh process has never swept, so the first pass is due even idle.
+        assert!(should_sweep_orphans(&budget).await);
+        // Being admitted ARMS the sweep; it stays owed until a traversal
+        // finishes, so a retry after an interrupted pass is still admitted.
+        assert!(should_sweep_orphans(&budget).await);
+        // Finishing a traversal is what clears it and restarts the interval.
+        budget
+            .progress
+            .orphan_sweep_pending
+            .store(false, Ordering::Release);
+        *budget.progress.orphan_swept_at.lock().await = Some(Instant::now());
+        assert!(!should_sweep_orphans(&budget).await);
+        // A reclaimed canonical row re-arms it regardless of the interval.
+        budget.progress.mark_orphan_sweep_pending();
+        assert!(should_sweep_orphans(&budget).await);
+
+        // Mid-traversal always continues: parking a cursor would defeat the
+        // paging that keeps each window bounded.
+        let mid = gc_budget();
+        *mid.progress.orphan_swept_at.lock().await = Some(Instant::now());
+        *mid.progress.orphan_cursor.lock().await = Some(SmIngressAppendKey {
+            message_key: MessageKey::new(),
+            kind: SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [7; 32],
+            resource: "gc@example.test/resource".parse().expect("resource"),
+        });
+        assert!(should_sweep_orphans(&mid).await);
+    }
+
+    #[tokio::test]
+    async fn an_owed_sweep_survives_a_pass_that_never_reached_the_ledger() {
+        let budget = gc_budget();
+        // Admit a pass, then end it before the traversal finished.
+        assert!(should_sweep_orphans(&budget).await);
+        // A production retry carries fresh pass-local counters over the same
+        // shared state, so nothing in the retry itself says a sweep is owed.
+        let retry = budget.fresh_progress_pass();
+        assert_eq!(retry.progress.committed_orphan_proofs(), 0);
+        assert!(retry.progress.orphan_cursor.lock().await.is_none());
+        // It is still owed, so the retry sweeps rather than waiting out the
+        // interval with orphans already on the floor.
+        assert!(should_sweep_orphans(&retry).await);
+    }
+
+    #[tokio::test]
+    async fn a_deletion_arms_the_sweep_even_when_its_pass_runs_out_of_budget() {
+        let budget = gc_budget();
+        // Consume the startup allowance so only the deletion can arm it.
+        assert!(should_sweep_orphans(&budget).await);
+        budget
+            .progress
+            .orphan_sweep_pending
+            .store(false, Ordering::Release);
+        *budget.progress.orphan_swept_at.lock().await = Some(Instant::now());
+        assert!(!should_sweep_orphans(&budget).await);
+
+        // A canonical phase that reclaims rows and then runs out of budget marks
+        // the sweep owed before returning, because its retry cannot see the
+        // deletion in its own fresh counters.
+        budget.progress.mark_orphan_sweep_pending();
+        let retry = budget.fresh_progress_pass();
+        assert!(should_sweep_orphans(&retry).await);
+    }
+
+    async fn orphan_gc_failure_does_not_fail_the_pass(db: &Database) {
+        let healthy = GC_BATCH_LIMIT * 2;
+        seed_healthy_gc_proofs(db, healthy).await;
+        let budget = gc_budget();
+        // The pass must report incomplete, never `Err`: the maintenance pass that
+        // wraps it maps a failed GC phase onto `MaintenanceOutcome::Failed`, which
+        // also governs the unrelated recovery phase's accounting and backoff. A
+        // sweep of rows nothing is waiting on must not drag recovery down.
+        let outcome = FAIL_ORPHAN_SWEEP
+            .scope(true, gc_expired_aliases(db, timestamp(7), budget.clone()))
+            .await
+            .expect("sweep failure must not fail the pass");
+        assert!(!outcome.completed);
+        assert_eq!(outcome.deleted_orphan_proofs, 0);
+        assert_eq!(gc_proof_count(db).await, healthy as i64);
+        // The next pass is unaffected and completes the traversal normally.
+        let recovered = gc_expired_aliases(db, timestamp(7), gc_budget())
+            .await
+            .expect("later pass runs normally");
+        assert!(recovered.completed);
+    }
+
+    async fn orphan_gc_wraps_after_healthy_traversal(db: &Database) {
+        let healthy_count = GC_BATCH_LIMIT * 2;
+        seed_healthy_gc_proofs(db, healthy_count).await;
+        let budget = gc_budget();
+        // A draining pass walks every window and resets the traversal at the end.
+        let outcome = gc_expired_aliases(db, timestamp(7), budget.clone())
+            .await
+            .expect("full healthy traversal");
+        assert!(outcome.completed);
+        assert_eq!(outcome.deleted_orphan_proofs, 0);
+        assert!(budget.progress.orphan_cursor.lock().await.is_none());
+        // A proof landing before the traversal's old position is still reclaimed,
+        // because the reset sends the next pass back to the beginning.
+        let early = MessageKey::from_storage(Uuid::nil());
+        seed_gc_proofs(db, early, 1).await;
+        let wrapped = gc_budget();
+        let outcome = gc_expired_aliases(db, timestamp(7), wrapped.clone())
+            .await
+            .expect("wrapped traversal");
+        assert_eq!(outcome.deleted_orphan_proofs, 1);
+        assert_eq!(outcome.deleted_messages, 0);
+        assert!(outcome.completed);
+        assert_eq!(gc_proof_count(db).await, healthy_count as i64);
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_advances_across_healthy_windows() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_advances_across_healthy_windows(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_advances_across_healthy_windows() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_advances_across_healthy_windows(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_expired_first_window_is_not_traversal_completion() {
+        let db = Database::in_memory("orphan-gc-expired-first")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_expired_first_window_is_not_traversal_completion(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_expired_first_window_is_not_traversal_completion() {
+        let Some(fixture) = Fixture::open("orphan_expired_first").await else {
+            return;
+        };
+        orphan_gc_expired_first_window_is_not_traversal_completion(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_sweep_is_skipped_when_it_cannot_find_anything() {
+        let db = Database::in_memory("orphan-gate-skip")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_sweep_is_skipped_when_it_cannot_find_anything(&db).await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_failure_does_not_fail_the_pass() {
+        let db = Database::in_memory("orphan-gc-failure")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_failure_does_not_fail_the_pass(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_failure_does_not_fail_the_pass() {
+        let Some(fixture) = Fixture::open("orphan_sweep_failure").await else {
+            return;
+        };
+        orphan_gc_failure_does_not_fail_the_pass(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sqlite_orphan_gc_wraps_after_healthy_traversal() {
+        let db = Database::in_memory("orphan-gc").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        orphan_gc_wraps_after_healthy_traversal(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_orphan_gc_wraps_after_healthy_traversal() {
+        let Some(fixture) = Fixture::open("orphan").await else {
+            return;
+        };
+        orphan_gc_wraps_after_healthy_traversal(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    async fn descendant_test_uow(db: &Database) -> crate::ingress::uow::IngressUnitOfWork {
+        let config = crate::config::LineageConfig {
+            deployment_uuid: Some(
+                "018f47b2-4b2e-7a3a-9a4c-52a5a6a90001"
+                    .parse()
+                    .expect("deployment UUID"),
+            ),
+            action: None,
+        };
+        crate::db::lineage::enroll(db, &config)
+            .await
+            .expect("enroll fixture");
+        crate::ingress::uow::IngressUnitOfWork::open(db.clone(), config).expect("open UoW")
+    }
+
+    async fn descendants_hold_canonical_evidence_until_every_provider_settles(db: &Database) {
+        use crate::ingress::uow::{
+            CanonicalMessageRepository, DeliveryEffectRepository, EffectDeliveryBinding,
+            EffectDescendantRepository, EffectIntentRepository, EffectReceiptRepository,
+        };
+        use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKey};
+        let uow = descendant_test_uow(db).await;
+        let store = PostgresIngressSubstrate::open(db.clone()).expect("store");
+        let key = MessageKey::new();
+        let recipient: BareJid = "target@example.com".parse().expect("recipient");
+        let effect = IngressEffectIntent::Extension {
+            recipient: recipient.clone(),
+            stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                "canonical",
+                recipient.clone().into(),
+            ),
+        };
+        let semantic = effect.semantic_key();
+        let candidate = Uuid::new_v4();
+        let first_provider = Uuid::new_v4();
+        let last_provider = Uuid::new_v4();
+        let terminal_at = timestamp(1);
+        let mut tx = uow.begin().await.expect("begin");
+        let alias = OriginId::new("descendant-dedup-origin");
+        assert_eq!(
+            CanonicalMessageRepository::resolve_and_record_alias(
+                &mut tx,
+                &sender(),
+                &target(),
+                &alias,
+                &digest(1),
+                || key,
+            )
+            .await
+            .expect("canonical alias"),
+            inserted(key)
+        );
+        EffectIntentRepository::reconcile(&mut tx, key, &[effect], false)
+            .await
+            .expect("intent");
+        let binding = DeliveryEffectRepository::bind_effect(&mut tx, key, &semantic)
+            .await
+            .expect("bind");
+        let EffectDeliveryBinding::Bound(delivery) = binding else {
+            panic!("extension is supported");
+        };
+        // A different target cannot borrow the accepted message's authority.
+        assert!(matches!(
+            DeliveryEffectRepository::bind_effect(
+                &mut tx,
+                key,
+                &IngressEffectKey::Extension("foreign@example.com".parse().expect("foreign"))
+            )
+            .await,
+            Err(crate::ingress::uow::IngressUowError::EffectIntentConflict)
+        ));
+        EffectDescendantRepository::attach(&mut tx, key, &semantic, candidate)
+            .await
+            .expect("candidate custody");
+        let hash: [u8; 32] = Sha256::digest(semantic.storage_identity().as_bytes()).into();
+        EffectReceiptRepository::record_receipt(
+            &mut tx,
+            key,
+            EffectReceiptKind::from_storage(semantic.storage_kind()),
+            &hash,
+        )
+        .await
+        .expect("canonical receipt");
+        CanonicalMessageRepository::terminalize(&mut tx, key, terminal_at)
+            .await
+            .expect("terminal");
+        tx.commit().await.expect("commit");
+        assert_eq!(
+            store
+                .gc_expired_aliases(terminal_at + Duration::days(20), gc_budget())
+                .await
+                .expect("pending candidate GC")
+                .deleted_messages,
+            0
+        );
+        let mut tx = uow.begin().await.expect("fanout");
+        EffectDescendantRepository::copy(&mut tx, candidate, first_provider)
+            .await
+            .expect("first provider ancestry");
+        EffectDescendantRepository::copy(&mut tx, candidate, last_provider)
+            .await
+            .expect("last provider ancestry");
+        EffectDescendantRepository::settle_all(
+            &mut tx,
+            candidate,
+            terminal_at + Duration::days(21),
+        )
+        .await
+        .expect("candidate accepted");
+        EffectDescendantRepository::settle_all(
+            &mut tx,
+            first_provider,
+            terminal_at + Duration::days(21),
+        )
+        .await
+        .expect("first provider settles");
+        tx.commit().await.expect("commit fanout");
+        assert_eq!(
+            store
+                .gc_expired_aliases(terminal_at + Duration::days(40), gc_budget())
+                .await
+                .expect("pending final provider GC")
+                .deleted_messages,
+            0
+        );
+        let mut tx = uow.begin().await.expect("binding replay");
+        assert_eq!(
+            CanonicalMessageRepository::resolve_and_record_alias(
+                &mut tx,
+                &sender(),
+                &target(),
+                &alias,
+                &digest(1),
+                MessageKey::new,
+            )
+            .await
+            .expect("alias still deduplicates with pending descendant"),
+            existing(key)
+        );
+        assert_eq!(
+            DeliveryEffectRepository::lookup(&mut tx, delivery)
+                .await
+                .expect("lookup retained binding"),
+            Some(key)
+        );
+        assert_eq!(
+            DeliveryEffectRepository::bind_effect(&mut tx, key, &semantic)
+                .await
+                .expect("same-key replay"),
+            binding
+        );
+        let settled = terminal_at + Duration::days(41);
+        EffectDescendantRepository::settle_all(&mut tx, last_provider, settled)
+            .await
+            .expect("last provider settles");
+        tx.commit().await.expect("settled");
+        assert_eq!(
+            store
+                .gc_expired_aliases(
+                    settled + ALIAS_RETENTION - Duration::microseconds(1),
+                    gc_budget()
+                )
+                .await
+                .expect("full tail")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(settled + ALIAS_RETENTION, gc_budget())
+                .await
+                .expect("exact tail boundary")
+                .deleted_messages,
+            1
+        );
+        let mut tx = uow.begin().await.expect("reclaimed");
+        assert_eq!(
+            DeliveryEffectRepository::lookup(&mut tx, delivery)
+                .await
+                .expect("lookup gone binding"),
+            None
+        );
+        tx.commit().await.expect("commit read");
+    }
+
+    #[tokio::test]
+    async fn sqlite_descendants_hold_canonical_evidence_until_every_provider_settles() {
+        let db = Database::in_memory("descendant-retention")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        descendants_hold_canonical_evidence_until_every_provider_settles(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_descendants_hold_canonical_evidence_until_every_provider_settles() {
+        let Some(fixture) = Fixture::open("descendant_retention").await else {
+            return;
+        };
+        descendants_hold_canonical_evidence_until_every_provider_settles(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    async fn last_sm_reference_starts_a_fresh_full_retention_tail(db: &Database) {
+        use crate::ingress::uow::{CanonicalMessageRepository, SmIngressRepository};
+        let uow = descendant_test_uow(db).await;
+        let store = PostgresIngressSubstrate::open(db.clone()).expect("store");
+        let key = MessageKey::new();
+        let sm = SmIngressId::new();
+        let now = Utc::now();
+        let mut stream_tx = store.begin().await.expect("stream fixture");
+        authority_tests::insert_stream(&mut stream_tx, sm).await;
+        stream_tx.commit().await.expect("stream fixture commit");
+        let mut tx = uow.begin().await.expect("begin");
+        CanonicalMessageRepository::record_message(&mut tx, key, &digest(1), None)
+            .await
+            .expect("message");
+        SmIngressRepository::insert_sm_ref(
+            &mut tx,
+            sm,
+            IngressOrdinal::FIRST,
+            WireHandledCount::from_storage(1),
+            key,
+        )
+        .await
+        .expect("SM custody");
+        CanonicalMessageRepository::terminalize(&mut tx, key, now - Duration::days(20))
+            .await
+            .expect("terminal");
+        tx.commit().await.expect("commit");
+        assert_eq!(
+            store
+                .gc_expired_aliases(now, gc_budget())
+                .await
+                .expect("live SM ref GC")
+                .deleted_messages,
+            0
+        );
+        let mut tx = uow.begin().await.expect("retire stream");
+        SmIngressRepository::delete_stream_ref(&mut tx, sm, IngressOrdinal::FIRST)
+            .await
+            .expect("last reference settles");
+        tx.commit().await.expect("retire");
+        assert_eq!(
+            store
+                .gc_expired_aliases(now + ALIAS_RETENTION - Duration::seconds(1), gc_budget())
+                .await
+                .expect("fresh full tail")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(
+                    Utc::now() + ALIAS_RETENTION + Duration::seconds(1),
+                    gc_budget()
+                )
+                .await
+                .expect("after fresh tail")
+                .deleted_messages,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_last_sm_reference_starts_a_fresh_full_retention_tail() {
+        let db = Database::in_memory("sm-retention").await.expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        last_sm_reference_starts_a_fresh_full_retention_tail(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_last_sm_reference_starts_a_fresh_full_retention_tail() {
+        let Some(fixture) = Fixture::open("last_sm_tail").await else {
+            return;
+        };
+        last_sm_reference_starts_a_fresh_full_retention_tail(&fixture.db).await;
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn postgres_canonical_nowait_contention_is_retryable_and_preserves_authority() {
+        use crate::ingress::uow::{
+            CanonicalMessageRepository, DbRetryClass, EffectDescendantRepository, IngressUowError,
+        };
+        let Some(fixture) = Fixture::open("canonical_nowait").await else {
+            return;
+        };
+        let uow = descendant_test_uow(&fixture.db).await;
+        let key = fixture.record_message().await;
+        let mut holder = uow.begin().await.expect("holder");
+        assert!(CanonicalMessageRepository::lock(&mut holder, key)
+            .await
+            .expect("lock parent"));
+        let mut contender = uow.begin().await.expect("contender");
+        let refused = tokio::time::timeout(
+            StdDuration::from_secs(1),
+            EffectDescendantRepository::lock_nowait(&mut contender, key),
+        )
+        .await
+        .expect("canonical acquisition must not wait");
+        assert!(matches!(
+            refused,
+            Err(IngressUowError::Database {
+                retry_class: DbRetryClass::CanonicalLockContention
+            })
+        ));
+        drop(contender);
+        holder.commit().await.expect("release holder");
+        let mut retry = uow.begin().await.expect("retry whole transaction");
+        EffectDescendantRepository::lock_nowait(&mut retry, key)
+            .await
+            .expect("acquire on fresh attempt");
+        retry.commit().await.expect("retry commit");
+        fixture.close().await;
+    }
+
+    async fn legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof(db: &Database) {
+        let uow = descendant_test_uow(db).await;
+        let store = PostgresIngressSubstrate::open(db.clone()).expect("store");
+        let key = MessageKey::new();
+        let now = timestamp(9);
+        let mut tx = uow.begin().await.expect("legacy fixture");
+        crate::ingress::uow::CanonicalMessageRepository::record_message(
+            &mut tx,
+            key,
+            &digest(1),
+            None,
+        )
+        .await
+        .expect("legacy message");
+        tx.commit().await.expect("canonical fixture commit");
+        let mut tx = store.begin().await.expect("legacy fixture mutation");
+        // Simulate a pre-V1025 row: terminal means receipts, never retention.
+        tx.execute(
+            dialect_sql(db.driver(), "UPDATE ingress_messages SET terminal_at = ?::timestamptz WHERE message_key = ?::uuid", "UPDATE ingress_messages SET terminal_at = ? WHERE message_key = ?"),
+            crate::db_params![(now - Duration::days(20)).to_rfc3339(), key.to_storage().to_string()],
+        ).await.expect("legacy terminal");
+        tx.commit().await.expect("legacy commit");
+        assert_eq!(
+            store
+                .gc_expired_aliases(now, gc_budget())
+                .await
+                .expect("adopt without deletion")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(
+                    now + ALIAS_RETENTION - Duration::microseconds(1),
+                    gc_budget()
+                )
+                .await
+                .expect("full adoption tail")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            store
+                .gc_expired_aliases(now + ALIAS_RETENTION, gc_budget())
+                .await
+                .expect("exact adoption tail")
+                .deleted_messages,
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlite_legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof() {
+        let db = Database::in_memory("legacy-retention")
+            .await
+            .expect("SQLite");
+        MigrationRunner::single().run(&db).await.expect("migrate");
+        legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof(&db).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof() {
+        let Some(fixture) = Fixture::open("legacy_tail").await else {
+            return;
+        };
+        legacy_terminal_rows_start_the_tail_at_adoption_without_fake_proof(&fixture.db).await;
+        fixture.close().await;
+    }
+    #[test]
+    fn gc_monitoring_predicate_matches_collector() {
+        fn normalized(sql: &str) -> String {
+            sql.split_whitespace().collect::<Vec<_>>().join(" ")
+        }
+
+        let monitoring = std::fs::read_to_string(
+            std::path::Path::new(&std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR")).join(
+                "../../../infrastructure/waddle.cloud/gitops/waddle-server/postgresql-monitoring-ingress.yaml",
+            ),
+        )
+        .expect("read deployed ingress monitoring SQL");
+        let monitoring = normalized(&monitoring);
+        let eligibility = "receipts_complete AND NOT has_ref AND NOT has_descendant";
+        let receipt_predicate = "NOT EXISTS ( SELECT 1 FROM ingress_effect_intents intent WHERE intent.message_key = message.message_key AND NOT EXISTS ( SELECT 1 FROM ingress_effect_receipts receipt WHERE receipt.message_key = intent.message_key AND receipt.kind = intent.kind AND receipt.semantic_identity_hash = intent.semantic_identity_hash ) )";
+        assert!(monitoring.contains(&format!("{receipt_predicate} AS receipts_complete")));
+
+        assert!(monitoring.contains("SELECT now() - interval '8 days' AS value"));
+        assert!(monitoring.contains(
+            "WHERE message.terminal_at IS NOT NULL AND (message.retention_eligible_at IS NULL OR message.retention_eligible_at <= cutoff.value)"
+        ));
+        assert_eq!(
+            monitoring
+                .matches(&format!("FILTER (WHERE {eligibility})"))
+                .count(),
+            2,
+            "backlog and oldest-age must use the same collector eligibility"
+        );
+        assert!(
+            monitoring.contains("count(*) FILTER (WHERE has_ref OR has_descendant OR NOT receipts_complete) AS retained_referenced_messages")
+        );
+        for (sql, cutoff) in [
+            (GC_CANDIDATES_POSTGRES, "?::timestamptz"),
+            (GC_CANDIDATES_SQLITE, "?"),
+        ] {
+            let sql = normalized(sql)
+                .replace(
+                    "NOT EXISTS ( SELECT 1 FROM ingress_effect_intents i WHERE i.message_key = m.message_key AND NOT EXISTS ( SELECT 1 FROM ingress_effect_receipts r WHERE r.message_key = i.message_key AND r.kind = i.kind AND r.semantic_identity_hash = i.semantic_identity_hash ) )",
+                    "receipts_complete",
+                )
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_origin_aliases a WHERE a.message_key = m.message_key )",
+                    "has_alias",
+                )
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_deliveries d WHERE d.message_key = m.message_key )",
+                    "has_delivery",
+                )
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_sm_refs r WHERE r.message_key = m.message_key )",
+                    "has_ref",
+                )
+                .replace(
+                    "EXISTS ( SELECT 1 FROM ingress_effect_descendants d WHERE d.message_key = m.message_key AND d.settled_at IS NULL )",
+                    "has_descendant",
+                );
+            let predicate = sql
+                .split_once(" WHERE ")
+                .expect("candidate WHERE")
+                .1
+                .split_once(" ORDER BY ")
+                .expect("candidate ordering")
+                .0;
+            assert_eq!(
+                predicate,
+                format!(
+                    "m.terminal_at IS NOT NULL AND (m.retention_eligible_at IS NULL OR m.retention_eligible_at <= {cutoff}) AND receipts_complete AND NOT has_ref AND NOT has_descendant"
+                )
+            );
+        }
+    }
+
+    #[test]
+    fn storage_codecs_round_trip_full_range_values_and_uuid_keys() {
+        let ordinal = IngressOrdinal::from_storage(u64::MAX)
+            .expect("u64::MAX is a valid persisted ingress ordinal");
+        assert_eq!(ordinal.to_storage(), u64::MAX);
+        assert!(IngressOrdinal::from_storage(0).is_err());
+
+        let uuid =
+            Uuid::parse_str("018e68e7-6a5f-7d4d-a0bc-64dc70a9ce10").expect("fixture UUID is valid");
+        assert_eq!(MessageKey::from_storage(uuid).to_storage(), uuid);
+        assert_eq!(DeliveryKey::from_storage(uuid).to_storage(), uuid);
+        assert_eq!(SmIngressId::from_storage(uuid).to_storage(), uuid);
+
+        for target in [
+            NormalizedTarget::Absent,
+            NormalizedTarget::Bare(
+                "romeo@example.com"
+                    .parse()
+                    .expect("fixture is a valid bare JID"),
+            ),
+            NormalizedTarget::Full(
+                "romeo@example.com/phone"
+                    .parse()
+                    .expect("fixture is a valid full JID"),
+            ),
+        ] {
+            let storage = target.to_storage();
+            assert_eq!(
+                NormalizedTarget::from_storage(storage.kind(), storage.jid()),
+                Ok(target),
+                "target codec must round trip every variant"
+            );
+        }
+    }
+
+    #[derive(Debug)]
+    struct FakePgError(&'static str);
+
+    impl std::fmt::Display for FakePgError {
+        fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(formatter, "fake pg error {}", self.0)
+        }
+    }
+
+    impl std::error::Error for FakePgError {}
+
+    impl sqlx::error::DatabaseError for FakePgError {
+        fn message(&self) -> &str {
+            "fake pg error"
+        }
+
+        fn code(&self) -> Option<Cow<'_, str>> {
+            Some(Cow::Borrowed(self.0))
+        }
+
+        fn kind(&self) -> sqlx::error::ErrorKind {
+            sqlx::error::ErrorKind::Other
+        }
+
+        fn as_error(&self) -> &(dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn as_error_mut(&mut self) -> &mut (dyn std::error::Error + Send + Sync + 'static) {
+            self
+        }
+
+        fn into_error(self: Box<Self>) -> Box<dyn std::error::Error + Send + Sync + 'static> {
+            self
+        }
+    }
+
+    fn fake_database_error(code: &'static str) -> DatabaseError {
+        DatabaseError::Internal(sqlx::Error::Database(Box::new(FakePgError(code))))
+    }
+
+    #[test]
+    fn alias_gc_maps_postgres_timeout_sqlstates_to_typed_kinds() {
+        assert_eq!(
+            database_timeout_kind(&fake_database_error("55P03")),
+            Some(DatabaseTimeoutKind::Lock)
+        );
+        assert_eq!(
+            database_timeout_kind(&fake_database_error("57014")),
+            Some(DatabaseTimeoutKind::Statement)
+        );
+        assert_eq!(database_timeout_kind(&fake_database_error("42P01")), None);
+    }
+
+    #[tokio::test]
+    async fn alias_key_is_unique_and_resolves_existing_or_conflict_from_joined_digest() {
+        let Some(fixture) = Fixture::open("alias_key").await else {
+            return;
+        };
+        let sender = sender();
+        let target = target();
+        let origin = OriginId::new("opaque-client-origin");
+        let first_digest = digest(7);
+        let first_key = MessageKey::new();
+
+        let mut tx = fixture.store.begin().await.expect("begin alias insert");
+        let first = fixture
+            .store
+            .resolve_and_record_alias(&mut tx, &sender, &target, &origin, &first_digest, || {
+                first_key
+            })
+            .await
+            .expect("insert alias");
+        tx.commit().await.expect("commit alias insert");
+        assert_eq!(first, inserted(first_key));
+
+        let mut tx = fixture.store.begin().await.expect("begin existing read");
+        let resolved = fixture
+            .store
+            .resolve_and_record_alias(&mut tx, &sender, &target, &origin, &first_digest, || {
+                MessageKey::new()
+            })
+            .await
+            .expect("resolve existing alias");
+        tx.commit().await.expect("commit existing read");
+        assert_eq!(resolved, existing(first_key));
+
+        let mut tx = fixture.store.begin().await.expect("begin conflict read");
+        let conflict = fixture
+            .store
+            .resolve_and_record_alias(&mut tx, &sender, &target, &origin, &digest(8), || {
+                MessageKey::new()
+            })
+            .await
+            .expect("resolve conflicting alias");
+        tx.commit().await.expect("commit conflict read");
+        assert!(matches!(
+            conflict,
+            AliasResolution::Aliased(AliasOutcome::Conflict(ref value))
+                if value.existing == first_key && value.stored == first_digest && value.offered == digest(8)
+        ));
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_alias_insert_same_digest_leaves_one_message_and_existing_result() {
+        let Some(fixture) = Fixture::open("alias_race_same").await else {
+            return;
+        };
+        let sender = sender();
+        let target = target();
+        let origin = OriginId::new("race-same-digest");
+        let start = Arc::new(Barrier::new(2));
+        let first = race_alias(
+            fixture.store.clone(),
+            sender.clone(),
+            target.clone(),
+            origin.clone(),
+            digest(9),
+            Arc::clone(&start),
+        );
+        let second = race_alias(
+            fixture.store.clone(),
+            sender,
+            target,
+            origin,
+            digest(9),
+            start,
+        );
+        let (first, second) = tokio::join!(first, second);
+        let outcomes = [
+            first.expect("first race result"),
+            second.expect("second race result"),
+        ];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    AliasResolution::Aliased(AliasOutcome::Inserted(_))
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    AliasResolution::Aliased(AliasOutcome::Existing(_))
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_first_alias_insert_different_digest_leaves_one_message_and_conflict_result()
+    {
+        let Some(fixture) = Fixture::open("alias_race_conflict").await else {
+            return;
+        };
+        let sender = sender();
+        let target = target();
+        let origin = OriginId::new("race-different-digest");
+        let start = Arc::new(Barrier::new(2));
+        let first = race_alias(
+            fixture.store.clone(),
+            sender.clone(),
+            target.clone(),
+            origin.clone(),
+            digest(10),
+            Arc::clone(&start),
+        );
+        let second = race_alias(
+            fixture.store.clone(),
+            sender,
+            target,
+            origin,
+            digest(11),
+            start,
+        );
+        let (first, second) = tokio::join!(first, second);
+        let outcomes = [
+            first.expect("first race result"),
+            second.expect("second race result"),
+        ];
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    AliasResolution::Aliased(AliasOutcome::Inserted(_))
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(
+            outcomes
+                .iter()
+                .filter(|outcome| matches!(
+                    outcome,
+                    AliasResolution::Aliased(AliasOutcome::Conflict(_))
+                ))
+                .count(),
+            1
+        );
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn terminalize_keeps_the_first_proven_terminal_time() {
+        let Some(fixture) = Fixture::open("terminalize").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let first_time = timestamp(1);
+        let second_time = timestamp(2);
+        let mut tx = fixture
+            .store
+            .begin()
+            .await
+            .expect("begin first terminalize");
+        assert_eq!(
+            fixture
+                .store
+                .terminalize_message(&mut tx, key, first_time)
+                .await
+                .expect("first terminalize"),
+            TerminalizeOutcome::Terminalized
+        );
+        tx.commit().await.expect("commit first terminalize");
+        let mut tx = fixture
+            .store
+            .begin()
+            .await
+            .expect("begin repeated terminalize");
+        assert_eq!(
+            fixture
+                .store
+                .terminalize_message(&mut tx, key, second_time)
+                .await
+                .expect("repeat terminalize"),
+            TerminalizeOutcome::AlreadyTerminal
+        );
+        tx.commit().await.expect("commit repeated terminalize");
+        assert!(fixture.terminal_is(key, first_time).await);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_deletes_aliasless_terminal_messages_and_makes_child_writes_vanish() {
+        let Some(fixture) = Fixture::open("gc_aliasless").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(3);
+        fixture.terminalize(key, terminal_at).await;
+        let result = fixture
+            .store
+            .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
+            .await
+            .expect("garbage collect terminal message");
+        assert_eq!(result.deleted_messages, 1);
+        let mut tx = fixture
+            .store
+            .begin()
+            .await
+            .expect("begin missing child insert");
+        assert_eq!(
+            fixture
+                .store
+                .insert_sm_ref(
+                    &mut tx,
+                    SmIngressId::new(),
+                    IngressOrdinal::FIRST,
+                    WireHandledCount::from_storage(1),
+                    key
+                )
+                .await
+                .expect("record vanished child"),
+            MessageWriteOutcome::MessageVanished
+        );
+        tx.commit().await.expect("commit vanished child result");
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_respects_the_exact_terminal_retention_cutoff() {
+        let Some(fixture) = Fixture::open("gc_cutoff").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(4);
+        fixture.terminalize(key, terminal_at).await;
+        assert_eq!(
+            fixture
+                .store
+                .gc_expired_aliases(
+                    terminal_at + ALIAS_RETENTION - Duration::microseconds(1),
+                    gc_budget(),
+                )
+                .await
+                .expect("collect before exact cutoff")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(
+            fixture
+                .store
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
+                .await
+                .expect("collect at exact cutoff")
+                .deleted_messages,
+            1
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_budget_stops_without_work_then_preserves_partial_progress() {
+        let Some(fixture) = Fixture::open("gc_budget_progress").await else {
+            return;
+        };
+        let terminal_at = timestamp(10);
+        let total = GC_BATCH_LIMIT + 2;
+        fixture.record_terminal_messages(total, terminal_at).await;
+        let now = terminal_at + ALIAS_RETENTION + Duration::days(1);
+
+        let no_work = fixture
+            .store
+            .gc_expired_aliases(
+                now,
+                AliasGcBudget {
+                    deadline: tokio::time::Instant::now() - StdDuration::from_millis(1),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect("an expired budget is a cooperative stop");
+        assert_eq!(
+            no_work,
+            AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages: 0,
+                completed: false,
+            }
+        );
+
+        fixture
+            .db
+            .execute(
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
+            )
+            .await
+            .expect("create deterministic GC pacing function");
+        fixture
+            .db
+            .execute(
+                "CREATE TRIGGER waddle_test_slow_gc_delete BEFORE DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_slow_gc_delete()",
+            )
+            .await
+            .expect("install deterministic GC pacing trigger");
+        let partial = fixture
+            .store
+            .gc_expired_aliases(
+                now,
+                AliasGcBudget {
+                    deadline: tokio::time::Instant::now() + StdDuration::from_secs(1),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect("budgeted GC returns committed progress");
+        assert!(!partial.completed);
+        assert!(partial.deleted_messages > 0);
+        assert!(partial.deleted_messages < total);
+        let remaining = usize::try_from(fixture.count("ingress_messages").await)
+            .expect("remaining count fits usize");
+        assert_eq!(partial.deleted_messages + remaining, total);
+
+        fixture
+            .db
+            .execute("DROP TRIGGER waddle_test_slow_gc_delete ON ingress_messages")
+            .await
+            .expect("remove deterministic GC pacing trigger");
+        fixture
+            .db
+            .execute("DROP FUNCTION waddle_test_slow_gc_delete()")
+            .await
+            .expect("remove deterministic GC pacing function");
+        let completed = fixture
+            .store
+            .gc_expired_aliases(now, gc_budget())
+            .await
+            .expect("finish remaining GC backlog");
+        assert!(completed.completed);
+        assert_eq!(completed.deleted_messages, remaining);
+        assert_eq!(partial.deleted_messages + completed.deleted_messages, total);
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_exact_full_batch_completes_after_empty_rescan() {
+        let Some(fixture) = Fixture::open("gc_exact_batch").await else {
+            return;
+        };
+        let terminal_at = timestamp(11);
+        fixture
+            .record_terminal_messages(GC_BATCH_LIMIT, terminal_at)
+            .await;
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("collect exact full batch and confirm empty rescan");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages: GC_BATCH_LIMIT,
+                completed: true,
+            }
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_skips_a_candidate_locked_by_another_writer_and_keeps_going() {
+        let Some(fixture) = Fixture::open("gc_lock_progress").await else {
+            return;
+        };
+        let terminal_at = timestamp(12);
+        let keys = fixture.record_terminal_messages(2, terminal_at).await;
+        let mut blocker = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open candidate blocker");
+        let mut blocker_tx = blocker.begin().await.expect("begin candidate blocker");
+        sqlx::query("SELECT 1 FROM ingress_messages WHERE message_key = $1 FOR UPDATE")
+            .bind(keys[1].to_storage())
+            .execute(&mut *blocker_tx)
+            .await
+            .expect("lock second GC candidate");
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    lock_timeout: StdDuration::from_millis(100),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect("a locked candidate is skipped, not waited on");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages: 1,
+                completed: false,
+            },
+            "a skipped candidate is still eligible, so the run is not complete"
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        blocker_tx.rollback().await.expect("release candidate lock");
+        drop(blocker);
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("the skipped candidate is reclaimed by the next run");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages: 1,
+                completed: true,
+            }
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_keeps_draining_later_batches_after_skipping_a_locked_candidate() {
+        let Some(fixture) = Fixture::open("gc_skip_then_drain").await else {
+            return;
+        };
+        let terminal_at = timestamp(17);
+        let total = GC_BATCH_LIMIT + 8;
+        let keys = fixture.record_terminal_messages(total, terminal_at).await;
+        let mut blocker = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open candidate blocker");
+        let mut blocker_tx = blocker.begin().await.expect("begin candidate blocker");
+        sqlx::query("SELECT 1 FROM ingress_messages WHERE message_key = $1 FOR UPDATE")
+            .bind(keys[0].to_storage())
+            .execute(&mut *blocker_tx)
+            .await
+            .expect("lock the oldest GC candidate");
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                gc_budget(),
+            )
+            .await
+            .expect("a locked head candidate must not stop the run");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages: total - 1,
+                completed: false,
+            },
+            "every unlocked row across both batches is reclaimed; the locked one keeps the run partial"
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        blocker_tx.rollback().await.expect("release candidate lock");
+        drop(blocker);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_epoch_lock_timeout_has_zero_progress() {
+        let Some(fixture) = Fixture::open("gc_epoch_lock_timeout").await else {
+            return;
+        };
+        let terminal_at = timestamp(13);
+        fixture.record_terminal_messages(1, terminal_at).await;
+        let mut blocker = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open epoch blocker");
+        let mut blocker_tx = blocker.begin().await.expect("begin epoch blocker");
+        sqlx::query("SELECT 1 FROM ingress_protocol_epoch WHERE id = 1 FOR UPDATE")
+            .execute(&mut *blocker_tx)
+            .await
+            .expect("lock protocol epoch row");
+
+        // Production-relative bounds: the statement timer covers the lock
+        // wait, so the lock bound must be the one that fires first.
+        let failure = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    lock_timeout: StdDuration::from_millis(100),
+                    statement_timeout: StdDuration::from_millis(250),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect_err("epoch lock must time out");
+        assert_eq!(failure.deleted_messages, 0);
+        assert!(matches!(
+            failure.error,
+            AliasGcError::DatabaseTimeout {
+                kind: DatabaseTimeoutKind::Lock
+            }
+        ));
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        blocker_tx.rollback().await.expect("release epoch lock");
+        drop(blocker);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_non_timeout_failure_after_progress_preserves_committed_count() {
+        let Some(fixture) = Fixture::open("gc_failure_progress").await else {
+            return;
+        };
+        let terminal_at = timestamp(14);
+        let keys = fixture.record_terminal_messages(2, terminal_at).await;
+        fixture
+            .db
+            .execute(&format!(
+                "CREATE FUNCTION waddle_test_fail_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN IF OLD.message_key = '{}'::uuid THEN RAISE EXCEPTION 'forced GC failure' USING ERRCODE = 'P0001'; END IF; RETURN OLD; END $$",
+                keys[1].to_storage()
+            ))
+            .await
+            .expect("create deterministic GC failure function");
+        fixture
+            .db
+            .execute(
+                "CREATE TRIGGER waddle_test_fail_gc_delete AFTER DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_fail_gc_delete()",
+            )
+            .await
+            .expect("install deterministic GC failure trigger");
+
+        let progress = AliasGcProgress::default();
+        let failure = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    progress: progress.clone(),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect_err("second candidate trigger must fail");
+        assert_eq!(failure.deleted_messages, 1);
+        assert!(matches!(failure.error, AliasGcError::Substrate(_)));
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        // The committed deletion is exactly when a cross-node append can be
+        // orphaned, and this pass exits through `?` before the sweep would run.
+        // Arming at the commit is what keeps the retry from skipping it.
+        assert!(progress.orphan_sweep_pending.load(Ordering::Acquire));
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_progress_handle_reports_committed_deletions_after_external_cancellation() {
+        let Some(fixture) = Fixture::open("gc_progress_cancel").await else {
+            return;
+        };
+        let terminal_at = timestamp(16);
+        let total = 8usize;
+        fixture.record_terminal_messages(total, terminal_at).await;
+        fixture
+            .db
+            .execute(
+                "CREATE FUNCTION waddle_test_slow_gc_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN PERFORM pg_sleep(0.05); RETURN OLD; END $$",
+            )
+            .await
+            .expect("create deterministic GC pacing function");
+        fixture
+            .db
+            .execute(
+                "CREATE TRIGGER waddle_test_slow_gc_delete BEFORE DELETE ON ingress_messages FOR EACH ROW EXECUTE FUNCTION waddle_test_slow_gc_delete()",
+            )
+            .await
+            .expect("install deterministic GC pacing trigger");
+        let progress = AliasGcProgress::default();
+        let cancelled = tokio::time::timeout(
+            StdDuration::from_millis(150),
+            fixture.store.gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION + Duration::days(1),
+                AliasGcBudget {
+                    progress: progress.clone(),
+                    ..gc_budget()
+                },
+            ),
+        )
+        .await;
+        assert!(
+            cancelled.is_err(),
+            "the paced run must be cancelled mid-way"
+        );
+        let remaining = usize::try_from(fixture.count("ingress_messages").await)
+            .expect("remaining count fits usize");
+        assert!(remaining > 0 && remaining < total);
+        assert_eq!(
+            progress.committed(),
+            total - remaining,
+            "the progress handle must match the rows actually committed"
+        );
+        // Cancellation runs no code after the await, so the sweep can only have
+        // been armed at the commit itself.
+        assert!(progress.orphan_sweep_pending.load(Ordering::Acquire));
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn concurrent_gc_runs_never_double_count_deletions() {
+        let Some(fixture) = Fixture::open("gc_concurrent").await else {
+            return;
+        };
+        let terminal_at = timestamp(15);
+        let total = 32usize;
+        fixture.record_terminal_messages(total, terminal_at).await;
+        let barrier = Arc::new(Barrier::new(3));
+        let now = terminal_at + ALIAS_RETENTION + Duration::days(1);
+        let spawn_gc = |store: PostgresIngressSubstrate, barrier: Arc<Barrier>| {
+            tokio::spawn(async move {
+                barrier.wait().await;
+                store.gc_expired_aliases(now, gc_budget()).await
+            })
+        };
+        let first = spawn_gc(fixture.store.clone(), barrier.clone());
+        let second = spawn_gc(fixture.store.clone(), barrier.clone());
+        barrier.wait().await;
+        let results = [
+            first.await.expect("join first GC"),
+            second.await.expect("join second GC"),
+        ];
+        let mut deleted = 0usize;
+        for result in results {
+            let outcome = result.expect("concurrent GC runs skip each other's locked rows");
+            deleted += outcome.deleted_messages;
+        }
+        assert_eq!(deleted, total);
+        assert_eq!(fixture.count("ingress_messages").await, 0);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_preserves_aliases_and_deliveries_with_live_sm_refs() {
+        let Some(fixture) = Fixture::open("gc_live_children").await else {
+            return;
+        };
+        // Create the message through the alias path so the retention pass
+        // has an expired alias to remove.
+        let key = MessageKey::new();
+        let mut tx = fixture.store.begin().await.expect("begin alias insert");
+        fixture
+            .store
+            .resolve_and_record_alias(
+                &mut tx,
+                &sender(),
+                &target(),
+                &OriginId::new("expired-with-live-children"),
+                &digest(5),
+                || key,
+            )
+            .await
+            .expect("insert alias");
+        tx.commit().await.expect("commit alias insert");
+
+        let terminal_at = timestamp(5);
+        let mut tx = fixture.store.begin().await.expect("begin child writes");
+        let sm_id = SmIngressId::new();
+        authority_tests::insert_stream(&mut tx, sm_id).await;
+        assert_eq!(
+            fixture
+                .store
+                .insert_sm_ref(
+                    &mut tx,
+                    sm_id,
+                    IngressOrdinal::FIRST,
+                    WireHandledCount::from_storage(1),
+                    key
+                )
+                .await
+                .expect("insert sm ref"),
+            MessageWriteOutcome::Recorded
+        );
+        assert_eq!(
+            fixture
+                .store
+                .record_delivery(&mut tx, DeliveryKey::new(), key)
+                .await
+                .expect("record delivery"),
+            MessageWriteOutcome::Recorded
+        );
+        tx.commit().await.expect("commit child writes");
+        fixture.terminalize(key, terminal_at).await;
+        assert_eq!(
+            fixture
+                .store
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
+                .await
+                .expect("collect terminal message with children")
+                .deleted_messages,
+            0
+        );
+        // Live SM custody retains the entire canonical dedup authority.
+        assert_eq!(fixture.count("ingress_origin_aliases").await, 1);
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        assert_eq!(fixture.count("ingress_sm_refs").await, 1);
+        assert_eq!(fixture.count("ingress_deliveries").await, 1);
+        // Referenced rows remain outside the candidate scan: a second
+        // pass finds no work and touches nothing.
+        assert_eq!(
+            fixture
+                .store
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
+                .await
+                .expect("re-run GC over retained history")
+                .deleted_messages,
+            0
+        );
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn sm_refs_are_keyed_by_sm_ingress_identity_not_transport_stream() {
+        let Some(fixture) = Fixture::open("sm_ref_identity").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let sm_id = SmIngressId::new();
+        let mut tx = fixture.store.begin().await.expect("begin first ref");
+        authority_tests::insert_stream(&mut tx, sm_id).await;
+        assert_eq!(
+            fixture
+                .store
+                .insert_sm_ref(
+                    &mut tx,
+                    sm_id,
+                    IngressOrdinal::FIRST,
+                    WireHandledCount::from_storage(1),
+                    key
+                )
+                .await
+                .expect("record the first handled-stanza reference"),
+            MessageWriteOutcome::Recorded
+        );
+        tx.commit().await.expect("commit first ref");
+
+        // An XEP-0198 resume continues the SAME SM ingress identity on a new
+        // transport stream: replaying the identical durable reference is an
+        // idempotent AlreadyRecorded, so an ambiguous-commit retry can finish
+        // its unit of work.
+        let mut tx = fixture.store.begin().await.expect("begin replayed ref");
+        assert_eq!(
+            fixture
+                .store
+                .insert_sm_ref(
+                    &mut tx,
+                    sm_id,
+                    IngressOrdinal::FIRST,
+                    WireHandledCount::from_storage(1),
+                    key
+                )
+                .await
+                .expect("identical replay is idempotent"),
+            MessageWriteOutcome::AlreadyRecorded
+        );
+        tx.commit().await.expect("commit replayed ref");
+
+        // The same ordinal bound to a DIFFERENT message is a typed identity
+        // conflict, distinguishable from outages and from AlreadyRecorded.
+        let other = fixture.record_message().await;
+        let mut tx = fixture.store.begin().await.expect("begin conflicting ref");
+        assert!(
+            matches!(
+                fixture
+                    .store
+                    .insert_sm_ref(
+                        &mut tx,
+                        sm_id,
+                        IngressOrdinal::FIRST,
+                        WireHandledCount::from_storage(1),
+                        other
+                    )
+                    .await,
+                Err(IngressSubstrateError::SmOrdinalConflict)
+            ),
+            "a different message under the same (SmIngressId, ordinal) must conflict"
+        );
+        drop(tx);
+        assert_eq!(fixture.count("ingress_sm_refs").await, 1);
+
+        // record_delivery mirrors the same idempotency contract.
+        let delivery = DeliveryKey::new();
+        let mut tx = fixture.store.begin().await.expect("begin delivery");
+        assert_eq!(
+            fixture
+                .store
+                .record_delivery(&mut tx, delivery, key)
+                .await
+                .expect("record delivery"),
+            MessageWriteOutcome::Recorded
+        );
+        assert_eq!(
+            fixture
+                .store
+                .record_delivery(&mut tx, delivery, key)
+                .await
+                .expect("identical delivery replay is idempotent"),
+            MessageWriteOutcome::AlreadyRecorded
+        );
+        assert!(matches!(
+            fixture
+                .store
+                .record_delivery(&mut tx, delivery, other)
+                .await,
+            Err(IngressSubstrateError::DeliveryKeyConflict)
+        ));
+        drop(tx);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_advances_at_most_once_per_transaction_and_future_epochs_fence_gc() {
+        let Some(fixture) = Fixture::open("epoch_single_advance").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(8);
+        fixture.terminalize(key, terminal_at).await;
+
+        // A duplicated activation statement inside ONE transaction must not
+        // commit a two-epoch jump no deployment ever observed.
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open activation connection");
+        let mut tx = conn.begin().await.expect("begin double-advance tx");
+        sqlx::query(
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("first advance in the transaction");
+        assert!(
+            sqlx::query(
+                "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .execute(&mut *tx)
+            .await
+            .is_err(),
+            "a second epoch advance in the same transaction must be rejected"
+        );
+        drop(tx);
+
+        // Advance to epoch 2 through two sanctioned transactions; the live
+        // epoch now exceeds what this binary supports, so its GC fails
+        // closed instead of auto-claiming the future epoch.
+        for statement in [
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+        ] {
+            sqlx::query(statement)
+                .execute(&mut conn)
+                .await
+                .expect("sanctioned single-step advance");
+        }
+        assert!(matches!(
+            fixture
+                .store
+                .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
+                .await,
+            Err(AliasGcFailure {
+                deleted_messages: 0,
+                error: AliasGcError::Substrate(IngressSubstrateError::UnsupportedLiveEpoch),
+                deleted_orphan_proofs: 0,
+            })
+        ));
+        drop(conn);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn alias_insert_succeeds_at_combined_maximum_key_lengths() {
+        let Some(fixture) = Fixture::open("alias_max_len").await else {
+            return;
+        };
+        // Maximum-length localparts/domains (1023 bytes each per RFC 7622)
+        // with a maximum-length origin-id: the fixed-width hash key must
+        // absorb what a composite B-tree tuple could not.
+        let long_domain = |label: &str| {
+            std::iter::repeat_n(label.repeat(62), 4)
+                .collect::<Vec<_>>()
+                .join(".")
+        };
+        let long_sender: BareJid = format!("{}@{}", "a".repeat(1023), long_domain("b"))
+            .parse()
+            .expect("long sender JID is valid");
+        let long_target: BareJid = format!("{}@{}", "c".repeat(1023), long_domain("d"))
+            .parse()
+            .expect("long target JID is valid");
+        let origin = OriginId::new("o".repeat(1024));
+        let key = MessageKey::new();
+        let mut tx = fixture.store.begin().await.expect("begin max-length alias");
+        assert_eq!(
+            fixture
+                .store
+                .resolve_and_record_alias(
+                    &mut tx,
+                    &long_sender,
+                    &NormalizedTarget::Bare(long_target),
+                    &origin,
+                    &digest(6),
+                    || key,
+                )
+                .await
+                .expect("maximum-length alias key inserts"),
+            inserted(key)
+        );
+        tx.commit().await.expect("commit max-length alias");
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_one_rejects_unproven_writes_and_accepts_transaction_bound_proof() {
+        let Some(fixture) = Fixture::open("epoch_proof").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        fixture
+            .db
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .await
+            .expect("activate epoch one");
+
+        for statement in [
+            format!(
+                "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+                Uuid::new_v4(),
+                key.to_storage()
+            ),
+            format!(
+                "UPDATE ingress_messages SET terminal_at = now() WHERE message_key = '{}'",
+                key.to_storage()
+            ),
+            format!(
+                "DELETE FROM ingress_messages WHERE message_key = '{}'",
+                key.to_storage()
+            ),
+            "TRUNCATE ingress_deliveries".to_string(),
+        ] {
+            assert!(
+                fixture.db.execute(&statement).await.is_err(),
+                "epoch-one protected operation must require proof: {statement}"
+            );
+        }
+
+        let mut tx = fixture
+            .store
+            .begin()
+            .await
+            .expect("begin proof transaction");
+        tx.execute("SET LOCAL waddle.protocol_epoch = '1'", ())
+            .await
+            .expect("set epoch proof");
+        tx.execute(
+            "SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+            (),
+        )
+        .await
+        .expect("set xid proof");
+        fixture
+            .store
+            .record_delivery(&mut tx, DeliveryKey::new(), key)
+            .await
+            .expect("proof authorizes protected write");
+        tx.commit().await.expect("commit proof transaction");
+
+        // A proof with a wrong epoch or no xid is intentionally incomplete.
+        let mut wrong_epoch = fixture
+            .store
+            .begin()
+            .await
+            .expect("begin wrong epoch proof");
+        wrong_epoch
+            .execute("SET LOCAL waddle.protocol_epoch = '0'", ())
+            .await
+            .expect("set wrong epoch proof");
+        assert!(fixture
+            .store
+            .record_delivery(&mut wrong_epoch, DeliveryKey::new(), key)
+            .await
+            .is_err());
+        drop(wrong_epoch); // dropping an uncommitted transaction rolls it back
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_and_manifest_tables_enforce_their_singleton_and_append_only_rules() {
+        let Some(fixture) = Fixture::open("epoch_invariants").await else {
+            return;
+        };
+        for statement in [
+            "UPDATE ingress_protocol_epoch SET epoch = 2, activated_at = now(), lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            "UPDATE ingress_protocol_epoch SET epoch = 1 WHERE id = 1",
+            "DELETE FROM ingress_protocol_epoch WHERE id = 1",
+            "TRUNCATE ingress_protocol_epoch",
+            "INSERT INTO ingress_protocol_epoch (id, epoch) VALUES (2, 0)",
+            "UPDATE ingress_epoch_guard_manifest SET table_name = 'bad' WHERE table_name = 'ingress_messages'",
+            "DELETE FROM ingress_epoch_guard_manifest WHERE table_name = 'ingress_messages'",
+            "TRUNCATE ingress_epoch_guard_manifest",
+            // TRUNCATE on protected tables is rejected at EVERY epoch by the
+            // lock-free truncate guard (its trigger must never request the
+            // epoch row: TRUNCATE's ACCESS EXCLUSIVE is taken first, which
+            // would invert the epoch-first lock order).
+            "TRUNCATE ingress_messages",
+            "TRUNCATE ingress_sm_refs",
+        ] {
+            assert!(fixture.db.execute(statement).await.is_err(), "must reject: {statement}");
+        }
+        let mut tx = fixture.store.begin().await.expect("begin manifest probe");
+        tx.execute(
+            "INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('ingress_future_probe')",
+            (),
+        )
+        .await
+        .expect("manifest permits future enrollment");
+        drop(tx); // probe must leave the append-only manifest unchanged
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_guard_manifest_matches_rust_and_live_trigger_catalog() {
+        let Some(fixture) = Fixture::open("guard_manifest").await else {
+            return;
+        };
+        let conn = fixture.db.guard().await.expect("guard manifest database");
+        let mut rows = conn
+            .query(
+                "SELECT table_name FROM ingress_epoch_guard_manifest ORDER BY table_name",
+                (),
+            )
+            .await
+            .expect("read guard manifest");
+        let mut manifest = Vec::new();
+        while let Some(row) = rows.next().await.expect("read manifest row") {
+            manifest.push(row.get::<String>(0).expect("decode manifest table"));
+        }
+        let mut expected = EPOCH_GUARDED_TABLES.map(str::to_owned).to_vec();
+        expected.sort();
+        assert_eq!(manifest, expected, "migration manifest and Rust list agree");
+
+        // Every live ingress_* table must be enrolled: an unlisted table
+        // would silently sit outside the activation boundary.
+        let mut live_rows = conn
+            .query(
+                "SELECT c.relname FROM pg_class c \
+                 JOIN pg_namespace n ON n.oid = c.relnamespace \
+                 WHERE n.nspname = current_schema() AND c.relkind = 'r' \
+                   AND c.relname LIKE 'ingress_%' ORDER BY c.relname",
+                (),
+            )
+            .await
+            .expect("enumerate live ingress tables");
+        let mut live = Vec::new();
+        while let Some(row) = live_rows.next().await.expect("read live table row") {
+            live.push(row.get::<String>(0).expect("decode live table name"));
+        }
+        let mut expected_live = expected.clone();
+        expected_live.push("ingress_epoch_guard_manifest".to_string());
+        expected_live.push("ingress_protocol_epoch".to_string());
+        expected_live.sort();
+        assert_eq!(
+            live, expected_live,
+            "every live ingress_* table is either guarded or the epoch/manifest table"
+        );
+
+        // Trigger shape is pinned, not just presence: BEFORE statement-level
+        // I/U/D (tgtype 30) plus BEFORE statement-level TRUNCATE (tgtype 34),
+        // both ENABLE ALWAYS and bound to the guard function.
+        for table in EPOCH_GUARDED_TABLES {
+            let mut trigger_rows = conn
+                .query(
+                    "SELECT tg.tgname, tg.tgtype::int, tg.tgenabled::text, p.proname \
+                     FROM pg_trigger tg \
+                     JOIN pg_class c ON c.oid = tg.tgrelid \
+                     JOIN pg_namespace n ON n.oid = c.relnamespace \
+                     JOIN pg_proc p ON p.oid = tg.tgfoid \
+                     WHERE n.nspname = current_schema() AND c.relname = ? \
+                       AND NOT tg.tgisinternal ORDER BY tg.tgname",
+                    crate::db_params![table],
+                )
+                .await
+                .expect("read guard triggers");
+            let mut triggers = Vec::new();
+            while let Some(row) = trigger_rows.next().await.expect("read trigger row") {
+                triggers.push((
+                    row.get::<String>(0).expect("decode trigger name"),
+                    row.get::<i64>(1).expect("decode trigger type"),
+                    row.get::<String>(2).expect("decode trigger mode"),
+                    row.get::<String>(3).expect("decode trigger function"),
+                ));
+            }
+            assert!(
+                triggers.contains(&(
+                    format!("{table}_epoch_guard_dml"),
+                    30,
+                    "A".to_string(),
+                    "waddle_ingress_epoch_guard".to_string(),
+                )),
+                "{table} must carry the BEFORE-statement I/U/D guard: {triggers:?}"
+            );
+            assert!(
+                triggers.contains(&(
+                    format!("{table}_epoch_guard_truncate"),
+                    34,
+                    "A".to_string(),
+                    "waddle_ingress_truncate_guard".to_string(),
+                )),
+                "{table} must carry the lock-free BEFORE-statement TRUNCATE reject: {triggers:?}"
+            );
+        }
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_installs_its_own_epoch_proof_and_collects_at_epoch_one() {
+        let Some(fixture) = Fixture::open("gc_epoch_one").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(7);
+        fixture.terminalize(key, terminal_at).await;
+        fixture
+            .db
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .await
+            .expect("activate epoch one");
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(terminal_at + ALIAS_RETENTION, gc_budget())
+            .await
+            .expect("GC proves its own transactions at epoch one");
+        assert_eq!(
+            outcome.deleted_messages, 1,
+            "GC collects normally after activation"
+        );
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn guard_uses_its_table_schema_not_the_callers_search_path() {
+        let Some(fixture) = Fixture::open("hostile_search_path").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        // Independent short name: suffixing the fixture schema would exceed
+        // PostgreSQL's 63-byte identifier cap and silently truncate into a
+        // collision with the fixture schema itself.
+        let hostile = format!("waddle_test_hostile_{}", Uuid::new_v4().simple());
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open one hostile-search-path connection");
+        sqlx::query(&format!("CREATE SCHEMA {hostile}"))
+            .execute(&mut conn)
+            .await
+            .expect("create hostile schema");
+        sqlx::query(&format!(
+            "CREATE TABLE {hostile}.ingress_protocol_epoch (id INTEGER PRIMARY KEY, epoch BIGINT NOT NULL)"
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("create hostile epoch shadow");
+        sqlx::query(&format!(
+            "INSERT INTO {hostile}.ingress_protocol_epoch (id, epoch) VALUES (1, 1)"
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("seed hostile epoch shadow");
+        sqlx::query(&format!("SET search_path = {hostile}, {}", fixture.schema))
+            .execute(&mut conn)
+            .await
+            .expect("place hostile schema first");
+        sqlx::query(&format!(
+            "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+            Uuid::new_v4(),
+            key.to_storage()
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("epoch-zero guard must ignore hostile epoch-one shadow");
+        drop(conn);
+        fixture.close().await;
+    }
+
+    /// Poll `pg_stat_activity` until a backend is blocked on a heavyweight
+    /// lock while running a query containing `fragment`.  The fragment is a
+    /// bound parameter, so this poll's own query text never matches itself.
+    async fn wait_for_lock_waiter(admin: &sqlx::PgPool, fragment: &str) {
+        for _ in 0..400 {
+            let waiting: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM pg_stat_activity \
+                 WHERE wait_event_type = 'Lock' AND query LIKE $1",
+            )
+            .bind(format!("%{fragment}%"))
+            .fetch_one(admin)
+            .await
+            .expect("poll pg_stat_activity for a lock waiter");
+            if waiting > 0 {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        }
+        panic!("no blocked backend appeared for query fragment {fragment:?}");
+    }
+
+    #[tokio::test]
+    async fn session_level_guc_and_stale_xid_proofs_do_not_authorize_writes() {
+        let Some(fixture) = Fixture::open("epoch_proof_matrix").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        fixture
+            .db
+            .execute(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .await
+            .expect("activate epoch one");
+
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open one dedicated connection");
+        let insert = format!(
+            "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+            Uuid::new_v4(),
+            key.to_storage()
+        );
+
+        // Session-level SET of BOTH GUCs: the xid captured now belongs to
+        // this transaction, so it cannot prove any later transaction.
+        sqlx::query("SET waddle.protocol_epoch = '1'")
+            .execute(&mut conn)
+            .await
+            .expect("session-level epoch setting");
+        let stale_xid: String = sqlx::query_scalar(
+            "SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, false)",
+        )
+        .fetch_one(&mut conn)
+        .await
+        .expect("session-level xid setting");
+        assert!(
+            sqlx::query(&insert).execute(&mut conn).await.is_err(),
+            "a session-retained proof must not authorize a later transaction"
+        );
+
+        // Missing xid half of the proof.
+        let mut tx = conn.begin().await.expect("begin missing-xid transaction");
+        sqlx::query("SET LOCAL waddle.protocol_epoch = '1'")
+            .execute(&mut *tx)
+            .await
+            .expect("set epoch half only");
+        assert!(
+            sqlx::query(&insert).execute(&mut *tx).await.is_err(),
+            "the epoch GUC alone must not authorize a write"
+        );
+        drop(tx);
+
+        // Stale xid replayed as a literal from an earlier transaction.
+        let mut tx = conn.begin().await.expect("begin stale-xid transaction");
+        sqlx::query("SET LOCAL waddle.protocol_epoch = '1'")
+            .execute(&mut *tx)
+            .await
+            .expect("set epoch for stale proof");
+        sqlx::query("SELECT set_config('waddle.protocol_epoch_xid', $1, true)")
+            .bind(&stale_xid)
+            .execute(&mut *tx)
+            .await
+            .expect("replay stale xid literal");
+        assert!(
+            sqlx::query(&insert).execute(&mut *tx).await.is_err(),
+            "a stale xid proof must not authorize a write"
+        );
+        drop(tx);
+
+        // A correct transaction-local proof works — and does not survive
+        // into the next transaction on the SAME pooled connection.
+        let mut tx = conn.begin().await.expect("begin proven transaction");
+        sqlx::query("SET LOCAL waddle.protocol_epoch = '1'")
+            .execute(&mut *tx)
+            .await
+            .expect("set local epoch");
+        sqlx::query(
+            "SELECT set_config('waddle.protocol_epoch_xid', pg_current_xact_id()::text, true)",
+        )
+        .execute(&mut *tx)
+        .await
+        .expect("set local xid");
+        sqlx::query(&insert)
+            .execute(&mut *tx)
+            .await
+            .expect("transaction-bound proof authorizes the write");
+        tx.commit().await.expect("commit proven transaction");
+        assert!(
+            sqlx::query(&format!(
+                "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+                Uuid::new_v4(),
+                key.to_storage()
+            ))
+            .execute(&mut conn)
+            .await
+            .is_err(),
+            "SET LOCAL must not be retained past commit on the same connection"
+        );
+        drop(conn);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn epoch_activation_waits_behind_in_flight_epoch_zero_writes() {
+        let Some(fixture) = Fixture::open("activation_race").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+
+        // Transaction A: an epoch-0 protected write whose statement trigger
+        // took FOR SHARE on the epoch row, held until commit.
+        let mut writer = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open epoch-zero writer connection");
+        let mut tx = writer.begin().await.expect("begin epoch-zero write");
+        sqlx::query(&format!(
+            "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+            Uuid::new_v4(),
+            key.to_storage()
+        ))
+        .execute(&mut *tx)
+        .await
+        .expect("epoch-zero write starts before activation");
+
+        // Concurrent activation must block behind the in-flight write.
+        let flip_url = fixture.schema_url.clone();
+        let flip = tokio::spawn(async move {
+            let mut conn = sqlx::PgConnection::connect(&flip_url)
+                .await
+                .expect("open activation connection");
+            sqlx::query(
+                "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+                 lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1",
+            )
+            .execute(&mut conn)
+            .await
+            .expect("activation update completes after the writer commits");
+        });
+        wait_for_lock_waiter(&fixture.admin, "UPDATE ingress_protocol_epoch").await;
+        assert!(!flip.is_finished(), "activation must still be blocked");
+        tx.commit().await.expect("commit the epoch-zero write");
+        flip.await.expect("join activation task");
+
+        // First post-activation write without a proof is rejected.
+        assert!(
+            sqlx::query(&format!(
+                "INSERT INTO ingress_deliveries (delivery_key, message_key) VALUES ('{}', '{}')",
+                Uuid::new_v4(),
+                key.to_storage()
+            ))
+            .execute(&mut writer)
+            .await
+            .is_err(),
+            "the first post-activation write requires the transaction proof"
+        );
+        drop(writer);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn gc_skips_a_message_whose_row_is_locked_by_an_in_flight_child_insert() {
+        let Some(fixture) = Fixture::open("gc_ref_race").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+        let terminal_at = timestamp(6);
+        fixture.terminalize(key, terminal_at).await;
+
+        let mut tx = fixture.store.begin().await.expect("begin child insert");
+        let sm_id = SmIngressId::new();
+        authority_tests::insert_stream(&mut tx, sm_id).await;
+        assert_eq!(
+            fixture
+                .store
+                .insert_sm_ref(
+                    &mut tx,
+                    sm_id,
+                    IngressOrdinal::FIRST,
+                    WireHandledCount::from_storage(1),
+                    key
+                )
+                .await
+                .expect("insert sm ref before GC"),
+            MessageWriteOutcome::Recorded
+        );
+
+        let outcome = fixture
+            .store
+            .gc_expired_aliases(
+                terminal_at + ALIAS_RETENTION,
+                AliasGcBudget {
+                    lock_timeout: StdDuration::from_millis(50),
+                    ..gc_budget()
+                },
+            )
+            .await
+            .expect("a row held by an in-flight child write is skipped");
+        assert_eq!(
+            outcome,
+            AliasGcOutcome {
+                deleted_orphan_proofs: 0,
+                deleted_messages: 0,
+                completed: false,
+            }
+        );
+        tx.commit()
+            .await
+            .expect("commit child insert after GC skipped the row");
+        assert_eq!(fixture.count("ingress_messages").await, 1);
+        assert_eq!(fixture.count("ingress_sm_refs").await, 1);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn child_insert_blocked_behind_gc_deletion_observes_message_vanished() {
+        let Some(fixture) = Fixture::open("ref_gc_race").await else {
+            return;
+        };
+        let key = fixture.record_message().await;
+
+        // Simulate GC's deletion transaction: FOR UPDATE on the message row,
+        // held while a child insert arrives.
+        let mut gc_conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open GC connection");
+        let mut gc_tx = gc_conn.begin().await.expect("begin GC transaction");
+        sqlx::query(&format!(
+            "SELECT 1 FROM ingress_messages WHERE message_key = '{}' FOR UPDATE",
+            key.to_storage()
+        ))
+        .execute(&mut *gc_tx)
+        .await
+        .expect("GC locks the message row");
+
+        let insert_store = fixture.store.clone();
+        let insert = tokio::spawn(async move {
+            let mut tx = insert_store.begin().await?;
+            let outcome = insert_store
+                .insert_sm_ref(
+                    &mut tx,
+                    SmIngressId::new(),
+                    IngressOrdinal::FIRST,
+                    WireHandledCount::from_storage(1),
+                    key,
+                )
+                .await?;
+            tx.commit()
+                .await
+                .map_err(|_| IngressSubstrateError::Database {
+                    retry_class: DbRetryClass::NotRetryable,
+                })?;
+            Ok::<_, IngressSubstrateError>(outcome)
+        });
+        wait_for_lock_waiter(&fixture.admin, "FOR UPDATE").await;
+        assert!(!insert.is_finished(), "child insert must wait behind GC");
+        sqlx::query(&format!(
+            "DELETE FROM ingress_messages WHERE message_key = '{}'",
+            key.to_storage()
+        ))
+        .execute(&mut *gc_tx)
+        .await
+        .expect("GC deletes the childless message");
+        gc_tx.commit().await.expect("commit GC deletion");
+        assert_eq!(
+            insert
+                .await
+                .expect("join child insert task")
+                .expect("child insert completes after GC commits"),
+            MessageWriteOutcome::MessageVanished,
+            "a child insert serialized behind GC observes the deletion"
+        );
+        drop(gc_conn);
+        fixture.close().await;
+    }
+
+    #[tokio::test]
+    async fn restricted_role_cannot_disable_or_replace_the_epoch_guard() {
+        let Some(fixture) = Fixture::open("restricted_role").await else {
+            return;
+        };
+        let role = format!("waddle_test_dml_{}", Uuid::new_v4().simple());
+        let mut conn = sqlx::PgConnection::connect(&fixture.schema_url)
+            .await
+            .expect("open role-test connection");
+        sqlx::query(&format!("CREATE ROLE {role} NOLOGIN"))
+            .execute(&mut conn)
+            .await
+            .expect("create restricted DML role");
+        sqlx::query(&format!(
+            "GRANT USAGE ON SCHEMA {} TO {role}",
+            fixture.schema
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("grant schema usage");
+        for table in EPOCH_GUARDED_TABLES {
+            sqlx::query(&format!(
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON {}.{table} TO {role}",
+                fixture.schema
+            ))
+            .execute(&mut conn)
+            .await
+            .expect("grant DML on protected table");
+        }
+        sqlx::query(&format!(
+            "GRANT SELECT ON {}.ingress_protocol_epoch TO {role}",
+            fixture.schema
+        ))
+        .execute(&mut conn)
+        .await
+        .expect("grant epoch read");
+
+        sqlx::query(&format!("SET ROLE {role}"))
+            .execute(&mut conn)
+            .await
+            .expect("assume restricted role");
+        for statement in [
+            "ALTER TABLE ingress_messages DISABLE TRIGGER ingress_messages_epoch_guard_dml"
+                .to_string(),
+            "CREATE OR REPLACE FUNCTION waddle_ingress_epoch_guard() RETURNS trigger \
+             LANGUAGE plpgsql AS $$ BEGIN RETURN NULL; END $$"
+                .to_string(),
+            "UPDATE ingress_protocol_epoch SET epoch = 1, activated_at = now(), \
+             lineage_uuid = '8a1d35a6-5e5a-41f1-8e2e-b864e60a4a92' WHERE id = 1"
+                .to_string(),
+            "INSERT INTO ingress_epoch_guard_manifest (table_name) VALUES ('rogue')".to_string(),
+            "DROP TRIGGER ingress_messages_epoch_guard_dml ON ingress_messages".to_string(),
+        ] {
+            assert!(
+                sqlx::query(&statement).execute(&mut conn).await.is_err(),
+                "the restricted role must not bypass the guard: {statement}"
+            );
+        }
+        sqlx::query("RESET ROLE")
+            .execute(&mut conn)
+            .await
+            .expect("reset role");
+        sqlx::query(&format!("DROP OWNED BY {role}"))
+            .execute(&mut conn)
+            .await
+            .expect("drop role grants");
+        sqlx::query(&format!("DROP ROLE {role}"))
+            .execute(&mut conn)
+            .await
+            .expect("drop restricted role");
+        drop(conn);
+        fixture.close().await;
+    }
+
+    async fn race_alias(
+        store: PostgresIngressSubstrate,
+        sender: BareJid,
+        target: NormalizedTarget,
+        origin: OriginId,
+        digest: SemanticDigest,
+        start: Arc<Barrier>,
+    ) -> Result<AliasResolution, IngressSubstrateError> {
+        let mut tx = store.begin().await?;
+        start.wait().await;
+        let result = store
+            .resolve_and_record_alias(&mut tx, &sender, &target, &origin, &digest, MessageKey::new)
+            .await?;
+        tx.commit().await.map_err(discard_database_error)?;
+        Ok(result)
+    }
+
+    fn inserted(key: MessageKey) -> AliasResolution {
+        AliasResolution::Aliased(AliasOutcome::Inserted(key))
+    }
+
+    fn existing(key: MessageKey) -> AliasResolution {
+        AliasResolution::Aliased(AliasOutcome::Existing(key))
+    }
+
+    fn digest(byte: u8) -> SemanticDigest {
+        SemanticDigest::from_storage(1, [byte; 32]).expect("valid semantic digest fixture")
+    }
+
+    fn sender() -> BareJid {
+        "romeo@example.com"
+            .parse()
+            .expect("fixture is a valid bare JID")
+    }
+
+    fn target() -> NormalizedTarget {
+        NormalizedTarget::Full(
+            "juliet@example.com/laptop"
+                .parse()
+                .expect("fixture is a valid full JID"),
+        )
+    }
+
+    fn timestamp(second: u32) -> DateTime<Utc> {
+        Utc.with_ymd_and_hms(2026, 1, 2, 3, 4, second)
+            .single()
+            .expect("fixture timestamp is valid")
+    }
+
+    struct Fixture {
+        store: PostgresIngressSubstrate,
+        db: Database,
+        admin: sqlx::PgPool,
+        schema: String,
+        schema_url: String,
+    }
+
+    impl Fixture {
+        async fn open(test_name: &str) -> Option<Self> {
+            let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+                eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (ingress substrate)");
+                return None;
+            };
+            let schema = format!(
+                "waddle_test_ingress_{test_name}_{}",
+                Uuid::new_v4().simple()
+            );
+            let admin = sqlx::PgPool::connect(&database_url)
+                .await
+                .expect("connect postgres admin pool");
+            sqlx::query(&format!("CREATE SCHEMA {schema}"))
+                .execute(&admin)
+                .await
+                .expect("create isolated postgres schema");
+            let schema_url = postgres_url_with_search_path(&database_url, &schema);
+            let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, schema_url.clone());
+            config.pool_size = 10;
+            let db = Database::from_config("ingress-substrate-test", &config)
+                .await
+                .expect("open isolated postgres database");
+            MigrationRunner::single()
+                .run(&db)
+                .await
+                .expect("apply migrations to isolated schema");
+            let store =
+                PostgresIngressSubstrate::open(db.clone()).expect("open Postgres substrate");
+            Some(Self {
+                store,
+                db,
+                admin,
+                schema,
+                schema_url,
+            })
+        }
+
+        async fn close(self) {
+            drop(self.store);
+            drop(self.db);
+            sqlx::query(&format!("DROP SCHEMA {} CASCADE", self.schema))
+                .execute(&self.admin)
+                .await
+                .expect("drop isolated postgres schema");
+        }
+
+        async fn record_message(&self) -> MessageKey {
+            let key = MessageKey::new();
+            let mut tx = self.store.begin().await.expect("begin message insert");
+            self.store
+                .record_message(&mut tx, key, &digest(1), None)
+                .await
+                .expect("record message");
+            tx.commit().await.expect("commit message insert");
+            key
+        }
+
+        async fn terminalize(&self, key: MessageKey, terminal_at: DateTime<Utc>) {
+            let mut tx = self.store.begin().await.expect("begin terminalize");
+            assert_eq!(
+                self.store
+                    .terminalize_message(&mut tx, key, terminal_at)
+                    .await
+                    .expect("terminalize message"),
+                TerminalizeOutcome::Terminalized
+            );
+            tx.commit().await.expect("commit terminalize");
+        }
+
+        async fn record_terminal_messages(
+            &self,
+            count: usize,
+            first_terminal_at: DateTime<Utc>,
+        ) -> Vec<MessageKey> {
+            let mut tx = self.store.begin().await.expect("begin message seed");
+            let mut keys = Vec::with_capacity(count);
+            for index in 0..count {
+                let key = MessageKey::new();
+                self.store
+                    .record_message(&mut tx, key, &digest(1), None)
+                    .await
+                    .expect("record seeded message");
+                assert_eq!(
+                    self.store
+                        .terminalize_message(
+                            &mut tx,
+                            key,
+                            first_terminal_at + Duration::milliseconds(index as i64),
+                        )
+                        .await
+                        .expect("terminalize seeded message"),
+                    TerminalizeOutcome::Terminalized
+                );
+                keys.push(key);
+            }
+            tx.commit().await.expect("commit message seed");
+            keys
+        }
+
+        async fn count(&self, table: &str) -> i64 {
+            let conn = self.db.guard().await.expect("database guard");
+            let mut rows = conn
+                .query(&format!("SELECT COUNT(*) FROM {table}"), ())
+                .await
+                .expect("count ingress rows");
+            let row = rows
+                .next()
+                .await
+                .expect("read count row")
+                .expect("count row exists");
+            row.get(0).expect("decode count")
+        }
+
+        async fn terminal_is(&self, key: MessageKey, expected: DateTime<Utc>) -> bool {
+            let conn = self.db.guard().await.expect("database guard");
+            let mut rows = conn
+                .query(
+                    "SELECT terminal_at = ?::timestamptz FROM ingress_messages WHERE message_key = ?::uuid",
+                    crate::db_params![expected.to_rfc3339(), key.to_storage().to_string()],
+                )
+                .await
+                .expect("read terminal time");
+            let row = rows
+                .next()
+                .await
+                .expect("read terminal row")
+                .expect("message row exists");
+            row.get(0).expect("decode terminal comparison")
+        }
+    }
+
+    fn postgres_url_with_search_path(database_url: &str, schema: &str) -> String {
+        let mut url = url::Url::parse(database_url).expect("parse postgres URL");
+        let retained: Vec<(String, String)> = url
+            .query_pairs()
+            .filter(|(key, _)| key != "options")
+            .map(|(key, value)| (key.into_owned(), value.into_owned()))
+            .collect();
+        url.query_pairs_mut()
+            .clear()
+            .extend_pairs(retained.iter().map(|(key, value)| (key, value)))
+            .append_pair("options", &format!("-c search_path={schema}"));
+        url.to_string()
+    }
+}

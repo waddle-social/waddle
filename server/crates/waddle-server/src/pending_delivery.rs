@@ -67,7 +67,7 @@ pub(crate) use flush::FLUSH_BATCH_SIZE;
 
 /// Open the pending_delivery storage for cluster mode (ADR-0017 Phase 3
 /// Slice 5 FIX 3, council-adjudicated) — mirrors
-/// `sm_persistence::open_for_cluster_mode`'s identical
+/// `sm::persistence::open_for_cluster_mode`'s identical
 /// co-location-then-construct pattern, one table over.
 ///
 /// When clustering is enabled and this storage opens a Postgres pool, its

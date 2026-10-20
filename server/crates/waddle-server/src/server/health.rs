@@ -594,8 +594,8 @@ mod readiness_generation_tests {
         let occupant_id_secret =
             OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
                 .expect("test occupant-id secret meets length floor");
-        let room_registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
-            waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(
+        let room_registry = waddle_xmpp::muc::room::registry_actor::RoomRegistryActor::spawn(
+            waddle_xmpp::muc::room::registry_actor::RoomRegistryActor::new(
                 muc_domain.to_string(),
                 occupant_id_secret.clone(),
             ),
@@ -609,7 +609,7 @@ mod readiness_generation_tests {
             blob_storage,
             inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
             spaces_metadata_store: Arc::new(
-                crate::spaces_metadata::InMemorySpacesMetadataStore::new(),
+                crate::spaces::metadata::InMemorySpacesMetadataStore::new(),
             ),
             channel_space_link_store: Arc::new(
                 crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),

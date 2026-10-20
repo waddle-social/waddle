@@ -1133,7 +1133,7 @@ mod tests {
         ApiSecret, CallId, Identity, JoinToken, Jti, Jwt, MediaCapabilities, SfuError, SfuService,
         TurnCredential, TurnHost, WebsocketUrl,
     };
-    use waddle_xmpp::muc::room_actor::UpsertMujiPresence;
+    use waddle_xmpp::muc::room::actor::UpsertMujiPresence;
     use waddle_xmpp::protocol::frame::{parse_frame, InboundFrame};
     use waddle_xmpp::registry::OutboundStanza;
     use waddle_xmpp::xep::xep0167::MediaKind;
@@ -1308,8 +1308,8 @@ mod tests {
             .append(description)
             .append(
                 Element::builder(
-                    waddle_xmpp::xep::xep_waddle_livekit_transport::TRANSPORT_NAME,
-                    waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT,
+                    waddle_xmpp::xep::waddle::livekit_transport::TRANSPORT_NAME,
+                    waddle_xmpp::xep::waddle::livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT,
                 )
                 .build(),
             )

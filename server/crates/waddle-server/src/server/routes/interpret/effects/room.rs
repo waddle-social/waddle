@@ -89,7 +89,7 @@ pub enum ExternalRoomEffect {
         room: BareJid,
         archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId,
         /// None completes recovery for a candidate suppressed by the planning-time gate.
-        candidate: Option<Box<crate::notification_outbox::NotificationCandidate>>,
+        candidate: Option<Box<crate::notification::outbox::NotificationCandidate>>,
         recovery: Option<PlannedGroupchatNotificationRecovery>,
     },
     #[cfg(feature = "clustering")]
@@ -165,7 +165,7 @@ pub(crate) fn message_dependencies(
     room: &BareJid,
     message: &Message,
 ) -> Vec<super::PlanEffectDependency> {
-    super::super::groupchat_archive::extract_room_stanza_id(message, room)
+    super::super::groupchat::archive::extract_room_stanza_id(message, room)
         .map(|id| after_archive(room, &id))
         .into_iter()
         .collect()

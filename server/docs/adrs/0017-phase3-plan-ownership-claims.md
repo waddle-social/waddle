@@ -378,7 +378,7 @@ repo's dead-code hard rule prefers landing an instrument with its first caller o
 Slice 1's Files line) rather than ahead of time in this slice.
 
 **Files**: `server/crates/waddle-server/src/db/backend.rs` (both adapters), `server/
-crates/waddle-server/src/db/mod.rs` (or wherever `DatabaseConfig` lives — control-plane
+crates/waddle-server/src/db.rs` (or wherever `DatabaseConfig` lives — control-plane
 pool field + accessor, plus a `pool_size`/`control_plane_pool.size >= 1` guard so a
 misconfigured zero fails construction immediately instead of hanging on sqlx's
 `acquire_timeout`), `server/crates/waddle-server/src/config.rs` (Helm-surfaced
@@ -564,10 +564,10 @@ fenced write (Slices 4, 7, 8) issues its own inline `SELECT ... FOR SHARE` on it
 
 **`ResumeIdentityProof`'s minting mechanism moves to a dedicated submodule, detailed in
 Slice 6** — the type is declared here (so `ClaimStore`'s signature can name it), but no
-constructor lives in `ownership/mod.rs` itself; see Slice 6 for
+constructor lives in `ownership.rs` itself; see Slice 6 for
 `ownership::resume::verify_resume_identity`.
 
-**Files**: `server/crates/waddle-xmpp/src/ownership/mod.rs` (trait + types, new
+**Files**: `server/crates/waddle-xmpp/src/ownership.rs` (trait + types, new
 module), `server/crates/waddle-xmpp/src/ownership/in_process.rs` (`InProcessClaimStore`
 — single-node semantics identical in contract to the Postgres impl: acquire succeeds
 iff the entity is unclaimed, same-node contention enforced, not idempotent-Ok'd),
@@ -578,7 +578,7 @@ resume call sites exist), `server/crates/waddle-server/src/clustering/claims.rs`
 `#[cfg(feature = "clustering")]`, `PostgresClaimStore` — schema +
 Acquire/Steal-stale/Steal-consent + advisory `fence`/`release`/`release_many`, running
 on the Slice 0 control-plane pool), `server/crates/waddle-server/src/
-clustering/mod.rs` (`pub mod claims;`), `server/crates/waddle-xmpp/src/
+clustering.rs` (`pub mod claims;`), `server/crates/waddle-xmpp/src/
 stream_management/session_registry/claims.rs` + `core.rs` (retrofit onto `Arc<dyn
 ClaimStore>`, per Q2). `clustering/metrics.rs` gains no new instruments this slice —
 the claims-table point-read and `NotOwner` NACK sent/received counters land with
@@ -680,7 +680,7 @@ trivial single-node arm standing in for "no clustering."
 **Files**: `server/crates/waddle-server/src/clustering/claims.rs` (reconciliation
 query + demote/tombstone), new `server/crates/waddle-server/src/clustering/
 self_fence.rs` (isolation detection reusing the swarm's connected-peer gauge from Phase
-2 Slice 1, hysteresis state machine), `server/crates/waddle-server/src/server/mod.rs`
+2 Slice 1, hysteresis state machine), `server/crates/waddle-server/src/server.rs`
 (readiness probe wiring — the HTTP health route needs a shared `AtomicBool`/similar
 flipped by this module), `server/crates/waddle-server/src/clustering/metrics.rs`
 (heartbeat-age gauge, heartbeat-write-latency histogram + alert threshold).
@@ -869,7 +869,7 @@ advisory in the fenced impl. The portable impl and schema remain byte-identical 
 SQLite."*
 
 **Code research finding, confirming the ADR's premise**: the portable
-`DatabaseSmPersistence` (`server/crates/waddle-server/src/sm_persistence.rs`) uses
+`DatabaseSmPersistence` (`server/crates/waddle-server/src/sm/persistence.rs`) uses
 `Database::guard()` (pooled `ConnectionGuard`, one connection per statement) for every
 trait method **except** `store_session_atomic`, which already overrides the trait's
 default with a real `Database::begin()` transaction
@@ -913,13 +913,13 @@ fencing-SELECT SQL shape between `PostgresClaimStore`'s own methods and
 `PostgresFencedSmPersistence`'s inline usage, which is the accepted tradeoff of the two
 types living in the crate that actually owns the transaction.
 
-**Files**: new `server/crates/waddle-server/src/sm_persistence_fenced.rs` (mirrors
+**Files**: new `server/crates/waddle-server/src/sm/persistence/fenced.rs` (mirrors
 `sm_persistence.rs`'s module doc style; sibling file, not a submodule of the portable
 impl — "not a decorator" extends to file layout too), implementing `waddle_xmpp::
 stream_management::persistence::SmPersistenceStorage` for `PostgresFencedSmPersistence`.
 No new schema: same `sm_sessions`/`sm_unacked` tables, byte-identical for SQLite.
 As landed (FIX 5(d) — the full touched-paths list, corrected from the single-file
-description above): `server/crates/waddle-xmpp/src/ownership/mod.rs` (`ensure_claimed`
+description above): `server/crates/waddle-xmpp/src/ownership.rs` (`ensure_claimed`
 trait method + `Entity`'s new `Display` impl, deviation 26/FIX 2),
 `server/crates/waddle-xmpp/src/ownership/in_process.rs` (`InProcessClaimStore`'s
 `ensure_claimed`, and its claim map widened to also track each claim's owning
@@ -935,7 +935,7 @@ waddle-server/src/clustering/self_fence.rs` (`NodeLeaseRunConfig` gains
 every `identity = fresh` reassignment — the Slice 4+ follow-up plumbing note below,
 now landed rather than merely flagged), `server/crates/waddle-server/src/lib.rs`
 (`#[cfg(feature = "clustering")] pub mod sm_persistence_fenced;`),
-`server/crates/waddle-server/src/server/mod.rs` (`start_with_config` threads
+`server/crates/waddle-server/src/server.rs` (`start_with_config` threads
 `start_if_enabled`'s returned `ClusteringHandles` onto `AppStateDeps`),
 `server/crates/waddle-server/src/server/state.rs` (`AppState`/`AppStateDeps` gain
 `clustering_claims: ClusteringHandles`), `server/crates/waddle-server/src/server/
@@ -944,7 +944,7 @@ http.rs` (`create_sm_session_registry` takes the `ClusteringHandles` and the glo
 sm_persistence.rs` (`open_for_cluster_mode` dispatcher — the driver-selection function
 described above, now also carrying FIX 4's co-location check and a
 `crate::db::redact_database_url` helper for safely embedding DSNs in the resulting
-error), `server/crates/waddle-server/src/db/mod.rs` (`Database` gains a
+error), `server/crates/waddle-server/src/db.rs` (`Database` gains a
 `database_url` field + `Database::database_url()` accessor, deviation 27).
 
 **`ClusteringHandles` (FIX 8(c)'s plumbing, now landed)**: `start_if_enabled` returns
@@ -1084,13 +1084,13 @@ janitor is the *guaranteed* flush path, the flush poke remains the optimization)
 > implementation), overridden by `DatabasePendingDeliveryStorage` only when clustering
 > is enabled AND this storage's own database is co-located with the clustering global
 > database (`pending_delivery::open_for_cluster_mode`, mirroring
-> `sm_persistence::open_for_cluster_mode`'s identical co-location-then-construct
+> `sm::persistence::open_for_cluster_mode`'s identical co-location-then-construct
 > pattern one table over — a mismatch fails startup with the new
 > `PendingStorageError::ClusterColocationMismatch`, never a silent unfenced fallback
 > under a misconfigured co-location). The fenced path runs the `SELECT ... FOR SHARE`
 > against `clustering_claims` and the `pending_delivery` INSERT in one
 > `Database::begin()` transaction — the exact shape
-> `sm_persistence_fenced::PostgresFencedSmPersistence::assert_fenced` already
+> `sm::persistence::fenced::PostgresFencedSmPersistence::assert_fenced` already
 > establishes, duplicated here (not shared via a generic helper) for the same
 > "the lock and the write it protects must share one connection, and this impl owns its
 > own inline fencing SQL" reason Slice 4's own design note gives. `origin_stream_id` is
@@ -1395,7 +1395,7 @@ affiliation-list read/write), `room_registry.rs` / `room_registry_actor.rs` /
 
 **Files, amended (FIX 2–9 pass, deviations 66–73)**: `server/crates/waddle-xmpp/
 src/muc/durable.rs` (`RoomClaimFenceContext`, ready-entry cache publication),
-`server/crates/waddle-xmpp/src/ownership/mod.rs` (`Entity` hand-written
+`server/crates/waddle-xmpp/src/ownership.rs` (`Entity` hand-written
 `Deserialize`, `ENTITY_ID_MAX_LEN`), `server/crates/waddle-server/src/
 muc_durable.rs` (exact actor-owned durable fencing and legacy cache checks),
 `server/crates/waddle-server/src/server/topology.rs`
@@ -1403,7 +1403,7 @@ muc_durable.rs` (exact actor-owned durable fencing and legacy cache checks),
 `server/crates/waddle-server/src/server/routes/websocket/cleanup.rs`
 (`get_or_create_room_actor`'s typed `Result`), `server/crates/waddle-server/src/
 server/routes/websocket/handlers/presence/muc.rs` (join-path error mapping),
-`server/crates/waddle-xmpp/src/muc/room_registry_actor.rs`
+`server/crates/waddle-xmpp/src/muc/room/registry_actor.rs`
 (`live_room` async + claim release), `server/crates/waddle-server/src/
 clustering/{local_claims.rs,mod.rs}` (`health_check` fix,
 `demote_room_actor`, `MucDurableStoreInit`), `server/crates/waddle-server/src/
@@ -1549,7 +1549,7 @@ slice deletes, per the XEP-conformance hard rule and the corrected Q8 finding)**
 
 - `server/crates/waddle-server/src/server/routes/websocket/handlers/iq/isr_token.rs` —
   **delete** the module (`handle_isr_token_request_iq`, the live `create_token` caller).
-- `server/crates/waddle-server/src/server/routes/websocket/handlers/iq/mod.rs` —
+- `server/crates/waddle-server/src/server/routes/websocket/handlers/iq.rs` —
   **delete** the dispatch: the `mod isr_token;` declaration (`:92`), the
   `handle_isr_token_request_iq` import (`:140`), the `is_isr_token_request` match and
   call (`:302-303`), and the now-unused
@@ -1762,7 +1762,7 @@ cancellation path is **the tested mechanism feeding `claims_abandoned_on_drain`*
 entity whose final handshake/write was cancelled mid-drain is counted abandoned (left
 fenced-safe for the orphan reaper), not silently dropped from both counters.
 
-**Files**: `server/crates/waddle-server/src/server/mod.rs` (`stop_token`, around line
+**Files**: `server/crates/waddle-server/src/server.rs` (`stop_token`, around line
 182 where `clustering::start_if_enabled` is invoked — drain sequencing hooks into the
 same shutdown path `spawn_graceful_shutdown_drain` in `session_janitors.rs` already
 uses for the Q6 SM drain, line 723), `server/crates/waddle-server/src/clustering/
@@ -1992,7 +1992,7 @@ line below names its module and test function(s).
    SELECT.**
    `muc::room_registry_actor::tests::restore_durable_room_state_applies_before_any_join`
    (restore-before-join, config/affiliations/subject) and
-   `muc_durable::tests::check_fenced_fanout_returns_false_immediately_after_a_steal_commits`
+   `muc::durable::tests::check_fenced_fanout_returns_false_immediately_after_a_steal_commits`
    (the deposed owner's very next fenced pre-fan-out SELECT returns false immediately
    after a steal commits — the plan's own Slice 7 Tests entry, quoted verbatim in that
    test's doc comment).
@@ -2238,7 +2238,7 @@ harness (it is a single-node concern).
     third-node-socket variant requires routed cross-node stanza delivery, which the
     ADR's Implementation Plan assigns to Phase 4 and this phase's Non-goals exclude.
 15. **`ResumeIdentityProof` minting relocated into `ownership/resume.rs`** (blocker
-    fix 3): the originally drafted shape (field private to `ownership/mod.rs`, minted
+    fix 3): the originally drafted shape (field private to `ownership.rs`, minted
     from `session_registry/` and `waddle-server`) cannot compile across module/crate
     privacy boundaries. The identity check itself —
     `ownership::resume::verify_resume_identity(sasl_identity, snapshot_owner) ->
@@ -2446,7 +2446,7 @@ harness (it is a single-node concern).
     `WADDLE_XMPP_SM_DATABASE_URL` (or its `WADDLE_DATABASE_URL` fallback) — its fencing
     `SELECT ... FOR SHARE` targets `clustering_claims`, which lives in the clustering
     global database, so a second, independently-resolved database might not even have
-    that table. `sm_persistence::open_for_cluster_mode` now takes the same `Database`
+    that table. `sm::persistence::open_for_cluster_mode` now takes the same `Database`
     handle `clustering::start_if_enabled` itself received (`db_pool.global()`) and
     constructs `PostgresFencedSmPersistence` by cloning it, never by opening a fresh
     pool from the resolved SM URL. Before that clone happens, the resolved SM
@@ -2655,7 +2655,7 @@ harness (it is a single-node concern).
 36. **Graceful drain is untouched this slice, confirmed against the plan's own Files
     lists**: Slice 5's Files/Tests lists name `session_registry`, the SM-expiry janitor,
     the new orphan reaper, `sm_promotion`/`pending.rs`, and `pending_delivery/flush.rs`
-    — none of `session_janitors.rs::spawn_graceful_shutdown_drain`, `server/mod.rs`'s
+    — none of `session_janitors.rs::spawn_graceful_shutdown_drain`, `server.rs`'s
     drain sequencing, or `ClaimStore::release_many` batching. Slice 10's own Files list
     ("Dependencies: Slice 5... for 'final fenced writes' to mean anything") is the
     slice that actually wires per-entity release-after-final-write into the drain path.
@@ -2905,7 +2905,7 @@ same "as-landed" style, numbered onward from 43.
     load-bearing wedge-avoidance mechanism the original design intended.
 50. **The owner-unreachable held-response window now distinguishes its two terminal
     conditions instead of collapsing them onto one (medium-severity conformance fix,
-    `ownership/mod.rs`/`in_process.rs`/`clustering/claims.rs`/`cross_node_resume.rs`)**:
+    `ownership.rs`/`in_process.rs`/`clustering/claims.rs`/`cross_node_resume.rs`)**:
     `ClaimSnapshot` gains a new `owner_lease_fresh: bool` field — for
     `PostgresClaimStore::current_claim`, an unlocked, advisory read of the exact same
     `NOT EXISTS`-over-`clustering_nodes` owner-stale predicate `steal_stale`'s
@@ -2928,7 +2928,7 @@ same "as-landed" style, numbered onward from 43.
     `owner_lease_expired_past_the_handshake_window_fails_with_not_found` commits that
     same row `expired = true` directly and asserts the new `NotFound` outcome).
 51. **`SmSessionId` enforces a 128-byte wire bound at deserialization (medium-severity
-    conformance fix, `pending_delivery/mod.rs`)**: `RelayResumeSteal` (the relay message
+    conformance fix, `pending_delivery.rs`)**: `RelayResumeSteal` (the relay message
     carrying this type across the wire) is not a stanza, so it never passes through the
     bounded XML stanza codec (`clustering::codec`'s `MAX_REMOTE_XML_BYTES` et al.) —
     every non-stanza relay message needs its own field-level bound rather than relying
@@ -3164,7 +3164,7 @@ same "as-landed" style, numbered onward from 43.
     is constructed empty at `clustering::start_if_enabled` time (mirroring
     `local_claims`/`resume_bridge`'s exact fill-in-later-cell pattern: the
     MUC room registry does not exist yet at that point in startup) and
-    wired later in `server/mod.rs` once the registry is spawned, via
+    wired later in `server.rs` once the registry is spawned, via
     `RoomRegistry::wire_clustering_claims`'s sibling call
     `room_local_claims.wire(room_registry.clone())`. The Demote ask itself
     (`Demote`/`DemoteReply` in `clustering::relay`, plus `RelayHandle::
@@ -3188,7 +3188,7 @@ same "as-landed" style, numbered onward from 43.
     tables/restore/fenced-backstop/Demote-ask machinery is wired only when
     `clustering::start_if_enabled` produces a live claim pair (clustering
     enabled, Postgres, the `clustering` Cargo feature compiled in), exactly
-    the same three-way gate `sm_persistence::open_for_cluster_mode`
+    the same three-way gate `sm::persistence::open_for_cluster_mode`
     already uses. Schema (PROPOSED, no ADR-locked DDL exists — following
     the `clustering_` prefix + ensure-schema-on-the-store convention Slice
     1's `clustering_nodes`/`clustering_claims` already establish, since no
@@ -3339,7 +3339,7 @@ record the retained work.
     another node's legitimate steal-intent for an entity this process can
     no longer act on at all.
 
-    Tests: `room_registry_actor::tests::ownership_claims_tests::
+    Tests: `room::registry_actor::tests::ownership_claims_tests::
     dead_actor_detection_releases_the_orphaned_claim` (kill the actor,
     trigger `live_room` via `GetRoom`, assert the claim store shows the
     claim released AND that a different node identity can now acquire
@@ -3388,7 +3388,7 @@ record the retained work.
     invite grant and rollback errors whose public variants encode that their
     affiliation writes failed before applying memory.
 
-    Test: `room_actor::tests::
+    Test: `room::actor::tests::
     join_is_refused_while_restore_is_pending_then_succeeds_once_recovered_with_no_ban_lost`
     — a `FlakyThenRecoveringStore` fails the initial load and the first
     retry, then succeeds on the second retry with a durable state
@@ -3767,7 +3767,7 @@ record the retained work.
     it with a different mechanism that produces a weaker (but still
     loss-free) guarantee. **Scope correction (coordinator ruling):** this
     self-healing-via-`DroppedClosed` behaviour applies to the
-    `route_to_connection.rs` delivery path only. `sm_promotion::promote_one`
+    `route_to_connection.rs` delivery path only. `sm::promotion::promote_one`
     still delivers via `ConnectionRegistry::send_to` and does **not**
     self-evict ghosts on that path — but it is bounded by its own existing
     pending-storage (Archived/Transient) fallback, so this deviation
@@ -3841,7 +3841,7 @@ record the retained work.
     `WireClusteringClaims` (`None` by default — a no-op, correct for every
     single-node deployment and pre-existing test), with the concrete
     `clustering::drain::PostgresRolloutBackoff` implementation constructed
-    and wired at `server/mod.rs` alongside the room registry's other
+    and wired at `server.rs` alongside the room registry's other
     clustering handles. Both paths share one pure, unit-tested decision
     function, `clustering::drain::rollout_backoff_delay`.
 96. **The generic per-entity drain (`clustering::drain::run_shutdown_drain`)
@@ -3881,14 +3881,14 @@ record the retained work.
 98. **`clustering::start_if_enabled`'s return type changed from
     `Result<ClusteringHandles, ClusteringError>` to
     `Result<(ClusteringHandles, ClusteringShutdown), ClusteringError>`**
-    (one call site, `server/mod.rs`; `ClusteringShutdown` is a small
+    (one call site, `server.rs`; `ClusteringShutdown` is a small
     `Option<JoinHandle<()>>` newtype, not a `ClusteringHandles` field,
     because `JoinHandle` is neither `Clone` nor meaningfully `Default` and
     `ClusteringHandles` derives both). Before this slice, `run_node_lease`'s
     task was pure fire-and-forget (`tokio::spawn` with the handle dropped);
     element 4's drain sequence explicitly requires the per-entity drain
     "completing before process exit," not merely racing it in the
-    background. `server/mod.rs` now calls
+    background. `server.rs` now calls
     `clustering_shutdown.await_drain(claim_release_budget + 2s margin)`
     after `http_handle.await` returns (the existing Q6/HTTP exit point) and
     before the Ecdysis lifecycle task teardown — bounded, so a wedged drain

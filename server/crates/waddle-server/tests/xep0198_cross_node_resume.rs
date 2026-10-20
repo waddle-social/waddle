@@ -30,7 +30,7 @@ use tokio::sync::Mutex as AsyncMutex;
 use waddle_server::clustering::claims::{NodeLeaseStore, PostgresClaimStore};
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::pending_delivery::DatabasePendingDeliveryStorage;
-use waddle_server::sm_persistence_fenced::PostgresFencedSmPersistence;
+use waddle_server::sm::persistence::fenced::PostgresFencedSmPersistence;
 use waddle_xmpp::auth::{
     AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
 };

@@ -94,7 +94,7 @@ mod tests {
     };
     use kameo::actor::Spawn;
     use waddle_xmpp::{
-        muc::{room_actor::RoomActor, MucRoom, RoomConfig},
+        muc::{room::actor::RoomActor, MucRoom, RoomConfig},
         pending_delivery::{PendingPayload, PendingRow, PendingRowId},
         xep::xep0421::OccupantIdSecret,
     };

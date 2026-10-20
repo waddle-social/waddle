@@ -1,5 +1,4 @@
 //! The registered socket endpoint retains ingress authority without archive ordering.
-#[path = "live_invitation.rs"]
 mod invitation;
 
 use super::*;

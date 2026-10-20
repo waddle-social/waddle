@@ -63,11 +63,9 @@ use xmpp_parsers::message::MessageType as XmppMessageType;
 use xmpp_parsers::minidom::Element;
 
 #[cfg(feature = "clustering")]
-#[path = "registration_owner_local.rs"]
 mod owner_local;
 
 #[cfg(feature = "clustering")]
-#[path = "registration_remote_retirement.rs"]
 mod remote_retirement;
 
 #[cfg(feature = "clustering")]

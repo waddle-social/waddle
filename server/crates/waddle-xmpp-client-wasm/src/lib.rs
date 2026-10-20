@@ -68,20 +68,7 @@ use waddle_xmpp_client::{
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{future_to_promise, spawn_local};
 
-mod client_account;
-mod client_admin;
-mod client_admin_v2;
-mod client_calls;
-mod client_core;
-mod client_extensions;
-mod client_history;
-mod client_messaging;
-mod client_rooms;
-mod client_social_feed;
-mod client_status_preference;
-mod client_stories;
-mod client_story_reads;
-mod client_xcal;
+mod client;
 mod commands;
 mod conversions;
 mod driver;

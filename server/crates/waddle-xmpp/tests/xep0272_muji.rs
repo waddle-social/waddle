@@ -32,9 +32,9 @@ use waddle_sfu::{
 use waddle_xmpp::protocol::event::{OutboundEvent, StanzaContext};
 use waddle_xmpp::protocol::handlers::jingle::{calls_mixer_jid, JingleHandler};
 use waddle_xmpp::protocol::traits::IqHandler;
+use waddle_xmpp::xep::waddle::livekit_transport::WaddleLiveKitTransport;
 use waddle_xmpp::xep::xep0167::{opus_audio_description, MediaKind};
 use waddle_xmpp::xep::xep0272::{find_muji, Creator, Muji, MujiContent, MujiParseError, NS_MUJI};
-use waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport;
 use waddle_xmpp::Stanza;
 use waddle_xmpp_core::OccupancySessionGeneration;
 use xmpp_parsers::iq::Iq;

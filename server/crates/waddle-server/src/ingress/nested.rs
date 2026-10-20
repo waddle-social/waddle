@@ -237,7 +237,7 @@ impl NestedIngressOperation {
                             Err(_) => SettlementOutcome {
                                 rejection: None,
                                 terminal: Err(
-                                    crate::ingress_uow::IngressUowError::AuthorityStopped.into(),
+                                    crate::ingress::uow::IngressUowError::AuthorityStopped.into(),
                                 ),
                             },
                         }
@@ -257,8 +257,8 @@ async fn consume_host_frames(
     continuation: &NestedContinuation,
     decision: &super::IngressDecision,
     report: &super::ExecutionReport,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
-    use crate::ingress_uow::{CanonicalMessageRepository, IngressUowError};
+) -> Result<(), crate::ingress::uow::IngressUowError> {
+    use crate::ingress::uow::{CanonicalMessageRepository, IngressUowError};
     use crate::server::routes::interpret::{FullJidDeliveryOutcome, SmIngressAppendContext};
     if !report
         .frame_obligations
@@ -310,7 +310,7 @@ async fn consume_host_frames(
                 .iter()
                 .find(|receipt| manifest.contains(receipt, Some(target)))
                 .ok_or(IngressUowError::EffectIntentConflict)?;
-            super::room_manifest_replay::validate_child(&envelope, receipt, target, stanza)?;
+            super::room_manifest::replay::validate_child(&envelope, receipt, target, stanza)?;
             let context = SmIngressAppendContext {
                 message_key: key,
                 receipt: receipt.clone(),
@@ -400,5 +400,4 @@ impl TestGate {
 }
 
 #[cfg(test)]
-#[path = "nested_tests.rs"]
 mod tests;

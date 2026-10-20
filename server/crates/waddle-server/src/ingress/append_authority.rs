@@ -12,19 +12,15 @@ use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 use waddle_xmpp::telemetry::attributes::IngressAppendAuthorizationFailure;
 use waddle_xmpp::Stanza;
 
-#[path = "append_authority_carbons.rs"]
 mod carbons;
 
 #[cfg(test)]
-#[path = "append_authority_carbon_tests.rs"]
 mod carbon_tests;
 
 #[cfg(test)]
-#[path = "append_authority_room_tests.rs"]
 mod room_tests;
 
 #[cfg(all(test, feature = "clustering"))]
-#[path = "append_authority_deferred_tests.rs"]
 mod deferred_tests;
 
 const AUTHORIZATION_READ_TIMEOUT: Duration = Duration::from_millis(250);
@@ -289,7 +285,7 @@ pub(crate) async fn check_canonical_obligation(
     }
     let positions = tokio::time::timeout(
         AUTHORIZATION_READ_TIMEOUT,
-        crate::ingress_uow::ArchiveDispatchRepository::positions_pooled(
+        crate::ingress::uow::ArchiveDispatchRepository::positions_pooled(
             db,
             obligation.message_key,
             &obligation.receipt,
@@ -310,7 +306,7 @@ async fn authorize_direct_sender(
     obligation: &super::identity::IngressAppendObligationRef,
 ) -> Result<(), AppendAuthorityRejection> {
     let (envelope, intents) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
+        crate::ingress::uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
             .await
             .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
     if let Some(intent) = intents.iter().find(|intent| {
@@ -370,7 +366,7 @@ async fn authorize_room_route(
         return Err(AppendAuthorityRejection::NotMessage);
     };
     let (envelope, intents) =
-        crate::ingress_uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
+        crate::ingress::uow::CarbonReceiptRepository::load_authority(db, obligation.message_key)
             .await
             .map_err(|_| AppendAuthorityRejection::CanonicalReadFailed)?;
     let target = message
@@ -429,7 +425,7 @@ pub(crate) async fn check_canonical_sender(
 ) -> Result<(), AppendAuthorityRejection> {
     let sender = tokio::time::timeout(
         AUTHORIZATION_READ_TIMEOUT,
-        crate::ingress_substrate::canonical_sender_pooled(db, message_key),
+        crate::ingress::substrate::canonical_sender_pooled(db, message_key),
     )
     .await
     .map_err(|_| AppendAuthorityRejection::CanonicalReadTimedOut)?

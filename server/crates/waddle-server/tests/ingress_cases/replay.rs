@@ -1,4 +1,5 @@
 use super::*;
+use waddle_server::ingress::uow::SmIngressStreamRepository;
 use waddle_server::ingress::{
     effects::{
         delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
@@ -8,7 +9,6 @@ use waddle_server::ingress::{
     execute::execute_effects,
     Deps, ExternalEffect, ImmediateSink, IngressStreamIdentity,
 };
-use waddle_server::ingress_uow::SmIngressStreamRepository;
 use waddle_xmpp::{ingress::WireHandledCount, pending_delivery::SmSessionId};
 
 pub(super) async fn resumable_identity(

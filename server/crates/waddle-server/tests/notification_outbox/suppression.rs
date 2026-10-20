@@ -4,7 +4,7 @@
 
 use crate::support::*;
 use jid::{BareJid, Jid};
-use waddle_server::notification_outbox::*;
+use waddle_server::notification::outbox::*;
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::NS_DATA_FORMS;
 use waddle_xmpp_core::xep0359::StanzaId;
@@ -83,22 +83,22 @@ async fn assert_inbox_witness_unchanged(
 /// Upsert a per-conversation rich-payload opt-in for a DM so the
 /// drain's T1 evaluator resolves rich XEP-0357 summaries.
 async fn opt_in_rich_payload(
-    projection: &waddle_server::notification_settings_projection::NotificationSettingsProjectionStore,
+    projection: &waddle_server::notification::settings_projection::NotificationSettingsProjectionStore,
     recipient: &BareJid,
     conversation: &BareJid,
 ) {
     projection
-        .upsert(&waddle_server::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&waddle_server::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: recipient.clone(),
             conversation_jid: conversation.clone(),
             conversation_kind:
-                waddle_server::notification_settings_projection::ConversationKind::Direct,
+                waddle_server::notification::settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::Always,
             rich_payload_opt_in: true,
             source_version: 1,
             updated_at_ms: 1,
             source:
-                waddle_server::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                waddle_server::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: conversation.clone(),
         })
         .await
@@ -124,14 +124,14 @@ async fn t1_xep0492_never_records_typed_suppressed_reason() {
     // Persist a `<never/>` notification setting for the recipient
     // against `sender`'s DM conversation.
     projection
-        .upsert(&waddle_server::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&waddle_server::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: recipient.clone(),
             conversation_jid: sender.clone(),
             conversation_kind:
-                waddle_server::notification_settings_projection::ConversationKind::Direct,
+                waddle_server::notification::settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::Never,
             source:
-                waddle_server::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                waddle_server::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: sender.clone(),
             updated_at_ms: 1,
             rich_payload_opt_in: false,
@@ -202,14 +202,14 @@ async fn t1_xep0492_on_mention_miss_records_typed_suppressed_reason() {
     let sender = bare("bob@example.com");
 
     projection
-        .upsert(&waddle_server::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&waddle_server::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: recipient.clone(),
             conversation_jid: sender.clone(),
             conversation_kind:
-                waddle_server::notification_settings_projection::ConversationKind::Direct,
+                waddle_server::notification::settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::OnMention,
             source:
-                waddle_server::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                waddle_server::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: sender.clone(),
             updated_at_ms: 1,
             rich_payload_opt_in: false,

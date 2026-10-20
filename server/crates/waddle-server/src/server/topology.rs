@@ -11,7 +11,7 @@ use kameo::actor::ActorRef;
 use std::sync::Arc;
 use tracing::{info, warn};
 use waddle_xmpp::muc::{
-    room_registry_actor::{GetOrCreateRoom, RoomRegistryActor},
+    room::registry_actor::{GetOrCreateRoom, RoomRegistryActor},
     RoomConfig,
 };
 use waddle_xmpp::pubsub::{NodeConfig, PubSubItem, PubSubStorage};
@@ -208,7 +208,7 @@ async fn seed_initial_xmpp_topology(
     // the existing publisher gates accept their publishes. Mirrors
     // the spaces seed below but scoped to the community service.
     for owner in state.server_owner_jids.iter() {
-        crate::spaces_pubsub_seed::seed_owner_on_all_nodes(pubsub_storage, &community_jid, owner)
+        crate::spaces::pubsub_seed::seed_owner_on_all_nodes(pubsub_storage, &community_jid, owner)
             .await
             .map_err(|error| {
                 anyhow::anyhow!("failed to seed community service owner affiliations: {error}")
@@ -257,7 +257,9 @@ async fn seed_initial_xmpp_topology(
             // its own caller's `?`, `seed_spaces_admin_affiliations` too)
             // on the very first already-claimed-elsewhere room.
             Err(kameo::error::SendError::HandlerError(
-                waddle_xmpp::muc::room_registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(_),
+                waddle_xmpp::muc::room::registry_actor::RoomRegistryError::ClaimHeldByAnotherNode(
+                    _,
+                ),
             )) => {
                 tracing::info!(
                     channel = %channel_record.id,
@@ -371,7 +373,7 @@ async fn seed_spaces_admin_affiliations(
         }
     };
     for node in &nodes {
-        crate::spaces_pubsub_seed::seed_owners_on_node(
+        crate::spaces::pubsub_seed::seed_owners_on_node(
             pubsub_storage,
             spaces_jid,
             node,
@@ -388,7 +390,7 @@ mod tests {
     };
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
     use std::sync::Arc;
-    use waddle_xmpp::muc::room_registry_actor::WireClusteringClaims;
+    use waddle_xmpp::muc::room::registry_actor::WireClusteringClaims;
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };

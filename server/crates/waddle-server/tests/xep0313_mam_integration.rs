@@ -10,7 +10,7 @@ use tokio::sync::Mutex;
 use waddle_server::{
     config::LineageConfig,
     db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_uow::{IngressUnitOfWork, MamArchiveRepository},
+    ingress::uow::{IngressUnitOfWork, MamArchiveRepository},
 };
 use waddle_xmpp::mam::{
     ArchivedMessage, MamArchiveKind, MamQuery, MamStorage, MamStorageError, MamTxStoreOutcome,

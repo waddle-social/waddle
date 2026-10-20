@@ -95,7 +95,7 @@ async fn execute_recovery(
     action: super::ImmediateAction,
     deps: &super::super::Deps<'_>,
 ) -> EffectOutcome {
-    use waddle_xmpp::muc::room_registry_actor::{DemoteRoomIfExactActor, GetOrCreateRoom};
+    use waddle_xmpp::muc::room::registry_actor::{DemoteRoomIfExactActor, GetOrCreateRoom};
     let Some(registry) = deps.room_registry else {
         return EffectOutcome::Unavailable;
     };

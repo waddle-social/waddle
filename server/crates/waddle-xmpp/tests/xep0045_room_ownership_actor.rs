@@ -17,14 +17,14 @@ use waddle_xmpp::muc::durable::{
     DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext, RoomCommitError,
     RoomCommitFuture, RoomCommittedCoordinates, RoomDurableMutation, RoomLifecycleId, RoomRevision,
 };
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     ConfigEffectPlan, DurableRestoreReadiness, GetAffiliation, GetConfig,
     GetDurableRestoreReadiness, GetRoomSealState, GetRoomSnapshot, Join, JoinAffiliationGrant,
     JoinWithAffiliation, OccupantCount, ResolverAffiliationSyncOutcome, RestoreDurableRoomState,
     RoomActor, RoomActorError, RoomMutationError, RoomSealState, SyncResolverAffiliation,
     UpdateConfig,
 };
-use waddle_xmpp::muc::room_registry_actor::{
+use waddle_xmpp::muc::room::registry_actor::{
     CreateRoom, GetOrCreateRoom, RoomCreation, RoomRegistryActor, RoomRegistryError,
     WireClusteringClaims,
 };

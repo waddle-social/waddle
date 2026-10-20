@@ -7,12 +7,12 @@ use alias_support::*;
 use ingress_support::IngressFixture;
 use jid::BareJid;
 use waddle_server::{
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::CanonicalMessageRepository,
     ingress::{
         commit::commit_submission, ExternalEffect, IngressDecision, IngressDecisionClass,
         IngressSubmission,
     },
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::CanonicalMessageRepository,
 };
 use waddle_xmpp::{
     ingress::{DigestContext, IngressEffectIntent, NormalizedTarget},
@@ -376,8 +376,8 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
         test_support::websocket_state_with_ingress,
     };
     use waddle_xmpp::muc::{
-        room_actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
-        room_registry_actor::CreateRoom,
+        room::actor::{Join, LeaveAttemptId, LeaveByRealJid, LeaveOrigin, LeaveSessionSelector},
+        room::registry_actor::CreateRoom,
     };
     let room: BareJid = "room@muc.example.com".parse().expect("room");
     let pool = Arc::new(
@@ -477,7 +477,7 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
         .begin()
         .await
         .expect("inspect frozen sender child");
-    let envelope = waddle_server::ingress_uow::CanonicalMessageRepository::load_envelope(
+    let envelope = waddle_server::ingress::uow::CanonicalMessageRepository::load_envelope(
         &mut tx,
         first.message_key.expect("original key"),
     )
@@ -600,7 +600,7 @@ async fn tombstoned_alias(fixture: IngressFixture) {
         .expect("original");
     assert_eq!(wire_messages(&fixture, &first).await.len(), 2);
     let mut tx = fixture.uow.begin().await.expect("retraction transaction");
-    waddle_server::ingress_uow::MamArchiveRepository::replace_with_tombstone(
+    waddle_server::ingress::uow::MamArchiveRepository::replace_with_tombstone(
         &mut tx,
         fixture.principal.bare_jid(),
         &first.archive_ids[0].1,

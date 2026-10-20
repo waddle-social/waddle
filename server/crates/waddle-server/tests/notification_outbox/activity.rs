@@ -4,10 +4,10 @@
 
 use crate::support::*;
 use jid::{BareJid, Jid};
-use waddle_server::notification_activity::{
+use waddle_server::notification::activity::{
     NotificationActivity, NotificationActivityError, NotificationActivityReader,
 };
-use waddle_server::notification_outbox::*;
+use waddle_server::notification::outbox::*;
 use waddle_xmpp_core::xep0359::StanzaId;
 
 /// Process-global mutex used to serialize tests that mutate
@@ -53,7 +53,7 @@ fn active_channel_mention_candidate_for(
 /// per-`(owner, conversation)` read calls so the slice 2b T0/T1
 /// stage-split and per-batch cache can be asserted.
 struct CountingActivityReader {
-    inner: waddle_server::notification_activity::NotificationActivityStore,
+    inner: waddle_server::notification::activity::NotificationActivityStore,
     calls: std::sync::atomic::AtomicUsize,
 }
 
@@ -109,7 +109,7 @@ async fn t1_active_channel_mention_with_recent_activity_delivers() {
         .record_chat_state(
             &recipient,
             &room,
-            waddle_server::notification_activity::NotificationChatState::Active,
+            waddle_server::notification::activity::NotificationChatState::Active,
             waddle_server::time::now_ms(),
         )
         .await
@@ -183,7 +183,7 @@ async fn t1_active_channel_mention_future_timestamp_does_not_extend_ttl_window()
         .record_chat_state(
             &recipient,
             &room,
-            waddle_server::notification_activity::NotificationChatState::Active,
+            waddle_server::notification::activity::NotificationChatState::Active,
             future_ms,
         )
         .await

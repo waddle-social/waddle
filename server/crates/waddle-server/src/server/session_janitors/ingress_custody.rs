@@ -6,7 +6,7 @@ use waddle_xmpp::stream_management::persistence::IngressCustodyDisposition;
 use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmIngressAppendKey};
 
 use crate::server::routes::websocket::WebSocketState;
-use crate::sm_promotion::{
+use crate::sm::promotion::{
     promote_ingress_custody, recent_tombstones_for_promotion,
     scrub_pending_for_tombstones_recorded_during_promotion, PromotedOutcome, PromotionScrubOutcome,
     TerminalOverflowPromotionDeps,

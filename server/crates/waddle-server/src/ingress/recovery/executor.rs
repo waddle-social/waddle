@@ -1,0 +1,576 @@
+//! Freeze recorded authority, release the lock, then replay existing effect arms.
+
+use std::time::Duration;
+
+use chrono::{DateTime, Utc};
+use jid::BareJid;
+use tokio::time::Instant;
+use waddle_xmpp::ingress::{IngressEffectIntent, IngressEffectKind, MessageKey};
+use waddle_xmpp::protocol::Blocklist;
+
+use crate::{
+    db::Database,
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::{
+        CanonicalMessageRepository, DeliveryProgressRepository, EffectIntentRepository,
+        EffectReceiptRepository, IngressUnitOfWork, IngressUowError, IngressUowTransaction,
+    },
+};
+
+use super::super::{recovery::rebuild, Deps, EffectReceiptKey, ImmediateSink, RouteProgress};
+use crate::server::routes::interpret::DeliveryExecutionContext;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(in crate::ingress) enum AttemptClassification {
+    Evaluable,
+    Inconclusive,
+}
+
+pub(in crate::ingress) enum RowRecovery {
+    Vanished,
+    NothingPending,
+    Executed {
+        unrecoverable: Vec<IngressEffectKind>,
+        pending: Vec<IngressEffectKind>,
+        classification: AttemptClassification,
+        /// Nothing left on the row can make progress until its evidence changes.
+        unsupported: bool,
+    },
+}
+
+struct FrozenRecovery {
+    envelope: MessageEnvelope,
+    created_at: DateTime<Utc>,
+    recorded: Vec<IngressEffectIntent>,
+    unreceipted: Vec<IngressEffectIntent>,
+    route_progress: Vec<RouteProgress>,
+}
+
+/// Freeze under the canonical lock, release it, rebuild, then run the arms.
+/// Progress accounting is the caller's: it compares receipt counts around this
+/// call so a row deadline cancelling any await here cannot lose credit.
+pub(in crate::ingress) async fn recover_row(
+    database: &Database,
+    uow: &IngressUnitOfWork,
+    deps: &Deps<'_>,
+    key: MessageKey,
+    deadline: Instant,
+) -> Result<RowRecovery, IngressUowError> {
+    #[cfg(test)]
+    record_attempt(key);
+    let Some(mut frozen) = freeze(uow, key).await? else {
+        return Ok(RowRecovery::Vanished);
+    };
+    if frozen.unreceipted.is_empty() {
+        return Ok(RowRecovery::NothingPending);
+    }
+    #[cfg(test)]
+    super::super::execute::test_hooks::after_recovery_freeze(key).await;
+    let mut classification = AttemptClassification::Evaluable;
+    let departed = discharge_departed_copies(uow, deps, key, &mut frozen).await?;
+    if departed.classification == AttemptClassification::Inconclusive {
+        classification = AttemptClassification::Inconclusive;
+    }
+    // A copy this attempt could neither deliver nor settle keeps the row
+    // RETRYABLE: the settlement's evidence is time-varying, so "nothing can
+    // progress until the evidence changes" — which is all the unsupported cache
+    // means — is simply false for it (#1803).
+    let still_owed = departed.still_owed;
+    // The MUC route receipts this row is still waiting for, kept so the
+    // post-execution check below can tell whether a rebuilt copy landed.
+    let owed_muc_receipts: Vec<EffectReceiptKey> = frozen
+        .route_progress
+        .iter()
+        .filter(|progress| progress.room().is_some())
+        .map(|progress| progress.receipt.clone())
+        .collect();
+    let pending = pending_kinds(&frozen.unreceipted);
+    let blocked_recipients = blocked_recipients(deps, &frozen).await?;
+    let host_owned_resources = frozen
+        .route_progress
+        .iter()
+        .flat_map(|progress| &progress.fanout)
+        .filter(|target| deps.owns_host_resource(target))
+        .cloned()
+        .collect();
+    let rebuilt = rebuild::rebuild(rebuild::RecoveryInput {
+        key,
+        envelope: &frozen.envelope,
+        created_at: frozen.created_at,
+        recorded: &frozen.recorded,
+        unreceipted: &frozen.unreceipted,
+        route_progress: frozen.route_progress,
+        host_owned_resources,
+        departed_occupants: departed.occupants,
+        blocked_recipients: &blocked_recipients,
+    })?;
+    record_discarded_receipts(uow, key, &rebuilt.discarded_receipts, &blocked_recipients).await?;
+    let mut unsupported = !still_owed
+        && rebuilt.decision.external.is_empty()
+        && rebuilt.delegated.is_empty()
+        && !rebuilt.unsupported_receipts.is_empty();
+    let mut unrecoverable = rebuilt.unrecoverable;
+    // Receipts that only a frame to the vanished sender or an unrebuildable
+    // obligation could still settle. Non-empty once a frame-only effect ran.
+    let mut settled_here: Vec<&EffectReceiptKey> = Vec::new();
+    if !rebuilt.decision.external.is_empty() {
+        let mut recovery_deps = deps.clone();
+        recovery_deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
+        let report = super::super::execute::execute_effects(
+            uow,
+            database,
+            &rebuilt.decision,
+            &ImmediateSink,
+            &recovery_deps,
+            deadline.saturating_duration_since(Instant::now()),
+        )
+        .await;
+        // Downgrade only: a settlement probe that could not gather its
+        // evidence already made this attempt inconclusive, and an evaluable
+        // effect report must not restore the stall streak it suspended.
+        if classify_report(&report) == AttemptClassification::Inconclusive {
+            classification = AttemptClassification::Inconclusive;
+        }
+        // Frames belong to the sender's connection, which no longer exists
+        // during recovery. A warning reply an observer produced cannot be
+        // delivered; retrying every tick would only re-invoke the plugin.
+        for obligation in &report.frame_obligations {
+            let effect = &rebuilt.decision.external[obligation.effect_index];
+            if let Some(kind) = frame_only_kind(effect) {
+                if !unrecoverable.contains(&kind) {
+                    unrecoverable.push(kind);
+                }
+                settled_here.extend(&rebuilt.decision.external_receipts[obligation.effect_index]);
+            }
+        }
+    }
+    for row in &rebuilt.delegated {
+        let Some(state) = deps.web_socket_state else {
+            classification = AttemptClassification::Inconclusive;
+            tracing::debug!(?key, "groupchat recovery has no websocket state");
+            continue;
+        };
+        let outcome =
+            crate::server::routes::interpret::reconcile_groupchat_notification_recovery(state, row)
+                .await?;
+        if outcome != super::super::RecoverySweepOutcome::Completed {
+            classification = AttemptClassification::Inconclusive;
+        }
+    }
+    // Classify after every arm and delegation on this row has settled: the row
+    // is cached only when nothing left on it can make progress until its
+    // evidence changes.
+    if !settled_here.is_empty() {
+        settled_here.extend(&rebuilt.unsupported_receipts);
+        let missing = missing_receipts(uow, key, &rebuilt.decision.receipts_pending).await?;
+        // `still_owed` was decided BEFORE the rebuilt effects ran. A copy one
+        // of them delivered since is no longer owed, so the receipts as they
+        // stand NOW decide, not the pre-execution answer: otherwise a row whose
+        // last copy just landed is retried once more, re-invoking any
+        // warning-only observer it also carries. `missing` already IS that
+        // reading — every frozen MUC route's receipt is one of the
+        // `receipts_pending` it was read from — so this costs no second
+        // transaction inside the row deadline.
+        let owed_now = still_owed
+            && owed_muc_receipts
+                .iter()
+                .any(|receipt| missing.contains(receipt));
+        unsupported = !owed_now
+            && !missing.is_empty()
+            && missing
+                .iter()
+                .all(|receipt| settled_here.contains(&receipt));
+    }
+    // Only a cached row is classified for the caller; a retryable one keeps
+    // whatever the settlement and the effect arms decided, so a stable fact
+    // ("a peer holds that socket", "the occupant is still seated") accumulates
+    // the ordinary stall streak and a failed read does not.
+    if unsupported {
+        classification = AttemptClassification::Inconclusive;
+    }
+    Ok(RowRecovery::Executed {
+        unrecoverable,
+        pending,
+        classification,
+        unsupported,
+    })
+}
+
+/// Settle the frozen copies this node can prove the room no longer owes, then
+/// drop every obligation the settlement discharged from the frozen authority so
+/// the rebuild neither replays those copies nor reports them unrecoverable.
+async fn discharge_departed_copies(
+    uow: &IngressUnitOfWork,
+    deps: &Deps<'_>,
+    key: MessageKey,
+    frozen: &mut FrozenRecovery,
+) -> Result<super::super::recovery::departed::DepartedSettlement, IngressUowError> {
+    if let Some(manifest) = frozen.envelope.room_manifest().cloned() {
+        let mut settlement = super::super::recovery::departed::DepartedSettlement {
+            occupants: Vec::new(),
+            settled: Vec::new(),
+            classification: AttemptClassification::Evaluable,
+            still_owed: false,
+        };
+        // Includes original reflections: their direct receipt still names a
+        // room-owned frozen child and must retire with its original occupancy.
+        for route in frozen
+            .route_progress
+            .iter_mut()
+            .filter(|route| route.room().is_some())
+        {
+            let context = crate::server::routes::interpret::SmIngressAppendContext {
+                message_key: key,
+                receipt: route.receipt.clone(),
+                received_at: Some(frozen.created_at),
+                archive_positions: Vec::new(),
+                dispatch_stream: None,
+                authority: super::super::append_authority::AppendAuthority::LocalOnly,
+            };
+            let owed: Vec<_> = route
+                .fanout
+                .iter()
+                .filter(|target| !route.completed.contains(target))
+                .cloned()
+                .collect();
+            for target in owed {
+                match super::super::room_manifest::replay::settle_superseded(
+                    uow,
+                    &manifest,
+                    deps.room_registry,
+                    &context,
+                    &target,
+                )
+                .await
+                {
+                    Ok(Some(settled)) => {
+                        route.completed.push(target);
+                        settlement.settled.extend(settled);
+                    }
+                    Ok(None) => settlement.still_owed = true,
+                    Err(error) => {
+                        tracing::debug!(%error, %target, "frozen room child retirement unavailable");
+                        settlement.classification = AttemptClassification::Inconclusive;
+                        settlement.still_owed = true;
+                    }
+                }
+            }
+        }
+        frozen
+            .unreceipted
+            .retain(|intent| !settlement.settled.contains(intent));
+        frozen
+            .route_progress
+            .retain(|route| !settlement.settled.contains(&route.settle_evidence()));
+        if !settlement.settled.is_empty() {
+            super::super::execute::terminalize_if_complete_outcome(
+                uow,
+                key,
+                DeliveryExecutionContext::MaintenanceRecovery.into(),
+            )
+            .await?;
+        }
+        return Ok(settlement);
+    }
+    let departed = super::super::recovery::departed::settle_departed_occupants(
+        uow,
+        deps,
+        key,
+        &frozen.route_progress,
+    )
+    .await?;
+    if departed.settled.is_empty() {
+        return Ok(departed);
+    }
+    frozen
+        .unreceipted
+        .retain(|intent| !departed.settled.contains(intent));
+    frozen
+        .route_progress
+        .retain(|progress| !departed.settled.contains(&progress.settle_evidence()));
+    // A row whose last obligation the settlement discharged must leave the
+    // backlog in this pass rather than wait for the next terminalization phase.
+    super::super::execute::terminalize_if_complete_outcome(
+        uow,
+        key,
+        DeliveryExecutionContext::MaintenanceRecovery.into(),
+    )
+    .await?;
+    Ok(departed)
+}
+
+fn pending_kinds(intents: &[IngressEffectIntent]) -> Vec<IngressEffectKind> {
+    let mut kinds = Vec::new();
+    for intent in intents {
+        let kind = intent.kind();
+        if !kinds.contains(&kind) {
+            kinds.push(kind);
+        }
+    }
+    kinds
+}
+
+fn classify_report(report: &super::super::execute::ExecutionReport) -> AttemptClassification {
+    if report.outcomes.iter().any(|(_, outcome)| {
+        matches!(
+            outcome,
+            super::super::execute::ExternalOutcome::Uncertain
+                | super::super::execute::ExternalOutcome::AwaitingPredecessor
+        )
+    }) || !report.receipt_failures.is_empty()
+        || report.terminalization_failure.is_some()
+    {
+        AttemptClassification::Inconclusive
+    } else {
+        AttemptClassification::Evaluable
+    }
+}
+
+/// Consult current policy only after freeze released the ingress transaction.
+async fn blocked_recipients(
+    deps: &Deps<'_>,
+    frozen: &FrozenRecovery,
+) -> Result<Vec<BareJid>, IngressUowError> {
+    let Some(storage) = deps.blocking_storage else {
+        return Ok(Vec::new());
+    };
+    // Policy I/O only for routes some rebuild path can produce: a lost
+    // groupchat row records one inbox-push route per occupant, none of which
+    // any path rebuilds, and one blocklist read per occupant would spend the
+    // row deadline before its observer or notification recovery ran.
+    let recipients: std::collections::BTreeSet<_> = frozen
+        .unreceipted
+        .iter()
+        .filter_map(|intent| match intent {
+            IngressEffectIntent::RouteDirect { recipient, .. }
+                if rebuild::policy_checked_direct_route(
+                    &frozen.envelope,
+                    &frozen.recorded,
+                    intent,
+                ) =>
+            {
+                Some(recipient.clone())
+            }
+            IngressEffectIntent::Carbons {
+                excluded_source,
+                kind: waddle_xmpp::protocol::CarbonKind::Received,
+                ..
+            } => Some(excluded_source.to_bare()),
+            IngressEffectIntent::RelayCarbons {
+                owner,
+                kind: waddle_xmpp::protocol::CarbonKind::Received,
+                ..
+            } => Some(owner.clone()),
+            _ => None,
+        })
+        .collect();
+    let mut blocked = Vec::new();
+    for recipient in recipients {
+        let entries = storage
+            .list_blocked_jid_entries(&recipient)
+            .await
+            .map_err(IngressUowError::BlocklistUnavailable)?;
+        if let Some(sender) = frozen.envelope.message().from.as_ref() {
+            if Blocklist::new(entries).contains_jid(sender) {
+                tracing::debug!(%recipient, %sender, "recovery dropping route: recipient blocked sender post-intake");
+                blocked.push(recipient.clone());
+            }
+        }
+    }
+    Ok(blocked)
+}
+
+async fn record_discarded_receipts(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    discarded: &[EffectReceiptKey],
+    blocked_recipients: &[BareJid],
+) -> Result<(), IngressUowError> {
+    if discarded.is_empty() {
+        return Ok(());
+    }
+    let mut tx = uow
+        .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+        .await?;
+    if !CanonicalMessageRepository::lock(&mut tx, key).await? {
+        return Err(IngressUowError::EffectIntentMessageMissing);
+    }
+    let intents = EffectIntentRepository::load(&mut tx, key).await?;
+    for receipt in discarded {
+        if intents.iter().any(|intent| {
+            matches!(intent, IngressEffectIntent::RouteDirect { recipient, .. } if blocked_recipients.contains(recipient))
+                && super::super::receipt_key(intent).ok().as_ref() == Some(receipt)
+        }) {
+            EffectReceiptRepository::record_policy_discard(&mut tx, key, receipt,
+                crate::ingress::uow::PolicyDiscardReason::RecipientBlocked).await?;
+            continue;
+        }
+        EffectReceiptRepository::record_receipt(
+            &mut tx,
+            key,
+            receipt.kind,
+            &receipt.semantic_identity_hash,
+        )
+        .await?;
+    }
+    super::super::execute::terminalize_if_complete_in_transaction(
+        &mut tx,
+        key,
+        DeliveryExecutionContext::MaintenanceRecovery.into(),
+    )
+    .await?;
+    tx.commit().await
+}
+
+/// Effects whose only completion path is a frame to the original sender.
+fn frame_only_kind(
+    effect: &crate::server::routes::interpret::effects::ExternalEffect,
+) -> Option<IngressEffectKind> {
+    use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, ExternalEffect};
+    match effect {
+        ExternalEffect::Room(ExternalRoomEffect::ObserveRoomMessage { .. }) => {
+            Some(IngressEffectKind::RoomObserver)
+        }
+        _ => None,
+    }
+}
+
+async fn freeze(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+) -> Result<Option<FrozenRecovery>, IngressUowError> {
+    let mut tx = uow
+        .begin_with_timeouts(Duration::from_millis(100), Duration::from_millis(250))
+        .await?;
+    if !CanonicalMessageRepository::lock(&mut tx, key).await?
+        || CanonicalMessageRepository::is_terminal(&mut tx, key).await?
+    {
+        tx.commit().await?;
+        return Ok(None);
+    }
+    let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+        .await?
+        .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+    let created_at = CanonicalMessageRepository::created_at(&mut tx, key).await?;
+    let recorded = EffectIntentRepository::load(&mut tx, key).await?;
+    // One bulk read of receipt identities: a groupchat row can carry one
+    // intent per occupant, and a per-intent lookup would spend the whole row
+    // deadline before anything recoverable on it could run.
+    let receipted = EffectReceiptRepository::keys(&mut tx, key).await?;
+    let mut unreceipted = Vec::new();
+    for intent in &recorded {
+        if !receipted.contains(&super::super::receipt_key(intent)?) {
+            unreceipted.push(intent.clone());
+        }
+    }
+    // A live invitation delivery and its offline fallback are mutually
+    // exclusive: one committed receipt proves both, exactly as alias replay.
+    super::super::commit::reconcile_invitation_delivery_receipts(
+        &mut tx,
+        key,
+        &recorded,
+        &mut unreceipted,
+    )
+    .await?;
+    // One bulk read of delivery progress for the same reason as the receipts.
+    let progress = DeliveryProgressRepository::load_all(&mut tx, key).await?;
+    let mut route_progress = Vec::new();
+    let mut settled_routes = Vec::new();
+    for intent in &unreceipted {
+        let Some(mut route) = RouteProgress::from_intent(intent, Some(created_at), Vec::new())?
+        else {
+            continue;
+        };
+        super::super::reflection_dispatch::classify_progress(&mut route, &recorded);
+        route.completed = progress
+            .iter()
+            .find(|(receipt, _)| receipt == &route.receipt)
+            .map(|(_, completed)| completed.clone())
+            .unwrap_or_default();
+        let prepared_complete = matches!(
+            intent,
+            IngressEffectIntent::RouteDirect {
+                prepared: Some(_),
+                ..
+            }
+        ) && !route.fanout.is_empty()
+            && route
+                .fanout
+                .iter()
+                .all(|target| route.completed.contains(target));
+        if (!route.is_direct() && route.fanout.is_empty()) || prepared_complete {
+            crate::ingress::uow::settle_recorded(&mut tx, key, &[route.settle_evidence()]).await?;
+            settled_routes.push(route.settle_evidence());
+        } else {
+            route_progress.push(route);
+        }
+    }
+    if !settled_routes.is_empty() {
+        unreceipted.retain(|intent| !settled_routes.contains(intent));
+        super::super::execute::terminalize_if_complete_in_transaction(
+            &mut tx,
+            key,
+            DeliveryExecutionContext::MaintenanceRecovery.into(),
+        )
+        .await?;
+    }
+    tx.commit().await?;
+    Ok(Some(FrozenRecovery {
+        envelope,
+        created_at,
+        recorded,
+        unreceipted,
+        route_progress,
+    }))
+}
+
+async fn contains(
+    tx: &mut IngressUowTransaction<'_>,
+    key: MessageKey,
+    receipt: &EffectReceiptKey,
+) -> Result<bool, IngressUowError> {
+    EffectReceiptRepository::contains(tx, key, receipt.kind, &receipt.semantic_identity_hash).await
+}
+
+/// Pending receipts that are still absent after execution.
+async fn missing_receipts(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    pending: &[EffectReceiptKey],
+) -> Result<Vec<EffectReceiptKey>, IngressUowError> {
+    let mut tx = uow.begin().await?;
+    let mut missing = Vec::new();
+    for receipt in pending {
+        if !contains(&mut tx, key, receipt).await? {
+            missing.push(receipt.clone());
+        }
+    }
+    tx.commit().await?;
+    Ok(missing)
+}
+
+#[cfg(test)]
+static ATTEMPTS: std::sync::LazyLock<std::sync::Mutex<std::collections::HashMap<MessageKey, u64>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+fn record_attempt(key: MessageKey) {
+    *ATTEMPTS
+        .lock()
+        .expect("recovery attempts")
+        .entry(key)
+        .or_default() += 1;
+}
+
+#[cfg(test)]
+pub(in crate::ingress) fn attempt_count(key: MessageKey) -> u64 {
+    ATTEMPTS
+        .lock()
+        .expect("recovery attempts")
+        .get(&key)
+        .copied()
+        .unwrap_or_default()
+}
+
+#[cfg(test)]
+mod tests;

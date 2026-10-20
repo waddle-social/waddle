@@ -10,7 +10,7 @@ use waddle_server::{
     db::{lineage, Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
     ingress::{IngressAuthority, IngressStreamIdentity, IngressSubmission},
     server::effects::{IngressPlan, RoomExecutionPath},
-    sm_persistence::DatabaseSmPersistence,
+    sm::persistence::DatabaseSmPersistence,
 };
 use waddle_xmpp::{
     auth::{AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch},

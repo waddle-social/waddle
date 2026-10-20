@@ -6,7 +6,7 @@
 use jid::{BareJid, FullJid};
 use minidom::Element;
 use std::time::Duration;
-use waddle_server::sm_persistence::DatabaseSmPersistence;
+use waddle_server::sm::persistence::DatabaseSmPersistence;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::pending_delivery::SmSessionId;
 use waddle_xmpp::stream_management::{

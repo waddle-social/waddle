@@ -1,4 +1,5 @@
 //! The sealed audience and child identities of a canonical room submission.
+pub(crate) mod replay;
 use std::collections::HashSet;
 
 use jid::{BareJid, FullJid};
@@ -9,14 +10,14 @@ use waddle_xmpp::{
             AdminMutationId, RoomClaimFenceContext, RoomCommittedCoordinates, RoomLifecycleId,
             RoomRevision,
         },
-        room_actor::OccupancyWatermark,
+        room::actor::OccupancyWatermark,
     },
     ownership::{ClaimEpoch, Entity, EntityType, NodeIdentity},
 };
 use waddle_xmpp_core::xep0359::StanzaId;
 
 use super::decision::EffectReceiptKey;
-use crate::{ingress_substrate::IngressSubstrateError, ingress_uow::IngressUowError};
+use crate::{ingress::substrate::IngressSubstrateError, ingress::uow::IngressUowError};
 
 /// One actor snapshot, captured before the handled frontier advances.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,8 +29,8 @@ pub struct RoomManifestSnapshot {
     pub host_no_transport: Vec<FullJid>,
 }
 
-impl From<&waddle_xmpp::muc::room_actor::RoomChainSnapshot> for RoomManifestSnapshot {
-    fn from(snapshot: &waddle_xmpp::muc::room_actor::RoomChainSnapshot) -> Self {
+impl From<&waddle_xmpp::muc::room::actor::RoomChainSnapshot> for RoomManifestSnapshot {
+    fn from(snapshot: &waddle_xmpp::muc::room::actor::RoomChainSnapshot) -> Self {
         Self {
             coordinates: snapshot.durable_coordinates,
             occupancy_incarnation: snapshot.occupancy_incarnation,

@@ -8,7 +8,7 @@ use http_body_util::BodyExt;
 use kameo::actor::Spawn;
 use std::str::FromStr;
 use tower::ServiceExt;
-use waddle_xmpp::muc::room_registry_actor::RoomRegistryActor;
+use waddle_xmpp::muc::room::registry_actor::RoomRegistryActor;
 use waddle_xmpp::pubsub::InMemoryPubSubStorage;
 use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
@@ -44,7 +44,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
         db_pool: Arc::clone(&db_pool),
         blob_storage,
         inbox_storage: Arc::new(waddle_xmpp::inbox::storage::InMemoryInboxStorage::new()),
-        spaces_metadata_store: Arc::new(crate::spaces_metadata::InMemorySpacesMetadataStore::new()),
+        spaces_metadata_store: Arc::new(crate::spaces::metadata::InMemorySpacesMetadataStore::new()),
         channel_space_link_store: Arc::new(
             crate::channel_space_links::InMemoryChannelSpaceLinkStore::new(),
         ),

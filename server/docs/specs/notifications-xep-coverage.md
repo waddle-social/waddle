@@ -51,8 +51,8 @@ push_publish_jobs  (durable row, Push Service queue; provider
 ## Locations
 
 - `groupchat_inbox.rs` = `crates/waddle-server/src/server/routes/interpret/groupchat_inbox.rs` (T0 groupchat classifier + its `#[cfg(test)] mod tests`)
-- `notification_outbox.rs` = `crates/waddle-server/src/notification_outbox.rs` (T0/T1 evaluator, candidate/outbox stores, in-file unit + integration tests)
-- `notification_settings_projection.rs` = `crates/waddle-server/src/notification_settings_projection.rs` (XEP-0492 level/source projection, DM-bookmark publish validation + projection-mutation derivation, push-dispatch reducer, in-file `#[cfg(test)] mod tests`)
+- `notification_outbox.rs` = `crates/waddle-server/src/notification/outbox.rs` (T0/T1 evaluator, candidate/outbox stores, in-file unit + integration tests)
+- `notification_settings_projection.rs` = `crates/waddle-server/src/notification/settings_projection.rs` (XEP-0492 level/source projection, DM-bookmark publish validation + projection-mutation derivation, push-dispatch reducer, in-file `#[cfg(test)] mod tests`)
 - `pubsub/tests.rs` = `crates/waddle-server/src/pubsub/tests.rs` (store-layer pubsub publish/retract/purge tests, including the `urn:waddle:dm-bookmarks:0` DM carrier)
 - `tests/xep0357_push_service_ws.rs` = WS-level XEP-0357 push pipeline integration tests
 - `tests/xep0492_push_enforcement_ws.rs` = pure `PushDispatchDecision`/`ConversationKind` reducer matrix (3 levels × 2 mention × 3 kinds)
@@ -120,7 +120,7 @@ All three providers deliver: Web Push (#528), APNs (#529) and FCM HTTP v1 (#530)
 
 ### Note on `SuppressedReason::ProviderRejected` / `ProviderTokenExpired`
 
-`crates/waddle-server/src/notification_outbox.rs` reserves these two `SuppressedReason` variants for use "by provider slices". Today they are not emitted — but readers should be aware they are **NOT** routed through the T0/T1 evaluator (`evaluate_push_gate_at_dispatch`); the evaluator runs BEFORE publish. Provider rejections arrive AFTER the XEP-0357 publish has succeeded on the XMPP boundary, so they will be wired through the post-publish callback path in #528/#529/#530 — likely as a new `NotificationOutboxPublishOutcome` variant rather than a re-routed `Suppressed` outcome. Without this clarification, a future maintainer might wire them via the suppression path and double-count (Failed + Suppressed for the same logical job).
+`crates/waddle-server/src/notification/outbox.rs` reserves these two `SuppressedReason` variants for use "by provider slices". Today they are not emitted — but readers should be aware they are **NOT** routed through the T0/T1 evaluator (`evaluate_push_gate_at_dispatch`); the evaluator runs BEFORE publish. Provider rejections arrive AFTER the XEP-0357 publish has succeeded on the XMPP boundary, so they will be wired through the post-publish callback path in #528/#529/#530 — likely as a new `NotificationOutboxPublishOutcome` variant rather than a re-routed `Suppressed` outcome. Without this clarification, a future maintainer might wire them via the suppression path and double-count (Failed + Suppressed for the same logical job).
 
 ### Other deferred items
 

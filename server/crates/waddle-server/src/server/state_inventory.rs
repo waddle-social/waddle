@@ -2,14 +2,16 @@
 //!
 //! The same data feeds two surfaces:
 //!
-//! - [`crate::server::state_inventory_route`] — the operator-side
+//! - [`crate::server::state_inventory::route`] — the operator-side
 //!   `/debug/state-inventory` JSON endpoint, gated on a token. Useful
 //!   when Grafana isn't reachable from where the operator is sitting.
-//! - [`crate::server::state_inventory_metrics`] — a periodic
+//! - [`crate::server::state_inventory::metrics`] — a periodic
 //!   publisher that records each field as an OTel gauge. This is the
 //!   primary surface in production: the values flow through Alloy
 //!   into Grafana Cloud and chart against `process_resident_memory_bytes`
 //!   without any port-forward or per-pod auth dance.
+pub(crate) mod metrics;
+pub(crate) mod route;
 
 use serde::Serialize;
 
@@ -88,8 +90,8 @@ pub struct RoomInventory {
 /// `None` for `sm_live_sessions`) so the publisher / endpoint never
 /// fail hard on a single hung actor.
 pub async fn collect_snapshot(ws: &WebSocketState) -> StateInventorySnapshot {
-    use waddle_xmpp::muc::room_actor::IsDormant;
-    use waddle_xmpp::muc::room_registry_actor::{GetRoom, ListRooms};
+    use waddle_xmpp::muc::room::actor::IsDormant;
+    use waddle_xmpp::muc::room::registry_actor::{GetRoom, ListRooms};
     use waddle_xmpp::muc::RoomRegistry;
 
     let deps = &ws.deps;

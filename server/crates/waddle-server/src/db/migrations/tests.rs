@@ -4373,7 +4373,7 @@ async fn seed_retained_sm_session(db: &Database) {
     }
 }
 
-use crate::sm_persistence::DatabaseSmPersistence;
+use crate::sm::persistence::DatabaseSmPersistence;
 use std::sync::Arc;
 use waddle_xmpp::stream_management::persistence::SmPersistenceStorage;
 
@@ -4804,10 +4804,10 @@ async fn query_optional_i64(db: &Database, sql: &str) -> Option<i64> {
 async fn collect_observer_history(
     db: &Database,
     now_ms: i64,
-) -> crate::ingress_uow::ObserverRetentionBatch {
+) -> crate::ingress::uow::ObserverRetentionBatch {
     let mut tx = db.begin_immediate().await.expect("retention tx");
     let batch =
-        crate::ingress_uow::RoomObservationRepository::collect_expired(&mut tx, now_ms, 256)
+        crate::ingress::uow::RoomObservationRepository::collect_expired(&mut tx, now_ms, 256)
             .await
             .expect("collect observer history");
     tx.commit().await.expect("retention commit");
@@ -4933,13 +4933,13 @@ async fn assert_v1023_stamps_existing_observer_history(db: &Database) {
     ] {
         assert_eq!(query_optional_i64(db, sql).await, None, "{sql}");
     }
-    crate::ingress_uow::initialize_room_observations(db)
+    crate::ingress::uow::initialize_room_observations(db)
         .await
         .expect("startup DDL is idempotent against the migrated shape");
 
     assert_eq!(
         collect_observer_history(db, after).await,
-        crate::ingress_uow::ObserverRetentionBatch::default(),
+        crate::ingress::uow::ObserverRetentionBatch::default(),
         "nothing is collectable immediately after the upgrade"
     );
     let horizon = after + chrono::Duration::days(8).num_milliseconds();
@@ -4997,7 +4997,7 @@ async fn postgres_observer_inspection_queries_run_as_pg_monitor() {
         .run(&db)
         .await
         .expect("run migrations in isolated postgres schema");
-    crate::ingress_uow::initialize_room_observations(&db)
+    crate::ingress::uow::initialize_room_observations(&db)
         .await
         .expect("startup DDL after V1023");
     // Production tables live in `public`, where pg_monitor already has USAGE.
@@ -5080,7 +5080,7 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
     let key = MessageKey::new();
     let active_key = MessageKey::new();
     let mut tx = db.begin_immediate().await.expect("legacy observer data");
-    crate::ingress_substrate::record_message(
+    crate::ingress::substrate::record_message(
         &mut tx,
         key,
         &SemanticDigest::from_storage(1, [1; 32]).expect("digest"),
@@ -5088,7 +5088,7 @@ async fn assert_v1025_adopts_only_matching_pending_publication_authority(db: &Da
     )
     .await
     .expect("canonical message");
-    crate::ingress_substrate::record_message(
+    crate::ingress::substrate::record_message(
         &mut tx,
         active_key,
         &SemanticDigest::from_storage(1, [2; 32]).expect("active digest"),

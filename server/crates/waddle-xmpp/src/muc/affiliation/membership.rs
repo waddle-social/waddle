@@ -1,8 +1,8 @@
 //! Durable room-membership source used for spawn-time hydration.
 //!
-//! A freshly spawned [`crate::muc::room_actor::RoomActor`] starts with an
+//! A freshly spawned [`crate::muc::room::actor::RoomActor`] starts with an
 //! empty in-memory affiliation list; before #1135 the durable inbox
-//! recipient set in [`crate::muc::room_actor::GetRoomSnapshot`] was derived
+//! recipient set in [`crate::muc::room::actor::GetRoomSnapshot`] was derived
 //! only from joins and point mutations observed *since spawn*, so offline
 //! members silently dropped out of inbox/notification fan-out after a
 //! deploy or actor respawn. Implementations of this trait bridge to the

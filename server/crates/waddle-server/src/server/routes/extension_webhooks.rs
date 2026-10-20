@@ -21,7 +21,7 @@ use waddle_extensions::{
 
 use crate::{db::actor::DbExecute, db_params};
 
-use super::super::extension_commands::pubsub::publish_extension_pubsub;
+use super::super::extension::commands::pubsub::publish_extension_pubsub;
 use super::websocket::WebSocketState;
 
 type HmacSha256 = Hmac<Sha256>;

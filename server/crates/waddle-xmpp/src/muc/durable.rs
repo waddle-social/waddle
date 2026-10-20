@@ -6,7 +6,7 @@
 //! default `MucRoom` would silently drop ban lists, member lists,
 //! passwords, config, and subject on every ownership move (element 7's
 //! locked spec). This module defines the dyn-compatible seam a freshly
-//! spawned/claimed [`super::room_actor::RoomActor`] uses to **restore
+//! spawned/claimed [`super::room::actor::RoomActor`] uses to **restore
 //! configuration, affiliations, and subject from Postgres before accepting
 //! any join** (the element-7 locked text, quoted verbatim), and to persist
 //! the same three pieces on every change thereafter.
@@ -376,7 +376,7 @@ pub struct DurableRoomState {
 /// This trait's `save_*` methods return an awaited `Result<(), XmppError>`.
 /// A fenced write that fails returns `Err` to its immediate caller; it is not
 /// fire-and-forget. What changed is what
-/// [`super::room_actor::RoomActor`] itself does with that `Err`, for every
+/// [`super::room::actor::RoomActor`] itself does with that `Err`, for every
 /// mutation handler that changes durable-relevant state (`UpdateConfig`,
 /// `RollbackConfigIfRevision`, `UpdateGroupDmConfigByMember`, `SetSubject`,
 /// `ChangeAffiliation`, `ApplyAdminItems`, `ApplyAffiliationChange`,
@@ -588,7 +588,7 @@ pub trait MucDurableStore: Send + Sync {
     /// The typed `(Entity, ClaimEpoch, node_id)` context currently published
     /// for a ready live room entry. This is observability/legacy support;
     /// actor-derived work must use the immutable fence carried by its own
-    /// [`super::room_actor::RoomChainSnapshot`]. `None` while no actor is
+    /// [`super::room::actor::RoomChainSnapshot`]. `None` while no actor is
     /// published (or after `forget_claim_fence`). Default
     /// `None`: single-node/non-clustering deployments never configure a
     /// `MucDurableStore` at all, so this default only matters for tests

@@ -120,7 +120,7 @@ pub(super) async fn handle_extension_route_items(
         warn!(node, error = %error, "Failed to sync extension route PubSub affiliation");
         return vec![iq_to_xml(build_pubsub_error(iq, PubSubError::Forbidden))];
     }
-    match crate::pubsub_authz::can_subscribe(
+    match crate::pubsub::authz::can_subscribe(
         &state.deps.protocol.pubsub_storage,
         request.target_jid,
         request.node,

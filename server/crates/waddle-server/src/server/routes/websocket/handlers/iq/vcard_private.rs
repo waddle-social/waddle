@@ -22,7 +22,7 @@ pub(super) async fn handle_vcard_iq(
     // avatar in-band once the server has fetched it.
     if waddle_xmpp::xep::xep0054::is_vcard_get(iq) {
         if let Some(bot) = iq.to().and_then(|to| {
-            crate::server::extension_bot::installed_bot(
+            crate::server::extension::bot::installed_bot(
                 &state.deps.service_domains,
                 &state.deps.protocol.extension_manager,
                 to,

@@ -472,5 +472,5 @@ fn is_bookmarks_node(node_name: &str) -> bool {
 }
 
 fn is_dm_bookmarks_node(node_name: &str) -> bool {
-    waddle_xmpp::xep::xep_waddle_dm_bookmarks::is_dm_bookmarks_node(node_name)
+    waddle_xmpp::xep::waddle::dm_bookmarks::is_dm_bookmarks_node(node_name)
 }

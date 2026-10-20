@@ -1,5 +1,5 @@
 //! Restore and finalize the derived archive position under canonical authority.
-use crate::ingress_uow::{EffectIntentRepository, IngressUowError, IngressUowTransaction};
+use crate::ingress::uow::{EffectIntentRepository, IngressUowError, IngressUowTransaction};
 use jid::BareJid;
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MessageKey},

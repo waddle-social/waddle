@@ -1,7 +1,7 @@
 //! Committed responsibility and the bounded post-commit work it authorizes.
 use crate::{
-    ingress_substrate::EffectReceiptKind,
-    ingress_uow::ReconcileVerdict,
+    ingress::substrate::EffectReceiptKind,
+    ingress::uow::ReconcileVerdict,
     server::routes::interpret::effects::{
         AppliedDurableEffects, ExternalEffect, PlanEffectDependency,
     },
@@ -59,14 +59,14 @@ pub(super) fn assemble_receipts(
     external: &[ExternalEffect],
     intents: &[waddle_xmpp::ingress::IngressEffectIntent],
     route_progress: &[super::recorded::RouteProgress],
-) -> Result<(Vec<Vec<EffectReceiptKey>>, Vec<EffectReceiptKey>), crate::ingress_uow::IngressUowError>
+) -> Result<(Vec<Vec<EffectReceiptKey>>, Vec<EffectReceiptKey>), crate::ingress::uow::IngressUowError>
 {
     let mut external_receipts = super::durable::external_receipts(external, intents)?;
     // A progress-aware arm can own a strict subset of the frozen fanout.
     // Generic receipt mapping deliberately requires full coverage; add only
     // the exact route receipt whose aggregate this arm settles transactionally.
     for (index, effect) in external.iter().enumerate() {
-        if super::execute_uow::owns(effect, route_progress)
+        if super::execute::uow::owns(effect, route_progress)
             || route_progress
                 .iter()
                 .any(|p| !p.is_direct() && p.matches(effect) && !p.remaining(effect).is_empty())
@@ -87,7 +87,7 @@ pub(super) fn assemble_receipts(
         .map(|p| p.receipt.clone())
         .collect();
     for (index, effect) in external.iter().enumerate() {
-        if super::execute_uow::owns(effect, route_progress) {
+        if super::execute::uow::owns(effect, route_progress) {
             for receipt in &external_receipts[index] {
                 if !arm_owned_receipts.contains(receipt) {
                     arm_owned_receipts.push(receipt.clone());

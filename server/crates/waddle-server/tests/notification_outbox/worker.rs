@@ -4,7 +4,7 @@
 
 use crate::support::*;
 use jid::{BareJid, Jid};
-use waddle_server::notification_outbox::*;
+use waddle_server::notification::outbox::*;
 use waddle_xmpp::push::PushSubscriptionStore;
 
 /// Test stub that returns `Ok(None)` — the "room not currently
@@ -236,17 +236,17 @@ async fn t1_drain_reevaluates_xep0492_when_projection_changes_after_insert() {
     // Race window: between T0 emission and T1 drain, the
     // recipient's XEP-0492 setting flips to `<never/>`.
     projection
-        .upsert(&waddle_server::notification_settings_projection::NotificationSettingsProjection {
+        .upsert(&waddle_server::notification::settings_projection::NotificationSettingsProjection {
             owner_bare_jid: candidate.recipient_bare_jid().clone(),
             conversation_jid: candidate.conversation_jid().clone(),
             conversation_kind:
-                waddle_server::notification_settings_projection::ConversationKind::Direct,
+                waddle_server::notification::settings_projection::ConversationKind::Direct,
             mode: waddle_xmpp::xep::NotificationLevel::Never,
             rich_payload_opt_in: false,
             source_version: 1,
             updated_at_ms: waddle_server::time::now_ms(),
             source:
-                waddle_server::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                waddle_server::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
             source_item_jid: candidate.conversation_jid().clone(),
         })
         .await

@@ -75,7 +75,7 @@ async fn read_failure(fixture: IngressFixture, direct: bool) {
         )
         .await;
     if direct {
-        assert!(super::direct_retraction::apply_retraction_tombstone(
+        assert!(super::direct::retraction::apply_retraction_tombstone(
             &deps,
             &room,
             "wire-original",

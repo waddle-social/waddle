@@ -81,7 +81,7 @@ pub trait ClusterMembership: Send + Sync {
 /// STABLE fact about the cluster as it is right now (a peer is holding that
 /// socket and will deliver to it), the second is a FAILURE TO READ. Callers
 /// classify a recovery attempt differently on each — see
-/// `ingress::recovery_reachability::ResourceReachability`.
+/// `ingress::recovery::reachability::ResourceReachability`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PeerResourceReachability {
     /// The membership read succeeded and every peer in it answered `Absent`
@@ -242,5 +242,4 @@ impl ResourcePresenceAsker for RelayResourcePresenceAsker {
 }
 
 #[cfg(test)]
-#[path = "resource_presence_tests.rs"]
 mod tests;

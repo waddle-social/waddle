@@ -131,7 +131,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
     let presence_show = presence
         .show
         .clone()
-        .map(crate::notification_activity::NotificationPresenceShow::from_xep0045);
+        .map(crate::notification::activity::NotificationPresenceShow::from_xep0045);
     let synthetic_session = synthetic_session_for_full_jid(&sender_jid);
     let frames = tokio::time::timeout(
         ORDERED_RECEIVER_DELIVERY_TIMEOUT,

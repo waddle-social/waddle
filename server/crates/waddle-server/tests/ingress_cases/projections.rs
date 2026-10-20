@@ -250,10 +250,10 @@ async fn ingress_gc_reclaims_expired_inbox_delivery(fixture: IngressFixture) {
     use tokio::time::Instant;
     use waddle_server::{
         db::DatabaseDriver,
-        ingress_substrate::{
+        ingress::substrate::{
             gc_expired_aliases, AliasGcBudget, AliasGcProgress, TerminalizeOutcome, ALIAS_RETENTION,
         },
-        ingress_uow::EffectReceiptRepository,
+        ingress::uow::EffectReceiptRepository,
     };
 
     let now = Utc::now();

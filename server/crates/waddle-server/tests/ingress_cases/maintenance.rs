@@ -2,8 +2,8 @@ use super::*;
 use chrono::{DateTime, Duration, Utc};
 use waddle_server::{
     db::DatabaseDriver,
+    ingress::substrate::receipt_complete_nonterminal_keys,
     ingress::{execute::execute_effects, Deps, ImmediateSink},
-    ingress_substrate::receipt_complete_nonterminal_keys,
 };
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, MessageKey},

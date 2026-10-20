@@ -18,8 +18,8 @@ use jid::BareJid;
 use minidom::Element;
 use waddle_server::db::{Database, IntoParams, Rows};
 use waddle_server::db_params;
-use waddle_server::push_service::vapid_storage::VapidStorage;
-use waddle_server::push_service::{
+use waddle_server::push::service::vapid_storage::VapidStorage;
+use waddle_server::push::service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::pubsub::PubSubItem;
@@ -27,15 +27,15 @@ use waddle_xmpp::push::types::{VapidSub, WebPushOutcome};
 use waddle_xmpp::push::{WebPushRequest, WebPushSender};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 
-/// Mirrors `DEVICE_STATUS_ACTIVE` in `waddle_server::push_service`.
+/// Mirrors `DEVICE_STATUS_ACTIVE` in `waddle_server::push::service`.
 const DEVICE_STATUS_ACTIVE: &str = "active";
-/// Mirrors `DEVICE_STATUS_DISABLED` in `waddle_server::push_service`.
+/// Mirrors `DEVICE_STATUS_DISABLED` in `waddle_server::push::service`.
 const DEVICE_STATUS_DISABLED: &str = "disabled";
-/// Mirrors `PUBLISH_JOB_STATUS_FAILED` in `waddle_server::push_service`.
+/// Mirrors `PUBLISH_JOB_STATUS_FAILED` in `waddle_server::push::service`.
 const PUBLISH_JOB_STATUS_FAILED: &str = "failed";
-/// Mirrors `crate::push_service::dispatch::ATTEMPT_STATUS_WEB_GONE`.
+/// Mirrors `crate::push::service::dispatch::ATTEMPT_STATUS_WEB_GONE`.
 const ATTEMPT_STATUS_WEB_GONE: &str = "web-gone";
-/// Mirrors `crate::push_service::dispatch::ATTEMPT_STATUS_WEB_DELIVERED`.
+/// Mirrors `crate::push::service::dispatch::ATTEMPT_STATUS_WEB_DELIVERED`.
 const ATTEMPT_STATUS_WEB_DELIVERED: &str = "web-delivered";
 
 async fn store() -> DatabasePushServiceStore {
@@ -272,7 +272,7 @@ async fn missing_backing_retries_are_bounded_without_provider_sends() {
     let db = Database::in_memory("missing-push-backing")
         .await
         .expect("db");
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(db.clone())
+    waddle_server::push::registrations::DatabasePushRegistrationStore::new(db.clone())
         .await
         .expect("registration store");
     let backing = Arc::new(
@@ -500,7 +500,7 @@ async fn last_gone_device_disables_the_xep0357_registration() {
     let node = store.ensure_node(&owner, "web").await.expect("node");
     register_web_device(&store, &owner, node.node(), "web-1", "gone-device").await;
     let registrations =
-        waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+        waddle_server::push::registrations::DatabasePushRegistrationStore::new(store.database())
             .await
             .expect("registration store");
     store
@@ -571,7 +571,7 @@ async fn gone_device_with_live_sibling_keeps_registration_enabled() {
     register_web_device(&store, &owner, node.node(), "web-gone", "gone-device").await;
     register_web_device(&store, &owner, node.node(), "web-live", "live-device").await;
     let registrations =
-        waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+        waddle_server::push::registrations::DatabasePushRegistrationStore::new(store.database())
             .await
             .expect("registration store");
     store
@@ -716,10 +716,11 @@ async fn earlier_provider_timeout_survives_later_known_failure() {
         let owner = owner();
         let node = store.ensure_node(&owner, failure).await.expect("node");
         register_web_device(&store, &owner, node.node(), "web-sticky", "sticky-device").await;
-        let registrations =
-            waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
-                .await
-                .expect("registrations");
+        let registrations = waddle_server::push::registrations::DatabasePushRegistrationStore::new(
+            store.database(),
+        )
+        .await
+        .expect("registrations");
         store
             .register_first_party_node_for_owner(&owner, "push.example.com", node.node(), None)
             .await

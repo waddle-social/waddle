@@ -13,7 +13,7 @@ use super::DatabasePubSubStorage;
 /// schema-shape change, AND if a stricter parser may reject XML
 /// payloads previously written by an older server (otherwise the
 /// next read silently defaults the user to inactive; see
-/// [`crate::dnd_projection`] preamble).
+/// [`crate::dnd::projection`] preamble).
 ///
 /// History:
 /// * v5 — initial `dnd_projection` (#367)

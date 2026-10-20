@@ -310,13 +310,13 @@ fn persist_subject_store_intent(
 
 pub(super) async fn spawn_subject_mutation_test_room() -> (
     kameo::actor::ActorRef<RoomRegistryActor>,
-    kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     jid::BareJid,
     Arc<waddle_xmpp::ownership::InProcessClaimStore>,
     waddle_xmpp::muc::RoomClaimFenceContext,
     Arc<SubjectMutationStore>,
 ) {
-    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, WireClusteringClaims};
+    use waddle_xmpp::muc::room::registry_actor::{CreateRoom, WireClusteringClaims};
     use waddle_xmpp::ownership::{InProcessClaimStore, NodeIdentity, SharedNodeIdentity};
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
@@ -411,8 +411,8 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
     // confirm the actor wrote `MucRoom.subject` to a `SubjectState`
     // matching the event payload.
     use chrono::TimeZone;
-    use waddle_xmpp::muc::room_actor::GetSnapshot;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::GetSnapshot;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
@@ -507,7 +507,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
 #[tokio::test]
 async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent() {
     use chrono::TimeZone;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 
@@ -714,8 +714,8 @@ async fn xep_0045_rejected_room_subject_records_error_reply_intent() {
 
 #[tokio::test]
 async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
-    use waddle_xmpp::muc::room_actor::GetSnapshot;
-    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DemoteRoomIfExactActor};
+    use waddle_xmpp::muc::room::actor::GetSnapshot;
+    use waddle_xmpp::muc::room::registry_actor::{CreateRoom, DemoteRoomIfExactActor};
     use waddle_xmpp::ownership::{ClaimStore, ExactReleaseOutcome};
 
     let (room_registry, original_actor, room_jid, claim_store, original_fence, store) =
@@ -804,7 +804,7 @@ async fn xep_0045_stale_subject_effect_cannot_mutate_same_jid_successor() {
 
 #[tokio::test]
 async fn xep_0045_new_clustered_room_subject_fails_closed_without_a_durable_parent() {
-    use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::muc::room::actor::GetSnapshot;
 
     // #1352 owns atomic complete room-plus-Owner initialization. Until that
     // prerequisite lands, the UPDATE-only subject path must fail before
@@ -845,8 +845,8 @@ async fn xep_0045_new_clustered_room_subject_fails_closed_without_a_durable_pare
 #[tokio::test]
 async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppresses_effects() {
     use waddle_xmpp::mam::{MamArchiveKind, MamQuery};
-    use waddle_xmpp::muc::room_actor::Join;
-    use waddle_xmpp::muc::room_registry_actor::{CreateRoom, DemoteRoomIfExactActor};
+    use waddle_xmpp::muc::room::actor::Join;
+    use waddle_xmpp::muc::room::registry_actor::{CreateRoom, DemoteRoomIfExactActor};
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::ownership::InProcessClaimStore;
     use waddle_xmpp::{Affiliation, Role};
@@ -1114,7 +1114,7 @@ async fn xep_0045_subject_ownership_unavailable_bounces_without_demotion_and_hal
 
 #[tokio::test]
 async fn xep_0045_subject_persist_failure_bounces_before_apply_and_halts_batch() {
-    use waddle_xmpp::muc::room_actor::GetSnapshot;
+    use waddle_xmpp::muc::room::actor::GetSnapshot;
 
     let (room_registry, room_actor, room_jid, _claim_store, claim_fence, store) =
         spawn_subject_mutation_test_room().await;
@@ -1145,7 +1145,7 @@ async fn xep_0045_subject_persist_failure_bounces_before_apply_and_halts_batch()
 
 #[tokio::test]
 async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast() {
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         AckDepartureOutcome, AckDepartureReceipt, GetSnapshot, Join, LeaveAttemptId,
         LeaveByRealJid, LeaveDisposition, LeaveOrigin, LeaveSessionSelector,
     };
@@ -1241,12 +1241,11 @@ async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast
 }
 
 #[cfg(feature = "clustering")]
-#[path = "room_relay_plan_tests.rs"]
 mod room_relay_plan_tests;
 
 #[tokio::test]
 async fn xep0045_subject_recovery_timeout_retires_unresponsive_exact_actor() {
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         GetSnapshot, RestoreDurableRoomState, SetSubject, SetSubjectError,
     };
     let (registry, actor, room, _claims, fence, store) = spawn_subject_mutation_test_room().await;
@@ -1291,7 +1290,7 @@ async fn xep0045_subject_recovery_timeout_retires_unresponsive_exact_actor() {
         .expect("queue stalled actor operation");
     store.load_started.notified().await;
     assert!(
-        !super::super::room_subject::reconcile_ambiguous_subject_commit(
+        !super::super::room::subject::reconcile_ambiguous_subject_commit(
             &registry,
             &room,
             &actor,
@@ -1302,14 +1301,14 @@ async fn xep0045_subject_recovery_timeout_retires_unresponsive_exact_actor() {
     );
     assert!(
         matches!(registry.ask(GetRoom { room_jid: room.clone() }).await,
-        Err(kameo::error::SendError::HandlerError(waddle_xmpp::muc::room_registry_actor::RoomRegistryError::RoomActorStateLost(jid))) if jid == room)
+        Err(kameo::error::SendError::HandlerError(waddle_xmpp::muc::room::registry_actor::RoomRegistryError::RoomActorStateLost(jid))) if jid == room)
     );
     registry.kill();
 }
 
 #[tokio::test]
 async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
-    use waddle_xmpp::muc::room_actor::{
+    use waddle_xmpp::muc::room::actor::{
         ChangeAffiliation, ConfigEffectPlan, GetSnapshot, Join, SetSubject, SetSubjectError,
         UpdateConfig,
     };
@@ -1385,7 +1384,7 @@ async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
         coordinates.revision = coordinates.revision.next().expect("foreign revision");
     }
     assert!(
-        super::super::room_subject::reconcile_ambiguous_subject_commit(
+        super::super::room::subject::reconcile_ambiguous_subject_commit(
             &registry,
             &room,
             &actor,

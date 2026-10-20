@@ -606,5 +606,4 @@ mod cutover_tests {
 }
 
 #[cfg(test)]
-#[path = "schema_ordinal_tests.rs"]
 mod ordinal_tests;

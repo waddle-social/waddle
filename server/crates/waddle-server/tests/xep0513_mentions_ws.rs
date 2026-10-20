@@ -500,7 +500,7 @@ async fn mentions_permissions_iq_service_jid_target_returns_bad_request_with_que
 /// Recovery must retain the recipient-specific occupant mention and No Ping semantics.
 #[test]
 fn recovery_envelope_preserves_occupant_mention_and_noping() {
-    use waddle_server::notification_outbox::{
+    use waddle_server::notification::outbox::{
         candidate_from_envelope, GroupchatCandidateIdentity, NotificationClass,
         NotificationThreadId,
     };

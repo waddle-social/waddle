@@ -158,7 +158,7 @@ async fn custody_ack_storage_failure_preserves_replay_and_ack_window() {
     let (_, memory, mut conn, keys) = wrapped_custody_session().await;
     let fixture = crate::ingress::test_support::IngressFixture::sqlite().await;
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SQL persistence"),
     );

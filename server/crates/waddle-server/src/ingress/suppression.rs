@@ -3,7 +3,7 @@ use waddle_xmpp::{mam::MamTxStoreOutcome, Stanza};
 use xmpp_parsers::message::Message;
 
 use crate::{
-    ingress_uow::ReconcileVerdict,
+    ingress::uow::ReconcileVerdict,
     server::routes::interpret::effects::{
         delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan,
         PlanEffectDependency, PlanSuppressionPolicy, PlannedEffect,

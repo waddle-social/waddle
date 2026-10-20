@@ -439,7 +439,7 @@ async fn dnd_pep_publish_invalid_payload_returns_bad_request() {
 /// fanout (which would leak the user's schedule to roster contacts);
 /// it must NOT block the user's own resource from fetching state on
 /// resume. The owner ↔ entity affiliation derivation in
-/// `pubsub_authz::effective_affiliation` grants Bob `Owner` on his
+/// `pubsub::authz::effective_affiliation` grants Bob `Owner` on his
 /// own PEP node, so the items-get path resolves.
 #[tokio::test]
 async fn dnd_owner_resource_can_fetch_via_items_get_despite_whitelist() {

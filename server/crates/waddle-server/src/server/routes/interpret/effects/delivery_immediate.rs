@@ -179,7 +179,7 @@ pub(crate) async fn execute_with_received_at(
             )
             .await,
         ),
-        // Ordinary pending delivery and its receipts belong to execute_uow.
+        // Ordinary pending delivery and its receipts belong to `ingress::execute::uow`.
         ExternalDeliveryEffect::QueueOfflineDelivery { .. } => EffectOutcome::Unavailable,
     }
 }
@@ -272,5 +272,4 @@ async fn finish_full_jid_relay_at(
 }
 
 #[cfg(test)]
-#[path = "delivery_immediate_tests.rs"]
 mod tests;

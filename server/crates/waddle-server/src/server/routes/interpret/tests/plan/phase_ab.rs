@@ -13,8 +13,8 @@ use crate::server::routes::websocket::{
 };
 use waddle_xmpp::ingress::{DigestContext, DigestInput, NormalizedTarget};
 use waddle_xmpp::muc::{
-    room_actor::{ChangeAffiliation, GetSnapshot, Join},
-    room_registry_actor::CreateRoom,
+    room::actor::{ChangeAffiliation, GetSnapshot, Join},
+    room::registry_actor::CreateRoom,
 };
 
 fn machine(sender: &jid::FullJid) -> XmppStateMachine {
@@ -148,7 +148,7 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
                 message.bodies.clear();
                 message
                     .payloads
-                    .push(waddle_xmpp::xep::xep_waddle_pin::build_pinned_element(
+                    .push(waddle_xmpp::xep::waddle::pin::build_pinned_element(
                         &waddle_xmpp_core::xep0359::StanzaId::new(
                             "target-original",
                             room.clone().into(),
@@ -316,7 +316,7 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
             )));
         }
         Scenario::Pin => assert!(actor
-            .ask(waddle_xmpp::muc::room_actor::GetPinList)
+            .ask(waddle_xmpp::muc::room::actor::GetPinList)
             .await
             .expect("pins")
             .is_empty()),

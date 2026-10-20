@@ -1,11 +1,11 @@
 //! RFC 0018 §3 recorded-wins and XEP-0198: resource drift cannot revoke acceptance.
 use super::*;
 use waddle_server::{
+    ingress::uow::{EffectIntentRepository, SmIngressStreamRepository},
     ingress::{
         effects::delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
         ExternalEffect, IngressStreamIdentity, PlanSuppressionPolicy,
     },
-    ingress_uow::{EffectIntentRepository, SmIngressStreamRepository},
 };
 use waddle_xmpp::ingress::{
     DigestContext, DigestInput, EffectMessageIdentity, NormalizedTarget, WireHandledCount,

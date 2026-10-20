@@ -5,7 +5,7 @@ use std::sync::{Arc, Mutex};
 
 use jid::{BareJid, FullJid};
 use kameo::actor::Spawn;
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     GetSnapshot, RestoreDurableRoomState, RestoreLiveRoster, RoomActor,
 };
 use waddle_xmpp::muc::{

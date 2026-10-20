@@ -1,6 +1,6 @@
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, MucInviteLedgerAction, MucInviteLedgerMutation},
-    muc::room_registry_actor::GetRoom,
+    muc::room::registry_actor::GetRoom,
     protocol::handlers::errors::message_error_reply,
     Stanza,
 };
@@ -103,7 +103,7 @@ async fn handle_muc_private_message(
         }
     };
     let Ok(snapshot) = room_actor
-        .ask(waddle_xmpp::muc::room_actor::GetSnapshot)
+        .ask(waddle_xmpp::muc::room::actor::GetSnapshot)
         .reply_timeout(std::time::Duration::from_secs(5))
         .await
     else {
@@ -636,9 +636,9 @@ pub(crate) fn restore_recorded_muc_decline(
     plan: &mut crate::ingress::IngressPlan,
     recorded: &[IngressEffectIntent],
     pending: &[IngressEffectIntent],
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &crate::ingress::substrate::MessageEnvelope,
     received_at: chrono::DateTime<chrono::Utc>,
-) -> Result<bool, crate::ingress_uow::IngressUowError> {
+) -> Result<bool, crate::ingress::uow::IngressUowError> {
     use crate::server::routes::interpret::effects::{invite::MucUserRoute, PlanSuppressionPolicy};
     use waddle_xmpp::{
         ingress::PendingDeliveryMutation,
@@ -656,7 +656,7 @@ pub(crate) fn restore_recorded_muc_decline(
     };
     let incoming = envelope.message();
     let decline = mediated_decline(incoming)
-        .ok_or(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing)?;
+        .ok_or(crate::ingress::uow::IngressUowError::EffectIntentMessageMissing)?;
     let invite = crate::server::routes::websocket::muc_invites::OutstandingInvite {
         room: mutation.room.clone(),
         invitee: mutation.invitee.clone(),
@@ -692,7 +692,7 @@ pub(crate) fn restore_recorded_muc_decline(
             } if recipient == &invite.inviter => Some(row_id.clone()),
             _ => None,
         }) else {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentMessageMissing);
+            return Err(crate::ingress::uow::IngressUowError::EffectIntentMessageMissing);
         };
         // A completed fallback is reconciled into the route receipt before this hook.
         let message = mediated_decline_message(
@@ -864,8 +864,8 @@ mod tests {
         create_test_websocket_state, register_test_connection,
     };
     use kameo::actor::ActorRef;
-    use waddle_xmpp::muc::room_actor::Join;
-    use waddle_xmpp::muc::room_registry_actor::CreateRoom;
+    use waddle_xmpp::muc::room::actor::Join;
+    use waddle_xmpp::muc::room::registry_actor::CreateRoom;
     use waddle_xmpp::muc::RoomConfig;
     use waddle_xmpp::xep::xep0421::{
         extract_occupant_id_from_message, generate_occupant_id, OccupantId, OccupantIdSecret,
@@ -890,7 +890,7 @@ mod tests {
     async fn create_test_room(
         state: &WebSocketState,
         room_jid: jid::BareJid,
-    ) -> ActorRef<waddle_xmpp::muc::room_actor::RoomActor> {
+    ) -> ActorRef<waddle_xmpp::muc::room::actor::RoomActor> {
         state
             .deps
             .protocol
@@ -1401,5 +1401,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "muc_direct_plan_failure_tests.rs"]
 mod plan_failure_tests;

@@ -38,7 +38,7 @@ pub const PEP_NODE_VCARD4: &str = "urn:xmpp:vcard4";
 
 /// Waddle DND PEP node + namespace (issue #367).
 ///
-/// Mirrored as `waddle_xmpp::xep::xep_waddle_dnd::PEP_NODE_WADDLE_DND`
+/// Mirrored as `waddle_xmpp::xep::waddle::dnd::PEP_NODE_WADDLE_DND`
 /// so the well-known-node configuration table in
 /// `NodeConfig::pep_for_node` can reference it without pulling
 /// `waddle-xmpp` into `waddle-xmpp-core`. The two constants are pinned
@@ -63,7 +63,7 @@ pub const PEP_NODE_WADDLE_DND: &str = "urn:waddle:dnd:0";
 /// `docs/specs/urn-waddle-dm-bookmarks.md`.
 ///
 /// Mirrored as
-/// `waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS`
+/// `waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS`
 /// so the well-known-node configuration table in
 /// `NodeConfig::pep_for_node` can reference it without pulling
 /// `waddle-xmpp` into `waddle-xmpp-core`. The two constants are pinned

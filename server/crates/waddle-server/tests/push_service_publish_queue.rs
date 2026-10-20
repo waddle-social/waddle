@@ -16,7 +16,7 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use tempfile::tempdir;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver, IntoParams, Rows};
 use waddle_server::db_params;
-use waddle_server::push_service::{
+use waddle_server::push::service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::pubsub::PubSubItem;

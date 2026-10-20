@@ -3,8 +3,8 @@ use waddle_xmpp::ingress::{IngressEffectIntent, MucInviteLedgerAction, PendingDe
 use xmpp_parsers::message::Message;
 
 use crate::{
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::IngressUowError,
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::IngressUowError,
     server::routes::websocket::handlers::message::{group_dm_invite, muc_direct, muc_invite},
 };
 

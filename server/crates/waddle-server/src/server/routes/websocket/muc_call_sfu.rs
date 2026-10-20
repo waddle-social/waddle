@@ -258,7 +258,7 @@ pub(crate) async fn derive_current_voice(
         }
     };
     match actor
-        .ask(waddle_xmpp::muc::room_actor::GetOccupantVoice {
+        .ask(waddle_xmpp::muc::room::actor::GetOccupantVoice {
             jid: full_jid.clone(),
         })
         // Bounded for the same reason as the reconciler's identical
@@ -362,7 +362,7 @@ pub(crate) async fn enforce_current_voice_grants(
 /// over-pushing costs only a few no-op requests.
 pub(crate) async fn converge_room_voice_after_moderation_flip(
     sfu: Option<&std::sync::Arc<dyn waddle_sfu::SfuService>>,
-    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room_actor::RoomActor>,
+    actor: &kameo::actor::ActorRef<waddle_xmpp::muc::room::actor::RoomActor>,
     room_jid: &BareJid,
     voices_from_recovered_snapshot: Option<&[(FullJid, Voice)]>,
 ) {
@@ -376,7 +376,7 @@ pub(crate) async fn converge_room_voice_after_moderation_flip(
         return;
     }
     let voices = match actor
-        .ask(waddle_xmpp::muc::room_actor::OccupantVoices)
+        .ask(waddle_xmpp::muc::room::actor::OccupantVoices)
         // Bounded: a wedged room actor must not park the config-change
         // handler that is waiting on this convergence.
         .reply_timeout(waddle_xmpp::muc::ROOM_REGISTRY_REPLY_TIMEOUT)
@@ -407,7 +407,7 @@ pub(crate) async fn converge_room_voice_after_moderation_flip(
 pub(crate) fn converge_members_only_sweep_via_sfu(
     sfu: Option<&std::sync::Arc<dyn waddle_sfu::SfuService>>,
     room_jid: &BareJid,
-    applied: &waddle_xmpp::muc::room_actor::AdminItemsApplied,
+    applied: &waddle_xmpp::muc::room::actor::AdminItemsApplied,
 ) {
     converge_moderation_deltas_via_sfu(
         sfu,

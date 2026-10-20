@@ -7,11 +7,11 @@ use minidom::Element;
 use std::sync::Arc;
 use uuid::Uuid;
 use waddle_server::{
-    notification_outbox::{
+    notification::outbox::{
         NotificationOutboxJob, NotificationOutboxPublishOutcome, NotificationOutboxStore,
         WADDLE_PUSH_CONTEXT_NS,
     },
-    push_service::{DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration},
+    push::service::{DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration},
 };
 use waddle_xmpp::{
     inbox::{
@@ -72,7 +72,7 @@ impl Fixture {
         )
         .await
         .expect("push service");
-        waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_db.db.clone())
+        waddle_server::push::registrations::DatabasePushRegistrationStore::new(push_db.db.clone())
             .await
             .expect("registration schema");
         let node = push
@@ -470,7 +470,7 @@ async fn explicit_revocation_retires_accepted_outbox_after_crash_gap(
     control: RevocationControl,
 ) {
     use sha2::{Digest, Sha256};
-    use waddle_server::ingress_uow::{
+    use waddle_server::ingress::uow::{
         CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
         EffectReceiptRepository,
     };
@@ -518,7 +518,7 @@ async fn explicit_revocation_retires_accepted_outbox_after_crash_gap(
     EffectReceiptRepository::record_receipt(
         &mut tx,
         parent,
-        waddle_server::ingress_substrate::EffectReceiptKind::from_storage(kind),
+        waddle_server::ingress::substrate::EffectReceiptKind::from_storage(kind),
         &identity,
     )
     .await
@@ -700,15 +700,15 @@ async fn explicit_revocation_retires_accepted_outbox_after_crash_gap(
         1,
         "exact proof settles the separate upstream descendant"
     );
-    let budget = waddle_server::ingress_substrate::AliasGcBudget {
+    let budget = waddle_server::ingress::substrate::AliasGcBudget {
         deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(10),
         lock_timeout: std::time::Duration::from_secs(1),
         statement_timeout: std::time::Duration::from_secs(2),
         scan_timeout: std::time::Duration::from_secs(2),
-        progress: waddle_server::ingress_substrate::AliasGcProgress::default(),
+        progress: waddle_server::ingress::substrate::AliasGcProgress::default(),
     };
     assert_eq!(
-        waddle_server::ingress_substrate::gc_expired_aliases(
+        waddle_server::ingress::substrate::gc_expired_aliases(
             &fixture.outbox_db.db,
             chrono::Utc::now() + chrono::Duration::days(9),
             budget

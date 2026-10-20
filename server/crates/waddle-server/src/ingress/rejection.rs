@@ -1,6 +1,6 @@
 use super::decision::IngressDecisionClass;
 use crate::{
-    ingress_uow::IngressUowError,
+    ingress::uow::IngressUowError,
     server::routes::interpret::effects::{
         delivery::ExternalDeliveryEffect, Effect, ExternalEffect, IngressPlan, PlanRejection,
         PlannedEffect, PolicyDeniedReason, RoomExecutionPath,
@@ -118,7 +118,7 @@ pub(super) fn is_recorded_rejection(intents: &[IngressEffectIntent]) -> bool {
 /// or today's provisional message. A wire replay cannot turn a rejection into
 /// an accepted message or change the standard stanza error it already owns.
 pub(super) fn recorded_rejection_plan(
-    envelope: &crate::ingress_substrate::MessageEnvelope,
+    envelope: &crate::ingress::substrate::MessageEnvelope,
     intents: &[IngressEffectIntent],
 ) -> Result<IngressPlan, IngressUowError> {
     if !is_recorded_rejection(intents) {
@@ -314,7 +314,7 @@ mod tests {
             }
         )));
         let replay = recorded_rejection_plan(
-            &crate::ingress_substrate::MessageEnvelope::new(plan.sanitized_message.clone()),
+            &crate::ingress::substrate::MessageEnvelope::new(plan.sanitized_message.clone()),
             &denied.intents,
         )
         .expect("reconstruct sender obligations");
@@ -329,7 +329,7 @@ mod tests {
     #[test]
     fn error_intent_alone_does_not_classify_a_plan_rejection() {
         let sender: jid::FullJid = "sender@example.test/device".parse().expect("sender");
-        let envelope = crate::ingress_substrate::MessageEnvelope::new(
+        let envelope = crate::ingress::substrate::MessageEnvelope::new(
             xmpp_parsers::message::Message::new(None),
         );
         let intents = vec![IngressEffectIntent::ErrorReply {
@@ -355,7 +355,7 @@ mod tests {
             xmpp_parsers::message::Lang::default(),
             "original body".into(),
         );
-        let envelope = crate::ingress_substrate::MessageEnvelope::new(offered);
+        let envelope = crate::ingress::substrate::MessageEnvelope::new(offered);
         let intents = vec![IngressEffectIntent::ErrorReply {
             recipient: sender.clone(),
             error: FrozenStanzaError::new(

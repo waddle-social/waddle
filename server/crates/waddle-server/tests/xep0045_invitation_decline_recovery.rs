@@ -9,9 +9,9 @@ use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
 use waddle_server::{
     db::{DatabaseConfig, DatabasePool, PoolConfig},
+    ingress::substrate::EffectReceiptKind,
+    ingress::uow::{CanonicalMessageRepository, EffectReceiptRepository},
     ingress::{commit::commit_submission, RecoveryEnvironment},
-    ingress_substrate::EffectReceiptKind,
-    ingress_uow::{CanonicalMessageRepository, EffectReceiptRepository},
     test_support::{
         claim_invite, create_test_session, list_invites, record_invite_at,
         register_test_connection, websocket_state_with_ingress, OutstandingInvite, RecordOutcome,

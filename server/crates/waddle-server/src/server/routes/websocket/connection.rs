@@ -2113,7 +2113,7 @@ fn response_batch_ends_with_websocket_stream_close(responses: &[ResponseFrame]) 
 fn response_batch_completion_frames(
     responses: ResponseBatch,
 ) -> Vec<(
-    crate::room_effect_outbox::drain::RoomEffectCompletion,
+    crate::room::effect_outbox::drain::RoomEffectCompletion,
     usize,
 )> {
     responses
@@ -2125,12 +2125,12 @@ fn response_batch_completion_frames(
 
 fn complete_batch_completions(
     state: &Arc<WebSocketState>,
-    completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+    completions: Vec<crate::room::effect_outbox::drain::RoomEffectCompletion>,
 ) {
     for completion in completions {
         let state = Arc::clone(state);
         tokio::spawn(async move {
-            match crate::room_effect_outbox::drain::complete_after_write(
+            match crate::room::effect_outbox::drain::complete_after_write(
                 state.as_ref(),
                 &completion,
             )
@@ -2161,7 +2161,7 @@ fn settle_batch_completions(
     resumable: bool,
     accepted_frame_indices: &[usize],
     completion_frames: Vec<(
-        crate::room_effect_outbox::drain::RoomEffectCompletion,
+        crate::room::effect_outbox::drain::RoomEffectCompletion,
         usize,
     )>,
 ) {
@@ -2184,7 +2184,7 @@ fn settle_batch_completions(
 
 fn queue_replay_recorded_completions(
     conn: &mut WsConnState,
-    completions: Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+    completions: Vec<crate::room::effect_outbox::drain::RoomEffectCompletion>,
 ) {
     let mut queued: std::collections::HashSet<_> = conn
         .pending_replay_completions
@@ -2225,11 +2225,11 @@ fn select_batch_completions_to_complete(
     resumable: bool,
     accepted_frame_indices: &[usize],
     completion_frames: Vec<(
-        crate::room_effect_outbox::drain::RoomEffectCompletion,
+        crate::room::effect_outbox::drain::RoomEffectCompletion,
         usize,
     )>,
 ) -> (
-    Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+    Vec<crate::room::effect_outbox::drain::RoomEffectCompletion>,
     usize,
 ) {
     let accepted_frame_indices: std::collections::HashSet<_> =
@@ -2241,7 +2241,7 @@ fn select_batch_completions_to_complete(
             .entry(completion_key)
             .and_modify(
                 |(_, all_frames_accepted): &mut (
-                    crate::room_effect_outbox::drain::RoomEffectCompletion,
+                    crate::room::effect_outbox::drain::RoomEffectCompletion,
                     bool,
                 )| {
                     *all_frames_accepted &= accepted_frame_indices.contains(&frame_index)
@@ -2388,15 +2388,15 @@ mod tests {
         BareJid::from_str("other-replay-completion@muc.example.com").expect("room JID")
     }
 
-    fn replay_completion_origin() -> crate::room_effect_outbox::RoomEffectOriginInstanceId {
-        crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+    fn replay_completion_origin() -> crate::room::effect_outbox::RoomEffectOriginInstanceId {
+        crate::room::effect_outbox::RoomEffectOriginInstanceId::new(
             "connection-replay-completion".to_owned(),
         )
         .expect("origin instance")
     }
 
-    fn replay_completion_node() -> crate::room_effect_outbox::RoomEffectProducingNode {
-        crate::room_effect_outbox::RoomEffectProducingNode::from_node_identity(
+    fn replay_completion_node() -> crate::room::effect_outbox::RoomEffectProducingNode {
+        crate::room::effect_outbox::RoomEffectProducingNode::from_node_identity(
             waddle_xmpp::ownership::NodeIdentity::new("node-a", "epoch-a"),
         )
     }
@@ -2410,7 +2410,7 @@ mod tests {
             .deps
             .protocol
             .room_registry
-            .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+            .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
                 room_jid: room_jid.clone(),
                 waddle_id: "connection-replay-completion".to_owned(),
                 channel_id: "connection-replay-completion".to_owned(),
@@ -2483,7 +2483,7 @@ mod tests {
         let reservation = store
             .enqueue_in_tx(
                 &mut tx,
-                crate::room_effect_outbox::RoomEffectEnqueue {
+                crate::room::effect_outbox::RoomEffectEnqueue {
                     lifecycle,
                     revision,
                     effects: &effects,
@@ -2504,9 +2504,9 @@ mod tests {
         initiator: &FullJid,
     ) -> (
         ResponseFrame,
-        crate::room_effect_outbox::drain::RoomEffectCompletion,
+        crate::room::effect_outbox::drain::RoomEffectCompletion,
     ) {
-        let mut frames = crate::room_effect_outbox::drain::drain_reservation_inline(
+        let mut frames = crate::room::effect_outbox::drain::drain_reservation_inline(
             state,
             reservation,
             Some(initiator),
@@ -3165,7 +3165,7 @@ mod tests {
             "a NotPersisted cleanup must retain replay-only completions for retry"
         );
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+            crate::room::effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
                 .await
                 .expect("complete retained completion"),
             "the retained completion must still be available for retry after NotPersisted cleanup"
@@ -3250,7 +3250,7 @@ mod tests {
             "the live-written prefix must settle while the replay-only tail stays leased"
         );
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(
+            crate::room::effect_outbox::drain::complete_after_write(
                 state.as_ref(),
                 &second_completion
             )
@@ -3314,7 +3314,7 @@ mod tests {
         wait_for_room_effect_queue_depth(&state, 1).await;
 
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(
+            crate::room::effect_outbox::drain::complete_after_write(
                 state.as_ref(),
                 &second_completion
             )
@@ -3371,7 +3371,7 @@ mod tests {
             "a partially accepted sibling frame set must retain the shared completion"
         );
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+            crate::room::effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
                 .await
                 .expect("complete retained completion"),
             "the shared completion must still be retained for retry"
@@ -3417,7 +3417,7 @@ mod tests {
             "non-resumable replay recording must retain the leased completion for retry"
         );
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+            crate::room::effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
                 .await
                 .expect("complete retained completion"),
             "the recorded-but-non-resumable completion must still be retained for retry"
@@ -3477,7 +3477,7 @@ mod tests {
             "a gapped replay tail must retain the leased completion for retry"
         );
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
+            crate::room::effect_outbox::drain::complete_after_write(state.as_ref(), &completion)
                 .await
                 .expect("complete retained completion"),
             "a replay-gap frame must not settle the completion as accepted work"
@@ -3538,7 +3538,7 @@ mod tests {
         wait_for_room_effect_queue_depth(&state, 1).await;
 
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(
+            crate::room::effect_outbox::drain::complete_after_write(
                 state.as_ref(),
                 &second_completion
             )
@@ -3714,7 +3714,7 @@ mod tests {
             "terminal recovery should accept only one more completion frame"
         );
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(
+            crate::room::effect_outbox::drain::complete_after_write(
                 state.as_ref(),
                 &first_completion
             )
@@ -3723,7 +3723,7 @@ mod tests {
             "the terminally recorded completion must stay retained until cleanup settles it"
         );
         assert!(
-            crate::room_effect_outbox::drain::complete_after_write(
+            crate::room::effect_outbox::drain::complete_after_write(
                 state.as_ref(),
                 &second_completion
             )

@@ -151,6 +151,10 @@
                 fi
               cp "''${CARGO_TARGET_DIR:-target}/cargo-timings/cargo-timing.html" "$out/ci-performance/cargo-timing.html"
               cargo nextest list "''${nextest_args[@]}" --message-format json > "$out/test-inventory.json"
+              # Module and test-binary renames do not fail compilation; fail
+              # here instead of letting an override silently stop applying.
+              ${pkgs.python3}/bin/python3 ${./server/scripts/check_nextest_filters.py} \
+                .config/nextest.toml "$out/test-inventory.json"
               ${pkgs.python3}/bin/python3 ${./server/scripts/plan_nextest_binary_shards.py} \
                 "$out/test-inventory.json" "$out" --count 4 \
                 --shared-binary waddle-server --shared-binary waddle-server::clustering_cluster_e2e

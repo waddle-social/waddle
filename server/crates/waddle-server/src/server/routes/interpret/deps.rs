@@ -177,7 +177,7 @@ impl HostOwnedResources {
     }
 
     pub(super) fn owns_configured_bot(target: &FullJid, state: &WebSocketState) -> bool {
-        target.resource().as_str() == crate::server::extension_bot::RESOURCE
+        target.resource().as_str() == crate::server::extension::bot::RESOURCE
             && state
                 .deps
                 .service_domains
@@ -211,7 +211,7 @@ pub struct Deps<'a> {
     /// Owned receipt context scoped to one recorded direct-route resource attempt.
     pub ingress_append_context: Option<SmIngressAppendContext>,
     /// Canonical authority of the current post-commit execution.
-    pub(crate) ingress_delivery_uow: Option<crate::ingress_uow::IngressUnitOfWork>,
+    pub(crate) ingress_delivery_uow: Option<crate::ingress::uow::IngressUnitOfWork>,
     /// Forced shutdown fence retained from the execution admission.
     pub(crate) ingress_delivery_stop: Option<tokio_util::sync::CancellationToken>,
     /// Resources whose planned frames are consumed by an extension host.
@@ -256,7 +256,7 @@ pub struct Deps<'a> {
     /// MUC room-registry actor. Used by the
     /// [`OutboundEvent::DispatchToRoom`] arm to look up the per-room
     /// actor and ask it for a frozen
-    /// [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`].
+    /// [`waddle_xmpp::muc::room::actor::RoomChainSnapshot`].
     pub room_registry: Option<&'a ActorRef<RoomRegistryActor>>,
     /// WebSocket route state. Used by the
     /// [`OutboundEvent::DispatchToRoom`] arm for the managed-room

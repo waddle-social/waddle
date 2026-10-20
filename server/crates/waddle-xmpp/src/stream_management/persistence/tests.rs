@@ -217,7 +217,7 @@ async fn persisted_unacked_round_trips_original_receipt_at() {
 /// it returns sessions paired with their unacked queues. The
 /// libSQL backend overrides with a single LEFT JOIN — that
 /// override is exercised separately in
-/// `server/crates/waddle-server/src/sm_persistence.rs` tests.
+/// `server/crates/waddle-server/src/sm/persistence.rs` tests.
 #[tokio::test]
 async fn list_all_sessions_with_unacked_groups_by_session() {
     let store = InMemorySmPersistence::new();

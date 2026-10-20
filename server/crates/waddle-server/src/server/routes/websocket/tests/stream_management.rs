@@ -2616,9 +2616,9 @@ async fn refused_detach_keeps_claim_fence_until_promotion_retry_settles() {
 
     let retry = sm_registry.drain_expired().await.expect("drain retry");
     assert_eq!(retry.len(), 1, "failed cleanup promotion is retryable");
-    let settled = crate::sm_promotion::promote_displaced_sessions(
+    let settled = crate::sm::promotion::promote_displaced_sessions(
         retry,
-        crate::sm_promotion::DisplacedPromotionDeps {
+        crate::sm::promotion::DisplacedPromotionDeps {
             sm_registry: sm_registry.as_ref(),
             connection_registry: &state.deps.protocol.connection_registry,
             user_registry: &state.deps.protocol.user_registry,
@@ -2760,9 +2760,9 @@ async fn assert_promotion_failure_survives_restart(terminal_recovery: bool) {
     assert!(retry[0].unacked_stanzas[0]
         .stanza_xml
         .contains("survives-restart"));
-    let settled = crate::sm_promotion::promote_displaced_sessions(
+    let settled = crate::sm::promotion::promote_displaced_sessions(
         retry,
-        crate::sm_promotion::DisplacedPromotionDeps {
+        crate::sm::promotion::DisplacedPromotionDeps {
             sm_registry: &restarted,
             connection_registry: &state.deps.protocol.connection_registry,
             user_registry: &state.deps.protocol.user_registry,
@@ -2849,9 +2849,9 @@ async fn cancelled_terminal_prefix_remains_available_to_the_live_janitor() {
     let retry = registry.drain_expired().await.expect("janitor custody");
     assert_eq!(retry.len(), 1);
     assert_eq!(retry[0].unacked_stanzas.len(), 1);
-    let outcome = crate::sm_promotion::promote_displaced_sessions(
+    let outcome = crate::sm::promotion::promote_displaced_sessions(
         retry,
-        crate::sm_promotion::DisplacedPromotionDeps {
+        crate::sm::promotion::DisplacedPromotionDeps {
             sm_registry: &registry,
             connection_registry: &state.deps.protocol.connection_registry,
             user_registry: &state.deps.protocol.user_registry,
@@ -4349,7 +4349,7 @@ async fn failed_pending_ownership_preflight_never_releases_a_durable_replay_copy
     pending
         .fail_next_list
         .store(true, std::sync::atomic::Ordering::SeqCst);
-    let outcome = crate::sm_promotion::release_row_backed_replay_copies(
+    let outcome = crate::sm::promotion::release_row_backed_replay_copies(
         &registry,
         &state.deps.protocol.pending_delivery_storage,
         &mut inventory,
@@ -4378,7 +4378,7 @@ async fn failed_pending_ownership_preflight_never_releases_a_durable_replay_copy
         .unwrap();
     assert_eq!(inventory.unacked_stanzas.len(), 1);
 
-    let released = crate::sm_promotion::release_row_backed_replay_copies(
+    let released = crate::sm::promotion::release_row_backed_replay_copies(
         &registry,
         &state.deps.protocol.pending_delivery_storage,
         &mut inventory,
@@ -10891,7 +10891,7 @@ async fn sm_janitor_helper_drains_expired_and_cleans_muc() {
     cleanup_muc_presence_for_jid(
         state.as_ref(),
         &drained[0].jid,
-        waddle_xmpp::muc::room_actor::LeaveSessionSelector::Generation(
+        waddle_xmpp::muc::room::actor::LeaveSessionSelector::Generation(
             drained[0].occupancy_session,
         ),
     )
@@ -11294,7 +11294,7 @@ mod fix_a_post_cas_shutdown {
     use crate::clustering::ClusteringHandles;
     use crate::db::{Database, DatabaseConfig, DatabaseDriver, DEFAULT_CONTROL_PLANE_POOL_SIZE};
     use crate::server::routes::websocket::tests::create_test_websocket_state_with_clustering;
-    use crate::sm_persistence_fenced::PostgresFencedSmPersistence;
+    use crate::sm::persistence::fenced::PostgresFencedSmPersistence;
     use std::sync::Arc;
     use std::time::Duration;
     use waddle_xmpp::ownership::{
@@ -12588,7 +12588,7 @@ mod terminal_ordering_release_tests {
             directory.path().join("retry.db").display()
         );
         let persistence = Arc::new(
-            crate::sm_persistence::DatabaseSmPersistence::open(Some(&database_url))
+            crate::sm::persistence::DatabaseSmPersistence::open(Some(&database_url))
                 .await
                 .expect("persistent SM retry storage"),
         );
@@ -12826,7 +12826,8 @@ mod terminal_ordering_release_tests {
         }));
         for session in retained {
             assert!(
-                crate::sm_promotion::reinsert_failed_session_for_retry(&sm_registry, session).await
+                crate::sm::promotion::reinsert_failed_session_for_retry(&sm_registry, session)
+                    .await
             );
         }
 

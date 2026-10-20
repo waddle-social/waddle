@@ -48,7 +48,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
     let subject = Subject::user("user-alice");
 
     assert!(
-        !extension_commands::pubsub::managed_channel_permission_allowed(
+        !extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &subject,
             "chat",
@@ -106,7 +106,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         .expect("server admin tuple");
 
     assert!(
-        extension_commands::pubsub::managed_channel_permission_allowed(
+        extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &subject,
             "chat",
@@ -117,7 +117,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "default chat extension publishes should inherit deployment membership"
     );
     assert!(
-        extension_commands::pubsub::managed_channel_permission_allowed(
+        extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &subject,
             "github-actions",
@@ -128,7 +128,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "github actions alerts should inherit deployment membership"
     );
     assert!(
-        extension_commands::pubsub::managed_channel_permission_allowed(
+        extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &owner_subject,
             "github-actions",
@@ -139,7 +139,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "github actions alerts policy must include deployment owners"
     );
     assert!(
-        extension_commands::pubsub::managed_channel_permission_allowed(
+        extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &admin_subject,
             "github-actions",
@@ -150,7 +150,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "github actions alerts policy must include deployment admins"
     );
     assert!(
-        extension_commands::pubsub::managed_channel_permission_allowed(
+        extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &subject,
             "announcements",
@@ -161,7 +161,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "default announcement route reads should inherit deployment membership"
     );
     assert!(
-        extension_commands::pubsub::managed_channel_permission_allowed(
+        extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &owner_subject,
             "chat",
@@ -172,7 +172,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "default room membership policy must include deployment owners"
     );
     assert!(
-        extension_commands::pubsub::managed_channel_permission_allowed(
+        extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &owner_subject,
             "announcements",
@@ -183,7 +183,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "deployment owners should be allowed to publish announcement extension state"
     );
     assert!(
-        !extension_commands::pubsub::managed_channel_permission_allowed(
+        !extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &subject,
             "announcements",
@@ -205,7 +205,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         .await
         .expect("announcement writer tuple");
     assert!(
-        !extension_commands::pubsub::managed_channel_permission_allowed(
+        !extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &subject,
             "announcements",
@@ -216,7 +216,7 @@ async fn extension_pubsub_permission_allows_bootstrap_chat_member() {
         "announcement channel writer grants must not bypass server-owner write policy"
     );
     assert!(
-        !extension_commands::pubsub::managed_channel_permission_allowed(
+        !extension::commands::pubsub::managed_channel_permission_allowed(
             &state,
             &subject,
             "random",

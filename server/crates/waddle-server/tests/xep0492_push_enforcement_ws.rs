@@ -7,11 +7,11 @@
 //! durable per-`(owner, conversation)` projection are covered by
 //! `waddle-xmpp/tests/xep0492_chat_notification_settings.rs` (parsing,
 //! validation, round-trip) and by the projection unit tests in
-//! `waddle_server::notification_settings_projection`.
+//! `waddle_server::notification::settings_projection`.
 //!
 //! This file covers the *enforcement* boundary that those two suites
 //! deliberately do NOT exercise: the pure reducer
-//! [`waddle_server::notification_settings_projection::PushDispatchDecision::evaluate`]
+//! [`waddle_server::notification::settings_projection::PushDispatchDecision::evaluate`]
 //! that the offline-delivery interpret arm consults immediately before
 //! invoking the push provider. The reducer is the single decision point
 //! shared by every conversation kind (`Direct`, `PrivateGroup`,
@@ -33,7 +33,7 @@
 //! lives next to the existing offline-delivery harness in
 //! `tests/messages.rs` — see `xep0492_direct_chat_*` tests there.
 
-use waddle_server::notification_settings_projection::{ConversationKind, PushDispatchDecision};
+use waddle_server::notification::settings_projection::{ConversationKind, PushDispatchDecision};
 use waddle_xmpp::xep::NotificationLevel;
 
 // ---------------------------------------------------------------------------
@@ -251,7 +251,7 @@ fn xep0492_suppression_reason_never_distinct_from_on_mention() {
 
 #[test]
 fn xep0492_public_group_default_delivers_personal_mention_for_mentioned_non_member() {
-    use waddle_server::notification_outbox::{
+    use waddle_server::notification::outbox::{
         candidate_from_envelope, GroupchatCandidateIdentity, NotificationClass,
         NotificationThreadId,
     };

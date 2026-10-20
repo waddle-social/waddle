@@ -1,6 +1,6 @@
 use super::restore;
+use crate::ingress::uow::IngressUowError;
 use crate::ingress::{commit::classify_failure, decision::IngressDecisionClass};
-use crate::ingress_uow::IngressUowError;
 use waddle_xmpp::{ingress::IngressEffectIntent, mam::ArchiveOrdinal};
 
 fn authority(ordinal: Option<ArchiveOrdinal>) -> IngressEffectIntent {

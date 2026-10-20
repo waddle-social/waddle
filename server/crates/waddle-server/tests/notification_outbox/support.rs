@@ -4,7 +4,7 @@ use std::ops::Deref;
 
 use jid::{BareJid, Jid};
 use waddle_server::db::Database;
-use waddle_server::notification_outbox::*;
+use waddle_server::notification::outbox::*;
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp::push::PushSubscriptionStore;
 use waddle_xmpp::xep::xep0191::{BlockingStorage, BlockingStorageError};
@@ -156,10 +156,11 @@ pub fn target_named(node: &str) -> NotificationOutboxTarget {
 /// Static so a `&NoopActivityReader` borrow stays valid for the
 /// duration of every call site without needing a `let binding =`
 /// dance at each invocation.
-pub static NOOP_ACTIVITY_READER: waddle_server::notification_activity::NoopActivityReader =
-    waddle_server::notification_activity::NoopActivityReader;
+pub static NOOP_ACTIVITY_READER: waddle_server::notification::activity::NoopActivityReader =
+    waddle_server::notification::activity::NoopActivityReader;
 
-pub fn noop_activity_reader() -> &'static waddle_server::notification_activity::NoopActivityReader {
+pub fn noop_activity_reader() -> &'static waddle_server::notification::activity::NoopActivityReader
+{
     &NOOP_ACTIVITY_READER
 }
 
@@ -172,7 +173,7 @@ pub fn noop_activity_reader() -> &'static waddle_server::notification_activity::
 pub fn drain_deps_with_noop_activity<'a>(
     room_policy: &'a dyn RoomPolicyStore,
     dnd_reader: &'a dyn DndReader,
-    activity_reader: &'a waddle_server::notification_activity::NoopActivityReader,
+    activity_reader: &'a waddle_server::notification::activity::NoopActivityReader,
 ) -> NotificationDrainDeps<'a> {
     NotificationDrainDeps::new(room_policy, dnd_reader, activity_reader)
 }
@@ -200,11 +201,11 @@ impl RoomPolicyStore for StubRoomPolicy {
 }
 
 pub async fn settings_projection(
-) -> waddle_server::notification_settings_projection::NotificationSettingsProjectionStore {
+) -> waddle_server::notification::settings_projection::NotificationSettingsProjectionStore {
     let storage = waddle_server::pubsub::DatabasePubSubStorage::open(Some("sqlite::memory:"))
         .await
         .expect("settings pubsub storage");
-    waddle_server::notification_settings_projection::NotificationSettingsProjectionStore::new(
+    waddle_server::notification::settings_projection::NotificationSettingsProjectionStore::new(
         storage.database(),
     )
 }
@@ -376,8 +377,8 @@ impl BlockingStorage for FailingBlockingStorage {
     }
 }
 
-pub async fn activity_store() -> waddle_server::notification_activity::NotificationActivityStore {
-    waddle_server::notification_activity::NotificationActivityStore::new(
+pub async fn activity_store() -> waddle_server::notification::activity::NotificationActivityStore {
+    waddle_server::notification::activity::NotificationActivityStore::new(
         Database::in_memory("notification-activity-eval")
             .await
             .expect("activity db"),

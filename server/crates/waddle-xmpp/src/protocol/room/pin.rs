@@ -30,7 +30,7 @@ use super::context::RoomContext;
 use super::traits::{RoomHandler, RoomHandlerOutcome};
 use crate::muc::pin::{PinChangeRequest, PinPreview};
 use crate::types::{Affiliation, Role};
-use crate::xep::xep_waddle_pin::{extract_pin_intent_from_message, PinIntent, NS_WADDLE_PIN_V0};
+use crate::xep::waddle::pin::{extract_pin_intent_from_message, PinIntent, NS_WADDLE_PIN_V0};
 use chrono::{DateTime, Utc};
 use jid::Jid;
 use minidom::Element;
@@ -294,8 +294,8 @@ mod tests {
     use crate::protocol::id_gen::FixedIdGenerator;
     use crate::protocol::room::context::OccupantSnapshot;
     use crate::types::{Affiliation, Role};
+    use crate::xep::waddle::pin::{build_pinned_element, build_unpinned_element};
     use crate::xep::xep0421::OccupantIdSecret;
-    use crate::xep::xep_waddle_pin::{build_pinned_element, build_unpinned_element};
     use jid::{BareJid, FullJid};
     use std::str::FromStr;
 

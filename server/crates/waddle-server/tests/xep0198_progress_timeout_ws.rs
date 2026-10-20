@@ -2,7 +2,7 @@
 
 use minidom::Element;
 use std::{collections::VecDeque, time::Duration};
-use waddle_server::sm_persistence::DatabaseSmPersistence;
+use waddle_server::sm::persistence::DatabaseSmPersistence;
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use waddle_xmpp::{
     pending_delivery::SmSessionId, stream_management::persistence::SmPersistenceStorage,

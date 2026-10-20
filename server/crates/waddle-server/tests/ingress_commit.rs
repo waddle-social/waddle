@@ -2,13 +2,13 @@ mod ingress_support;
 
 use ingress_support::IngressFixture;
 use waddle_server::{
+    ingress::substrate::MessageEnvelope,
+    ingress::uow::CanonicalMessageRepository,
     ingress::{
         commit::commit_submission,
         effects::{direct::DurableDirectEffect, Effect},
         DurableEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
     },
-    ingress_substrate::MessageEnvelope,
-    ingress_uow::CanonicalMessageRepository,
 };
 use waddle_xmpp::{
     ingress::IngressEffectIntent,

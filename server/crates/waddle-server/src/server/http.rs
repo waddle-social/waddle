@@ -1,7 +1,7 @@
 use crate::config::ServerConfig;
-use crate::server::extension_commands::{build_extension_manager, register_extension_commands};
-use crate::server::extension_host_adapter;
-use crate::server::extension_host_tools::DeferredExtensionHostTools;
+use crate::server::extension::commands::{build_extension_manager, register_extension_commands};
+use crate::server::extension::host_adapter;
+use crate::server::extension::host_tools::DeferredExtensionHostTools;
 use crate::server::health::{
     configure_cors, detailed_health_handler, health_handler, metrics_handler, readiness_handler,
 };
@@ -561,9 +561,9 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
     // setting the env var. Returns per-map `.len()` counts so a
     // Prometheus scrape can correlate the offending structure with
     // process RSS.
-    if let Some(auth) = crate::server::state_inventory_route::debug_state_auth_from_env() {
+    if let Some(auth) = crate::server::state_inventory::route::debug_state_auth_from_env() {
         info!("Mounting /debug/state-inventory (WADDLE_DEBUG_STATE_TOKEN set)");
-        app_router = app_router.merge(crate::server::state_inventory_route::router(
+        app_router = app_router.merge(crate::server::state_inventory::route::router(
             websocket_state.clone(),
             auth,
         ));
@@ -713,12 +713,12 @@ async fn create_websocket_state(
         Arc::clone(&deferred_extension_host_tools),
     )
     .await?;
-    crate::server::extension_bot::install_bot_hats(
+    crate::server::extension::bot::install_bot_hats(
         &state.server_hats,
         service_domains.clone(),
         Arc::clone(&extension_manager),
     );
-    let bot_avatars = Arc::new(crate::server::extension_bot_avatar::BotAvatars::default());
+    let bot_avatars = Arc::new(crate::server::extension::bot::avatar::BotAvatars::default());
     bot_avatars.prefetch(&extension_manager);
 
     let websocket_command_registry = Arc::new(waddle_xmpp::commands::CommandRegistry::new());
@@ -746,11 +746,11 @@ async fn create_websocket_state(
             tokio::runtime::Handle::current(),
         );
     let room_effect_outbox = Arc::new(
-        crate::room_effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
+        crate::room::effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
             .await
             .map_err(|error| anyhow::anyhow!("failed to initialize room effect outbox: {error}"))?,
     );
-    let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
+    let room_effect_arm_supervisor = crate::room::effect_outbox::RoomEffectArmSupervisor::new(
         Arc::clone(&room_effect_outbox),
         tokio::runtime::Handle::current(),
     );
@@ -941,11 +941,11 @@ async fn create_websocket_state(
         // Grant reconciliation mutates application data and opens a lineage-
         // guarded transaction. Run it only after the readiness attestation;
         // an unenrolled node must remain alive to expose its diagnostics.
-        let extension_grant_uow = crate::ingress_uow::IngressUnitOfWork::open(
+        let extension_grant_uow = crate::ingress::uow::IngressUnitOfWork::open(
             state.db_pool.global().clone(),
             state.lineage_config.clone(),
         )?;
-        crate::server::extension_commands::startup::sync_extension_grants(
+        crate::server::extension::commands::startup::sync_extension_grants(
             &extension_manager,
             &extension_grant_uow,
         )
@@ -1008,7 +1008,7 @@ async fn create_websocket_state(
     }
     ensure_push_service_global_database_is_durable()?;
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
-        crate::push_registrations::DatabasePushRegistrationStore::new(
+        crate::push::registrations::DatabasePushRegistrationStore::new(
             state.db_pool.global().clone(),
         )
         .await
@@ -1022,7 +1022,7 @@ async fn create_websocket_state(
     // case the entire push service degrades, so the caller intentionally
     // fails boot rather than silently dispatching without VAPID.
     let vapid_signer = if lineage_attested {
-        crate::push_service::vapid_storage::VapidStorage::load_or_provision(
+        crate::push::service::vapid_storage::VapidStorage::load_or_provision(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
         )
@@ -1032,7 +1032,7 @@ async fn create_websocket_state(
         // Never provision (write) a key into an unattested database. The
         // node is permanently unready in this state, so an ephemeral,
         // unpersisted signer only has to keep the object graph valid.
-        crate::push_service::vapid_storage::VapidStorage::load_or_ephemeral(
+        crate::push::service::vapid_storage::VapidStorage::load_or_ephemeral(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
         )
@@ -1056,7 +1056,7 @@ async fn create_websocket_state(
     let vapid_sub = waddle_xmpp::push::types::VapidSub::default_for_domain(&xmpp_domain)
         .map_err(|error| anyhow::anyhow!("failed to derive VAPID sub claim: {error}"))?;
     let push_service =
-        crate::push_service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+        crate::push::service::DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             state.db_pool.global().clone(),
             server_config.session_key.as_bytes(),
             service_domains.push.parse()?,
@@ -1127,10 +1127,13 @@ async fn create_websocket_state(
     // routes by node ([`CommandBoundary::PushService`]); registration
     // here is what makes the disco#items + dispatch arms wire up to
     // typed storage calls instead of returning service-unavailable.
-    crate::push_service::commands::register(&websocket_command_registry, Arc::clone(&push_service))
-        .await;
+    crate::push::service::commands::register(
+        &websocket_command_registry,
+        Arc::clone(&push_service),
+    )
+    .await;
     let notification_outbox = Arc::new(
-        crate::notification_outbox::NotificationOutboxStore::new(state.db_pool.global().clone())
+        crate::notification::outbox::NotificationOutboxStore::new(state.db_pool.global().clone())
             .await
             .map_err(|error| {
                 anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
@@ -1143,18 +1146,18 @@ async fn create_websocket_state(
         .await
         .context("failed to adopt canonical notification ancestry")?;
     let notification_settings_projection = Arc::new(
-        crate::notification_settings_projection::NotificationSettingsProjectionStore::new(
+        crate::notification::settings_projection::NotificationSettingsProjectionStore::new(
             pubsub_database_storage.database(),
         ),
     );
-    let dnd_projection = Arc::new(crate::dnd_projection::DndProjectionStore::new(
+    let dnd_projection = Arc::new(crate::dnd::projection::DndProjectionStore::new(
         pubsub_database_storage.database(),
     ));
-    let dnd_reader = Arc::new(crate::dnd_reader::PepDndReader::with_system_clock(
+    let dnd_reader = Arc::new(crate::dnd::reader::PepDndReader::with_system_clock(
         Arc::clone(&dnd_projection),
     ));
     let notification_activity = Arc::new(
-        crate::notification_activity::NotificationActivityStore::new(
+        crate::notification::activity::NotificationActivityStore::new(
             state.db_pool.global().clone(),
         )
         .await
@@ -1301,7 +1304,7 @@ async fn create_websocket_state(
             warn!("ordered relay delivery bridge not wired: clustering node lease handle or TTL missing");
         }
     }
-    deferred_extension_host_tools.set(Arc::new(extension_host_adapter::ExtensionHostAdapter::new(
+    deferred_extension_host_tools.set(Arc::new(host_adapter::ExtensionHostAdapter::new(
         Arc::clone(&websocket_state),
     )));
     // Start the SFU ghost-reconciliation backstop: periodically ask
@@ -1320,7 +1323,7 @@ async fn create_websocket_state(
         }
     }
     if lineage_attested {
-        crate::room_observation::RoomObservationActors::start(&websocket_state).await?;
+        crate::room::observation::RoomObservationActors::start(&websocket_state).await?;
     } else {
         // Observer configuration and recovery write through lineage-guarded
         // transactions. Keep an unattested node alive for diagnostics without
@@ -1407,7 +1410,7 @@ fn promote_to_serving_and_spawn_janitors(
     crate::server::session_janitors::spawn_local_muc_departure_janitor(websocket_state);
     #[cfg(feature = "clustering")]
     crate::server::session_janitors::spawn_remote_muc_membership_reconciler(websocket_state);
-    crate::server::state_inventory_metrics::spawn_state_inventory_publisher(websocket_state);
+    crate::server::state_inventory::metrics::spawn_state_inventory_publisher(websocket_state);
 }
 
 /// One startup attestation pass with a short bounded retry for transient
@@ -1762,7 +1765,7 @@ async fn create_ingress_sm_storage(
     global: &crate::db::Database,
 ) -> Result<Arc<dyn waddle_xmpp::stream_management::persistence::SmPersistenceStorage>> {
     ensure_ingress_storage_colocation(database_url, global).await?;
-    Ok(crate::sm_persistence::open_for_cluster_mode_with_lineage(
+    Ok(crate::sm::persistence::open_for_cluster_mode_with_lineage(
         clustering_enabled,
         claim_pair,
         global,
@@ -2274,9 +2277,7 @@ mod ingress_colocation_tests {
 }
 
 #[cfg(test)]
-#[path = "pending_colocation_tests.rs"]
 mod pending_colocation_tests;
 
 #[cfg(test)]
-#[path = "sm_colocation_tests.rs"]
 mod sm_colocation_tests;

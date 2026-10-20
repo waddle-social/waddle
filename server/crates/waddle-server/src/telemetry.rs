@@ -296,7 +296,7 @@ pub fn init() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // `traceparent` / `tracestate` headers from the browser (injected by
     // the chat frontend's Faro `TracingInstrumentation`) join their
     // spans into the trace we're about to start. The tower-http
-    // `TraceLayer` in `server/mod.rs` reads this propagator in its
+    // `TraceLayer` in `server.rs` reads this propagator in its
     // `make_span_with` closure.
     opentelemetry::global::set_text_map_propagator(
         opentelemetry_sdk::propagation::TraceContextPropagator::new(),

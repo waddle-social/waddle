@@ -35,8 +35,8 @@ use p256::elliptic_curve::sec1::{FromEncodedPoint, ToEncodedPoint};
 use sha2::Sha256;
 use waddle_server::db::{Database, IntoParams, Rows};
 use waddle_server::db_params;
-use waddle_server::push_registrations::DatabasePushRegistrationStore;
-use waddle_server::push_service::{
+use waddle_server::push::registrations::DatabasePushRegistrationStore;
+use waddle_server::push::service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::pubsub::PubSubItem;
@@ -53,7 +53,7 @@ use waddle_xmpp::xep::xep0357::NS_PUSH;
 const APP_ID: &str = "social.waddle.android";
 const PROJECT_ID: &str = "waddle-test";
 const PUSH_SERVICE_JID: &str = "push.example.com";
-/// Mirrors `DEVICE_STATUS_*` in `waddle_server::push_service`.
+/// Mirrors `DEVICE_STATUS_*` in `waddle_server::push::service`.
 const DEVICE_STATUS_ACTIVE: &str = "active";
 const DEVICE_STATUS_DISABLED: &str = "disabled";
 /// Mirror `fcm_dispatch::ATTEMPT_STATUS_FCM_*`.

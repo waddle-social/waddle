@@ -2,7 +2,7 @@
 //!
 //! Extracted from the former inline `mod tests` in `src/notification_outbox.rs`.
 
-use waddle_server::notification_activity::NotificationActivityReader;
+use waddle_server::notification::activity::NotificationActivityReader;
 
 use crate::support::*;
 
@@ -18,7 +18,7 @@ async fn xep0085_chat_state_writer_persists_typed_token() {
         .record_chat_state(
             &owner,
             &conversation,
-            waddle_server::notification_activity::NotificationChatState::Composing,
+            waddle_server::notification::activity::NotificationChatState::Composing,
             42,
         )
         .await
@@ -31,7 +31,7 @@ async fn xep0085_chat_state_writer_persists_typed_token() {
     assert_eq!(activity.last_active_at_ms, 42);
     assert_eq!(
         activity.last_chat_state,
-        Some(waddle_server::notification_activity::NotificationChatState::Composing),
+        Some(waddle_server::notification::activity::NotificationChatState::Composing),
     );
 }
 
@@ -88,7 +88,7 @@ async fn xep0045_presence_writer_persists_show_and_clears_on_unavailable() {
         .record_presence_available(
             &owner,
             &room,
-            Some(waddle_server::notification_activity::NotificationPresenceShow::Dnd),
+            Some(waddle_server::notification::activity::NotificationPresenceShow::Dnd),
             1_000,
         )
         .await
@@ -101,7 +101,7 @@ async fn xep0045_presence_writer_persists_show_and_clears_on_unavailable() {
     assert_eq!(after_available.last_active_at_ms, 1_000);
     assert_eq!(
         after_available.presence_show,
-        Some(waddle_server::notification_activity::NotificationPresenceShow::Dnd)
+        Some(waddle_server::notification::activity::NotificationPresenceShow::Dnd)
     );
 
     store

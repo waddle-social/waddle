@@ -131,7 +131,7 @@ fn obligation() -> IngressAppendObligationRef {
         message_key: MessageKey::from_storage(uuid::Uuid::from_u128(1804)),
         sender_bare: "a@example.test".parse().expect("sender"),
         receipt: crate::ingress::EffectReceiptKey {
-            kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+            kind: crate::ingress::substrate::EffectReceiptKind::from_storage(
                 IngressEffectKind::RouteDirect.storage_tag(),
             ),
             semantic_identity_hash: [18; 32],

@@ -296,18 +296,18 @@ async fn recover_canonical_pending_notification(
             .ingress
             .prepare_pending_notification_recovery(row)
             .await?;
-        let crate::ingress_uow::PendingNotificationPreparation::Ready(preparation) = preparation
+        let crate::ingress::uow::PendingNotificationPreparation::Ready(preparation) = preparation
         else {
             return Ok(crate::ingress::RecoverySweepOutcome::CanonicalGone);
         };
         let waddle_xmpp::pending_delivery::PendingPayload::Archived(stamp) = &row.payload else {
-            return Err(crate::ingress_uow::IngressUowError::EffectIntentConflict);
+            return Err(crate::ingress::uow::IngressUowError::EffectIntentConflict);
         };
         let message = preparation.envelope().message();
         let sender = message
             .from
             .as_ref()
-            .ok_or(crate::ingress_uow::IngressUowError::EffectIntentConflict)?;
+            .ok_or(crate::ingress::uow::IngressUowError::EffectIntentConflict)?;
         let prepared = prepare_notification_candidate_for_message(
             state,
             &row.recipient,
@@ -409,7 +409,7 @@ async fn prepare_notification_candidate_for_message(
     archive_stanza_id: &waddle_xmpp_core::xep0359::StanzaId,
     original_message: &Message,
 ) -> PreparedOfflineNotification {
-    let candidate = match crate::notification_outbox::direct_candidate_from_envelope(
+    let candidate = match crate::notification::outbox::direct_candidate_from_envelope(
         original_message,
         recipient,
         sender_jid,
@@ -417,7 +417,7 @@ async fn prepare_notification_candidate_for_message(
     ) {
         Ok(candidate) => candidate,
         Err(
-            crate::notification_outbox::NotificationOutboxError::SelfDirectedNotificationCandidate(
+            crate::notification::outbox::NotificationOutboxError::SelfDirectedNotificationCandidate(
                 _,
             ),
         ) => {
@@ -445,26 +445,26 @@ async fn prepare_notification_candidate_for_message(
     // DM evaluation never consults `room_policy`, so the no-op
     // adapter is sufficient here; the per-call cache is a fresh empty
     // map (one-shot eval).
-    let room_policy = crate::notification_outbox::NoopRoomPolicy;
+    let room_policy = crate::notification::outbox::NoopRoomPolicy;
     let mut room_policy_cache = std::collections::BTreeMap::<
         BareJid,
-        crate::notification_outbox::RoomPolicyCacheEntry,
+        crate::notification::outbox::RoomPolicyCacheEntry,
     >::new();
-    let dnd_reader = crate::notification_outbox::NoopDndReader;
+    let dnd_reader = crate::notification::outbox::NoopDndReader;
     let mut dnd_cache =
-        std::collections::BTreeMap::<BareJid, crate::notification_outbox::DndState>::new();
+        std::collections::BTreeMap::<BareJid, crate::notification::outbox::DndState>::new();
     // T0 emission does NOT consult the activity reader — XEP-0513
     // `<active/>` is a T1-only gate (current activity is a T1 read
     // per the recipient-state contract). The `NoopActivityReader` is
     // wired only to satisfy the typed signature; it would never be
     // dispatched into at T0Emit even if the candidate class were
     // `ActiveChannelMention`.
-    let activity_reader = crate::notification_activity::NoopActivityReader;
+    let activity_reader = crate::notification::activity::NoopActivityReader;
     let mut activity_cache = std::collections::BTreeMap::<
         (BareJid, BareJid),
-        Option<crate::notification_activity::NotificationActivity>,
+        Option<crate::notification::activity::NotificationActivity>,
     >::new();
-    let eval_deps = crate::notification_outbox::PushEvalDeps {
+    let eval_deps = crate::notification::outbox::PushEvalDeps {
         settings_projection: state
             .deps
             .protocol
@@ -479,17 +479,17 @@ async fn prepare_notification_candidate_for_message(
         // the default-in-ms as a typed placeholder; T1 (which DOES
         // consult the TTL) reads the env-driven value at the drain
         // site (Copilot review on PR #731).
-        active_mention_ttl_ms: (crate::notification_outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS
+        active_mention_ttl_ms: (crate::notification::outbox::DEFAULT_ACTIVE_MENTION_TTL_SECONDS
             as i64)
             * 1_000,
     };
-    let mut eval_caches = crate::notification_outbox::PushEvalCaches {
+    let mut eval_caches = crate::notification::outbox::PushEvalCaches {
         room_policy: &mut room_policy_cache,
         dnd: &mut dnd_cache,
         activity: &mut activity_cache,
     };
-    let outcome = match crate::notification_outbox::evaluate_push_gate_at_dispatch(
-        crate::notification_outbox::PushEvalStage::T0Emit,
+    let outcome = match crate::notification::outbox::evaluate_push_gate_at_dispatch(
+        crate::notification::outbox::PushEvalStage::T0Emit,
         eval_deps,
         &candidate,
         &mut eval_caches,
@@ -508,8 +508,8 @@ async fn prepare_notification_candidate_for_message(
         }
     };
     match outcome {
-        crate::notification_outbox::T1PushDispatchOutcome::Deliver { .. } => {}
-        crate::notification_outbox::T1PushDispatchOutcome::Suppressed { reason } => {
+        crate::notification::outbox::T1PushDispatchOutcome::Deliver { .. } => {}
+        crate::notification::outbox::T1PushDispatchOutcome::Suppressed { reason } => {
             info!(
                 recipient = %candidate.recipient_bare_jid(),
                 conversation = %candidate.conversation_jid(),
@@ -524,7 +524,7 @@ async fn prepare_notification_candidate_for_message(
             );
             return PreparedOfflineNotification::Suppressed;
         }
-        crate::notification_outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
+        crate::notification::outbox::T1PushDispatchOutcome::DeferUnknownRoomPolicy => {
             // DM evaluation does not consult room_policy, so this is
             // a structural invariant violation. Fail-loud and retry.
             warn!(
@@ -562,10 +562,10 @@ async fn insert_prepared_notification(
         .insert_candidate(&candidate)
         .await
     {
-        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Inserted) => {
+        Ok(crate::notification::outbox::NotificationCandidateInsertOutcome::Inserted) => {
             NotificationCandidateQueueOutcome::Inserted
         }
-        Ok(crate::notification_outbox::NotificationCandidateInsertOutcome::Duplicate) => {
+        Ok(crate::notification::outbox::NotificationCandidateInsertOutcome::Duplicate) => {
             NotificationCandidateQueueOutcome::Duplicate
         }
         Err(error) => {
@@ -738,5 +738,4 @@ pub(crate) fn offline_quota_error() -> xmpp_parsers::stanza_error::StanzaError {
 }
 
 #[cfg(test)]
-#[path = "offline_delivery_recovery_tests.rs"]
 mod recovery_tests;

@@ -498,13 +498,13 @@ impl OrderedRelayDeliveryBridge {
                     )
                     .await
                 {
-                    Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+                    Ok(crate::ingress::uow::DispatchReadiness::Completed) => {
                         return RelayRemoteResourceFrameReply {
                             status: RelayRemoteResourceFrameStatus::Delivered,
                         };
                     }
-                    Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
-                    Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
+                    Ok(crate::ingress::uow::DispatchReadiness::Ready) => {}
+                    Ok(crate::ingress::uow::DispatchReadiness::Blocked(_)) | Err(_) => {
                         return RelayRemoteResourceFrameReply {
                             status: RelayRemoteResourceFrameStatus::Backpressure,
                         };

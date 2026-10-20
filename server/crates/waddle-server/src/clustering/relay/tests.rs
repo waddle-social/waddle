@@ -142,8 +142,8 @@ fn changed_muc_proxy_wire_shapes_have_new_remote_message_ids() {
 #[test]
 fn remote_resource_frame_v3_carries_the_ingress_obligation() {
     use crate::ingress::identity::IngressAppendObligationRef;
+    use crate::ingress::substrate::EffectReceiptKind;
     use crate::ingress::EffectReceiptKey;
-    use crate::ingress_substrate::EffectReceiptKind;
     use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 
     assert_eq!(
@@ -710,7 +710,7 @@ fn keyed_carbon_side_effect_retains_original_obligation_on_wire() {
     let context = SmIngressAppendContext {
         message_key: MessageKey::new(),
         receipt: crate::ingress::EffectReceiptKey {
-            kind: crate::ingress_substrate::EffectReceiptKind::from_storage(
+            kind: crate::ingress::substrate::EffectReceiptKind::from_storage(
                 IngressEffectKind::RelayCarbons.storage_tag(),
             ),
             semantic_identity_hash: [7; 32],

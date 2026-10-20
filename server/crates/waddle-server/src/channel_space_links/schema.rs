@@ -2,7 +2,7 @@
 //! mirroring the `spaces_metadata` schema migration shape.
 
 use super::{ChannelSpaceLinkError, DatabaseChannelSpaceLinkStore};
-use crate::space_identity::projected_space_node_from_jid_text;
+use crate::spaces::identity::projected_space_node_from_jid_text;
 
 pub(super) async fn initialize(
     store: &DatabaseChannelSpaceLinkStore,

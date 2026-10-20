@@ -1426,14 +1426,14 @@ pub(super) async fn flush_ingress_checkpoint(
     state: &WebSocketState,
     sm_state: &StreamManagementState,
     tracker: &mut crate::server::routes::interpret::SmInboundCompletionTracker,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), crate::ingress::uow::IngressUowError> {
     if !tracker.checkpoint_dirty() || !sm_state.is_resumable() {
         return Ok(());
     }
     let stream_id = sm_state
         .stream_id
         .as_ref()
-        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+        .ok_or(crate::ingress::uow::IngressUowError::SmIngressStreamMissing)?;
     let stream = state
         .deps
         .protocol
@@ -1442,7 +1442,7 @@ pub(super) async fn flush_ingress_checkpoint(
             stream_id.clone(),
         ))
         .await?
-        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+        .ok_or(crate::ingress::uow::IngressUowError::SmIngressStreamMissing)?;
     state
         .deps
         .protocol
@@ -1459,7 +1459,7 @@ pub(super) async fn flush_ingress_checkpoint(
 async fn restore_ingress_checkpoint(
     state: &WebSocketState,
     detached: &mut waddle_xmpp::stream_management::DetachedSession,
-) -> Result<(), crate::ingress_uow::IngressUowError> {
+) -> Result<(), crate::ingress::uow::IngressUowError> {
     let checkpoint = state
         .deps
         .protocol
@@ -1468,7 +1468,7 @@ async fn restore_ingress_checkpoint(
             detached.stream_id.clone(),
         ))
         .await?
-        .ok_or(crate::ingress_uow::IngressUowError::SmIngressStreamMissing)?;
+        .ok_or(crate::ingress::uow::IngressUowError::SmIngressStreamMissing)?;
     detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
         detached.inbound_count,
         checkpoint.to_storage(),

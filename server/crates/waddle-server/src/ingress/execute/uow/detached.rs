@@ -1,0 +1,663 @@
+//! Append one resource before atomically committing its progress and receipt.
+use jid::FullJid;
+use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
+
+use crate::{
+    ingress::uow::{
+        run_with_retry, settle_recorded, CanonicalMessageRepository, DeliveryPolicyDiscardReason,
+        DeliveryProgressRepository, IngressUnitOfWork, IngressUowError,
+    },
+    server::routes::interpret::{
+        close_call_setup_from_outcome, deliver_direct_to_full_locally,
+        deliver_direct_to_full_with_registered_remote, deliver_peer_to_full_with_registered_remote,
+        effects::{
+            delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
+            EffectOutcome, ImmediateSink, SettledCompletion, SettledOutcome,
+        },
+        queue_processed_for_detached, Deps, DetachedQueueOutcome, FullJidDeliveryOutcome,
+        SmIngressAppendContext,
+    },
+};
+
+use super::super::super::{decision::IngressDecision, recorded::RouteProgress};
+use crate::ingress::append_authority::AppendAuthority;
+
+#[cfg(test)]
+tokio::task_local! {
+    pub(crate) static FAIL_DELIVERY_PROGRESS_TX: bool;
+    pub(crate) static CONTEND_DELIVERY_PROGRESS_ONCE: std::sync::Arc<std::sync::atomic::AtomicBool>;
+    pub(crate) static CANCEL_STALLED_DELIVERY: tokio_util::sync::CancellationToken;
+    pub(crate) static STALL_DELIVERY_RESOURCE: (FullJid, std::sync::Arc<std::sync::atomic::AtomicBool>);
+}
+
+pub(super) async fn execute(
+    uow: &IngressUnitOfWork,
+    decision: &IngressDecision,
+    index: usize,
+    effect: &ExternalDeliveryEffect,
+    deps: &Deps<'_>,
+) -> EffectOutcome {
+    let no_call_setup = None;
+    let (resources, call_setup) = match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { target, .. } => {
+            (vec![target.clone()], &no_call_setup)
+        }
+        ExternalDeliveryEffect::QueueDetached {
+            resources,
+            call_setup,
+            ..
+        } => (resources.clone(), call_setup),
+        ExternalDeliveryEffect::RouteToPeer {
+            jid, call_setup, ..
+        }
+        | ExternalDeliveryEffect::RelayFullJid {
+            target: jid,
+            call_setup,
+            ..
+        } => (vec![jid.clone()], call_setup),
+        _ => return EffectOutcome::Unavailable,
+    };
+    let external =
+        crate::server::routes::interpret::effects::ExternalEffect::Delivery(effect.clone());
+    let Some(progress) = decision.route_progress.iter().find(|progress| {
+        progress.matches(&external) && decision.external_receipts[index].contains(&progress.receipt)
+    }) else {
+        return EffectOutcome::Unavailable;
+    };
+    let Some(key) = decision.message_key else {
+        return EffectOutcome::Unavailable;
+    };
+    let mut immediate = deps.clone();
+    immediate.effects = &ImmediateSink;
+    immediate.ingress_delivery_uow = Some(uow.clone());
+    if immediate.ingress_delivery_stop.is_none() {
+        immediate.ingress_delivery_stop = immediate
+            .web_socket_state
+            .map(|state| state.deps.protocol.ingress.delivery_stop_token());
+    }
+    let mut destinations = Vec::with_capacity(resources.len());
+    let mut persisted = Vec::new();
+    let mut handed_off = Vec::new();
+    let mut completion = SettledCompletion::Incomplete;
+    for resource in resources.iter().filter(|resource| {
+        progress.fanout.contains(resource) && !progress.completed.contains(resource)
+    }) {
+        match super::relay_copy::attempt_before_readiness(
+            uow, decision, index, effect, resource, &immediate,
+        )
+        .await
+        {
+            Ok(Some(super::relay_copy::LegacyRemoteAttempt::Wire(outcome))) => {
+                destinations.push((resource.clone(), outcome));
+                completion = SettledCompletion::Uncertain;
+                continue;
+            }
+            Ok(Some(super::relay_copy::LegacyRemoteAttempt::Superseded(settled))) => {
+                handed_off.push(resource.clone());
+                if !settled.is_empty() {
+                    persisted = settled;
+                    completion = SettledCompletion::Complete;
+                    break;
+                }
+                continue;
+            }
+            Ok(None) => {}
+            Err(error) => {
+                tracing::debug!(%error, %resource, "live legacy remote child authority unavailable");
+                completion = SettledCompletion::Uncertain;
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+        }
+        let dispatch_stream = deps.connection_registry.local_sm_stream(resource);
+        match crate::ingress::archive_dispatch::resource_ready(
+            uow,
+            key,
+            &progress.receipt,
+            Some(resource),
+            dispatch_stream.as_ref(),
+        )
+        .await
+        {
+            Ok(crate::ingress::uow::DispatchReadiness::Ready) => {}
+            Ok(crate::ingress::uow::DispatchReadiness::Completed) => {
+                // Another executor may have completed this same copy since
+                // this decision was frozen. Its durable proof supersedes the
+                // stale snapshot; never enqueue an older copy behind successors.
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Delivered));
+                continue;
+            }
+            Ok(crate::ingress::uow::DispatchReadiness::Blocked(predecessors)) => {
+                if completion != SettledCompletion::Uncertain {
+                    if !predecessors.is_empty() {
+                        completion = SettledCompletion::Deferred;
+                    } else if completion != SettledCompletion::Deferred {
+                        completion = SettledCompletion::DeferredPending;
+                    }
+                }
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+            Err(error) => {
+                tracing::warn!(%error, "archive dispatch ordering unavailable; preserving delivery");
+                completion = SettledCompletion::Uncertain;
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+        }
+        #[cfg(test)]
+        if STALL_DELIVERY_RESOURCE
+            .try_with(|(target, entered)| {
+                if target == resource {
+                    entered.store(true, std::sync::atomic::Ordering::SeqCst);
+                    true
+                } else {
+                    false
+                }
+            })
+            .unwrap_or(false)
+        {
+            if let Ok(cancel) = CANCEL_STALLED_DELIVERY.try_with(Clone::clone) {
+                cancel.cancelled().await;
+                // Test-controlled cancellation is no acceptance evidence.
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+            std::future::pending::<()>().await;
+        }
+        // The recorded receipt, rather than today's stanza or audience, owns
+        // this resource's append. Each resource gets an independent context.
+        let mut resource_deps = immediate.clone();
+        let archive_positions = match crate::ingress::archive_dispatch::positions(
+            uow,
+            key,
+            &progress.receipt,
+        )
+        .await
+        {
+            Ok(positions) => positions,
+            Err(error) => {
+                tracing::warn!(%error, "archive dispatch positions unavailable; preserving delivery");
+                completion = SettledCompletion::Uncertain;
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+        };
+        resource_deps.ingress_append_context = Some(SmIngressAppendContext {
+            message_key: key,
+            receipt: progress.receipt.clone(),
+            received_at: progress.received_at,
+            archive_positions,
+            dispatch_stream,
+            authority: AppendAuthority::Verified,
+        });
+        let sealed = match crate::ingress::room_manifest::replay::load(
+            uow,
+            match resource_deps.ingress_append_context.as_ref() {
+                Some(context) => context,
+                None => return EffectOutcome::Unavailable,
+            },
+            resource,
+            effect_stanza(effect),
+        )
+        .await
+        {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                tracing::debug!(%error, %resource, "sealed room child authority unavailable");
+                completion = SettledCompletion::Uncertain;
+                destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                continue;
+            }
+        };
+        if let Some(manifest) = sealed.as_ref() {
+            let Some(context) = resource_deps.ingress_append_context.as_ref() else {
+                return EffectOutcome::Unavailable;
+            };
+            match crate::ingress::room_manifest::replay::settle_superseded(
+                uow,
+                manifest,
+                resource_deps.room_registry,
+                context,
+                resource,
+            )
+            .await
+            {
+                Ok(Some(settled)) => {
+                    // A replacement occupancy resolves only the old logical
+                    // child. It never proves socket delivery to the replacement.
+                    handed_off.push(resource.clone());
+                    if !settled.is_empty() {
+                        persisted = settled;
+                        completion = SettledCompletion::Complete;
+                        break;
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::debug!(%error, %resource, "superseded room child policy unavailable");
+                    completion = SettledCompletion::Uncertain;
+                    destinations.push((resource.clone(), FullJidDeliveryOutcome::Unavailable));
+                    continue;
+                }
+            }
+        }
+        let ResourceDelivery { outcome, certainty } =
+            append_resource(uow, &resource_deps, effect, resource, sealed.as_ref()).await;
+        if outcome == FullJidDeliveryOutcome::Unavailable && sealed.is_none() {
+            let handoff =
+                super::ambiguous_offline::handoff(uow, deps, key, progress, resource).await;
+            match handoff {
+                Ok(Some(settled)) => {
+                    handed_off.push(resource.clone());
+                    if !settled.is_empty() {
+                        // Recipient-wide custody settled the entire route.
+                        // Do not turn its aggregate proof into fabricated
+                        // per-sibling socket successes on the next iteration.
+                        persisted = settled;
+                        completion = SettledCompletion::Complete;
+                        break;
+                    }
+                    continue;
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "ambiguous delivery offline handoff failed");
+                    completion = SettledCompletion::Uncertain;
+                }
+            }
+        }
+        destinations.push((resource.clone(), outcome));
+        if certainty == DeliveryCertainty::Uncertain {
+            completion = SettledCompletion::Uncertain;
+        }
+        if accepted(outcome) {
+            #[cfg(test)]
+            crate::ingress::execute::test_hooks::after_delivery_append(key, resource).await;
+            // Retry only the progress transaction after proven database contention.
+            // The socket already accepted this copy: retrying the append would
+            // duplicate delivery. The enclosing execution deadline still applies.
+            match run_with_retry(5, || {
+                record_delivery_progress(uow, key, progress, std::slice::from_ref(resource), None)
+            })
+            .await
+            .map_err(|failure| failure.last_error)
+            {
+                Ok(settled) => {
+                    if !settled.is_empty() {
+                        persisted = settled;
+                    }
+                }
+                Err(error) => {
+                    tracing::warn!(%error, %resource, "delivery progress transaction failed after append");
+                    completion = SettledCompletion::Uncertain;
+                    // Do not append another resource after losing this one's progress.
+                    break;
+                }
+            }
+        }
+    }
+    // Each effect completes its own resources; another effect may still own
+    // the remaining fanout. Only `persisted` proves the aggregate receipt.
+    if completion != SettledCompletion::Uncertain
+        && (!destinations.is_empty() || !handed_off.is_empty())
+        && destinations.iter().all(|(_, outcome)| accepted(*outcome))
+    {
+        completion = SettledCompletion::Complete;
+    }
+    let delivery_outcome = fanout_outcome(&destinations);
+    close_call_setup_from_outcome(call_setup.clone(), delivery_outcome);
+    EffectOutcome::Settled(SettledOutcome {
+        refusal: None,
+        persisted,
+        completion,
+        detached: Some(destinations),
+    })
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum DeliveryCertainty {
+    Proven,
+    Uncertain,
+}
+
+struct ResourceDelivery {
+    outcome: FullJidDeliveryOutcome,
+    certainty: DeliveryCertainty,
+}
+
+async fn append_resource(
+    uow: &IngressUnitOfWork,
+    deps: &Deps<'_>,
+    effect: &ExternalDeliveryEffect,
+    resource: &FullJid,
+    sealed: Option<&crate::ingress::FrozenRoomManifest>,
+) -> ResourceDelivery {
+    if let Some(context) = deps.ingress_append_context.as_ref() {
+        let status = match (&deps.ingress_delivery_uow, deps.web_socket_state) {
+            (Some(uow), _) => {
+                crate::ingress::live_delivery::live_delivery_status(
+                    uow,
+                    deps.ingress_delivery_stop.as_ref(),
+                    context,
+                    resource,
+                )
+                .await
+            }
+            (None, Some(state)) => {
+                state
+                    .deps
+                    .protocol
+                    .ingress
+                    .live_delivery_status(context, resource)
+                    .await
+            }
+            (None, None) => Err(IngressUowError::EffectIntentConflict),
+        };
+        match status {
+            Ok(Some(outcome)) => {
+                return ResourceDelivery {
+                    outcome,
+                    certainty: if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+                        DeliveryCertainty::Uncertain
+                    } else {
+                        DeliveryCertainty::Proven
+                    },
+                };
+            }
+            Ok(None) => {}
+            Err(_) => {
+                return ResourceDelivery {
+                    outcome: FullJidDeliveryOutcome::MaybeCommitted,
+                    certainty: DeliveryCertainty::Uncertain,
+                };
+            }
+        }
+    }
+    if let Some(outcome) = crate::server::routes::interpret::existing_ingress_delivery(
+        deps.sm_session_registry,
+        deps.ingress_append_context.as_ref(),
+        resource,
+    )
+    .await
+    {
+        return ResourceDelivery {
+            outcome,
+            certainty: DeliveryCertainty::Proven,
+        };
+    }
+    if let Some(manifest) = sealed {
+        if matches!(effect, ExternalDeliveryEffect::HostOwnedCopy { .. }) {
+            if let (Some(consumer), Some(context)) = (
+                deps.host_copy_consumer.clone(),
+                deps.ingress_append_context.as_ref(),
+            ) {
+                let target = resource.clone();
+                let stanza = effect_stanza(effect).clone();
+                let outcome = crate::ingress::live_delivery::accept_live_delivery_guarded(
+                    uow,
+                    deps.ingress_delivery_stop.as_ref(),
+                    context,
+                    resource,
+                    effect_stanza(effect),
+                    deps.room_registry,
+                    move || consumer.consume(&target, &stanza),
+                )
+                .await;
+                return ResourceDelivery {
+                    outcome,
+                    certainty: if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+                        DeliveryCertainty::Uncertain
+                    } else {
+                        DeliveryCertainty::Proven
+                    },
+                };
+            }
+        }
+        // The ordered relay's legacy ACK has no frozen-child completion proof.
+        // A sealed child stays pending until its actual local sink can prove it.
+        let outcome = match deps.ingress_append_context.as_ref() {
+            Some(context) => match crate::ingress::room_manifest::replay::queue_detached(
+                manifest,
+                uow,
+                deps,
+                context,
+                resource,
+                effect_stanza(effect),
+            )
+            .await
+            {
+                Ok(FullJidDeliveryOutcome::Unavailable) => {
+                    deliver_direct_to_full_locally(deps, resource, effect_stanza(effect)).await
+                }
+                Ok(outcome) => outcome,
+                Err(_) => FullJidDeliveryOutcome::MaybeCommitted,
+            },
+            None => FullJidDeliveryOutcome::MaybeCommitted,
+        };
+        return ResourceDelivery {
+            certainty: if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+                DeliveryCertainty::Uncertain
+            } else {
+                DeliveryCertainty::Proven
+            },
+            outcome,
+        };
+    }
+    let mut certainty = DeliveryCertainty::Proven;
+    let outcome = match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { target, .. } if target == resource => {
+            FullJidDeliveryOutcome::Delivered
+        }
+        ExternalDeliveryEffect::QueueDetached { stanza, .. } => {
+            let outcomes = queue_processed_for_detached(
+                deps,
+                vec![resource.clone()],
+                &std::collections::HashSet::new(),
+                stanza,
+            )
+            .await;
+            if outcomes
+                .iter()
+                .any(|(_, outcome)| *outcome == DetachedQueueOutcome::AppendFailed)
+            {
+                certainty = DeliveryCertainty::Uncertain;
+            }
+            if outcomes.contains(&(resource.clone(), DetachedQueueOutcome::Queued)) {
+                FullJidDeliveryOutcome::QueuedDetached
+            } else if deps.delivery_execution_context
+                == crate::server::routes::interpret::DeliveryExecutionContext::MaintenanceRecovery
+            {
+                deliver_direct_to_full_locally(deps, resource, stanza).await
+            } else {
+                deliver_direct_to_full_with_registered_remote(deps, resource, stanza).await
+            }
+        }
+        ExternalDeliveryEffect::RouteToPeer { stanza, kind, .. } => match kind {
+            PeerDeliveryKind::RegistryFrame => {
+                deliver_direct_to_full_locally(deps, resource, stanza).await
+            }
+            PeerDeliveryKind::PeerStanza => {
+                deliver_peer_to_full_with_registered_remote(deps, resource, stanza).await
+            }
+            PeerDeliveryKind::DirectFrame => {
+                deliver_direct_to_full_with_registered_remote(deps, resource, stanza).await
+            }
+        },
+        ExternalDeliveryEffect::RelayFullJid { .. } => {
+            super::relay_copy::append(deps, effect).await
+        }
+        _ => FullJidDeliveryOutcome::Unavailable,
+    };
+    if outcome == FullJidDeliveryOutcome::MaybeCommitted {
+        certainty = DeliveryCertainty::Uncertain;
+    }
+    ResourceDelivery { outcome, certainty }
+}
+
+fn effect_stanza(effect: &ExternalDeliveryEffect) -> &waddle_xmpp::Stanza {
+    match effect {
+        ExternalDeliveryEffect::HostOwnedCopy { stanza, .. }
+        | ExternalDeliveryEffect::QueueDetached { stanza, .. }
+        | ExternalDeliveryEffect::RouteToPeer { stanza, .. }
+        | ExternalDeliveryEffect::RelayFullJid { stanza, .. } => stanza,
+        _ => unreachable!("detached executor accepts only endpoint delivery effects"),
+    }
+}
+
+/// Commit one obligation's newly discharged resources and, once the frozen
+/// fanout is complete, its aggregate receipt — atomically, under the canonical
+/// lock. Shared by live delivery (one appended resource) and by maintenance
+/// recovery settling copies the room no longer owes.
+///
+/// `room_fence` is the durable room claim the caller's evidence rests on
+/// (#1803). A departed-occupant settlement permanently drops a copy on the
+/// strength of an in-memory roster, so wherever the unit of work is clustered
+/// that exact claim is asserted under `FOR SHARE` inside this transaction: a
+/// steal committing between the roster probe and this write makes the
+/// assertion fail, rolls the transaction back, and settles nothing. Live
+/// delivery passes `None` — it records a copy it actually handed over, which
+/// rests on no room authority at all.
+pub(in crate::ingress) async fn record_delivery_progress(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    progress: &RouteProgress,
+    resources: &[FullJid],
+    room_fence: Option<(
+        &jid::BareJid,
+        &waddle_xmpp::muc::durable::RoomClaimFenceContext,
+    )>,
+) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+    record_progress(uow, key, progress, resources, room_fence, None).await
+}
+
+pub(in crate::ingress) async fn record_policy_progress(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    progress: &RouteProgress,
+    resources: &[FullJid],
+    reason: DeliveryPolicyDiscardReason,
+) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+    record_progress(uow, key, progress, resources, None, Some(reason)).await
+}
+
+async fn record_progress(
+    uow: &IngressUnitOfWork,
+    key: MessageKey,
+    progress: &RouteProgress,
+    resources: &[FullJid],
+    room_fence: Option<(
+        &jid::BareJid,
+        &waddle_xmpp::muc::durable::RoomClaimFenceContext,
+    )>,
+    policy: Option<DeliveryPolicyDiscardReason>,
+) -> Result<Vec<IngressEffectIntent>, IngressUowError> {
+    let mut tx = uow
+        .begin_with_timeouts(
+            std::time::Duration::from_millis(100),
+            std::time::Duration::from_millis(250),
+        )
+        .await?;
+    if !CanonicalMessageRepository::lock(&mut tx, key).await? {
+        return Err(IngressUowError::EffectIntentMessageMissing);
+    }
+    #[cfg(feature = "clustering")]
+    if let Some((room, fence)) = room_fence {
+        // Only a clustered unit of work has a bound node identity to assert
+        // against; an unclustered one is not racing a cross-node steal, so
+        // the store-side proof the caller already took stands alone there.
+        if matches!(
+            tx.fencing(),
+            crate::ingress::uow::IngressFencing::Clustered(_)
+        ) {
+            crate::ingress::uow::ClaimRepository::assert_room_claim(
+                &mut tx,
+                room,
+                &fence.owner,
+                fence.epoch,
+            )
+            .await?;
+        }
+    }
+    #[cfg(not(feature = "clustering"))]
+    let _ = room_fence;
+    if let Some(reason) = policy {
+        let envelope = CanonicalMessageRepository::load_envelope(&mut tx, key)
+            .await?
+            .ok_or(IngressUowError::EffectIntentMessageMissing)?;
+        let manifest = envelope
+            .room_manifest()
+            .ok_or(IngressUowError::EffectIntentConflict)?;
+        if manifest.message_key() != key
+            || resources.iter().any(|target| {
+                !progress.fanout.contains(target)
+                    || !manifest.contains(&progress.receipt, Some(target))
+            })
+        {
+            return Err(IngressUowError::EffectIntentConflict);
+        }
+        DeliveryProgressRepository::record_policy_discard(
+            &mut tx,
+            key,
+            &progress.receipt,
+            resources,
+            reason,
+        )
+        .await?;
+    } else {
+        DeliveryProgressRepository::record(&mut tx, key, &progress.receipt, resources).await?;
+    }
+    #[cfg(test)]
+    if CONTEND_DELIVERY_PROGRESS_ONCE
+        .try_with(|pending| pending.swap(false, std::sync::atomic::Ordering::SeqCst))
+        .unwrap_or(false)
+    {
+        return Err(IngressUowError::Database {
+            retry_class: crate::ingress::uow::DbRetryClass::SqliteContention,
+        });
+    }
+    #[cfg(test)]
+    if FAIL_DELIVERY_PROGRESS_TX
+        .try_with(|fail| *fail)
+        .unwrap_or(false)
+    {
+        return Err(IngressUowError::Timeout);
+    }
+    let completed = DeliveryProgressRepository::load(&mut tx, key, &progress.receipt).await?;
+    let persisted = if progress
+        .fanout
+        .iter()
+        .all(|target| completed.contains(target))
+    {
+        settle_recorded(&mut tx, key, &[progress.settle_evidence()]).await?
+    } else {
+        Vec::new()
+    };
+    tx.commit().await?;
+    Ok(persisted)
+}
+
+fn accepted(outcome: FullJidDeliveryOutcome) -> bool {
+    matches!(
+        outcome,
+        FullJidDeliveryOutcome::Delivered | FullJidDeliveryOutcome::QueuedDetached
+    )
+}
+
+fn fanout_outcome(destinations: &[(FullJid, FullJidDeliveryOutcome)]) -> FullJidDeliveryOutcome {
+    if destinations.is_empty() {
+        FullJidDeliveryOutcome::Unavailable
+    } else if destinations.iter().all(|(_, outcome)| accepted(*outcome)) {
+        if destinations
+            .iter()
+            .any(|(_, outcome)| *outcome == FullJidDeliveryOutcome::QueuedDetached)
+        {
+            FullJidDeliveryOutcome::QueuedDetached
+        } else {
+            FullJidDeliveryOutcome::Delivered
+        }
+    } else {
+        FullJidDeliveryOutcome::Dropped
+    }
+}

@@ -27,7 +27,7 @@ pub(crate) async fn plan_muc_for_relay(
     let capture = crate::ingress::IngressEffectCapture::new();
     let planned =
         super::build_plan_deps(deps, &sink).with_ingress_effect_capture(Some(capture.clone()));
-    super::room_dispatch::dispatch_to_room(&planned, room, message.clone(), 0).await;
+    super::room::dispatch::dispatch_to_room(&planned, room, message.clone(), 0).await;
     let mut plan = super::message_plan::finish_plan(&sink, &capture, message, sender.clone());
     if let Some(sender) = sender {
         return_sender_reflection(&mut plan, &sender);

@@ -391,5 +391,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "frame_receipts_tests.rs"]
 mod persistence_tests;

@@ -31,8 +31,8 @@ impl CommandBoundary {
             || node.starts_with("urn:waddle:extension:1:")
         {
             Self::Extensions
-        } else if node == crate::push_service::commands::REGISTER_DEVICE_NODE
-            || node == crate::push_service::commands::DISABLE_DEVICE_NODE
+        } else if node == crate::push::service::commands::REGISTER_DEVICE_NODE
+            || node == crate::push::service::commands::DISABLE_DEVICE_NODE
         {
             Self::PushService
         } else if node == waddle_xmpp::admin::NS_GROUP_DM_RENAME {

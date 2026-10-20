@@ -2,7 +2,7 @@
 use super::{external_route_identity, external_route_recipient, external_route_targets};
 use crate::{
     ingress::decision::EffectReceiptKey,
-    ingress_uow::IngressUowError,
+    ingress::uow::IngressUowError,
     server::routes::interpret::effects::{delivery::ExternalDeliveryEffect, ExternalEffect},
 };
 use jid::{BareJid, FullJid};

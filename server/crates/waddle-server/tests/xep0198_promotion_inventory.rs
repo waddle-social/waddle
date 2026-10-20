@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Duration;
 use waddle_server::{
     db::DatabaseDriver, pending_delivery::DatabasePendingDeliveryStorage,
-    sm_persistence::DatabaseSmPersistence, sm_promotion::promote_session_unacked,
+    sm::persistence::DatabaseSmPersistence, sm::promotion::promote_session_unacked,
 };
 use waddle_xmpp::{
     ownership::{
@@ -561,7 +561,7 @@ async fn postgres_fenced_expired_completion_uses_supplied_authority_and_exact_ep
     use waddle_server::{
         clustering::claims::{NodeLeaseStore, PostgresClaimStore},
         db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE},
-        sm_persistence_fenced::PostgresFencedSmPersistence,
+        sm::persistence::fenced::PostgresFencedSmPersistence,
     };
     use waddle_xmpp::{
         ownership::StalePredicate,
@@ -971,7 +971,7 @@ async fn postgres_fenced_poison_settles_ack_before_quarantine(corrupt_header: bo
     use waddle_server::{
         clustering::claims::{NodeLeaseStore, PostgresClaimStore},
         db::{Database, DatabaseConfig, DEFAULT_CONTROL_PLANE_POOL_SIZE},
-        sm_persistence_fenced::PostgresFencedSmPersistence,
+        sm::persistence::fenced::PostgresFencedSmPersistence,
     };
     use waddle_xmpp::{
         ownership::{ExactReleaseOutcome, StalePredicate},

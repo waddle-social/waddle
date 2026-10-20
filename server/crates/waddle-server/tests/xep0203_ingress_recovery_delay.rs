@@ -4,6 +4,7 @@ pub mod ingress_support;
 use ingress_support::IngressFixture;
 use std::{sync::Arc, time::Duration};
 use waddle_server::{
+    ingress::uow::CanonicalMessageRepository,
     ingress::{
         effects::{
             delivery::{ExternalDeliveryEffect, PreparedOfflineNotification},
@@ -12,7 +13,6 @@ use waddle_server::{
         Deps, ExternalEffect, IngressDecisionClass, IngressSubmission, PlannedEffect,
         RecoveryEnvironment,
     },
-    ingress_uow::CanonicalMessageRepository,
     pending_delivery::DatabasePendingDeliveryStorage,
 };
 use waddle_xmpp::{

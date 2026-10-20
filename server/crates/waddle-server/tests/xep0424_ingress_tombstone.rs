@@ -68,8 +68,8 @@ fn archive_plan(fixture: &IngressFixture, id: &str) -> IngressSubmission {
 }
 
 async fn tombstone_survives_expired_origin_alias(fixture: IngressFixture) {
+    use waddle_server::ingress::uow::MamArchiveRepository;
     use waddle_server::ingress::{effects::PlanEffectDependency, ExternalEffect};
-    use waddle_server::ingress_uow::MamArchiveRepository;
     use waddle_xmpp::{
         inbox::{ConversationKind, InboxEntry},
         ingress::InboxProjectionMutation,

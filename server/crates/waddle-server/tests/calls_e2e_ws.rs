@@ -28,9 +28,9 @@ const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 // from the wire shape the server actually implements.
 use waddle_xmpp::muc::{NS_MUC_ADMIN, NS_MUC_OWNER};
 use waddle_xmpp::ns::JABBER_CLIENT as NS_JABBER_CLIENT;
+use waddle_xmpp::xep::waddle::livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
 use waddle_xmpp::xep::xep0166::NS_JINGLE;
 use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
-use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
 const NS_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 const NS_FASTEN: &str = "urn:xmpp:fasten:0";
 const NS_SID: &str = "urn:xmpp:sid:0";

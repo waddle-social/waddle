@@ -26,7 +26,7 @@ struct DetachingSocket {
 
 async fn detaching_socket(fixture: IngressFixture) -> DetachingSocket {
     let persistence = Arc::new(
-        crate::sm_persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
+        crate::sm::persistence::DatabaseSmPersistence::open(Some(fixture.db.database_url()))
             .await
             .expect("SM persistence"),
     );
@@ -430,7 +430,6 @@ paired!(
     postgres_live_recorded_frames_are_proven_at_detach
 );
 
-#[path = "user_actor_keyed_append.rs"]
 mod user_actor_keyed_append;
 
 #[tokio::test]
@@ -443,7 +442,7 @@ async fn canonical_keyed_timestamp_wins_over_untrusted_transport_timestamp_durin
         .begin()
         .await
         .expect("canonical receipt read");
-    let received_at = crate::ingress_uow::CanonicalMessageRepository::created_at(
+    let received_at = crate::ingress::uow::CanonicalMessageRepository::created_at(
         &mut tx,
         obligation.key.message_key,
     )

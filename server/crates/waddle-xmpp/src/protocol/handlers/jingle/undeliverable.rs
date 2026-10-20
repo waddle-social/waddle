@@ -14,11 +14,11 @@ use xmpp_parsers::jingle::{Action, Jingle};
 use waddle_sfu::{CallId, Identity, Jti};
 
 use super::scoped_call_id;
-use crate::xep::xep0166::NS_JINGLE;
-use crate::xep::xep0272::find_muji;
-use crate::xep::xep_waddle_livekit_transport::{
+use crate::xep::waddle::livekit_transport::{
     WaddleLiveKitTransport, NS_WADDLE_LIVEKIT_TRANSPORT, TRANSPORT_NAME,
 };
+use crate::xep::xep0166::NS_JINGLE;
+use crate::xep::xep0272::find_muji;
 
 /// The `(call, identity)` whose freshly minted LiveKit join credentials
 /// must be revoked when a forwarded 1:1 Jingle negotiation IQ turns out

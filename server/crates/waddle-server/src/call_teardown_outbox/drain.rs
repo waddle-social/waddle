@@ -9,8 +9,8 @@ use waddle_sfu::{
     CallTeardownIntentLite, Identity, LiveKitTeardownExecutor, ObservedCallSids, SfuService,
     TeardownExecution, TeardownTargetLite,
 };
-use waddle_xmpp::muc::room_actor::GetActiveMujiSessions;
-use waddle_xmpp::muc::room_registry_actor::{LocalRoomJids, RoomRegistryActor};
+use waddle_xmpp::muc::room::actor::GetActiveMujiSessions;
+use waddle_xmpp::muc::room::registry_actor::{LocalRoomJids, RoomRegistryActor};
 use waddle_xmpp::ownership::{ClaimSnapshot, Entity, EntityType};
 
 use super::{

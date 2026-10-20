@@ -1,4 +1,5 @@
 //! Database-backed storage for XEP-0060 PubSub and XEP-0163 PEP data.
+pub mod authz;
 
 use async_trait::async_trait;
 use jid::{BareJid, Jid};

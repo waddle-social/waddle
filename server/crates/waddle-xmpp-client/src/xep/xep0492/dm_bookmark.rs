@@ -24,7 +24,7 @@ const NS_CLIENT: &str = "jabber:client";
 /// The client keeps its own copy (it does NOT depend on the server
 /// `waddle-xmpp` crate). It MUST stay byte-compatible with the server
 /// module
-/// `waddle_xmpp::xep::xep_waddle_dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS`
+/// `waddle_xmpp::xep::waddle::dm_bookmarks::PEP_NODE_WADDLE_DM_BOOKMARKS`
 /// and the core constant
 /// `waddle_xmpp_core::pubsub::pep::PEP_NODE_WADDLE_DM_BOOKMARKS`, whose
 /// value is `urn:waddle:dm-bookmarks:0` (node name == namespace, as in

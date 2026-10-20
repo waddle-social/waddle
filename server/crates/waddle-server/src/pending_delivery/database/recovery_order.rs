@@ -191,5 +191,4 @@ async fn initialize_sqlite(tx: &mut crate::db::Transaction<'_>) -> Result<(), Pe
 }
 
 #[cfg(test)]
-#[path = "recovery_order_tests.rs"]
 mod tests;

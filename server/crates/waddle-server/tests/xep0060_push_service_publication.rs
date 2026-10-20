@@ -15,8 +15,8 @@ use p256::elliptic_curve::sec1::ToEncodedPoint;
 use waddle_server::db::Database;
 use waddle_server::db_params;
 use waddle_server::pubsub::DatabasePubSubStorage;
-use waddle_server::push_registrations::DatabasePushRegistrationStore;
-use waddle_server::push_service::{
+use waddle_server::push::registrations::DatabasePushRegistrationStore;
+use waddle_server::push::service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::pubsub::{PubSubItem, PubSubStorage};
@@ -74,7 +74,7 @@ fn notification(stanza_id: &str) -> Element {
         .append(
             Element::builder(
                 "context",
-                waddle_server::notification_outbox::WADDLE_PUSH_CONTEXT_NS,
+                waddle_server::notification::outbox::WADDLE_PUSH_CONTEXT_NS,
             )
             .attr(
                 minidom::rxml::xml_ncname!("conversation").to_owned(),

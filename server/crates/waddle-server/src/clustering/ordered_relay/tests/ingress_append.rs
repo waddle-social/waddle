@@ -1,6 +1,6 @@
 use super::*;
+use crate::ingress::substrate::EffectReceiptKind;
 use crate::ingress::{identity::IngressAppendObligationRef, EffectReceiptKey};
-use crate::ingress_substrate::EffectReceiptKind;
 use libp2p::identity::Keypair;
 use waddle_xmpp::ingress::{IngressEffectKind, MessageKey};
 

@@ -367,7 +367,7 @@ async fn first_active_device_for_owner_node(
     state: &WebSocketState,
     owner: &BareJid,
     node: &str,
-) -> crate::push_service::PushServiceDevice {
+) -> crate::push::service::PushServiceDevice {
     let devices = state
         .deps
         .protocol
@@ -1239,7 +1239,7 @@ async fn handle_iq_disco_items_lists_room_bots() {
         fixture.clone(),
         waddle_extensions::PluginId::new("uninstalled").expect("plugin"),
     ] {
-        crate::server::extension_bot_rooms::record(db, &room, &plugin)
+        crate::server::extension::bot::rooms::record(db, &room, &plugin)
             .await
             .expect("record bot room");
     }
@@ -1248,7 +1248,7 @@ async fn handle_iq_disco_items_lists_room_bots() {
         state.deps.service_domains.extensions
     );
     let name =
-        crate::server::extension_bot::bot_name(&state.deps.protocol.extension_manager, &fixture);
+        crate::server::extension::bot::bot_name(&state.deps.protocol.extension_manager, &fixture);
     let list = |requester: &FullJid| {
         let (state, phase) = (Arc::clone(&state), ready_phase(requester));
         async move {
@@ -1381,7 +1381,7 @@ async fn handle_iq_answers_profiles_for_extension_bots() {
     let phase = ready_phase(&"alice@example.com/web".parse().expect("alice"));
     let extensions = state.deps.service_domains.extensions.clone();
     let bot = format!("{FIXTURE_BOT_PLUGIN}@{extensions}");
-    let installed = crate::server::extension_bot::installed_bot(
+    let installed = crate::server::extension::bot::installed_bot(
         &state.deps.service_domains,
         &state.deps.protocol.extension_manager,
         &bot.parse().expect("bot jid"),
@@ -1481,7 +1481,7 @@ fn vcard_get_frame(to: &str) -> String {
 /// fetch completes, the answers are those of a bot without an avatar.
 #[tokio::test]
 async fn handle_iq_serves_extension_bot_avatars_in_band() {
-    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use crate::server::extension::bot::avatar::tests::{encode_image, serve_artifact};
     use base64::{engine::general_purpose::STANDARD as BASE64, Engine as _};
     use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
 
@@ -1580,7 +1580,7 @@ async fn handle_iq_serves_extension_bot_avatars_in_band() {
 /// answers: XEP-0084 metadata then data, else the vcard-temp PHOTO.
 #[tokio::test]
 async fn shared_client_resolves_extension_bot_avatars() {
-    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use crate::server::extension::bot::avatar::tests::{encode_image, serve_artifact};
     use waddle_xmpp_client::avatar::{
         parse_vcard_photo_response, request_avatar_with_iq, AvatarId, AvatarRequestFailure,
     };
@@ -1628,7 +1628,7 @@ async fn shared_client_resolves_extension_bot_avatars() {
 /// served: the bot answers as one without an avatar.
 #[tokio::test]
 async fn handle_iq_serves_no_extension_bot_avatar_on_digest_mismatch() {
-    use crate::server::extension_bot_avatar::tests::{encode_image, serve_artifact};
+    use crate::server::extension::bot::avatar::tests::{encode_image, serve_artifact};
     use waddle_xmpp::xep::{xep0054, xep0084, xep0292};
 
     let artifacts = wiremock::MockServer::start().await;
@@ -1998,8 +1998,8 @@ async fn handle_iq_push_service_xep0050_registration_keeps_provider_tokens_insid
     // still carries the platform credentials inside the service
     // boundary — the chat client only ever sees the assigned node id in
     // the stage-4 result form, never the provider secrets.
-    use crate::push_service::commands::{DISABLE_DEVICE_FORM_TYPE, REGISTER_DEVICE_FORM_TYPE};
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{DISABLE_DEVICE_FORM_TYPE, REGISTER_DEVICE_FORM_TYPE};
+    use crate::push::service::commands::{
         DISABLE_DEVICE_NODE, FIELD_APP_ID, FIELD_DEVICE_ID, FIELD_ENVIRONMENT, FIELD_NODE,
         FIELD_PLATFORM, FIELD_WEB_PUSH_AUTH, FIELD_WEB_PUSH_ENDPOINT, FIELD_WEB_PUSH_P256DH,
         REGISTER_DEVICE_NODE,
@@ -2130,7 +2130,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
     // unsubscribing one browser MUST NOT take down push for sibling
     // Apple / Android / other-browser installations on the same
     // `(user, app_id)` node.
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2155,10 +2155,10 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
             .push_service
             .upsert_device(
                 &owner,
-                crate::push_service::PushDeviceRegistration::new(
+                crate::push::service::PushDeviceRegistration::new(
                     device_id,
                     shared_node.node(),
-                    crate::push_service::PushDevicePlatform::Web,
+                    crate::push::service::PushDevicePlatform::Web,
                     "test",
                 ),
             )
@@ -2244,7 +2244,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_per_device_scoped() {
 /// second call resurrecting or otherwise mutating active state.
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2265,10 +2265,10 @@ async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 device_id,
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2331,7 +2331,7 @@ async fn handle_iq_push_service_xep0050_disable_device_is_idempotent() {
 /// device-id is reported honestly (adversarial finding B2).
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found() {
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2353,10 +2353,10 @@ async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "real-device",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2417,7 +2417,7 @@ async fn handle_iq_push_service_xep0050_disable_unknown_device_is_item_not_found
 /// storage layer with a single owner) — adversarial finding M3.
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
-    use crate::push_service::commands::{
+    use crate::push::service::commands::{
         DISABLE_DEVICE_FORM_TYPE, DISABLE_DEVICE_NODE, FIELD_DEVICE_ID, FIELD_NODE,
     };
 
@@ -2436,10 +2436,10 @@ async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
         .push_service
         .upsert_device(
             &alice,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "alice-device",
                 alice_node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -2502,7 +2502,7 @@ async fn handle_iq_push_service_xep0050_disable_device_rejects_foreign_owner() {
 /// real path (adversarial conformance finding B1).
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_sessionid() {
-    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+    use crate::push::service::commands::REGISTER_DEVICE_NODE;
 
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -2549,7 +2549,7 @@ async fn handle_iq_push_service_xep0050_complete_with_unknown_sessionid_is_bad_s
 /// finding — the `MalformedAction` variant was previously dead).
 #[tokio::test]
 async fn handle_iq_push_service_xep0050_unknown_action_is_malformed_action() {
-    use crate::push_service::commands::REGISTER_DEVICE_NODE;
+    use crate::push::service::commands::REGISTER_DEVICE_NODE;
 
     let state = create_test_websocket_state().await;
     let jid: FullJid = "alice@example.com/web".parse().expect("jid");
@@ -2603,10 +2603,10 @@ async fn handle_iq_xep0357_disable_removes_registration_without_retiring_push_se
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             )
             .with_provider_token(Some("provider-secret".to_string())),
@@ -2732,10 +2732,10 @@ async fn handle_iq_xep0357_disable_without_node_removes_registrations_only() {
             .push_service
             .upsert_device(
                 &owner,
-                crate::push_service::PushDeviceRegistration::new(
+                crate::push::service::PushDeviceRegistration::new(
                     format!("device-{node}"),
                     node,
-                    crate::push_service::PushDevicePlatform::Web,
+                    crate::push::service::PushDevicePlatform::Web,
                     "test",
                 )
                 .with_provider_token(Some("provider-secret".to_string())),
@@ -2862,10 +2862,10 @@ async fn handle_iq_pubsub_publish_to_push_service_rejects_client_origin_publish(
         .push_service
         .upsert_device(
             &owner,
-            crate::push_service::PushDeviceRegistration::new(
+            crate::push::service::PushDeviceRegistration::new(
                 "web-1",
                 node.node(),
-                crate::push_service::PushDevicePlatform::Web,
+                crate::push::service::PushDevicePlatform::Web,
                 "test",
             ),
         )
@@ -3106,7 +3106,7 @@ async fn handle_iq_pubsub_items_spaces_node_backfills_linked_channel_bookmarks()
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: channel_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "legacy".to_string(),
@@ -3121,7 +3121,7 @@ async fn handle_iq_pubsub_items_spaces_node_backfills_linked_channel_bookmarks()
         .set(&crate::channel_space_links::ChannelSpaceLink {
             channel_jid: channel_jid.clone(),
             space_jid: "team@spaces.example.com".parse().expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("team"),
+            space_node: crate::spaces::identity::SpaceNode::from("team"),
             created_at: 0,
         })
         .await
@@ -3206,7 +3206,7 @@ async fn handle_iq_pubsub_items_spaces_node_requires_authorization_before_backfi
         .deps
         .protocol
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: channel_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "private-legacy".to_string(),
@@ -3229,7 +3229,7 @@ async fn handle_iq_pubsub_items_spaces_node_requires_authorization_before_backfi
             space_jid: "private-team@spaces.example.com"
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("private-team"),
+            space_node: crate::spaces::identity::SpaceNode::from("private-team"),
             created_at: 0,
         })
         .await
@@ -3573,7 +3573,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
         .deps
         .app_state
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "duplicate".to_string(),
@@ -3595,7 +3595,7 @@ async fn admin_channels_delete_retracts_duplicate_space_bookmarks() {
             space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("alpha"),
+            space_node: crate::spaces::identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -3700,7 +3700,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
         .deps
         .app_state
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "rename-duplicate".to_string(),
@@ -3722,7 +3722,7 @@ async fn admin_channels_update_retracts_duplicate_space_bookmarks() {
             space_jid: format!("alpha@{}", state.deps.app_state.spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("alpha"),
+            space_node: crate::spaces::identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -3918,7 +3918,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
         .deps
         .app_state
         .room_registry
-        .ask(waddle_xmpp::muc::room_registry_actor::CreateRoom {
+        .ask(waddle_xmpp::muc::room::registry_actor::CreateRoom {
             room_jid: room_jid.clone(),
             waddle_id: "test".to_string(),
             channel_id: "delete-parent".to_string(),
@@ -3940,7 +3940,7 @@ async fn admin_spaces_delete_clears_channel_parent_tuple() {
             space_jid: format!("alpha@{}", spaces_jid.domain())
                 .parse()
                 .expect("space jid"),
-            space_node: crate::space_identity::SpaceNode::from("alpha"),
+            space_node: crate::spaces::identity::SpaceNode::from("alpha"),
             created_at: 0,
         })
         .await
@@ -4539,7 +4539,7 @@ async fn xep0402_bookmark_publish_updates_xep0492_projection() {
     assert_eq!(projection.mode, waddle_xmpp::xep::NotificationLevel::Never);
     assert_eq!(
         projection.conversation_kind,
-        crate::notification_settings_projection::ConversationKind::PrivateGroup
+        crate::notification::settings_projection::ConversationKind::PrivateGroup
     );
 }
 
@@ -4750,16 +4750,16 @@ async fn xep0402_bookmark_publish_without_notify_deletes_xep0492_projection() {
         .protocol
         .notification_settings_projection
         .upsert(
-            &crate::notification_settings_projection::NotificationSettingsProjection {
+            &crate::notification::settings_projection::NotificationSettingsProjection {
                 owner_bare_jid: owner.clone(),
                 conversation_jid: conversation.clone(),
                 conversation_kind:
-                    crate::notification_settings_projection::ConversationKind::PrivateGroup,
+                    crate::notification::settings_projection::ConversationKind::PrivateGroup,
                 mode: waddle_xmpp::xep::NotificationLevel::Never,
                 rich_payload_opt_in: false,
                 source_version: 1,
                 updated_at_ms: 1,
-                source: crate::notification_settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
+                source: crate::notification::settings_projection::NotificationSettingsSource::Xep0402Bookmarks,
                 source_item_jid: conversation.clone(),
             },
         )
@@ -5479,7 +5479,7 @@ async fn create_members_only_room_with_member(
     .expect("room actor")
     .actor_ref;
     actor
-        .ask(waddle_xmpp::muc::room_actor::JoinWithAffiliation {
+        .ask(waddle_xmpp::muc::room::actor::JoinWithAffiliation {
             sender_jid: member_jid.clone(),
             nick: "member".to_string(),
             affiliation_grant: JoinAffiliationGrant::Resolver(Affiliation::Member),

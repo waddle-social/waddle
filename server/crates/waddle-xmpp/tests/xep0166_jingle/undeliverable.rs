@@ -9,8 +9,8 @@ use waddle_sfu::{Identity, SfuService};
 use waddle_xmpp::protocol::event::OutboundEvent;
 use waddle_xmpp::protocol::handlers::jingle::JingleHandler;
 use waddle_xmpp::protocol::traits::IqHandler;
+use waddle_xmpp::xep::waddle::livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
 use waddle_xmpp::xep::xep0166::Action;
-use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
 use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 

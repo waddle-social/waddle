@@ -48,7 +48,7 @@
 //! - [`OutboundEvent::DispatchToRoom`] — MUC sender-pass: hoists
 //!   managed-room owner check + rich-target validation, queries the
 //!   per-room actor for a frozen
-//!   [`waddle_xmpp::muc::room_actor::RoomChainSnapshot`], runs the
+//!   [`waddle_xmpp::muc::room::actor::RoomChainSnapshot`], runs the
 //!   stateless room handler chain, and recursively interprets emitted
 //!   events.
 //! - [`OutboundEvent::ArchiveGroupchat`] — XEP-0313 §5.1.3 room MAM
@@ -99,13 +99,13 @@ use waddle_xmpp::mam::{
     ArchivedReply, ArchivedRetraction, ArchivedRichMessage, ArchivedRichPayload, ArchivedTombstone,
     RichMessageId, RichText, STANZA_ID_NS,
 };
-use waddle_xmpp::muc::room_actor::{
+use waddle_xmpp::muc::room::actor::{
     ApplyPin, GetAffiliation, GetNicknameGeneration, GetRoomSnapshot, JoinAffiliationGrant,
     JoinWithAffiliation, RoomActor, SetSubject,
 };
 #[cfg(feature = "clustering")]
-use waddle_xmpp::muc::room_registry_actor::DemoteRoomIfExactActor;
-use waddle_xmpp::muc::room_registry_actor::{GetRoom, RoomRegistryActor};
+use waddle_xmpp::muc::room::registry_actor::DemoteRoomIfExactActor;
+use waddle_xmpp::muc::room::registry_actor::{GetRoom, RoomRegistryActor};
 use waddle_xmpp::muc::SubjectState;
 use waddle_xmpp::parse_managed_room_jid;
 use waddle_xmpp::parser::{message_to_string, stanza_to_string};
@@ -152,23 +152,12 @@ mod message_plan;
 pub(crate) mod preview_plan;
 pub(crate) use message_plan::reject_malformed_message;
 pub use message_plan::{build_plan_deps, plan_message_dispatch};
-mod direct_archive;
-mod direct_call_thread;
-mod direct_inbox;
-mod direct_retraction;
 mod displayed_marker;
-mod groupchat_archive;
-mod groupchat_inbox;
-mod groupchat_validation;
 mod handoff;
 pub(crate) mod mention_audience;
 mod notification_activity_ingest;
 pub(crate) mod offline_delivery;
 mod recipient_selection;
-mod room_dispatch;
-mod room_pin;
-mod room_subject;
-mod room_system_message;
 mod route_to_connection;
 mod routing;
 #[cfg(feature = "clustering")]
@@ -192,23 +181,23 @@ pub(crate) use bot::{
     TEST_SIGNING_TIME,
 };
 use carbons::send_carbons;
-use direct_archive::archive_direct;
-use direct_inbox::project_direct_inbox;
-use direct_retraction::apply_retraction_tombstone;
+use direct::archive::archive_direct;
+use direct::inbox::project_direct_inbox;
+use direct::retraction::apply_retraction_tombstone;
 use displayed_marker::mark_inbox_read_from_displayed;
 #[cfg(test)]
-use groupchat_archive::apply_groupchat_retraction_tombstone;
-use groupchat_archive::{
+use groupchat::archive::apply_groupchat_retraction_tombstone;
+use groupchat::archive::{
     apply_groupchat_retraction_tombstone_outcome, archive_groupchat_message,
     project_groupchat_inbox, resolve_room_claim_fence, ArchiveGroupchatOutcome,
     GroupchatRetractionTombstoneOutcome,
 };
 #[cfg(test)]
-pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates;
-pub(crate) use groupchat_inbox::reconcile_groupchat_notification_candidates_for_sweep;
-pub(crate) use groupchat_inbox::reconcile_groupchat_notification_recovery;
-use groupchat_inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
-use groupchat_validation::{
+pub(crate) use groupchat::inbox::reconcile_groupchat_notification_candidates;
+pub(crate) use groupchat::inbox::reconcile_groupchat_notification_candidates_for_sweep;
+pub(crate) use groupchat::inbox::reconcile_groupchat_notification_recovery;
+use groupchat::inbox::{project_groupchat_inbox_event, ProjectGroupchatInboxEvent};
+use groupchat::validation::{
     bad_request_error, build_message_error_reply, item_not_found_error, remove_framework_envelopes,
     resource_constraint_error, validate_groupchat_rich_targets,
 };
@@ -225,9 +214,9 @@ pub(crate) use offline_delivery::reconcile_xep0357_notification_candidates;
 pub(crate) use offline_delivery::{
     reconcile_xep0357_notification_candidates_for_sweep, PendingNotificationRecoveryCursor,
 };
-use room_dispatch::dispatch_to_room;
-use room_pin::apply_pin_change_event;
-use room_subject::{
+use room::dispatch::dispatch_to_room;
+use room::pin::apply_pin_change_event;
+use room::subject::{
     persist_room_subject_event, PersistRoomSubjectEventOutcome, PersistRoomSubjectRequest,
 };
 #[cfg(feature = "clustering")]
@@ -264,7 +253,7 @@ pub use deps::{
     Deps, HostOwnedResources, InterpretOutcome, OrderedRelayRouteOrigin, SmIngressAppendContext,
     TimerCommand,
 };
-pub(crate) use groupchat_archive::{project_groupchat_archive, push_inbox_update};
+pub(crate) use groupchat::archive::{project_groupchat_archive, push_inbox_update};
 pub(crate) use notification_activity_ingest::{
     record_presence_available_activity_on_state, record_presence_unavailable_activity_on_state,
 };
@@ -274,7 +263,7 @@ pub(crate) async fn broadcast_room_system_message(
     room: BareJid,
     message: Box<Message>,
 ) -> Option<String> {
-    room_system_message::broadcast_room_system_message_event(deps, room, message, 0).await
+    room::system_message::broadcast_room_system_message_event(deps, room, message, 0).await
 }
 
 #[cfg(feature = "clustering")]
@@ -672,7 +661,7 @@ async fn interpret_with_depth(
                     continue;
                 };
                 let tombstone_outcome = if deps.effects.is_planning() {
-                    groupchat_archive::plan_groupchat_retraction_tombstone(
+                    groupchat::archive::plan_groupchat_retraction_tombstone(
                         deps,
                         &room,
                         &target_message_id,
@@ -728,7 +717,7 @@ async fn interpret_with_depth(
                 // remove it from the projection and broadcast a
                 // synthetic unpin system message so live clients see the
                 // tab update without a separate poll.
-                room_pin::cascade_retraction_to_pin_list(
+                room::pin::cascade_retraction_to_pin_list(
                     deps,
                     room,
                     target_message_id,
@@ -1004,5 +993,7 @@ mod retraction_ingress_tests;
 #[cfg(all(test, feature = "clustering"))]
 pub(crate) use route_to_connection::{ControlledMucRelay, CONTROLLED_MUC_RELAY};
 
-mod room_result;
-pub(crate) use room_result::plan_room_result;
+mod direct;
+mod groupchat;
+mod room;
+pub(crate) use room::result::plan_room_result;

@@ -62,7 +62,7 @@ async fn drop_postgres_test_schema(database_url: &str, schema: &str) {
 }
 
 /// A fresh, empty actor-authoritative registry for
-/// `sm_promotion::promote_session_unacked` (ADR-0017 Phase 3 Slice 9).
+/// `sm::promotion::promote_session_unacked` (ADR-0017 Phase 3 Slice 9).
 fn test_user_registry() -> ActorRef<UserRegistryActor> {
     UserRegistryActor::spawn(UserRegistryActor::new())
 }
@@ -3710,7 +3710,7 @@ async fn xep0160_promoted_stanzas_carry_original_receipt_time_in_delay() {
 
     // Step 5: SM-expiry promotion re-creates the pending row.
     let user_registry = test_user_registry();
-    let summary = crate::sm_promotion::promote_session_unacked(
+    let summary = crate::sm::promotion::promote_session_unacked(
         &detached,
         &registry,
         &user_registry,
@@ -3974,7 +3974,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
         )
         .await
         .expect("claim origin stream");
-    let _sm = crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+    let _sm = crate::sm::persistence::DatabaseSmPersistence::open(Some(&scoped_url))
         .await
         .expect("initialize SM tables");
     let recipient = format!("atomic-sm-{}@example.com", uuid::Uuid::new_v4());
@@ -4063,7 +4063,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
 
     let sm_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
         .with_persistence(std::sync::Arc::new(
-            crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+            crate::sm::persistence::DatabaseSmPersistence::open(Some(&scoped_url))
                 .await
                 .expect("open promotion SM persistence"),
         ))
@@ -4123,9 +4123,9 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
         pending_subscribes_flushed: false,
     };
     let pending: std::sync::Arc<dyn PendingDeliveryStorage> = std::sync::Arc::new(storage.clone());
-    let summary = crate::sm_promotion::promote_session_with_custody(
+    let summary = crate::sm::promotion::promote_session_with_custody(
         &session,
-        crate::sm_promotion::TerminalOverflowPromotionDeps {
+        crate::sm::promotion::TerminalOverflowPromotionDeps {
             sm_registry: &sm_registry,
             registry: &live_registry,
             user_registry: &users,
@@ -4227,7 +4227,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     ));
     let successor_registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
         .with_persistence(std::sync::Arc::new(
-            crate::sm_persistence::DatabaseSmPersistence::open(Some(&scoped_url))
+            crate::sm::persistence::DatabaseSmPersistence::open(Some(&scoped_url))
                 .await
                 .expect("open successor SM persistence"),
         ))

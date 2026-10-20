@@ -1412,7 +1412,7 @@ fn add_text_feature_evidence(text: &str, evidence: &mut BTreeSet<String>) {
 }
 
 fn implemented_official_xep_modules() -> Result<BTreeSet<String>> {
-    let xep_mod = server_root().join("crates/waddle-xmpp/src/xep/mod.rs");
+    let xep_mod = server_root().join("crates/waddle-xmpp/src/xep.rs");
     let content =
         fs::read_to_string(&xep_mod).with_context(|| format!("read {}", xep_mod.display()))?;
     let mut implemented = BTreeSet::new();

@@ -25,7 +25,7 @@ use tracing::{debug, warn};
 use waddle_xmpp::inbox::storage::InboxStorage;
 use waddle_xmpp_core::mam::ThreadId;
 
-use super::groupchat_archive::push_inbox_update;
+use super::groupchat::archive::push_inbox_update;
 use super::Deps;
 
 /// Drive [`OutboundEvent::MarkInboxReadFromDisplayed`] effects against
@@ -459,7 +459,7 @@ mod tests {
         assert!(!failure.class().advances());
         assert!(matches!(
             failure.source,
-            crate::ingress_uow::IngressUowError::Plan(PlanFailure::InboxSnapshotRead)
+            crate::ingress::uow::IngressUowError::Plan(PlanFailure::InboxSnapshotRead)
         ));
         assert_eq!(fixture.count("ingress_messages").await, 0);
         assert_eq!(fixture.count("ingress_effect_intents").await, 0);
@@ -493,5 +493,4 @@ mod tests {
 }
 
 #[cfg(test)]
-#[path = "displayed_marker_plan_tests.rs"]
 mod plan_tests;

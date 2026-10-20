@@ -1,6 +1,6 @@
 use super::ingress_support::IngressFixture;
 use waddle_extensions::PluginId;
-use waddle_server::ingress_uow::{
+use waddle_server::ingress::uow::{
     ConfiguredPluginGrants, ExtensionGrantRepository as Grants, GrantAssertion,
     GrantAssertionFailure, IngressUowError,
 };

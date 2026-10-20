@@ -1,4 +1,4 @@
-//! Public Phase B/C wire regressions; real planner coverage lives in muc_occupant_progress_tests.
+//! Public Phase B/C wire regressions; real planner coverage lives in `ingress::tests::muc_occupant_progress`.
 use crate::{detached_progress_support as detached, ingress_support::IngressFixture};
 use jid::{BareJid, FullJid};
 use kameo::actor::Spawn;
@@ -16,8 +16,8 @@ use waddle_xmpp::{
         NormalizedTarget, StoredMessagePayload,
     },
     muc::{
-        room_actor::Join,
-        room_registry_actor::{CreateRoom, RoomRegistryActor},
+        room::actor::Join,
+        room::registry_actor::{CreateRoom, RoomRegistryActor},
     },
     registry::ConnectionRegistry,
     stream_management::InMemorySmSessionRegistry,
@@ -327,7 +327,7 @@ async fn replay_case(
         .expect("accept");
     if occupant_case == OccupantCase::Missing {
         let mut tx = fixture.uow.begin().await.expect("inspect frozen source");
-        let envelope = waddle_server::ingress_uow::CanonicalMessageRepository::load_envelope(
+        let envelope = waddle_server::ingress::uow::CanonicalMessageRepository::load_envelope(
             &mut tx,
             first.message_key.expect("accepted message key"),
         )
@@ -666,7 +666,7 @@ pub async fn seated_ghost_occupant_is_never_evicted(fixture: IngressFixture) {
     }
     assert!(
         actor
-            .ask(waddle_xmpp::muc::room_actor::GetOccupantByJid { jid: b.clone() })
+            .ask(waddle_xmpp::muc::room::actor::GetOccupantByJid { jid: b.clone() })
             .await
             .expect("occupancy probe")
             .is_some(),

@@ -12,7 +12,7 @@ use waddle_xmpp_core::first_eligible_https_url_text;
 use waddle_xmpp_core::PreviewImageMediaType;
 
 use crate::config::LinkPreviewConfig;
-use crate::server::routes::websocket::handlers::iq::link_preview_player_embed::is_sealed_player_embed_allowed;
+use crate::server::routes::websocket::handlers::iq::link_preview::player_embed::is_sealed_player_embed_allowed;
 use crate::server::routes::websocket::link_preview_telemetry::{
     record_link_preview_event, LinkPreviewTelemetryEvent,
 };

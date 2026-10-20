@@ -7,7 +7,7 @@ mod replay_bytes_support;
 use ingress_support::IngressFixture;
 use replay_bytes_support::ReplayBytesFixture;
 use std::sync::Arc;
-use waddle_server::sm_persistence::DatabaseSmPersistence;
+use waddle_server::sm::persistence::DatabaseSmPersistence;
 use waddle_xmpp::stream_management::InMemorySmSessionRegistry;
 
 async fn persisted_replay_bytes(fixture: IngressFixture) {

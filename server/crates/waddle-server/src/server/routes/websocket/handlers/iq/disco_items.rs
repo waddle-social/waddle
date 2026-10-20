@@ -129,7 +129,7 @@ async fn room_bot_items(
         RoomArchiveAccess::Error => return Err(()),
     }
     let plugins =
-        crate::server::extension_bot_rooms::list(state.deps.app_state.db_pool.global(), room)
+        crate::server::extension::bot::rooms::list(state.deps.app_state.db_pool.global(), room)
             .await
             .map_err(|error| warn!(%room, %error, "Failed to list room bots"))?;
     if plugins.is_empty() {
@@ -157,7 +157,7 @@ async fn room_bot_items(
         .filter_map(|plugin| domains.extension_bot_jid(plugin).ok())
         .filter_map(|bot| {
             let bot = Jid::from(bot.to_bare());
-            crate::server::extension_bot::installed_bot(domains, manager, &bot)
+            crate::server::extension::bot::installed_bot(domains, manager, &bot)
                 .map(|installed| (bot, installed))
         })
         .filter(|(bot, _)| {
@@ -253,7 +253,7 @@ pub(super) async fn handle_disco_items_iq(
         };
 
         // XEP-0045 §6.6 (#1265 item 10): disco to an occupant JID.
-        if let Some(error) = muc_occupant_disco::muc_occupant_disco_error(
+        if let Some(error) = muc::occupant_disco::muc_occupant_disco_error(
             state,
             target_to,
             muc_domain,
@@ -509,7 +509,7 @@ pub(super) async fn handle_disco_items_iq(
                                     continue;
                                 };
                                 let visible = match requester.as_ref() {
-                                    Some(requester) => crate::pubsub_authz::can_subscribe(
+                                    Some(requester) => crate::pubsub::authz::can_subscribe(
                                         &state.deps.protocol.pubsub_storage,
                                         &spaces_jid,
                                         &node,
@@ -588,7 +588,7 @@ pub(super) async fn handle_disco_items_iq(
             .and_then(|target| target.parse::<jid::Jid>().ok())
             .filter(|target| state.deps.service_domains.is_extensions_address(target))
         {
-            let is_bot = crate::server::extension_bot::installed_bot(
+            let is_bot = crate::server::extension::bot::installed_bot(
                 &state.deps.service_domains,
                 &state.deps.protocol.extension_manager,
                 &target,

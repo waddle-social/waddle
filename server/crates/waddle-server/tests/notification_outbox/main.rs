@@ -1,5 +1,5 @@
 //! Integration suite for the notification pipeline, grouped by concern:
-//! `waddle_server::notification_outbox`, the `notification_activity`
+//! `waddle_server::notification::outbox`, the `notification_activity`
 //! store and writers, and the `notification_settings_projection` store.
 //! One test binary keeps link time and disk footprint down.
 

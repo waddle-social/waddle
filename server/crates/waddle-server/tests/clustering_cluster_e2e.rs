@@ -1820,7 +1820,7 @@ async fn surge_node_joins_default_mesh_without_rotating_startup_identity() {
 /// a harness-only reimplementation: every node spawned here
 /// (`spawn_cluster_server`) is a full `waddle-server` subprocess that runs
 /// `clustering::start_if_enabled`'s production bring-up unconditionally
-/// (`server::start_with_config` always calls it — see `server/mod.rs`), so
+/// (`server::start_with_config` always calls it — see `server.rs`), so
 /// `run_node_lease` is already driving each subprocess's readiness signal
 /// with no harness-side wiring required. The one gap this fills: the
 /// pre-existing harness never drove a *third* in-process node through this
@@ -2397,7 +2397,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
     use waddle_xmpp::muc::durable::{
         DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
     };
-    use waddle_xmpp::muc::room_actor::{ConfigEffectPlan, HealthCheck, UpdateConfig};
+    use waddle_xmpp::muc::room::actor::{ConfigEffectPlan, HealthCheck, UpdateConfig};
     use waddle_xmpp::muc::{RoomConfig, RoomRegistry};
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, NodeIdentity, SharedNodeIdentity,
@@ -3978,10 +3978,10 @@ fn muji_terminate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
 /// Muji `session-initiate` IQ for `room`, built with minidom builders
 /// per the repo's XML-generation rule (id = `mji-{sid}`).
 fn muji_initiate_iq(room: &str, sid: &str) -> xmpp_parsers::minidom::Element {
+    use waddle_xmpp::xep::waddle::livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
     use waddle_xmpp::xep::xep0166::NS_JINGLE;
     use waddle_xmpp::xep::xep0167::NS_JINGLE_RTP;
     use waddle_xmpp::xep::xep0272::NS_MUJI;
-    use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
     use xmpp_parsers::minidom::Element;
 
     let payload_type = Element::builder("payload-type", NS_JINGLE_RTP)

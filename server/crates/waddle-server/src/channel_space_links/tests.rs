@@ -2,7 +2,7 @@
 
 use jid::BareJid;
 
-use crate::space_identity::SpaceNode;
+use crate::spaces::identity::SpaceNode;
 
 use super::{ChannelSpaceLink, ChannelSpaceLinkStore, DatabaseChannelSpaceLinkStore};
 

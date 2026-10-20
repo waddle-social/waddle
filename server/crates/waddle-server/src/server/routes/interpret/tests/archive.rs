@@ -86,7 +86,7 @@ async fn direct_correction_preview_ref_target_resolves_to_wire_message_id() {
     .await
     .expect("seed direct archive row");
 
-    let target = super::direct_archive::resolve_direct_correction_target_message_id(
+    let target = super::direct::archive::resolve_direct_correction_target_message_id(
         &deps,
         &archive_jid,
         &sender,
@@ -122,7 +122,7 @@ async fn direct_correction_preview_ref_target_resolves_to_wire_message_id() {
     .await
     .expect("seed origin-id direct archive row");
 
-    let target = super::direct_archive::resolve_direct_correction_target_message_id(
+    let target = super::direct::archive::resolve_direct_correction_target_message_id(
         &deps,
         &archive_jid,
         &sender,

@@ -1,5 +1,4 @@
 use super::*;
-#[path = "route_to_connection_plan.rs"]
 pub(super) mod plan;
 use std::{future::Future, pin::Pin};
 use waddle_xmpp::ingress::IngressEffectIntent;
@@ -1505,13 +1504,13 @@ pub(crate) async fn deliver_ordered_local_copy(
             (None, None) => return Some(FullJidDeliveryOutcome::MaybeCommitted),
         };
         match readiness {
-            Ok(crate::ingress_uow::DispatchReadiness::Completed) => {
+            Ok(crate::ingress::uow::DispatchReadiness::Completed) => {
                 return Some(FullJidDeliveryOutcome::Delivered);
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Blocked(_)) | Err(_) => {
+            Ok(crate::ingress::uow::DispatchReadiness::Blocked(_)) | Err(_) => {
                 return Some(FullJidDeliveryOutcome::MaybeCommitted);
             }
-            Ok(crate::ingress_uow::DispatchReadiness::Ready) => {}
+            Ok(crate::ingress::uow::DispatchReadiness::Ready) => {}
         }
     }
     let mut outbound = waddle_xmpp::registry::OutboundStanza::new(stanza.clone());
@@ -1944,5 +1943,4 @@ fn stanza_message_id(stanza: &Stanza) -> &str {
 }
 
 #[cfg(test)]
-#[path = "routing_plan_failure_tests.rs"]
 mod routing_plan_failure_tests;

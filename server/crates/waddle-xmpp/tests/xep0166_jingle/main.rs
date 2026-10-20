@@ -43,7 +43,7 @@ use waddle_xmpp::Stanza;
 use xmpp_parsers::iq::Iq;
 use xmpp_parsers::stanza_error::DefinedCondition;
 
-use waddle_xmpp::xep::xep_waddle_livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
+use waddle_xmpp::xep::waddle::livekit_transport::NS_WADDLE_LIVEKIT_TRANSPORT;
 
 const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
 
@@ -1483,7 +1483,7 @@ fn two_content_initiate(from: &str, to: &str, sid: &str) -> Iq {
 }
 
 fn forwarded_content_tokens(events: &[OutboundEvent]) -> Vec<String> {
-    use waddle_xmpp::xep::xep_waddle_livekit_transport::WaddleLiveKitTransport;
+    use waddle_xmpp::xep::waddle::livekit_transport::WaddleLiveKitTransport;
     let forwarded = events
         .iter()
         .find_map(|event| {

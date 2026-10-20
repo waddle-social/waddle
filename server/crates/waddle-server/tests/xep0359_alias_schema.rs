@@ -9,7 +9,7 @@ mod ingress_authority_support;
 
 use waddle_server::{
     db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner},
-    ingress_substrate::PostgresIngressSubstrate,
+    ingress::substrate::PostgresIngressSubstrate,
 };
 use waddle_xmpp::ingress::{
     AliasOutcome, AliasResolution, MessageKey, NormalizedTarget, SemanticDigest,

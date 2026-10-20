@@ -2,8 +2,8 @@
 use crate::ingress_support::IngressFixture;
 use waddle_extensions::PluginId;
 use waddle_server::{
+    ingress::uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
     ingress::{ExtensionPrincipal, IngressPrincipal, IngressStreamIdentity, IngressSubmission},
-    ingress_uow::{ConfiguredPluginGrants, ExtensionGrantRepository},
 };
 use waddle_xmpp::ingress::{DigestContext, DigestInput, TransportGeneration};
 
@@ -15,7 +15,7 @@ use waddle_server::{
         },
         PlannedEffect,
     },
-    notification_outbox::NotificationCandidate,
+    notification::outbox::NotificationCandidate,
 };
 use waddle_xmpp::{
     ingress::{

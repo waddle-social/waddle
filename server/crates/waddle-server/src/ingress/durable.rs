@@ -1,8 +1,8 @@
 //! Transactional writes and their exact durable completion receipts.
 use super::decision::EffectReceiptKey;
 use crate::{
-    ingress_substrate::EffectReceiptKind,
-    ingress_uow::{
+    ingress::substrate::EffectReceiptKind,
+    ingress::uow::{
         EffectReceiptRepository, InboxRepository, IngressUowError, IngressUowTransaction,
         MamArchiveRepository,
     },
@@ -43,9 +43,9 @@ pub(super) async fn apply_durable(
     key: MessageKey,
     plan: &IngressPlan,
     recorded: &[IngressEffectIntent],
-    room_proof: &super::commit_room::RoomProof<'_>,
+    room_proof: &super::commit::room::RoomProof<'_>,
     sender: &jid::BareJid,
-    publication: Option<&crate::ingress_uow::RoomPublication>,
+    publication: Option<&crate::ingress::uow::RoomPublication>,
 ) -> Result<AppliedDurable, IngressUowError> {
     let mut applied = AppliedDurable {
         archives: Vec::new(),
@@ -73,7 +73,7 @@ pub(super) async fn apply_durable(
         .collect();
     MamArchiveRepository::lock_sequences(tx, &archives).await?;
     if let Some(publication) = publication {
-        if !crate::ingress_uow::RoomObservationRepository::assert_publication(tx, publication)
+        if !crate::ingress::uow::RoomObservationRepository::assert_publication(tx, publication)
             .await?
         {
             return Err(IngressUowError::PrincipalAssertionFailed);
@@ -124,7 +124,7 @@ pub(super) async fn apply_durable(
                 let outcome = if matches!(effect, DurableEffect::Room(_))
                     && matches!(
                         tx.fencing(),
-                        crate::ingress_uow::IngressFencing::Clustered(_)
+                        crate::ingress::uow::IngressFencing::Clustered(_)
                     ) {
                     MamArchiveRepository::store_fenced(
                         tx,
@@ -165,9 +165,9 @@ pub(super) async fn apply_durable(
                         }) => correction_target.as_ref(),
                         _ => None,
                     };
-                    crate::ingress_uow::RoomObservationRepository::capture(
+                    crate::ingress::uow::RoomObservationRepository::capture(
                         tx,
-                        crate::ingress_uow::CapturedRoomSource {
+                        crate::ingress::uow::CapturedRoomSource {
                             key,
                             room: archive,
                             message: &plan.sanitized_message,
@@ -254,7 +254,7 @@ pub(super) async fn apply_durable(
                 MamArchiveRepository::replace_with_tombstone(tx, archive, target, tombstone)
                     .await?;
                 if tx.room_observers_enabled() {
-                    crate::ingress_uow::RoomObservationRepository::retract(
+                    crate::ingress::uow::RoomObservationRepository::retract(
                         tx,
                         archive,
                         target,
@@ -286,7 +286,7 @@ pub(super) async fn apply_durable(
         }
     }
     if let Some(publication) = publication {
-        crate::ingress_uow::RoomObservationRepository::mark_published(
+        crate::ingress::uow::RoomObservationRepository::mark_published(
             tx,
             &publication.id,
             crate::time::now_ms(),

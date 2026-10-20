@@ -35,11 +35,11 @@ use crate::protocol::traits::IqHandler;
 use crate::telemetry::attributes::{
     CallControlRateLimitedSurface, CallSetupFailureReason, MetricAttribute, SfuDenialReason,
 };
-use crate::xep::xep0166::NS_JINGLE;
-use crate::xep::xep0272::{find_muji, Muji};
-use crate::xep::xep_waddle_livekit_transport::{
+use crate::xep::waddle::livekit_transport::{
     IssuedTransport, TransportParseError, WaddleLiveKitTransport, NS_WADDLE_LIVEKIT_TRANSPORT,
 };
+use crate::xep::xep0166::NS_JINGLE;
+use crate::xep::xep0272::{find_muji, Muji};
 use crate::Stanza;
 
 mod undeliverable;

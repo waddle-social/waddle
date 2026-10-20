@@ -12,7 +12,7 @@ use waddle_server::{
         execute::execute_effects,
         Deps, ExternalEffect, ExternalOutcome, ImmediateSink, IngressDecision,
     },
-    notification_outbox::{
+    notification::outbox::{
         NotificationCandidate, NotificationClass, NotificationOutboxStore, NotificationThreadId,
     },
 };
@@ -312,12 +312,12 @@ dialect_tests!(
 );
 
 fn rebuild(
-    envelope: &waddle_server::ingress_substrate::MessageEnvelope,
+    envelope: &waddle_server::ingress::substrate::MessageEnvelope,
     recovery: &GroupchatNotificationRecovery,
 ) -> NotificationCandidate {
-    waddle_server::notification_outbox::candidate_from_envelope(
+    waddle_server::notification::outbox::candidate_from_envelope(
         envelope.message(),
-        waddle_server::notification_outbox::GroupchatCandidateIdentity {
+        waddle_server::notification::outbox::GroupchatCandidateIdentity {
             owner: &recovery.key.recipient,
             room: &recovery.key.room,
             sender: &recovery.sender_jid,

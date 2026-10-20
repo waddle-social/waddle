@@ -1466,7 +1466,7 @@ pub struct ProtocolServices {
     /// Runtime extension manager for message embeds + feature advertisements.
     pub extension_manager: Arc<ExtensionManager>,
     /// Extension bots' manifest avatars, fetched and served in-band.
-    pub(crate) bot_avatars: Arc<crate::server::extension_bot_avatar::BotAvatars>,
+    pub(crate) bot_avatars: Arc<crate::server::extension::bot::avatar::BotAvatars>,
     /// Sans-I/O stanza dispatcher. Handlers migrated so far (ping, session,
     /// carbons) are routed through this before falling back to the
     /// legacy string-matching code paths below.
@@ -1488,11 +1488,11 @@ pub struct ProtocolServices {
     /// XEP-0357 push subscription storage.
     pub push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore>,
     /// First-party XMPP Push Service state and fake provider dispatch.
-    pub push_service: Arc<crate::push_service::DatabasePushServiceStore>,
+    pub push_service: Arc<crate::push::service::DatabasePushServiceStore>,
     /// User-server notification candidate/outbox state. This coalesces
     /// committed XMPP state into durable XEP-0357 PubSub publish jobs while
     /// leaving canonical registration state in `push_store`.
-    pub notification_outbox: Arc<crate::notification_outbox::NotificationOutboxStore>,
+    pub notification_outbox: Arc<crate::notification::outbox::NotificationOutboxStore>,
     /// Durable convergence queue for failed LiveKit admin teardown and
     /// cross-node Muji-presence cleanup effects.
     pub call_teardown_outbox: Arc<crate::call_teardown_outbox::CallTeardownOutboxStore>,
@@ -1503,35 +1503,35 @@ pub struct ProtocolServices {
     /// Durable, per-room FIFO mutation-effect queue.  Producers own enqueueing
     /// in their mutation transaction; this shared handle is exclusively the
     /// consumer/janitor and arm-supervisor boundary.
-    pub room_effect_outbox: Arc<crate::room_effect_outbox::RoomEffectOutboxStore>,
+    pub room_effect_outbox: Arc<crate::room::effect_outbox::RoomEffectOutboxStore>,
     /// Origin-owned retry path for committed staged config effects.  It has
     /// only the truthful Arm disposition; rollback/supersession deletes rows
     /// transactionally elsewhere.
-    pub room_effect_arm_supervisor: crate::room_effect_outbox::RoomEffectArmSupervisor,
+    pub room_effect_arm_supervisor: crate::room::effect_outbox::RoomEffectArmSupervisor,
     /// Async LiveKit admin view of the concrete SFU, retained separately
     /// from the synchronous protocol service for the teardown janitor.
     pub call_teardown_executor: Option<waddle_sfu::LiveKitTeardownExecutor>,
     /// Durable derived projection of XEP-0492 notification settings from
     /// canonical XMPP state.
     pub notification_settings_projection:
-        Arc<crate::notification_settings_projection::NotificationSettingsProjectionStore>,
+        Arc<crate::notification::settings_projection::NotificationSettingsProjectionStore>,
     /// Durable derived projection of the user's `urn:waddle:dnd:0` PEP
     /// item (#367). Lookup keys: `owner_bare_jid` → typed
-    /// [`waddle_xmpp::xep::xep_waddle_dnd::WaddleDnd`]. Consulted at
-    /// T1 push dispatch via [`crate::dnd_reader::PepDndReader`].
-    pub dnd_projection: Arc<crate::dnd_projection::DndProjectionStore>,
+    /// [`waddle_xmpp::xep::waddle::dnd::WaddleDnd`]. Consulted at
+    /// T1 push dispatch via [`crate::dnd::reader::PepDndReader`].
+    pub dnd_projection: Arc<crate::dnd::projection::DndProjectionStore>,
     /// PEP-backed DND reader plumbed into the T1 push gate
     /// (`notification_outbox`). Reads [`dnd_projection`] + a
     /// `chrono::Utc::now()` clock and resolves the typed
-    /// [`crate::notification_outbox::DndState`] used to suppress
-    /// candidates with [`crate::notification_outbox::SuppressedReason::WaddleDnd`].
-    pub dnd_reader: Arc<crate::dnd_reader::PepDndReader>,
+    /// [`crate::notification::outbox::DndState`] used to suppress
+    /// candidates with [`crate::notification::outbox::SuppressedReason::WaddleDnd`].
+    pub dnd_reader: Arc<crate::dnd::reader::PepDndReader>,
     /// Durable per-(user, conversation) activity projection backing
     /// the XEP-0513 `<active/>` push filter. Ingested from typed
     /// XEP-0085 chat-state changes, XEP-0490 read-marker advances,
     /// outbound message commits, and XEP-0045 presence events; read
     /// by the T1 push-gate evaluator (`notification_outbox`).
-    pub notification_activity: Arc<crate::notification_activity::NotificationActivityStore>,
+    pub notification_activity: Arc<crate::notification::activity::NotificationActivityStore>,
     /// XEP-0198 detached-session registry — holds state for clients whose
     /// WebSocket has closed but may still resume within the session timeout.
     pub sm_session_registry: Arc<InMemorySmSessionRegistry>,
@@ -1592,7 +1592,7 @@ pub struct ProtocolServices {
     /// presence to the authoritative remote RoomActor even though no local
     /// RoomActor exists to discover by registry scan.
     pub remote_muc_memberships: Arc<RemoteMucMemberships>,
-    pub extension_bot_rooms: crate::server::extension_host_adapter::BotRoomLocks,
+    pub extension_bot_rooms: crate::server::extension::host_adapter::BotRoomLocks,
     /// Local departures retained until the owning room actor can project them.
     pub pending_local_muc_departures: Arc<super::PendingLocalMucDepartures>,
     /// At most one detached resolver-affiliation repair per room/member pair.
@@ -1808,7 +1808,7 @@ pub(super) struct WsConnState {
     /// replay after transport loss. They settle only once cleanup proves a
     /// detached replay owner exists; `NotPersisted` leaves them leased.
     pub(super) pending_replay_completions:
-        Vec<crate::room_effect_outbox::drain::RoomEffectCompletion>,
+        Vec<crate::room::effect_outbox::drain::RoomEffectCompletion>,
     /// Countable stanzas dropped because terminal recovery hit
     /// [`TERMINAL_RECOVERY_QUEUE_CAP`]. Logged at most once per connection.
     pub(super) terminal_sm_recovery_dropped: usize,

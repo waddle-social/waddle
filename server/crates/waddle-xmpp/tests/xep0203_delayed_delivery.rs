@@ -202,7 +202,7 @@ fn xep0203_delay_lives_in_stanza_payloads_not_body() {
 
 // SM-promote → pending_delivery → flush path delay stamping is
 // covered by the classifier-level Q6 promotion tests in
-// `server/crates/waddle-server/src/sm_promotion.rs::tests` and the
+// `server/crates/waddle-server/src/sm/promotion.rs::tests` and the
 // e2e test
 // `pending_delivery::tests::xep0160_promoted_stanzas_carry_original_receipt_time_in_delay`.
 // Those live in the server crate where `flush_for_resource` and the

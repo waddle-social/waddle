@@ -1,0 +1,2040 @@
+use super::*;
+use chrono::TimeZone;
+use std::time::Duration;
+use waddle_xmpp::auth::{
+    AuthContextId, AuthContextVersion, AuthenticatedPrincipalRef, PrincipalAuthEpoch,
+};
+
+fn full(s: &str) -> FullJid {
+    s.parse().unwrap()
+}
+
+fn fixed_time() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 5, 1, 12, 30, 0).unwrap()
+}
+
+fn fixed_occupancy_session() -> waddle_xmpp_core::OccupancySessionGeneration {
+    waddle_xmpp_core::OccupancySessionGeneration::from_uuid(
+        uuid::Uuid::parse_str("11111111-2222-3333-4444-555555555555").expect("uuid"),
+    )
+}
+
+async fn stored_occupancy_session_text(
+    storage: &DatabaseSmPersistence,
+    stream_id: &SmSessionId,
+) -> Option<String> {
+    let mut rows = storage
+        .query(
+            "SELECT occupancy_session FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("query occupancy_session");
+    let row = rows.next().await.expect("row result").expect("row present");
+    row.get(0).expect("occupancy_session column")
+}
+
+fn fixture_session(stream_id: &str) -> PersistedSession {
+    PersistedSession {
+        stream_id: SmSessionId::new(stream_id),
+        user_id: "alice".to_string(),
+        jid: full("alice@example.com/web"),
+        occupancy_session: fixed_occupancy_session(),
+        inbound_count: 7,
+        outbound_count: 12,
+        last_acked: 10,
+        replay_gap_through: Some(9),
+        max_resume_time: Some(60),
+        detached_at: fixed_time(),
+        max_resume_duration: Duration::from_secs(60),
+        carbons_enabled: true,
+        roster_interested: true,
+        blocklist_interested: true,
+        presence_available: true,
+        presence_show: Some(Show::Chat),
+        presence_status: Some("at the keyboard".to_string()),
+        presence_priority: 5,
+        presence_payloads: Vec::new(),
+    }
+}
+
+fn fixture_unacked(stream_id: &str, sequence: u32) -> PersistedUnackedStanza {
+    let mut message = xmpp_parsers::message::Message::new(None::<jid::Jid>);
+    message
+        .bodies
+        .insert(xmpp_parsers::message::Lang::new(), format!("m{sequence}"));
+    PersistedUnackedStanza {
+        ingress_receipts: Vec::new(),
+        stream_id: SmSessionId::new(stream_id),
+        sequence,
+        stanza: Box::new(Stanza::Message(message)),
+        original_receipt_at: fixed_time(),
+    }
+}
+
+fn fixture_principal() -> AuthenticatedPrincipalRef {
+    AuthenticatedPrincipalRef::new(
+        "alice@example.com".parse().expect("valid bare JID"),
+        AuthContextId::new(uuid::Uuid::new_v4()),
+        AuthContextVersion::INITIAL,
+        PrincipalAuthEpoch::INITIAL,
+    )
+}
+
+#[cfg(feature = "clustering")]
+#[tokio::test]
+async fn clustering_refuses_portable_sm_persistence() {
+    let global_db = crate::db::Database::in_memory("cluster-sm-portable-rejected")
+        .await
+        .expect("in-memory global database");
+    let error = match open_for_cluster_mode_with_lineage(true, None, &global_db).await {
+        Ok(_) => panic!("cluster mode must never fall back to unfenced portable persistence"),
+        Err(error) => error,
+    };
+    assert!(matches!(error, SmPersistenceError::ClusterRequiresPostgres));
+}
+
+#[tokio::test]
+async fn round_trip_session_preserves_every_field() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let s = fixture_session("stream-1");
+    storage.upsert_session(s.clone()).await.unwrap();
+    let loaded = storage
+        .get_session(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.stream_id, s.stream_id);
+    assert_eq!(loaded.user_id, s.user_id);
+    assert_eq!(loaded.jid, s.jid);
+    assert_eq!(loaded.occupancy_session, s.occupancy_session);
+    assert_eq!(loaded.inbound_count, s.inbound_count);
+    assert_eq!(loaded.outbound_count, s.outbound_count);
+    assert_eq!(loaded.last_acked, s.last_acked);
+    assert_eq!(loaded.replay_gap_through, s.replay_gap_through);
+    assert_eq!(loaded.max_resume_time, s.max_resume_time);
+    assert_eq!(loaded.detached_at, s.detached_at);
+    assert_eq!(loaded.max_resume_duration, s.max_resume_duration);
+    assert_eq!(loaded.carbons_enabled, s.carbons_enabled);
+    assert_eq!(loaded.roster_interested, s.roster_interested);
+    assert_eq!(loaded.blocklist_interested, s.blocklist_interested);
+    assert_eq!(loaded.presence_available, s.presence_available);
+    assert_eq!(loaded.presence_show, s.presence_show);
+    assert_eq!(loaded.presence_status, s.presence_status);
+    assert_eq!(loaded.presence_priority, s.presence_priority);
+    assert_eq!(loaded.presence_payloads, s.presence_payloads);
+}
+
+/// #1206: the durable shape must carry the resource's own presence
+/// extension payloads (XEP-0115 `<c/>` caps, XEP-0319 `<idle/>`) so a
+/// session rehydrated from storage relays them verbatim on probe instead
+/// of coming back caps-less. The payloads survive a serialize→TEXT→parse
+/// round-trip, verbatim and in order.
+#[tokio::test]
+async fn round_trip_session_preserves_presence_payloads() {
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut s = fixture_session("stream-payloads");
+    s.presence_payloads = vec![caps.clone(), idle.clone()];
+    storage.upsert_session(s.clone()).await.unwrap();
+
+    let loaded = storage
+        .get_session(&SmSessionId::new("stream-payloads"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        loaded.presence_payloads,
+        vec![caps, idle],
+        "durable get_session must return the stored presence payloads verbatim and in order"
+    );
+}
+
+#[tokio::test]
+async fn upsert_session_persists_with_all_nullable_bigint_fields_unset() {
+    // Regression for the SM-detach failure mode where every detach
+    // attempt failed on Postgres because `replay_gap_through` /
+    // `max_resume_time` came in as `None` and the bind path folded
+    // every `None` onto an untyped null that the Postgres binder
+    // typed as TEXT — rejected by the `bigint` column. SQLite is
+    // type-loose enough not to trip on the bug directly, but
+    // exercising the all-None path here pins the API surface: writes
+    // succeed and reads round-trip `None` to `None`.
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut s = fixture_session("stream-null-fields");
+    s.replay_gap_through = None;
+    s.max_resume_time = None;
+    s.presence_show = None;
+    s.presence_status = None;
+    storage.upsert_session(s.clone()).await.unwrap();
+    let loaded = storage
+        .get_session(&SmSessionId::new("stream-null-fields"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.replay_gap_through, None);
+    assert_eq!(loaded.max_resume_time, None);
+    assert_eq!(loaded.presence_show, None);
+    assert_eq!(loaded.presence_status, None);
+}
+
+#[tokio::test]
+async fn upsert_replaces_existing_session() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut s = fixture_session("stream-1");
+    storage.upsert_session(s.clone()).await.unwrap();
+    s.inbound_count = 99;
+    s.presence_priority = -1;
+    storage.upsert_session(s.clone()).await.unwrap();
+    let loaded = storage
+        .get_session(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(loaded.inbound_count, 99);
+    assert_eq!(loaded.presence_priority, -1);
+}
+
+#[tokio::test]
+async fn list_unacked_orders_ascending_by_sequence() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for seq in [3u32, 1, 4, 2] {
+        storage
+            .append_unacked(fixture_unacked("stream-1", seq))
+            .await
+            .unwrap();
+    }
+    let rows = storage
+        .list_unacked(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap();
+    let seqs: Vec<u32> = rows.iter().map(|r| r.sequence).collect();
+    assert_eq!(seqs, vec![1, 2, 3, 4]);
+}
+
+#[tokio::test]
+async fn ack_through_drops_only_acked_sequences() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for seq in 1..=4 {
+        storage
+            .append_unacked(fixture_unacked("stream-1", seq))
+            .await
+            .unwrap();
+    }
+    let dropped = storage
+        .ack_through(&SmSessionId::new("stream-1"), 2)
+        .await
+        .unwrap();
+    assert_eq!(dropped, 2);
+    let remaining = storage
+        .list_unacked(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap();
+    assert_eq!(
+        remaining.iter().map(|r| r.sequence).collect::<Vec<_>>(),
+        vec![3, 4]
+    );
+}
+
+#[tokio::test]
+async fn delete_session_clears_unacked_too() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("stream-1"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("stream-1", 1))
+        .await
+        .unwrap();
+    storage
+        .delete_session(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap();
+    assert!(storage
+        .get_session(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(storage
+        .list_unacked(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn delete_session_releases_stream_lock_entry() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("stream-leaky"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("stream-leaky", 1))
+        .await
+        .unwrap();
+    assert!(
+        storage
+            .stream_locks
+            .contains_key(&SmSessionId::new("stream-leaky")),
+        "append_unacked must populate the stream_locks entry"
+    );
+
+    storage
+        .delete_session(&SmSessionId::new("stream-leaky"))
+        .await
+        .unwrap();
+    assert!(
+        !storage
+            .stream_locks
+            .contains_key(&SmSessionId::new("stream-leaky")),
+        "delete_session must drop its local Arc clone so drop_stream_lock can GC the entry"
+    );
+}
+
+#[tokio::test]
+async fn list_expired_filters_by_detached_plus_duration() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let now = Utc::now();
+    let mut past = fixture_session("expired");
+    past.detached_at = now - chrono::Duration::seconds(120);
+    past.max_resume_duration = Duration::from_secs(60);
+    let mut active = fixture_session("active");
+    active.detached_at = now;
+    active.max_resume_duration = Duration::from_secs(600);
+    storage.upsert_session(past).await.unwrap();
+    storage.upsert_session(active).await.unwrap();
+
+    let expired = storage.list_expired_sessions(now).await.unwrap();
+    assert_eq!(expired.len(), 1);
+    assert_eq!(expired[0].stream_id, SmSessionId::new("expired"));
+}
+
+#[tokio::test]
+async fn list_expired_sessions_skips_poison_rows_and_keeps_healthy_sessions() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for stream_id in ["healthy-before", "poison", "healthy-after"] {
+        storage
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .unwrap();
+    }
+    let mut active = fixture_session("active");
+    active.detached_at = fixed_time() + chrono::Duration::hours(1);
+    storage.upsert_session(active).await.unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid", "poison"],
+        )
+        .await
+        .unwrap();
+
+    let sessions = storage
+        .list_expired_sessions(fixed_time() + chrono::Duration::minutes(2))
+        .await
+        .expect("a poison row must not abort expiry listing");
+    let mut stream_ids: Vec<_> = sessions.iter().map(|s| s.stream_id.as_str()).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy-after", "healthy-before"]);
+}
+
+#[tokio::test]
+async fn list_all_sessions_skips_poison_rows_and_keeps_healthy_sessions() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for stream_id in ["healthy-before", "poison", "healthy-after"] {
+        storage
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .unwrap();
+    }
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid", "poison"],
+        )
+        .await
+        .unwrap();
+
+    let sessions = storage
+        .list_all_sessions()
+        .await
+        .expect("a poison row must not abort the complete session listing");
+    let mut stream_ids: Vec<_> = sessions.iter().map(|s| s.stream_id.as_str()).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy-after", "healthy-before"]);
+}
+
+#[tokio::test]
+async fn list_all_session_ids_keeps_poison_metadata_for_queue_safety_checks() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    for stream_id in ["healthy", "poison"] {
+        storage
+            .upsert_session(fixture_session(stream_id))
+            .await
+            .unwrap();
+    }
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid", "poison"],
+        )
+        .await
+        .unwrap();
+
+    let ids = storage
+        .list_all_session_ids()
+        .await
+        .expect("queue safety checks must still inspect a session with corrupt metadata");
+    let mut stream_ids: Vec<_> = ids.iter().map(SmSessionId::as_str).collect();
+    stream_ids.sort_unstable();
+    assert_eq!(stream_ids, ["healthy", "poison"]);
+}
+
+#[tokio::test]
+async fn list_all_session_ids_fails_closed_on_an_unreadable_id() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("unreadable-id"))
+        .await
+        .unwrap();
+    // SQLite permits NULL in a TEXT PRIMARY KEY; it cannot become a typed ID.
+    storage
+        .execute("UPDATE sm_sessions SET stream_id = NULL", ())
+        .await
+        .unwrap();
+
+    storage
+        .list_all_session_ids()
+        .await
+        .expect_err("an unreadable ID must fail the scan rather than hide a durable queue");
+}
+
+#[tokio::test]
+async fn round_trip_unacked_preserves_typed_stanza() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .append_unacked(fixture_unacked("stream-1", 1))
+        .await
+        .unwrap();
+    let rows = storage
+        .list_unacked(&SmSessionId::new("stream-1"))
+        .await
+        .unwrap();
+    let body = match &*rows[0].stanza {
+        Stanza::Message(m) => m.bodies.values().next().cloned(),
+        _ => panic!("expected Message"),
+    };
+    assert_eq!(body, Some("m1".to_string()));
+}
+
+/// Issue #209 PR #405: the libSQL backend overrides
+/// `list_all_sessions_with_unacked` with a single LEFT JOIN
+/// query (vs the trait default's N+1). Verify the SQL grouping
+/// produces correct (PersistedSession, Vec<PersistedUnackedStanza>)
+/// tuples for sessions with 0, 1, and N unacked rows.
+#[tokio::test]
+async fn list_all_sessions_with_unacked_uses_single_join_query() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    // Insert mixed-cardinality fixture: alpha=0, beta=2, gamma=1.
+    storage
+        .upsert_session(fixture_session("alpha"))
+        .await
+        .unwrap();
+    storage
+        .upsert_session(fixture_session("beta"))
+        .await
+        .unwrap();
+    storage
+        .upsert_session(fixture_session("gamma"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 1))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 2))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("gamma", 1))
+        .await
+        .unwrap();
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    // The libSQL backend ORDERs BY stream_id ASC, so the
+    // assertions can rely on alphabetical order without an
+    // explicit sort.
+    assert_eq!(grouped.len(), 3);
+    assert_eq!(grouped[0].0.stream_id.as_str(), "alpha");
+    assert!(grouped[0].1.is_empty(), "session with no unacked");
+    assert_eq!(grouped[1].0.stream_id.as_str(), "beta");
+    assert_eq!(grouped[1].1.len(), 2);
+    assert_eq!(grouped[1].1[0].sequence, 1);
+    assert_eq!(grouped[1].1[1].sequence, 2);
+    assert_eq!(grouped[2].0.stream_id.as_str(), "gamma");
+    assert_eq!(grouped[2].1.len(), 1);
+
+    // Sanity: the round-tripped unacked stanzas decode back to
+    // typed Message values (same shape `list_unacked` returns).
+    let body = match &*grouped[1].1[0].stanza {
+        Stanza::Message(m) => m.bodies.values().next().cloned(),
+        _ => panic!("expected Message"),
+    };
+    assert_eq!(body, Some("m1".to_string()));
+
+    // The JOIN result MUST equal the N+1 trait default applied
+    // to the same data — pin the JOIN's correctness by spot-
+    // checking the stream-id ordering directly.
+    let mut sessions = grouped
+        .iter()
+        .map(|(s, _)| s.stream_id.as_str().to_string())
+        .collect::<Vec<_>>();
+    sessions.sort();
+    assert_eq!(sessions, vec!["alpha", "beta", "gamma"]);
+}
+
+/// Issue #209 PR #405: `store_session_atomic` wraps the upsert
+/// + N appends in a `Database::begin` transaction. Verify the
+/// success path produces the same observable state as the
+/// non-atomic upsert + appends, and that `get_session` /
+/// `list_unacked` see the rows after commit.
+#[tokio::test]
+async fn store_session_atomic_round_trips_via_transaction() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let session = fixture_session("atomic-stream");
+    let unacked = vec![
+        fixture_unacked("atomic-stream", 1),
+        fixture_unacked("atomic-stream", 2),
+        fixture_unacked("atomic-stream", 3),
+    ];
+    storage
+        .store_session_atomic(session, unacked)
+        .await
+        .unwrap();
+
+    // Session row written.
+    let read = storage
+        .get_session(&SmSessionId::new("atomic-stream"))
+        .await
+        .unwrap()
+        .expect("session present after atomic write");
+    assert_eq!(read.stream_id.as_str(), "atomic-stream");
+
+    // All unacked rows written.
+    let listed = storage
+        .list_unacked(&SmSessionId::new("atomic-stream"))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 3);
+    assert_eq!(listed[0].sequence, 1);
+    assert_eq!(listed[2].sequence, 3);
+}
+
+#[tokio::test]
+async fn store_session_atomic_with_principal_round_trips_principal() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("atomic-principal");
+    let principal = fixture_principal();
+
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            fixture_session(stream_id.as_str()),
+            vec![fixture_unacked(stream_id.as_str(), 1)],
+        )
+        .await
+        .expect("atomically persist principal with snapshot and queue");
+
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load stored principal"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn plain_store_session_atomic_preserves_an_existing_principal() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("atomic-principal-preserved");
+    let principal = fixture_principal();
+
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            fixture_session(stream_id.as_str()),
+            Vec::new(),
+        )
+        .await
+        .expect("persist principal snapshot");
+    // Detached-session snapshot refreshes (stanzas recorded while detached)
+    // go through the plain atomic store; they must never strip the durable
+    // resume authority written at the detach boundary.
+    storage
+        .store_session_atomic(fixture_session(stream_id.as_str()), Vec::new())
+        .await
+        .expect("persist plain snapshot");
+
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load preserved principal"),
+        Some(principal)
+    );
+}
+
+#[tokio::test]
+async fn null_occupancy_session_mints_and_rewrites_non_null() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = "null-occupancy";
+    storage
+        .upsert_session(fixture_session(stream_id))
+        .await
+        .unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = NULL WHERE stream_id = ?",
+            crate::db_params![stream_id.to_string()],
+        )
+        .await
+        .unwrap();
+
+    let loaded = storage
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .unwrap()
+        .expect("session present");
+    let minted = loaded.occupancy_session;
+    storage.upsert_session(loaded).await.unwrap();
+
+    let mut rows = storage
+        .query(
+            "SELECT occupancy_session FROM sm_sessions WHERE stream_id = ?",
+            crate::db_params![stream_id.to_string()],
+        )
+        .await
+        .unwrap();
+    let row = rows.next().await.unwrap().expect("rewritten row");
+    let stored: Option<String> = row.get(0).expect("occupancy_session");
+    assert_eq!(stored.as_deref(), Some(minted.to_string().as_str()));
+}
+
+#[tokio::test]
+async fn malformed_occupancy_session_is_a_corrupt_decode_error() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = "bad-occupancy";
+    storage
+        .upsert_session(fixture_session(stream_id))
+        .await
+        .unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid".to_string(), stream_id.to_string()],
+        )
+        .await
+        .unwrap();
+
+    let error = storage
+        .get_session(&SmSessionId::new(stream_id))
+        .await
+        .expect_err("malformed occupancy_session must fail decode");
+    assert!(matches!(
+        error,
+        SmPersistenceError::Corrupt {
+            stream_id: ref corrupt_stream_id,
+            ..
+        } if corrupt_stream_id.as_str() == stream_id
+    ));
+}
+
+#[tokio::test]
+async fn detached_snapshot_refresh_preserves_principal_through_registry() {
+    use waddle_xmpp::stream_management::{DetachedSession, InMemorySmSessionRegistry};
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(std::sync::Arc::new(storage)),
+    );
+    let principal = fixture_principal();
+    let session = DetachedSession {
+        promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
+        stream_id: "refresh-keeps-principal".to_string(),
+        user_id: "u1".to_string(),
+        jid: full("alice@example.com/phone"),
+        occupancy_session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        inbound_count: 0,
+        outbound_count: 0,
+        last_acked: 0,
+        replay_gap_through: None,
+        unacked_stanzas: Vec::new(),
+        max_resume_time: Some(300),
+        detached_at: std::time::Instant::now(),
+        carbons_enabled: false,
+        roster_interested: false,
+        blocklist_interested: false,
+        presence_available: true,
+        presence_show: None,
+        presence_status: None,
+        presence_priority: 0,
+        presence_payloads: Vec::new(),
+        pending_subscribes_flushed: false,
+    };
+    registry
+        .store_session_with_principal(session, principal.clone())
+        .await
+        .expect("store with principal");
+    let recorded = registry
+        .record_outbound_for_detached_stream(
+            "refresh-keeps-principal",
+            &Stanza::Message(xmpp_parsers::message::Message::new(Some(
+                "alice@example.com/phone".parse().expect("recipient JID"),
+            ))),
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("record stanza into detached session");
+    assert!(recorded, "stanza recorded for detached stream");
+    assert_eq!(
+        registry
+            .session_principal("refresh-keeps-principal")
+            .await
+            .expect("load principal after snapshot refresh"),
+        Some(principal),
+        "principal must survive a detached-fanout snapshot refresh"
+    );
+}
+
+#[tokio::test]
+async fn null_occupancy_session_decodes_to_minted_generation_and_rewrites_non_null() {
+    use waddle_xmpp::stream_management::{InMemorySmSessionRegistry, SmSessionRegistry as _};
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("legacy-null-occupancy");
+    let mut session = fixture_session(stream_id.as_str());
+    session.detached_at = Utc::now();
+    let original_occupancy_session = session.occupancy_session;
+    storage
+        .store_session_atomic(session, Vec::new())
+        .await
+        .expect("persist session");
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = NULL WHERE stream_id = ?",
+            crate::db_params![stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("null legacy occupancy_session");
+
+    let registry = std::sync::Arc::new(
+        InMemorySmSessionRegistry::new().with_persistence(std::sync::Arc::new(storage.clone())),
+    );
+    assert_eq!(
+        registry
+            .restore_from_persistence()
+            .await
+            .expect("hydrate restored session"),
+        1
+    );
+    let hydrated = registry
+        .peek_session(stream_id.as_str())
+        .await
+        .expect("peek hydrated session")
+        .expect("hydrated detached session");
+    let minted_occupancy_session = hydrated.occupancy_session;
+    assert_ne!(
+        minted_occupancy_session, original_occupancy_session,
+        "NULL must mint a fresh typed occupancy generation at decode time"
+    );
+
+    assert!(
+        registry
+            .record_outbound_for_detached_stream(
+                stream_id.as_str(),
+                &Stanza::Message(xmpp_parsers::message::Message::new(Some(
+                    "alice@example.com/web".parse().expect("recipient JID"),
+                ))),
+                fixed_time(),
+            )
+            .await
+            .expect("persist detached refresh"),
+        "detached refresh must mutate and write the row back"
+    );
+
+    let stored = stored_occupancy_session_text(&storage, &stream_id).await;
+    let expected = minted_occupancy_session.to_string();
+    assert_eq!(
+        stored,
+        Some(expected),
+        "the next persistence write must rewrite a concrete non-NULL occupancy_session"
+    );
+}
+
+#[tokio::test]
+async fn malformed_occupancy_session_text_is_a_corrupt_decode_error() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("poison-occupancy-session");
+    storage
+        .store_session_atomic(fixture_session(stream_id.as_str()), Vec::new())
+        .await
+        .expect("persist session");
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-uuid".to_string(), stream_id.as_str().to_string()],
+        )
+        .await
+        .expect("poison occupancy_session");
+
+    let error = storage
+        .get_session(&stream_id)
+        .await
+        .expect_err("malformed occupancy_session must fail decode");
+    match error {
+        SmPersistenceError::Corrupt {
+            stream_id: corrupt_stream,
+            detail,
+        } => {
+            assert_eq!(corrupt_stream, stream_id);
+            assert!(
+                detail.contains("occupancy_session"),
+                "decode error should name the corrupt occupancy_session field: {detail}"
+            );
+        }
+        other => panic!("expected Corrupt decode error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn delete_session_removes_principal() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let stream_id = SmSessionId::new("deleted-principal");
+    storage
+        .store_session_atomic_with_principal(
+            &fixture_principal(),
+            fixture_session(stream_id.as_str()),
+            Vec::new(),
+        )
+        .await
+        .expect("persist principal snapshot");
+
+    storage
+        .delete_session(&stream_id)
+        .await
+        .expect("delete session");
+
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load removed principal"),
+        None
+    );
+}
+
+/// #1206: the production store path is `store_session` → the OVERRIDDEN
+/// `store_session_atomic`, and cold-start restore reads back through the
+/// `list_all_sessions_with_unacked` JOIN. Both must carry the resource's
+/// presence payloads. This drives the end-to-end write+JOIN-read path and
+/// simultaneously guards the JOIN column indices: the unacked stanza must
+/// still decode after `presence_payloads` was inserted as a session column.
+#[tokio::test]
+async fn store_session_atomic_and_join_read_preserve_presence_payloads() {
+    use xmpp_parsers::minidom::Element;
+
+    let caps: Element = r#"<c xmlns='http://jabber.org/protocol/caps' hash='sha-1' node='https://example.com/client' ver='zHyEOgxTrkpSdGcQKH8EFPLsriY='/>"#
+        .parse()
+        .expect("valid XEP-0115 caps element");
+    let idle: Element = r#"<idle xmlns='urn:xmpp:idle:1' since='2026-07-08T10:00:00+00:00'/>"#
+        .parse()
+        .expect("valid XEP-0319 idle element");
+
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let mut session = fixture_session("atomic-payloads");
+    session.presence_payloads = vec![caps.clone(), idle.clone()];
+    storage
+        .store_session_atomic(session, vec![fixture_unacked("atomic-payloads", 1)])
+        .await
+        .unwrap();
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    let (restored, unacked) = grouped
+        .iter()
+        .find(|(s, _)| s.stream_id.as_str() == "atomic-payloads")
+        .expect("session present in cold-start restore set");
+
+    assert_eq!(
+        restored.presence_payloads,
+        vec![caps, idle],
+        "the atomic store + JOIN restore must preserve the resource's presence payloads"
+    );
+
+    // Column-index guard: the unacked stanza still decodes end-to-end after
+    // presence_payloads shifted the JOIN's unacked columns by one.
+    assert_eq!(unacked.len(), 1, "the unacked stanza must survive the JOIN");
+    assert_eq!(unacked[0].sequence, 1);
+    let body = match &*unacked[0].stanza {
+        Stanza::Message(m) => m.bodies.values().next().cloned(),
+        _ => panic!("expected Message"),
+    };
+    assert_eq!(body, Some("m1".to_string()));
+}
+
+/// #1206 hardening (review): a corrupt `presence_payloads` cell must NOT
+/// poison the whole session on restore. Presence caps are non-essential and
+/// self-heal on the client's next presence broadcast, but the session's
+/// XEP-0198 unacked message queue is precious — decode degrades to caps-less
+/// and keeps the session (and its queue) instead of dropping it.
+#[tokio::test]
+async fn corrupt_presence_payloads_cell_degrades_to_caps_less_not_session_drop() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .store_session_atomic(
+            fixture_session("corrupt-payloads"),
+            vec![fixture_unacked("corrupt-payloads", 1)],
+        )
+        .await
+        .unwrap();
+
+    // Simulate storage-layer corruption of ONLY the presence_payloads cell
+    // (unclosed element — parses to an error).
+    storage
+        .execute(
+            "UPDATE sm_sessions SET presence_payloads = ? WHERE stream_id = ?",
+            crate::db_params![
+                "<c xmlns='urn:x'".to_string(),
+                "corrupt-payloads".to_string(),
+            ],
+        )
+        .await
+        .unwrap();
+
+    // get_session: session survives, caps-less.
+    let loaded = storage
+        .get_session(&SmSessionId::new("corrupt-payloads"))
+        .await
+        .unwrap()
+        .expect("session must survive a corrupt presence_payloads cell");
+    assert!(
+        loaded.presence_payloads.is_empty(),
+        "a corrupt payloads cell degrades to caps-less"
+    );
+
+    // Cold-start JOIN restore: the session AND its unacked queue survive
+    // (the corrupt cell must not turn it into a dropped poison pill).
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    let (session, unacked) = grouped
+        .iter()
+        .find(|(s, _)| s.stream_id.as_str() == "corrupt-payloads")
+        .expect("session must not be dropped as a poison pill");
+    assert!(session.presence_payloads.is_empty());
+    assert_eq!(
+        unacked.len(),
+        1,
+        "the unacked message queue must be preserved despite the corrupt payloads cell"
+    );
+}
+
+/// Issue #209 PR #405 (Greptile/Copilot P2 review):
+/// `store_session_atomic` MUST roll back the entire transaction
+/// on any mid-batch failure — including the session-row update.
+/// Force a fault by passing two unacked stanzas with the same
+/// sequence; the second INSERT trips the `(stream_id, sequence)`
+/// PRIMARY KEY constraint inside the transaction.
+///
+/// After the failed call, both `get_session` and `list_unacked`
+/// MUST observe the prior state (here: nothing), proving the
+/// session row update did NOT commit.
+#[tokio::test]
+async fn store_session_atomic_rolls_back_on_unacked_constraint_violation() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    let session = fixture_session("rollback-stream");
+    // Two stanzas with the SAME sequence — the second INSERT
+    // hits the (stream_id, sequence) PRIMARY KEY constraint.
+    // Note that the new DELETE-before-INSERT (Greptile P1 fix)
+    // clears any pre-existing rows, so the conflict is between
+    // the two stanzas in THIS batch, not against pre-existing
+    // state.
+    let unacked = vec![
+        fixture_unacked("rollback-stream", 1),
+        fixture_unacked("rollback-stream", 1), // duplicate sequence
+    ];
+    let result = storage.store_session_atomic(session, unacked).await;
+    assert!(
+        result.is_err(),
+        "duplicate (stream_id, sequence) MUST fail the transaction"
+    );
+
+    // Critical assertion: the session row MUST NOT be present.
+    // Without `tx.commit()`, dropping the Transaction rolls back
+    // every statement including the session upsert.
+    let session_after = storage
+        .get_session(&SmSessionId::new("rollback-stream"))
+        .await
+        .unwrap();
+    assert!(
+        session_after.is_none(),
+        "transaction rollback MUST hide the session row update"
+    );
+
+    // No unacked rows leaked either.
+    let unacked_after = storage
+        .list_unacked(&SmSessionId::new("rollback-stream"))
+        .await
+        .unwrap();
+    assert!(
+        unacked_after.is_empty(),
+        "transaction rollback MUST hide partial unacked inserts"
+    );
+}
+
+/// Issue #209 PR #405 (Greptile P1 review): `store_session_atomic`
+/// must be idempotent against pre-existing unacked rows for the
+/// same stream_id (e.g., a previous `persist_delete_session`
+/// failure left rows behind). The atomic store DELETEs existing
+/// rows inside the transaction before the INSERT loop, so the
+/// (stream_id, sequence) PRIMARY KEY constraint can't roll back
+/// the session row update.
+#[tokio::test]
+async fn store_session_atomic_clears_stale_unacked_before_inserting() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    // Pre-seed an unacked row at (stream_id, sequence=1) — this
+    // simulates a previous persist_delete_session that failed in
+    // the eviction path.
+    storage
+        .append_unacked(fixture_unacked("retry-stream", 1))
+        .await
+        .unwrap();
+    // Now atomic-store with NEW unacked rows that include the
+    // same sequence (1). Without the DELETE-before-INSERT, the
+    // INSERT for sequence=1 would fail and roll back the session.
+    let session = fixture_session("retry-stream");
+    let unacked = vec![
+        fixture_unacked("retry-stream", 1),
+        fixture_unacked("retry-stream", 2),
+    ];
+    storage
+        .store_session_atomic(session, unacked)
+        .await
+        .expect("atomic store survives pre-existing unacked rows");
+
+    // Session row written.
+    assert!(storage
+        .get_session(&SmSessionId::new("retry-stream"))
+        .await
+        .unwrap()
+        .is_some());
+    // Exactly the new unacked rows are present (the stale row
+    // was DELETEd inside the transaction).
+    let listed = storage
+        .list_unacked(&SmSessionId::new("retry-stream"))
+        .await
+        .unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(listed[0].sequence, 1);
+    assert_eq!(listed[1].sequence, 2);
+}
+
+/// Issue #209 PR #405 (Greptile/Copilot/Qodo P1 review): a
+/// single poison-pill `sm_unacked` row MUST NOT brick cold
+/// startup. `list_all_sessions_with_unacked` should skip the
+/// poisoned session and return the rest.
+#[tokio::test]
+async fn list_all_sessions_with_unacked_skips_poison_pill_unacked_rows() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    // Two healthy sessions.
+    storage
+        .upsert_session(fixture_session("alpha"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("alpha", 1))
+        .await
+        .unwrap();
+    storage
+        .upsert_session(fixture_session("gamma"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("gamma", 1))
+        .await
+        .unwrap();
+    // One poison-pill session: insert a sm_unacked row whose
+    // stanza_xml is malformed XML so decode fails. We bypass
+    // `append_unacked` (which serializes a typed Stanza) and
+    // write the raw poison directly via the underlying db.
+    storage
+        .upsert_session(fixture_session("beta"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 1))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 3))
+        .await
+        .unwrap();
+    storage
+        .execute(
+            "INSERT INTO sm_unacked (stream_id, sequence, stanza_xml, original_receipt_at_ms) \
+             VALUES (?, ?, ?, ?)",
+            crate::db_params![
+                "beta".to_string(),
+                2i64,
+                "not valid xml <<<".to_string(),
+                0i64
+            ],
+        )
+        .await
+        .expect("insert poison row");
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    // Returning any part of beta would leave an unmarked replay hole. Its
+    // healthy prefix and suffix must not be published or leak to its neighbors.
+    let stream_ids: Vec<_> = grouped
+        .iter()
+        .map(|(session, _)| session.stream_id.as_str())
+        .collect();
+    assert_eq!(stream_ids, vec!["alpha", "gamma"]);
+    for (session, unacked) in grouped {
+        assert_eq!(unacked.len(), 1);
+        assert_eq!(unacked[0].sequence, 1);
+        assert_eq!(unacked[0].stream_id, session.stream_id);
+    }
+}
+
+/// Regression for #1157: a session row that fails to decode while
+/// its unacked rows decode fine MUST have those rows dropped with
+/// the group — not appended to the preceding valid session's queue,
+/// which would replay one user's stanzas on another user's
+/// `<resumed/>` (XEP-0198 §5 retransmission is per-stream).
+#[tokio::test]
+async fn poison_session_rows_do_not_leak_into_preceding_sessions_queue() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    // Valid session "alpha" with one unacked stanza; sorts before
+    // "beta" under the query's ORDER BY stream_id ASC.
+    storage
+        .upsert_session(fixture_session("alpha"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("alpha", 1))
+        .await
+        .unwrap();
+    // Session "beta" with two healthy unacked stanzas, then corrupt
+    // beta's session row so decode_session fails while the unacked
+    // rows still decode.
+    storage
+        .upsert_session(fixture_session("beta"))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 1))
+        .await
+        .unwrap();
+    storage
+        .append_unacked(fixture_unacked("beta", 2))
+        .await
+        .unwrap();
+    storage
+        .execute(
+            "UPDATE sm_sessions SET presence_show = 'bogus' WHERE stream_id = ?",
+            crate::db_params!["beta".to_string()],
+        )
+        .await
+        .expect("corrupt beta session row");
+
+    let grouped = storage.list_all_sessions_with_unacked().await.unwrap();
+    // The poison group is fully dropped...
+    assert_eq!(grouped.len(), 1);
+    let (session, unacked) = &grouped[0];
+    assert_eq!(session.stream_id.as_str(), "alpha");
+    // ...and alpha's queue holds exactly its own stanza — beta's
+    // rows must not have been appended to it.
+    assert_eq!(unacked.len(), 1);
+    assert_eq!(unacked[0].sequence, 1);
+    assert_eq!(unacked[0].stream_id.as_str(), "alpha");
+}
+
+/// Regression for #456: existing Postgres SM tables created before
+/// the driver-aware BIGINT selector must be widened online. The test
+/// exercises both session timestamp fields and unacked receipt
+/// timestamps with values that do not fit in Postgres int4.
+#[tokio::test]
+async fn postgres_handles_i32_overflow_session_and_unacked_timestamps_ms() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed regression for sm persistence BIGINT)"
+        );
+        return;
+    };
+
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    let stream_id = format!("postgres-bigint-{}", uuid::Uuid::new_v4());
+    let receipt_ms: i64 = 1_778_000_000_000;
+    assert!(
+        receipt_ms > i64::from(i32::MAX),
+        "test value must exceed Postgres int4 range"
+    );
+    let receipt_at =
+        DateTime::<Utc>::from_timestamp_millis(receipt_ms).expect("valid receipt timestamp");
+
+    let mut session = fixture_session(&stream_id);
+    session.detached_at = receipt_at;
+    storage
+        .upsert_session(session.clone())
+        .await
+        .expect("BIGINT sm_sessions timestamps accept values past i32::MAX");
+    let loaded = storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("load postgres sm session")
+        .expect("postgres sm session row");
+    assert_eq!(loaded.detached_at, receipt_at);
+
+    let mut unacked = fixture_unacked(&stream_id, 1);
+    unacked.original_receipt_at = receipt_at;
+    storage
+        .append_unacked(unacked)
+        .await
+        .expect("BIGINT sm_unacked original_receipt_at_ms accepts values past i32::MAX");
+
+    let listed = storage
+        .list_unacked(&SmSessionId::new(&stream_id))
+        .await
+        .expect("list postgres unacked stanzas");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].original_receipt_at, receipt_at);
+
+    storage
+        .delete_session(&SmSessionId::new(&stream_id))
+        .await
+        .expect("cleanup postgres sm rows");
+}
+
+#[tokio::test]
+async fn postgres_store_session_atomic_with_principal_round_trips() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed SM principal persistence)"
+        );
+        return;
+    };
+
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    let stream_id = SmSessionId::new(format!("postgres-principal-{}", uuid::Uuid::new_v4()));
+    let principal = fixture_principal();
+    storage
+        .store_session_atomic_with_principal(
+            &principal,
+            fixture_session(stream_id.as_str()),
+            Vec::new(),
+        )
+        .await
+        .expect("persist postgres principal snapshot");
+
+    let loaded = storage
+        .get_session(&stream_id)
+        .await
+        .expect("load postgres session")
+        .expect("postgres session row");
+    assert_eq!(loaded.occupancy_session, fixed_occupancy_session());
+    assert_eq!(
+        storage
+            .get_session_principal(&stream_id)
+            .await
+            .expect("load postgres principal"),
+        Some(principal)
+    );
+    storage
+        .delete_session(&stream_id)
+        .await
+        .expect("clean up postgres principal snapshot");
+}
+
+#[tokio::test]
+async fn postgres_round_trip_session_preserves_occupancy_generation() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed occupancy_session persistence)"
+        );
+        return;
+    };
+
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    let stream_id = format!("postgres-occupancy-{}", uuid::Uuid::new_v4());
+    let session = fixture_session(&stream_id);
+    let expected_occupancy_session = session.occupancy_session;
+    storage
+        .upsert_session(session)
+        .await
+        .expect("persist session");
+
+    let loaded = storage
+        .get_session(&SmSessionId::new(&stream_id))
+        .await
+        .expect("load postgres session")
+        .expect("postgres session row");
+    assert_eq!(loaded.occupancy_session, expected_occupancy_session);
+
+    storage
+        .delete_session(&SmSessionId::new(&stream_id))
+        .await
+        .expect("cleanup postgres occupancy session row");
+}
+
+#[tokio::test]
+async fn delete_unacked_removes_only_named_sequences_for_stream() {
+    // Issue #1145: the tombstone scrub needs a targeted durable
+    // delete keyed on the (stream_id, sequence) PK so retracted
+    // stanzas cannot be rehydrated after a restart. Rows for other
+    // sequences and other streams must be untouched.
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    storage
+        .upsert_session(fixture_session("stream-a"))
+        .await
+        .unwrap();
+    storage
+        .upsert_session(fixture_session("stream-b"))
+        .await
+        .unwrap();
+    for seq in [1u32, 2, 3] {
+        storage
+            .append_unacked(fixture_unacked("stream-a", seq))
+            .await
+            .unwrap();
+    }
+    storage
+        .append_unacked(fixture_unacked("stream-b", 2))
+        .await
+        .unwrap();
+
+    let removed = storage
+        .delete_unacked(&SmSessionId::new("stream-a"), &[1, 3])
+        .await
+        .unwrap();
+    assert_eq!(removed, 2);
+
+    let remaining_a = storage
+        .list_unacked(&SmSessionId::new("stream-a"))
+        .await
+        .unwrap();
+    let seqs: Vec<u32> = remaining_a.iter().map(|r| r.sequence).collect();
+    assert_eq!(seqs, vec![2]);
+    let remaining_b = storage
+        .list_unacked(&SmSessionId::new("stream-b"))
+        .await
+        .unwrap();
+    assert_eq!(remaining_b.len(), 1, "other streams' rows are untouched");
+
+    // Deleting sequences that no longer exist is a no-op, not an error.
+    let removed = storage
+        .delete_unacked(&SmSessionId::new("stream-a"), &[1, 3])
+        .await
+        .unwrap();
+    assert_eq!(removed, 0);
+}
+
+#[tokio::test]
+async fn sqlite_schema_drops_shadow_ordinal_and_preserves_session() {
+    let storage = DatabaseSmPersistence::open(None)
+        .await
+        .expect("open SQLite SM store");
+    let session = fixture_session("shadow-column-removal");
+    storage
+        .upsert_session(session.clone())
+        .await
+        .expect("store session");
+    storage
+        .execute(
+            "ALTER TABLE sm_sessions ADD COLUMN shadow_ordinal TEXT NOT NULL DEFAULT '0'",
+            (),
+        )
+        .await
+        .expect("install former shadow column");
+
+    schema::initialize(&storage)
+        .await
+        .expect("remove shadow column");
+    schema::initialize(&storage)
+        .await
+        .expect("repeat schema initialization");
+
+    let mut rows = storage
+        .query("PRAGMA table_info(sm_sessions)", ())
+        .await
+        .expect("inspect schema");
+    while let Some(row) = rows.next().await.expect("schema row") {
+        let column: String = row.get(1).expect("column name");
+        assert_ne!(column, "shadow_ordinal");
+    }
+    drop(rows);
+    let restored = storage
+        .get_session(&session.stream_id)
+        .await
+        .expect("load session")
+        .expect("session retained");
+    assert_eq!(restored.inbound_count, session.inbound_count);
+    assert_eq!(restored.outbound_count, session.outbound_count);
+    assert_eq!(restored.occupancy_session, session.occupancy_session);
+}
+
+#[tokio::test]
+async fn postgres_schema_has_no_shadow_ordinal() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (Postgres shadow column removal)");
+        return;
+    };
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open Postgres SM store");
+    schema::initialize(&storage)
+        .await
+        .expect("repeat schema initialization");
+    let mut rows = storage.query("SELECT COUNT(*) FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'sm_sessions' AND column_name = 'shadow_ordinal'", ()).await.expect("inspect schema");
+    let count: i64 = rows
+        .next()
+        .await
+        .expect("schema query")
+        .expect("count row")
+        .get(0)
+        .expect("column count");
+    assert_eq!(count, 0);
+}
+
+/// #1803: the resource-presence probe asks about ONE full JID, per
+/// roster-absent occupant and on every cluster peer, inside a bounded fan-out
+/// budget. The backend must answer with an exact predicate — a same-bare-JID
+/// sibling resource and another user's session are both non-answers — and the
+/// registry probe on top of it must read the result as Present/Absent.
+async fn full_jid_scoped_listing(storage: DatabaseSmPersistence, tag: &str) {
+    let target = full(&format!("scoped{tag}@example.com/web"));
+    let sibling = full(&format!("scoped{tag}@example.com/phone"));
+    let stranger = full(&format!("other{tag}@example.com/web"));
+    let unknown_resource = full(&format!("scoped{tag}@example.com/tablet"));
+    let rows = [
+        (format!("scoped-target-{tag}"), &target),
+        (format!("scoped-sibling-{tag}"), &sibling),
+        (format!("scoped-stranger-{tag}"), &stranger),
+    ];
+    for (stream_id, jid) in &rows {
+        let mut session = fixture_session(stream_id);
+        session.user_id = jid.to_bare().to_string();
+        session.jid = (*jid).clone();
+        // The probe's resumability window is evaluated against wall-clock now.
+        session.detached_at = Utc::now();
+        storage
+            .upsert_session(session)
+            .await
+            .expect("persist session");
+    }
+
+    let listed = storage
+        .list_sessions_for_full_jid(&target)
+        .await
+        .expect("scoped listing");
+    assert_eq!(
+        listed
+            .iter()
+            .map(|row| row.stream_id.as_str().to_string())
+            .collect::<Vec<_>>(),
+        vec![format!("scoped-target-{tag}")],
+        "only the exact full JID's row is returned"
+    );
+    assert_eq!(listed[0].jid, target);
+    assert!(
+        storage
+            .list_sessions_for_full_jid(&unknown_resource)
+            .await
+            .expect("scoped listing for an unknown resource")
+            .is_empty(),
+        "a sibling resource's row is not this resource's session"
+    );
+
+    let registry = waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
+        .with_persistence(Arc::new(storage.clone()));
+    assert_eq!(
+        registry.probe_resumable_session_for_full_jid(&target).await,
+        waddle_xmpp::stream_management::ResumableSessionProbe::Present
+    );
+    assert_eq!(
+        registry
+            .probe_resumable_session_for_full_jid(&unknown_resource)
+            .await,
+        waddle_xmpp::stream_management::ResumableSessionProbe::Absent
+    );
+
+    for (stream_id, _) in &rows {
+        storage
+            .delete_session(&SmSessionId::new(stream_id))
+            .await
+            .expect("clean up scoped listing rows");
+    }
+}
+
+#[tokio::test]
+async fn sqlite_lists_sessions_for_one_full_jid() {
+    let storage = DatabaseSmPersistence::open(None)
+        .await
+        .expect("open in-memory sm persistence");
+    full_jid_scoped_listing(storage, "sqlite").await;
+}
+
+#[tokio::test]
+async fn postgres_lists_sessions_for_one_full_jid() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!(
+            "skipping: WADDLE_TEST_POSTGRES_URL not set \
+             (postgres-backed full-JID scoped session listing)"
+        );
+        return;
+    };
+    let storage = DatabaseSmPersistence::open(Some(&database_url))
+        .await
+        .expect("open postgres sm persistence");
+    full_jid_scoped_listing(storage, &format!("pg{}", uuid::Uuid::new_v4().simple())).await;
+}
+
+/// The scoped read backs an eviction guard, so an undecodable row that MATCHES
+/// the JID must read as "cannot tell", never as absence, even though the
+/// best-effort unscoped listing skips undecodable rows.
+#[tokio::test]
+async fn sqlite_scoped_listing_fails_closed_on_an_undecodable_matching_row() {
+    let storage = DatabaseSmPersistence::open(None)
+        .await
+        .expect("open in-memory sm persistence");
+    let jid = full("poison@example.com/web");
+    let mut session = fixture_session("scoped-poison");
+    session.jid = jid.clone();
+    storage
+        .upsert_session(session)
+        .await
+        .expect("persist session");
+    storage
+        .execute(
+            "UPDATE sm_sessions SET occupancy_session = ? WHERE stream_id = ?",
+            crate::db_params!["not-a-generation".to_string(), "scoped-poison".to_string()],
+        )
+        .await
+        .expect("corrupt the row");
+
+    storage
+        .list_sessions_for_full_jid(&jid)
+        .await
+        .expect_err("a matching row that cannot be decoded is not proof of absence");
+}
+
+mod ingress_receipt_tests;
+
+mod ingress_append_tests;
+
+async fn promotion_append_outcomes(storage: &dyn SmPersistenceStorage, stream: &str) {
+    let mut inventory = fixture_session(stream);
+    inventory.max_resume_time = Some(0);
+    inventory.max_resume_duration = Duration::ZERO;
+    storage.upsert_session(inventory).await.expect("inventory");
+    let stanza = fixture_unacked(stream, 13);
+    assert_eq!(
+        storage
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("append"),
+        PromotionAppendOutcome::Appended
+    );
+    assert_eq!(
+        storage
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("retry"),
+        PromotionAppendOutcome::AlreadyRecorded
+    );
+    let mut conflict = stanza.clone();
+    conflict.original_receipt_at += chrono::Duration::milliseconds(1);
+    assert!(matches!(
+        storage.append_promotion_stanza(conflict).await,
+        Err(SmPersistenceError::PromotionSequenceConflict { sequence: 13, .. })
+    ));
+    let mut wrong_payload = fixture_unacked(stream, 99);
+    wrong_payload.sequence = 13;
+    assert!(matches!(
+        storage.append_promotion_stanza(wrong_payload).await,
+        Err(SmPersistenceError::PromotionSequenceConflict { sequence: 13, .. })
+    ));
+    storage
+        .delete_unacked(&stanza.stream_id, &[13])
+        .await
+        .expect("retire payload");
+    assert_eq!(
+        storage
+            .append_promotion_stanza(stanza.clone())
+            .await
+            .expect("retired retry"),
+        PromotionAppendOutcome::Retired
+    );
+    // Model a malformed queue with a row ahead of the source watermark. An
+    // INSERT DO NOTHING must not turn this inconsistent allocation into success.
+    let ahead = fixture_unacked(stream, 14);
+    storage
+        .append_unacked(ahead.clone())
+        .await
+        .expect("seed inconsistent row");
+    assert!(matches!(
+        storage.append_promotion_stanza(ahead).await,
+        Err(SmPersistenceError::PromotionSequenceConflict { sequence: 14, .. })
+    ));
+    assert_eq!(
+        storage
+            .get_session(&stanza.stream_id)
+            .await
+            .expect("header")
+            .expect("source")
+            .outbound_count,
+        13
+    );
+    let rows = storage
+        .list_unacked(&stanza.stream_id)
+        .await
+        .expect("queue unchanged");
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].sequence, 14);
+    storage
+        .delete_session(&stanza.stream_id)
+        .await
+        .expect("cleanup");
+}
+
+#[tokio::test]
+async fn sqlite_promotion_append_distinguishes_retries_retirement_and_conflicts() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("sqlite");
+    promotion_append_outcomes(&storage, "sqlite-promotion-outcomes").await;
+}
+
+#[tokio::test]
+async fn memory_promotion_append_distinguishes_retries_retirement_and_conflicts() {
+    let storage = waddle_xmpp::stream_management::persistence::InMemorySmPersistence::new();
+    promotion_append_outcomes(&storage, "memory-promotion-outcomes").await;
+}
+
+#[tokio::test]
+async fn postgres_promotion_append_distinguishes_retries_retirement_and_conflicts() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (promotion append outcomes)");
+        return;
+    };
+    let storage = DatabaseSmPersistence::open(Some(&url))
+        .await
+        .expect("postgres");
+    promotion_append_outcomes(
+        &storage,
+        &format!("pg-promotion-outcomes-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+fn expiry_ingress_append(entry: &PersistedUnackedStanza) -> PersistedIngressAppend {
+    PersistedIngressAppend {
+        key: waddle_xmpp::stream_management::SmIngressAppendKey {
+            message_key: waddle_xmpp::ingress::MessageKey::new(),
+            kind: waddle_xmpp::stream_management::SmIngressReceiptKind::from_storage(3),
+            semantic_identity_hash: [7; 32],
+            resource: full("alice@example.com/web"),
+        },
+        accepting_stream: entry.stream_id.clone(),
+        sequence: entry.sequence,
+        appended_at: entry.original_receipt_at,
+        payload: *entry.stanza.clone(),
+        original_receipt_at: entry.original_receipt_at,
+        disposition: IngressCustodyDisposition::Pending,
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_atomically_trims_valid_wrapping_acknowledgements() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("database");
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, h, retained) in [
+        ("ordinary-expiry", 10_u32, 12_u32, 11_u32, vec![12]),
+        ("wrapping-expiry", u32::MAX - 1, 1, 0, vec![1]),
+        ("unchanged-ack", 10, 12, 10, vec![11, 12]),
+        ("fully-acknowledged", 10, 12, 12, vec![]),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let queue = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| fixture_unacked(name, floor.wrapping_add(distance)))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        for _ in 0..2 {
+            storage
+                .mark_session_nonresumable(&stream, h, &fence, None)
+                .await
+                .expect("retire existing source idempotently");
+            let source = storage
+                .get_session(&stream)
+                .await
+                .expect("read source")
+                .expect("retained source");
+            assert_eq!(source.last_acked, h);
+            assert_eq!(source.outbound_count, outbound);
+            assert_eq!(source.max_resume_time, Some(0));
+            assert_eq!(source.max_resume_duration, Duration::ZERO);
+            for append in &appends {
+                let allocation = storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read ingress allocation")
+                    .expect("retained allocation proof");
+                let expected = if retained.contains(&append.sequence) {
+                    IngressCustodyDisposition::Pending
+                } else {
+                    IngressCustodyDisposition::Acknowledged
+                };
+                assert_eq!(allocation.disposition, expected);
+            }
+            assert_eq!(
+                storage
+                    .list_unacked(&stream)
+                    .await
+                    .expect("retained suffix")
+                    .iter()
+                    .map(|entry| entry.sequence)
+                    .collect::<Vec<_>>(),
+                retained
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn nonresumable_transition_rejects_invalid_ack_and_missing_source_without_writes() {
+    let storage = DatabaseSmPersistence::open(None).await.expect("database");
+    let fence = waddle_xmpp::stream_management::persistence::SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("test-node", "test-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    for (name, floor, outbound, invalid) in [
+        ("ack-ahead", 10_u32, 12_u32, 13_u32),
+        ("ack-behind", 10, 12, 9),
+        ("wrapping-ahead", u32::MAX - 1, 1, 2),
+        ("wrapping-behind", u32::MAX - 1, 1, u32::MAX - 2),
+    ] {
+        let mut session = fixture_session(name);
+        session.last_acked = floor;
+        session.outbound_count = outbound;
+        let stream = session.stream_id.clone();
+        let resume_time = session.max_resume_time;
+        let resume_duration = session.max_resume_duration;
+        let sequences = (1..=outbound.wrapping_sub(floor))
+            .map(|distance| floor.wrapping_add(distance))
+            .collect::<Vec<_>>();
+        let queue = sequences
+            .iter()
+            .map(|sequence| fixture_unacked(name, *sequence))
+            .collect::<Vec<_>>();
+        let appends = queue.iter().map(expiry_ingress_append).collect::<Vec<_>>();
+        storage
+            .store_session_atomic_with_principal_and_ingress_appends(
+                &fixture_principal(),
+                session,
+                queue,
+                appends.clone(),
+            )
+            .await
+            .expect("seed source and ingress custody");
+        let before_sequences = storage
+            .list_unacked(&stream)
+            .await
+            .expect("canonical queue before rejected acknowledgement")
+            .iter()
+            .map(|entry| entry.sequence)
+            .collect::<Vec<_>>();
+        assert!(storage
+            .mark_session_nonresumable(&stream, invalid, &fence, None)
+            .await
+            .is_err());
+        let source = storage
+            .get_session(&stream)
+            .await
+            .expect("read source")
+            .expect("unchanged source");
+        assert_eq!(source.last_acked, floor);
+        assert_eq!(source.outbound_count, outbound);
+        assert_eq!(source.max_resume_time, resume_time);
+        assert_eq!(source.max_resume_duration, resume_duration);
+        for append in &appends {
+            assert_eq!(
+                storage
+                    .get_ingress_append(&append.key)
+                    .await
+                    .expect("read untouched custody")
+                    .expect("allocation remains")
+                    .disposition,
+                IngressCustodyDisposition::Pending
+            );
+        }
+        assert_eq!(
+            storage
+                .list_unacked(&stream)
+                .await
+                .expect("unchanged queue")
+                .iter()
+                .map(|entry| entry.sequence)
+                .collect::<Vec<_>>(),
+            before_sequences
+        );
+        storage
+            .delete_session(&stream)
+            .await
+            .expect("delete source");
+        assert!(storage
+            .mark_session_nonresumable(&stream, floor, &fence, None)
+            .await
+            .is_err());
+        assert!(storage
+            .get_session(&stream)
+            .await
+            .expect("missing source")
+            .is_none());
+        assert!(storage
+            .list_unacked(&stream)
+            .await
+            .expect("missing queue")
+            .is_empty());
+    }
+}
+
+async fn assert_ack_journal_custody(storage: &dyn SmPersistenceStorage, name: &str) {
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+    let fence = SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("ack-node", "ack-incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let mut session = fixture_session(name);
+    session.last_acked = u32::MAX - 1;
+    session.outbound_count = 1;
+    let stream = session.stream_id.clone();
+    storage
+        .store_session_atomic(
+            session,
+            vec![
+                fixture_unacked(name, u32::MAX),
+                fixture_unacked(name, 0),
+                fixture_unacked(name, 1),
+            ],
+        )
+        .await
+        .expect("seed wrapping source");
+    assert!(
+        storage
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&stream),
+        "canonical source without ACK proof is protected"
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .expect("commit ACK and journal");
+    let expected = SmAckWindow {
+        from_exclusive: u32::MAX - 1,
+        to_inclusive: 0,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+    let source = storage.get_session(&stream).await.unwrap().unwrap();
+    assert_eq!(source.last_acked, 0);
+    assert_eq!(source.max_resume_time, Some(60));
+    assert_eq!(source.max_resume_duration, Duration::from_secs(60));
+    assert_eq!(
+        storage
+            .list_unacked(&stream)
+            .await
+            .unwrap()
+            .iter()
+            .map(|row| row.sequence)
+            .collect::<Vec<_>>(),
+        vec![1]
+    );
+    storage
+        .acknowledge_claimed_session(&stream, 0, &fence, None)
+        .await
+        .expect("no-op retry");
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(
+        storage.delete_session(&stream).await.is_err(),
+        "pending settlement blocks source deletion"
+    );
+    storage
+        .confirm_acknowledgement(
+            &stream,
+            SmAckWindow {
+                from_exclusive: 0,
+                to_inclusive: 1,
+            },
+            &fence,
+            None,
+        )
+        .await
+        .expect("unrelated confirmation is idempotent");
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![expected]
+    );
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(storage.list_unacked(&stream).await.unwrap().len(), 1);
+    for _ in 0..2 {
+        storage
+            .confirm_acknowledgement(&stream, expected, &fence, None)
+            .await
+            .expect("retry exact confirmation");
+    }
+    assert!(storage
+        .pending_acknowledgements(&stream)
+        .await
+        .unwrap()
+        .is_empty());
+    assert!(
+        storage
+            .pending_claim_protected_streams()
+            .await
+            .unwrap()
+            .contains(&stream),
+        "settled canonical source remains protected"
+    );
+    storage
+        .delete_session(&stream)
+        .await
+        .expect("settled source may be deleted");
+    assert!(!storage
+        .pending_claim_protected_streams()
+        .await
+        .unwrap()
+        .contains(&stream));
+}
+
+#[tokio::test]
+async fn sqlite_claimed_ack_journal_preserves_custody_until_exact_confirmation() {
+    let storage = DatabaseSmPersistence::open(None).await.unwrap();
+    assert_ack_journal_custody(&storage, "sqlite-ack-journal").await;
+}
+
+#[tokio::test]
+async fn postgres_claimed_ack_journal_preserves_custody_until_exact_confirmation() {
+    let Ok(url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        return;
+    };
+    #[cfg(feature = "clustering")]
+    let _lock = crate::clustering::claims::clustering_control_plane_table_lock()
+        .lock()
+        .await;
+    let storage = DatabaseSmPersistence::open(Some(&url)).await.unwrap();
+    assert_ack_journal_custody(
+        &storage,
+        &format!("postgres-ack-journal-{}", uuid::Uuid::new_v4()),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn sqlite_ack_journal_survives_reopen_before_pending_settlement() {
+    use waddle_xmpp::stream_management::persistence::SmClaimFence;
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("ack-journal.sqlite");
+    let url = path.to_str().unwrap();
+    let fence = SmClaimFence::new(
+        waddle_xmpp::ownership::NodeIdentity::new("node", "incarnation"),
+        waddle_xmpp::ownership::ClaimEpoch(1),
+    );
+    let stream = SmSessionId::new("reopened-ack");
+    {
+        let storage = DatabaseSmPersistence::open(Some(url)).await.unwrap();
+        storage
+            .store_session_atomic(
+                fixture_session(stream.as_str()),
+                vec![
+                    fixture_unacked(stream.as_str(), 11),
+                    fixture_unacked(stream.as_str(), 12),
+                ],
+            )
+            .await
+            .unwrap();
+        storage
+            .acknowledge_claimed_session(&stream, 11, &fence, None)
+            .await
+            .unwrap();
+    }
+    let storage = DatabaseSmPersistence::open(Some(url)).await.unwrap();
+    let window = SmAckWindow {
+        from_exclusive: 10,
+        to_inclusive: 11,
+    };
+    assert_eq!(
+        storage.pending_acknowledgements(&stream).await.unwrap(),
+        vec![window]
+    );
+    assert!(storage.delete_session(&stream).await.is_err());
+    assert_eq!(
+        storage
+            .get_session(&stream)
+            .await
+            .unwrap()
+            .unwrap()
+            .last_acked,
+        11
+    );
+    assert_eq!(storage.list_unacked(&stream).await.unwrap()[0].sequence, 12);
+    storage
+        .confirm_acknowledgement(&stream, window, &fence, None)
+        .await
+        .unwrap();
+    storage.delete_session(&stream).await.unwrap();
+}
+
+mod incremental_tests;

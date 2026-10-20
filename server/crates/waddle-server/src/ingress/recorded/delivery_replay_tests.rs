@@ -1,5 +1,5 @@
 use super::*;
-use crate::ingress_substrate::MessageEnvelope;
+use crate::ingress::substrate::MessageEnvelope;
 use waddle_xmpp_core::xep0359::{add_stanza_id, extract_stanza_id_by, StanzaId};
 use xmpp_parsers::message::{Message, MessageType};
 

@@ -24,7 +24,7 @@ use minidom::Element;
 use p256::pkcs8::EncodePrivateKey;
 use waddle_server::db::{Database, IntoParams, Rows};
 use waddle_server::db_params;
-use waddle_server::push_service::{
+use waddle_server::push::service::{
     DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
 };
 use waddle_xmpp::inbox::storage::InboxStorage as _;
@@ -45,7 +45,7 @@ const PUSH_SERVICE_JID: &str = "push.example.com";
 const TOKEN_A: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TOKEN_B: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
 const TOKEN_C: &str = "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc";
-/// Mirrors `DEVICE_STATUS_*` in `waddle_server::push_service`.
+/// Mirrors `DEVICE_STATUS_*` in `waddle_server::push::service`.
 const DEVICE_STATUS_ACTIVE: &str = "active";
 const DEVICE_STATUS_DISABLED: &str = "disabled";
 /// Mirrors `apns_dispatch::ATTEMPT_STATUS_APNS_*`.
@@ -217,7 +217,7 @@ async fn store_with_apns(
     );
     // The user server's XEP-0357 registration table lives in the same
     // database; creating its store creates the table.
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+    waddle_server::push::registrations::DatabasePushRegistrationStore::new(store.database())
         .await
         .expect("registration store");
     store
@@ -372,7 +372,7 @@ async fn attempt_statuses(store: &DatabasePushServiceStore, node: &str) -> Vec<(
 
 async fn enabled_registrations(store: &DatabasePushServiceStore, owner: &BareJid) -> usize {
     use waddle_xmpp::push::PushSubscriptionStore as _;
-    waddle_server::push_registrations::DatabasePushRegistrationStore::new(store.database())
+    waddle_server::push::registrations::DatabasePushRegistrationStore::new(store.database())
         .await
         .expect("registration store")
         .get_for_user(owner.to_string().as_str())

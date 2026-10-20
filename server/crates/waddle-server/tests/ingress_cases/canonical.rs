@@ -270,7 +270,7 @@ async fn groupchat_alias_conflict_replies_to_authenticated_sender(fixture: Ingre
     assert_eq!(reply.to, Some(offered.sender.clone().into()));
     assert_eq!(reply.from, Some(room.into()));
     let mut tx = fixture.uow.begin().await.expect("read intents");
-    let intents = waddle_server::ingress_uow::EffectIntentRepository::load(
+    let intents = waddle_server::ingress::uow::EffectIntentRepository::load(
         &mut tx,
         decision.message_key.expect("rejection key"),
     )
