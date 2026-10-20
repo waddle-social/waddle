@@ -76,7 +76,7 @@ pub struct HistoryMessage {
     pub message: IncomingMessage,
 }
 
-/// The cursor belongs to the archive query, even when filtering a DM page
+/// The cursor belongs to the archive query, even when filtering a page
 /// for a thread leaves no visible messages.
 pub struct HistoryPage {
     pub messages: Vec<HistoryMessage>,
@@ -296,8 +296,10 @@ impl Session {
     }
 
     /// The newest page before `before` (or the newest page), oldest first.
-    /// Room threads have their own filtered MAM query. DM threads use the
-    /// personal archive; the UI filters rows while retaining its full cursor.
+    /// Thread views page the full room or personal archive. Reactions,
+    /// corrections and Jev judgments can omit XEP-0201 thread metadata, so
+    /// server-side thread filtering would lose updates to archived replies.
+    /// The UI selects content while retaining this unfiltered page cursor.
     pub async fn history(
         &self,
         conversation: &Conversation,
@@ -306,19 +308,14 @@ impl Session {
         let client = Arc::clone(&self.client);
         let peer = conversation.jid.clone();
         let kind = conversation.kind;
-        let thread = conversation.thread.clone();
         let page = runtime::spawn(async move {
-            match (kind, thread) {
-                (Kind::Room, Some(thread)) => client
-                    .fetch_room_thread_history(peer, thread.id, PAGE_SIZE, before)
-                    .await
-                    .map_err(|error| format!("Could not load thread history: {error}")),
-                (Kind::Room, None) => Ok(client.fetch_room_history(peer, PAGE_SIZE, before).await),
-                (Kind::Direct, _) => Ok(client.fetch_dm_history(peer, PAGE_SIZE, before).await),
+            match kind {
+                Kind::Room => client.fetch_room_history(peer, PAGE_SIZE, before).await,
+                Kind::Direct => client.fetch_dm_history(peer, PAGE_SIZE, before).await,
             }
         })
         .await
-        .map_err(|_| "History loading was interrupted.".to_string())??;
+        .map_err(|_| "History loading was interrupted.".to_string())?;
         let peer: BareJid = conversation
             .jid
             .parse()

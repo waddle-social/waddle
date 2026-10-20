@@ -265,6 +265,14 @@ template $WaddleWindow: Adw.ApplicationWindow {
                   tooltip-text: _("Back to conversation");
                   clicked => $on_thread_back() swapped;
                 }
+
+                [end]
+                Button load_earlier {
+                  visible: false;
+                  label: _("Load Earlier");
+                  tooltip-text: _("Load earlier conversation history");
+                  clicked => $on_load_earlier() swapped;
+                }
               }
 
               [top]

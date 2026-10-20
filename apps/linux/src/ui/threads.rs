@@ -82,7 +82,7 @@ impl WaddleWindow {
             .unwrap_or(&thread.id);
         conversation.name = title.unwrap_or(fallback).chars().take(60).collect();
         let key = conversation.key();
-        let created = {
+        {
             let mut conversations = self.imp().conversations.borrow_mut();
             if let Some(known) = conversations.iter_mut().find(|known| known.key() == key) {
                 if title.is_some() || known.name == thread.id {
@@ -97,26 +97,12 @@ impl WaddleWindow {
                     known.thread = Some(thread);
                 }
                 conversation = known.clone();
-                false
             } else {
                 let at = conversations
                     .iter()
                     .rposition(|known| known.jid == base.jid)
                     .map_or(conversations.len(), |at| at + 1);
                 conversations.insert(at, conversation.clone());
-                true
-            }
-        };
-        if created {
-            let updates = self
-                .imp()
-                .thread_updates
-                .borrow()
-                .get(&base.jid)
-                .cloned()
-                .unwrap_or_default();
-            for update in updates {
-                self.edit_conversation(&key, |timeline| timeline.apply_live(update));
             }
         }
         conversation
@@ -146,17 +132,17 @@ impl WaddleWindow {
             .cloned();
         let mut timeline = Timeline::new();
         if let Some(root) = root {
+            let updates = self
+                .imp()
+                .thread_updates
+                .borrow()
+                .get(&conversation.jid)
+                .map(|updates| updates.for_message(&root))
+                .unwrap_or_default();
             timeline.apply_live(root);
-        }
-        for update in self
-            .imp()
-            .thread_updates
-            .borrow()
-            .get(&conversation.jid)
-            .into_iter()
-            .flatten()
-        {
-            timeline.apply_live(update.clone());
+            for update in updates {
+                timeline.apply_live(update);
+            }
         }
         let text = match timeline.items().first() {
             Some(item) if item.retracted => "Original message deleted".to_string(),
@@ -198,14 +184,31 @@ impl WaddleWindow {
         self.open_conversation(&conversation.key());
     }
 
+    pub(super) fn replay_thread_updates(
+        &self,
+        conversation: &Conversation,
+        message: &IncomingMessage,
+    ) {
+        let updates = self
+            .imp()
+            .thread_updates
+            .borrow()
+            .get(&conversation.jid)
+            .map(|updates| updates.for_message(message))
+            .unwrap_or_default();
+        for update in updates {
+            self.edit_conversation(&conversation.key(), |timeline| timeline.apply_live(update));
+        }
+    }
+
     /// Apply a threadless fastening to all cached views of its destination.
     pub(super) fn broadcast_fastening(&self, jid: &str, message: IncomingMessage) {
-        let mut updates = self.imp().thread_updates.borrow_mut();
-        let retained = updates.entry(jid.to_string()).or_default();
-        if !retained.contains(&message) {
-            retained.push(message.clone());
-        }
-        drop(updates);
+        self.imp()
+            .thread_updates
+            .borrow_mut()
+            .entry(jid.to_string())
+            .or_default()
+            .insert(message.clone());
         let keys: Vec<String> = self
             .imp()
             .conversations
@@ -322,6 +325,42 @@ mod tests {
         window.edit_conversation(&thread.key(), |timeline| {
             timeline.apply_history_page(vec![child], Some("child".into()), true)
         });
+        window.on_arrival(crate::session::Arrival {
+            conversation: base.jid.clone(),
+            kind: Kind::Room,
+            thread: None,
+            message: IncomingMessage {
+                stanza_id: Some("legacy".into()),
+                reference_id: Some("legacy".into()),
+                sender: "Carol".into(),
+                body: Some("Legacy reply".into()),
+                timestamp_ms: 3,
+                reply_to: Some(waddle_client_session::ReplyTo {
+                    id: "root".into(),
+                    sender: Some("Alice".into()),
+                }),
+                ..IncomingMessage::default()
+            },
+            mentions_me: false,
+            delayed: true,
+        });
+        assert_eq!(
+            window.imp().rows.borrow().as_ref().unwrap().n_items(),
+            2,
+            "live legacy replies appear immediately in the selected thread"
+        );
+        assert_eq!(
+            window
+                .imp()
+                .timelines
+                .borrow()
+                .get(&base.key())
+                .unwrap()
+                .items()
+                .len(),
+            2,
+            "legacy replies retain their main-conversation copy"
+        );
         window.broadcast_fastening(
             &base.jid,
             IncomingMessage {
@@ -349,7 +388,7 @@ mod tests {
             badges.first_child().is_none(),
             "an old revision's badge must disappear"
         );
-        assert_eq!(window.imp().rows.borrow().as_ref().unwrap().n_items(), 1);
+        assert_eq!(window.imp().rows.borrow().as_ref().unwrap().n_items(), 2);
         window.broadcast_fastening(
             &base.jid,
             IncomingMessage {

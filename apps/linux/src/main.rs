@@ -11,6 +11,7 @@ mod composer;
 mod judgments;
 mod runtime;
 mod session;
+mod thread_updates;
 mod threads;
 mod ui;
 

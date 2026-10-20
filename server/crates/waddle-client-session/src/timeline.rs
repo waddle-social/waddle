@@ -295,6 +295,9 @@ pub struct Timeline {
     next_serial: u64,
     by_serial: HashMap<u64, usize>,
     by_stanza: HashMap<String, usize>,
+    /// Exact judgment identity to stable row serials, including ambiguous
+    /// identities so a later duplicate invalidates already shown scores.
+    by_score_target: HashMap<ScoreTarget, BTreeSet<u64>>,
     by_reference: HashMap<String, usize>,
     by_chosen: HashMap<(Author, String), usize>,
     /// The user's own rows by origin id and `@id`, for delivery outcomes.
@@ -554,6 +557,9 @@ impl Timeline {
             .clone_from(&previous.source_revision_id);
         item.scores_at = previous.scores_at;
         let mut touched = BTreeSet::from([at]);
+        if let Some(target) = self.items[at].score_target.clone() {
+            self.invalidate_ambiguous_judgments(&target, &mut touched);
+        }
         self.refresh_replies_to(at, &mut touched);
         self.sets(touched)
     }
@@ -811,9 +817,7 @@ impl Timeline {
                         scores: update.scores.clone(),
                     },
                 );
-                for at in 0..self.items.len() {
-                    self.settle_judgments(at, touched);
-                }
+                self.settle_judgment_target(&update.target, touched);
             }
             return true;
         }
@@ -889,18 +893,57 @@ impl Timeline {
     }
 
     fn settle_judgments(&mut self, at: usize, touched: &mut BTreeSet<usize>) {
-        let item = &self.items[at];
-        let (Some(target), Some(revision)) = (&item.score_target, &item.source_revision_id) else {
+        if let Some(target) = self.items[at].score_target.clone() {
+            self.settle_judgment_target(&target, touched);
+        }
+    }
+
+    /// Ambiguous identities cannot retain a batch applied before the
+    /// duplicate arrived. Stable serials remain valid when history prepends.
+    fn invalidate_ambiguous_judgments(
+        &mut self,
+        target: &ScoreTarget,
+        touched: &mut BTreeSet<usize>,
+    ) -> bool {
+        let Some(rows) = self
+            .by_score_target
+            .get(target)
+            .filter(|rows| rows.len() > 1)
+        else {
+            return false;
+        };
+        for serial in rows {
+            if let Some(&at) = self.by_serial.get(serial) {
+                let item = &mut self.items[at];
+                if item.scores.take().is_some() {
+                    touched.insert(at);
+                }
+                item.scores_at = None;
+            }
+        }
+        true
+    }
+
+    /// A judgment visits only the rows bearing its exact target identity;
+    /// the ordinary unique-target case performs no timeline scan.
+    fn settle_judgment_target(&mut self, target: &ScoreTarget, touched: &mut BTreeSet<usize>) {
+        if self.invalidate_ambiguous_judgments(target, touched) {
+            return;
+        }
+        let Some(at) = self
+            .by_score_target
+            .get(target)
+            .and_then(|rows| rows.first())
+            .and_then(|serial| self.by_serial.get(serial))
+            .copied()
+        else {
             return;
         };
-        if item.retracted
-            || self
-                .items
-                .iter()
-                .filter(|item| item.score_target.as_ref() == Some(target))
-                .count()
-                != 1
-        {
+        let item = &self.items[at];
+        let Some(revision) = &item.source_revision_id else {
+            return;
+        };
+        if item.retracted {
             return;
         }
         let Some(batch) = self.judgments.get(&(target.clone(), revision.clone())) else {
@@ -1081,6 +1124,12 @@ impl Timeline {
         let ids = &self.ids[at];
         let author = Author::of_item(item);
         self.by_serial.insert(self.serials[at], at);
+        if let Some(target) = &item.score_target {
+            self.by_score_target
+                .entry(target.clone())
+                .or_default()
+                .insert(self.serials[at]);
+        }
         if let Some(stanza) = &ids.stanza {
             self.by_stanza.entry(stanza.clone()).or_insert(at);
         }
@@ -1101,6 +1150,7 @@ impl Timeline {
     fn reindex(&mut self) {
         self.by_serial.clear();
         self.by_stanza.clear();
+        self.by_score_target.clear();
         self.by_reference.clear();
         self.by_chosen.clear();
         self.own_chosen.clear();
@@ -2170,6 +2220,69 @@ mod judgment_tests {
         timeline.apply_live(reflection);
         assert_eq!(probability(&timeline), Some(0.8));
         assert_eq!(timeline.items()[0].body, "Now an answer.");
+    }
+
+    #[test]
+    fn xep0422_judgment_index_tracks_target_when_history_prepends() {
+        let mut timeline = Timeline::new();
+        for at in 0..2_000 {
+            timeline.apply_live(IncomingMessage {
+                stanza_id: Some(format!("unrelated-{at}")),
+                sender: "bob".into(),
+                body: Some("Unrelated".into()),
+                ..IncomingMessage::default()
+            });
+        }
+        timeline.apply_live(original());
+        timeline.apply_live(batch("original", 0.9, 2));
+        timeline.apply_history_page(
+            vec![IncomingMessage {
+                stanza_id: Some("older".into()),
+                sender: "bob".into(),
+                body: Some("Older".into()),
+                ..IncomingMessage::default()
+            }],
+            Some("older".into()),
+            true,
+        );
+        let diffs = timeline.apply_live(batch("original", 0.8, 3));
+        assert_eq!(diffs.len(), 1);
+        assert!(matches!(&diffs[0], TimelineDiff::Set { index: 2_001, item }
+            if item.scores.as_ref().unwrap().scores[0].probability.value() == 0.8));
+        let target_rows = timeline.by_score_target.get(&target()).unwrap();
+        assert_eq!(target_rows.len(), 1);
+        assert_eq!(
+            timeline.by_serial.get(target_rows.first().unwrap()),
+            Some(&2_001)
+        );
+    }
+
+    #[test]
+    fn xep0422_ambiguous_target_clears_existing_scores_on_live_or_history_insert() {
+        for archived in [false, true] {
+            let mut timeline = Timeline::new();
+            timeline.apply_live(original());
+            timeline.apply_live(batch("original", 0.9, 2));
+            let previous = timeline.items()[0].clone();
+            // The adapter should never supply inconsistent identities, but
+            // the store still fails closed if two rows claim one target.
+            let mut duplicate = original();
+            duplicate.stanza_id = Some("distinct-row".into());
+            duplicate.origin_id = Some("distinct-origin".into());
+            duplicate.reference_id = Some("distinct-row".into());
+            let diffs = if archived {
+                timeline.apply_history_page(vec![duplicate], Some("distinct-row".into()), true)
+            } else {
+                timeline.apply_live(duplicate)
+            };
+            assert_eq!(timeline.items().len(), 2);
+            assert!(timeline.items().iter().all(|item| item.scores.is_none()));
+            assert!(diffs.iter().any(|diff| matches!(diff, TimelineDiff::Set { item, .. } if item.key == previous.key && item.scores.is_none())));
+            assert!(timeline.apply_live(batch("original", 0.99, 3)).is_empty());
+            timeline.apply_live(correction());
+            timeline.restore(&previous);
+            assert!(timeline.items().iter().all(|item| item.scores.is_none()));
+        }
     }
 
     #[test]

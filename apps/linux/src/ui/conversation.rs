@@ -64,6 +64,8 @@ const CONNECT_BUDGET_SECS: u32 = 20;
 /// How long to gather messages read in the open conversation before
 /// telling the server (XEP-0430 mark-read).
 const READ_DEBOUNCE_SECS: u32 = 2;
+/// Bound client-side thread filtering per user request.
+const HISTORY_SCAN_PAGES: u8 = 3;
 
 impl WaddleWindow {
     pub(super) fn setup_timeline(&self) {
@@ -114,7 +116,13 @@ impl WaddleWindow {
         imp.timeline_scroller
             .vadjustment()
             .connect_value_changed(move |adjustment| {
-                if adjustment.value() < 200.0 {
+                // Thread filtering may skip many pages. Its bounded
+                // batches resume only through the Load Earlier button.
+                if adjustment.value() < 200.0
+                    && window
+                        .current_conversation()
+                        .is_some_and(|conversation| conversation.thread.is_none())
+                {
                     window.load_older();
                 }
             });
@@ -278,7 +286,7 @@ impl WaddleWindow {
         }
     }
 
-    fn on_arrival(&self, arrival: Arrival) {
+    pub(super) fn on_arrival(&self, arrival: Arrival) {
         let imp = self.imp();
         let Arrival {
             conversation,
@@ -305,6 +313,30 @@ impl WaddleWindow {
             return;
         }
         self.remember_thread_root(&base, &message);
+        // Legacy XEP-0461 replies have no explicit thread. Infer only
+        // against an already known thread, preserving ordinary replies.
+        let legacy_thread = thread
+            .is_none()
+            .then(|| {
+                imp.conversations
+                    .borrow()
+                    .iter()
+                    .find(|known| {
+                        known.jid == base.jid
+                            && known.thread.is_some()
+                            && crate::threads::belongs_to_thread(
+                                &message,
+                                None,
+                                known.thread.as_ref(),
+                            )
+                    })
+                    .and_then(|known| known.thread.clone())
+            })
+            .flatten();
+        if legacy_thread.is_some() {
+            self.edit_conversation(&base.key(), |timeline| timeline.apply_live(message.clone()));
+        }
+        let thread = thread.or(legacy_thread);
         let destination = match thread {
             Some(thread) => self.ensure_thread(&base, thread, None),
             None => base,
@@ -341,6 +373,8 @@ impl WaddleWindow {
                 self.scroll_to_end();
             }
         }
+        self.replay_thread_updates(&destination, &message);
+        self.refresh_thread_context();
         // A message held while away is already in the inbox's unread
         // count, and too old to announce.
         let Some((sender, body)) = notice.filter(|_| added && !delayed) else {
@@ -487,16 +521,19 @@ impl WaddleWindow {
         self.read_current();
         self.render_conversations();
 
-        let needs_history = imp
-            .timelines
-            .borrow()
-            .get(&conversation.key())
-            .is_none_or(|timeline| timeline.older_cursor().is_none());
+        let needs_history =
+            imp.timelines
+                .borrow()
+                .get(&conversation.key())
+                .is_none_or(|timeline| {
+                    timeline.older_cursor().is_none() && !timeline.history_complete()
+                });
         self.rebuild_rows();
+        self.refresh_history_controls();
         self.refresh_thread_context();
         self.scroll_to_end();
         if needs_history {
-            self.load_history(conversation, None);
+            self.load_history(conversation, None, HISTORY_SCAN_PAGES);
         }
     }
 
@@ -581,27 +618,45 @@ impl WaddleWindow {
         app.send_notification(Some(&notification_id(jid)), &notification);
     }
 
-    fn load_older(&self) {
+    fn refresh_history_controls(&self) {
+        let imp = self.imp();
+        let Some(conversation) = self.current_conversation() else {
+            imp.load_earlier.set_visible(false);
+            return;
+        };
+        let key = conversation.key();
+        let complete = imp
+            .timelines
+            .borrow()
+            .get(&key)
+            .is_some_and(|timeline| timeline.history_complete());
+        let loading = imp.loading_history.borrow().contains(&key);
+        imp.load_earlier.set_visible(!complete);
+        imp.load_earlier.set_sensitive(!loading);
+        imp.load_earlier.set_label(if loading {
+            "Loading…"
+        } else {
+            "Load Earlier"
+        });
+    }
+
+    pub(super) fn load_older(&self) {
         let imp = self.imp();
         let Some(conversation) = self.current_conversation() else {
             return;
         };
         let cursor = {
             let timelines = imp.timelines.borrow();
-            let Some(timeline) = timelines.get(&conversation.key()) else {
-                return;
-            };
-            if timeline.history_complete() {
+            let timeline = timelines.get(&conversation.key());
+            if timeline.is_some_and(|timeline| timeline.history_complete()) {
                 return;
             }
-            timeline.older_cursor().map(str::to_string)
+            timeline.and_then(|timeline| timeline.older_cursor().map(str::to_string))
         };
-        if cursor.is_some() {
-            self.load_history(conversation, cursor);
-        }
+        self.load_history(conversation, cursor, HISTORY_SCAN_PAGES);
     }
 
-    fn load_history(&self, conversation: Conversation, before: Option<String>) {
+    fn load_history(&self, conversation: Conversation, before: Option<String>, remaining: u8) {
         let imp = self.imp();
         let key = conversation.key();
         if !imp.loading_history.borrow_mut().insert(key.clone()) {
@@ -609,8 +664,10 @@ impl WaddleWindow {
         }
         let Some(session) = imp.session.borrow().clone() else {
             imp.loading_history.borrow_mut().remove(&key);
+            self.refresh_history_controls();
             return;
         };
+        self.refresh_history_controls();
         let initial = before.is_none();
         let generation = imp.generation.get();
         let window = self.clone();
@@ -622,6 +679,7 @@ impl WaddleWindow {
                 return;
             }
             imp.loading_history.borrow_mut().remove(&key);
+            window.refresh_history_controls();
             let page = match result {
                 Ok(page) => page,
                 Err(message) => {
@@ -641,45 +699,57 @@ impl WaddleWindow {
                     selected.push(entry.message);
                     continue;
                 }
-                let destination = match entry.thread.as_ref() {
-                    Some(thread) => window.ensure_thread(&conversation, thread.clone(), None),
-                    None => {
-                        let mut base = conversation.clone();
-                        base.thread = None;
-                        base
-                    }
-                };
-                if destination.key() == key {
+                if let Some(thread) = entry.thread.as_ref() {
+                    window.ensure_thread(&conversation, thread.clone(), None);
+                }
+                if crate::threads::belongs_to_thread(
+                    &entry.message,
+                    entry.thread.as_ref(),
+                    conversation.thread.as_ref(),
+                ) {
                     selected.push(entry.message);
                 }
             }
             let had_content = selected.iter().any(|message| !is_fastening(message));
             let advanced = page.first_id.is_some() && page.first_id != requested_cursor;
+            let context_messages: Vec<_> = selected
+                .iter()
+                .filter(|message| !is_fastening(message))
+                .cloned()
+                .collect();
+            let next_cursor = page.first_id.clone();
             let diffs = imp
                 .timelines
                 .borrow_mut()
                 .entry(key.clone())
                 .or_default()
                 .apply_history_page(selected, page.first_id, page.complete);
+            let current = imp.current.borrow().as_deref() == Some(key.as_str());
+            if current {
+                window.apply(&diffs);
+            }
+            for message in &context_messages {
+                window.replay_thread_updates(&conversation, message);
+            }
             window.render_conversations();
             window.refresh_thread_context();
-            if imp.current.borrow().as_deref() != Some(key.as_str()) {
+            window.refresh_history_controls();
+            if !current {
                 return;
             }
             let pushed = diffs.iter().find_map(|diff| match diff {
                 TimelineDiff::PushFront { items } => Some(items.len()),
                 _ => None,
             });
-            window.apply(&diffs);
             if initial {
                 window.scroll_to_end();
             } else if let Some(pushed) = pushed {
                 window.scroll_to(pushed);
             }
-            // A page can contain only other DM threads, even when older
-            // replies are requested below an already loaded window.
-            if !page.complete && !had_content && advanced {
-                window.load_older();
+            // Skip a bounded batch of irrelevant pages. The explicit
+            // Load Earlier button resumes once that budget is exhausted.
+            if !page.complete && !had_content && advanced && remaining > 1 {
+                window.load_history(conversation, next_cursor, remaining - 1);
             }
         });
     }

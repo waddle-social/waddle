@@ -57,6 +57,8 @@ mod imp {
         #[template_child]
         pub thread_context: TemplateChild<gtk::Box>,
         #[template_child]
+        pub load_earlier: TemplateChild<gtk::Button>,
+        #[template_child]
         pub content_stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub timeline_scroller: TemplateChild<gtk::ScrolledWindow>,
@@ -97,7 +99,7 @@ mod imp {
         /// Original messages retained as context when opening an implicit-root thread.
         pub thread_roots:
             RefCell<HashMap<(String, String), waddle_client_session::IncomingMessage>>,
-        pub thread_updates: RefCell<HashMap<String, Vec<waddle_client_session::IncomingMessage>>>,
+        pub thread_updates: RefCell<HashMap<String, crate::thread_updates::ThreadUpdates>>,
         /// The open conversation's bare JID.
         pub current: RefCell<Option<String>>,
         /// A conversation asked for (from a notification) before the
@@ -271,6 +273,11 @@ impl WaddleWindow {
         if let Some(conversation) = self.current_conversation() {
             self.open_conversation(&conversation.jid);
         }
+    }
+
+    #[template_callback]
+    fn on_load_earlier(&self) {
+        self.load_older();
     }
 
     #[template_callback]
