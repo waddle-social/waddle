@@ -677,8 +677,8 @@ pub enum WebPushCapability {
 }
 
 /// Verify the connect budget on an actual production client's configuration.
-/// Keep real time until TCP and ClientHello arrive, then advance only the TLS
-/// wait. This exercises reqwest's real timeout flags without five wall seconds.
+/// Bound the real-time wait for TCP and ClientHello before advancing only the
+/// TLS wait. This exercises reqwest's real timeout flags without five wall seconds.
 #[cfg(test)]
 pub(crate) async fn assert_production_connect_timeout(client: reqwest::Client) {
     use tokio::io::AsyncReadExt as _;
@@ -706,6 +706,10 @@ pub(crate) async fn assert_production_connect_timeout(client: reqwest::Client) {
     tokio::select! {
         result = &mut request => panic!("TLS setup completed before the fixture stalled: {result:?}"),
         established = established => established.expect("TLS ClientHello arrived"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            server.abort();
+            panic!("local TLS fixture did not receive ClientHello within five real seconds; check proxy settings");
+        }
     }
     tokio::time::pause();
     tokio::time::advance(std::time::Duration::from_secs(6)).await;
@@ -730,6 +734,34 @@ pub(crate) async fn assert_production_connect_timeout(client: reqwest::Client) {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[tokio::test]
+    #[should_panic(
+        expected = "local TLS fixture did not receive ClientHello within five real seconds"
+    )]
+    async fn connect_timeout_fixture_bounds_a_stalled_proxy_in_real_time() {
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("proxy listener");
+        let proxy_url = format!("http://{}", proxy.local_addr().expect("proxy address"));
+        tokio::spawn(async move {
+            let (_connection, _) = proxy.accept().await.expect("proxy connection");
+            // Accept CONNECT but never establish a tunnel to the TLS fixture.
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy_url).expect("proxy URL"))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("proxied client");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            assert_production_connect_timeout(client),
+        )
+        .await
+        .expect("fixture must enforce its own deadline before the outer test guard");
+    }
 
     #[test]
     fn kid_round_trip() {

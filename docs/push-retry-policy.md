@@ -234,9 +234,27 @@ Current-state gauges supplement transition counters:
 
 Count gauges use annotation units `{job}` and `{node}` so their Prometheus
 names remain unsuffixed, such as `xmpp_push_queue_parked`. The snapshot gauge
-uses `s` and translates to `xmpp_push_queue_snapshot_at_seconds`. The shared
-exported-unit fixture and real OTLP ingestion test verify these names against
-the actual recording rules; a dimensionless gauge unit `1` would add `_ratio`.
+uses `s` and translates to `xmpp_push_queue_snapshot_at_seconds`. The Rust test
+checks exported units against the shared fixture. Verifying their translated
+names against the actual recording rules requires the manual real OTLP
+ingestion test below; a dimensionless gauge unit `1` would add `_ratio`.
+
+Infrastructure PR CI currently lints rule syntax; it does not run
+`rules/tests/run.sh`. Run the behavioral rule tests and OTLP translation check
+manually when changing these metrics, the shared fixture or recording rules.
+From the repository root, with an existing Prometheus 3.x distribution containing
+both `promtool` and `prometheus`, run:
+
+```sh
+PROMETHEUS_DIR=/path/to/prometheus-distribution
+PATH="$PROMETHEUS_DIR:$PATH" PROMETHEUS_BIN="$PROMETHEUS_DIR/prometheus" \
+  sh infrastructure/waddle.cloud/rules/tests/run.sh
+```
+
+The runner always executes the `promtool` rule tests. It runs
+`push_otlp_contract.py` only when `PROMETHEUS_BIN` is set; omitting that variable
+does not verify OTLP translation. The OTLP check also requires Python 3 and uses
+only local temporary files and a loopback listener.
 
 Replicas sharing the database report the same inventory. First exclude each
 replica's values when its own queue snapshot is older than five minutes, then
