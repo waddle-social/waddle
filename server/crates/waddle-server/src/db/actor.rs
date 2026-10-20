@@ -106,7 +106,7 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                     r#"
                     INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (jid) DO NOTHING
                     "#,
                 )
                 .bind(&msg.user_jid)
@@ -151,7 +151,7 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                     r#"
                     INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (jid) DO NOTHING
                     "#,
                 )
                 .bind(&msg.user_jid)

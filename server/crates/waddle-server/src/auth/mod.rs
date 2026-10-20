@@ -15,6 +15,7 @@ pub mod oidc;
 pub mod providers;
 pub mod redirect;
 pub mod session;
+pub(crate) mod token_hash;
 
 use thiserror::Error;
 

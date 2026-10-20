@@ -5,10 +5,8 @@
 
 use super::AuthError;
 use chrono::{DateTime, Duration, NaiveDateTime, Utc};
-use hmac::{Hmac, KeyInit, Mac};
 use kameo::actor::ActorRef;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tracing::{debug, instrument, warn};
 use uuid::Uuid;
@@ -17,10 +15,9 @@ use waddle_xmpp::auth::{
 };
 
 use crate::auth::directory::canonical_localpart;
+use crate::auth::token_hash::TokenHasher;
 use crate::db::actor::{CreateAuthSession, DbActor, DbExecute, DbQueryOne, RowValues};
 use crate::db::{row_value, ValueExt};
-
-type HmacSha256 = Hmac<Sha256>;
 
 /// Prefix stored in `sessions.token_hash` for native-SCRAM resume rows
 /// instead of a real token hash. The full stored value is
@@ -115,7 +112,7 @@ impl Session {
 
 pub struct SessionManager {
     actor: ActorRef<DbActor>,
-    hash_key: Option<Vec<u8>>,
+    hasher: TokenHasher,
 }
 
 /// A session row cannot yield a durable principal reference when its persisted
@@ -141,27 +138,12 @@ impl SessionManager {
     pub fn new(actor: ActorRef<DbActor>, hash_key: Option<&[u8]>) -> Self {
         Self {
             actor,
-            hash_key: hash_key.map(|k| k.to_vec()),
+            hasher: TokenHasher::new(hash_key),
         }
     }
 
     pub fn actor_ref(&self) -> ActorRef<DbActor> {
         self.actor.clone()
-    }
-
-    fn token_hash(&self, token: &str) -> String {
-        match &self.hash_key {
-            Some(key) => {
-                let mut mac = HmacSha256::new_from_slice(key).expect("HMAC supports any key");
-                mac.update(token.as_bytes());
-                hex::encode(mac.finalize().into_bytes())
-            }
-            None => {
-                let mut hasher = Sha256::new();
-                hasher.update(token.as_bytes());
-                hex::encode(hasher.finalize())
-            }
-        }
     }
 
     /// Convert an actor ask error into an AuthError.
@@ -174,7 +156,7 @@ impl SessionManager {
         let token_hash = if session.native_resume_only {
             native_resume_token_hash()
         } else {
-            self.token_hash(&session.id)
+            self.hasher.session(&session.id)
         };
         let expires_at = session.expires_at.map(|v| v.to_rfc3339());
         let created_at = session.created_at.to_rfc3339();
@@ -229,7 +211,7 @@ impl SessionManager {
             .map_err(|e| AuthError::DatabaseError(format!("Failed to get token hash: {}", e)))?;
 
         let native_resume_only = is_native_resume_token_hash(&token_hash);
-        if !native_resume_only && token_hash != self.token_hash(&id) {
+        if !native_resume_only && token_hash != self.hasher.session(&id) {
             return Err(AuthError::SessionNotFound(id));
         }
 
@@ -285,14 +267,14 @@ impl SessionManager {
         })
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, session_id))]
     pub async fn get_session(&self, session_id: &str) -> Result<Option<Session>, AuthError> {
         let sql = r#"
             SELECT s.id, s.user_jid, s.token_hash, s.expires_at, s.created_at, s.last_used_at,
                    u.username, u.xmpp_localpart, s.auth_context_id, s.auth_context_version,
                    s.principal_auth_epoch
             FROM sessions s
-            JOIN users u ON u.jid = s.user_jid
+            JOIN users u ON u.jid = s.user_jid AND u.kind = 'human'
             WHERE s.id = ?
             LIMIT 1
         "#
@@ -334,7 +316,7 @@ impl SessionManager {
                    u.username, u.xmpp_localpart, s.auth_context_id, s.auth_context_version,
                    s.principal_auth_epoch
             FROM sessions s
-            JOIN users u ON u.jid = s.user_jid
+            JOIN users u ON u.jid = s.user_jid AND u.kind = 'human'
             WHERE s.auth_context_id = ?
             LIMIT 1
         "#
@@ -403,7 +385,7 @@ impl SessionManager {
         Ok(())
     }
 
-    #[instrument(skip(self))]
+    #[instrument(skip(self, session_id))]
     pub async fn validate_session(&self, session_id: &str) -> Result<Session, AuthError> {
         let session = self
             .get_session(session_id)
@@ -411,7 +393,7 @@ impl SessionManager {
             .ok_or_else(|| AuthError::SessionNotFound(session_id.to_string()))?;
 
         if session.is_expired() {
-            warn!(session_id = %session_id, "Session expired");
+            warn!("Session expired");
             return Err(AuthError::SessionExpired);
         }
 
@@ -486,7 +468,8 @@ mod tests {
             CREATE TABLE users (
                 jid TEXT PRIMARY KEY,
                 username TEXT NOT NULL,
-                xmpp_localpart TEXT NOT NULL
+                xmpp_localpart TEXT NOT NULL,
+                kind TEXT NOT NULL DEFAULT 'human'
             );
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY,
@@ -522,7 +505,7 @@ mod tests {
             crate::db_params![
                 session.id.clone(),
                 session.user_jid.clone(),
-                manager.token_hash(&session.id),
+                manager.hasher.session(&session.id),
                 session.expires_at.map(|value| value.to_rfc3339()),
                 session.created_at.to_rfc3339(),
                 session.last_used_at.to_rfc3339(),
@@ -674,5 +657,114 @@ mod tests {
             }
             outcome => panic!("expected resolved native principal, got {outcome:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn bot_session_row_is_invisible() {
+        let db = Database::in_memory("test-bot-session-row")
+            .await
+            .expect("in-memory database");
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let actor = DbActor::spawn(DbActor::new(db.clone()));
+        let manager = SessionManager::new(actor, Some(b"test-key"));
+        let session = Session::new(
+            "alice+standup@bots.example.com",
+            "alice+standup",
+            "alice+standup",
+        );
+        let principal = session
+            .authenticated_principal_ref()
+            .expect("typed principal");
+        let conn = db.guard().await.expect("database guard");
+        conn.execute(
+            "INSERT INTO users (jid, username, xmpp_localpart, kind, owner_jid, created_at, \
+             updated_at) VALUES (?, ?, ?, 'bot', ?, ?, ?)",
+            crate::db_params![
+                session.user_jid.clone(),
+                session.username.clone(),
+                session.xmpp_localpart.clone(),
+                "alice@example.com",
+                session.created_at.to_rfc3339(),
+                session.created_at.to_rfc3339(),
+            ],
+        )
+        .await
+        .expect("insert bot user");
+        // A correctly hashed, unexpired session row pointing at the bot: only
+        // the `kind = 'human'` join keeps it from backing a session.
+        conn.execute(
+            r#"
+            INSERT INTO sessions (
+                id, user_jid, token_hash, expires_at, created_at, last_used_at,
+                auth_context_id, auth_context_version, principal_auth_epoch
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+            crate::db_params![
+                session.id.clone(),
+                session.user_jid.clone(),
+                manager.hasher.session(&session.id),
+                session.expires_at.map(|value| value.to_rfc3339()),
+                session.created_at.to_rfc3339(),
+                session.last_used_at.to_rfc3339(),
+                session.auth_context_id.to_string(),
+                session.auth_context_version,
+                session.principal_auth_epoch,
+            ],
+        )
+        .await
+        .expect("insert bot session");
+        drop(conn);
+
+        assert!(manager
+            .get_session(&session.id)
+            .await
+            .expect("bot session lookup")
+            .is_none());
+        assert!(matches!(
+            manager.validate_session(&session.id).await,
+            Err(super::AuthError::SessionNotFound(_))
+        ));
+        assert!(matches!(
+            manager.resolve_principal(&principal).await,
+            PrincipalResolution::Missing
+        ));
+    }
+
+    #[tokio::test]
+    async fn create_auth_session_localpart_collision_errors() {
+        let db = Database::in_memory("test-auth-session-localpart-collision")
+            .await
+            .expect("in-memory database");
+        MigrationRunner::single()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let actor = DbActor::spawn(DbActor::new(db.clone()));
+        let manager = SessionManager::new(actor, Some(b"test-key"));
+        manager
+            .create_session(&Session::new("alice@example.com", "alice", "x"))
+            .await
+            .expect("first user session");
+
+        // Only a `jid` conflict may be ignored; a different account claiming
+        // the same localpart must fail the whole transaction.
+        let colliding = Session::new("bob@example.com", "bob", "x");
+        assert!(manager.create_session(&colliding).await.is_err());
+
+        let conn = db.guard().await.expect("database guard");
+        let mut rows = conn
+            .query(
+                "SELECT (SELECT COUNT(*) FROM users WHERE jid = ?), \
+                        (SELECT COUNT(*) FROM sessions WHERE user_jid = ?)",
+                crate::db_params!["bob@example.com", "bob@example.com"],
+            )
+            .await
+            .expect("count bob rows");
+        let row = rows.next().await.expect("read row").expect("count row");
+        assert_eq!(row.get::<i64>(0).expect("users count"), 0);
+        assert_eq!(row.get::<i64>(1).expect("sessions count"), 0);
     }
 }
