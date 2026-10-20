@@ -249,13 +249,25 @@ schema.#Project & {
 		// API 34: the aosp-atd image line trails the newest platform; 34
 		// matches minSdk and has stable ATD images. Configuration cache is
 		// off for GMD runs: the emulator lifecycle interacts badly with
-		// cached configuration. The Kotlin compiler runs in-process: a
-		// separate Kotlin daemon inherits the Gradle heap, and two such
-		// JVMs plus the booting emulator exceeded the 16 GB runner, which
-		// SIGKILLed the job (exit 137) during :core:client compilation.
+		// cached configuration.
+		//
+		// Compilation and the emulator must not overlap: GMD setup boots
+		// the emulator while compile tasks run, and together they exceeded
+		// the 16 GB runner, which SIGKILLed the job (exit 137) mid-compile.
+		// The first Gradle run builds the app and test APKs with no
+		// emulator; the second finds them up to date and only runs the
+		// device. The Kotlin compiler runs in-process because a separate
+		// Kotlin daemon inherits the Gradle heap and doubles it.
 		gmdCheck: schema.#Task & {
 			command: "bash"
-			args: ["-c", "ls -l /dev/kvm && ./gradlew --no-daemon --no-configuration-cache --no-parallel --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process '-Dorg.gradle.jvmargs=-Xmx5g -XX:+UseParallelGC' :app:atdApi34FossDebugAndroidTest"]
+			args: ["-c", #"""
+				set -euo pipefail
+				ls -l /dev/kvm
+				free -m
+				gradle_args=(--no-daemon --no-configuration-cache --no-parallel --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process '-Dorg.gradle.jvmargs=-Xmx5g -XX:+UseParallelGC')
+				./gradlew "${gradle_args[@]}" :app:assembleFossDebug :app:assembleFossDebugAndroidTest
+				./gradlew "${gradle_args[@]}" :app:atdApi34FossDebugAndroidTest
+				"""#]
 			dependsOn: [setupSdk, buildRustJni]
 			// Include this definition so GMD-only changes are selected by affectedness.
 			inputs: list.Concat([_gradleInputs, ["env.cue"]])
