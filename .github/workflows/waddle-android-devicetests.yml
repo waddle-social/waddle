@@ -37,6 +37,8 @@ on:
     - apps/android/settings.gradle.kts
     - apps/android/settings.gradle.kts/**
     - cue.mod/**
+    - scripts/android-ci-gradle.sh
+    - scripts/android-ci-gradle.sh/**
     - scripts/build-android-rust.sh
     - scripts/build-android-rust.sh/**
     - scripts/check-android-ffi-bindings.sh

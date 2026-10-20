@@ -67,6 +67,8 @@ let _ffiInputs = [
 ]
 
 let _gradleInputs = [
+	"env.cue",
+	"../../scripts/android-ci-gradle.sh",
 	"**/build.gradle.kts",
 	"settings.gradle.kts",
 	"build.gradle.kts",
@@ -120,7 +122,7 @@ schema.#Project & {
 				manual:        true
 			}
 			provider: github: permissions: {contents: "write", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.publishApk]
+			"tasks": [tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.publishApk]
 		}
 		pullRequest: {
 			when: {
@@ -128,7 +130,7 @@ schema.#Project & {
 				manual:      true
 			}
 			provider: github: permissions: {contents: "read", "id-token": "write", packages: "none"}
-			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.lint, tasks.test, tasks.build]
+			"tasks": [tasks.checkCiDrift, tasks.checkBindingsDrift, tasks.telemetryContract, tasks.ciGradleContract, tasks.lint, tasks.test, tasks.build]
 		}
 		// Instrumented suite on a headless GMD ATD emulator. Runs as its
 		// own parallel PR job so a flaky emulator never delays unit-test
@@ -212,7 +214,7 @@ schema.#Project & {
 		// secrets, and R8 only needs the build to configure.
 		build: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon :app:assembleFossDebug :app:assemblePlayDebug :app:minifyPlayReleaseWithR8 -PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder -PWADDLE_FIREBASE_APP_ID=1:0:android:0 -PWADDLE_FIREBASE_API_KEY=ci-placeholder -PWADDLE_FIREBASE_SENDER_ID=0"]
+			args: ["../../scripts/android-ci-gradle.sh", ":app:assembleFossDebug", ":app:assemblePlayDebug", ":app:minifyPlayReleaseWithR8", "-PWADDLE_FIREBASE_PROJECT_ID=ci-placeholder", "-PWADDLE_FIREBASE_APP_ID=1:0:android:0", "-PWADDLE_FIREBASE_API_KEY=ci-placeholder", "-PWADDLE_FIREBASE_SENDER_ID=0"]
 			dependsOn: [setupSdk, buildRustJni]
 			inputs: _gradleInputs
 			outputs: [
@@ -227,7 +229,7 @@ schema.#Project & {
 		// their state explicitly, so both flavours share one set of goldens.
 		test: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon :core:client:testDebugUnitTest :app:testFossDebugUnitTest :app:testPlayDebugUnitTest -Proborazzi.test.verify=true"]
+			args: ["../../scripts/android-ci-gradle.sh", ":core:client:testDebugUnitTest", ":app:testFossDebugUnitTest", ":app:testPlayDebugUnitTest", "-Proborazzi.test.verify=true"]
 			dependsOn: [setupSdk]
 			inputs: _gradleInputs
 		}
@@ -240,9 +242,17 @@ schema.#Project & {
 		// analytics, crash or performance reporting in `play`.
 		lint: schema.#Task & {
 			command: "bash"
-			args: ["-c", "./gradlew --no-daemon detekt :app:lintFossDebug :app:lintPlayDebug :app:verifyFossRuntimeClasspath :app:verifyPlayRuntimeClasspath"]
+			args: ["../../scripts/android-ci-gradle.sh", "detekt", ":app:lintFossDebug", ":app:lintPlayDebug", ":app:verifyFossRuntimeClasspath", ":app:verifyPlayRuntimeClasspath"]
 			dependsOn: [setupSdk]
 			inputs: _gradleInputs
+		}
+
+		// Exercise evaluated CI entrypoints without an SDK or Gradle build.
+		// Resource-policy edits must select the real lint/test/build tasks too.
+		ciGradleContract: schema.#Task & {
+			command: "python3"
+			args: ["../../scripts/test_android_ci_gradle.py"]
+			inputs: ["env.cue", "../../scripts/android-ci-gradle.sh", "../../scripts/test_android_ci_gradle.py"]
 		}
 
 		// KVM probe + headless ATD emulator suite (deviceTests pipeline).
@@ -263,14 +273,12 @@ schema.#Project & {
 			args: ["-c", #"""
 				set -euo pipefail
 				ls -l /dev/kvm
-				free -m
-				gradle_args=(--no-daemon --no-configuration-cache --no-parallel --max-workers=2 -Pkotlin.compiler.execution.strategy=in-process '-Dorg.gradle.jvmargs=-Xmx5g -XX:+UseParallelGC')
-				./gradlew "${gradle_args[@]}" :app:assembleFossDebug :app:assembleFossDebugAndroidTest
-				./gradlew "${gradle_args[@]}" :app:atdApi34FossDebugAndroidTest
+				bash ../../scripts/android-ci-gradle.sh --no-configuration-cache :app:assembleFossDebug :app:assembleFossDebugAndroidTest
+				bash ../../scripts/android-ci-gradle.sh --no-configuration-cache :app:atdApi34FossDebugAndroidTest
 				"""#]
 			dependsOn: [setupSdk, buildRustJni]
 			// Include this definition so GMD-only changes are selected by affectedness.
-			inputs: list.Concat([_gradleInputs, ["env.cue"]])
+			inputs: _gradleInputs
 		}
 
 		// Install-in-place artifact: every merge to main builds the FOSS
@@ -305,7 +313,7 @@ schema.#Project & {
 				# Commit-timestamp minutes: monotonic across builds and immune
 				# to shallow CI clones (rev-list --count would report 1).
 				version_code="$(( $(git show -s --format=%ct HEAD) / 60 ))"
-				./gradlew --no-daemon :app:assembleFossPreview \
+				bash ../../scripts/android-ci-gradle.sh :app:assembleFossPreview \
 				  -PversionCode="${version_code}" \
 				  -PversionName="$(git rev-parse --short HEAD)"
 				sha="$(git rev-parse --short HEAD)"
@@ -342,7 +350,7 @@ schema.#Project & {
 			// cuenv's incremental engine reports "no affected tasks" for
 			// a script-only fix and the rolling release is never
 			// rebuilt.
-			inputs: list.Concat([_gradleInputs, ["env.cue"]])
+			inputs: _gradleInputs
 			outputs: ["app/build/outputs/apk/foss/preview/app-foss-preview.apk"]
 		}
 	}
