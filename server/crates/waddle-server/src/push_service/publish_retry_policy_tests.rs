@@ -83,7 +83,16 @@ async fn postgres_expired_batch_backoff_uses_each_rows_durable_count() {
 #[tokio::test]
 async fn node_retirement_preserves_terminal_history_and_does_not_count_noops() {
     let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
-    let store = store().await;
+    let store = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+        crate::db::Database::in_memory("retirement-history")
+            .await
+            .expect("database"),
+        &rand::random::<[u8; 32]>(),
+        "push.example.com".parse().expect("service"),
+        std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
+    )
+    .await
+    .expect("configured push service");
     let registrations =
         crate::push_registrations::DatabasePushRegistrationStore::new(store.db.clone())
             .await

@@ -55,6 +55,16 @@ outbox obligation under its unsettled Foundation branch. That restricted output
 can supply the authenticated inspection and retirement commands; its identities
 are excluded from this aggregate record.
 
+The rollout plan now explicitly includes authenticated inspection and confirmed
+retirement of the **13 parked plus one known-failed unsettled outbox obligation**
+after the administrator commands are deployed. This remains pending operator
+execution, using exact owner/node targets from a refreshed inventory. Counts
+alone do not authorize automatic retirement. Verify subsequent settlement,
+disabled registrations, actual Grafana/Mimir metric names and units, and the
+corresponding gauges and alert evaluations. No production retirement has been
+performed in this preflight.
+
 These counts describe the recorded snapshot, not the state at deployment time.
-Re-run the same inventory before merge and deployment, review any changed
-obligations, and retain the timestamp with the new aggregate results.
+Re-run the same inventory immediately before merge and again before deployment,
+review any changed obligations, and retain the timestamp with the new aggregate
+results.

@@ -155,6 +155,7 @@ impl HttpApnsSender {
 fn base_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
         .http2_prior_knowledge()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(APNS_REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
 }
@@ -574,6 +575,12 @@ mod tests {
             .expect_err("nothing listens on port 1");
         assert!(error.to_string().contains(&token), "reqwest names the URL");
         assert!(!transport_error_detail(error).contains(&token));
+    }
+
+    #[tokio::test]
+    async fn production_client_connect_timeout_preserves_pre_send_evidence() {
+        let sender = HttpApnsSender::new().expect("production sender");
+        crate::push::types::assert_production_connect_timeout(sender.client).await;
     }
 
     #[tokio::test]

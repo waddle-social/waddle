@@ -676,45 +676,60 @@ pub enum WebPushCapability {
     Degraded { reason: SuppressionReason },
 }
 
+/// Verify the connect budget on an actual production client's configuration.
+/// Keep real time until TCP and ClientHello arrive, then advance only the TLS
+/// wait. This exercises reqwest's real timeout flags without five wall seconds.
+#[cfg(test)]
+pub(crate) async fn assert_production_connect_timeout(client: reqwest::Client) {
+    use tokio::io::AsyncReadExt as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let endpoint = format!(
+        "https://{}/push",
+        listener.local_addr().expect("local address")
+    );
+    let (ready, established) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.expect("accept TCP setup");
+        let mut hello = [0_u8; 1];
+        connection
+            .read_exact(&mut hello)
+            .await
+            .expect("receive TLS ClientHello");
+        ready.send(()).expect("test awaits TLS setup");
+        std::future::pending::<()>().await;
+    });
+    let request = client.post(endpoint).send();
+    tokio::pin!(request);
+    tokio::select! {
+        result = &mut request => panic!("TLS setup completed before the fixture stalled: {result:?}"),
+        established = established => established.expect("TLS ClientHello arrived"),
+    }
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), request)
+        .await
+        .expect("production connect budget must expire before the ten-second overall timeout")
+        .expect_err("TLS setup must time out");
+    tokio::time::resume();
+    server.abort();
+    assert!(
+        error.is_connect(),
+        "dedicated connection-setup evidence is preserved: {error}"
+    );
+    assert!(error.is_timeout());
+    assert_eq!(
+        TransientFailure::from_transport_error(&error),
+        TransientFailure::Connect
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::str::FromStr;
-
-    #[tokio::test]
-    async fn connect_timeout_preserves_pre_send_evidence_before_general_timeout() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .expect("listener");
-        let endpoint = format!(
-            "https://{}/push",
-            listener.local_addr().expect("local address")
-        );
-        let accepted = tokio::spawn(async move {
-            let (_connection, _) = listener.accept().await.expect("accept TCP setup");
-            // TCP succeeds, but TLS setup never completes. reqwest reports
-            // this deterministic connect timeout with both predicates true.
-            std::future::pending::<()>().await;
-        });
-        let client = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_millis(100))
-            .timeout(std::time::Duration::from_secs(2))
-            .no_proxy()
-            .build()
-            .expect("client");
-        let error = client
-            .post(endpoint)
-            .send()
-            .await
-            .expect_err("TLS setup must time out");
-        accepted.abort();
-        assert!(error.is_connect());
-        assert!(error.is_timeout());
-        assert_eq!(
-            TransientFailure::from_transport_error(&error),
-            TransientFailure::Connect
-        );
-    }
 
     #[test]
     fn kid_round_trip() {

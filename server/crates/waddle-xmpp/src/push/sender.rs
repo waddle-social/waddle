@@ -83,6 +83,7 @@ pub struct HttpWebPushSender {
 impl HttpWebPushSender {
     pub fn new() -> Self {
         let client = reqwest::Client::builder()
+            .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -362,6 +363,12 @@ mod tests {
     fn parse_retry_after_rejects_http_date() {
         // We only honor delta-seconds; HTTP-date returns None.
         assert_eq!(parse_retry_after("Fri, 31 Dec 1999 23:59:59 GMT"), None);
+    }
+
+    #[tokio::test]
+    async fn production_client_connect_timeout_preserves_pre_send_evidence() {
+        let sender = HttpWebPushSender::new();
+        crate::push::types::assert_production_connect_timeout(sender.client).await;
     }
 
     #[tokio::test]

@@ -47,6 +47,9 @@ groups:
         # First filter each raw pod observation by its own successful-read
         # timestamp: a fresh peer must not keep a failed peer's old high value.
         # All-stale inventory is absent (unknown), never a fabricated zero.
+        # Count gauges use UCUM {job}/{node} annotations, which translate
+        # without suffixes. Unit "1" would add _ratio and break these aliases.
+        # tests/push_otlp_contract.py exercises the real OTLP translator.
         - record: waddle_push_queue_parked
           expr: max by (queue) (xmpp_push_queue_parked and ((time() - (xmpp_push_queue_snapshot_at_seconds or xmpp_push_queue_snapshot_at)) <= 300))
         - record: waddle_push_queue_unresolved_failed

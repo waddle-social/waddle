@@ -193,12 +193,16 @@ async fn notification_provider_binding_and_revocation(
         crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
             .await
             .expect("registrations");
+    // Host registration retirement requires the exact service boundary.
+    let service: BareJid = "push.example.com".parse().expect("service");
     // Two nodes of one owner that both deliver: the victim is the
     // Android app (fake FCM), the other the Apple app (fake APNs).
     let push = with_fake_apns(with_fake_fcm(
-        DatabasePushServiceStore::new_with_secret_key(
+        DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             fixture.db.clone(),
             &rand::random::<[u8; 32]>(),
+            service.clone(),
+            std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
         )
         .await
         .expect("push service"),
@@ -206,7 +210,6 @@ async fn notification_provider_binding_and_revocation(
     ));
     let candidate = candidate("provider-bound");
     let owner = candidate.recipient_bare_jid.clone();
-    let service: BareJid = "push.example.com".parse().expect("service");
     let victim = push
         .ensure_node(&owner, FCM_TEST_APP_ID)
         .await
@@ -664,15 +667,17 @@ async fn explicit_revocation_retires_parked_boundary_without_provider_row(
     crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
         .await
         .expect("registration schema");
-    let push = DatabasePushServiceStore::new_with_secret_key(
+    let service: BareJid = "push.example.com".parse().expect("service");
+    let push = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
         fixture.db.clone(),
         &rand::random::<[u8; 32]>(),
+        service.clone(),
+        std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
     )
     .await
     .expect("push");
     let notification = candidate("parked-before-provider-call");
     let owner = notification.recipient_bare_jid.clone();
-    let service: BareJid = "push.example.com".parse().expect("service");
     let node = push
         .ensure_node(&owner, FCM_TEST_APP_ID)
         .await

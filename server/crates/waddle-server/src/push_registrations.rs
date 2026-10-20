@@ -276,6 +276,7 @@ pub(crate) async fn disable_registration_tx(
 pub(crate) async fn disable_node_registrations_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner: &jid::BareJid,
+    service: &jid::BareJid,
     node: Option<&str>,
 ) -> Result<u64, PushError> {
     let probe = if tx.driver() == crate::db::DatabaseDriver::Postgres {
@@ -297,8 +298,8 @@ pub(crate) async fn disable_node_registrations_tx(
         return Ok(0);
     }
     tx.execute(
-        "UPDATE push_registrations SET status = ?, next_retry_at_ms = NULL, last_error = 'push node explicitly retired', updated_at_ms = ? WHERE owner_bare_jid = ? AND (node = ? OR ? = 0) AND status <> ?",
-        crate::db_params![STATUS_DISABLED, crate::time::now_ms(), owner.to_string(), node, i64::from(node.is_some()), STATUS_DISABLED],
+        "UPDATE push_registrations SET status = ?, next_retry_at_ms = NULL, last_error = 'push node explicitly retired', updated_at_ms = ? WHERE owner_bare_jid = ? AND push_service_jid = ? AND (node = ? OR ? = 0) AND status <> ?",
+        crate::db_params![STATUS_DISABLED, crate::time::now_ms(), owner.to_string(), service.to_string(), node, i64::from(node.is_some()), STATUS_DISABLED],
     ).await.map_err(|error| PushError::StorageError(error.to_string()))
 }
 

@@ -125,6 +125,7 @@ impl HttpFcmSender {
 
 fn base_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(FCM_REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
 }
@@ -386,6 +387,12 @@ mod tests {
                 retry_after: None,
             }
         );
+    }
+
+    #[tokio::test]
+    async fn production_client_connect_timeout_preserves_pre_send_evidence() {
+        let sender = HttpFcmSender::new().expect("production sender");
+        crate::push::types::assert_production_connect_timeout(sender.client).await;
     }
 
     #[tokio::test]

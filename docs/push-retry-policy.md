@@ -32,6 +32,10 @@ provider-specific classification:
   A timeout after connection, lost response, or other transport failure that
   cannot prove no request was sent remains `unknown_after_send`.
 
+Web Push, APNs, FCM and OAuth token HTTP clients use a five-second connection
+setup timeout inside their ten-second overall request timeout. A stalled
+connection therefore retains the transport's pre-send evidence.
+
 These distinctions follow [the APNs response contract](https://developer.apple.com/library/archive/documentation/NetworkingInternet/Conceptual/RemoteNotificationsPG/CommunicatingwithAPNs.html),
 [FCM error definitions](https://firebase.google.com/docs/cloud-messaging/error-codes),
 and [RFC 8030](https://www.rfc-editor.org/rfc/rfc8030.html). Provider acceptance is
@@ -122,6 +126,11 @@ canonical parent lock contends, the transaction rolls back and the command
 returns an error: retry the complete retirement after contention clears. There
 is no partial-success disposition.
 
+Host registrations and outbox owners are retired only for the configured push
+service. An identical owner/node pair on another service is outside that
+authority. A standalone provider store without a configured service can retire
+its own provider state but leaves service-keyed host records untouched.
+
 Canonical acceptance rows, candidate lineage and required replay evidence remain
 protected until authoritative disposition and the configured alias-retention
 tail have elapsed. A retry budget must never substitute for that retention rule.
@@ -178,6 +187,25 @@ Do not use raw SQL deletes or clear uncertainty flags to create headroom. There
 is intentionally no resume command. Re-enabling a registration is a separate
 registration decision and does not replay the retired or parked backlog.
 
+For this rollout, refresh the production preflight **immediately before merge**
+and again before deployment. The recorded inventory identifies 13 parked
+uncertain outbox obligations and one known-failed unsettled outbox obligation.
+The rollout plan includes inspection and authoritative retirement of these
+**14 obligations** after the administrator commands are deployed. Obtain the
+exact owner/node targets from the refreshed restricted inventory, group jobs by
+that pair, inspect each pair, and explicitly confirm its node-wide retirement
+using the procedure above. A count does not itself authorize an automatic
+retirement; changed targets or additional work require inspection before that
+confirmation. No production retirement has been performed by the preflight.
+
+Afterward, verify settlement and disabled registrations with the read-only
+inventory. In Grafana/Mimir, inspect the actual deployed exported metric names
+and units, confirm the recording rules match those series, and compare fresh
+parked/unresolved gauges with the database result. Verify parked-work, unsettled
+custody, capacity and snapshot-freshness alerts evaluate correctly and recover
+when the corresponding condition clears. Retained terminal rows can continue
+to consume capacity during the retention tail.
+
 ## Diagnosis
 
 Structured push transition logs include the bounded retry reason, failure class
@@ -203,6 +231,12 @@ Current-state gauges supplement transition counters:
 | `xmpp.push.queue.snapshot_at{queue=outbox\|provider}` | Unix seconds of the last successful database inventory for that queue. |
 | `xmpp.push.provider.retained_max_per_node` | Largest current retained provider-job count on one node, including terminal tails. |
 | `xmpp.push.provider.near_capacity_nodes` | Number of nodes retaining at least 9,000 jobs, against the 10,000 admission cap. |
+
+Count gauges use annotation units `{job}` and `{node}` so their Prometheus
+names remain unsuffixed, such as `xmpp_push_queue_parked`. The snapshot gauge
+uses `s` and translates to `xmpp_push_queue_snapshot_at_seconds`. The shared
+exported-unit fixture and real OTLP ingestion test verify these names against
+the actual recording rules; a dimensionless gauge unit `1` would add `_ratio`.
 
 Replicas sharing the database report the same inventory. First exclude each
 replica's values when its own queue snapshot is older than five minutes, then

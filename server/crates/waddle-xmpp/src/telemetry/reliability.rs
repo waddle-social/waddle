@@ -21,14 +21,14 @@ pub fn record_push_queue_snapshot(
 ) {
     crate::gauge_record!(
         "xmpp.push.queue.parked",
-        "1",
+        "{job}",
         "Current parked push rows retaining uncertain custody.",
         parked,
         queue,
     );
     crate::gauge_record!(
         "xmpp.push.queue.unresolved_failed",
-        "1",
+        "{job}",
         "Failed push rows with known pre-send outcome and unsettled ancestry.",
         unresolved_failed,
         queue,
@@ -47,13 +47,13 @@ pub fn record_push_queue_snapshot(
 pub fn record_push_provider_capacity(retained_max_per_node: u64, near_capacity_nodes: u64) {
     crate::gauge_record!(
         "xmpp.push.provider.retained_max_per_node",
-        "1",
+        "{job}",
         "Largest retained provider queue on a single push node.",
         retained_max_per_node,
     );
     crate::gauge_record!(
         "xmpp.push.provider.near_capacity_nodes",
-        "1",
+        "{node}",
         "Push nodes retaining at least ninety percent of their provider row cap.",
         near_capacity_nodes,
     );

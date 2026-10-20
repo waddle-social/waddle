@@ -303,6 +303,7 @@ impl OAuthFcmTokenSource {
     ) -> Result<Self, FcmTokenSourceBuildError> {
         let client = reqwest::Client::builder()
             .https_only(true)
+            .connect_timeout(Duration::from_secs(5))
             .timeout(TOKEN_REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -588,6 +589,16 @@ mod tests {
             "token_type": "Bearer",
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn production_client_connect_timeout_preserves_pre_send_evidence() {
+        let (private_pem, _) = rsa_key_pair();
+        let key = FcmServiceAccountKey::from_json(&service_account_json(&private_pem, ""))
+            .expect("service-account key");
+        let source = OAuthFcmTokenSource::new(key, Arc::new(SystemFcmClock))
+            .expect("production token source");
+        crate::push::types::assert_production_connect_timeout(source.client).await;
     }
 
     #[derive(Deserialize)]

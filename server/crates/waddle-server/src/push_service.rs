@@ -20,6 +20,8 @@ mod publish;
 mod publish_jobs;
 mod pubsub_backing;
 mod registration;
+#[cfg(test)]
+mod retirement_scope_tests;
 mod secrets;
 mod settlement;
 mod store;

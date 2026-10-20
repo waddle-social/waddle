@@ -105,18 +105,26 @@ impl DatabasePushServiceStore {
         } else {
             "FALSE"
         };
+        let service = self
+            .pubsub_boundary
+            .as_ref()
+            .map(|boundary| boundary.service_jid.as_str());
+        // Configured operators inspect the same service boundary they can
+        // retire. Standalone inventories remain broad read-only diagnostics.
+        let outbox_service_scope =
+            "(target.scope_service = 0 OR push_service_jid = target.service_jid)";
         let outbox = if has_outbox {
             // The budget is the historical deployment threshold, independent
             // of future policy changes: operators need to identify old backlog.
-            format!("(SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id), \
-             (SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id AND status = 'failed' AND queue_acceptance_may_exist = 1 AND published_at_ms IS NULL), \
-             (SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id AND status IN ('queued', 'in-progress') AND queue_acceptance_may_exist = 1 AND attempt_count + policy_error_count >= 5), \
-             (SELECT COUNT(*) FROM notification_outbox o WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id AND status = 'failed' AND queue_acceptance_may_exist = 0 AND ({outbox_lineage} OR {outbox_foundation}))")
+            format!("(SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id AND {outbox_service_scope}), \
+             (SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id AND {outbox_service_scope} AND status = 'failed' AND queue_acceptance_may_exist = 1), \
+             (SELECT COUNT(*) FROM notification_outbox WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id AND {outbox_service_scope} AND status IN ('queued', 'in-progress') AND queue_acceptance_may_exist = 1 AND attempt_count + policy_error_count >= 5), \
+             (SELECT COUNT(*) FROM notification_outbox o WHERE recipient_bare_jid = target.owner_jid AND node = target.node_id AND {outbox_service_scope} AND status = 'failed' AND queue_acceptance_may_exist = 0 AND ({outbox_lineage} OR {outbox_foundation}))")
         } else {
             "CAST(0 AS BIGINT), CAST(0 AS BIGINT), CAST(0 AS BIGINT), CAST(0 AS BIGINT)".to_owned()
         };
         let sql = format!(
-            "WITH target AS (SELECT ? AS owner_jid, ? AS node_id, ? AS budget) SELECT \
+            "WITH target AS (SELECT ? AS owner_jid, ? AS node_id, ? AS budget, ? AS service_jid, ? AS scope_service) SELECT \
              (SELECT status FROM push_nodes WHERE owner_bare_jid = target.owner_jid AND node = target.node_id), \
              (SELECT COUNT(*) FROM push_publish_jobs WHERE owner_bare_jid = target.owner_jid AND node = target.node_id), \
              (SELECT COUNT(*) FROM push_publish_jobs WHERE owner_bare_jid = target.owner_jid AND node = target.node_id AND status = 'failed' AND uncertain_send = 1 AND terminal_disposition IS NULL), \
@@ -129,7 +137,9 @@ impl DatabasePushServiceStore {
                 crate::db_params![
                     owner.to_string(),
                     node.as_str(),
-                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS
+                    PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
+                    service,
+                    i64::from(service.is_some())
                 ],
             )
             .await
@@ -230,13 +240,19 @@ mod tests {
     #[tokio::test]
     async fn inventory_includes_parked_outbox_without_provider_acceptance() {
         let push = store().await;
-        crate::notification_outbox::NotificationOutboxStore::new(push.db.clone())
+        let outbox = crate::notification_outbox::NotificationOutboxStore::new(push.db.clone())
             .await
             .expect("outbox schema");
         let node = PushOperatorNode::parse("outbox-only-node").expect("node");
         push.execute("INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, class, message_count, context_xml, status, attempt_count, queue_acceptance_may_exist, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?, 'failed', 5, 1, 1, 1)",
             crate::db_params!["parked-outbox", owner().to_string(), "push.example.com", node.as_str(), "bob@example.com", "bob@example.com", "[]", "dm", "<notification/>"])
             .await.expect("parked outbox");
+        push.execute(
+            "UPDATE notification_outbox SET published_at_ms = 41 WHERE job_id = 'parked-outbox'",
+            (),
+        )
+        .await
+        .expect("historical timestamp cannot erase uncertainty");
         let inventory = push
             .operator_inventory(&owner(), &node)
             .await
@@ -245,6 +261,14 @@ mod tests {
         assert_eq!(inventory.provider_retained, 0);
         assert_eq!(inventory.outbox_retained, 1);
         assert_eq!(inventory.outbox_parked, 1);
+        assert_eq!(
+            outbox
+                .queue_observation()
+                .await
+                .expect("queue snapshot")
+                .parked,
+            1
+        );
         assert_eq!(inventory.outbox_at_budget, 0);
     }
 

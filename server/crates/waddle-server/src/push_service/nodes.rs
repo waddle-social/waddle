@@ -390,6 +390,10 @@ impl DatabasePushServiceStore {
             validate_len("Push Service node", node, MAX_NODE_ID_LEN)?;
         }
         let now_ms = crate::time::now_ms();
+        let service = self
+            .pubsub_boundary
+            .as_ref()
+            .map(|boundary| &boundary.service_jid);
         let mut tx = self
             .db
             .begin_immediate()
@@ -405,22 +409,29 @@ impl DatabasePushServiceStore {
                 {
                     vec![node.to_string()]
                 } else {
-                    let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
-                        &mut tx,
-                        owner_bare_jid,
-                        None,
-                        Some(node),
-                    )
-                    .await
-                    .map_err(|error| XmppError::internal(error.to_string()))?;
-                    let retired_registrations =
-                        crate::push_registrations::disable_node_registrations_tx(
-                            &mut tx,
-                            owner_bare_jid,
-                            Some(node),
-                        )
-                        .await
-                        .map_err(|error| XmppError::internal(error.to_string()))?;
+                    let (retired_outbox, retired_registrations) = if let Some(service) = service {
+                        let retired_outbox =
+                            crate::notification_outbox::retire_registration_outbox_tx(
+                                &mut tx,
+                                owner_bare_jid,
+                                Some(service),
+                                Some(node),
+                            )
+                            .await
+                            .map_err(|error| XmppError::internal(error.to_string()))?;
+                        let retired_registrations =
+                            crate::push_registrations::disable_node_registrations_tx(
+                                &mut tx,
+                                owner_bare_jid,
+                                service,
+                                Some(node),
+                            )
+                            .await
+                            .map_err(|error| XmppError::internal(error.to_string()))?;
+                        (retired_outbox, retired_registrations)
+                    } else {
+                        (0, 0)
+                    };
                     tx.commit()
                         .await
                         .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -479,18 +490,29 @@ impl DatabasePushServiceStore {
             .await?;
         }
 
-        let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
-            &mut tx,
-            owner_bare_jid,
-            None,
-            node,
-        )
-        .await
-        .map_err(|error| XmppError::internal(error.to_string()))?;
-        let retired_registrations =
-            crate::push_registrations::disable_node_registrations_tx(&mut tx, owner_bare_jid, node)
-                .await
-                .map_err(|error| XmppError::internal(error.to_string()))?;
+        // Only the configured service can authorize retirement of host-owned
+        // registrations/outbox rows. Standalone stores own provider state only.
+        let (retired_outbox, retired_registrations) = if let Some(service) = service {
+            let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
+                &mut tx,
+                owner_bare_jid,
+                Some(service),
+                node,
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            let retired_registrations = crate::push_registrations::disable_node_registrations_tx(
+                &mut tx,
+                owner_bare_jid,
+                service,
+                node,
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+            (retired_outbox, retired_registrations)
+        } else {
+            (0, 0)
+        };
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;

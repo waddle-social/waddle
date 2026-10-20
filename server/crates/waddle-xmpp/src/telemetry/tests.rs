@@ -48,6 +48,35 @@ async fn push_queue_gauges_export_current_state_including_recovery_to_zero() {
     record_push_queue_snapshot(PushQueue::Provider, 8, 2, 100);
     record_push_queue_snapshot(PushQueue::Outbox, 3, 1, 101);
     record_push_provider_capacity(9_000, 1);
+    // The real-translator test consumes this same fixture. Bind its units and
+    // sample shapes to production instruments, rather than a synthetic copy.
+    let contract: serde_json::Value =
+        serde_json::from_str(include_str!("push_gauge_contract.json"))
+            .expect("gauge contract JSON");
+    let entries = contract.as_array().expect("gauge contracts");
+    assert_eq!(entries.len(), 5);
+    for entry in entries {
+        let name = entry["name"].as_str().expect("instrument name");
+        let unit = entry["unit"].as_str().expect("instrument unit");
+        assert_eq!(guard.metric_unit(name).as_deref(), Some(unit), "{name}");
+        let expected_attributes = entry["attributes"].as_object().expect("attributes");
+        assert!(
+            guard
+                .gauge_samples(name)
+                .expect("exported gauge")
+                .iter()
+                .any(|(_, attrs)| {
+                    attrs.len() == expected_attributes.len()
+                        && attrs.iter().all(|(key, value)| {
+                            expected_attributes
+                                .get(key)
+                                .and_then(serde_json::Value::as_str)
+                                == Some(value.as_str())
+                        })
+                }),
+            "{name} fixture attributes must match a real exported sample"
+        );
+    }
     assert_eq!(
         guard.gauge_samples("xmpp.push.provider.retained_max_per_node"),
         Some(vec![(9_000, vec![])])
@@ -77,7 +106,7 @@ async fn push_queue_gauges_export_current_state_including_recovery_to_zero() {
         assert!(samples
             .iter()
             .all(|(value, attrs)| *value == 0 && attrs.len() == 1 && attrs[0].0 == "queue"));
-        assert_eq!(guard.metric_unit(name), Some("1".into()));
+        assert_eq!(guard.metric_unit(name), Some("{job}".into()));
         assert_eq!(guard.counter_sum(name, &[]), None);
     }
     assert_eq!(
@@ -87,6 +116,14 @@ async fn push_queue_gauges_export_current_state_including_recovery_to_zero() {
     assert_eq!(
         guard.gauge_samples("xmpp.push.provider.near_capacity_nodes"),
         Some(vec![(0, vec![])])
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.provider.retained_max_per_node"),
+        Some("{job}".into())
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.provider.near_capacity_nodes"),
+        Some("{node}".into())
     );
     assert_eq!(
         guard.metric_unit("xmpp.push.queue.snapshot_at"),

@@ -61,3 +61,29 @@ uncertainty, persisted backoff, falling and zero gauges, alert boundaries,
 retirement history, authorization, and rollback. Keep this a focused repair;
 consolidate duplicated classification only where needed to enforce the typed
 boundary and avoid broad file splitting.
+
+## Rollout plan
+
+1. Refresh the read-only production preflight immediately before merge and again
+   before deployment. Record the snapshot timestamp and aggregate counts; retain
+   exact identities only in restricted operator output.
+2. After the authenticated commands are deployed, inspect the exact owner/node
+   pairs covering the 13 parked outbox obligations and one known-failed
+   unsettled outbox obligation identified by the preflight. Plan to retire these
+   14 obligations through explicit, confirmed administrator retirement of their
+   matching registrations. Refresh the target list if the inventory changes;
+   counts alone do not authorize automatic retirement. Review the node-wide
+   effect before confirming each exact pair.
+3. Verify each retirement through authenticated inspection and the read-only
+   inventory: the registration is disabled, those obligations have settled, and
+   terminal evidence remains for its retention tail. Retry an atomic retirement
+   after lock contention; do not clear flags or delete rows manually. There is
+   intentionally no resume operation.
+4. Verify the deployed metric names in Grafana/Mimir against the actual exported
+   series, including count units and snapshot timestamps. Confirm recording
+   rules receive fresh data, current parked/unresolved counts reflect the
+   post-retirement inventory, and parked, custody, capacity and freshness alerts
+   evaluate correctly. Compare replicas using freshness-filtered `max`.
+
+This is a rollout task list, not evidence of execution. No production retirement
+has been performed as part of the read-only preflight or documentation work.
