@@ -270,6 +270,39 @@ pub(crate) async fn disable_registration_tx(
     .map_err(|error| PushError::StorageError(error.to_string()))
 }
 
+/// Explicit node retirement also stops user-server candidate generation. Keep
+/// this in the caller's transaction with credential erasure and custody release.
+/// Standalone push-service stores need not have a user-server registration table.
+pub(crate) async fn disable_node_registrations_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner: &jid::BareJid,
+    service: &jid::BareJid,
+    node: Option<&str>,
+) -> Result<u64, PushError> {
+    let probe = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        "SELECT 1 WHERE to_regclass('push_registrations') IS NOT NULL"
+    } else {
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_registrations'"
+    };
+    let mut rows = tx
+        .query(probe, ())
+        .await
+        .map_err(|error| PushError::StorageError(error.to_string()))?;
+    let exists = rows
+        .next()
+        .await
+        .map_err(|error| PushError::StorageError(error.to_string()))?
+        .is_some();
+    drop(rows);
+    if !exists {
+        return Ok(0);
+    }
+    tx.execute(
+        "UPDATE push_registrations SET status = ?, next_retry_at_ms = NULL, last_error = 'push node explicitly retired', updated_at_ms = ? WHERE owner_bare_jid = ? AND push_service_jid = ? AND (node = ? OR ? = 0) AND status <> ?",
+        crate::db_params![STATUS_DISABLED, crate::time::now_ms(), owner.to_string(), service.to_string(), node, i64::from(node.is_some()), STATUS_DISABLED],
+    ).await.map_err(|error| PushError::StorageError(error.to_string()))
+}
+
 pub(crate) async fn registered_nodes_for_disable_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner_bare_jid: &jid::BareJid,

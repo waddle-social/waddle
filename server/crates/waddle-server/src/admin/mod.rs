@@ -37,6 +37,7 @@
 //! storage failure.
 
 pub mod channels;
+pub mod push;
 pub mod spaces;
 pub mod users_list;
 

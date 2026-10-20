@@ -1,0 +1,170 @@
+rule_files:
+  - waddle-reliability.yaml
+evaluation_interval: 1m
+
+tests:
+  - name: shared database observations deduplicate replicas and warn at ninety percent
+    interval: 1m
+    input_series:
+      - series: 'xmpp_push_provider_retained_max_per_node{pod="one"}'
+        values: '8999x4 9000x10 0x10'
+      - series: 'xmpp_push_provider_retained_max_per_node{pod="two"}'
+        values: '8999x4 9000x10 0x10'
+      - series: 'xmpp_push_provider_near_capacity_nodes{pod="one"}'
+        values: '0x4 1x10 0x10'
+      - series: 'xmpp_push_provider_near_capacity_nodes{pod="two"}'
+        values: '0x4 1x10 0x10'
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="provider",pod="one"}'
+        values: '0+60x25'
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="provider",pod="two"}'
+        values: '0+60x25'
+    promql_expr_test:
+      - expr: waddle_push_provider_retained_max_per_node
+        eval_time: 4m
+        exp_samples:
+          - labels: waddle_push_provider_retained_max_per_node
+            value: 8999
+      - expr: 'ALERTS{alertname="PushNodeCapacityPressure",alertstate="firing"}'
+        eval_time: 9m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="PushNodeCapacityPressure",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="PushNodeCapacityPressure",alertstate="firing",severity="warning",team="waddle"}'
+            value: 1
+      - expr: waddle_push_provider_near_capacity_nodes
+        eval_time: 10m
+        exp_samples:
+          - labels: waddle_push_provider_near_capacity_nodes
+            value: 1
+      - expr: 'ALERTS{alertname="PushNodeCapacityPressure",alertstate="firing"}'
+        eval_time: 16m
+        exp_samples: []
+
+  - name: parked and unresolved inventory falls to zero after retirement
+    interval: 1m
+    input_series:
+      - series: 'xmpp_push_queue_parked{queue="provider",pod="one"}'
+        values: '3x6 0x10'
+      - series: 'xmpp_push_queue_parked{queue="provider",pod="two"}'
+        values: '3x6 0x10'
+      - series: 'xmpp_push_queue_unresolved_failed{queue="outbox",pod="one"}'
+        values: '1x6 0x10'
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="provider",pod="one"}'
+        values: '0+60x17'
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="provider",pod="two"}'
+        values: '0+60x17'
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="outbox",pod="one"}'
+        values: '0+60x17'
+    promql_expr_test:
+      - expr: waddle_push_queue_parked
+        eval_time: 6m
+        exp_samples:
+          - labels: 'waddle_push_queue_parked{queue="provider"}'
+            value: 3
+      - expr: 'ALERTS{alertname="PushParkedBacklog",alertstate="firing"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="PushParkedBacklog",alertstate="firing",queue="provider",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="PushUnresolvedFailedCustody",alertstate="firing"}'
+        eval_time: 5m
+        exp_samples:
+          - labels: 'ALERTS{alertname="PushUnresolvedFailedCustody",alertstate="firing",queue="outbox",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname=~"PushParkedBacklog|PushUnresolvedFailedCustody",alertstate="firing"}'
+        eval_time: 7m
+        exp_samples: []
+
+  - name: a failed peer cannot hold recovered inventory high and all-stale inventory is unknown
+    interval: 1m
+    input_series:
+      - series: 'xmpp_push_queue_parked{queue="provider",pod="failed"}'
+        values: '9x20'
+      - series: 'xmpp_push_queue_unresolved_failed{queue="provider",pod="failed"}'
+        values: '3x20'
+      - series: 'xmpp_push_provider_retained_max_per_node{pod="failed"}'
+        values: '9500x20'
+      - series: 'xmpp_push_provider_near_capacity_nodes{pod="failed"}'
+        values: '1x20'
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="provider",pod="failed"}'
+        values: '0x20'
+      - series: 'xmpp_push_queue_parked{queue="provider",pod="recovered"}'
+        values: '0x20'
+      - series: 'xmpp_push_queue_unresolved_failed{queue="provider",pod="recovered"}'
+        values: '0x20'
+      - series: 'xmpp_push_provider_retained_max_per_node{pod="recovered"}'
+        values: '0x20'
+      - series: 'xmpp_push_provider_near_capacity_nodes{pod="recovered"}'
+        values: '0x20'
+      - series: 'xmpp_push_queue_snapshot_at{queue="provider",pod="recovered"}'
+        values: '0+60x6 360x14'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname=~"PushParkedBacklog|PushUnresolvedFailedCustody|PushNodeCapacityPressure",alertstate="firing"}'
+        eval_time: 6m
+        exp_samples: []
+      - expr: 'waddle_push_queue_parked{queue="provider"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'waddle_push_queue_parked{queue="provider"}'
+            value: 0
+      - expr: 'waddle_push_queue_unresolved_failed{queue="provider"}'
+        eval_time: 6m
+        exp_samples:
+          - labels: 'waddle_push_queue_unresolved_failed{queue="provider"}'
+            value: 0
+      - expr: waddle_push_provider_retained_max_per_node
+        eval_time: 6m
+        exp_samples:
+          - labels: waddle_push_provider_retained_max_per_node
+            value: 0
+      - expr: waddle_push_provider_near_capacity_nodes
+        eval_time: 6m
+        exp_samples:
+          - labels: waddle_push_provider_near_capacity_nodes
+            value: 0
+      - expr: '{__name__=~"waddle_push_queue_parked|waddle_push_queue_unresolved_failed|waddle_push_provider_retained_max_per_node|waddle_push_provider_near_capacity_nodes"}'
+        eval_time: 12m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="PushQueueSnapshotStale",alertstate="firing",queue="provider"}'
+        eval_time: 17m
+        exp_samples:
+          - labels: 'ALERTS{alertname="PushQueueSnapshotStale",alertstate="firing",queue="provider",severity="warning",team="waddle"}'
+            value: 1
+
+  - name: freshness uses the freshest replica and accepts both OTLP unit spellings
+    interval: 1m
+    input_series:
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="provider",pod="one"}'
+        values: '0x20'
+      - series: 'xmpp_push_queue_snapshot_at_seconds{queue="provider",pod="two"}'
+        values: '0+60x20'
+      - series: 'xmpp_push_queue_snapshot_at{queue="outbox",pod="one"}'
+        values: '0x20'
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="PushQueueSnapshotStale",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="PushQueueSnapshotStale",alertstate="firing"}'
+        eval_time: 11m
+        exp_samples:
+          - labels: 'ALERTS{alertname="PushQueueSnapshotStale",alertstate="firing",queue="outbox",severity="warning",team="waddle"}'
+            value: 1
+      - expr: 'ALERTS{alertname="PushQueueSnapshotMissing",alertstate="firing"}'
+        eval_time: 15m
+        exp_samples: []
+
+  - name: no fabricated startup zero hides a missing snapshot
+    interval: 1m
+    input_series: []
+    promql_expr_test:
+      - expr: 'ALERTS{alertname="PushQueueSnapshotMissing",alertstate="firing"}'
+        eval_time: 9m
+        exp_samples: []
+      - expr: 'ALERTS{alertname="PushQueueSnapshotMissing",alertstate="firing"}'
+        eval_time: 10m
+        exp_samples:
+          - labels: 'ALERTS{alertname="PushQueueSnapshotMissing",alertstate="firing",queue="outbox",severity="warning",team="waddle"}'
+            value: 1
+          - labels: 'ALERTS{alertname="PushQueueSnapshotMissing",alertstate="firing",queue="provider",severity="warning",team="waddle"}'
+            value: 1

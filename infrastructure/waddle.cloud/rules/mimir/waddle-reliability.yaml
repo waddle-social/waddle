@@ -43,6 +43,68 @@ groups:
             summary: A pending-delivery row could not be resolved (poison pill) — a message is stuck and will not be delivered.
     - name: waddle-push
       rules:
+        # Replicas observe the same database inventory. Never sum pod values.
+        # First filter each raw pod observation by its own successful-read
+        # timestamp: a fresh peer must not keep a failed peer's old high value.
+        # All-stale inventory is absent (unknown), never a fabricated zero.
+        # Count gauges use UCUM {job}/{node} annotations, which translate
+        # without suffixes. Unit "1" would add _ratio and break these aliases.
+        # tests/push_otlp_contract.py exercises the real OTLP translator.
+        - record: waddle_push_queue_parked
+          expr: max by (queue) (xmpp_push_queue_parked and ((time() - (xmpp_push_queue_snapshot_at_seconds or xmpp_push_queue_snapshot_at)) <= 300))
+        - record: waddle_push_queue_unresolved_failed
+          expr: max by (queue) (xmpp_push_queue_unresolved_failed and ((time() - (xmpp_push_queue_snapshot_at_seconds or xmpp_push_queue_snapshot_at)) <= 300))
+        - record: waddle_push_queue_snapshot_at_seconds
+          expr: max by (queue) (xmpp_push_queue_snapshot_at_seconds or xmpp_push_queue_snapshot_at)
+        - record: waddle_push_provider_retained_max_per_node
+          expr: max(xmpp_push_provider_retained_max_per_node and ignoring (queue) ((time() - (xmpp_push_queue_snapshot_at_seconds{queue="provider"} or xmpp_push_queue_snapshot_at{queue="provider"})) <= 300))
+        - record: waddle_push_provider_near_capacity_nodes
+          expr: max(xmpp_push_provider_near_capacity_nodes and ignoring (queue) ((time() - (xmpp_push_queue_snapshot_at_seconds{queue="provider"} or xmpp_push_queue_snapshot_at{queue="provider"})) <= 300))
+        - alert: PushParkedBacklog
+          expr: waddle_push_queue_parked > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            summary: Push work remains parked with uncertain custody.
+            runbook: Inspect the exact owner/node inventory through authenticated XMPP administration and follow docs/push-retry-policy.md. Parked work cannot replay automatically; explicit retirement is a terminal decision. This is current database inventory, deduplicated with max across replicas.
+        - alert: PushUnresolvedFailedCustody
+          expr: waddle_push_queue_unresolved_failed > 0
+          for: 5m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            summary: A failed push row still has unsettled notification ancestry.
+            runbook: Inspect known pre-send failed rows and outstanding lineage/descendants using docs/push-retry-policy.md. These rows retain custody pending settlement or explicit retirement.
+        - alert: PushNodeCapacityPressure
+          expr: waddle_push_provider_retained_max_per_node >= 9000
+          for: 5m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            summary: A push node retains at least ninety percent of its 10000-row cap.
+            runbook: Inspect the exact node inventory using docs/push-retry-policy.md. All retained rows consume capacity, including parked work and terminal retention tails. waddle_push_provider_near_capacity_nodes counts affected nodes; use max across replicas sharing the database.
+        - alert: PushQueueSnapshotStale
+          expr: time() - waddle_push_queue_snapshot_at_seconds > 300
+          for: 5m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            summary: Push queue inventory has not refreshed successfully for over five minutes.
+            runbook: Check push janitor logs and database reads. Failed reads preserve the previous gauges and timestamp; a stale zero does not prove an empty queue.
+        - alert: PushQueueSnapshotMissing
+          expr: absent(waddle_push_queue_snapshot_at_seconds{queue="outbox"}) or absent(waddle_push_queue_snapshot_at_seconds{queue="provider"})
+          for: 10m
+          labels:
+            severity: warning
+            team: waddle
+          annotations:
+            summary: A durable push queue has no successful inventory snapshot.
+            runbook: Check rollout status, push janitor startup, database query errors and the OTLP pipeline. Gauges start only after a successful read, never at a fabricated zero.
         - alert: PushDeadLettered
           expr: increase(waddle_push_outbox_dead_lettered_total[1h]) > 0
           labels:

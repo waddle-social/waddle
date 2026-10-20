@@ -623,13 +623,30 @@ pub enum WebPushOutcome {
 /// Kept typed instead of stringly to honor the typed-payloads rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransientFailure {
-    /// Network-layer error (DNS, connect, TLS, body).
+    /// Connection setup failed before an HTTP request could reach the provider
+    /// (including DNS, refused connections, TLS setup, and connect timeouts).
+    Connect,
+    /// Network-layer error after setup; the provider may have accepted the request.
     Network,
     /// HTTP 5xx from the relay.
     ServerError { status: u16 },
     /// Request did not complete within the sender's per-attempt
     /// timeout budget.
     Timeout,
+}
+
+impl TransientFailure {
+    /// reqwest marks a connect timeout as both connect and timeout. Preserve
+    /// the stronger pre-send evidence before considering a general timeout.
+    pub(crate) fn from_transport_error(error: &reqwest::Error) -> Self {
+        if error.is_connect() {
+            Self::Connect
+        } else if error.is_timeout() {
+            Self::Timeout
+        } else {
+            Self::Network
+        }
+    }
 }
 
 /// Reason a downstream send path was suppressed.
@@ -659,10 +676,92 @@ pub enum WebPushCapability {
     Degraded { reason: SuppressionReason },
 }
 
+/// Verify the connect budget on an actual production client's configuration.
+/// Bound the real-time wait for TCP and ClientHello before advancing only the
+/// TLS wait. This exercises reqwest's real timeout flags without five wall seconds.
+#[cfg(test)]
+pub(crate) async fn assert_production_connect_timeout(client: reqwest::Client) {
+    use tokio::io::AsyncReadExt as _;
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("listener");
+    let endpoint = format!(
+        "https://{}/push",
+        listener.local_addr().expect("local address")
+    );
+    let (ready, established) = tokio::sync::oneshot::channel();
+    let server = tokio::spawn(async move {
+        let (mut connection, _) = listener.accept().await.expect("accept TCP setup");
+        let mut hello = [0_u8; 1];
+        connection
+            .read_exact(&mut hello)
+            .await
+            .expect("receive TLS ClientHello");
+        ready.send(()).expect("test awaits TLS setup");
+        std::future::pending::<()>().await;
+    });
+    let request = client.post(endpoint).send();
+    tokio::pin!(request);
+    tokio::select! {
+        result = &mut request => panic!("TLS setup completed before the fixture stalled: {result:?}"),
+        established = established => established.expect("TLS ClientHello arrived"),
+        _ = tokio::time::sleep(std::time::Duration::from_secs(5)) => {
+            server.abort();
+            panic!("local TLS fixture did not receive ClientHello within five real seconds; check proxy settings");
+        }
+    }
+    tokio::time::pause();
+    tokio::time::advance(std::time::Duration::from_secs(6)).await;
+    let error = tokio::time::timeout(std::time::Duration::from_secs(1), request)
+        .await
+        .expect("production connect budget must expire before the ten-second overall timeout")
+        .expect_err("TLS setup must time out");
+    tokio::time::resume();
+    server.abort();
+    assert!(
+        error.is_connect(),
+        "dedicated connection-setup evidence is preserved: {error}"
+    );
+    assert!(error.is_timeout());
+    assert_eq!(
+        TransientFailure::from_transport_error(&error),
+        TransientFailure::Connect
+    );
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[tokio::test]
+    #[should_panic(
+        expected = "local TLS fixture did not receive ClientHello within five real seconds"
+    )]
+    async fn connect_timeout_fixture_bounds_a_stalled_proxy_in_real_time() {
+        let proxy = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("proxy listener");
+        let proxy_url = format!("http://{}", proxy.local_addr().expect("proxy address"));
+        tokio::spawn(async move {
+            let (_connection, _) = proxy.accept().await.expect("proxy connection");
+            // Accept CONNECT but never establish a tunnel to the TLS fixture.
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder()
+            .proxy(reqwest::Proxy::all(proxy_url).expect("proxy URL"))
+            .timeout(std::time::Duration::from_secs(30))
+            .build()
+            .expect("proxied client");
+
+        tokio::time::timeout(
+            std::time::Duration::from_secs(6),
+            assert_production_connect_timeout(client),
+        )
+        .await
+        .expect("fixture must enforce its own deadline before the outer test guard");
+    }
 
     #[test]
     fn kid_round_trip() {

@@ -41,6 +41,8 @@ on:
     - cue.mod/**
     - flake.nix
     - flake.nix/**
+    - scripts/android-ci-gradle.sh
+    - scripts/android-ci-gradle.sh/**
     - scripts/build-android-rust.sh
     - scripts/build-android-rust.sh/**
     - scripts/check-android-ffi-bindings.sh
@@ -51,6 +53,8 @@ on:
     - scripts/native-telemetry-cargo-closure.py/**
     - scripts/setup-android-sdk.sh
     - scripts/setup-android-sdk.sh/**
+    - scripts/test_android_ci_gradle.py
+    - scripts/test_android_ci_gradle.py/**
     - server/.cargo/**
     - server/Cargo.lock
     - server/Cargo.lock/**
@@ -86,6 +90,10 @@ jobs:
         path: |-
           /home/runner/.android-sdk
           /home/runner/.gradle
+    - name: Bound CUE evaluator memory
+      run: |-
+        # GITHUB_ENV applies to subsequent steps, including cuenv startup.
+        printf '%s\n' 'GOGC=100' >> "$GITHUB_ENV"
     - name: Install Determinate Nix
       uses: DeterminateSystems/determinate-nix-action@021c8a1bd3570eb21f5c20a054812b0c4d9ca614
       with:

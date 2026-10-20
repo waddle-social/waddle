@@ -125,6 +125,7 @@ impl HttpFcmSender {
 
 fn base_client_builder() -> reqwest::ClientBuilder {
     reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(5))
         .timeout(FCM_REQUEST_TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
 }
@@ -197,11 +198,7 @@ async fn read_body_bounded(mut response: reqwest::Response) -> Vec<u8> {
 }
 
 fn classify_transport_error(error: reqwest::Error) -> FcmOutcome {
-    let failure = if error.is_timeout() {
-        TransientFailure::Timeout
-    } else {
-        TransientFailure::Network
-    };
+    let failure = TransientFailure::from_transport_error(&error);
     warn!(
         error = %error.without_url(),
         timeout = matches!(failure, TransientFailure::Timeout),
@@ -386,21 +383,62 @@ mod tests {
             )
             .await,
             FcmOutcome::Transient {
-                cause: FcmTransient::Failure(TransientFailure::ServerError { status: 503 }),
+                cause: FcmTransient::Unavailable,
                 retry_after: None,
             }
         );
     }
 
     #[tokio::test]
-    async fn connection_refused_is_transient_network() {
+    async fn production_client_connect_timeout_preserves_pre_send_evidence() {
+        let sender = HttpFcmSender::new().expect("production sender");
+        crate::push::types::assert_production_connect_timeout(sender.client).await;
+    }
+
+    #[tokio::test]
+    async fn established_connection_timeout_keeps_acceptance_unknown() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let endpoint = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("address")
+        ))
+        .expect("url");
+        let (accepted, established) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_connection, _) = listener.accept().await.expect("accept connection");
+            accepted.send(()).expect("test awaiting setup");
+            std::future::pending::<()>().await;
+        });
+        let mut sender = HttpFcmSender::with_base_url(endpoint).expect("sender");
+        sender.client = base_client_builder()
+            .timeout(Duration::from_millis(100))
+            .no_proxy()
+            .build()
+            .expect("client");
+        let fixture = Fixture::new();
+        let outcome = sender.send(fixture.request()).await;
+        established.await.expect("TCP connection was established");
+        server.abort();
+        assert_eq!(
+            outcome,
+            FcmOutcome::Transient {
+                cause: FcmTransient::Failure(TransientFailure::Timeout),
+                retry_after: None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_refused_is_pre_send_connect_failure() {
         let sender = HttpFcmSender::with_base_url(Url::parse("http://127.0.0.1:1/").expect("url"))
             .expect("sender");
         let fixture = Fixture::new();
         assert_eq!(
             sender.send(fixture.request()).await,
             FcmOutcome::Transient {
-                cause: FcmTransient::Failure(TransientFailure::Network),
+                cause: FcmTransient::Failure(TransientFailure::Connect),
                 retry_after: None,
             }
         );

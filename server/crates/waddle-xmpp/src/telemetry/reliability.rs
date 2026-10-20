@@ -1,4 +1,4 @@
-//! Reliability counters, emitted to the OTel meter family only.
+//! Reliability counters and current-state gauges, emitted through OTel only.
 //!
 //! Contract phase of #1330: the legacy `waddle_*` text half of the old
 //! dual-emit is gone; every retired name keeps answering through the
@@ -10,6 +10,54 @@
 //! scrape during the dual-emit release.
 
 use crate::ingress::IngressEffectKind;
+
+/// Record a successful current-state read. Failures must not call this helper:
+/// a failed query is neither an empty inventory nor a fresh observation.
+pub fn record_push_queue_snapshot(
+    queue: super::attributes::PushQueue,
+    parked: u64,
+    unresolved_failed: u64,
+    snapshot_at_seconds: u64,
+) {
+    crate::gauge_record!(
+        "xmpp.push.queue.parked",
+        "{job}",
+        "Current parked push rows retaining uncertain custody.",
+        parked,
+        queue,
+    );
+    crate::gauge_record!(
+        "xmpp.push.queue.unresolved_failed",
+        "{job}",
+        "Failed push rows with known pre-send outcome and unsettled ancestry.",
+        unresolved_failed,
+        queue,
+    );
+    crate::gauge_record!(
+        "xmpp.push.queue.snapshot_at",
+        "s",
+        "Unix time of the last successful push queue snapshot.",
+        snapshot_at_seconds,
+        queue,
+    );
+}
+
+/// All retained provider rows consume the node cap, including terminal tails.
+/// Both replicas observe the same database; consumers must use max, never sum.
+pub fn record_push_provider_capacity(retained_max_per_node: u64, near_capacity_nodes: u64) {
+    crate::gauge_record!(
+        "xmpp.push.provider.retained_max_per_node",
+        "{job}",
+        "Largest retained provider queue on a single push node.",
+        retained_max_per_node,
+    );
+    crate::gauge_record!(
+        "xmpp.push.provider.near_capacity_nodes",
+        "{node}",
+        "Push nodes retaining at least ninety percent of their provider row cap.",
+        near_capacity_nodes,
+    );
+}
 
 use super::attributes::{
     IngressAliasOutcome, IngressDecisionClass, IngressEffectExecutionPhase, IngressGcOutcome,
@@ -313,9 +361,16 @@ pub fn register_reliability_counters() {
     add_push_outbox_dead_lettered(0);
     for reason in PushRetryReason::ALL {
         add_push_outbox_retry_scheduled(0, reason);
+        add_push_failure_reason(0, reason);
     }
     for reason in PushSuppressReason::ALL {
         add_push_suppressed(0, reason);
+    }
+    for class in super::attributes::PushFailureClass::ALL {
+        add_push_failure_class(0, class);
+    }
+    for disposition in super::attributes::PushDisposition::ALL {
+        add_push_disposition(0, disposition);
     }
     super::push_pipeline::register_pipeline_stages();
     super::call::register_call_setup_counters();
@@ -407,6 +462,54 @@ fn add_push_outbox_dead_lettered(count: u64) {
 pub fn increment_push_outbox_dead_lettered() {
     add_push_outbox_dead_lettered(1);
     super::push_pipeline::increment_dead_lettered();
+}
+
+fn add_push_disposition(count: u64, disposition: super::attributes::PushDisposition) {
+    crate::counter_add!(
+        "xmpp.push.disposition",
+        "{transition}",
+        "Push scheduling and custody dispositions.",
+        count,
+        disposition
+    );
+}
+
+fn add_push_failure_class(count: u64, class: super::attributes::PushFailureClass) {
+    crate::counter_add!(
+        "xmpp.push.failure_class",
+        "{notification}",
+        "Push failures by send certainty.",
+        count,
+        class
+    );
+}
+
+fn add_push_failure_reason(count: u64, reason: PushRetryReason) {
+    crate::counter_add!(
+        "xmpp.push.failure_reason",
+        "{notification}",
+        "Push failures by bounded cause.",
+        count,
+        reason
+    );
+}
+
+/// Record orthogonal dimensions separately to preserve the per-instrument
+/// cardinality budget. Structured logs retain their event-level correlation.
+pub fn increment_push_disposition(
+    reason: PushRetryReason,
+    class: super::attributes::PushFailureClass,
+    disposition: super::attributes::PushDisposition,
+) {
+    add_push_failure_reason(1, reason);
+    add_push_failure_class(1, class);
+    add_push_disposition(1, disposition);
+}
+
+/// Explicit administrative revocation is a custody transition, not evidence
+/// that a provider refused a send. Emit only after an actual state change.
+pub fn increment_push_registration_revoked() {
+    add_push_disposition(1, super::attributes::PushDisposition::RegistrationRevoked);
 }
 
 fn add_push_suppressed(count: u64, reason: PushSuppressReason) {

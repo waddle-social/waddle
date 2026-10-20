@@ -177,7 +177,10 @@ async fn postgres_notification_ancestry_fanout_coalescing_and_late_parent() {
     }
 }
 
-async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
+async fn notification_provider_binding_and_revocation(
+    fixture: IngressFixture,
+    known_failed_owner: bool,
+) {
     use crate::push_service::test_support::{
         apns_registration, fcm_registration, with_fake_apns, with_fake_fcm, FakeFcmSender,
         APNS_TEST_TOPIC, FCM_TEST_APP_ID,
@@ -190,12 +193,16 @@ async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
         crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
             .await
             .expect("registrations");
+    // Host registration retirement requires the exact service boundary.
+    let service: BareJid = "push.example.com".parse().expect("service");
     // Two nodes of one owner that both deliver: the victim is the
     // Android app (fake FCM), the other the Apple app (fake APNs).
     let push = with_fake_apns(with_fake_fcm(
-        DatabasePushServiceStore::new_with_secret_key(
+        DatabasePushServiceStore::new_with_secret_key_and_pubsub(
             fixture.db.clone(),
             &rand::random::<[u8; 32]>(),
+            service.clone(),
+            std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
         )
         .await
         .expect("push service"),
@@ -203,7 +210,6 @@ async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
     ));
     let candidate = candidate("provider-bound");
     let owner = candidate.recipient_bare_jid.clone();
-    let service: BareJid = "push.example.com".parse().expect("service");
     let victim = push
         .ensure_node(&owner, FCM_TEST_APP_ID)
         .await
@@ -313,9 +319,35 @@ async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
         1,
         "a wire publication cannot settle canonical custody even at the same tuple"
     );
+    if known_failed_owner {
+        // The known failed owner still has canonical custody, and the exact
+        // provider acceptance has not received its upstream completion ACK.
+        fixture.execute("UPDATE notification_outbox SET status = 'failed', queue_acceptance_may_exist = 0, last_error = 'historical-known-refusal', updated_at_ms = 41, published_at_ms = NULL WHERE job_id = ?", crate::db_params![claimed.job_id.as_str()]).await;
+        fixture.execute("UPDATE push_publish_jobs SET status = 'failed', uncertain_send = 0, terminal_disposition = NULL WHERE ancestry_job_id = ?", crate::db_params![claimed.job_id.as_str()]).await;
+    } else {
+        fixture.execute("UPDATE notification_outbox SET status = 'failed', queue_acceptance_may_exist = 1, published_at_ms = NULL WHERE job_id = ?", crate::db_params![claimed.job_id.as_str()]).await;
+    }
+    fixture
+        .execute(
+            "UPDATE push_publish_jobs SET upstream_completed = 0 WHERE ancestry_job_id = ?",
+            crate::db_params![claimed.job_id.as_str()],
+        )
+        .await;
     push.remove_registered_nodes_for_owner(&owner, service.as_str(), Some(victim.node()))
         .await
         .expect("revoke victim registration");
+    assert_eq!(
+        fixture
+            .count("push_publish_jobs WHERE ancestry_job_id IS NOT NULL AND upstream_completed = 1")
+            .await,
+        1,
+        "same-database explicit retirement acknowledges its exact canonical provider owner"
+    );
+    if known_failed_owner {
+        assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND queue_acceptance_may_exist = 0 AND last_error = 'historical-known-refusal' AND updated_at_ms = 41").await, 1, "provider settlement ACK must not rewrite the terminal owner's history or tail");
+    } else {
+        assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND queue_acceptance_may_exist = 0 AND last_error = 'registration-revoked'").await, 1);
+    }
     assert_eq!(
         fixture
             .count("ingress_effect_descendants WHERE settled_at IS NULL")
@@ -334,20 +366,32 @@ async fn notification_provider_binding_and_revocation(fixture: IngressFixture) {
             .count("push_publish_jobs WHERE ancestry_job_id IS NOT NULL AND status = 'failed'")
             .await,
         1,
-        "revocation records refusal rather than provider success or disappearing evidence"
+        "revocation retains explicit cancellation evidence without fabricating provider success"
     );
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn sqlite_notification_provider_binding_and_revocation() {
-    notification_provider_binding_and_revocation(IngressFixture::sqlite().await).await;
+    notification_provider_binding_and_revocation(IngressFixture::sqlite().await, false).await;
 }
 
 #[tokio::test]
 async fn postgres_notification_provider_binding_and_revocation() {
     if let Some(fixture) = IngressFixture::postgres("notification_binding").await {
-        notification_provider_binding_and_revocation(fixture).await;
+        notification_provider_binding_and_revocation(fixture, false).await;
+    }
+}
+
+#[tokio::test]
+async fn sqlite_known_failed_outbox_retirement_ack_preserves_terminal_history() {
+    notification_provider_binding_and_revocation(IngressFixture::sqlite().await, true).await;
+}
+
+#[tokio::test]
+async fn postgres_known_failed_outbox_retirement_ack_preserves_terminal_history() {
+    if let Some(fixture) = IngressFixture::postgres("known_failed_outbox_ack").await {
+        notification_provider_binding_and_revocation(fixture, true).await;
     }
 }
 
@@ -476,5 +520,414 @@ async fn sqlite_notification_lost_backing_marker_preserves_newer_wire() {
 async fn postgres_notification_lost_backing_marker_preserves_newer_wire() {
     if let Some(fixture) = IngressFixture::postgres("notification_version").await {
         notification_lost_backing_marker_preserves_newer_wire(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_parked_parent_contention_does_not_block_fresh_outbox_work() {
+    use crate::ingress_uow::EffectDescendantRepository;
+    use crate::notification_outbox::test_support::inbox_with_unread;
+    use crate::push_service::test_support::{
+        fcm_registration, with_fake_fcm, FakeFcmSender, FCM_TEST_APP_ID,
+    };
+    use crate::push_service::DatabasePushServiceStore;
+    use waddle_xmpp::push::{InMemoryPushStore, PushSubscription};
+    let Some(fixture) = IngressFixture::postgres("parked_outbox_fairness").await else {
+        return;
+    };
+    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let provider_db = Database::in_memory("parked-fairness-provider")
+        .await
+        .expect("provider db");
+    crate::push_registrations::DatabasePushRegistrationStore::new(provider_db.clone())
+        .await
+        .expect("registration schema");
+    let push = with_fake_fcm(
+        DatabasePushServiceStore::new_with_secret_key(provider_db, &rand::random::<[u8; 32]>())
+            .await
+            .expect("push"),
+        FakeFcmSender::default(),
+    );
+    let parked_candidate = candidate("parked-parent-contention");
+    let owner = parked_candidate.recipient_bare_jid.clone();
+    let service: BareJid = "push.example.com".parse().expect("service");
+    let node = push
+        .ensure_node(&owner, FCM_TEST_APP_ID)
+        .await
+        .expect("node");
+    push.upsert_device(&owner, fcm_registration("fairness-device", node.node()))
+        .await
+        .expect("device");
+    push.register_first_party_node_for_owner(&owner, service.as_str(), node.node(), None)
+        .await
+        .expect("registration");
+    let registrations = InMemoryPushStore::new();
+    registrations
+        .register(PushSubscription {
+            user_jid: owner.to_string(),
+            service_jid: service.to_string(),
+            node: Some(node.node().to_string()),
+            publish_options: None,
+            endpoint: None,
+            p256dh: None,
+            auth_key: None,
+        })
+        .await
+        .expect("user registration");
+    let target = NotificationOutboxTarget::new(
+        service.clone(),
+        PushServiceNodeName::new(node.node()).expect("node"),
+    );
+    let parent = attach(&fixture, &parked_candidate).await;
+    fanout(&outbox, &parked_candidate, std::slice::from_ref(&target)).await;
+    let parked = outbox
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("claim")
+        .remove(0);
+    let inbox = inbox_with_unread(&owner, &parked_candidate.conversation_jid, 1).await;
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    outbox
+        .publish_claimed_job(&parked, &push, &registrations, &inbox, &blocking, &service)
+        .await
+        .expect("canonical acceptance");
+    // The separate provider store can finish while the upstream owner retains
+    // custody after losing its acceptance reply and exhausting its budget.
+    push.drain_queued_notification_publish_jobs(1)
+        .await
+        .expect("provider completion");
+    fixture.execute("UPDATE notification_outbox SET status = 'failed', queue_acceptance_may_exist = 1, attempt_count = 5, published_at_ms = NULL WHERE job_id = ?", crate::db_params![parked.job_id.as_str()]).await;
+    let fresh = candidate("unrelated-fresh-owner");
+    attach(&fixture, &fresh).await;
+    fanout(&outbox, &fresh, &[target]).await;
+    let mut held_parent = fixture.db.begin().await.expect("hold parent");
+    EffectDescendantRepository::lock_raw(&mut held_parent, parent)
+        .await
+        .expect("parent lock");
+    let outcomes = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        outbox.drain_due_outbox_jobs(&push, &registrations, &inbox, &blocking, &service, 1),
+    )
+    .await
+    .expect("parked parent must not stall drain")
+    .expect("isolated parent contention");
+    assert!(
+        matches!(outcomes.as_slice(), [NotificationOutboxPublishOutcome::Published { job_id, .. }] if job_id != parked.job_id())
+    );
+    assert_eq!(
+        fixture
+            .count("notification_outbox WHERE status = 'failed' AND queue_acceptance_may_exist = 1")
+            .await,
+        1,
+        "contended parked custody stays intact"
+    );
+    held_parent.commit().await.expect("release parent");
+    let reconciled = outbox
+        .drain_due_outbox_jobs(&push, &registrations, &inbox, &blocking, &service, 1)
+        .await
+        .expect("reconcile after release");
+    assert!(
+        matches!(reconciled.as_slice(), [NotificationOutboxPublishOutcome::Published { job_id, .. }] if job_id == parked.job_id())
+    );
+    fixture.close().await;
+}
+
+// Production pruning deliberately fails fast after 100ms. Under test load,
+// retry only that bounded acquisition timeout; require a successful retention
+// check within a larger test deadline so a persistent fixture lock still fails.
+async fn prune_with_test_deadline(
+    outbox: &NotificationOutboxStore,
+) -> NotificationOutboxPruneOutcome {
+    tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            match outbox.prune_completed_before(i64::MAX, 16).await {
+                Ok(result) => break result,
+                Err(NotificationOutboxError::Ancestry(
+                    crate::ingress_uow::IngressUowError::Timeout,
+                )) => {}
+                Err(error) => panic!("retention check failed: {error}"),
+            }
+        }
+    })
+    .await
+    .expect("retention check must complete without a persistent lock")
+}
+
+async fn explicit_revocation_retires_parked_boundary_without_provider_row(
+    fixture: IngressFixture,
+    parent_contention: bool,
+) {
+    use crate::push_service::test_support::{fcm_registration, FCM_TEST_APP_ID};
+    use crate::push_service::DatabasePushServiceStore;
+    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+        .await
+        .expect("registration schema");
+    let service: BareJid = "push.example.com".parse().expect("service");
+    let push = DatabasePushServiceStore::new_with_secret_key_and_pubsub(
+        fixture.db.clone(),
+        &rand::random::<[u8; 32]>(),
+        service.clone(),
+        std::sync::Arc::new(waddle_xmpp::pubsub::InMemoryPubSubStorage::new()),
+    )
+    .await
+    .expect("push");
+    let notification = candidate("parked-before-provider-call");
+    let owner = notification.recipient_bare_jid.clone();
+    let node = push
+        .ensure_node(&owner, FCM_TEST_APP_ID)
+        .await
+        .expect("node");
+    push.upsert_device(&owner, fcm_registration("boundary-device", node.node()))
+        .await
+        .expect("device");
+    push.register_first_party_node_for_owner(&owner, service.as_str(), node.node(), None)
+        .await
+        .expect("registration");
+    let parent = attach(&fixture, &notification).await;
+    fanout(
+        &outbox,
+        &notification,
+        &[NotificationOutboxTarget::new(
+            service.clone(),
+            PushServiceNodeName::new(node.node()).expect("node"),
+        )],
+    )
+    .await;
+    let job = outbox
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("claim")
+        .remove(0);
+    let payload = job
+        .to_xep0357_pubsub_item()
+        .payload
+        .expect("frozen payload");
+    // Crash after freezing and persisting acceptance uncertainty, before the
+    // first provider call. Exhaustion parks custody without any queue proof.
+    fixture.execute("UPDATE notification_outbox SET status = 'failed', queue_acceptance_may_exist = 1, approved_payload_xml = ?, attempt_count = 5, claimed_at_ms = NULL, claim_token = NULL WHERE job_id = ?", crate::db_params![String::from(&payload), job.job_id.as_str()]).await;
+    assert_eq!(fixture.count("push_publish_jobs").await, 0);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1
+    );
+    assert_eq!(
+        push.remove_registered_nodes_for_owner(&owner, "other-push.example.com", None)
+            .await
+            .expect("other service"),
+        0
+    );
+    assert_eq!(
+        fixture
+            .count("notification_outbox WHERE queue_acceptance_may_exist = 1")
+            .await,
+        1,
+        "a different service has no retirement authority"
+    );
+    assert_eq!(prune_with_test_deadline(&outbox).await.jobs_deleted, 0);
+    if parent_contention {
+        use crate::ingress_uow::EffectDescendantRepository;
+        // This lower-sorted active job is tentatively retired before the
+        // contended parent. The failed disable must roll back both jobs.
+        fixture.execute("INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, queue_acceptance_may_exist, created_at_ms, updated_at_ms) SELECT '00000000-0000-4000-8000-000000000001', recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, 'queued', 0, 0, 0, 1, 1 FROM notification_outbox WHERE job_id = ?", crate::db_params![job.job_id.as_str()]).await;
+        let mut held = fixture.db.begin().await.expect("hold canonical parent");
+        EffectDescendantRepository::lock_raw(&mut held, parent)
+            .await
+            .expect("parent lock");
+        let failure = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            push.remove_registered_nodes_for_owner(&owner, service.as_str(), Some(node.node())),
+        )
+        .await
+        .expect("NOWAIT retirement is bounded");
+        assert!(
+            failure.is_err(),
+            "parent contention must abort the entire explicit disable"
+        );
+        assert_eq!(
+            fixture.count("push_registrations").await,
+            1,
+            "registration removal rolled back"
+        );
+        assert_eq!(
+            fixture.count("push_nodes WHERE status = 'active'").await,
+            1,
+            "node disable rolled back"
+        );
+        assert_eq!(fixture.count("notification_outbox WHERE job_id = '00000000-0000-4000-8000-000000000001' AND status = 'queued' AND last_error IS NULL AND updated_at_ms = 1").await, 1, "earlier outbox retirement rolled back");
+        assert_eq!(
+            fixture
+                .count("notification_outbox WHERE queue_acceptance_may_exist = 1")
+                .await,
+            1
+        );
+        held.commit().await.expect("release parent");
+        fixture.execute("DELETE FROM notification_outbox WHERE job_id = '00000000-0000-4000-8000-000000000001'", ()).await;
+        assert_eq!(
+            push.remove_registered_nodes_for_owner(&owner, service.as_str(), Some(node.node()))
+                .await
+                .expect("retry explicit disable after contention"),
+            1
+        );
+    } else {
+        // Lost registration metadata does not invalidate the explicit owner's
+        // service-wide retirement request; no live node list is required.
+        fixture.execute("DELETE FROM push_registrations", ()).await;
+        assert_eq!(
+            push.remove_registered_nodes_for_owner(&owner, service.as_str(), None)
+                .await
+                .expect("explicit revocation with empty registration list"),
+            0
+        );
+    }
+    assert_eq!(fixture.count("notification_outbox WHERE status = 'failed' AND queue_acceptance_may_exist = 0 AND last_error = 'registration-revoked' AND claim_token IS NULL").await, 1);
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .count("notification_outbox_lineage WHERE settled_at_ms IS NULL")
+            .await,
+        0
+    );
+    let mut rows = outbox
+        .query(
+            "SELECT approved_payload_xml FROM notification_outbox WHERE job_id = ?",
+            crate::db_params![job.job_id.as_str()],
+        )
+        .await
+        .expect("retained evidence");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row")
+            .expect("outbox")
+            .get::<String>(0)
+            .expect("payload"),
+        String::from(&payload)
+    );
+    drop(rows);
+    assert_eq!(prune_with_test_deadline(&outbox).await.jobs_deleted, 0);
+    fixture
+        .execute(
+            "UPDATE notification_outbox SET updated_at_ms = 42 WHERE job_id = ?",
+            crate::db_params![job.job_id.as_str()],
+        )
+        .await;
+    push.remove_registered_nodes_for_owner(&owner, service.as_str(), None)
+        .await
+        .expect("idempotent explicit revocation");
+    assert_eq!(fixture.count("notification_outbox WHERE updated_at_ms = 42 AND last_error = 'registration-revoked'").await, 1, "repeated retirement must not restart the evidence retention tail");
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_explicit_revocation_retires_parked_boundary_without_provider_row() {
+    explicit_revocation_retires_parked_boundary_without_provider_row(
+        IngressFixture::sqlite().await,
+        false,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_explicit_revocation_retires_parked_boundary_without_provider_row() {
+    if let Some(fixture) = IngressFixture::postgres("parked_boundary_revocation").await {
+        explicit_revocation_retires_parked_boundary_without_provider_row(fixture, false).await;
+    }
+}
+
+#[tokio::test]
+async fn postgres_outbox_parent_contention_rolls_back_explicit_disable_and_allows_retry() {
+    if let Some(fixture) = IngressFixture::postgres("outbox_retirement_atomicity").await {
+        explicit_revocation_retires_parked_boundary_without_provider_row(fixture, true).await;
+    }
+}
+
+async fn explicit_retirement_only_rewrites_failed_jobs_with_outstanding_custody(
+    fixture: IngressFixture,
+) {
+    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox");
+    let target = target_named("known-failure-retirement");
+    let notification = candidate("known-failure-canonical-custody");
+    attach(&fixture, &notification).await;
+    fanout(&outbox, &notification, std::slice::from_ref(&target)).await;
+    fixture.execute("UPDATE notification_outbox SET status = 'failed', last_error = 'original-known-refusal', updated_at_ms = 37", ()).await;
+    // A known refusal with unresolved canonical/lineage custody is still a
+    // live obligation even though its scheduler row already says failed.
+    let mut tx = fixture.db.begin_immediate().await.expect("retirement");
+    let retired = retire_registration_outbox_tx(
+        &mut tx,
+        &notification.recipient_bare_jid,
+        Some(&target.push_service_jid),
+        Some(target.node.as_str()),
+    )
+    .await
+    .expect("retire outstanding known failure");
+    assert_eq!(retired, 1);
+    tx.commit().await.expect("commit");
+    assert_eq!(
+        fixture
+            .count("notification_outbox WHERE last_error = 'registration-revoked'")
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        0
+    );
+    assert_eq!(
+        fixture
+            .count("notification_outbox_lineage WHERE settled_at_ms IS NULL")
+            .await,
+        0
+    );
+    // Once custody is settled, preserve the historic diagnosis and tail for
+    // every later endpoint retirement, including non-revocation diagnoses.
+    fixture.execute("UPDATE notification_outbox SET last_error = 'historical-known-refusal', updated_at_ms = 41", ()).await;
+    let mut tx = fixture
+        .db
+        .begin_immediate()
+        .await
+        .expect("repeat retirement");
+    let retired = retire_registration_outbox_tx(
+        &mut tx,
+        &notification.recipient_bare_jid,
+        Some(&target.push_service_jid),
+        None,
+    )
+    .await
+    .expect("preserve settled history");
+    assert_eq!(retired, 0, "settled history is not a new retirement");
+    tx.commit().await.expect("commit");
+    assert_eq!(fixture.count("notification_outbox WHERE last_error = 'historical-known-refusal' AND updated_at_ms = 41").await, 1);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_retirement_preserves_settled_failure_history() {
+    explicit_retirement_only_rewrites_failed_jobs_with_outstanding_custody(
+        IngressFixture::sqlite().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_retirement_preserves_settled_failure_history() {
+    if let Some(fixture) = IngressFixture::postgres("outbox_terminal_history").await {
+        explicit_retirement_only_rewrites_failed_jobs_with_outstanding_custody(fixture).await;
     }
 }

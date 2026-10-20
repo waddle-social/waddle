@@ -335,6 +335,7 @@ async fn uncertain_publish_job_survives_reopen_and_retries_after_lease_recovery(
         db_params![acceptance_id.clone()],
     )
     .await;
+    let recovery_started = chrono::Utc::now().timestamp_millis();
     assert!(
         reopened
             .drain_queued_notification_publish_jobs(16)
@@ -343,6 +344,27 @@ async fn uncertain_publish_job_survives_reopen_and_retries_after_lease_recovery(
             .is_empty(),
         "lease recovery schedules retry backoff before another provider attempt"
     );
+    let recovery_finished = chrono::Utc::now().timestamp_millis();
+    let mut recovery_rows = query(
+        &reopened,
+        "SELECT attempt_count, next_retry_at_ms FROM push_publish_jobs WHERE job_id = ?",
+        db_params![acceptance_id.clone()],
+    )
+    .await;
+    let recovery_row = recovery_rows
+        .next()
+        .await
+        .expect("row")
+        .expect("recovered lease");
+    assert_eq!(
+        recovery_row
+            .get::<i64>(0)
+            .expect("completed failed attempts"),
+        1
+    );
+    let retry_at = recovery_row.get::<i64>(1).expect("persisted backoff");
+    assert!((recovery_started + 45_000..=recovery_finished + 75_000).contains(&retry_at));
+    drop(recovery_rows);
     let recovered = reopened
         .queued_publish_jobs()
         .await

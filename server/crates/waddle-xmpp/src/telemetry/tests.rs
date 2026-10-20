@@ -11,6 +11,132 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 #[tokio::test]
+async fn push_registration_revocation_is_not_a_provider_failure() {
+    let guard = test_support::acquire().await;
+    super::reliability::register_reliability_counters();
+    super::reliability::increment_push_registration_revoked();
+
+    assert_eq!(
+        guard.counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")]
+        ),
+        Some(1),
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.disposition"),
+        Some("{transition}".into())
+    );
+    assert_eq!(guard.counter_sum("xmpp.push.failure_class", &[]), Some(0));
+    assert_eq!(
+        guard.counter_sum(
+            "xmpp.push.failure_class",
+            &[("failure_class", "proven_refusal")]
+        ),
+        Some(0)
+    );
+    assert_eq!(guard.counter_sum("xmpp.push.failure_reason", &[]), Some(0));
+}
+
+#[tokio::test]
+async fn push_queue_gauges_export_current_state_including_recovery_to_zero() {
+    use super::attributes::PushQueue;
+    use super::reliability::{record_push_provider_capacity, record_push_queue_snapshot};
+
+    let guard = test_support::acquire().await;
+    assert_eq!(guard.gauge_samples("xmpp.push.queue.parked"), None);
+    record_push_queue_snapshot(PushQueue::Provider, 8, 2, 100);
+    record_push_queue_snapshot(PushQueue::Outbox, 3, 1, 101);
+    record_push_provider_capacity(9_000, 1);
+    // The real-translator test consumes this same fixture. Bind its units and
+    // sample shapes to production instruments, rather than a synthetic copy.
+    let contract: serde_json::Value =
+        serde_json::from_str(include_str!("push_gauge_contract.json"))
+            .expect("gauge contract JSON");
+    let entries = contract.as_array().expect("gauge contracts");
+    assert_eq!(entries.len(), 5);
+    for entry in entries {
+        let name = entry["name"].as_str().expect("instrument name");
+        let unit = entry["unit"].as_str().expect("instrument unit");
+        assert_eq!(guard.metric_unit(name).as_deref(), Some(unit), "{name}");
+        let expected_attributes = entry["attributes"].as_object().expect("attributes");
+        assert!(
+            guard
+                .gauge_samples(name)
+                .expect("exported gauge")
+                .iter()
+                .any(|(_, attrs)| {
+                    attrs.len() == expected_attributes.len()
+                        && attrs.iter().all(|(key, value)| {
+                            expected_attributes
+                                .get(key)
+                                .and_then(serde_json::Value::as_str)
+                                == Some(value.as_str())
+                        })
+                }),
+            "{name} fixture attributes must match a real exported sample"
+        );
+    }
+    assert_eq!(
+        guard.gauge_samples("xmpp.push.provider.retained_max_per_node"),
+        Some(vec![(9_000, vec![])])
+    );
+    assert_eq!(
+        guard
+            .gauge_samples("xmpp.push.queue.parked")
+            .map(|mut samples| {
+                samples.sort_by(|a, b| a.1.cmp(&b.1));
+                samples
+            }),
+        Some(vec![
+            (3, vec![("queue".into(), "outbox".into())]),
+            (8, vec![("queue".into(), "provider".into())]),
+        ])
+    );
+
+    record_push_queue_snapshot(PushQueue::Provider, 0, 0, 200);
+    record_push_queue_snapshot(PushQueue::Outbox, 0, 0, 201);
+    record_push_provider_capacity(0, 0);
+    for name in [
+        "xmpp.push.queue.parked",
+        "xmpp.push.queue.unresolved_failed",
+    ] {
+        let samples = guard.gauge_samples(name).expect("gauge samples");
+        assert_eq!(samples.len(), 2);
+        assert!(samples
+            .iter()
+            .all(|(value, attrs)| *value == 0 && attrs.len() == 1 && attrs[0].0 == "queue"));
+        assert_eq!(guard.metric_unit(name), Some("{job}".into()));
+        assert_eq!(guard.counter_sum(name, &[]), None);
+    }
+    assert_eq!(
+        guard.gauge_samples("xmpp.push.provider.retained_max_per_node"),
+        Some(vec![(0, vec![])])
+    );
+    assert_eq!(
+        guard.gauge_samples("xmpp.push.provider.near_capacity_nodes"),
+        Some(vec![(0, vec![])])
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.provider.retained_max_per_node"),
+        Some("{job}".into())
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.provider.near_capacity_nodes"),
+        Some("{node}".into())
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.queue.snapshot_at"),
+        Some("s".into())
+    );
+    let timestamps = guard
+        .gauge_samples("xmpp.push.queue.snapshot_at")
+        .expect("timestamps");
+    assert!(timestamps.contains(&(200, vec![("queue".into(), "provider".into())])));
+    assert!(timestamps.contains(&(201, vec![("queue".into(), "outbox".into())])));
+}
+
+#[tokio::test]
 async fn observed_claim_store_exports_one_sample_per_external_operation() {
     use crate::ownership::{
         verify_resume_identity, ClaimStore, Entity, EntityType, ExactReleaseOutcome,
@@ -533,5 +659,75 @@ fn attribute_enums_expose_stable_keys_and_values() {
     assert_eq!(
         CallControlRateLimitedSurface::MujiAction.value(),
         "muji_action"
+    );
+}
+
+#[tokio::test]
+async fn classified_outbox_transitions_export_only_allowlisted_reasons() {
+    use super::attributes::{PushDisposition, PushFailureClass, PushRetryReason};
+    let guard = test_support::acquire().await;
+    for reason in PushRetryReason::ALL {
+        super::reliability::increment_push_outbox_retry_scheduled(reason);
+        super::reliability::increment_push_disposition(
+            reason,
+            PushFailureClass::PreSend,
+            PushDisposition::DeadLetter,
+        );
+    }
+    for reason in PushRetryReason::ALL {
+        assert_eq!(
+            guard.counter_sum(
+                "xmpp.push.outbox_retry_scheduled",
+                &[("reason", reason.as_str())]
+            ),
+            Some(1)
+        );
+        assert_eq!(
+            guard.counter_sum("xmpp.push.failure_reason", &[("reason", reason.as_str())]),
+            Some(1)
+        );
+    }
+    assert_eq!(
+        guard.counter_sum("xmpp.push.failure_class", &[("failure_class", "pre_send")]),
+        Some(17)
+    );
+    assert_eq!(
+        guard.counter_sum("xmpp.push.disposition", &[("disposition", "dead_letter")]),
+        Some(17)
+    );
+    for (metric, key) in [
+        ("xmpp.push.disposition", "disposition"),
+        ("xmpp.push.failure_class", "failure_class"),
+        ("xmpp.push.failure_reason", "reason"),
+    ] {
+        for (_, attributes) in guard.counter_samples(metric).expect("exported samples") {
+            assert_eq!(attributes.len(), 1, "bounded independent metric dimension");
+            assert_eq!(attributes[0].0, key);
+        }
+    }
+}
+
+#[tokio::test]
+async fn capacity_backpressure_exports_separately_from_accepted_work() {
+    use super::attributes::{PushDisposition, PushFailureClass, PushRetryReason};
+    let guard = test_support::acquire().await;
+    super::reliability::increment_push_disposition(
+        PushRetryReason::Capacity,
+        PushFailureClass::PreSend,
+        PushDisposition::Backpressure,
+    );
+    assert_eq!(
+        guard.counter_sum("xmpp.push.disposition", &[("disposition", "backpressure")]),
+        Some(1)
+    );
+    assert_eq!(
+        guard
+            .counter_sum("xmpp.push.disposition", &[("disposition", "dead_letter")])
+            .unwrap_or(0),
+        0
+    );
+    assert_eq!(
+        guard.counter_sum("xmpp.push.failure_reason", &[("reason", "capacity")]),
+        Some(1)
     );
 }

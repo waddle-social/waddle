@@ -1,10 +1,10 @@
-//! Create-at-increment OTel metrics — the single convention for new
+//! Create-at-use OTel metrics — the single convention for new
 //! Waddle metrics (spec #1323, foundation #1325).
 //!
 //! # Convention
 //!
 //! - **Creation and use are the same act.** The only way to emit a
-//!   metric is [`counter_add!`] / [`histogram_record!`]; the first
+//!   metric is [`counter_add!`] / [`histogram_record!`] / [`gauge_record!`]; the first
 //!   invocation lazily creates the instrument behind a `OnceLock`.
 //!   There is no standalone registration API, so a
 //!   registered-but-never-wired metric cannot exist by construction.
@@ -46,6 +46,11 @@
 //! must stay unregistered — a flat-zero series would hold that alert
 //! permanently firing. New counter, new alert: decide which kind it is.
 //!
+//! Current-state queue inventories use synchronous gauges through
+//! [`gauge_record!`]. Record every successful snapshot, including zero;
+//! preserve the last value on read failure and publish the last successful
+//! snapshot time separately. Never register a fabricated empty snapshot.
+//!
 //! # Cardinality budget
 //!
 //! Every attribute is a closed enum defined in [`attributes`]; adding
@@ -62,7 +67,7 @@
 //! # Initialization order
 //!
 //! Instruments bind to the **global meter provider live at their
-//! first increment** and are then cached for the process lifetime.
+//! first use** and are then cached for the process lifetime.
 //! `waddle-server` installs the OTLP provider in `telemetry::init()`
 //! as the first act of `main`, before any increment can run; keep it
 //! that way — an increment that races ahead of `init()` binds to the
@@ -91,7 +96,7 @@ mod tests;
 /// expansions, which may live in downstream crates.
 #[doc(hidden)]
 pub mod __export {
-    pub use opentelemetry::metrics::{Counter, Histogram};
+    pub use opentelemetry::metrics::{Counter, Gauge, Histogram};
     pub use opentelemetry::KeyValue;
     pub use std::sync::OnceLock;
 }
@@ -268,6 +273,30 @@ macro_rules! counter_add {
                     .build()
             })
             .add($value, attributes);
+    }};
+}
+
+/// Record the latest `u64` state, creating the gauge on first use.
+/// Same compile-time naming and sealed attribute rules as [`counter_add!`].
+#[macro_export]
+macro_rules! gauge_record {
+    ($name:literal, $unit:literal, $desc:literal, $value:expr $(, $attr:expr)* $(,)?) => {{
+        const _VALIDATED: &str = $crate::telemetry::validate_metric_name($name);
+        static INSTRUMENT: $crate::telemetry::__export::OnceLock<
+            $crate::telemetry::__export::Gauge<u64>,
+        > = $crate::telemetry::__export::OnceLock::new();
+        let attributes: &[$crate::telemetry::__export::KeyValue] = &[
+            $($crate::telemetry::attributes::MetricAttribute::key_value(&$attr)),*
+        ];
+        INSTRUMENT
+            .get_or_init(|| {
+                $crate::telemetry::meter()
+                    .u64_gauge($name)
+                    .with_unit($unit)
+                    .with_description($desc)
+                    .build()
+            })
+            .record($value, attributes);
     }};
 }
 

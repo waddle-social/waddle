@@ -106,3 +106,16 @@ The suite covers normal live unresolved attempts, flat aged obligations, the
 age threshold and hold/reset/resolution, primary failover, missing age telemetry,
 and independent per-kind backlog growth. Run it when changing ingress alerts;
 the existing PR pipeline lints rule syntax but does not run these behavioral tests.
+
+The runner also evaluates `tests/push.test.yaml`. To verify the Rust-exported
+push gauge units through a real OTLP receiver and the same recording rules,
+run with Python 3 and an existing Prometheus 3.x binary:
+
+```sh
+PROMETHEUS_BIN=/path/to/prometheus sh rules/tests/run.sh
+```
+
+This contract uses annotation count units and checks the translated series and
+recording aliases. A dimensionless-unit control must produce `_ratio`, which
+guards against bypassing translation. No tools are downloaded or cloud writes
+performed. Check the actual Grafana/Mimir series again after deployment.

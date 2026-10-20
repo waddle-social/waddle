@@ -7,7 +7,130 @@ const MAX_OUTBOX_ATTEMPTS: i64 = 5;
 const BASE_RETRY_DELAY_MS: i64 = 5_000;
 const BASE_POLICY_RETRY_DELAY_MS: i64 = 60_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
+const BASE_UNCERTAIN_RETRY_DELAY_MS: i64 = 300_000;
+const MAX_UNCERTAIN_RETRY_DELAY_MS: i64 = 3_600_000;
 pub(super) const OUTBOX_CLAIM_TIMEOUT_MS: i64 = 300_000;
+
+/// Closed classification propagated through every publish retry/failure path.
+/// Diagnostic error values are logged at their source, never used as labels.
+#[derive(Debug, Clone, Copy, Error)]
+enum PublishFailureClass {
+    #[error("notification storage failed")]
+    Storage,
+    #[error("blocking policy lookup failed")]
+    PolicyLookup,
+    #[error("registration lookup failed")]
+    RegistrationLookup,
+    #[error("inbox lookup failed")]
+    InboxLookup,
+    #[error("non-first-party notification target")]
+    InvalidTarget,
+    #[error("recipient blocked notification sender")]
+    Blocked,
+    #[error("registration is no longer active")]
+    RegistrationGone,
+    #[error("notification claim is no longer current")]
+    ClaimLost,
+    #[error("queue invocation was refused")]
+    QueueRefused,
+    #[error("queue invocation acceptance is unknown")]
+    QueueUnknown,
+    #[error("malformed notification job")]
+    Malformed,
+    #[error("unclassified notification failure")]
+    Unknown,
+}
+
+impl PublishFailureClass {
+    fn reason(self) -> waddle_xmpp::telemetry::attributes::PushRetryReason {
+        use waddle_xmpp::telemetry::attributes::PushRetryReason as Reason;
+        match self {
+            Self::Storage => Reason::Storage,
+            Self::PolicyLookup => Reason::PolicyLookup,
+            Self::RegistrationLookup => Reason::RegistrationLookup,
+            Self::InboxLookup => Reason::InboxLookup,
+            Self::InvalidTarget => Reason::InvalidTarget,
+            Self::Blocked => Reason::Blocked,
+            Self::RegistrationGone => Reason::RegistrationGone,
+            Self::ClaimLost => Reason::ClaimLost,
+            Self::QueueRefused => Reason::QueueRefused,
+            Self::QueueUnknown => Reason::QueueUnknown,
+            Self::Malformed => Reason::Malformed,
+            Self::Unknown => Reason::Unknown,
+        }
+    }
+
+    fn with_error(self, error: impl std::fmt::Display) -> PublishFailure {
+        PublishFailure {
+            class: self,
+            diagnostic: error.to_string(),
+        }
+    }
+}
+
+/// Human diagnostic text stays attached to a typed failure until the durable
+/// transition log. Only its closed class enters storage and metrics.
+#[derive(Debug, Error)]
+#[error("{diagnostic}")]
+struct PublishFailure {
+    class: PublishFailureClass,
+    diagnostic: String,
+}
+
+impl From<PublishFailureClass> for PublishFailure {
+    fn from(class: PublishFailureClass) -> Self {
+        class.with_error(class)
+    }
+}
+
+impl PublishFailure {
+    fn from_store_error(error: &NotificationOutboxError) -> Self {
+        let class = match error {
+            NotificationOutboxError::Inbox(_) => PublishFailureClass::InboxLookup,
+            NotificationOutboxError::Blocking(_) => PublishFailureClass::PolicyLookup,
+            NotificationOutboxError::Database(_) | NotificationOutboxError::Ancestry(_) => {
+                PublishFailureClass::Storage
+            }
+            NotificationOutboxError::Push(_) => PublishFailureClass::QueueUnknown,
+            _ => PublishFailureClass::Malformed,
+        };
+        class.with_error(error)
+    }
+}
+
+fn record_failure_transition(
+    job_id: &str,
+    notification_class: &str,
+    failure: &PublishFailure,
+    terminal: bool,
+    uncertain: bool,
+) {
+    use waddle_xmpp::telemetry::attributes::{PushDisposition, PushFailureClass};
+    let reason = failure.class.reason();
+    let class = match failure.class {
+        PublishFailureClass::QueueUnknown => PushFailureClass::UnknownAfterSend,
+        PublishFailureClass::ClaimLost if uncertain => PushFailureClass::UnknownAfterSend,
+        PublishFailureClass::QueueRefused => PushFailureClass::ProvenRefusal,
+        _ => PushFailureClass::PreSend,
+    };
+    let disposition = match (terminal, uncertain) {
+        (true, true) => PushDisposition::Parked,
+        (true, false) => PushDisposition::DeadLetter,
+        (false, _) => PushDisposition::Retry,
+    };
+    if disposition == PushDisposition::DeadLetter {
+        waddle_xmpp::telemetry::reliability::increment_push_outbox_dead_lettered();
+    } else if disposition == PushDisposition::Retry {
+        waddle_xmpp::telemetry::reliability::increment_push_outbox_retry_scheduled(reason);
+    }
+    waddle_xmpp::telemetry::reliability::increment_push_disposition(reason, class, disposition);
+    let push_stage = match disposition {
+        PushDisposition::Retry => "retry_scheduled",
+        PushDisposition::Parked => "parked",
+        _ => "dead_lettered",
+    };
+    tracing::warn!(job_id, notification_class, push_stage, failure = reason.as_str(), failure_class = class.as_str(), custody_uncertain = uncertain, disposition = disposition.as_str(), error = %failure, "push pipeline transition");
+}
 
 impl NotificationOutboxStore {
     pub async fn pending_outbox_jobs(
@@ -117,12 +240,24 @@ impl NotificationOutboxStore {
 
         let mut claimed = Vec::new();
         for job in selected {
+            if job.status == NotificationOutboxStatus::InProgress
+                && job
+                    .attempt_count
+                    .saturating_add(job.policy_error_count)
+                    .saturating_add(1)
+                    >= MAX_OUTBOX_ATTEMPTS
+            {
+                self.schedule_retry_or_fail_with_failure(&job, PublishFailureClass::ClaimLost)
+                    .await?;
+                continue;
+            }
             let claim_token = uuid::Uuid::new_v4().to_string();
             let affected = self
                 .execute(
                     r#"
                     UPDATE notification_outbox
-                    SET status = ?,
+                    SET attempt_count = attempt_count + CASE WHEN status = 'in-progress' THEN 1 ELSE 0 END,
+                        status = ?,
                         claimed_at_ms = ?,
                         claim_token = ?,
                         updated_at_ms = ?
@@ -160,7 +295,20 @@ impl NotificationOutboxStore {
                     crate::db_params![job.job_id.as_str(), STATUS_IN_PROGRESS, claim_token],
                 ).await?;
                 if let Some(row) = rows.next().await? {
-                    claimed.push(decode_outbox_job(&row)?);
+                    let claimed_job = decode_outbox_job(&row)?;
+                    if claimed_job
+                        .attempt_count
+                        .saturating_add(claimed_job.policy_error_count)
+                        >= MAX_OUTBOX_ATTEMPTS
+                    {
+                        self.schedule_retry_or_fail_with_failure(
+                            &claimed_job,
+                            PublishFailureClass::ClaimLost,
+                        )
+                        .await?;
+                    } else {
+                        claimed.push(claimed_job);
+                    }
                 }
             }
         }
@@ -218,6 +366,7 @@ impl NotificationOutboxStore {
             }
             Err(error) => error,
         };
+        tracing::warn!(%error, "malformed notification outbox job");
         let uncertain = current.get::<i64>(19)? != 0;
         // Any parent discovered after acquiring the child lock is taken NOWAIT.
         // A conflicting late attachment aborts this disposition without settling.
@@ -227,7 +376,7 @@ impl NotificationOutboxStore {
         }
         let changed = tx.execute(
             "UPDATE notification_outbox SET status = ?, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status = ? AND (claim_token = ? OR (claim_token IS NULL AND ? = 0))",
-            crate::db_params![STATUS_FAILED, format!("malformed notification outbox job: {error}"), now_ms, job_id.as_str(), status.as_str(), token.as_deref(), i64::from(token.is_some())],
+            crate::db_params![STATUS_FAILED, PublishFailureClass::Malformed.reason().as_str(), now_ms, job_id.as_str(), status.as_str(), token.as_deref(), i64::from(token.is_some())],
         ).await?;
         // Failed + uncertain is a parked quarantine, not provider refusal.
         // Its frozen bytes and unresolved custody survive until verified disposition.
@@ -235,6 +384,15 @@ impl NotificationOutboxStore {
             settle_outbox_if_unowned_tx(&mut tx, &job_id).await?;
         }
         tx.commit().await?;
+        if changed > 0 {
+            record_failure_transition(
+                &job_id,
+                "malformed",
+                &PublishFailureClass::Malformed.with_error(&error),
+                true,
+                uncertain,
+            );
+        }
         Ok(())
     }
 
@@ -263,8 +421,12 @@ impl NotificationOutboxStore {
             {
                 Ok(outcome) => outcome,
                 Err(error) => {
-                    self.retry_or_fail_outcome_for_claimed_job(&job, error.to_string())
-                        .await?
+                    tracing::warn!(job_id = job.job_id.as_str(), %error, "notification publish failed");
+                    self.retry_or_fail_outcome_for_claimed_job(
+                        &job,
+                        PublishFailure::from_store_error(&error),
+                    )
+                    .await?
                 }
             };
             // #531 push-pipeline observability: bucket the typed
@@ -283,24 +445,8 @@ impl NotificationOutboxStore {
                         "push pipeline transition"
                     );
                 }
-                NotificationOutboxPublishOutcome::RetryScheduled { .. } => {
-                    waddle_xmpp::telemetry::reliability::increment_push_outbox_retry_scheduled(
-                        waddle_xmpp::telemetry::attributes::PushRetryReason::Unknown,
-                    );
-                    tracing::warn!(
-                        notification_class = job.class().as_db_value(),
-                        push_stage = "retry_scheduled",
-                        "push pipeline transition"
-                    );
-                }
-                NotificationOutboxPublishOutcome::Failed { .. } => {
-                    waddle_xmpp::telemetry::reliability::increment_push_outbox_dead_lettered();
-                    tracing::warn!(
-                        notification_class = job.class().as_db_value(),
-                        push_stage = "dead_lettered",
-                        "push pipeline transition"
-                    );
-                }
+                NotificationOutboxPublishOutcome::RetryScheduled { .. }
+                | NotificationOutboxPublishOutcome::Failed { .. } => {}
                 NotificationOutboxPublishOutcome::Suppressed { .. } => {
                     tracing::info!(
                         notification_class = job.class().as_db_value(),
@@ -314,6 +460,15 @@ impl NotificationOutboxStore {
                 }
             }
             outcomes.push(outcome);
+        }
+        // Terminal-only housekeeping never blocks ordinary due work. A parked
+        // owner's storage/proof contention must remain isolated to that owner.
+        match self
+            .reconcile_parked_outbox_jobs(push_service, batch_size)
+            .await
+        {
+            Ok(completed) => outcomes.extend(completed),
+            Err(error) => tracing::warn!(%error, "parked notification reconciliation scan failed"),
         }
         Ok(outcomes)
     }
@@ -368,10 +523,7 @@ impl NotificationOutboxStore {
 
         if job.push_service_jid() != first_party_service_jid {
             if self
-                .mark_job_failed(
-                    job,
-                    "notification outbox job targets a non-first-party XEP-0357 Push Service",
-                )
+                .mark_job_failed_with_failure(job, PublishFailureClass::InvalidTarget)
                 .await?
             {
                 return Ok(NotificationOutboxPublishOutcome::Failed {
@@ -379,18 +531,14 @@ impl NotificationOutboxStore {
                 });
             }
             return self
-                .retry_or_fail_outcome_for_claimed_job(
-                    job,
-                    "notification outbox job targets a non-first-party XEP-0357 Push Service"
-                        .to_string(),
-                )
+                .retry_or_fail_outcome_for_claimed_job(job, PublishFailureClass::InvalidTarget)
                 .await;
         }
 
         match xep0191_blocks_notification_job(job, blocking_storage).await {
             Ok(true) => {
                 if self
-                    .mark_job_failed(job, "recipient blocked sender before XEP-0357 publish")
+                    .mark_job_failed_with_failure(job, PublishFailureClass::Blocked)
                     .await?
                 {
                     return Ok(NotificationOutboxPublishOutcome::Failed {
@@ -398,18 +546,16 @@ impl NotificationOutboxStore {
                     });
                 }
                 return self
-                    .retry_or_fail_outcome_for_claimed_job(
-                        job,
-                        "recipient blocked sender before XEP-0357 publish".to_string(),
-                    )
+                    .retry_or_fail_outcome_for_claimed_job(job, PublishFailureClass::Blocked)
                     .await;
             }
             Ok(false) => {}
             Err(error) => {
+                tracing::warn!(job_id = job.job_id.as_str(), failure = "policy_lookup", %error, "XEP-0191 blocklist load failed");
                 return self
                     .defer_claimed_job_without_attempt(
                         job,
-                        format!("XEP-0191 blocklist load failed: {error}"),
+                        PublishFailureClass::PolicyLookup.with_error(&error),
                     )
                     .await;
             }
@@ -417,12 +563,17 @@ impl NotificationOutboxStore {
 
         let registrations = push_store
             .get_for_user(&job.recipient_bare_jid.to_string())
-            .await
-            .map_err(|error| error.to_string());
+            .await;
         let registrations = match registrations {
             Ok(registrations) => registrations,
             Err(error) => {
-                return self.retry_or_fail_outcome_for_claimed_job(job, error).await;
+                tracing::warn!(job_id = job.job_id.as_str(), failure = "registration_lookup", %error, "notification registration lookup failed");
+                return self
+                    .retry_or_fail_outcome_for_claimed_job(
+                        job,
+                        PublishFailureClass::RegistrationLookup.with_error(&error),
+                    )
+                    .await;
             }
         };
         let service = job.push_service_jid.to_string();
@@ -432,7 +583,7 @@ impl NotificationOutboxStore {
         });
         let Some(registration) = registration else {
             if self
-                .mark_job_failed(job, "first-party XEP-0357 registration is no longer active")
+                .mark_job_failed_with_failure(job, PublishFailureClass::RegistrationGone)
                 .await?
             {
                 return Ok(NotificationOutboxPublishOutcome::Failed {
@@ -440,10 +591,7 @@ impl NotificationOutboxStore {
                 });
             }
             return self
-                .retry_or_fail_outcome_for_claimed_job(
-                    job,
-                    "first-party XEP-0357 registration is no longer active".to_string(),
-                )
+                .retry_or_fail_outcome_for_claimed_job(job, PublishFailureClass::RegistrationGone)
                 .await;
         };
 
@@ -478,10 +626,7 @@ impl NotificationOutboxStore {
                 });
             }
             return self
-                .retry_or_fail_outcome_for_claimed_job(
-                    job,
-                    "unread suppression lost claim or possible queue acceptance".to_string(),
-                )
+                .retry_or_fail_outcome_for_claimed_job(job, PublishFailureClass::ClaimLost)
                 .await;
         }
         let message_count = unread.unwrap_or(0);
@@ -537,14 +682,130 @@ impl NotificationOutboxStore {
             Err(crate::push_service::PushQueueAcceptanceError::KnownNotAccepted(error)) => {
                 self.record_known_queue_refusal(job, prior_acceptance_may_exist)
                     .await?;
-                self.retry_or_fail_outcome_for_claimed_job(job, error.to_string())
-                    .await
+                tracing::warn!(job_id = job.job_id.as_str(), failure = "queue_refused", %error, "notification queue refused invocation");
+                self.retry_or_fail_outcome_for_claimed_job(
+                    job,
+                    PublishFailureClass::QueueRefused.with_error(&error),
+                )
+                .await
             }
             Err(crate::push_service::PushQueueAcceptanceError::Unknown(error)) => {
-                self.retry_or_fail_outcome_for_claimed_job(job, error.to_string())
-                    .await
+                tracing::warn!(job_id = job.job_id.as_str(), failure = "queue_unknown", %error, "notification queue acceptance unknown");
+                self.retry_or_fail_outcome_for_claimed_job(
+                    job,
+                    PublishFailureClass::QueueUnknown.with_error(&error),
+                )
+                .await
             }
         }
+    }
+
+    /// Parking stops sends, but exact provider completion/revocation proof can
+    /// still close upstream custody. This path never invokes queue acceptance.
+    async fn reconcile_parked_outbox_jobs(
+        &self,
+        push_service: &crate::push_service::DatabasePushServiceStore,
+        batch_size: usize,
+    ) -> Result<Vec<NotificationOutboxPublishOutcome>, NotificationOutboxError> {
+        // Failed jobs never re-enter the send scheduler. Reuse their otherwise
+        // idle retry timestamp as a durable probe cursor: oldest probes rotate
+        // to the back even when no proof is available or completion contends.
+        // Row locks are released before provider lookups and parent NOWAIT locks.
+        let mut tx = self.db.begin_immediate().await?;
+        let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            " FOR UPDATE SKIP LOCKED"
+        } else {
+            ""
+        };
+        let mut rows = tx.query(
+            &format!("SELECT job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, claim_token, summary_sender_jid, summary_body, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist, next_attempt_at_ms FROM notification_outbox WHERE status = ? AND queue_acceptance_may_exist = 1 AND approved_payload_xml IS NOT NULL ORDER BY COALESCE(next_attempt_at_ms, 0), job_id LIMIT ?{lock}"),
+            crate::db_params![STATUS_FAILED, batch_size.clamp(1, 1_000)],
+        ).await?;
+        let mut selected = Vec::new();
+        while let Some(row) = rows.next().await? {
+            selected.push(row);
+        }
+        drop(rows);
+        let now = crate::time::now_ms();
+        let mut jobs = Vec::new();
+        for row in selected {
+            let job_id: String = row.get(0)?;
+            let previous_probe: Option<i64> = row.get(20)?;
+            let next_probe = now.max(previous_probe.unwrap_or(0).saturating_add(1));
+            tx.execute("UPDATE notification_outbox SET next_attempt_at_ms = ? WHERE job_id = ? AND status = ? AND queue_acceptance_may_exist = 1", crate::db_params![next_probe, job_id.as_str(), STATUS_FAILED]).await?;
+            match decode_outbox_job(&row) {
+                Ok(job) => jobs.push(job),
+                Err(error) => {
+                    tracing::warn!(job_id, %error, "parked notification proof probe skipped malformed row")
+                }
+            }
+        }
+        tx.commit().await?;
+        let mut completed = Vec::new();
+        for job in jobs {
+            let item = job.to_xep0357_pubsub_item();
+            let delivery = match uuid::Uuid::parse_str(job.job_id.as_str()) {
+                Ok(delivery) => delivery,
+                Err(error) => {
+                    tracing::warn!(job_id = job.job_id.as_str(), %error, "parked notification proof probe has invalid identity");
+                    continue;
+                }
+            };
+            let proof = match push_service
+                .canonical_terminal_notification_proof(
+                    &job.push_service_jid,
+                    &job.node,
+                    &item,
+                    &job.recipient_bare_jid,
+                    job.approved_publish_options.as_ref(),
+                    delivery,
+                )
+                .await
+            {
+                Ok(Some(proof)) => proof,
+                Ok(None) => continue,
+                Err(error) => {
+                    tracing::warn!(job_id = job.job_id.as_str(), %error, "parked notification terminal proof lookup failed");
+                    continue;
+                }
+            };
+            let completed_owner = match self
+                .complete_claimed_job_from_terminal_proof(&job, proof)
+                .await
+            {
+                Ok(completed) => completed,
+                Err(error) => {
+                    tracing::warn!(job_id = job.job_id.as_str(), %error, "parked notification terminal completion deferred");
+                    continue;
+                }
+            };
+            if completed_owner {
+                if proof
+                    == crate::push_service::CanonicalNotificationTerminalProof::ProviderCompleted
+                {
+                    waddle_xmpp::telemetry::reliability::increment_push_outbox_published();
+                    tracing::info!(
+                        job_id = job.job_id.as_str(),
+                        notification_class = job.class.as_db_value(),
+                        push_stage = "published",
+                        "parked push terminal proof reconciled"
+                    );
+                }
+                self.acknowledge_provider_owner_completion(
+                    push_service,
+                    &job,
+                    &item,
+                    job.approved_publish_options.as_ref(),
+                    delivery,
+                )
+                .await;
+                completed.push(match proof {
+                    crate::push_service::CanonicalNotificationTerminalProof::ProviderCompleted => NotificationOutboxPublishOutcome::Published { job_id: job.job_id.clone(), item_id: job.job_id.as_str().to_string() },
+                    crate::push_service::CanonicalNotificationTerminalProof::RegistrationRevoked => NotificationOutboxPublishOutcome::Failed { job_id: job.job_id.clone() },
+                });
+            }
+        }
+        Ok(completed)
     }
 
     async fn complete_claimed_job_from_terminal_proof(
@@ -566,8 +827,8 @@ impl NotificationOutboxStore {
         let mut tx = self.db.begin_immediate().await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let changed = tx.execute(
-            "UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = CASE WHEN ? = 1 THEN 0 ELSE queue_acceptance_may_exist END, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ?, published_at_ms = CASE WHEN ? = 1 THEN ? ELSE published_at_ms END WHERE job_id = ? AND status = ? AND claim_token = ? AND recipient_bare_jid = ? AND push_service_jid = ? AND node = ? AND approved_payload_xml = ? AND (approved_publish_options_xml = ? OR (approved_publish_options_xml IS NULL AND ? = 0))",
-            crate::db_params![status, i64::from(cancelled), if cancelled {Some("canonical notification acceptance explicitly cancelled by registration revocation")} else {None}, now, i64::from(!cancelled), now, job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref(), job.recipient_bare_jid.to_string(), job.push_service_jid.to_string(), job.node.as_str(), String::from(payload), job.approved_publish_options.as_ref().map(String::from), i64::from(job.approved_publish_options.is_some())],
+            "UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = CASE WHEN ? = 1 THEN 0 ELSE queue_acceptance_may_exist END, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ?, published_at_ms = CASE WHEN ? = 1 THEN ? ELSE published_at_ms END WHERE job_id = ? AND status = ? AND (claim_token = ? OR (claim_token IS NULL AND ? = 1 AND queue_acceptance_may_exist = 1)) AND recipient_bare_jid = ? AND push_service_jid = ? AND node = ? AND approved_payload_xml = ? AND (approved_publish_options_xml = ? OR (approved_publish_options_xml IS NULL AND ? = 0))",
+            crate::db_params![status, i64::from(cancelled), if cancelled {Some("canonical notification acceptance explicitly cancelled by registration revocation")} else {None}, now, i64::from(!cancelled), now, job.job_id.as_str(), if job.status == NotificationOutboxStatus::Failed { STATUS_FAILED } else { STATUS_IN_PROGRESS }, job.claim_token.as_deref(), i64::from(job.status == NotificationOutboxStatus::Failed), job.recipient_bare_jid.to_string(), job.push_service_jid.to_string(), job.node.as_str(), String::from(payload), job.approved_publish_options.as_ref().map(String::from), i64::from(job.approved_publish_options.is_some())],
         ).await?;
         if changed > 0 {
             settle_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
@@ -575,6 +836,16 @@ impl NotificationOutboxStore {
                 .await?;
         }
         tx.commit().await?;
+        if changed > 0 && cancelled {
+            waddle_xmpp::telemetry::reliability::increment_push_registration_revoked();
+            tracing::info!(
+                job_id = job.job_id.as_str(),
+                notification_class = job.class.as_db_value(),
+                push_stage = "registration_revoked",
+                disposition = "registration_revoked",
+                "push pipeline transition"
+            );
+        }
         Ok(changed > 0)
     }
 
@@ -723,9 +994,13 @@ impl NotificationOutboxStore {
     async fn retry_or_fail_outcome_for_claimed_job(
         &self,
         job: &NotificationOutboxJob,
-        error: String,
+        failure: impl Into<PublishFailure>,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
-        let Some(_) = self.schedule_retry_or_fail(job, error).await? else {
+        let failure = failure.into();
+        let Some(_) = self
+            .schedule_retry_or_fail_with_failure(job, failure)
+            .await?
+        else {
             return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
                 job_id: job.job_id.clone(),
             });
@@ -754,39 +1029,62 @@ impl NotificationOutboxStore {
     async fn defer_claimed_job_without_attempt(
         &self,
         job: &NotificationOutboxJob,
-        error: String,
+        failure: impl Into<PublishFailure>,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        let failure = failure.into();
+        let next_policy_error_count = job.policy_error_count.saturating_add(1);
+        let exhausted =
+            next_policy_error_count.saturating_add(job.attempt_count) >= MAX_OUTBOX_ATTEMPTS;
+        let status = if exhausted {
+            STATUS_FAILED
+        } else {
+            STATUS_QUEUED
+        };
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let row_lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            " FOR UPDATE"
+        } else {
+            ""
+        };
+        let mut rows = tx
+            .query(
+                &format!("SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?{row_lock}"),
+                crate::db_params![job.job_id.as_str()],
+            )
+            .await?;
+        let uncertain = match rows.next().await? {
+            Some(row) => row.get::<i64>(0)? != 0,
+            None => false,
+        };
+        drop(rows);
         let now_ms = crate::time::now_ms();
-        let next_policy_error_count = job.policy_error_count + 1;
-        self.execute(
-            r#"
-            UPDATE notification_outbox
-            SET status = ?,
-                policy_error_count = ?,
-                last_error = ?,
-                next_attempt_at_ms = ?,
-                claimed_at_ms = NULL,
-                claim_token = NULL,
-                updated_at_ms = ?
-            WHERE job_id = ?
-              AND status = ?
-              AND claim_token = ?
-            "#,
-            crate::db_params![
-                STATUS_QUEUED,
-                next_policy_error_count,
-                error,
-                now_ms.saturating_add(policy_retry_delay_ms(next_policy_error_count)),
-                now_ms,
+        let changed = tx.execute(
+            "UPDATE notification_outbox SET status = ?, policy_error_count = ?, last_error = ?, next_attempt_at_ms = ?, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status = ? AND claim_token = ?",
+            crate::db_params![status, next_policy_error_count, failure.class.reason().as_str(), if exhausted { None } else { Some(now_ms.saturating_add(if uncertain { uncertain_retry_delay_ms(next_policy_error_count.saturating_add(job.attempt_count)) } else { policy_retry_delay_ms(next_policy_error_count) })) }, now_ms, job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+        ).await?;
+        if changed > 0 && exhausted && !uncertain {
+            settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
+        }
+        tx.commit().await?;
+        if changed > 0 {
+            record_failure_transition(
                 job.job_id.as_str(),
-                STATUS_IN_PROGRESS,
-                job.claim_token.as_deref(),
-            ],
-        )
-        .await?;
-        Ok(NotificationOutboxPublishOutcome::RetryScheduled {
-            job_id: job.job_id.clone(),
-        })
+                job.class.as_db_value(),
+                &failure,
+                exhausted,
+                uncertain,
+            );
+        }
+        if changed > 0 && exhausted {
+            Ok(NotificationOutboxPublishOutcome::Failed {
+                job_id: job.job_id.clone(),
+            })
+        } else {
+            Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            })
+        }
     }
 
     pub async fn mark_job_published(
@@ -867,11 +1165,23 @@ impl NotificationOutboxStore {
         Ok(affected > 0)
     }
 
+    #[cfg(test)]
     async fn mark_job_failed(
         &self,
         job: &NotificationOutboxJob,
         error: &str,
     ) -> Result<bool, NotificationOutboxError> {
+        tracing::warn!(error, "notification job failed");
+        self.mark_job_failed_with_failure(job, PublishFailureClass::Unknown)
+            .await
+    }
+
+    async fn mark_job_failed_with_failure(
+        &self,
+        job: &NotificationOutboxJob,
+        failure: impl Into<PublishFailure>,
+    ) -> Result<bool, NotificationOutboxError> {
+        let failure = failure.into();
         let now_ms = crate::time::now_ms();
         let mut tx = self.db.begin_immediate().await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
@@ -893,7 +1203,7 @@ impl NotificationOutboxStore {
             "#,
                 crate::db_params![
                     STATUS_FAILED,
-                    error,
+                    failure.class.reason().as_str(),
                     now_ms,
                     job.job_id.as_str(),
                     STATUS_IN_PROGRESS,
@@ -905,6 +1215,15 @@ impl NotificationOutboxStore {
             settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
         }
         tx.commit().await?;
+        if affected > 0 {
+            record_failure_transition(
+                job.job_id.as_str(),
+                job.class.as_db_value(),
+                &failure,
+                true,
+                false,
+            );
+        }
         Ok(affected > 0)
     }
 
@@ -913,13 +1232,31 @@ impl NotificationOutboxStore {
         job: &NotificationOutboxJob,
         error: String,
     ) -> Result<Option<i64>, NotificationOutboxError> {
-        let next_attempt_count = job.attempt_count + 1;
-        let now_ms = crate::time::now_ms();
+        tracing::warn!(%error, "notification retry requested");
+        self.schedule_retry_or_fail_with_failure(
+            job,
+            PublishFailureClass::Unknown.with_error(error),
+        )
+        .await
+    }
+
+    async fn schedule_retry_or_fail_with_failure(
+        &self,
+        job: &NotificationOutboxJob,
+        failure: impl Into<PublishFailure>,
+    ) -> Result<Option<i64>, NotificationOutboxError> {
+        let failure = failure.into();
+        let next_attempt_count = job.attempt_count.saturating_add(1);
         let mut tx = self.db.begin_immediate().await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let row_lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            " FOR UPDATE"
+        } else {
+            ""
+        };
         let mut rows = tx
             .query(
-                "SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?",
+                &format!("SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?{row_lock}"),
                 crate::db_params![job.job_id.as_str()],
             )
             .await?;
@@ -927,15 +1264,23 @@ impl NotificationOutboxStore {
             Some(row) => row.get::<i64>(0)? != 0,
             None => false,
         };
-        // Freezing the preview is independent from queue acceptance. Only known
-        // unaccepted work reaches the cap; a lost reply remains unknown.
+        drop(rows);
+        let now_ms = crate::time::now_ms();
+        // Budget exhaustion stops scheduling even when acceptance remains unknown.
+        // Failed + uncertain is a parked quarantine retaining payload and custody.
         let (status, next_attempt_at_ms) =
-            if !acceptance_may_exist && next_attempt_count >= MAX_OUTBOX_ATTEMPTS {
+            if next_attempt_count.saturating_add(job.policy_error_count) >= MAX_OUTBOX_ATTEMPTS {
                 (STATUS_FAILED, None)
             } else {
                 (
                     STATUS_QUEUED,
-                    Some(now_ms.saturating_add(retry_delay_ms(next_attempt_count))),
+                    Some(now_ms.saturating_add(if acceptance_may_exist {
+                        uncertain_retry_delay_ms(
+                            next_attempt_count.saturating_add(job.policy_error_count),
+                        )
+                    } else {
+                        retry_delay_ms(next_attempt_count)
+                    })),
                 )
             };
         let affected = tx
@@ -944,7 +1289,6 @@ impl NotificationOutboxStore {
             UPDATE notification_outbox
             SET status = ?,
                 attempt_count = ?,
-                policy_error_count = 0,
                 last_error = ?,
                 next_attempt_at_ms = ?,
                 claimed_at_ms = NULL,
@@ -953,29 +1297,33 @@ impl NotificationOutboxStore {
             WHERE job_id = ?
               AND status = ?
               AND claim_token = ?
-              AND (queue_acceptance_may_exist = 0 OR ? <> ?)
             "#,
                 crate::db_params![
                     status,
                     next_attempt_count,
-                    error,
+                    failure.class.reason().as_str(),
                     next_attempt_at_ms,
                     now_ms,
                     job.job_id.as_str(),
                     STATUS_IN_PROGRESS,
                     job.claim_token.as_deref(),
-                    status,
-                    STATUS_FAILED,
                 ],
             )
             .await?;
         if affected == 0 {
             return Ok(None);
         }
-        if status == STATUS_FAILED {
+        if status == STATUS_FAILED && !acceptance_may_exist {
             settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
         }
         tx.commit().await?;
+        record_failure_transition(
+            job.job_id.as_str(),
+            job.class.as_db_value(),
+            &failure,
+            status == STATUS_FAILED,
+            acceptance_may_exist,
+        );
         Ok(Some(next_attempt_count))
     }
 }
@@ -1017,6 +1365,15 @@ pub(super) fn retry_delay_ms(attempt_count: i64) -> i64 {
             .saturating_mul(2_i64.saturating_pow(exponent))
             .min(MAX_RETRY_DELAY_MS),
     )
+}
+
+/// Unknown queue acceptance receives a longer recovery window before parking:
+/// the four retry waits have a nominal total of 75 minutes. Jitter is bounded
+/// after applying it, so an individual uncertain wait never exceeds one hour.
+fn uncertain_retry_delay_ms(combined_failure_count: i64) -> i64 {
+    let exponent = combined_failure_count.saturating_sub(1).clamp(0, 10) as u32;
+    apply_retry_jitter(BASE_UNCERTAIN_RETRY_DELAY_MS.saturating_mul(2_i64.saturating_pow(exponent)))
+        .min(MAX_UNCERTAIN_RETRY_DELAY_MS)
 }
 
 pub(super) fn policy_retry_delay_ms(policy_error_count: i64) -> i64 {
@@ -1071,6 +1428,70 @@ pub(super) async fn settle_outbox_ancestry_tx(
     Ok(())
 }
 
+/// Explicit owner-scoped registration retirement is authoritative even when a
+/// crash left an uncertain outbox boundary without any provider queue row.
+/// Call after cancelling provider-owned work in the same transaction.
+pub(crate) async fn retire_registration_outbox_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner: &BareJid,
+    service: Option<&BareJid>,
+    node: Option<&str>,
+) -> Result<u64, NotificationOutboxError> {
+    let exists = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        "SELECT 1 WHERE to_regclass('notification_outbox') IS NOT NULL"
+    } else {
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_outbox'"
+    };
+    let mut rows = tx.query(exists, ()).await?;
+    let initialized = rows.next().await?.is_some();
+    drop(rows);
+    if !initialized {
+        return Ok(0);
+    }
+    let foundation_exists = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        "SELECT 1 WHERE to_regclass('ingress_effect_descendants') IS NOT NULL"
+    } else {
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_effect_descendants'"
+    };
+    let mut rows = tx.query(foundation_exists, ()).await?;
+    let has_foundation = rows.next().await?.is_some();
+    drop(rows);
+    let canonical_custody = if has_foundation {
+        "EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = notification_outbox.job_id AND settled_at IS NULL)"
+    } else {
+        "0 = 1"
+    };
+    // Settled known failures are terminal history, including their original
+    // diagnosis and retention tail. Only outstanding custody permits retirement.
+    let eligible = format!("(status IN ('queued', 'in-progress') OR (status = 'failed' AND (queue_acceptance_may_exist = 1 OR {canonical_custody} OR EXISTS (SELECT 1 FROM notification_outbox_lineage WHERE job_id = notification_outbox.job_id AND settled_at_ms IS NULL))))");
+    let service_raw = service.map(ToString::to_string);
+    let mut rows = tx.query(
+        &format!("SELECT job_id FROM notification_outbox WHERE recipient_bare_jid = ? AND (push_service_jid = ? OR ? = 0) AND (node = ? OR ? = 0) AND {eligible} ORDER BY job_id"),
+        crate::db_params![owner.to_string(), service_raw.as_deref(), i64::from(service.is_some()), node, i64::from(node.is_some())],
+    ).await?;
+    let mut jobs = Vec::new();
+    while let Some(row) = rows.next().await? {
+        jobs.push(row.get::<String>(0)?);
+    }
+    drop(rows);
+    let mut retired = 0_u64;
+    for job_id in jobs {
+        // Registration/node locks are held by the caller, so never wait while
+        // reversing the canonical-parent-before-scheduler lock order.
+        lock_outbox_ancestry_tx(tx, &job_id).await?;
+        let changed = tx.execute(
+            &format!("UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = 0, last_error = 'registration-revoked', next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND recipient_bare_jid = ? AND (push_service_jid = ? OR ? = 0) AND (node = ? OR ? = 0) AND {eligible}"),
+            crate::db_params![STATUS_FAILED, crate::time::now_ms(), job_id.as_str(), owner.to_string(), service_raw.as_deref(), i64::from(service.is_some()), node, i64::from(node.is_some())],
+        ).await?;
+        if changed > 0 {
+            retired += changed;
+            settle_outbox_if_unowned_tx(tx, &job_id).await?;
+            crate::push_service::acknowledge_completed_outbox_tx(tx, &job_id).await?;
+        }
+    }
+    Ok(retired)
+}
+
 /// An upstream refusal cannot release a descendant already owned by the
 /// durable provider queue. The provider worker settles that remaining custody.
 pub(super) async fn settle_outbox_if_unowned_tx(
@@ -1095,7 +1516,7 @@ pub(super) async fn settle_outbox_if_unowned_tx(
         rows.next().await?.is_some()
     };
     if has_queue {
-        let mut rows = tx.query("SELECT 1 FROM push_publish_jobs WHERE ancestry_job_id = ? AND status IN ('queued', 'in-progress') LIMIT 1", crate::db_params![job_id]).await?;
+        let mut rows = tx.query("SELECT 1 FROM push_publish_jobs WHERE ancestry_job_id = ? AND (status IN ('queued', 'in-progress') OR (status = 'failed' AND uncertain_send = 1 AND terminal_disposition IS NULL)) LIMIT 1", crate::db_params![job_id]).await?;
         if rows.next().await?.is_some() {
             return Ok(());
         }
@@ -1229,3 +1650,7 @@ mod acceptance_fence_tests;
 #[cfg(test)]
 #[path = "malformed_outbox_tests.rs"]
 mod malformed_outbox_tests;
+
+#[cfg(test)]
+#[path = "retry_policy_tests.rs"]
+mod retry_policy_tests;

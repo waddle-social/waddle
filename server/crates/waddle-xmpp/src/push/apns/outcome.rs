@@ -125,7 +125,9 @@ pub enum ApnsTransient {
     /// `429` — `TooManyRequests` for this device or
     /// `TooManyProviderTokenUpdates` for this provider.
     RateLimited { reason: ApnsReason },
-    /// Network error, timeout, or an APNs 5xx.
+    /// A documented APNs server rejection; acceptance is ruled out.
+    Refused { status: u16, reason: ApnsReason },
+    /// Network error, timeout, or an unrecognized APNs 5xx. Acceptance is unknown.
     Failure(TransientFailure),
 }
 
@@ -173,6 +175,14 @@ pub fn classify_response(
             cause: ApnsTransient::RateLimited { reason },
             retry_after,
         },
+        // Apple documents these exact error responses as failed requests:
+        // https://developer.apple.com/documentation/usernotifications/handling-notification-responses-from-apns
+        // A bare 5xx or an unrecognized reason is insufficient evidence.
+        (500, ApnsReason::InternalServerError)
+        | (503, ApnsReason::ServiceUnavailable | ApnsReason::Shutdown) => ApnsOutcome::Transient {
+            cause: ApnsTransient::Refused { status, reason },
+            retry_after,
+        },
         (500..=599, _) => ApnsOutcome::Transient {
             cause: ApnsTransient::Failure(TransientFailure::ServerError { status }),
             retry_after,
@@ -207,6 +217,37 @@ mod tests {
         );
         assert_eq!(reason(""), ApnsReason::Unrecognized);
         assert_eq!(reason("<html>"), ApnsReason::Unrecognized);
+    }
+
+    #[test]
+    fn only_documented_server_rejections_rule_out_acceptance() {
+        for (status, reason) in [
+            (500, ApnsReason::InternalServerError),
+            (503, ApnsReason::ServiceUnavailable),
+            (503, ApnsReason::Shutdown),
+        ] {
+            assert!(matches!(
+                classify_response(status, reason, None, None),
+                ApnsOutcome::Transient {
+                    cause: ApnsTransient::Refused { .. },
+                    ..
+                }
+            ));
+        }
+        for (status, reason) in [
+            (500, ApnsReason::Unrecognized),
+            (503, ApnsReason::Unrecognized),
+            (502, ApnsReason::ServiceUnavailable),
+            (500, ApnsReason::Shutdown),
+        ] {
+            assert!(matches!(
+                classify_response(status, reason, None, None),
+                ApnsOutcome::Transient {
+                    cause: ApnsTransient::Failure(TransientFailure::ServerError { .. }),
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -314,7 +355,10 @@ mod tests {
                 ApnsReason::InternalServerError,
                 None,
                 ApnsOutcome::Transient {
-                    cause: ApnsTransient::Failure(TransientFailure::ServerError { status: 500 }),
+                    cause: ApnsTransient::Refused {
+                        status: 500,
+                        reason: ApnsReason::InternalServerError,
+                    },
                     retry_after: None,
                 },
             ),
@@ -323,7 +367,10 @@ mod tests {
                 ApnsReason::ServiceUnavailable,
                 Some(Duration::from_secs(5)),
                 ApnsOutcome::Transient {
-                    cause: ApnsTransient::Failure(TransientFailure::ServerError { status: 503 }),
+                    cause: ApnsTransient::Refused {
+                        status: 503,
+                        reason: ApnsReason::ServiceUnavailable,
+                    },
                     retry_after: Some(Duration::from_secs(5)),
                 },
             ),

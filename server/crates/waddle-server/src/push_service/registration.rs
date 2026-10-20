@@ -160,6 +160,9 @@ impl DatabasePushServiceStore {
         service_jid: &str,
         node: Option<&str>,
     ) -> Result<u64, XmppError> {
+        let service: BareJid = service_jid
+            .parse()
+            .map_err(|_| XmppError::bad_request(Some("invalid push service JID".to_string())))?;
         if let Some(node) = node {
             validate_len("Push Service node", node, MAX_NODE_ID_LEN)?;
         }
@@ -180,9 +183,20 @@ impl DatabasePushServiceStore {
         .await
         .map_err(push_error_to_xmpp_error)?;
         if registered_nodes.is_empty() {
+            let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
+                &mut tx,
+                owner_bare_jid,
+                Some(&service),
+                node,
+            )
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
             tx.commit()
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
+            if retired_outbox > 0 {
+                super::publish_jobs::record_registration_revoked();
+            }
             return Ok(0);
         }
 
@@ -193,10 +207,20 @@ impl DatabasePushServiceStore {
             .collect::<Vec<_>>();
         registered_push_nodes.sort();
         registered_push_nodes.dedup();
+        let mut retired_provider = 0;
         for node in &registered_push_nodes {
             lock_node_tx(&mut tx, node, now_ms).await?;
-            cancel_retryable_publish_jobs_for_node_tx(&mut tx, owner_bare_jid, node).await?;
+            retired_provider +=
+                cancel_retryable_publish_jobs_for_node_tx(&mut tx, owner_bare_jid, node).await?;
         }
+        let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
+            &mut tx,
+            owner_bare_jid,
+            Some(&service),
+            node,
+        )
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
         let removed = crate::push_registrations::remove_subscription_tx(
             &mut tx,
             owner_bare_jid,
@@ -209,6 +233,9 @@ impl DatabasePushServiceStore {
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
+        if removed > 0 || retired_provider > 0 || retired_outbox > 0 {
+            super::publish_jobs::record_registration_revoked();
+        }
         Ok(removed)
     }
 }

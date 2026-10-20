@@ -199,6 +199,8 @@ pub enum FcmTransient {
     /// `429` / `QUOTA_EXCEEDED` / `RESOURCE_EXHAUSTED`: FCM did not
     /// accept the message.
     RateLimited,
+    /// Exact `503 UNAVAILABLE`: the server could not process the request.
+    Unavailable,
     /// Network error, timeout, or an FCM 5xx / `UNAVAILABLE` /
     /// `INTERNAL`: FCM may or may not have accepted the message.
     Failure(TransientFailure),
@@ -261,6 +263,18 @@ pub fn classify_response(
         cause: FcmTransient::Failure(TransientFailure::ServerError { status }),
         retry_after,
     };
+    // FCM documents UNAVAILABLE as a request it could not process. Require
+    // the exact HTTP/status contract; INTERNAL and generic 5xx remain unknown.
+    // https://firebase.google.com/docs/cloud-messaging/error-codes
+    if status == 503
+        && detail.status == Some(GoogleRpcStatus::Unavailable)
+        && matches!(detail.error_code, None | Some(FcmErrorCode::Unavailable))
+    {
+        return FcmOutcome::Transient {
+            cause: FcmTransient::Unavailable,
+            retry_after,
+        };
+    }
     // The FCM-specific error code is the most precise signal.
     match detail.error_code {
         Some(FcmErrorCode::Unregistered) => return FcmOutcome::Unregistered { status, detail },
@@ -333,6 +347,31 @@ mod tests {
 
     fn classify(status: u16, body: &[u8]) -> FcmOutcome {
         classify_response(status, FcmErrorDetail::from_body(body), None)
+    }
+
+    #[test]
+    fn only_exact_unavailable_response_rules_out_acceptance() {
+        assert!(matches!(
+            classify(503, &body(503, "UNAVAILABLE", fcm_error("UNAVAILABLE"))),
+            FcmOutcome::Transient {
+                cause: FcmTransient::Unavailable,
+                ..
+            }
+        ));
+        for (status, response) in [
+            (503, b"bad gateway".to_vec()),
+            (503, body(503, "INTERNAL", fcm_error("INTERNAL"))),
+            (500, body(500, "UNAVAILABLE", fcm_error("UNAVAILABLE"))),
+            (500, body(500, "INTERNAL", fcm_error("INTERNAL"))),
+        ] {
+            assert!(matches!(
+                classify(status, &response),
+                FcmOutcome::Transient {
+                    cause: FcmTransient::Failure(TransientFailure::ServerError { .. }),
+                    ..
+                }
+            ));
+        }
     }
 
     #[test]
@@ -452,7 +491,7 @@ mod tests {
             (
                 503,
                 body(503, "UNAVAILABLE", fcm_error("UNAVAILABLE")),
-                "server-error",
+                "provider-refused",
             ),
             (
                 500,
@@ -509,6 +548,10 @@ mod tests {
                     cause: FcmTransient::Failure(TransientFailure::ServerError { .. }),
                     ..
                 } => "server-error",
+                FcmOutcome::Transient {
+                    cause: FcmTransient::Unavailable,
+                    ..
+                } => "provider-refused",
                 FcmOutcome::Transient { .. } => "network",
                 FcmOutcome::Rejected { .. } => "rejected",
             };

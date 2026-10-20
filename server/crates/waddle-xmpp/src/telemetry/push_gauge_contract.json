@@ -1,0 +1,42 @@
+[
+  {
+    "name": "xmpp.push.queue.parked",
+    "unit": "{job}",
+    "prometheus_name": "xmpp_push_queue_parked",
+    "recording_name": "waddle_push_queue_parked",
+    "value": 8,
+    "attributes": { "queue": "provider" }
+  },
+  {
+    "name": "xmpp.push.queue.unresolved_failed",
+    "unit": "{job}",
+    "prometheus_name": "xmpp_push_queue_unresolved_failed",
+    "recording_name": "waddle_push_queue_unresolved_failed",
+    "value": 2,
+    "attributes": { "queue": "provider" }
+  },
+  {
+    "name": "xmpp.push.queue.snapshot_at",
+    "unit": "s",
+    "prometheus_name": "xmpp_push_queue_snapshot_at_seconds",
+    "recording_name": "waddle_push_queue_snapshot_at_seconds",
+    "value": "now",
+    "attributes": { "queue": "provider" }
+  },
+  {
+    "name": "xmpp.push.provider.retained_max_per_node",
+    "unit": "{job}",
+    "prometheus_name": "xmpp_push_provider_retained_max_per_node",
+    "recording_name": "waddle_push_provider_retained_max_per_node",
+    "value": 9000,
+    "attributes": {}
+  },
+  {
+    "name": "xmpp.push.provider.near_capacity_nodes",
+    "unit": "{node}",
+    "prometheus_name": "xmpp_push_provider_near_capacity_nodes",
+    "recording_name": "waddle_push_provider_near_capacity_nodes",
+    "value": 1,
+    "attributes": {}
+  }
+]

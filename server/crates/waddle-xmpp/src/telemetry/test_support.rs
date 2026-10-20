@@ -34,6 +34,7 @@ use opentelemetry_sdk::trace::{
 use tracing_subscriber::prelude::*;
 
 /// One exported `u64` counter value and its complete attribute set.
+/// Gauges reuse this value/attribute shape without counter summation semantics.
 pub type CounterSample = (u64, Vec<(String, String)>);
 
 /// Install a thread-scoped tracing subscriber backed by an in-memory OTel
@@ -316,6 +317,28 @@ impl MetricsTestGuard {
             }
         });
         total
+    }
+
+    /// Latest exported gauge samples. Later collections replace earlier values
+    /// for the same attribute set, so a falling gauge is never summed.
+    pub fn gauge_samples(&self, name: &str) -> Option<Vec<CounterSample>> {
+        let mut samples: Option<Vec<CounterSample>> = None;
+        self.each_metric(name, |metric| {
+            let AggregatedMetrics::U64(MetricData::Gauge(gauge)) = metric.data() else {
+                return;
+            };
+            let entry = samples.get_or_insert_with(Vec::new);
+            for point in gauge.data_points() {
+                let mut attributes: Vec<(String, String)> = point
+                    .attributes()
+                    .map(|kv| (kv.key.as_str().to_string(), kv.value.to_string()))
+                    .collect();
+                attributes.sort();
+                entry.retain(|(_, existing)| existing != &attributes);
+                entry.push((point.value(), attributes));
+            }
+        });
+        samples
     }
 
     /// Total sample count of every `f64` histogram data point for

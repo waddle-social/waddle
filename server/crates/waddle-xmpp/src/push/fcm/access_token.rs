@@ -303,6 +303,7 @@ impl OAuthFcmTokenSource {
     ) -> Result<Self, FcmTokenSourceBuildError> {
         let client = reqwest::Client::builder()
             .https_only(true)
+            .connect_timeout(Duration::from_secs(5))
             .timeout(TOKEN_REQUEST_TIMEOUT)
             .redirect(reqwest::redirect::Policy::none())
             .build()
@@ -413,11 +414,7 @@ impl OAuthFcmTokenSource {
             .send()
             .await
             .map_err(|error| {
-                let failure = if error.is_timeout() {
-                    TransientFailure::Timeout
-                } else {
-                    TransientFailure::Network
-                };
+                let failure = TransientFailure::from_transport_error(&error);
                 warn!(error = %error.without_url(), "FCM OAuth token request failed");
                 FcmTokenError::Transient(failure)
             })?;
@@ -592,6 +589,16 @@ mod tests {
             "token_type": "Bearer",
         })
         .to_string()
+    }
+
+    #[tokio::test]
+    async fn production_client_connect_timeout_preserves_pre_send_evidence() {
+        let (private_pem, _) = rsa_key_pair();
+        let key = FcmServiceAccountKey::from_json(&service_account_json(&private_pem, ""))
+            .expect("service-account key");
+        let source = OAuthFcmTokenSource::new(key, Arc::new(SystemFcmClock))
+            .expect("production token source");
+        crate::push::types::assert_production_connect_timeout(source.client).await;
     }
 
     #[derive(Deserialize)]
@@ -844,7 +851,7 @@ mod tests {
         );
         assert_eq!(
             unreachable.current().await,
-            Err(FcmTokenError::Transient(TransientFailure::Network))
+            Err(FcmTokenError::Transient(TransientFailure::Connect))
         );
     }
 

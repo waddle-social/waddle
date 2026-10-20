@@ -1025,6 +1025,7 @@ async fn coalescing_new_candidate_clears_retry_backoff() {
 
 #[tokio::test]
 async fn publish_rejects_non_first_party_outbox_target() {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     enqueue_jobs_for_test(&store, &candidate("archive-1"), &[foreign_target()]).await;
     let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
@@ -1058,6 +1059,15 @@ async fn publish_rejects_non_first_party_outbox_target() {
         outcomes[0],
         NotificationOutboxPublishOutcome::Failed { .. }
     ));
+    assert_eq!(
+        telemetry.counter_sum("xmpp.push.disposition", &[("disposition", "dead_letter")]),
+        Some(1)
+    );
+    assert_eq!(
+        telemetry.counter_sum("xmpp.push.outbox_dead_lettered", &[]),
+        Some(1)
+    );
+
     assert!(
         push_service
             .queued_publish_jobs()
@@ -1070,6 +1080,7 @@ async fn publish_rejects_non_first_party_outbox_target() {
 
 #[tokio::test]
 async fn push_registration_lookup_error_retries_each_claimed_outbox_job() {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
     let store = store().await;
     enqueue_jobs_for_test(
         &store,
@@ -1098,6 +1109,19 @@ async fn push_registration_lookup_error_retries_each_claimed_outbox_job() {
         .await
         .expect("drain");
 
+    assert_eq!(
+        telemetry.counter_sum(
+            "xmpp.push.outbox_retry_scheduled",
+            &[("reason", "registration_lookup")],
+        ),
+        Some(2),
+    );
+    assert_eq!(
+        telemetry
+            .counter_sum("xmpp.push.outbox_retry_scheduled", &[("reason", "unknown")])
+            .unwrap_or(0),
+        0,
+    );
     assert_eq!(outcomes.len(), 2);
     assert!(outcomes.iter().all(|outcome| matches!(
         outcome,
@@ -1285,4 +1309,371 @@ async fn prune_completed_reaps_policy_retry_dead_lettered_candidate() {
         .expect("candidate count row")
         .expect("candidate count");
     assert_eq!(row.get::<i64>(0).expect("candidate count"), 0);
+}
+
+#[tokio::test]
+async fn repeated_expired_outbox_claims_park_uncertain_work_at_the_budget() {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
+    let store = store().await;
+    enqueue_jobs_for_test(&store, &candidate("expired-budget"), &[target()]).await;
+    let mut job = store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("initial claim")
+        .remove(0);
+    store
+        .execute(
+            "UPDATE notification_outbox SET queue_acceptance_may_exist = 1 WHERE job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("unknown queue acceptance");
+    for count in 1..=4 {
+        store
+            .execute(
+                "UPDATE notification_outbox SET claimed_at_ms = 1 WHERE job_id = ?",
+                waddle_server::db_params![job.job_id().as_str()],
+            )
+            .await
+            .expect("expire claim");
+        let mut claimed = store.claim_due_outbox_jobs(1).await.expect("recover claim");
+        assert_eq!(claimed.len(), 1);
+        job = claimed.remove(0);
+        assert_eq!(job.attempt_count(), count);
+    }
+    store
+        .execute(
+            "UPDATE notification_outbox SET claimed_at_ms = 1 WHERE job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("expire final claim");
+    assert!(store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("exhausted recovery")
+        .is_empty());
+    for _ in 0..3 {
+        assert!(store
+            .claim_due_outbox_jobs(1)
+            .await
+            .expect("parked recovery")
+            .is_empty());
+    }
+    assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+    assert_eq!(
+        store
+            .prune_completed_before(i64::MAX, 16)
+            .await
+            .expect("prune")
+            .jobs_deleted,
+        0
+    );
+    assert_eq!(
+        telemetry.counter_sum("xmpp.push.disposition", &[("disposition", "parked")]),
+        Some(1)
+    );
+    assert_eq!(
+        telemetry
+            .counter_sum("xmpp.push.outbox_dead_lettered", &[])
+            .unwrap_or(0),
+        0
+    );
+}
+
+#[tokio::test]
+async fn persistent_outbox_policy_failures_stop_at_the_budget() {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    enqueue_jobs_for_test(&store, &candidate("policy-budget"), &[target]).await;
+    let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 1).await;
+    for attempt in 1..=5 {
+        let outcome = store
+            .drain_due_outbox_jobs(
+                &push_service,
+                &push_store,
+                &inbox,
+                &FailingBlockingStorage,
+                &bare("push.example.com"),
+                1,
+            )
+            .await
+            .expect("policy failure");
+        assert_eq!(outcome.len(), 1);
+        assert_eq!(
+            matches!(outcome[0], NotificationOutboxPublishOutcome::Failed { .. }),
+            attempt == 5
+        );
+        store
+            .execute(
+                "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE status = 'queued'",
+                (),
+            )
+            .await
+            .expect("advance retry");
+    }
+    assert!(store
+        .drain_due_outbox_jobs(
+            &push_service,
+            &push_store,
+            &inbox,
+            &FailingBlockingStorage,
+            &bare("push.example.com"),
+            1
+        )
+        .await
+        .expect("exhausted policy")
+        .is_empty());
+    assert!(push_service
+        .queued_publish_jobs()
+        .await
+        .expect("provider queue")
+        .is_empty());
+    assert_eq!(
+        telemetry.counter_sum(
+            "xmpp.push.outbox_retry_scheduled",
+            &[("reason", "policy_lookup")]
+        ),
+        Some(4)
+    );
+    assert_eq!(
+        telemetry.counter_sum("xmpp.push.disposition", &[("disposition", "dead_letter")]),
+        Some(1)
+    );
+}
+
+#[tokio::test]
+async fn parked_outbox_reconciles_revocation_from_a_separate_push_database() {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let (push_service, push_store, target) = first_party_push_setup(&recipient).await;
+    enqueue_jobs_for_test(
+        &store,
+        &candidate("parked-revocation"),
+        std::slice::from_ref(&target),
+    )
+    .await;
+    let job = store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("claim")
+        .remove(0);
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 1).await;
+    store
+        .publish_claimed_job(
+            &job,
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("queue acceptance");
+    // The queue commit succeeded but its reply never closed the outbox owner.
+    // Repeated uncertain retries have now exhausted that owner's budget.
+    store.execute("UPDATE notification_outbox SET status = 'failed', attempt_count = 5, queue_acceptance_may_exist = 1, published_at_ms = NULL WHERE job_id = ?", waddle_server::db_params![job.job_id().as_str()]).await.expect("park exhausted owner");
+    let db = push_service.database();
+    db.guard()
+        .await
+        .expect("provider db")
+        .execute(
+            "UPDATE push_publish_jobs SET upstream_completed = 0 WHERE ancestry_job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("lost completion acknowledgment");
+    assert!(store
+        .drain_due_outbox_jobs(
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+            1
+        )
+        .await
+        .expect("parked drain")
+        .is_empty());
+    assert_eq!(
+        push_service
+            .queued_publish_jobs()
+            .await
+            .expect("queue")
+            .len(),
+        1
+    );
+    push_service
+        .remove_registered_nodes_for_owner(
+            &recipient,
+            "push.example.com",
+            Some(target.node().as_str()),
+        )
+        .await
+        .expect("authoritative revocation");
+    // Endpoint revocation and upstream outbox reconciliation are distinct
+    // lifecycle transitions. Measure this owner's reconciliation separately.
+    let revoked_before_reconciliation = telemetry
+        .counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")],
+        )
+        .unwrap_or(0);
+    let outcomes = store
+        .drain_due_outbox_jobs(
+            &push_service,
+            &push_store,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+            1,
+        )
+        .await
+        .expect("terminal-only reconciliation");
+    assert!(matches!(
+        outcomes.as_slice(),
+        [NotificationOutboxPublishOutcome::Failed { .. }]
+    ));
+    let mut rows = store
+        .query(
+            "SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("outbox disposition");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row")
+            .expect("retained outbox")
+            .get::<i64>(0)
+            .expect("certainty"),
+        0
+    );
+    let mut rows = db
+        .guard()
+        .await
+        .expect("db")
+        .query(
+            "SELECT upstream_completed FROM push_publish_jobs WHERE ancestry_job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("ack");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row")
+            .expect("retained provider proof")
+            .get::<i64>(0)
+            .expect("completed"),
+        1
+    );
+    assert_eq!(
+        telemetry
+            .counter_sum(
+                "xmpp.push.disposition",
+                &[("disposition", "registration_revoked")]
+            )
+            .expect("reconciliation disposition")
+            - revoked_before_reconciliation,
+        1,
+        "reconciling this outbox owner records one additional transition",
+    );
+}
+
+#[tokio::test]
+async fn bounded_parked_probes_rotate_past_unresolved_owners_across_restarts() {
+    let store = store().await;
+    let recipient = bare("alice@example.com");
+    let (push, registrations, target) = first_party_push_setup(&recipient).await;
+    enqueue_jobs_for_test(
+        &store,
+        &candidate("later-terminal-proof"),
+        std::slice::from_ref(&target),
+    )
+    .await;
+    let terminal = store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("claim")
+        .remove(0);
+    let inbox = inbox_with_unread(&recipient, &bare("bob@example.com"), 1).await;
+    let blocking = waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new();
+    store
+        .publish_claimed_job(
+            &terminal,
+            &push,
+            &registrations,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+        )
+        .await
+        .expect("acceptance");
+    store.execute("UPDATE notification_outbox SET status = 'failed', queue_acceptance_may_exist = 1, attempt_count = 5, next_attempt_at_ms = 2, published_at_ms = NULL WHERE job_id = ?", waddle_server::db_params![terminal.job_id().as_str()]).await.expect("park terminal owner");
+    // These older frozen owners crossed the uncertainty boundary before a
+    // crash, so no provider acceptance or authoritative terminal proof exists.
+    for _ in 0..2 {
+        store.execute(
+            "INSERT INTO notification_outbox (job_id, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, status, attempt_count, policy_error_count, approved_payload_xml, approved_publish_options_xml, queue_acceptance_may_exist, next_attempt_at_ms, created_at_ms, updated_at_ms) SELECT ?, recipient_bare_jid, push_service_jid, node, conversation_jid, sender_jid, sender_jids, thread_id, class, message_count, context_xml, 'failed', 5, 0, approved_payload_xml, approved_publish_options_xml, 1, 1, created_at_ms, updated_at_ms FROM notification_outbox WHERE job_id = ?",
+            waddle_server::db_params![uuid::Uuid::new_v4().to_string(), terminal.job_id().as_str()],
+        ).await.expect("unknown parked owner");
+    }
+    push.remove_registered_nodes_for_owner(
+        &recipient,
+        "push.example.com",
+        Some(target.node().as_str()),
+    )
+    .await
+    .expect("terminal proof");
+    for _ in 0..2 {
+        assert!(
+            store
+                .drain_due_outbox_jobs(
+                    &push,
+                    &registrations,
+                    &inbox,
+                    &blocking,
+                    &bare("push.example.com"),
+                    1
+                )
+                .await
+                .expect("bounded unresolved probe")
+                .is_empty(),
+            "one unresolved owner per pass keeps later proof outside this batch"
+        );
+    }
+    // Reconstruct the store to prove fairness survives worker/store restart.
+    let resumed = NotificationOutboxStore::new(store.db.clone())
+        .await
+        .expect("restart store");
+    let completed = resumed
+        .drain_due_outbox_jobs(
+            &push,
+            &registrations,
+            &inbox,
+            &blocking,
+            &bare("push.example.com"),
+            1,
+        )
+        .await
+        .expect("later terminal probe");
+    assert!(
+        matches!(completed.as_slice(), [NotificationOutboxPublishOutcome::Failed { job_id }] if job_id == terminal.job_id())
+    );
+    let mut rows = store.query("SELECT COUNT(*) FROM notification_outbox WHERE status = 'failed' AND queue_acceptance_may_exist = 1", ()).await.expect("remaining custody");
+    assert_eq!(
+        rows.next()
+            .await
+            .expect("row")
+            .expect("count")
+            .get::<i64>(0)
+            .expect("count"),
+        2
+    );
 }
