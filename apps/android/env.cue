@@ -259,8 +259,7 @@ schema.#Project & {
 		// analytics, crash or performance reporting in `play`.
 		lint: schema.#Task & {
 			command: "bash"
-			// Temporary CI proof: execute the original SIGKILL path without cache hits.
-			args: ["../../scripts/android-ci-gradle.sh", "--rerun-tasks", "--no-build-cache", "detekt", ":app:lintFossDebug", ":app:lintPlayDebug", ":app:verifyFossRuntimeClasspath", ":app:verifyPlayRuntimeClasspath"]
+			args: ["../../scripts/android-ci-gradle.sh", "detekt", ":app:lintFossDebug", ":app:lintPlayDebug", ":app:verifyFossRuntimeClasspath", ":app:verifyPlayRuntimeClasspath"]
 			dependsOn: [setupSdk]
 			inputs: _gradleInputs
 		}
