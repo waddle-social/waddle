@@ -317,27 +317,27 @@ pub(super) async fn record_known_publish_job_failure_tx(
     error: &str,
     now_ms: i64,
 ) -> Result<(), XmppError> {
+    let retry_at = retry_deadline_sql(now_ms);
     let mut rows = tx
         .query(
-            r#"
+            &format!(r#"
         UPDATE push_publish_jobs
         SET status = CASE WHEN uncertain_send = 1 AND attempt_count + 1 < ? THEN ? ELSE ? END,
             attempt_count = attempt_count + 1,
             last_error = ?,
-            next_retry_at_ms = CASE WHEN uncertain_send = 1 AND attempt_count + 1 < ? THEN ? ELSE NULL END,
+            next_retry_at_ms = CASE WHEN uncertain_send = 1 AND attempt_count + 1 < ? THEN {retry_at} ELSE NULL END,
             claimed_at_ms = NULL,
             claim_token = NULL,
             updated_at_ms = ?
         WHERE job_id = ? AND status = ? AND claim_token = ?
         RETURNING status
-        "#,
+        "#),
             crate::db_params![
                 PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                 PUBLISH_JOB_STATUS_QUEUED,
                 PUBLISH_JOB_STATUS_FAILED,
                 error,
                 PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
-                retry_at_ms(now_ms),
                 now_ms,
                 job.job_id(),
                 PUBLISH_JOB_STATUS_IN_PROGRESS,
@@ -397,7 +397,7 @@ async fn has_notification_lineage_tx(
 
 /// Push schema initialization precedes the outbox's runtime upgrade at boot.
 /// Resolve the actual table, not a same-named table in another PostgreSQL schema.
-async fn has_notification_outbox_frozen_schema_tx(
+pub(super) async fn has_notification_outbox_frozen_schema_tx(
     tx: &mut crate::db::Transaction<'_>,
 ) -> Result<bool, XmppError> {
     let sql = match tx.driver() {
@@ -439,7 +439,7 @@ pub(super) async fn lock_notification_ancestry_tx(
         })
 }
 
-enum NotificationAncestryLockError {
+pub(super) enum NotificationAncestryLockError {
     Contended,
     Failed(XmppError),
 }
@@ -465,7 +465,7 @@ impl From<crate::db::DatabaseError> for NotificationAncestryLockError {
     }
 }
 
-async fn lock_notification_ancestry_typed_tx(
+pub(super) async fn lock_notification_ancestry_typed_tx(
     tx: &mut crate::db::Transaction<'_>,
     job: &PushPublishJob,
 ) -> Result<(), NotificationAncestryLockError> {
@@ -737,14 +737,56 @@ pub(crate) async fn acknowledge_completed_outbox_tx(
     Ok(())
 }
 
+/// SQL guards refer to the provider row at this fixed database boundary.
+/// Only genuinely outstanding ancestry makes a known failed job retireable;
+/// already-settled failure history is immutable during endpoint retirement.
+pub(super) async fn pending_notification_custody_sql(
+    tx: &mut crate::db::Transaction<'_>,
+) -> Result<String, XmppError> {
+    let sql = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        "SELECT to_regclass('notification_outbox_lineage') IS NOT NULL, to_regclass('ingress_effect_descendants') IS NOT NULL"
+    } else {
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'notification_outbox_lineage'), EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_effect_descendants')"
+    };
+    let mut rows = tx
+        .query(sql, ())
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let row = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+        .ok_or_else(|| XmppError::internal("push ancestry schema probe missing"))?;
+    let lineage: bool = row
+        .get(0)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let foundation: bool = row
+        .get(1)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let mut guards = Vec::new();
+    if lineage {
+        guards.push("EXISTS (SELECT 1 FROM notification_outbox_lineage WHERE job_id = push_publish_jobs.ancestry_job_id AND settled_at_ms IS NULL)");
+    }
+    if foundation {
+        guards.push("EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = push_publish_jobs.ancestry_job_id AND settled_at IS NULL)");
+    }
+    Ok(if guards.is_empty() {
+        "FALSE".to_owned()
+    } else {
+        guards.join(" OR ")
+    })
+}
+
 pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner_bare_jid: &BareJid,
     node: &str,
-) -> Result<(), XmppError> {
+) -> Result<u64, XmppError> {
+    let pending = pending_notification_custody_sql(tx).await?;
+    let eligible = format!("(status IN ('queued', 'in-progress') OR (status = 'failed' AND terminal_disposition IS NULL AND (uncertain_send = 1 OR ({pending}))))");
     let mut rows = tx.query(
-        "SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send FROM push_publish_jobs WHERE owner_bare_jid = ? AND node = ? AND (status IN (?, ?) OR (status = 'failed' AND terminal_disposition IS NULL)) ORDER BY job_id",
-        crate::db_params![owner_bare_jid.to_string(), node, PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
+        &format!("SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send FROM push_publish_jobs WHERE owner_bare_jid = ? AND node = ? AND {eligible} ORDER BY job_id"),
+        crate::db_params![owner_bare_jid.to_string(), node],
     ).await.map_err(|error| XmppError::internal(error.to_string()))?;
     let mut jobs = Vec::new();
     while let Some(row) = rows
@@ -754,28 +796,35 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
     {
         jobs.push(decode_publish_job(&row)?);
     }
+    drop(rows);
+    let mut retired = 0;
+    let has_outbox = has_notification_outbox_frozen_schema_tx(tx).await?;
     for job in jobs {
-        // Node/owner locks are already held by revocation. NOWAIT avoids
-        // reversing Foundation's canonical-before-scheduler lock order.
+        // Explicit retirement stays atomic. A contended canonical parent rolls
+        // back the request so credentials and registration cannot be half retired.
         lock_notification_ancestry_tx(tx, &job).await?;
-        let changed = tx.execute("UPDATE push_publish_jobs SET status = ?, terminal_disposition = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND (status IN (?, ?) OR (status = 'failed' AND terminal_disposition IS NULL))",
-            crate::db_params![PUBLISH_JOB_STATUS_FAILED, REGISTRATION_REVOKED_DISPOSITION, "notification registration revoked", crate::time::now_ms(), job.job_id(), PUBLISH_JOB_STATUS_QUEUED, PUBLISH_JOB_STATUS_IN_PROGRESS],
+        let changed = tx.execute(&format!("UPDATE push_publish_jobs SET status = ?, terminal_disposition = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND {eligible}"),
+            crate::db_params![PUBLISH_JOB_STATUS_FAILED, REGISTRATION_REVOKED_DISPOSITION, "notification registration revoked", crate::time::now_ms(), job.job_id()],
         ).await.map_err(|error| XmppError::internal(error.to_string()))?;
         if changed > 0 {
+            retired += changed;
             settle_notification_ancestry_tx(tx, &job).await?;
+            if has_outbox {
+                if let Some(id) = job.ancestry_job_id() {
+                    acknowledge_completed_outbox_tx(tx, &id.to_string())
+                        .await
+                        .map_err(|error| XmppError::internal(error.to_string()))?;
+                }
+            }
         }
     }
-    Ok(())
+    Ok(retired)
 }
 
 /// One committed endpoint-retirement operation, independent of queued job count.
 pub(super) fn record_registration_revoked() {
-    use waddle_xmpp::telemetry::attributes::{PushDisposition, PushFailureClass, PushRetryReason};
-    waddle_xmpp::telemetry::reliability::increment_push_disposition(
-        PushRetryReason::RegistrationGone,
-        PushFailureClass::ProvenRefusal,
-        PushDisposition::RegistrationRevoked,
-    );
+    use waddle_xmpp::telemetry::attributes::PushDisposition;
+    waddle_xmpp::telemetry::reliability::increment_push_registration_revoked();
     tracing::info!(
         push_stage = "registration_revoked",
         disposition = PushDisposition::RegistrationRevoked.as_str(),
@@ -783,15 +832,51 @@ pub(super) fn record_registration_revoked() {
     );
 }
 
-pub(super) fn retry_at_ms(now_ms: i64) -> i64 {
-    // #1126: ±25% jitter so publish jobs requeued by one relay outage
-    // do not all retry on the same 60s beat.
-    let jitter = {
-        use rand::RngExt as _;
-        let factor: f64 = rand::rng().random_range(0.75..=1.25);
-        ((PUBLISH_JOB_RETRY_DELAY_MS as f64) * factor) as i64
+/// Retry delay after `failed_attempt_count` failures, never exceeding one hour.
+fn retry_delay_ms(failed_attempt_count: i64) -> i64 {
+    let exponent = failed_attempt_count.saturating_sub(1).clamp(0, 6) as u32;
+    PUBLISH_JOB_RETRY_DELAY_MS
+        .saturating_mul(1_i64 << exponent)
+        .min(PUBLISH_JOB_MAX_RETRY_AFTER_MS)
+}
+
+pub(super) fn retry_at_ms(now_ms: i64, failed_attempt_count: i64) -> i64 {
+    use rand::RngExt as _;
+    let jitter = rand::rng().random_range(7_500..=12_500);
+    now_ms.saturating_add(
+        (retry_delay_ms(failed_attempt_count) * jitter / 10_000)
+            .min(PUBLISH_JOB_MAX_RETRY_AFTER_MS),
+    )
+}
+
+/// The atomic repair/recovery statements must derive backoff from each row's
+/// old count rather than a shared deadline or an unfenced Rust-side snapshot.
+/// Only server-generated integer literals and this fixed column name enter SQL.
+fn retry_deadline_sql(now_ms: i64) -> String {
+    use rand::RngExt as _;
+    let jitter: i64 = rand::rng().random_range(7_500..=12_500);
+    retry_deadline_sql_with_jitter(now_ms, jitter)
+}
+
+fn retry_deadline_sql_with_jitter(now_ms: i64, jitter: i64) -> String {
+    let mut base = String::from("CASE");
+    for old_count in 0..6 {
+        base.push_str(&format!(
+            " WHEN attempt_count <= {old_count} THEN {}",
+            retry_delay_ms(old_count + 1),
+        ));
+    }
+    base.push_str(&format!(" ELSE {PUBLISH_JOB_MAX_RETRY_AFTER_MS} END"));
+    let delay = if jitter > 10_000 {
+        format!("CASE WHEN attempt_count >= 6 THEN {PUBLISH_JOB_MAX_RETRY_AFTER_MS} ELSE CAST(({base}) AS BIGINT) * {jitter} / 10000 END")
+    } else {
+        format!("(CAST(({base}) AS BIGINT) * {jitter} / 10000)")
     };
-    now_ms.saturating_add(jitter)
+    format!(
+        "(CASE WHEN {now_ms} > {} - ({delay}) THEN {} ELSE {now_ms} + ({delay}) END)",
+        i64::MAX,
+        i64::MAX
+    )
 }
 
 fn decode_publish_job(row: &crate::db::Row) -> Result<PushPublishJob, XmppError> {
@@ -1274,14 +1359,16 @@ impl DatabasePushServiceStore {
             PushDisposition, PushFailureClass, PushRetryReason,
         };
         let now_ms = crate::time::now_ms();
+        let retry_at = retry_deadline_sql(now_ms);
         let mut rows = self
             .query(
-                r#"
+                &format!(
+                    r#"
             UPDATE push_publish_jobs
             SET status = CASE WHEN attempt_count + 1 >= ? THEN 'failed' ELSE 'queued' END,
                 attempt_count = attempt_count + 1,
                 last_error = 'Push publish job claim expired before completion',
-                next_retry_at_ms = CASE WHEN attempt_count + 1 >= ? THEN NULL ELSE ? END,
+                next_retry_at_ms = CASE WHEN attempt_count + 1 >= ? THEN NULL ELSE {retry_at} END,
                 claimed_at_ms = NULL,
                 claim_token = NULL,
                 uncertain_send = 1,
@@ -1291,15 +1378,11 @@ impl DatabasePushServiceStore {
               AND claimed_at_ms <= ?
               AND (? = 0 OR job_id = ?)
             RETURNING status
-            "#,
+            "#
+                ),
                 crate::db_params![
                     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
-                    if job_id.is_some() {
-                        None
-                    } else {
-                        Some(retry_at_ms(now_ms))
-                    },
                     now_ms,
                     now_ms - PUBLISH_JOB_CLAIM_TIMEOUT_MS,
                     i64::from(job_id.is_some()),
@@ -1347,27 +1430,28 @@ impl DatabasePushServiceStore {
         // Ordinary repair must not reacquire the contended canonical parent
         // that may have caused processing to fail. Only terminal disposition
         // requires ancestry locks; this atomic update excludes that case.
-        const REPAIR_SQL: &str = r#"
+        let now_ms = crate::time::now_ms();
+        let retry_at = retry_deadline_sql(now_ms);
+        let repair_sql = format!(
+            r#"
             UPDATE push_publish_jobs
             SET status = CASE WHEN status = 'queued' AND attempt_count + 1 >= ? THEN 'failed' ELSE status END,
                 uncertain_send = CASE WHEN status = 'in-progress' THEN 1 ELSE uncertain_send END,
                 attempt_count = CASE WHEN status = 'queued' THEN attempt_count + 1 ELSE attempt_count END,
                 last_error = CASE WHEN status = 'queued' THEN ? ELSE last_error END,
-                next_retry_at_ms = CASE WHEN status = 'queued' AND attempt_count + 1 >= ? THEN NULL WHEN status = 'queued' THEN ? ELSE next_retry_at_ms END,
+                next_retry_at_ms = CASE WHEN status = 'queued' AND attempt_count + 1 >= ? THEN NULL WHEN status = 'queued' THEN {retry_at} ELSE next_retry_at_ms END,
                 updated_at_ms = CASE WHEN status = 'queued' THEN ? ELSE updated_at_ms END
             WHERE job_id = ? AND status IN (?, ?)
               AND (? = 1 OR status = 'in-progress' OR uncertain_send = 1 OR attempt_count < ?)
-        "#;
-        let now_ms = crate::time::now_ms();
-        let retry_at = retry_at_ms(now_ms);
+        "#
+        );
         let repaired = self
             .execute(
-                REPAIR_SQL,
+                &repair_sql,
                 crate::db_params![
                     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                     error,
                     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
-                    retry_at,
                     now_ms,
                     job_id,
                     PUBLISH_JOB_STATUS_QUEUED,
@@ -1398,12 +1482,11 @@ impl DatabasePushServiceStore {
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
                 self.execute(
-                    REPAIR_SQL,
+                    &repair_sql,
                     crate::db_params![
                         PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                         error,
                         PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
-                        retry_at,
                         now_ms,
                         job_id,
                         PUBLISH_JOB_STATUS_QUEUED,
@@ -1459,12 +1542,11 @@ impl DatabasePushServiceStore {
             }
         } else {
             tx.execute(
-                REPAIR_SQL,
+                &repair_sql,
                 crate::db_params![
                     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
                     error,
                     PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
-                    retry_at,
                     now_ms,
                     job_id,
                     PUBLISH_JOB_STATUS_QUEUED,
@@ -1554,7 +1636,7 @@ mod tests {
         let now_ms = 1_000_000;
         let mut seen = std::collections::HashSet::new();
         for _ in 0..200 {
-            let retry_at = retry_at_ms(now_ms);
+            let retry_at = retry_at_ms(now_ms, 1);
             let delay = retry_at - now_ms;
             assert!(
                 (45_000..=75_000).contains(&delay),
@@ -1566,6 +1648,141 @@ mod tests {
             seen.len() > 1,
             "200 samples produced a single delay — backoff is not jittered"
         );
+    }
+
+    #[test]
+    fn retry_backoff_grows_from_persisted_failures_and_caps_after_jitter() {
+        for (attempt, minimum, maximum) in [
+            (1, 45_000, 75_000),
+            (2, 90_000, 150_000),
+            (3, 180_000, 300_000),
+            (6, 1_440_000, 2_400_000),
+            (7, 2_700_000, 3_600_000),
+            (24, 2_700_000, 3_600_000),
+            (i64::MAX, 2_700_000, 3_600_000),
+        ] {
+            for _ in 0..32 {
+                let delay = retry_at_ms(1_000, attempt) - 1_000;
+                assert!(
+                    (minimum..=maximum).contains(&delay),
+                    "attempt {attempt}: {delay}"
+                );
+            }
+        }
+        assert_eq!(retry_at_ms(i64::MAX - 1, 24), i64::MAX);
+    }
+
+    #[tokio::test]
+    async fn atomic_repair_backoff_uses_each_durable_attempt_count() {
+        verify_atomic_repair_backoff(store().await).await;
+    }
+
+    #[tokio::test]
+    async fn postgres_atomic_repair_backoff_uses_each_durable_attempt_count() {
+        if let Some(fixture) =
+            crate::ingress::test_support::IngressFixture::postgres("push_repair_backoff").await
+        {
+            let store = DatabasePushServiceStore::new(fixture.db.clone())
+                .await
+                .expect("store");
+            verify_atomic_repair_backoff(store).await;
+            fixture.close().await;
+        }
+    }
+
+    async fn verify_atomic_repair_backoff(store: DatabasePushServiceStore) {
+        let node = store
+            .ensure_node(&owner(), "repair-backoff")
+            .await
+            .expect("node");
+        for (id, old_count, minimum, maximum) in [
+            ("first", 0, 45_000, 75_000),
+            ("later", 2, 180_000, 300_000),
+            ("integer-overflow-control", 5, 1_440_000, 2_400_000),
+            ("capped-delay", 8, 2_700_000, 3_600_000),
+        ] {
+            let accepted = store
+                .enqueue_notification_publish_job_from_user_server(
+                    node.node(),
+                    &notification_item(id),
+                    &owner(),
+                )
+                .await
+                .expect("accepted");
+            let job = accepted.job_id().to_string();
+            store
+                .execute(
+                    "UPDATE push_publish_jobs SET attempt_count = ? WHERE job_id = ?",
+                    crate::db_params![old_count, &job],
+                )
+                .await
+                .expect("durable prior failures");
+            let before = crate::time::now_ms();
+            store
+                .record_publish_job_failure_by_id(&job, "pre-send storage failure")
+                .await
+                .expect("repair");
+            let after = crate::time::now_ms();
+            let deadline = scalar_i64(
+                &store,
+                "SELECT next_retry_at_ms FROM push_publish_jobs WHERE job_id = ?",
+                crate::db_params![&job],
+            )
+            .await;
+            assert!(
+                deadline >= before + minimum && deadline <= after + maximum,
+                "{id}: {deadline}"
+            );
+            assert_eq!(
+                scalar_i64(
+                    &store,
+                    "SELECT attempt_count FROM push_publish_jobs WHERE job_id = ?",
+                    crate::db_params![&job]
+                )
+                .await,
+                old_count + 1
+            );
+        }
+        // Execute the SQL expression on both database engines with both
+        // extreme jitter values. PostgreSQL must promote multiplication to
+        // BIGINT before it overflows the otherwise int4 CASE literals.
+        for (old_count, jitter, expected_delay) in [
+            (2, 7_500, 180_000),
+            (2, 12_500, 300_000),
+            (5, 7_500, 1_440_000),
+            (5, 12_500, 2_400_000),
+            (6, 7_500, 2_700_000),
+            (6, 12_500, 3_600_000),
+        ] {
+            let item = format!("sql-backoff-{old_count}-{jitter}");
+            let accepted = store
+                .enqueue_notification_publish_job_from_user_server(
+                    node.node(),
+                    &notification_item(&item),
+                    &owner(),
+                )
+                .await
+                .expect("accepted expression fixture");
+            let id = accepted.job_id().to_string();
+            store
+                .execute(
+                    "UPDATE push_publish_jobs SET attempt_count = ? WHERE job_id = ?",
+                    crate::db_params![old_count, &id],
+                )
+                .await
+                .expect("durable count");
+            let deadline = retry_deadline_sql_with_jitter(1_000_000, jitter);
+            store.execute(&format!("UPDATE push_publish_jobs SET next_retry_at_ms = {deadline} WHERE job_id = ?"), crate::db_params![&id]).await.expect("SQL backoff without integer overflow");
+            assert_eq!(
+                scalar_i64(
+                    &store,
+                    "SELECT next_retry_at_ms FROM push_publish_jobs WHERE job_id = ?",
+                    crate::db_params![&id]
+                )
+                .await,
+                1_000_000 + expected_delay
+            );
+        }
     }
 
     #[tokio::test]

@@ -37,3 +37,27 @@ independent final code review.
 The implementation must document which specific responses prove refusal;
 unrecognized failures remain conservative rather than inferring certainty
 from the HTTP status family.
+
+## Adversarial review follow-up
+
+1. Distinguish connection establishment failures (including connect timeouts)
+   from requests that may have reached a provider. Carry typed certainty from
+   provider outcomes to worker scheduling; preserve earlier uncertainty.
+2. Replace the fixed provider retry delay with bounded exponential backoff based
+   on each durable row's failure count, including repair and expired-claim paths.
+3. Export current parked counts, maximum per-node occupancy, near-cap node count,
+   and snapshot freshness through the existing create-at-use telemetry pattern.
+   Keep identity-bearing node inventory out of metric labels; use structured logs
+   and read-only inventory for exact nodes. Add capacity and parked-work alerts.
+4. Correct lost-claim certainty and retirement event semantics. Preserve terminal
+   history, and verify explicit retirement either commits fully or returns a
+   retryable error without partial cancellation on lock contention.
+5. Provide an operator-authorized XMPP retirement procedure and obtain a
+   read-only production inventory of legacy rows before any merge/deployment.
+
+Use the existing sender, queue/drain, exported telemetry, and authenticated XMPP
+command seams. Verify refusal/connect/post-connect-timeout distinctions, sticky
+uncertainty, persisted backoff, falling and zero gauges, alert boundaries,
+retirement history, authorization, and rollback. Keep this a focused repair;
+consolidate duplicated classification only where needed to enforce the typed
+boundary and avoid broad file splitting.

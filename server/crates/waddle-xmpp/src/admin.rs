@@ -22,6 +22,11 @@
 /// var or disco#items the commands node and look for the entry.
 pub const NS_ADMIN_USERS_LIST: &str = "urn:waddle:admin:users:list:0";
 
+/// Exact-owner/node push inventory over XEP-0050 (community-owner only).
+pub const NS_ADMIN_PUSH_INSPECT: &str = "urn:waddle:admin:push:inspect:0";
+/// Explicitly confirmed push-node retirement over XEP-0050.
+pub const NS_ADMIN_PUSH_RETIRE: &str = "urn:waddle:admin:push:retire:0";
+
 // ---------------------------------------------------------------------------
 // Admin V2 — Spaces + Channels CRUD command namespaces.
 //

@@ -17,10 +17,10 @@ use waddle_xmpp::push::apns::{
 };
 use waddle_xmpp::push::types::TransientFailure;
 use waddle_xmpp::push::Urgency;
-use waddle_xmpp::telemetry::attributes::MetricAttribute;
+use waddle_xmpp::telemetry::attributes::{MetricAttribute, PushRetryReason};
 
 use super::commands::PushDeviceEnvironment;
-use super::dispatch::{envelope_item, ParsedPushPayload, SealedActiveDevice};
+use super::dispatch::{envelope_item, ParsedPushPayload, RetryMetadata, SealedActiveDevice};
 use super::secrets::PushSecretCipher;
 
 pub(crate) const ATTEMPT_STATUS_APNS_DELIVERED: &str = "apns-delivered";
@@ -28,6 +28,7 @@ pub(crate) const ATTEMPT_STATUS_APNS_DELIVERED: &str = "apns-delivered";
 /// The only APNs status that disables the device (XEP-0357 §6).
 pub(crate) const ATTEMPT_STATUS_APNS_GONE: &str = "apns-gone";
 pub(crate) const ATTEMPT_STATUS_APNS_RATE_LIMITED: &str = "apns-rate-limited";
+pub(crate) const ATTEMPT_STATUS_APNS_CONNECT_FAILED: &str = "apns-connect-failed";
 pub(crate) const ATTEMPT_STATUS_APNS_SERVER_ERROR: &str = "apns-server-error";
 pub(crate) const ATTEMPT_STATUS_APNS_PROVIDER_REFUSED: &str = "apns-provider-refused";
 pub(crate) const ATTEMPT_STATUS_APNS_TRANSIENT: &str = "apns-transient";
@@ -75,6 +76,7 @@ pub(super) struct ApnsAttempt {
     pub(super) status: &'static str,
     pub(super) last_error: Option<String>,
     pub(super) retry_after: Option<Duration>,
+    pub(super) retry: Option<RetryMetadata>,
 }
 
 impl ApnsAttempt {
@@ -83,6 +85,7 @@ impl ApnsAttempt {
             status,
             last_error: Some(diagnostic),
             retry_after: None,
+            retry: None,
         }
     }
 }
@@ -186,6 +189,7 @@ pub(super) async fn dispatch_apns_device(
                 status: reason.status(),
                 last_error: None,
                 retry_after: None,
+                retry: None,
             };
         }
     };
@@ -298,11 +302,15 @@ pub(super) fn outcome_to_attempt_status(outcome: &ApnsOutcome) -> &'static str {
             ..
         } => ATTEMPT_STATUS_APNS_PROVIDER_REFUSED,
         ApnsOutcome::Transient {
+            cause: ApnsTransient::Failure(TransientFailure::Connect),
+            ..
+        } => ATTEMPT_STATUS_APNS_CONNECT_FAILED,
+        ApnsOutcome::Transient {
             cause: ApnsTransient::Failure(TransientFailure::ServerError { .. }),
             ..
         } => ATTEMPT_STATUS_APNS_SERVER_ERROR,
         ApnsOutcome::Transient {
-            cause: ApnsTransient::Failure(_),
+            cause: ApnsTransient::Failure(TransientFailure::Network | TransientFailure::Timeout),
             ..
         } => ATTEMPT_STATUS_APNS_TRANSIENT,
         ApnsOutcome::Rejected { .. } => ATTEMPT_STATUS_APNS_REJECTED,
@@ -329,6 +337,9 @@ fn outcome_diagnostic(outcome: &ApnsOutcome) -> Option<String> {
                 ApnsTransient::Failure(TransientFailure::ServerError { status }) => {
                     format!("transient: HTTP {status}")
                 }
+                ApnsTransient::Failure(TransientFailure::Connect) => {
+                    "transient: connection setup failed before send".to_string()
+                }
                 ApnsTransient::Failure(TransientFailure::Network) => {
                     "transient: network".to_string()
                 }
@@ -351,6 +362,24 @@ fn outcome_diagnostic(outcome: &ApnsOutcome) -> Option<String> {
     Some(diagnostic)
 }
 
+fn retry_metadata(outcome: &ApnsOutcome) -> Option<RetryMetadata> {
+    match outcome {
+        ApnsOutcome::Transient { cause, .. } => Some(match cause {
+            ApnsTransient::RateLimited { .. } => {
+                RetryMetadata::refused(PushRetryReason::RateLimited)
+            }
+            ApnsTransient::Refused { .. } => {
+                RetryMetadata::refused(PushRetryReason::ProviderServerError)
+            }
+            ApnsTransient::Failure(failure) => RetryMetadata::for_transport_failure(failure),
+        }),
+        ApnsOutcome::Sent { .. }
+        | ApnsOutcome::DeviceGone { .. }
+        | ApnsOutcome::ProviderAuth { .. }
+        | ApnsOutcome::Rejected { .. } => None,
+    }
+}
+
 fn attempt_for_outcome(outcome: &ApnsOutcome) -> ApnsAttempt {
     let retry_after = match outcome {
         ApnsOutcome::Transient { retry_after, .. } => *retry_after,
@@ -360,6 +389,7 @@ fn attempt_for_outcome(outcome: &ApnsOutcome) -> ApnsAttempt {
         status: outcome_to_attempt_status(outcome),
         last_error: outcome_diagnostic(outcome),
         retry_after,
+        retry: retry_metadata(outcome),
     }
 }
 
@@ -368,6 +398,54 @@ mod tests {
     use waddle_xmpp::push::apns::ApnsReason;
 
     use super::*;
+
+    #[test]
+    fn connection_setup_is_typed_pre_send_and_other_transport_failures_stay_unknown() {
+        use waddle_xmpp::telemetry::attributes::PushFailureClass;
+        for (failure, class, reason) in [
+            (
+                TransientFailure::Connect,
+                PushFailureClass::PreSend,
+                PushRetryReason::PreSend,
+            ),
+            (
+                TransientFailure::Network,
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::UnknownAfterSend,
+            ),
+            (
+                TransientFailure::Timeout,
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::UnknownAfterSend,
+            ),
+            (
+                TransientFailure::ServerError { status: 503 },
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::ProviderServerError,
+            ),
+        ] {
+            let outcome = ApnsOutcome::Transient {
+                cause: ApnsTransient::Failure(failure.clone()),
+                retry_after: None,
+            };
+            assert_eq!(
+                attempt_for_outcome(&outcome).retry,
+                Some(RetryMetadata {
+                    failure_class: class,
+                    reason
+                })
+            );
+            if failure == TransientFailure::Connect {
+                assert_eq!(
+                    outcome_to_attempt_status(&outcome),
+                    ATTEMPT_STATUS_APNS_CONNECT_FAILED
+                );
+                assert!(outcome_diagnostic(&outcome)
+                    .expect("diagnostic")
+                    .contains("before send"));
+            }
+        }
+    }
 
     #[test]
     fn persisted_retry_status_distinguishes_failure_contracts() {
@@ -442,6 +520,10 @@ mod tests {
             ),
         ] {
             assert_eq!(outcome_to_attempt_status(&outcome), expected);
+            assert_eq!(
+                retry_metadata(&outcome).is_some(),
+                matches!(outcome, ApnsOutcome::Transient { .. })
+            );
         }
     }
 

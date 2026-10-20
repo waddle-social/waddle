@@ -1210,6 +1210,13 @@ async fn persistent_web_push_failures_stop_dispatch_after_twenty_four_attempts()
     for prior_unknown in [false, true] {
         for (status, outcome, new_uncertainty) in [
             (
+                "web-connect-failed",
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::Connect,
+                },
+                false,
+            ),
+            (
                 "web-server-error",
                 WebPushOutcome::Transient {
                     kind: TransientFailure::ServerError { status: 500 },

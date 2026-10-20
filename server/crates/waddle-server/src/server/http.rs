@@ -1129,6 +1129,13 @@ async fn create_websocket_state(
     // typed storage calls instead of returning service-unavailable.
     crate::push_service::commands::register(&websocket_command_registry, Arc::clone(&push_service))
         .await;
+    crate::admin::push::register(
+        &websocket_command_registry,
+        Arc::clone(&state),
+        Arc::clone(&push_service),
+        xmpp_domain.parse()?,
+    )
+    .await;
     let notification_outbox = Arc::new(
         crate::notification_outbox::NotificationOutboxStore::new(state.db_pool.global().clone())
             .await

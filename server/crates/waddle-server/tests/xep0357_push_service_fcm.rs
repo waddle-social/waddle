@@ -1157,6 +1157,14 @@ async fn persistent_provider_failures_stop_dispatch_after_twenty_four_attempts()
     for prior_unknown in [false, true] {
         for (status, outcome, new_uncertainty) in [
             (
+                "fcm-connect-failed",
+                FcmOutcome::Transient {
+                    cause: FcmTransient::Failure(TransientFailure::Connect),
+                    retry_after: None,
+                },
+                false,
+            ),
+            (
                 "fcm-server-error",
                 FcmOutcome::Transient {
                     cause: FcmTransient::Failure(TransientFailure::ServerError { status: 500 }),

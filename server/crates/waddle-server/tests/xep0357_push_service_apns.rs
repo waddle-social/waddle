@@ -851,3 +851,82 @@ async fn apns_transient_failure_requeues_without_resending_to_delivered_siblings
         "#1123: an already-delivered Apple device is not pushed twice"
     );
 }
+
+#[tokio::test]
+async fn connection_setup_failures_stop_at_budget_and_preserve_only_prior_uncertainty() {
+    for prior_unknown in [false, true] {
+        let sender = FakeApnsSender::with_outcomes(vec![(
+            TOKEN_A,
+            vec![
+                ApnsOutcome::Transient {
+                    cause: ApnsTransient::Failure(TransientFailure::Connect),
+                    retry_after: None
+                };
+                25
+            ],
+        )]);
+        let store = store_with_apns(sender.clone(), counting_tokens()).await;
+        let owner = owner();
+        let node = store.ensure_node(&owner, BUNDLE_ID).await.expect("node");
+        register_apple_device(&store, &owner, node.node(), "phone", "prod", TOKEN_A).await;
+        publish(
+            &store,
+            &owner,
+            node.node(),
+            notification_item("connect-budget", 1, false),
+        )
+        .await;
+        if prior_unknown {
+            store
+                .database()
+                .guard()
+                .await
+                .expect("guard")
+                .execute("UPDATE push_publish_jobs SET uncertain_send = 1", ())
+                .await
+                .expect("earlier unknown send");
+        }
+        for completed in 1..=24 {
+            let mut rows = query(&store, "SELECT status, uncertain_send, attempt_count FROM push_publish_jobs WHERE item_id = 'connect-budget'", ()).await;
+            let row = rows.next().await.expect("row").expect("job");
+            assert_eq!(
+                row.get::<String>(0).expect("status"),
+                if completed < 24 { "queued" } else { "failed" }
+            );
+            assert_eq!(
+                row.get::<i64>(1).expect("uncertainty"),
+                i64::from(prior_unknown)
+            );
+            assert_eq!(row.get::<i64>(2).expect("count"), completed);
+            assert_eq!(sender.calls_for(TOKEN_A).len(), completed as usize);
+            if completed < 24 {
+                store
+                    .database()
+                    .guard()
+                    .await
+                    .expect("guard")
+                    .execute("UPDATE push_publish_jobs SET next_retry_at_ms = 0", ())
+                    .await
+                    .expect("retry due");
+                store
+                    .drain_queued_notification_publish_jobs(16)
+                    .await
+                    .expect("next attempt");
+            }
+        }
+        assert!(store.queued_publish_jobs().await.expect("queue").is_empty());
+        assert!(attempt_statuses(&store, node.node())
+            .await
+            .iter()
+            .all(|(_, status)| status == "apns-connect-failed"));
+        store
+            .drain_queued_notification_publish_jobs(16)
+            .await
+            .expect("exhausted work idle");
+        assert_eq!(sender.calls_for(TOKEN_A).len(), 24);
+        assert_eq!(
+            device_status(&store, node.node(), "phone").await,
+            DEVICE_STATUS_ACTIVE
+        );
+    }
+}

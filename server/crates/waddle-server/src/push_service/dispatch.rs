@@ -17,9 +17,10 @@ use jid::BareJid;
 use minidom::Element;
 use url::Url;
 use waddle_xmpp::push::envelope::{push_topic_for, NotificationClass, PushEnvelope};
-use waddle_xmpp::push::types::{SubscriptionKeys, VapidSub, WebPushOutcome};
+use waddle_xmpp::push::types::{SubscriptionKeys, TransientFailure, VapidSub, WebPushOutcome};
 use waddle_xmpp::push::vapid::{aud_for, vapid_k_header, VapidSigner};
 use waddle_xmpp::push::{encrypt, WebPushRequest, WebPushSender};
+use waddle_xmpp::telemetry::attributes::{PushFailureClass, PushRetryReason};
 use waddle_xmpp::xep::xep0357::NS_PUSH;
 use waddle_xmpp::XmppError;
 
@@ -34,6 +35,56 @@ const NS_WADDLE_PUSH_CONTEXT: &str = "urn:waddle:push:context:0";
 const XEP0357_SUMMARY_FORM_TYPE: &str = "urn:xmpp:push:summary";
 /// XEP-0004 data-forms namespace.
 const NS_DATA_FORMS: &str = "jabber:x:data";
+
+/// Retry evidence carried directly from typed provider outcomes to the durable
+/// worker. Persistence status strings are diagnostics, never scheduler inputs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct RetryMetadata {
+    pub(super) failure_class: PushFailureClass,
+    pub(super) reason: PushRetryReason,
+}
+
+impl RetryMetadata {
+    pub(super) const PRE_SEND: Self = Self {
+        failure_class: PushFailureClass::PreSend,
+        reason: PushRetryReason::PreSend,
+    };
+
+    pub(super) const fn refused(reason: PushRetryReason) -> Self {
+        Self {
+            failure_class: PushFailureClass::ProvenRefusal,
+            reason,
+        }
+    }
+
+    pub(super) fn for_transport_failure(failure: &TransientFailure) -> Self {
+        match failure {
+            TransientFailure::Connect => Self::PRE_SEND,
+            TransientFailure::Network | TransientFailure::Timeout => Self {
+                failure_class: PushFailureClass::UnknownAfterSend,
+                reason: PushRetryReason::UnknownAfterSend,
+            },
+            TransientFailure::ServerError { .. } => Self {
+                failure_class: PushFailureClass::UnknownAfterSend,
+                reason: PushRetryReason::ProviderServerError,
+            },
+        }
+    }
+}
+
+pub(super) fn web_push_retry_metadata(outcome: &WebPushOutcome) -> Option<RetryMetadata> {
+    match outcome {
+        WebPushOutcome::Transient { kind } => Some(RetryMetadata::for_transport_failure(kind)),
+        WebPushOutcome::RateLimited { .. } => {
+            Some(RetryMetadata::refused(PushRetryReason::RateLimited))
+        }
+        WebPushOutcome::ClockSkew { .. } => Some(RetryMetadata::refused(PushRetryReason::PreSend)),
+        WebPushOutcome::Delivered { .. }
+        | WebPushOutcome::SubscriptionGone { .. }
+        | WebPushOutcome::PayloadTooLarge { .. }
+        | WebPushOutcome::BadRequest { .. } => None,
+    }
+}
 
 /// Parsed XEP-0357 §4 notification payload as we emit it on the wire.
 /// Protocol fields are typed at the parsing boundary so downstream
@@ -331,9 +382,14 @@ pub(crate) fn outcome_to_attempt_status(outcome: &WebPushOutcome) -> &'static st
         WebPushOutcome::PayloadTooLarge { .. } => ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE,
         WebPushOutcome::BadRequest { .. } => ATTEMPT_STATUS_WEB_BAD_REQUEST,
         WebPushOutcome::Transient {
-            kind: waddle_xmpp::push::types::TransientFailure::ServerError { .. },
+            kind: TransientFailure::Connect,
+        } => ATTEMPT_STATUS_WEB_CONNECT_FAILED,
+        WebPushOutcome::Transient {
+            kind: TransientFailure::ServerError { .. },
         } => ATTEMPT_STATUS_WEB_SERVER_ERROR,
-        WebPushOutcome::Transient { .. } => ATTEMPT_STATUS_WEB_TRANSIENT,
+        WebPushOutcome::Transient {
+            kind: TransientFailure::Network | TransientFailure::Timeout,
+        } => ATTEMPT_STATUS_WEB_TRANSIENT,
     }
 }
 
@@ -357,6 +413,7 @@ pub(crate) const ATTEMPT_STATUS_WEB_CLOCK_SKEW: &str = "web-clock-skew";
 pub(crate) const ATTEMPT_STATUS_WEB_RATE_LIMITED: &str = "web-rate-limited";
 pub(crate) const ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE: &str = "web-payload-too-large";
 pub(crate) const ATTEMPT_STATUS_WEB_BAD_REQUEST: &str = "web-bad-request";
+pub(crate) const ATTEMPT_STATUS_WEB_CONNECT_FAILED: &str = "web-connect-failed";
 pub(crate) const ATTEMPT_STATUS_WEB_SERVER_ERROR: &str = "web-server-error";
 pub(crate) const ATTEMPT_STATUS_WEB_TRANSIENT: &str = "web-transient";
 pub(crate) const ATTEMPT_STATUS_WEB_MISSING_MATERIAL: &str = "web-missing-material";
@@ -368,6 +425,76 @@ pub(crate) const ATTEMPT_STATUS_WEB_INVALID_KEYS: &str = "web-invalid-keys";
 mod tests {
     use super::*;
     use waddle_xmpp::push::envelope::{push_class_for_db_value, PushClass};
+
+    #[test]
+    fn typed_web_push_outcomes_carry_retry_evidence() {
+        for (outcome, class, reason) in [
+            (
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::Connect,
+                },
+                PushFailureClass::PreSend,
+                PushRetryReason::PreSend,
+            ),
+            (
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::Network,
+                },
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::UnknownAfterSend,
+            ),
+            (
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::Timeout,
+                },
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::UnknownAfterSend,
+            ),
+            (
+                WebPushOutcome::Transient {
+                    kind: TransientFailure::ServerError { status: 503 },
+                },
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::ProviderServerError,
+            ),
+            (
+                WebPushOutcome::RateLimited {
+                    status: 429,
+                    retry_after: None,
+                },
+                PushFailureClass::ProvenRefusal,
+                PushRetryReason::RateLimited,
+            ),
+            (
+                WebPushOutcome::ClockSkew { status: 401 },
+                PushFailureClass::ProvenRefusal,
+                PushRetryReason::PreSend,
+            ),
+        ] {
+            assert_eq!(
+                web_push_retry_metadata(&outcome),
+                Some(RetryMetadata {
+                    failure_class: class,
+                    reason
+                })
+            );
+        }
+        for outcome in [
+            WebPushOutcome::Delivered { status: 201 },
+            WebPushOutcome::SubscriptionGone { status: 410 },
+            WebPushOutcome::PayloadTooLarge { status: 413 },
+            WebPushOutcome::BadRequest { status: 0 },
+            WebPushOutcome::BadRequest { status: 400 },
+        ] {
+            assert_eq!(web_push_retry_metadata(&outcome), None);
+        }
+        assert_eq!(
+            outcome_to_attempt_status(&WebPushOutcome::Transient {
+                kind: TransientFailure::Connect
+            }),
+            ATTEMPT_STATUS_WEB_CONNECT_FAILED
+        );
+    }
 
     #[test]
     fn server_response_is_persisted_separately_from_lost_response() {

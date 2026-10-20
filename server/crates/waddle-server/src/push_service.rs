@@ -14,11 +14,14 @@ pub(crate) mod dispatch;
 mod fcm_config;
 mod fcm_dispatch;
 mod nodes;
+pub(crate) mod observability;
+mod operator_inventory;
 mod publish;
 mod publish_jobs;
 mod pubsub_backing;
 mod registration;
 mod secrets;
+mod settlement;
 mod store;
 #[cfg(test)]
 pub(crate) mod test_support;
@@ -28,6 +31,8 @@ mod worker;
 
 pub use apns_config::{ApnsConfig, ApnsConfigError, ApnsConfigVar};
 pub use fcm_config::{FcmConfig, FcmConfigError, FcmConfigVar, FcmTokenSourceLoadError};
+pub use observability::PushProviderQueueObservation;
+pub use operator_inventory::{PushOperatorInventory, PushOperatorNode, PushOperatorNodeStatus};
 pub(crate) use publish_jobs::acknowledge_completed_outbox_tx;
 pub use pubsub_backing::ensure_xep0060_push_node;
 pub(crate) use secrets::PushSecretCipher;

@@ -11,6 +11,95 @@ use async_trait::async_trait;
 use std::time::Duration;
 
 #[tokio::test]
+async fn push_registration_revocation_is_not_a_provider_failure() {
+    let guard = test_support::acquire().await;
+    super::reliability::register_reliability_counters();
+    super::reliability::increment_push_registration_revoked();
+
+    assert_eq!(
+        guard.counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")]
+        ),
+        Some(1),
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.disposition"),
+        Some("{transition}".into())
+    );
+    assert_eq!(guard.counter_sum("xmpp.push.failure_class", &[]), Some(0));
+    assert_eq!(
+        guard.counter_sum(
+            "xmpp.push.failure_class",
+            &[("failure_class", "proven_refusal")]
+        ),
+        Some(0)
+    );
+    assert_eq!(guard.counter_sum("xmpp.push.failure_reason", &[]), Some(0));
+}
+
+#[tokio::test]
+async fn push_queue_gauges_export_current_state_including_recovery_to_zero() {
+    use super::attributes::PushQueue;
+    use super::reliability::{record_push_provider_capacity, record_push_queue_snapshot};
+
+    let guard = test_support::acquire().await;
+    assert_eq!(guard.gauge_samples("xmpp.push.queue.parked"), None);
+    record_push_queue_snapshot(PushQueue::Provider, 8, 2, 100);
+    record_push_queue_snapshot(PushQueue::Outbox, 3, 1, 101);
+    record_push_provider_capacity(9_000, 1);
+    assert_eq!(
+        guard.gauge_samples("xmpp.push.provider.retained_max_per_node"),
+        Some(vec![(9_000, vec![])])
+    );
+    assert_eq!(
+        guard
+            .gauge_samples("xmpp.push.queue.parked")
+            .map(|mut samples| {
+                samples.sort_by(|a, b| a.1.cmp(&b.1));
+                samples
+            }),
+        Some(vec![
+            (3, vec![("queue".into(), "outbox".into())]),
+            (8, vec![("queue".into(), "provider".into())]),
+        ])
+    );
+
+    record_push_queue_snapshot(PushQueue::Provider, 0, 0, 200);
+    record_push_queue_snapshot(PushQueue::Outbox, 0, 0, 201);
+    record_push_provider_capacity(0, 0);
+    for name in [
+        "xmpp.push.queue.parked",
+        "xmpp.push.queue.unresolved_failed",
+    ] {
+        let samples = guard.gauge_samples(name).expect("gauge samples");
+        assert_eq!(samples.len(), 2);
+        assert!(samples
+            .iter()
+            .all(|(value, attrs)| *value == 0 && attrs.len() == 1 && attrs[0].0 == "queue"));
+        assert_eq!(guard.metric_unit(name), Some("1".into()));
+        assert_eq!(guard.counter_sum(name, &[]), None);
+    }
+    assert_eq!(
+        guard.gauge_samples("xmpp.push.provider.retained_max_per_node"),
+        Some(vec![(0, vec![])])
+    );
+    assert_eq!(
+        guard.gauge_samples("xmpp.push.provider.near_capacity_nodes"),
+        Some(vec![(0, vec![])])
+    );
+    assert_eq!(
+        guard.metric_unit("xmpp.push.queue.snapshot_at"),
+        Some("s".into())
+    );
+    let timestamps = guard
+        .gauge_samples("xmpp.push.queue.snapshot_at")
+        .expect("timestamps");
+    assert!(timestamps.contains(&(200, vec![("queue".into(), "provider".into())])));
+    assert!(timestamps.contains(&(201, vec![("queue".into(), "outbox".into())])));
+}
+
+#[tokio::test]
 async fn observed_claim_store_exports_one_sample_per_external_operation() {
     use crate::ownership::{
         verify_resume_identity, ClaimStore, Entity, EntityType, ExactReleaseOutcome,

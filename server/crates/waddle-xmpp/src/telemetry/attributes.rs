@@ -31,6 +31,28 @@ pub trait MetricAttribute: sealed::Sealed {
     }
 }
 
+/// `queue` — the two durable stages of first-party push custody.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushQueue {
+    Outbox,
+    Provider,
+}
+
+impl sealed::Sealed for PushQueue {}
+
+impl MetricAttribute for PushQueue {
+    fn key(&self) -> &'static str {
+        "queue"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::Outbox => "outbox",
+            Self::Provider => "provider",
+        }
+    }
+}
+
 /// `operation` — the externally requested ownership mutation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClaimOp {

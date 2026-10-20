@@ -413,11 +413,7 @@ impl OAuthFcmTokenSource {
             .send()
             .await
             .map_err(|error| {
-                let failure = if error.is_timeout() {
-                    TransientFailure::Timeout
-                } else {
-                    TransientFailure::Network
-                };
+                let failure = TransientFailure::from_transport_error(&error);
                 warn!(error = %error.without_url(), "FCM OAuth token request failed");
                 FcmTokenError::Transient(failure)
             })?;
@@ -844,7 +840,7 @@ mod tests {
         );
         assert_eq!(
             unreachable.current().await,
-            Err(FcmTokenError::Transient(TransientFailure::Network))
+            Err(FcmTokenError::Transient(TransientFailure::Connect))
         );
     }
 

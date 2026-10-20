@@ -405,7 +405,7 @@ impl DatabasePushServiceStore {
                 {
                     vec![node.to_string()]
                 } else {
-                    crate::notification_outbox::retire_registration_outbox_tx(
+                    let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
                         &mut tx,
                         owner_bare_jid,
                         None,
@@ -413,10 +413,20 @@ impl DatabasePushServiceStore {
                     )
                     .await
                     .map_err(|error| XmppError::internal(error.to_string()))?;
+                    let retired_registrations =
+                        crate::push_registrations::disable_node_registrations_tx(
+                            &mut tx,
+                            owner_bare_jid,
+                            Some(node),
+                        )
+                        .await
+                        .map_err(|error| XmppError::internal(error.to_string()))?;
                     tx.commit()
                         .await
                         .map_err(|error| XmppError::internal(error.to_string()))?;
-                    super::publish_jobs::record_registration_revoked();
+                    if retired_outbox > 0 || retired_registrations > 0 {
+                        super::publish_jobs::record_registration_revoked();
+                    }
                     return Ok(0);
                 }
             }
@@ -424,6 +434,8 @@ impl DatabasePushServiceStore {
         };
 
         let mut affected_devices = 0;
+        let mut affected_nodes = 0;
+        let mut retired_provider = 0;
         for node in &nodes {
             lock_node_tx(&mut tx, node, now_ms).await?;
             affected_devices += tx
@@ -437,7 +449,7 @@ impl DatabasePushServiceStore {
                         provider_auth = NULL,
                         last_error = ?,
                         updated_at_ms = ?
-                    WHERE node = ?
+                    WHERE node = ? AND (status <> 'disabled' OR provider_endpoint IS NOT NULL OR provider_token IS NOT NULL OR provider_key_material IS NOT NULL OR provider_auth IS NOT NULL)
                     "#,
                     crate::db_params![
                         DEVICE_STATUS_DISABLED,
@@ -448,17 +460,18 @@ impl DatabasePushServiceStore {
                 )
                 .await
                 .map_err(|error| XmppError::internal(error.to_string()))?;
-            tx.execute(
-                r#"
+            affected_nodes += tx
+                .execute(
+                    r#"
                 UPDATE push_nodes
                 SET status = ?, updated_at_ms = ?
-                WHERE node = ?
+                WHERE node = ? AND status <> 'disabled'
                 "#,
-                crate::db_params![PushNodeStatus::Disabled.as_str(), now_ms, node.clone()],
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-            super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx(
+                    crate::db_params![PushNodeStatus::Disabled.as_str(), now_ms, node.clone()],
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            retired_provider += super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx(
                 &mut tx,
                 owner_bare_jid,
                 node,
@@ -466,7 +479,7 @@ impl DatabasePushServiceStore {
             .await?;
         }
 
-        crate::notification_outbox::retire_registration_outbox_tx(
+        let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
             &mut tx,
             owner_bare_jid,
             None,
@@ -474,10 +487,19 @@ impl DatabasePushServiceStore {
         )
         .await
         .map_err(|error| XmppError::internal(error.to_string()))?;
+        let retired_registrations =
+            crate::push_registrations::disable_node_registrations_tx(&mut tx, owner_bare_jid, node)
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        for _ in &nodes {
+        if affected_nodes > 0
+            || affected_devices > 0
+            || retired_provider > 0
+            || retired_outbox > 0
+            || retired_registrations > 0
+        {
             super::publish_jobs::record_registration_revoked();
         }
         Ok(affected_devices)

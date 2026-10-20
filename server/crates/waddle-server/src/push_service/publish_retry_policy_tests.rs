@@ -1,6 +1,165 @@
 use super::*;
 use crate::push_service::test_support::{notification_item, owner, scalar_i64, store};
 
+async fn expired_batch_backoff_uses_each_rows_durable_count(
+    fixture: crate::ingress::test_support::IngressFixture,
+) {
+    let store = DatabasePushServiceStore::new(fixture.db.clone())
+        .await
+        .expect("store");
+    let node = store
+        .ensure_node(&owner(), "expired-backoff")
+        .await
+        .expect("node");
+    let mut jobs = Vec::new();
+    for (id, count, minimum, maximum) in [
+        ("second-failure", 1, 90_000, 150_000),
+        ("fourth-failure", 3, 360_000, 600_000),
+    ] {
+        let accepted = store
+            .enqueue_notification_publish_job_from_user_server(
+                node.node(),
+                &notification_item(id),
+                &owner(),
+            )
+            .await
+            .expect("accepted");
+        let job = accepted.job_id().to_string();
+        store.execute("UPDATE push_publish_jobs SET status = 'in-progress', claimed_at_ms = 0, claim_token = ?, attempt_count = ? WHERE job_id = ?", crate::db_params![uuid::Uuid::new_v4().to_string(), count, &job]).await.expect("expired claim");
+        jobs.push((job, count, minimum, maximum));
+    }
+    let before = crate::time::now_ms();
+    store
+        .recover_stale_publish_job_claims()
+        .await
+        .expect("single atomic batch recovery");
+    let after = crate::time::now_ms();
+    for (job, count, minimum, maximum) in jobs {
+        let deadline = scalar_i64(
+            &store,
+            "SELECT next_retry_at_ms FROM push_publish_jobs WHERE job_id = ?",
+            crate::db_params![&job],
+        )
+        .await;
+        assert!(deadline >= before + minimum && deadline <= after + maximum);
+        assert_eq!(
+            scalar_i64(
+                &store,
+                "SELECT attempt_count FROM push_publish_jobs WHERE job_id = ?",
+                crate::db_params![&job]
+            )
+            .await,
+            count + 1
+        );
+        assert!(
+            store
+                .load_publish_job(&job)
+                .await
+                .expect("read")
+                .expect("retained")
+                .uncertain_send
+        );
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_expired_batch_backoff_uses_each_rows_durable_count() {
+    expired_batch_backoff_uses_each_rows_durable_count(
+        crate::ingress::test_support::IngressFixture::sqlite().await,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_expired_batch_backoff_uses_each_rows_durable_count() {
+    if let Some(fixture) =
+        crate::ingress::test_support::IngressFixture::postgres("push_batch_backoff").await
+    {
+        expired_batch_backoff_uses_each_rows_durable_count(fixture).await;
+    }
+}
+
+#[tokio::test]
+async fn node_retirement_preserves_terminal_history_and_does_not_count_noops() {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
+    let store = store().await;
+    let registrations =
+        crate::push_registrations::DatabasePushRegistrationStore::new(store.db.clone())
+            .await
+            .expect("registrations");
+    let node = store
+        .ensure_node(&owner(), "retirement-history")
+        .await
+        .expect("node");
+    store
+        .upsert_device(
+            &owner(),
+            crate::push_service::PushDeviceRegistration::new(
+                "device",
+                node.node(),
+                crate::push_service::PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("device");
+    store
+        .register_first_party_node_for_owner(&owner(), "push.example.com", node.node(), None)
+        .await
+        .expect("active registration");
+    let accepted = store
+        .enqueue_notification_publish_job_from_user_server(
+            node.node(),
+            &notification_item("settled-history"),
+            &owner(),
+        )
+        .await
+        .expect("accepted");
+    let job = accepted.job_id().to_string();
+    store.execute("UPDATE push_publish_jobs SET status = 'failed', attempt_count = 24, uncertain_send = 0, last_error = 'original known failure', updated_at_ms = 41 WHERE job_id = ?", crate::db_params![&job]).await.expect("terminal known history");
+    assert_eq!(
+        store
+            .disable_nodes_for_owner(&owner(), Some(node.node()))
+            .await
+            .expect("retire"),
+        1
+    );
+    assert_eq!(scalar_i64(&store, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = ? AND terminal_disposition IS NULL AND last_error = 'original known failure' AND updated_at_ms = 41", crate::db_params![&job]).await, 1);
+    assert_eq!(scalar_i64(&store, "SELECT COUNT(*) FROM push_registrations WHERE owner_bare_jid = ? AND node = ? AND status = 'enabled'", crate::db_params![owner().to_string(), node.node()]).await, 0, "operator retirement must stop future candidate routing");
+    assert_eq!(
+        telemetry.counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        store
+            .disable_nodes_for_owner(&owner(), Some(node.node()))
+            .await
+            .expect("idempotent retirement"),
+        0
+    );
+    assert_eq!(
+        telemetry.counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        telemetry
+            .counter_sum(
+                "xmpp.push.failure_class",
+                &[("failure_class", "proven_refusal")]
+            )
+            .unwrap_or(0),
+        0
+    );
+    drop(registrations);
+}
+
 #[tokio::test]
 async fn legacy_queued_work_past_budget_parks_before_provider_send() {
     use crate::push_service::test_support::{

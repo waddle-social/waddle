@@ -285,19 +285,10 @@ fn classify_transport_error(endpoint: &Url, err: reqwest::Error) -> WebPushOutco
     let endpoint_hash = EndpointHash::of(endpoint.as_str());
     let origin = endpoint.origin().ascii_serialization();
     // The endpoint URL is a bearer capability: log the error without it.
-    let is_timeout = err.is_timeout();
+    let kind = TransientFailure::from_transport_error(&err);
     let err = err.without_url();
-    if is_timeout {
-        warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, "Web Push timeout");
-        WebPushOutcome::Transient {
-            kind: TransientFailure::Timeout,
-        }
-    } else {
-        warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, "Web Push transport failure");
-        WebPushOutcome::Transient {
-            kind: TransientFailure::Network,
-        }
-    }
+    warn!(endpoint_hash = %endpoint_hash, origin = origin, error = %err, failure = ?kind, "Web Push transport failure");
+    WebPushOutcome::Transient { kind }
 }
 
 /// Whether the HTTPS-only invariant accepts this endpoint. Production
@@ -371,6 +362,82 @@ mod tests {
     fn parse_retry_after_rejects_http_date() {
         // We only honor delta-seconds; HTTP-date returns None.
         assert_eq!(parse_retry_after("Fri, 31 Dec 1999 23:59:59 GMT"), None);
+    }
+
+    #[tokio::test]
+    async fn established_connection_timeout_keeps_acceptance_unknown() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let endpoint = Url::parse(&format!(
+            "http://{}/push",
+            listener.local_addr().expect("address")
+        ))
+        .expect("url");
+        let (accepted, established) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_connection, _) = listener.accept().await.expect("accept connection");
+            accepted.send(()).expect("test awaiting setup");
+            std::future::pending::<()>().await;
+        });
+        let sender = HttpWebPushSender::with_client(
+            reqwest::Client::builder()
+                .timeout(Duration::from_millis(100))
+                .no_proxy()
+                .build()
+                .expect("client"),
+        );
+        let jwt = dummy_jwt();
+        let payload = payload();
+        let outcome = sender
+            .send(WebPushRequest {
+                endpoint: &endpoint,
+                payload: &payload,
+                vapid_jwt: &jwt,
+                vapid_public_key_b64u: "BFoo",
+                topic: None,
+                ttl: 60,
+                urgency: Urgency::Normal,
+            })
+            .await;
+        established.await.expect("TCP connection was established");
+        server.abort();
+        assert_eq!(
+            outcome,
+            WebPushOutcome::Transient {
+                kind: TransientFailure::Timeout
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_refused_is_pre_send_connect_failure() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("reserve unused port");
+        let endpoint = Url::parse(&format!(
+            "http://{}/push",
+            listener.local_addr().expect("local address")
+        ))
+        .expect("url");
+        drop(listener);
+        let sender = HttpWebPushSender::new();
+        let jwt = dummy_jwt();
+        let payload = payload();
+        assert_eq!(
+            sender
+                .send(WebPushRequest {
+                    endpoint: &endpoint,
+                    payload: &payload,
+                    vapid_jwt: &jwt,
+                    vapid_public_key_b64u: "BFoo",
+                    topic: None,
+                    ttl: 60,
+                    urgency: Urgency::Normal,
+                })
+                .await,
+            WebPushOutcome::Transient {
+                kind: TransientFailure::Connect
+            }
+        );
     }
 
     #[tokio::test]

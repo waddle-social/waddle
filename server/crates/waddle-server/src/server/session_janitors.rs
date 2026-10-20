@@ -7747,6 +7747,12 @@ pub(crate) fn spawn_push_service_publish_job_janitor(websocket_state: &Arc<WebSo
 
 async fn run_push_service_publish_job_sweep(state: &WebSocketState, batch_size: usize) {
     async {
+        // Inventory refresh is independent of sends, including an idle queue.
+        // Preserve the prior values and timestamp if the read fails.
+        match state.deps.protocol.push_service.queue_observation().await {
+            Ok(snapshot) => snapshot.record(),
+            Err(error) => warn!(%error, "Push provider queue snapshot failed"),
+        }
         let outcome = match state
             .deps
             .protocol
@@ -8060,6 +8066,13 @@ pub(crate) async fn run_notification_outbox_sweep(
 ) {
     async {
         let mut sweep_failed = false;
+        match state.deps.protocol.notification_outbox.queue_observation().await {
+            Ok(snapshot) => snapshot.record(),
+            Err(error) => {
+                sweep_failed = true;
+                warn!(%error, "Push outbox queue snapshot failed");
+            }
+        }
         let first_party_service_jid = match state.deps.service_domains.push.parse() {
             Ok(jid) => jid,
             Err(error) => {

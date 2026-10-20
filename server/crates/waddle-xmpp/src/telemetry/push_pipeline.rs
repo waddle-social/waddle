@@ -130,7 +130,7 @@ pub fn record_web_push_outcome(outcome: &WebPushOutcome) -> Option<PushStage> {
         }
         WebPushOutcome::BadRequest { status: 0 }
         | WebPushOutcome::Transient {
-            kind: TransientFailure::Network | TransientFailure::Timeout,
+            kind: TransientFailure::Connect | TransientFailure::Network | TransientFailure::Timeout,
         } => return None,
     };
     Some(stage)
@@ -166,7 +166,12 @@ pub fn record_apns_outcome(outcome: &ApnsOutcome) -> Option<PushStage> {
         }
         ApnsOutcome::Rejected { status: 0, .. }
         | ApnsOutcome::Transient {
-            cause: ApnsTransient::Failure(TransientFailure::Network | TransientFailure::Timeout),
+            cause:
+                ApnsTransient::Failure(
+                    TransientFailure::Connect
+                    | TransientFailure::Network
+                    | TransientFailure::Timeout,
+                ),
             ..
         } => return None,
     };
@@ -209,7 +214,12 @@ pub fn record_fcm_outcome(outcome: &FcmOutcome) -> Option<PushStage> {
         }
         FcmOutcome::Rejected { status: 0, .. }
         | FcmOutcome::Transient {
-            cause: FcmTransient::Failure(TransientFailure::Network | TransientFailure::Timeout),
+            cause:
+                FcmTransient::Failure(
+                    TransientFailure::Connect
+                    | TransientFailure::Network
+                    | TransientFailure::Timeout,
+                ),
             ..
         } => return None,
     };

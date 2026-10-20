@@ -623,13 +623,30 @@ pub enum WebPushOutcome {
 /// Kept typed instead of stringly to honor the typed-payloads rule.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum TransientFailure {
-    /// Network-layer error (DNS, connect, TLS, body).
+    /// Connection setup failed before an HTTP request could reach the provider
+    /// (including DNS, refused connections, TLS setup, and connect timeouts).
+    Connect,
+    /// Network-layer error after setup; the provider may have accepted the request.
     Network,
     /// HTTP 5xx from the relay.
     ServerError { status: u16 },
     /// Request did not complete within the sender's per-attempt
     /// timeout budget.
     Timeout,
+}
+
+impl TransientFailure {
+    /// reqwest marks a connect timeout as both connect and timeout. Preserve
+    /// the stronger pre-send evidence before considering a general timeout.
+    pub(crate) fn from_transport_error(error: &reqwest::Error) -> Self {
+        if error.is_connect() {
+            Self::Connect
+        } else if error.is_timeout() {
+            Self::Timeout
+        } else {
+            Self::Network
+        }
+    }
 }
 
 /// Reason a downstream send path was suppressed.
@@ -663,6 +680,41 @@ pub enum WebPushCapability {
 mod tests {
     use super::*;
     use std::str::FromStr;
+
+    #[tokio::test]
+    async fn connect_timeout_preserves_pre_send_evidence_before_general_timeout() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let endpoint = format!(
+            "https://{}/push",
+            listener.local_addr().expect("local address")
+        );
+        let accepted = tokio::spawn(async move {
+            let (_connection, _) = listener.accept().await.expect("accept TCP setup");
+            // TCP succeeds, but TLS setup never completes. reqwest reports
+            // this deterministic connect timeout with both predicates true.
+            std::future::pending::<()>().await;
+        });
+        let client = reqwest::Client::builder()
+            .connect_timeout(std::time::Duration::from_millis(100))
+            .timeout(std::time::Duration::from_secs(2))
+            .no_proxy()
+            .build()
+            .expect("client");
+        let error = client
+            .post(endpoint)
+            .send()
+            .await
+            .expect_err("TLS setup must time out");
+        accepted.abort();
+        assert!(error.is_connect());
+        assert!(error.is_timeout());
+        assert_eq!(
+            TransientFailure::from_transport_error(&error),
+            TransientFailure::Connect
+        );
+    }
 
     #[test]
     fn kid_round_trip() {

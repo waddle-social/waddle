@@ -7,6 +7,8 @@ const MAX_OUTBOX_ATTEMPTS: i64 = 5;
 const BASE_RETRY_DELAY_MS: i64 = 5_000;
 const BASE_POLICY_RETRY_DELAY_MS: i64 = 60_000;
 const MAX_RETRY_DELAY_MS: i64 = 300_000;
+const BASE_UNCERTAIN_RETRY_DELAY_MS: i64 = 300_000;
+const MAX_UNCERTAIN_RETRY_DELAY_MS: i64 = 3_600_000;
 pub(super) const OUTBOX_CLAIM_TIMEOUT_MS: i64 = 300_000;
 
 /// Closed classification propagated through every publish retry/failure path.
@@ -107,6 +109,7 @@ fn record_failure_transition(
     let reason = failure.class.reason();
     let class = match failure.class {
         PublishFailureClass::QueueUnknown => PushFailureClass::UnknownAfterSend,
+        PublishFailureClass::ClaimLost if uncertain => PushFailureClass::UnknownAfterSend,
         PublishFailureClass::QueueRefused => PushFailureClass::ProvenRefusal,
         _ => PushFailureClass::PreSend,
     };
@@ -834,19 +837,11 @@ impl NotificationOutboxStore {
         }
         tx.commit().await?;
         if changed > 0 && cancelled {
-            use waddle_xmpp::telemetry::attributes::{
-                PushDisposition, PushFailureClass, PushRetryReason,
-            };
-            waddle_xmpp::telemetry::reliability::increment_push_disposition(
-                PushRetryReason::RegistrationGone,
-                PushFailureClass::UnknownAfterSend,
-                PushDisposition::RegistrationRevoked,
-            );
+            waddle_xmpp::telemetry::reliability::increment_push_registration_revoked();
             tracing::info!(
                 job_id = job.job_id.as_str(),
                 notification_class = job.class.as_db_value(),
                 push_stage = "registration_revoked",
-                failure = "registration_gone",
                 disposition = "registration_revoked",
                 "push pipeline transition"
             );
@@ -1037,7 +1032,6 @@ impl NotificationOutboxStore {
         failure: impl Into<PublishFailure>,
     ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
         let failure = failure.into();
-        let now_ms = crate::time::now_ms();
         let next_policy_error_count = job.policy_error_count.saturating_add(1);
         let exhausted =
             next_policy_error_count.saturating_add(job.attempt_count) >= MAX_OUTBOX_ATTEMPTS;
@@ -1064,9 +1058,10 @@ impl NotificationOutboxStore {
             None => false,
         };
         drop(rows);
+        let now_ms = crate::time::now_ms();
         let changed = tx.execute(
             "UPDATE notification_outbox SET status = ?, policy_error_count = ?, last_error = ?, next_attempt_at_ms = ?, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status = ? AND claim_token = ?",
-            crate::db_params![status, next_policy_error_count, failure.class.reason().as_str(), if exhausted { None } else { Some(now_ms.saturating_add(policy_retry_delay_ms(next_policy_error_count))) }, now_ms, job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+            crate::db_params![status, next_policy_error_count, failure.class.reason().as_str(), if exhausted { None } else { Some(now_ms.saturating_add(if uncertain { uncertain_retry_delay_ms(next_policy_error_count.saturating_add(job.attempt_count)) } else { policy_retry_delay_ms(next_policy_error_count) })) }, now_ms, job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
         ).await?;
         if changed > 0 && exhausted && !uncertain {
             settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
@@ -1252,7 +1247,6 @@ impl NotificationOutboxStore {
     ) -> Result<Option<i64>, NotificationOutboxError> {
         let failure = failure.into();
         let next_attempt_count = job.attempt_count.saturating_add(1);
-        let now_ms = crate::time::now_ms();
         let mut tx = self.db.begin_immediate().await?;
         lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
         let row_lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
@@ -1271,6 +1265,7 @@ impl NotificationOutboxStore {
             None => false,
         };
         drop(rows);
+        let now_ms = crate::time::now_ms();
         // Budget exhaustion stops scheduling even when acceptance remains unknown.
         // Failed + uncertain is a parked quarantine retaining payload and custody.
         let (status, next_attempt_at_ms) =
@@ -1279,7 +1274,13 @@ impl NotificationOutboxStore {
             } else {
                 (
                     STATUS_QUEUED,
-                    Some(now_ms.saturating_add(retry_delay_ms(next_attempt_count))),
+                    Some(now_ms.saturating_add(if acceptance_may_exist {
+                        uncertain_retry_delay_ms(
+                            next_attempt_count.saturating_add(job.policy_error_count),
+                        )
+                    } else {
+                        retry_delay_ms(next_attempt_count)
+                    })),
                 )
             };
         let affected = tx
@@ -1366,6 +1367,15 @@ pub(super) fn retry_delay_ms(attempt_count: i64) -> i64 {
     )
 }
 
+/// Unknown queue acceptance receives a longer recovery window before parking:
+/// the four retry waits have a nominal total of 75 minutes. Jitter is bounded
+/// after applying it, so an individual uncertain wait never exceeds one hour.
+fn uncertain_retry_delay_ms(combined_failure_count: i64) -> i64 {
+    let exponent = combined_failure_count.saturating_sub(1).clamp(0, 10) as u32;
+    apply_retry_jitter(BASE_UNCERTAIN_RETRY_DELAY_MS.saturating_mul(2_i64.saturating_pow(exponent)))
+        .min(MAX_UNCERTAIN_RETRY_DELAY_MS)
+}
+
 pub(super) fn policy_retry_delay_ms(policy_error_count: i64) -> i64 {
     let exponent = (policy_error_count - 1).clamp(0, 10) as u32;
     apply_retry_jitter(
@@ -1426,7 +1436,7 @@ pub(crate) async fn retire_registration_outbox_tx(
     owner: &BareJid,
     service: Option<&BareJid>,
     node: Option<&str>,
-) -> Result<(), NotificationOutboxError> {
+) -> Result<u64, NotificationOutboxError> {
     let exists = if tx.driver() == crate::db::DatabaseDriver::Postgres {
         "SELECT 1 WHERE to_regclass('notification_outbox') IS NOT NULL"
     } else {
@@ -1436,32 +1446,50 @@ pub(crate) async fn retire_registration_outbox_tx(
     let initialized = rows.next().await?.is_some();
     drop(rows);
     if !initialized {
-        return Ok(());
+        return Ok(0);
     }
+    let foundation_exists = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+        "SELECT 1 WHERE to_regclass('ingress_effect_descendants') IS NOT NULL"
+    } else {
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ingress_effect_descendants'"
+    };
+    let mut rows = tx.query(foundation_exists, ()).await?;
+    let has_foundation = rows.next().await?.is_some();
+    drop(rows);
+    let canonical_custody = if has_foundation {
+        "EXISTS (SELECT 1 FROM ingress_effect_descendants WHERE descendant_key = notification_outbox.job_id AND settled_at IS NULL)"
+    } else {
+        "0 = 1"
+    };
+    // Settled known failures are terminal history, including their original
+    // diagnosis and retention tail. Only outstanding custody permits retirement.
+    let eligible = format!("(status IN ('queued', 'in-progress') OR (status = 'failed' AND (queue_acceptance_may_exist = 1 OR {canonical_custody} OR EXISTS (SELECT 1 FROM notification_outbox_lineage WHERE job_id = notification_outbox.job_id AND settled_at_ms IS NULL))))");
     let service_raw = service.map(ToString::to_string);
     let mut rows = tx.query(
-        "SELECT job_id FROM notification_outbox WHERE recipient_bare_jid = ? AND (push_service_jid = ? OR ? = 0) AND (node = ? OR ? = 0) AND status <> ? AND NOT (status = 'failed' AND queue_acceptance_may_exist = 0 AND COALESCE(last_error, '') = 'registration-revoked') ORDER BY job_id",
-        crate::db_params![owner.to_string(), service_raw.as_deref(), i64::from(service.is_some()), node, i64::from(node.is_some()), STATUS_PUBLISHED],
+        &format!("SELECT job_id FROM notification_outbox WHERE recipient_bare_jid = ? AND (push_service_jid = ? OR ? = 0) AND (node = ? OR ? = 0) AND {eligible} ORDER BY job_id"),
+        crate::db_params![owner.to_string(), service_raw.as_deref(), i64::from(service.is_some()), node, i64::from(node.is_some())],
     ).await?;
     let mut jobs = Vec::new();
     while let Some(row) = rows.next().await? {
         jobs.push(row.get::<String>(0)?);
     }
     drop(rows);
+    let mut retired = 0_u64;
     for job_id in jobs {
         // Registration/node locks are held by the caller, so never wait while
         // reversing the canonical-parent-before-scheduler lock order.
         lock_outbox_ancestry_tx(tx, &job_id).await?;
         let changed = tx.execute(
-            "UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = 0, last_error = 'registration-revoked', next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND recipient_bare_jid = ? AND (push_service_jid = ? OR ? = 0) AND (node = ? OR ? = 0) AND status <> ? AND NOT (status = 'failed' AND queue_acceptance_may_exist = 0 AND COALESCE(last_error, '') = 'registration-revoked')",
-            crate::db_params![STATUS_FAILED, crate::time::now_ms(), job_id.as_str(), owner.to_string(), service_raw.as_deref(), i64::from(service.is_some()), node, i64::from(node.is_some()), STATUS_PUBLISHED],
+            &format!("UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = 0, last_error = 'registration-revoked', next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND recipient_bare_jid = ? AND (push_service_jid = ? OR ? = 0) AND (node = ? OR ? = 0) AND {eligible}"),
+            crate::db_params![STATUS_FAILED, crate::time::now_ms(), job_id.as_str(), owner.to_string(), service_raw.as_deref(), i64::from(service.is_some()), node, i64::from(node.is_some())],
         ).await?;
         if changed > 0 {
+            retired += changed;
             settle_outbox_if_unowned_tx(tx, &job_id).await?;
             crate::push_service::acknowledge_completed_outbox_tx(tx, &job_id).await?;
         }
     }
-    Ok(())
+    Ok(retired)
 }
 
 /// An upstream refusal cannot release a descendant already owned by the
@@ -1622,3 +1650,7 @@ mod acceptance_fence_tests;
 #[cfg(test)]
 #[path = "malformed_outbox_tests.rs"]
 mod malformed_outbox_tests;
+
+#[cfg(test)]
+#[path = "retry_policy_tests.rs"]
+mod retry_policy_tests;

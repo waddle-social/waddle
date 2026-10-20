@@ -263,11 +263,7 @@ async fn read_body_bounded(mut response: reqwest::Response) -> Vec<u8> {
 }
 
 fn classify_transport_error(environment: ApnsEnvironment, error: reqwest::Error) -> ApnsOutcome {
-    let failure = if error.is_timeout() {
-        TransientFailure::Timeout
-    } else {
-        TransientFailure::Network
-    };
+    let failure = TransientFailure::from_transport_error(&error);
     warn!(
         environment = environment.host(),
         error = %transport_error_detail(error),
@@ -581,7 +577,45 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn connection_refused_is_transient_network() {
+    async fn established_connection_timeout_keeps_acceptance_unknown() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("listener");
+        let endpoint = Url::parse(&format!(
+            "http://{}/",
+            listener.local_addr().expect("address")
+        ))
+        .expect("url");
+        let (accepted, established) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (_connection, _) = listener.accept().await.expect("accept connection");
+            accepted.send(()).expect("test awaiting setup");
+            std::future::pending::<()>().await;
+        });
+        let mut sender =
+            HttpApnsSender::with_base_urls(endpoint.clone(), endpoint).expect("sender");
+        sender.client = base_client_builder()
+            .timeout(Duration::from_millis(100))
+            .no_proxy()
+            .build()
+            .expect("client");
+        let fixture = Fixture::new();
+        let outcome = sender
+            .send(fixture.request(ApnsEnvironment::Production))
+            .await;
+        established.await.expect("TCP connection was established");
+        server.abort();
+        assert_eq!(
+            outcome,
+            ApnsOutcome::Transient {
+                cause: ApnsTransient::Failure(TransientFailure::Timeout),
+                retry_after: None
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn connection_refused_is_pre_send_connect_failure() {
         let unused = Url::parse("http://127.0.0.1:1/").expect("url");
         let sender = HttpApnsSender::with_base_urls(unused.clone(), unused).expect("sender");
         let fixture = Fixture::new();
@@ -591,7 +625,7 @@ mod tests {
         assert_eq!(
             outcome,
             ApnsOutcome::Transient {
-                cause: ApnsTransient::Failure(TransientFailure::Network),
+                cause: ApnsTransient::Failure(TransientFailure::Connect),
                 retry_after: None,
             }
         );

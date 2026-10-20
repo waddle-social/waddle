@@ -25,9 +25,9 @@ use waddle_xmpp::push::fcm::{
 };
 use waddle_xmpp::push::types::{SubscriptionKeys, TransientFailure, WebPushCryptoError};
 use waddle_xmpp::push::Urgency;
-use waddle_xmpp::telemetry::attributes::MetricAttribute;
+use waddle_xmpp::telemetry::attributes::{MetricAttribute, PushRetryReason};
 
-use super::dispatch::{envelope_item, ParsedPushPayload, SealedActiveDevice};
+use super::dispatch::{envelope_item, ParsedPushPayload, RetryMetadata, SealedActiveDevice};
 use super::secrets::PushSecretCipher;
 
 pub(crate) const ATTEMPT_STATUS_FCM_DELIVERED: &str = "fcm-delivered";
@@ -42,8 +42,9 @@ pub(crate) const ATTEMPT_STATUS_FCM_INVALID_TOKEN: &str = "fcm-invalid-token";
 /// be built for this device. Disables the device, like `web-invalid-keys`.
 pub(crate) const ATTEMPT_STATUS_FCM_INVALID_KEYS: &str = "fcm-invalid-keys";
 pub(crate) const ATTEMPT_STATUS_FCM_RATE_LIMITED: &str = "fcm-rate-limited";
-/// Network failure, timeout or an FCM 5xx: FCM may have accepted the
-/// message, so the retry is a possible duplicate.
+/// Connection setup failed before sending the notification request.
+pub(crate) const ATTEMPT_STATUS_FCM_CONNECT_FAILED: &str = "fcm-connect-failed";
+/// An unrecognized 5xx may have followed acceptance; retry can duplicate delivery.
 pub(crate) const ATTEMPT_STATUS_FCM_SERVER_ERROR: &str = "fcm-server-error";
 pub(crate) const ATTEMPT_STATUS_FCM_PROVIDER_REFUSED: &str = "fcm-provider-refused";
 pub(crate) const ATTEMPT_STATUS_FCM_TRANSIENT: &str = "fcm-transient";
@@ -148,6 +149,7 @@ pub(super) struct FcmAttempt {
     pub(super) status: &'static str,
     pub(super) last_error: Option<String>,
     pub(super) retry_after: Option<Duration>,
+    pub(super) retry: Option<RetryMetadata>,
 }
 
 impl FcmAttempt {
@@ -156,6 +158,7 @@ impl FcmAttempt {
             status,
             last_error: Some(diagnostic),
             retry_after: None,
+            retry: None,
         }
     }
 }
@@ -248,6 +251,9 @@ pub(super) fn token_error_attempt(error: &FcmTokenError) -> FcmAttempt {
         FcmTokenError::Signing => ATTEMPT_STATUS_FCM_INTERNAL_ERROR,
     };
     let diagnostic = match error {
+        FcmTokenError::Transient(TransientFailure::Connect) => {
+            "oauth token: connection setup failed".to_string()
+        }
         FcmTokenError::Transient(TransientFailure::Network) => "oauth token: network".to_string(),
         FcmTokenError::Transient(TransientFailure::Timeout) => "oauth token: timeout".to_string(),
         FcmTokenError::Transient(TransientFailure::ServerError { status }) => {
@@ -259,7 +265,14 @@ pub(super) fn token_error_attempt(error: &FcmTokenError) -> FcmAttempt {
         }
         FcmTokenError::Signing => "oauth token: assertion signing failed".to_string(),
     };
-    FcmAttempt::failed(status, diagnostic)
+    let mut attempt = FcmAttempt::failed(status, diagnostic);
+    attempt.retry = match error {
+        FcmTokenError::Transient(_) | FcmTokenError::MalformedResponse => {
+            Some(RetryMetadata::PRE_SEND)
+        }
+        FcmTokenError::Rejected { .. } | FcmTokenError::Signing => None,
+    };
+    attempt
 }
 
 /// Send one notification to one Android device. `access_token` is the
@@ -292,6 +305,7 @@ pub(super) async fn dispatch_fcm_device(
                 status: reason.status(),
                 last_error: None,
                 retry_after: None,
+                retry: None,
             };
         }
     };
@@ -429,11 +443,15 @@ pub(super) fn outcome_to_attempt_status(outcome: &FcmOutcome) -> &'static str {
             ..
         } => ATTEMPT_STATUS_FCM_PROVIDER_REFUSED,
         FcmOutcome::Transient {
+            cause: FcmTransient::Failure(TransientFailure::Connect),
+            ..
+        } => ATTEMPT_STATUS_FCM_CONNECT_FAILED,
+        FcmOutcome::Transient {
             cause: FcmTransient::Failure(TransientFailure::ServerError { .. }),
             ..
         } => ATTEMPT_STATUS_FCM_SERVER_ERROR,
         FcmOutcome::Transient {
-            cause: FcmTransient::Failure(_),
+            cause: FcmTransient::Failure(TransientFailure::Network | TransientFailure::Timeout),
             ..
         } => ATTEMPT_STATUS_FCM_TRANSIENT,
         // Settled before it gets here; unsettled, it disables nothing.
@@ -471,6 +489,9 @@ fn outcome_diagnostic(outcome: &FcmOutcome) -> Option<String> {
                 FcmTransient::Failure(TransientFailure::ServerError { status }) => {
                     format!("transient: HTTP {status}")
                 }
+                FcmTransient::Failure(TransientFailure::Connect) => {
+                    "transient: connection setup failed before send".to_string()
+                }
                 FcmTransient::Failure(TransientFailure::Network) => {
                     "transient: network".to_string()
                 }
@@ -494,6 +515,26 @@ fn outcome_diagnostic(outcome: &FcmOutcome) -> Option<String> {
     Some(diagnostic)
 }
 
+fn retry_metadata(outcome: &FcmOutcome) -> Option<RetryMetadata> {
+    match outcome {
+        FcmOutcome::Transient { cause, .. } => Some(match cause {
+            FcmTransient::RateLimited => RetryMetadata::refused(PushRetryReason::RateLimited),
+            FcmTransient::Unavailable => {
+                RetryMetadata::refused(PushRetryReason::ProviderServerError)
+            }
+            FcmTransient::Failure(failure) => RetryMetadata::for_transport_failure(failure),
+        }),
+        FcmOutcome::Sent
+        | FcmOutcome::Unregistered { .. }
+        | FcmOutcome::InvalidToken { .. }
+        | FcmOutcome::UnattributedInvalidArgument { .. }
+        | FcmOutcome::Unauthenticated { .. }
+        | FcmOutcome::ProviderAuth { .. }
+        | FcmOutcome::SenderIdMismatch { .. }
+        | FcmOutcome::Rejected { .. } => None,
+    }
+}
+
 fn attempt_for_outcome(outcome: &FcmOutcome) -> FcmAttempt {
     let retry_after = match outcome {
         FcmOutcome::Transient { retry_after, .. } => *retry_after,
@@ -503,6 +544,7 @@ fn attempt_for_outcome(outcome: &FcmOutcome) -> FcmAttempt {
         status: outcome_to_attempt_status(outcome),
         last_error: outcome_diagnostic(outcome),
         retry_after,
+        retry: retry_metadata(outcome),
     }
 }
 
@@ -566,6 +608,54 @@ mod tests {
             outcome_to_attempt_status(&provider.settle(unattributed())),
             ATTEMPT_STATUS_FCM_INVALID_TOKEN
         );
+    }
+
+    #[test]
+    fn connection_setup_is_typed_pre_send_and_other_transport_failures_stay_unknown() {
+        use waddle_xmpp::telemetry::attributes::PushFailureClass;
+        for (failure, class, reason) in [
+            (
+                TransientFailure::Connect,
+                PushFailureClass::PreSend,
+                PushRetryReason::PreSend,
+            ),
+            (
+                TransientFailure::Network,
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::UnknownAfterSend,
+            ),
+            (
+                TransientFailure::Timeout,
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::UnknownAfterSend,
+            ),
+            (
+                TransientFailure::ServerError { status: 503 },
+                PushFailureClass::UnknownAfterSend,
+                PushRetryReason::ProviderServerError,
+            ),
+        ] {
+            let outcome = FcmOutcome::Transient {
+                cause: FcmTransient::Failure(failure.clone()),
+                retry_after: None,
+            };
+            assert_eq!(
+                attempt_for_outcome(&outcome).retry,
+                Some(RetryMetadata {
+                    failure_class: class,
+                    reason
+                })
+            );
+            if failure == TransientFailure::Connect {
+                assert_eq!(
+                    outcome_to_attempt_status(&outcome),
+                    ATTEMPT_STATUS_FCM_CONNECT_FAILED
+                );
+                assert!(outcome_diagnostic(&outcome)
+                    .expect("diagnostic")
+                    .contains("before send"));
+            }
+        }
     }
 
     #[test]
@@ -654,6 +744,10 @@ mod tests {
             ),
         ] {
             assert_eq!(outcome_to_attempt_status(&outcome), expected);
+            assert_eq!(
+                retry_metadata(&outcome).is_some(),
+                matches!(outcome, FcmOutcome::Transient { .. })
+            );
         }
     }
 
