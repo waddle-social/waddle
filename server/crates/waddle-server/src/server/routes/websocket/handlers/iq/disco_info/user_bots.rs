@@ -3,12 +3,13 @@ use super::*;
 /// XEP-0030 on the user bots domain. An enabled bot is a leaf `client/bot`
 /// entity the server answers for; it supports disco#info and nothing else
 /// until it holds a MUC occupancy. The bare domain, unknown or disabled
-/// bots, and any node on a bot do not exist.
+/// bots, any node on a bot, and any full JID (bots never bind a resource)
+/// do not exist.
 pub(super) async fn handle_user_bot_disco_info<'a>(
     req: &'a DiscoInfoRequest<'a>,
     state: &WebSocketState,
 ) -> Option<DiscoInfoResponse<'a>> {
-    let target = req.target_to?.parse::<BareJid>().ok()?;
+    let target: jid::Jid = req.target_to?.parse().ok()?;
     if target.domain() != &**req.bots_domain {
         return None;
     }
@@ -20,9 +21,10 @@ pub(super) async fn handle_user_bot_disco_info<'a>(
             item_not_found_iq_error("Requested item not found."),
         ))
     };
-    if req.node.is_some() {
+    if req.node.is_some() || target.resource().is_some() {
         return not_found();
     }
+    let target = target.to_bare();
     let Ok(bot) = crate::auth::bots::BotJid::parse(target.as_str(), req.bots_domain) else {
         return not_found();
     };

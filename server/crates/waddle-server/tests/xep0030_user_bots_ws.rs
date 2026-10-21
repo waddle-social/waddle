@@ -1,9 +1,9 @@
 //! XEP-0030 service discovery on user bot accounts (`bots.<domain>`).
 //!
 //! An enabled bot is a leaf entity: disco#info answers `client/bot` with the
-//! `disco#info` feature and disco#items is empty. Unknown or disabled bots
-//! and the bare bots domain host no entity and answer `<item-not-found/>`
-//! (XEP-0030 §3.1, §4.1).
+//! `disco#info` feature and disco#items is empty. Unknown or disabled bots,
+//! full JIDs on the bots domain and the bare bots domain host no entity and
+//! answer `<item-not-found/>` (XEP-0030 §3.1, §4.1).
 #![cfg(feature = "test-support")]
 
 use minidom::Element;
@@ -159,12 +159,16 @@ async fn disco_info_bot_jid_is_client_bot() {
 async fn disco_info_unknown_bot_item_not_found() {
     let fixture = Fixture::start().await;
     let disabled = fixture.seed_bot("standup", None, true).await;
+    let enabled = fixture.seed_bot("triage", None, false).await;
+    // Bots never bind a resource, so no full JID on the domain exists.
+    let full = format!("{enabled}/x");
     let mut client = fixture.connect().await;
 
     for target in [
         "admin+ghost@bots.localhost",
         disabled.as_str(),
         "admin@bots.localhost",
+        full.as_str(),
     ] {
         assert_item_not_found(disco_info(&mut client, target, "unknown-bot-info").await);
     }
@@ -198,7 +202,14 @@ async fn disco_items_bot_jid_empty() {
     let items = DiscoItemsResult::try_from(payload).expect("typed disco#items");
     assert!(items.items.is_empty(), "a bot hosts no items: {items:?}");
 
-    for target in [BOTS_DOMAIN, "admin+ghost@bots.localhost", disabled.as_str()] {
+    // Bots never bind a resource, so no full JID on the domain exists.
+    let full = format!("{bot}/x");
+    for target in [
+        BOTS_DOMAIN,
+        "admin+ghost@bots.localhost",
+        disabled.as_str(),
+        full.as_str(),
+    ] {
         assert_item_not_found(disco_items(&mut client, target, "missing-bot-items").await);
     }
     client.close().await.expect("close");

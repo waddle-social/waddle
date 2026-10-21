@@ -607,20 +607,22 @@ pub(super) async fn handle_disco_items_iq(
         }
 
         // A user bot is a leaf entity with no items. The bare bots domain,
-        // unknown or disabled bots and nodes on a bot do not exist.
+        // unknown or disabled bots, nodes on a bot and full JIDs (bots never
+        // bind a resource) do not exist.
         if let Some(target) = target_to
-            .and_then(|target| target.parse::<BareJid>().ok())
+            .and_then(|target| target.parse::<jid::Jid>().ok())
             .filter(|target| target.domain() == &*state.deps.service_domains.bots)
         {
-            let exists = if target.node().is_some() && query.node.is_none() {
-                crate::auth::bots::store::bot_account_exists(
-                    state.deps.app_state.db_pool.global_actor(),
-                    &target,
-                )
-                .await
-            } else {
-                Ok(false)
-            };
+            let exists =
+                if target.node().is_some() && target.resource().is_none() && query.node.is_none() {
+                    crate::auth::bots::store::bot_account_exists(
+                        state.deps.app_state.db_pool.global_actor(),
+                        &target.to_bare(),
+                    )
+                    .await
+                } else {
+                    Ok(false)
+                };
             return match exists {
                 Ok(true) => vec![iq_to_xml(build_disco_items_response(request_iq, &[], None))],
                 Ok(false) => vec![build_iq_error_xml_typed(
