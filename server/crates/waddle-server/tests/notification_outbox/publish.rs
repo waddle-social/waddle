@@ -23,16 +23,14 @@ async fn reclaim_stale_job(store: &TestStore) -> (NotificationOutboxJob, Notific
         .into_iter()
         .next()
         .expect("claimed job");
-    // Epoch-adjacent timestamp: older than any plausible claim
-    // timeout, so the claim is unconditionally stale.
-    let stale_claimed_at_ms = 1_i64;
+    expire_claim_into_backoff(store, &stale_claim, 3_750, 6_250).await;
     store
         .execute(
-            "UPDATE notification_outbox SET claimed_at_ms = ? WHERE job_id = ?",
-            waddle_server::db_params![stale_claimed_at_ms, stale_claim.job_id().as_str()],
+            "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE job_id = ?",
+            waddle_server::db_params![stale_claim.job_id().as_str()],
         )
         .await
-        .expect("make claim stale");
+        .expect("advance retry deadline");
     let fresh_claim = store
         .claim_due_outbox_jobs(16)
         .await
@@ -40,7 +38,55 @@ async fn reclaim_stale_job(store: &TestStore) -> (NotificationOutboxJob, Notific
         .into_iter()
         .next()
         .expect("reclaimed job");
+    assert_ne!(fresh_claim.claim_token(), stale_claim.claim_token());
+    assert_eq!(fresh_claim.attempt_count(), stale_claim.attempt_count() + 1);
     (stale_claim, fresh_claim)
+}
+
+async fn expire_claim_into_backoff(
+    store: &TestStore,
+    job: &NotificationOutboxJob,
+    minimum_delay_ms: i64,
+    maximum_delay_ms: i64,
+) {
+    // Epoch-adjacent timestamp is unconditionally older than the claim timeout.
+    store
+        .execute(
+            "UPDATE notification_outbox SET claimed_at_ms = 1 WHERE job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("expire claim");
+    let before = waddle_server::time::now_ms();
+    assert!(store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("schedule expired claim retry")
+        .is_empty());
+    let after = waddle_server::time::now_ms();
+    let mut rows = store
+        .query(
+            "SELECT status, attempt_count, next_attempt_at_ms, claim_token, claimed_at_ms FROM notification_outbox WHERE job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("persisted retry");
+    let row = rows.next().await.expect("row").expect("job");
+    assert_eq!(row.get::<String>(0).expect("status"), "queued");
+    assert_eq!(
+        row.get::<i64>(1).expect("attempts"),
+        job.attempt_count() + 1
+    );
+    let deadline = row.get::<i64>(2).expect("deadline");
+    assert!(deadline >= before + minimum_delay_ms && deadline <= after + maximum_delay_ms);
+    assert!(row.get::<Option<String>>(3).expect("token").is_none());
+    assert!(row.get::<Option<i64>>(4).expect("claim time").is_none());
+    drop(rows);
+    assert!(store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("backoff prevents early claim")
+        .is_empty());
 }
 
 struct FailingPushStore;
@@ -477,21 +523,20 @@ async fn stale_in_progress_outbox_job_is_claimable_again() {
         .expect("immediate claim");
     assert!(immediate_claim.is_empty());
 
-    // Epoch-adjacent timestamp: older than any plausible claim
-    // timeout, so the claim is unconditionally stale.
-    let stale_claimed_at_ms = 1_i64;
+    expire_claim_into_backoff(&store, &first_claim[0], 3_750, 6_250).await;
     store
         .execute(
-            "UPDATE notification_outbox SET claimed_at_ms = ? WHERE job_id = ?",
-            waddle_server::db_params![stale_claimed_at_ms, first_claim[0].job_id().as_str()],
+            "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE job_id = ?",
+            waddle_server::db_params![first_claim[0].job_id().as_str()],
         )
         .await
-        .expect("make claim stale");
+        .expect("advance retry deadline");
 
     let reclaimed = store.claim_due_outbox_jobs(16).await.expect("reclaim");
     assert_eq!(reclaimed.len(), 1);
     assert_eq!(reclaimed[0].job_id(), first_claim[0].job_id());
     assert_eq!(reclaimed[0].status(), NotificationOutboxStatus::InProgress);
+    assert_eq!(reclaimed[0].attempt_count(), 1);
     assert_ne!(reclaimed[0].claim_token(), first_claim[0].claim_token());
 }
 
@@ -1321,25 +1366,36 @@ async fn repeated_expired_outbox_claims_park_uncertain_work_at_the_budget() {
         .await
         .expect("initial claim")
         .remove(0);
+    let payload = job.to_xep0357_pubsub_item().payload.expect("payload");
     store
         .execute(
-            "UPDATE notification_outbox SET queue_acceptance_may_exist = 1 WHERE job_id = ?",
-            waddle_server::db_params![job.job_id().as_str()],
+            "UPDATE notification_outbox SET queue_acceptance_may_exist = 1, approved_payload_xml = ? WHERE job_id = ?",
+            waddle_server::db_params![String::from(&payload), job.job_id().as_str()],
         )
         .await
         .expect("unknown queue acceptance");
-    for count in 1..=4 {
+    for (index, (minimum_delay_ms, maximum_delay_ms)) in [
+        (225_000, 375_000),
+        (450_000, 750_000),
+        (900_000, 1_500_000),
+        (1_800_000, 3_000_000),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        expire_claim_into_backoff(&store, &job, minimum_delay_ms, maximum_delay_ms).await;
         store
             .execute(
-                "UPDATE notification_outbox SET claimed_at_ms = 1 WHERE job_id = ?",
+                "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE job_id = ?",
                 waddle_server::db_params![job.job_id().as_str()],
             )
             .await
-            .expect("expire claim");
+            .expect("advance retry deadline");
         let mut claimed = store.claim_due_outbox_jobs(1).await.expect("recover claim");
         assert_eq!(claimed.len(), 1);
+        assert_ne!(claimed[0].claim_token(), job.claim_token());
         job = claimed.remove(0);
-        assert_eq!(job.attempt_count(), count);
+        assert_eq!(job.attempt_count(), index as i64 + 1);
     }
     store
         .execute(
@@ -1361,6 +1417,24 @@ async fn repeated_expired_outbox_claims_park_uncertain_work_at_the_budget() {
             .is_empty());
     }
     assert_eq!(failed_outbox_jobs_count(&store).await, 1);
+    let mut rows = store
+        .query(
+            "SELECT attempt_count, next_attempt_at_ms, claim_token, queue_acceptance_may_exist, approved_payload_xml, (SELECT COUNT(*) FROM notification_outbox_lineage WHERE job_id = notification_outbox.job_id AND settled_at_ms IS NULL) FROM notification_outbox WHERE job_id = ?",
+            waddle_server::db_params![job.job_id().as_str()],
+        )
+        .await
+        .expect("parked custody");
+    let row = rows.next().await.expect("row").expect("parked job");
+    assert_eq!(row.get::<i64>(0).expect("attempts"), 5);
+    assert!(row.get::<Option<i64>>(1).expect("deadline").is_none());
+    assert!(row.get::<Option<String>>(2).expect("token").is_none());
+    assert_eq!(row.get::<i64>(3).expect("uncertainty"), 1);
+    assert_eq!(
+        row.get::<String>(4).expect("approved payload"),
+        String::from(&payload)
+    );
+    assert_eq!(row.get::<i64>(5).expect("unsettled lineage"), 1);
+    drop(rows);
     assert_eq!(
         store
             .prune_completed_before(i64::MAX, 16)

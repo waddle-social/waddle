@@ -347,6 +347,177 @@ async fn automatic_disable_cannot_settle_earlier_unknown_send(fixture: IngressFi
     fixture.close().await;
 }
 
+async fn known_failure_after_uncertainty_emits_retry_and_parked_dispositions(
+    fixture: IngressFixture,
+) {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    for exhausted in [false, true] {
+        for status in [
+            dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST,
+            dispatch::ATTEMPT_STATUS_WEB_PAYLOAD_TOO_LARGE,
+            ATTEMPT_STATUS_WEB_INTERNAL_ERROR,
+            apns_dispatch::ATTEMPT_STATUS_APNS_PROVIDER_AUTH,
+            apns_dispatch::ATTEMPT_STATUS_APNS_TOPIC_MISMATCH,
+        ] {
+            let state = seed(&fixture, &format!("known-metrics-{exhausted}-{status}")).await;
+            unknown(&state).await;
+            let job = claim(&state).await;
+            if exhausted {
+                // The transition's evidence must come from the durable row,
+                // not the attempt count captured by phase 1.
+                state
+                    .push
+                    .execute(
+                        "UPDATE push_publish_jobs SET attempt_count = ? WHERE job_id = ?",
+                        crate::db_params![
+                            PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS - 1,
+                            state.job.to_string()
+                        ],
+                    )
+                    .await
+                    .expect("advance durable retry budget after claim");
+            }
+            let disposition = if exhausted {
+                PushDisposition::Parked
+            } else {
+                PushDisposition::Retry
+            };
+            let counts = || {
+                [
+                    metrics.counter_sum(
+                        "xmpp.push.failure_reason",
+                        &[("reason", "unknown_after_send")],
+                    ),
+                    metrics.counter_sum(
+                        "xmpp.push.failure_class",
+                        &[("failure_class", "unknown_after_send")],
+                    ),
+                    metrics.counter_sum(
+                        "xmpp.push.disposition",
+                        &[("disposition", disposition.as_str())],
+                    ),
+                ]
+                .map(|count| count.unwrap_or(0))
+            };
+            let before = counts();
+            let failure = attempt(status);
+            assert!(failure.retry.is_none(), "exercise retained uncertainty");
+            state
+                .push
+                .finalize_publish_job(
+                    &job,
+                    std::slice::from_ref(&failure),
+                    MAX_DELIVERY_ATTEMPTS_PER_NODE,
+                    crate::time::now_ms(),
+                )
+                .await
+                .expect("known failure after unknown send");
+            let after = before.map(|count| count + 1);
+            assert_eq!(counts(), after, "{status}, exhausted={exhausted}");
+            if exhausted {
+                assert_parked(&state).await;
+            } else {
+                assert_pending(&state).await;
+            }
+            state
+                .push
+                .finalize_publish_job(
+                    &job,
+                    &[failure],
+                    MAX_DELIVERY_ATTEMPTS_PER_NODE,
+                    crate::time::now_ms(),
+                )
+                .await
+                .expect("stale callback loses its cleared claim");
+            assert_eq!(counts(), after, "a stale fence cannot emit a transition");
+            assert_eq!(
+                scalar_i64(
+                    &state.push,
+                    "SELECT COUNT(*) FROM push_delivery_attempts WHERE publish_job_id = ?",
+                    crate::db_params![state.job.to_string()]
+                )
+                .await,
+                2,
+                "a stale callback cannot append another provider attempt"
+            );
+        }
+    }
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_prior_uncertainty_disposition_is_not_emitted_before_commit() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let fixture = IngressFixture::sqlite().await;
+    let state = seed(&fixture, "rolled-back-known-failure-disposition").await;
+    unknown(&state).await;
+    let job = claim(&state).await;
+    let counts = || {
+        [
+            metrics.counter_sum(
+                "xmpp.push.failure_reason",
+                &[("reason", "unknown_after_send")],
+            ),
+            metrics.counter_sum(
+                "xmpp.push.failure_class",
+                &[("failure_class", "unknown_after_send")],
+            ),
+            metrics.counter_sum("xmpp.push.disposition", &[("disposition", "retry")]),
+        ]
+        .map(|count| count.unwrap_or(0))
+    };
+    let before = counts();
+    state
+        .push
+        .execute(
+            "CREATE TRIGGER fail_provider_attempt_prune BEFORE DELETE ON push_delivery_attempts BEGIN SELECT RAISE(ABORT, 'prune denied'); END",
+            (),
+        )
+        .await
+        .expect("inject a failure after the known-failure transition");
+    assert!(state
+        .push
+        .finalize_publish_job(
+            &job,
+            &[attempt(dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST)],
+            0,
+            crate::time::now_ms(),
+        )
+        .await
+        .is_err());
+    assert_eq!(counts(), before, "rolled-back transitions emit nothing");
+    assert_eq!(scalar_i64(&state.push, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = ? AND status = 'in-progress' AND claim_token = ? AND attempt_count = 1 AND uncertain_send = 1", crate::db_params![state.job.to_string(), job.claim_token()]).await, 1, "the failed finalization preserves the current claim and durable retry history");
+    assert_eq!(
+        scalar_i64(
+            &state.push,
+            "SELECT COUNT(*) FROM push_delivery_attempts WHERE publish_job_id = ?",
+            crate::db_params![state.job.to_string()]
+        )
+        .await,
+        1,
+        "the new attempt rolled back with the transition"
+    );
+    assert_eq!(scalar_i64(&state.push, "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![state.delivery.to_string()]).await, 2);
+    state
+        .push
+        .execute("DROP TRIGGER fail_provider_attempt_prune", ())
+        .await
+        .expect("restore pruning");
+    state
+        .push
+        .finalize_publish_job(
+            &job,
+            &[attempt(dispatch::ATTEMPT_STATUS_WEB_BAD_REQUEST)],
+            MAX_DELIVERY_ATTEMPTS_PER_NODE,
+            crate::time::now_ms(),
+        )
+        .await
+        .expect("commit the same claim exactly once");
+    assert_eq!(counts(), before.map(|count| count + 1));
+    assert_pending(&state).await;
+    fixture.close().await;
+}
+
 async fn parse_failure_cannot_fail_successor_claim(fixture: IngressFixture) {
     let state = seed(&fixture, "parse-successor-fence").await;
     let captured = claim(&state).await;
@@ -377,6 +548,166 @@ async fn parse_failure_cannot_fail_successor_claim(fixture: IngressFixture) {
     assert_eq!(job.status(), PUBLISH_JOB_STATUS_IN_PROGRESS);
     assert_eq!(job.claim_token(), successor);
     assert_eq!(scalar_i64(&state.push, "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![state.delivery.to_string()]).await, 2);
+    fixture.close().await;
+}
+
+async fn prior_delivery_completes_after_all_devices_become_inactive(fixture: IngressFixture) {
+    let state = seed(&fixture, "confirmed-before-all-devices-inactive").await;
+    state
+        .push
+        .upsert_device(
+            &owner(),
+            PushDeviceRegistration::new(
+                "uncertain-device",
+                state.node.node(),
+                PushDevicePlatform::Web,
+                "test",
+            ),
+        )
+        .await
+        .expect("second device");
+    let job = claim(&state).await;
+    let mut uncertain = attempt(dispatch::ATTEMPT_STATUS_WEB_TRANSIENT);
+    uncertain.device_id = "uncertain-device".to_string();
+    state
+        .push
+        .finalize_publish_job(
+            &job,
+            &[attempt(dispatch::ATTEMPT_STATUS_WEB_DELIVERED), uncertain],
+            MAX_DELIVERY_ATTEMPTS_PER_NODE,
+            crate::time::now_ms(),
+        )
+        .await
+        .expect("one confirmed delivery and one unknown outcome");
+    assert_pending(&state).await;
+    state
+        .push
+        .execute(
+            "UPDATE push_devices SET status = 'disabled' WHERE node = ?",
+            crate::db_params![state.node.node()],
+        )
+        .await
+        .expect("all devices become inactive");
+    state
+        .push
+        .execute(
+            "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
+            crate::db_params![state.job.to_string()],
+        )
+        .await
+        .expect("retry now");
+    let result = state
+        .push
+        .process_publish_job_with_retention_limit(
+            &state.job.to_string(),
+            MAX_DELIVERY_ATTEMPTS_PER_NODE,
+        )
+        .await
+        .expect("complete from durable acceptance proof")
+        .expect("completed job");
+    assert_eq!(result.attempted_devices(), 0);
+    assert_eq!(scalar_i64(&state.push, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = ? AND status = 'published' AND attempt_count = 2 AND uncertain_send = 1 AND last_error IS NULL AND next_retry_at_ms IS NULL AND published_at_ms IS NOT NULL AND claim_token IS NULL AND claimed_at_ms IS NULL", crate::db_params![state.job.to_string()]).await, 1, "completion keeps the historical uncertainty while recording authoritative delivery");
+    assert_eq!(scalar_i64(&state.push, "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![state.delivery.to_string()]).await, 0);
+    assert_eq!(
+        scalar_i64(
+            &state.push,
+            "SELECT COUNT(*) FROM push_delivery_attempts WHERE publish_job_id = ?",
+            crate::db_params![state.job.to_string()]
+        )
+        .await,
+        2
+    );
+    assert!(state
+        .push
+        .process_publish_job_with_retention_limit(
+            &state.job.to_string(),
+            MAX_DELIVERY_ATTEMPTS_PER_NODE,
+        )
+        .await
+        .expect("terminal job stays complete")
+        .is_none());
+    assert_eq!(
+        scalar_i64(
+            &state.push,
+            "SELECT COUNT(*) FROM push_delivery_attempts WHERE publish_job_id = ?",
+            crate::db_params![state.job.to_string()]
+        )
+        .await,
+        2,
+        "completion never replays provider requests"
+    );
+
+    // A delivery for another acceptance of the exact same wire item is not
+    // authoritative evidence for the original acceptance's unknown send.
+    let foreign = seed(&fixture, "foreign-delivery-before-inactive").await;
+    unknown(&foreign).await;
+    let other = foreign
+        .push
+        .enqueue_canonical_notification_publish_job(
+            foreign.node.node(),
+            &notification_item("foreign-delivery-before-inactive"),
+            &owner(),
+            &foreign.service,
+            None,
+            uuid::Uuid::new_v4(),
+        )
+        .await
+        .expect("distinct acceptance");
+    let Phase1Outcome::Continue(work) = foreign
+        .push
+        .process_publish_phase1(&other.job_id().to_string(), crate::time::now_ms())
+        .await
+        .expect("claim distinct acceptance")
+    else {
+        panic!("distinct acceptance must be claimed");
+    };
+    foreign
+        .push
+        .finalize_publish_job(
+            &work.job,
+            &[attempt(dispatch::ATTEMPT_STATUS_WEB_DELIVERED)],
+            MAX_DELIVERY_ATTEMPTS_PER_NODE,
+            crate::time::now_ms(),
+        )
+        .await
+        .expect("other acceptance delivered");
+    foreign
+        .push
+        .execute(
+            "UPDATE push_devices SET status = 'disabled' WHERE node = ?",
+            crate::db_params![foreign.node.node()],
+        )
+        .await
+        .expect("all devices inactive");
+    foreign
+        .push
+        .execute(
+            "UPDATE push_publish_jobs SET next_retry_at_ms = NULL WHERE job_id = ?",
+            crate::db_params![foreign.job.to_string()],
+        )
+        .await
+        .expect("retry original acceptance");
+    let result = foreign
+        .push
+        .process_publish_job_with_retention_limit(
+            &foreign.job.to_string(),
+            MAX_DELIVERY_ATTEMPTS_PER_NODE,
+        )
+        .await
+        .expect("no current devices")
+        .expect("original remains pending");
+    assert_eq!(result.attempted_devices(), 0);
+    assert_pending(&foreign).await;
+    assert_eq!(
+        scalar_i64(
+            &foreign.push,
+            "SELECT COUNT(*) FROM push_delivery_attempts WHERE publish_job_id = ?",
+            crate::db_params![foreign.job.to_string()]
+        )
+        .await,
+        1,
+        "the empty-node retry cannot send or copy another acceptance's delivery"
+    );
     fixture.close().await;
 }
 
@@ -1046,6 +1377,97 @@ async fn postgres_locked_failed_provider_row_does_not_block_fresh_work_or_custod
     fixture.close().await;
 }
 
+async fn postgres_failed_custody_owner_or_node_lock_is_bounded(owner_lock: bool) {
+    use crate::push_service::test_support::{
+        fcm_registration, with_fake_fcm, FakeFcmSender, FCM_TEST_APP_ID,
+    };
+    let schema = if owner_lock {
+        "pushcustodyowner"
+    } else {
+        "pushcustodynode"
+    };
+    let Some(fixture) = IngressFixture::postgres(schema).await else {
+        return;
+    };
+    let blocked = seed(&fixture, "contended-known-custody-lock").await;
+    seed_failed_custody(&blocked, false, 0).await;
+    let sender = FakeFcmSender::default();
+    let push = with_fake_fcm(blocked.push.clone(), sender.clone());
+    let independent_owner: BareJid = "independent@example.com".parse().expect("other owner");
+    let fresh = push
+        .ensure_node(&independent_owner, FCM_TEST_APP_ID)
+        .await
+        .expect("independent owner's node");
+    push.upsert_device(
+        &independent_owner,
+        fcm_registration("independent-phone", fresh.node()),
+    )
+    .await
+    .expect("independent device");
+    push.enqueue_notification_publish_job_from_user_server(
+        fresh.node(),
+        &notification_item("independent-before-custody-lock"),
+        &independent_owner,
+    )
+    .await
+    .expect("independent work");
+
+    let mut held = fixture.db.begin().await.expect("hold scheduler lock row");
+    let (sql, key) = if owner_lock {
+        (
+            "SELECT owner_bare_jid FROM push_owner_locks WHERE owner_bare_jid = ? FOR UPDATE",
+            owner().to_string(),
+        )
+    } else {
+        (
+            "SELECT node FROM push_node_locks WHERE node = ? FOR UPDATE",
+            blocked.node.node().to_string(),
+        )
+    };
+    let mut rows = held
+        .query(sql, crate::db_params![key])
+        .await
+        .expect("scheduler row lock");
+    assert!(rows.next().await.expect("locked row").is_some());
+    drop(rows);
+    let results = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        push.drain_queued_notification_publish_jobs(1),
+    )
+    .await
+    .expect("owner/node contention is bounded by the ancestry transaction deadlines")
+    .expect("independent work completes");
+    assert_eq!(results.len(), 1);
+    assert_eq!(results[0].item_id(), "independent-before-custody-lock");
+    assert_eq!(sender.sent(), 1);
+    assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![blocked.delivery.to_string()]).await, 2, "lock contention cannot release canonical custody");
+    assert_failure_history_preserved(&blocked, false).await;
+
+    held.commit().await.expect("release scheduler lock row");
+    assert!(tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        push.drain_queued_notification_publish_jobs(1),
+    )
+    .await
+    .expect("released scheduler lock permits custody repair")
+    .expect("custody repair")
+    .is_empty());
+    assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![blocked.delivery.to_string()]).await, 0);
+    assert_eq!(sender.sent(), 1, "custody repair never replays a send");
+    assert_failure_history_preserved(&blocked, false).await;
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn postgres_failed_custody_owner_lock_does_not_block_independent_owner() {
+    postgres_failed_custody_owner_or_node_lock_is_bounded(true).await;
+}
+
+#[tokio::test]
+async fn postgres_failed_custody_node_lock_does_not_block_independent_owner() {
+    postgres_failed_custody_owner_or_node_lock_is_bounded(false).await;
+}
+
 macro_rules! backend_tests {
     ($sqlite:ident, $postgres:ident, $helper:ident, $fixture:literal) => {
         #[tokio::test]
@@ -1073,10 +1495,22 @@ backend_tests!(
     "pushauto"
 );
 backend_tests!(
+    sqlite_known_failure_after_uncertainty_emits_retry_and_parked_dispositions,
+    postgres_known_failure_after_uncertainty_emits_retry_and_parked_dispositions,
+    known_failure_after_uncertainty_emits_retry_and_parked_dispositions,
+    "pushknowndisposition"
+);
+backend_tests!(
     sqlite_parse_failure_cannot_fail_successor_claim,
     postgres_parse_failure_cannot_fail_successor_claim,
     parse_failure_cannot_fail_successor_claim,
     "pushparse"
+);
+backend_tests!(
+    sqlite_prior_delivery_completes_after_all_devices_become_inactive,
+    postgres_prior_delivery_completes_after_all_devices_become_inactive,
+    prior_delivery_completes_after_all_devices_become_inactive,
+    "pushpriorinactive"
 );
 backend_tests!(
     sqlite_known_failure_success_and_explicit_cancellation_controls,

@@ -35,15 +35,54 @@ async function waitMs(ms: number): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+function stubBrowserGlobal(name: "window" | "navigator", value: unknown): () => void {
+  const original = Object.getOwnPropertyDescriptor(globalThis, name);
+  Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
+  return () => {
+    if (original) Object.defineProperty(globalThis, name, original);
+    else delete (globalThis as Record<string, unknown>)[name];
+  };
+}
+
+describe("long-press browser globals", () => {
+  for (const { label, descriptor } of [
+    {
+      label: "read-only data property",
+      descriptor: { configurable: true, enumerable: true, writable: false, value: {} },
+    },
+    { label: "getter-only property", descriptor: { configurable: true, get: () => ({}) } },
+    { label: "absent property", descriptor: undefined },
+  ]) {
+    test(`restores the exact ${label} after stubbing`, () => {
+      const original = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+      try {
+        delete (globalThis as Record<string, unknown>).navigator;
+        if (descriptor) Object.defineProperty(globalThis, "navigator", descriptor);
+        const before = Object.getOwnPropertyDescriptor(globalThis, "navigator");
+        const navigator = { vibrate: mock(() => true) };
+        const restore = stubBrowserGlobal("navigator", navigator);
+        expect(globalThis.navigator).toBe(navigator);
+        restore();
+        expect(Object.getOwnPropertyDescriptor(globalThis, "navigator")).toEqual(before);
+      } finally {
+        if (original) Object.defineProperty(globalThis, "navigator", original);
+        else delete (globalThis as Record<string, unknown>).navigator;
+      }
+    });
+  }
+});
+
 describe("useLongPress", () => {
   // Node's globalThis needs a stub window for the click-swallow path.
-  const originalWindow = globalThis.window;
-  const originalNavigator = globalThis.navigator;
+  let originalWindow: Window & typeof globalThis;
+  let restoreWindow: () => void;
+  let restoreNavigator: () => void;
   const clickListeners: Array<(event: MouseEvent) => void> = [];
 
   beforeEach(() => {
     clickListeners.length = 0;
-    globalThis.window = {
+    originalWindow = globalThis.window;
+    restoreWindow = stubBrowserGlobal("window", {
       addEventListener(type: string, listener: (event: MouseEvent) => void) {
         if (type === "click") clickListeners.push(listener);
       },
@@ -52,13 +91,13 @@ describe("useLongPress", () => {
         const idx = clickListeners.indexOf(listener);
         if (idx >= 0) clickListeners.splice(idx, 1);
       },
-    } as unknown as Window & typeof globalThis;
-    globalThis.navigator = { vibrate: () => true } as unknown as Navigator;
+    });
+    restoreNavigator = stubBrowserGlobal("navigator", { vibrate: () => true });
   });
 
   afterEach(() => {
-    globalThis.window = originalWindow;
-    globalThis.navigator = originalNavigator;
+    restoreNavigator();
+    restoreWindow();
   });
 
   test("fires after the delay when the finger stays still", async () => {

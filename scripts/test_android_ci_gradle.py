@@ -118,7 +118,7 @@ class AndroidCiGradleTests(unittest.TestCase):
             return result, calls
 
     def assert_policy(self, args):
-        self.assertTrue(POLICY <= set(args), f"Missing bounded CI flags: {POLICY - set(args)}")
+        self.assertLessEqual(POLICY, set(args), f"Missing bounded CI flags: {POLICY - set(args)}")
         # A later conflicting flag could override an earlier correct one.
         self.assertNotIn("--parallel", args)
         self.assertEqual([arg for arg in args if arg.startswith("--max-workers")], ["--max-workers=2"])
@@ -138,7 +138,7 @@ class AndroidCiGradleTests(unittest.TestCase):
                 self.assertEqual(result.returncode, 0, result.stderr)
                 self.assertEqual(len(calls), 1, calls)
                 self.assert_policy(calls[0])
-                self.assertTrue(required_args <= set(calls[0]), f"Lost checks: {required_args - set(calls[0])}")
+                self.assertLessEqual(required_args, set(calls[0]), f"Lost checks: {required_args - set(calls[0])}")
 
     def test_gmd_builds_apks_before_starting_device_with_bounded_memory(self):
         result, calls = self.run_entrypoint("gmdCheck")

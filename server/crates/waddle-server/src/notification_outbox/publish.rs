@@ -240,13 +240,10 @@ impl NotificationOutboxStore {
 
         let mut claimed = Vec::new();
         for job in selected {
-            if job.status == NotificationOutboxStatus::InProgress
-                && job
-                    .attempt_count
-                    .saturating_add(job.policy_error_count)
-                    .saturating_add(1)
-                    >= MAX_OUTBOX_ATTEMPTS
-            {
+            if job.status == NotificationOutboxStatus::InProgress {
+                // An expired claim is a failed attempt, not permission to
+                // resend immediately. Persist the same uncertainty-aware
+                // backoff and budget transition used by a live worker.
                 self.schedule_retry_or_fail_with_failure(&job, PublishFailureClass::ClaimLost)
                     .await?;
                 continue;
@@ -256,22 +253,13 @@ impl NotificationOutboxStore {
                 .execute(
                     r#"
                     UPDATE notification_outbox
-                    SET attempt_count = attempt_count + CASE WHEN status = 'in-progress' THEN 1 ELSE 0 END,
-                        status = ?,
+                    SET status = ?,
                         claimed_at_ms = ?,
                         claim_token = ?,
                         updated_at_ms = ?
                     WHERE job_id = ?
-                      AND (
-                        (
-                            status = ?
-                            AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
-                        ) OR (
-                            status = ?
-                            AND claimed_at_ms IS NOT NULL
-                            AND claimed_at_ms <= ?
-                        )
-                      )
+                      AND status = ?
+                      AND (next_attempt_at_ms IS NULL OR next_attempt_at_ms <= ?)
                     "#,
                     crate::db_params![
                         STATUS_IN_PROGRESS,
@@ -281,8 +269,6 @@ impl NotificationOutboxStore {
                         job.job_id.as_str(),
                         STATUS_QUEUED,
                         now_ms,
-                        STATUS_IN_PROGRESS,
-                        stale_claimed_before_ms,
                     ],
                 )
                 .await?;
@@ -486,7 +472,7 @@ impl NotificationOutboxStore {
             let item = job.to_xep0357_pubsub_item();
             let delivery = uuid::Uuid::parse_str(job.job_id.as_str())
                 .map_err(|_| NotificationOutboxError::InvalidDeliveryIdentity)?;
-            if let Some(proof) = push_service
+            let proof = match push_service
                 .canonical_terminal_notification_proof(
                     &job.push_service_jid,
                     &job.node,
@@ -496,8 +482,20 @@ impl NotificationOutboxStore {
                     delivery,
                 )
                 .await
-                .map_err(|error| NotificationOutboxError::Push(error.to_string()))?
             {
+                Ok(proof) => proof,
+                Err(error) => {
+                    // This lookup precedes queue invocation. A storage error
+                    // here is not evidence of unknown queue acceptance.
+                    return self
+                        .retry_or_fail_outcome_for_claimed_job(
+                            job,
+                            PublishFailureClass::Storage.with_error(error),
+                        )
+                        .await;
+                }
+            };
+            if let Some(proof) = proof {
                 if self
                     .complete_claimed_job_from_terminal_proof(job, proof)
                     .await?
@@ -1296,7 +1294,7 @@ impl NotificationOutboxStore {
                 updated_at_ms = ?
             WHERE job_id = ?
               AND status = ?
-              AND claim_token = ?
+              AND (claim_token = ? OR (claim_token IS NULL AND ? = 0))
             "#,
                 crate::db_params![
                     status,
@@ -1307,6 +1305,7 @@ impl NotificationOutboxStore {
                     job.job_id.as_str(),
                     STATUS_IN_PROGRESS,
                     job.claim_token.as_deref(),
+                    i64::from(job.claim_token.is_some()),
                 ],
             )
             .await?;

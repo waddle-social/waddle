@@ -644,7 +644,12 @@ impl DatabasePushServiceStore {
 
         let sealed_devices =
             active_devices_with_subscription_for_node_tx(&mut tx, job.node()).await?;
-        if sealed_devices.is_empty() {
+        // Delivery proof belongs to this durable acceptance, even when every
+        // device has since become inactive. Check it before the empty-node
+        // retry path so an already delivered notification can complete.
+        let already_delivered =
+            delivered_device_ids_for_acceptance_tx(&mut tx, job.job_id()).await?;
+        if sealed_devices.is_empty() && already_delivered.is_empty() {
             let failed_attempt_count = read_publish_job_attempt_count_tx(&mut tx, job.job_id())
                 .await?
                 .unwrap_or(0)
@@ -704,8 +709,6 @@ impl DatabasePushServiceStore {
         // attempt for this same item already succeeded. Filter the
         // dispatch set against the terminal-success attempts recorded
         // by earlier passes.
-        let already_delivered =
-            delivered_device_ids_for_acceptance_tx(&mut tx, job.job_id()).await?;
         let sealed_devices: Vec<_> = sealed_devices
             .into_iter()
             .filter(|device| !already_delivered.contains(&device.device_id))
@@ -1324,7 +1327,21 @@ impl DatabasePushServiceStore {
                 .iter()
                 .find_map(|attempt| attempt.last_error.as_deref())
                 .unwrap_or("No definitive provider success after an earlier unknown send");
-            record_known_publish_job_failure_tx(&mut tx, job, error, now_ms).await?;
+            if let Some(failure) =
+                record_known_publish_job_failure_tx(&mut tx, job, error, now_ms).await?
+            {
+                // No current retry evidence exists. The earlier unresolved
+                // acceptance is why this job still retries or parks; do not
+                // reclassify the current nonretry provider outcome.
+                retry_disposition = Some((
+                    PushRetryReason::UnknownAfterSend,
+                    PushFailureClass::UnknownAfterSend,
+                    failure.disposition,
+                    failure.attempt_count,
+                    failure.uncertain_send,
+                    error.to_string(),
+                ));
+            }
         } else if let Some(uniform_status) =
             all_attempts_with_encoder_bug_signature(attempts).filter(|_| !has_confirmed_delivery)
         {
