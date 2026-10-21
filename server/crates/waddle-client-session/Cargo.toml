@@ -8,5 +8,6 @@ authors.workspace = true
 repository.workspace = true
 
 [dependencies]
+jid.workspace = true
 
 [dev-dependencies]

@@ -53,6 +53,12 @@ mod imp {
         #[template_child]
         pub room_title: TemplateChild<adw::WindowTitle>,
         #[template_child]
+        pub thread_back: TemplateChild<gtk::Button>,
+        #[template_child]
+        pub thread_context: TemplateChild<gtk::Box>,
+        #[template_child]
+        pub load_earlier: TemplateChild<gtk::Button>,
+        #[template_child]
         pub content_stack: TemplateChild<gtk::Stack>,
         #[template_child]
         pub timeline_scroller: TemplateChild<gtk::ScrolledWindow>,
@@ -90,6 +96,10 @@ mod imp {
         pub unread: RefCell<HashMap<String, u32>>,
         /// One timeline per conversation, by bare JID.
         pub timelines: RefCell<HashMap<String, Timeline>>,
+        /// Original messages retained as context when opening an implicit-root thread.
+        pub thread_roots:
+            RefCell<HashMap<(String, String), waddle_client_session::IncomingMessage>>,
+        pub thread_updates: RefCell<HashMap<String, crate::thread_updates::ThreadUpdates>>,
         /// The open conversation's bare JID.
         pub current: RefCell<Option<String>>,
         /// A conversation asked for (from a notification) before the
@@ -254,8 +264,20 @@ impl WaddleWindow {
     #[template_callback]
     fn on_room_activated(&self, row: &gtk::ListBoxRow) {
         if let Some(conversation) = self.conversation_at(row.index()) {
+            self.open_conversation(&conversation.key());
+        }
+    }
+
+    #[template_callback]
+    fn on_thread_back(&self) {
+        if let Some(conversation) = self.current_conversation() {
             self.open_conversation(&conversation.jid);
         }
+    }
+
+    #[template_callback]
+    fn on_load_earlier(&self) {
+        self.load_older();
     }
 
     #[template_callback]

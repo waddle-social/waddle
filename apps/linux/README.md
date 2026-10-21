@@ -4,13 +4,16 @@ A native GTK4 + libadwaita client, in Rust. The plan is `claude/linux-client-pla
 
 ## Status
 
-Scaffold only:
+The native client currently supports:
 
 - **Sign-in:** RFC 8628 device flow against any Waddle server, the same flow the Apple and Android apps use. Pick a provider, approve in the browser, and the window continues by itself.
 - **Accounts:** stored in the Secret Service (`oo7`), one item per server and JID, so several communities can be signed in at once.
 - **Shell:** an adaptive `AdwNavigationSplitView` that collapses at phone widths.
+- **Chat:** rooms and DMs, paged history, replies, reactions, edits, deletions and attachments.
+- **Threads:** choose **Reply in Thread** below a message, or **Open Thread** from its message menu. Threads appear beneath their conversation in the sidebar, with separate unread counts and history. **Start Subthread** creates a nested thread; the back button returns to the main conversation. The original message appears above the replies when loaded. Thread views filter full archive pages so saved reactions, edits and Jev judgments remain available. Automatic scanning stops after three pages; **Load Earlier** continues through older history.
+- **Jev badges:** question and content-safety judgments appear beneath messages. Expand a badge to inspect probabilities, model and taxonomy versions. Judgments follow the exact message revision and disappear after an edit or deletion until a current result arrives.
 
-Rooms, DMs, timelines, presence and calls arrive with `waddle-client-session` (ADR-0019). This app keeps no client state of its own.
+The timeline and judgment lifecycle use `waddle-client-session` (ADR-0019).
 
 ## Build
 
@@ -35,6 +38,8 @@ cargo test --locked
 desktop-file-validate data/social.waddle.Waddle.desktop
 appstreamcli validate --no-net data/social.waddle.Waddle.metainfo.xml
 ```
+
+The GTK navigation regression test requires a display and is excluded from ordinary headless runs. Run it separately with `xvfb-run -a cargo test --locked thread_navigation_and_context -- --ignored --test-threads=1`.
 
 ## Layout
 

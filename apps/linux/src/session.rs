@@ -33,7 +33,9 @@ use waddle_xmpp_client_ffi::{
 use crate::attachments::{self, TransferError};
 use crate::auth::store::StoredAccount;
 use crate::composer::{Availability, Mentionable};
+use crate::judgments;
 use crate::runtime;
+use crate::threads::{self, Thread};
 
 const PAGE_SIZE: u32 = 50;
 
@@ -57,6 +59,29 @@ pub struct Conversation {
     pub name: String,
     pub kind: Kind,
     pub autojoin: bool,
+    /// The selected XEP-0201 thread, or the room/DM's main timeline.
+    pub thread: Option<Thread>,
+}
+
+impl Conversation {
+    pub fn key(&self) -> String {
+        threads::conversation_key(&self.jid, self.thread.as_ref())
+    }
+}
+
+/// One archive message, with its routing metadata kept outside the timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HistoryMessage {
+    pub thread: Option<Thread>,
+    pub message: IncomingMessage,
+}
+
+/// The cursor belongs to the archive query, even when filtering a page
+/// for a thread leaves no visible messages.
+pub struct HistoryPage {
+    pub messages: Vec<HistoryMessage>,
+    pub first_id: Option<String>,
+    pub complete: bool,
 }
 
 /// What the UI hears from the session.
@@ -90,6 +115,7 @@ pub struct Arrival {
     pub conversation: String,
     pub kind: Kind,
     pub message: IncomingMessage,
+    pub thread: Option<Thread>,
     /// XEP-0372 mention of this account or the whole room.
     pub mentions_me: bool,
     /// XEP-0203: the server held it while this client was away. The
@@ -134,6 +160,7 @@ pub struct Draft {
     pub files: Vec<WaddleSharedFile>,
     /// Whom the body's typed `@nick`s may mention (XEP-0372).
     pub mentionable: Vec<Mentionable>,
+    pub thread: Option<Thread>,
 }
 
 struct Forwarder(async_channel::Sender<SessionEvent>);
@@ -242,11 +269,12 @@ impl Session {
         }
     }
 
-    pub fn mark_read(&self, jid: &str) {
+    pub fn mark_read(&self, conversation: &Conversation) {
         let client = Arc::clone(&self.client);
-        let jid = jid.to_string();
+        let jid = conversation.jid.clone();
+        let thread = conversation.thread.as_ref().map(|thread| thread.id.clone());
         runtime::spawn(async move {
-            if let Err(error) = client.mark_inbox_read(jid, None).await {
+            if let Err(error) = client.mark_inbox_read(jid, thread).await {
                 tracing::warn!(?error, "could not mark the conversation read");
             }
         });
@@ -268,30 +296,31 @@ impl Session {
     }
 
     /// The newest page before `before` (or the newest page), oldest first.
+    /// Thread views page the full room or personal archive. Reactions,
+    /// corrections and Jev judgments can omit XEP-0201 thread metadata, so
+    /// server-side thread filtering would lose updates to archived replies.
+    /// The UI selects content while retaining this unfiltered page cursor.
     pub async fn history(
         &self,
-        jid: &str,
-        kind: Kind,
+        conversation: &Conversation,
         before: Option<String>,
-    ) -> (Vec<IncomingMessage>, Option<String>, bool) {
+    ) -> Result<HistoryPage, String> {
         let client = Arc::clone(&self.client);
-        let peer = jid.to_string();
+        let peer = conversation.jid.clone();
+        let kind = conversation.kind;
         let page = runtime::spawn(async move {
             match kind {
                 Kind::Room => client.fetch_room_history(peer, PAGE_SIZE, before).await,
                 Kind::Direct => client.fetch_dm_history(peer, PAGE_SIZE, before).await,
             }
         })
-        .await;
-        let (Ok(page), Ok(conversation)) = (page, jid.parse::<BareJid>()) else {
-            return (Vec::new(), None, false);
-        };
-        let messages = page
-            .messages
-            .into_iter()
-            .filter_map(|message| archived_from(message, &conversation, kind, &self.me))
-            .collect();
-        (messages, page.first_id, page.is_complete)
+        .await
+        .map_err(|_| "History loading was interrupted.".to_string())?;
+        let peer: BareJid = conversation
+            .jid
+            .parse()
+            .map_err(|_| "The conversation address is invalid.".to_string())?;
+        Ok(history_page(page, &peer, kind, &self.me))
     }
 
     /// Send `draft`. True when the stanza was written.
@@ -302,11 +331,13 @@ impl Session {
             quote,
             files,
             mentionable,
+            thread,
         } = draft;
         let mut options = WaddleSendOptions {
             stanza_id: Some(origin_id),
             shared_files: files,
             mention_directory: mention_directory(kind, &mentionable),
+            thread: thread.as_ref().map(Thread::wire),
             ..WaddleSendOptions::default()
         };
         if let Some(quote) = quote {
@@ -603,6 +634,7 @@ pub fn rooms_from(topology: WaddleTopology) -> Vec<Conversation> {
             jid: channel.room_jid,
             kind: Kind::Room,
             autojoin: channel.autojoin,
+            thread: None,
         })
         .collect()
 }
@@ -628,6 +660,7 @@ pub fn direct_conversation(peer: &str) -> Option<Conversation> {
         jid: bare.to_string(),
         kind: Kind::Direct,
         autojoin: false,
+        thread: None,
     })
 }
 
@@ -650,11 +683,29 @@ pub fn arrival(message: WaddleMessage, me: &Me) -> Option<Arrival> {
 fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
     let room = from.to_bare();
     let delayed = message.timestamp.is_some();
+    let thread = Thread::from_wire(message.thread.clone(), message.parent_thread_id.clone());
     let Some(nick) = from
         .resource()
         .map(|resource| resource.as_str().to_string())
     else {
-        // The room itself: only its XEP-0425 moderation broadcasts matter.
+        // Only the bare room can attach judgments or relay moderation.
+        if let Some(scores) = message
+            .safety_scores
+            .and_then(|scores| judgments::fastening(&room, scores))
+        {
+            return Some(Arrival {
+                conversation: room.to_string(),
+                kind: Kind::Room,
+                thread: None,
+                message: IncomingMessage {
+                    safety_scores: Some(scores),
+                    timestamp_ms: timestamp_ms(message.timestamp.as_deref()),
+                    ..IncomingMessage::default()
+                },
+                mentions_me: false,
+                delayed,
+            });
+        }
         let target = message.moderation_target_id?;
         return Some(Arrival {
             conversation: room.to_string(),
@@ -664,6 +715,7 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
                 timestamp_ms: timestamp_ms(message.timestamp.as_deref()),
                 ..IncomingMessage::default()
             },
+            thread,
             mentions_me: false,
             delayed,
         });
@@ -675,7 +727,9 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
             .iter()
             .any(|uri| uri.strip_prefix("xmpp:") == Some(me.bare.as_str()));
     let own = nick == me.nick;
+    let score_target = judgments::target(&room, stanza_id.as_deref(), message.origin_id.as_deref());
     let incoming = IncomingMessage {
+        score_target,
         reference_id: stanza_id.clone(),
         stanza_id,
         origin_id: message.origin_id,
@@ -702,11 +756,13 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
         sender: nick,
         // A live room message does not expose the occupant's real JID.
         author_id: None,
+        ..IncomingMessage::default()
     };
     Some(Arrival {
         conversation: room.to_string(),
         kind: Kind::Room,
         message: incoming,
+        thread,
         mentions_me: mentions_me && !own,
         delayed,
     })
@@ -714,6 +770,7 @@ fn room_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
 
 fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival> {
     let delayed = message.timestamp.is_some();
+    let thread = Thread::from_wire(message.thread.clone(), message.parent_thread_id.clone());
     let from_me = from.to_bare() == me.bare;
     let own = from_me || message.carbon == Some(WaddleCarbonDirection::Sent);
     let peer = if own {
@@ -754,14 +811,41 @@ fn direct_arrival(message: WaddleMessage, from: Jid, me: &Me) -> Option<Arrival>
         reply_to: message.reply_to_id.map(|id| ReplyTo { id, sender: None }),
         reaction: reaction(message.reaction_target_id, message.reaction_emojis),
         attachments: message.shared_files.iter().map(attachment_from).collect(),
+        ..IncomingMessage::default()
     };
     Some(Arrival {
         conversation: peer.to_string(),
         kind: Kind::Direct,
         message: incoming,
+        thread,
         mentions_me: false,
         delayed,
     })
+}
+
+fn history_page(
+    page: waddle_xmpp_client_ffi::WaddleMamPage,
+    conversation: &BareJid,
+    kind: Kind,
+    me: &Me,
+) -> HistoryPage {
+    let messages = page
+        .messages
+        .into_iter()
+        .filter_map(|message| {
+            let thread =
+                Thread::from_wire(message.thread.clone(), message.parent_thread_id.clone());
+            Some(HistoryMessage {
+                thread,
+                message: archived_from(message, conversation, kind, me)?,
+            })
+        })
+        .collect();
+    HistoryPage {
+        messages,
+        first_id: page.first_id,
+        complete: page.is_complete,
+    }
 }
 
 /// An archived message of `conversation` in the core's terms.
@@ -773,12 +857,27 @@ pub fn archived_from(
 ) -> Option<IncomingMessage> {
     let from: Jid = message.from.as_deref()?.parse().ok()?;
     let timestamp = timestamp_ms(message.timestamp.as_deref());
+    if kind == Kind::Room
+        && (from.to_bare() != *conversation || message.message_type != "groupchat")
+    {
+        return None;
+    }
     let (sender, own, reference_id, author_id) = match kind {
         Kind::Room => {
             let Some(nick) = from
                 .resource()
                 .map(|resource| resource.as_str().to_string())
             else {
+                if let Some(scores) = message
+                    .safety_scores
+                    .and_then(|scores| judgments::fastening(conversation, scores))
+                {
+                    return Some(IncomingMessage {
+                        safety_scores: Some(scores),
+                        timestamp_ms: timestamp,
+                        ..IncomingMessage::default()
+                    });
+                }
                 let target = message.moderation_target_id?;
                 return Some(IncomingMessage {
                     moderates_id: Some(target),
@@ -810,7 +909,17 @@ pub fn archived_from(
             (sender, own, reference, Some(from.to_bare().to_string()))
         }
     };
+    let score_target = (kind == Kind::Room)
+        .then(|| {
+            judgments::target(
+                conversation,
+                Some(&message.mam_id),
+                message.origin_id.as_deref(),
+            )
+        })
+        .flatten();
     Some(IncomingMessage {
+        score_target,
         stanza_id: Some(message.mam_id),
         origin_id: message.origin_id,
         message_id: message.id,
@@ -837,6 +946,7 @@ pub fn archived_from(
         }),
         reaction: reaction(message.reaction_target_id, message.reaction_emojis),
         attachments: message.shared_files.iter().map(attachment_from).collect(),
+        ..IncomingMessage::default()
     })
 }
 
@@ -953,6 +1063,54 @@ mod tests {
             call_thread: None,
             shared_files: Vec::new(),
             mds_displayed: None,
+        }
+    }
+
+    fn archived(real: Option<&str>) -> WaddleArchivedMessage {
+        WaddleArchivedMessage {
+            mam_id: "s1".into(),
+            query_id: None,
+            id: Some("m1".into()),
+            stanza_id: None,
+            stanza_id_by: None,
+            stanza_ids: Vec::new(),
+            origin_id: Some("o1".into()),
+            timestamp: Some("2026-10-18T12:00:00Z".into()),
+            from: Some("general@muc.waddle.social/david".into()),
+            to: None,
+            message_type: "groupchat".into(),
+            body: Some("hi".into()),
+            subject: None,
+            replaces_id: None,
+            retracts_id: None,
+            retraction_id: None,
+            is_retracted: false,
+            moderation_target_id: None,
+            moderated_by: None,
+            moderation_reason: None,
+            reaction_target_id: None,
+            reaction_emojis: Vec::new(),
+            thread: None,
+            parent_thread_id: None,
+            reply_to_id: None,
+            reply_to_sender: None,
+            reply_fallback_start: None,
+            reply_fallback_end: None,
+            markup_spans: Vec::new(),
+            broadcast_mention: None,
+            mention_uris: Vec::new(),
+            references: Vec::new(),
+            forum_post_kind: None,
+            forum_title: None,
+            is_sticker: false,
+            muc_user: false,
+            author_real_jid: real.map(str::to_string),
+            call_thread: None,
+            call_thread_ended: None,
+            safety_scores: None,
+            shared_files: Vec::new(),
+            link_previews: Vec::new(),
+            call_event: None,
         }
     }
 
@@ -1124,51 +1282,6 @@ mod tests {
 
     #[test]
     fn archived_room_messages_carry_the_real_author_when_exposed() {
-        let archived = |real: Option<&str>| WaddleArchivedMessage {
-            mam_id: "s1".into(),
-            query_id: None,
-            id: Some("m1".into()),
-            stanza_id: None,
-            stanza_id_by: None,
-            stanza_ids: Vec::new(),
-            origin_id: Some("o1".into()),
-            timestamp: Some("2026-10-18T12:00:00Z".into()),
-            from: Some("general@muc.waddle.social/david".into()),
-            to: None,
-            message_type: "groupchat".into(),
-            body: Some("hi".into()),
-            subject: None,
-            replaces_id: None,
-            retracts_id: None,
-            retraction_id: None,
-            is_retracted: false,
-            moderation_target_id: None,
-            moderated_by: None,
-            moderation_reason: None,
-            reaction_target_id: None,
-            reaction_emojis: Vec::new(),
-            thread: None,
-            parent_thread_id: None,
-            reply_to_id: None,
-            reply_to_sender: None,
-            reply_fallback_start: None,
-            reply_fallback_end: None,
-            markup_spans: Vec::new(),
-            broadcast_mention: None,
-            mention_uris: Vec::new(),
-            references: Vec::new(),
-            forum_post_kind: None,
-            forum_title: None,
-            is_sticker: false,
-            muc_user: false,
-            author_real_jid: real.map(str::to_string),
-            call_thread: None,
-            call_thread_ended: None,
-            safety_scores: None,
-            shared_files: Vec::new(),
-            link_previews: Vec::new(),
-            call_event: None,
-        };
         let room: BareJid = "general@muc.waddle.social".parse().expect("jid");
         // Someone else now holding the nick "david" is not the user.
         let other = archived_from(
@@ -1244,5 +1357,137 @@ mod tests {
         assert_eq!(reconnect_delay(3, 0.0), Duration::from_secs(1));
         assert_eq!(reconnect_delay(3, 1.0), Duration::from_secs(8));
         assert_eq!(reconnect_delay(40, 1.0), Duration::from_secs(60));
+    }
+
+    fn judgment(room: &str) -> waddle_xmpp_client_ffi::WaddleSafetyScoresFastening {
+        waddle_xmpp_client_ffi::WaddleSafetyScoresFastening {
+            target_origin_id: "o1".into(),
+            target_stanza_id: "s1".into(),
+            target_stanza_by: room.into(),
+            source_revision_id: "s1".into(),
+            scores: waddle_xmpp_client_ffi::WaddleSafetyScores {
+                model_version: "jev-v1".into(),
+                scores: vec![],
+            },
+        }
+    }
+
+    #[test]
+    fn live_threads_preserve_parent_in_rooms_and_dms() {
+        for (from, kind) in [
+            ("general@muc.waddle.social/ann", "groupchat"),
+            ("ann@waddle.social/phone", "chat"),
+        ] {
+            let mut message = wire(from, kind, "a child reply");
+            message.thread = Some("child".into());
+            message.parent_thread_id = Some("outer".into());
+            let arrived = arrival(message, &me()).expect("message");
+            assert_eq!(
+                arrived.thread,
+                Some(Thread {
+                    id: "child".into(),
+                    parent: Some("outer".into())
+                })
+            );
+        }
+    }
+
+    #[test]
+    fn archive_pages_preserve_thread_metadata_and_the_unfiltered_cursor() {
+        let room: BareJid = "general@muc.waddle.social".parse().expect("jid");
+        let mut reply = archived(None);
+        reply.thread = Some("child".into());
+        reply.parent_thread_id = Some("outer".into());
+        let page = history_page(
+            waddle_xmpp_client_ffi::WaddleMamPage {
+                messages: vec![reply],
+                first_id: Some("cursor".into()),
+                last_id: None,
+                is_complete: false,
+            },
+            &room,
+            Kind::Room,
+            &me(),
+        );
+        assert_eq!(page.messages.len(), 1);
+        assert_eq!(
+            page.messages[0]
+                .thread
+                .as_ref()
+                .map(|thread| thread.id.as_str()),
+            Some("child")
+        );
+        assert_eq!(
+            page.messages[0]
+                .thread
+                .as_ref()
+                .and_then(|thread| thread.parent.as_deref()),
+            Some("outer")
+        );
+        assert_eq!(page.first_id.as_deref(), Some("cursor"));
+        assert!(!page.complete);
+
+        let empty = history_page(
+            waddle_xmpp_client_ffi::WaddleMamPage {
+                messages: vec![],
+                first_id: Some("next-empty-page".into()),
+                last_id: None,
+                is_complete: false,
+            },
+            &room,
+            Kind::Room,
+            &me(),
+        );
+        assert_eq!(empty.first_id.as_deref(), Some("next-empty-page"));
+        assert!(!empty.complete);
+    }
+
+    #[test]
+    fn judgments_require_bare_room_authority_live_and_archived() {
+        let room: BareJid = "general@muc.waddle.social".parse().expect("jid");
+        let mut score = wire(room.as_str(), "groupchat", "");
+        score.safety_scores = Some(judgment(room.as_str()));
+        let arrived = arrival(score.clone(), &me()).expect("bare-room scores");
+        assert!(arrived.message.safety_scores.is_some());
+        assert_eq!(arrived.thread, None);
+        score.from = Some(format!("{room}/mallory"));
+        assert!(arrival(score.clone(), &me())
+            .expect("occupant content")
+            .message
+            .safety_scores
+            .is_none());
+        score.from = Some(room.to_string());
+        score.safety_scores = Some(judgment("other@muc.waddle.social"));
+        assert!(arrival(score, &me()).is_none());
+
+        let mut score = archived(None);
+        score.from = Some(room.to_string());
+        score.safety_scores = Some(judgment(room.as_str()));
+        assert!(archived_from(score.clone(), &room, Kind::Room, &me())
+            .expect("scores")
+            .safety_scores
+            .is_some());
+        score.from = Some("other@muc.waddle.social".into());
+        assert!(archived_from(score, &room, Kind::Room, &me()).is_none());
+    }
+
+    #[test]
+    fn original_room_content_carries_verified_judgment_identity() {
+        let room: BareJid = "general@muc.waddle.social".parse().expect("jid");
+        let mut live = wire("general@muc.waddle.social/ann", "groupchat", "question?");
+        live.stanza_ids = vec![stanza_id("s1", room.as_str())];
+        let target = arrival(live, &me())
+            .expect("message")
+            .message
+            .score_target
+            .expect("identity");
+        assert_eq!(target.origin_id, "o1");
+        assert_eq!(target.stanza_id, "s1");
+        assert_eq!(target.stanza_by, room);
+        let target = archived_from(archived(None), &room, Kind::Room, &me())
+            .expect("message")
+            .score_target
+            .expect("archive identity");
+        assert_eq!(target.stanza_id, "s1");
     }
 }

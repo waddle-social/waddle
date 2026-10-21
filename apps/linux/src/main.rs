@@ -1,16 +1,18 @@
 //! Waddle for Linux: GTK4 + libadwaita.
 //!
-//! This is the scaffold from `claude/linux-client-plan.md` Phase 2.1:
-//! device-flow sign-in, accounts in the Secret Service, and the adaptive
-//! shell. Client state (rooms, timelines, presence) arrives with
-//! `waddle-client-session` (ADR-0019); nothing here keeps its own copy.
+//! Device-flow sign-in, accounts in the Secret Service, and an adaptive
+//! chat shell. Timeline and judgment state use `waddle-client-session`
+//! (ADR-0019); GTK renders conversations and separately paged threads.
 
 mod application;
 mod attachments;
 mod auth;
 mod composer;
+mod judgments;
 mod runtime;
 mod session;
+mod thread_updates;
+mod threads;
 mod ui;
 
 use gtk::glib;
