@@ -1,15 +1,18 @@
 //! Transactional writes for user bot accounts and their tokens.
 //!
-//! Both messages take a row lock first (`UPDATE ... SET updated_at`) so the
-//! limit checks that follow serialize across connections and replicas on
-//! SQLite and Postgres alike.
+//! The create and mint messages take a row lock first (`UPDATE ... SET
+//! updated_at`) so the limit checks that follow serialize across
+//! connections and replicas on SQLite and Postgres alike. The lifecycle
+//! janitor's disable and enable messages are idempotent.
 
 use chrono::{DateTime, Utc};
 use jid::BareJid;
 use kameo::message::Context;
 
 use super::{mark_actor_result, DbActor};
-use crate::auth::bots::{storage_timestamp, BotJid, BotTokenId, BotTokenLabel, UserKind};
+use crate::auth::bots::{
+    storage_timestamp, BotJid, BotTokenId, BotTokenLabel, DisabledReason, UserKind,
+};
 use crate::db::{DatabaseError, Transaction, Value};
 
 /// Insert a `kind = 'bot'` users row owned by `owner`, enforcing the
@@ -254,6 +257,108 @@ async fn mint_bot_token(
     )
     .await?;
     Ok(MintOutcome::Minted)
+}
+
+/// D3: disable `bot` for `reason` and revoke every unrevoked token it holds,
+/// in one transaction, so a crash cannot leave a disabled bot with live
+/// tokens. `disabled_at` keeps its first value; `disabled_reason` is
+/// rewritten only if it differs. Re-running it revokes any token that is
+/// still unrevoked and is otherwise a no-op.
+pub struct DisableBot {
+    pub bot: BotJid,
+    pub reason: DisabledReason,
+    pub now: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisableBotReport {
+    /// The users row changed: newly disabled, or disabled for a new reason.
+    pub disabled: bool,
+    pub tokens_revoked: u64,
+}
+
+impl kameo::message::Message<DisableBot> for DbActor {
+    type Reply = Result<DisableBotReport, DatabaseError>;
+
+    async fn handle(
+        &mut self,
+        msg: DisableBot,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.touch();
+        let result = async {
+            let now = storage_timestamp(msg.now);
+            let bot = msg.bot.as_bare().as_str();
+            let reason = msg.reason.as_str();
+            let mut tx = self.db.begin_immediate().await?;
+            let disabled = tx
+                .execute(
+                    "UPDATE users SET disabled_at = COALESCE(disabled_at, ?), \
+                     disabled_reason = ?, updated_at = ? \
+                     WHERE jid = ? AND kind = ? \
+                     AND (disabled_at IS NULL OR disabled_reason IS NULL \
+                     OR disabled_reason <> ?)",
+                    [
+                        now.as_str(),
+                        reason,
+                        now.as_str(),
+                        bot,
+                        UserKind::Bot.as_str(),
+                        reason,
+                    ],
+                )
+                .await?;
+            let tokens_revoked = tx
+                .execute(
+                    "UPDATE bot_tokens SET revoked_at = ? \
+                     WHERE bot_jid = ? AND revoked_at IS NULL",
+                    [now.as_str(), bot],
+                )
+                .await?;
+            tx.commit().await?;
+            Ok(DisableBotReport {
+                disabled: disabled > 0,
+                tokens_revoked,
+            })
+        }
+        .await;
+        mark_actor_result(result)
+    }
+}
+
+/// Clear `bot`'s disabled state. Revoked tokens stay revoked: the owner
+/// mints new ones. Returns whether the bot was disabled.
+pub struct EnableBot {
+    pub bot: BotJid,
+    pub now: DateTime<Utc>,
+}
+
+impl kameo::message::Message<EnableBot> for DbActor {
+    type Reply = Result<bool, DatabaseError>;
+
+    async fn handle(
+        &mut self,
+        msg: EnableBot,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.touch();
+        let result =
+            async {
+                let now = storage_timestamp(msg.now);
+                let conn = self.db.guard().await?;
+                let updated = conn
+                .execute(
+                    "UPDATE users SET disabled_at = NULL, disabled_reason = NULL, updated_at = ? \
+                     WHERE jid = ? AND kind = ? \
+                     AND (disabled_at IS NOT NULL OR disabled_reason IS NOT NULL)",
+                    [now.as_str(), msg.bot.as_bare().as_str(), UserKind::Bot.as_str()],
+                )
+                .await?;
+                Ok(updated > 0)
+            }
+            .await;
+        mark_actor_result(result)
+    }
 }
 
 fn is_unique_violation(error: &DatabaseError) -> bool {

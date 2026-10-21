@@ -167,6 +167,8 @@ pub enum Janitor {
     RemoteMucMembership,
     /// Retained local MUC departure reconciliation.
     LocalMucDeparture,
+    /// User bot owner-health and bot-token cleanup.
+    BotLifecycle,
 }
 
 impl sealed::Sealed for Janitor {}
@@ -189,6 +191,7 @@ impl MetricAttribute for Janitor {
             Self::RemoteOwnerMirror => "remote_owner_mirror",
             Self::RemoteMucMembership => "remote_muc_membership",
             Self::LocalMucDeparture => "local_muc_departure",
+            Self::BotLifecycle => "bot_lifecycle",
         }
     }
 }

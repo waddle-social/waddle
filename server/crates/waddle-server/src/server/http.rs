@@ -1404,6 +1404,7 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_room_effect_outbox_janitor(websocket_state);
     spawn_push_service_publish_job_janitor(websocket_state);
     spawn_auth_state_janitor(websocket_state);
+    crate::server::bot_janitor::spawn_bot_lifecycle_janitor(websocket_state);
     crate::auth::directory::spawn_account_key_backfill(
         websocket_state.deps.app_state.db_pool.global_actor(),
         crate::auth::directory::ACCOUNT_KEY_BACKFILL_INTERVAL,

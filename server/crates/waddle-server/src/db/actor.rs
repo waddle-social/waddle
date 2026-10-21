@@ -10,7 +10,10 @@ use super::{Database, DatabaseError};
 
 mod bots;
 
-pub use bots::{CreateBotAccount, CreateBotOutcome, MintBotToken, MintOutcome};
+pub use bots::{
+    CreateBotAccount, CreateBotOutcome, DisableBot, DisableBotReport, EnableBot, MintBotToken,
+    MintOutcome,
+};
 
 fn mark_actor_result<T>(result: Result<T, DatabaseError>) -> Result<T, DatabaseError> {
     if result.is_err() {
