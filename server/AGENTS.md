@@ -21,8 +21,9 @@
 
 ## Telemetry
 
-- Create metrics only through `waddle_xmpp::counter_add!` and `waddle_xmpp::histogram_record!` in `crates/waddle-xmpp/src/telemetry/`; do not add a standalone registration API.
+- Create metrics only through `waddle_xmpp::counter_add!`, `waddle_xmpp::histogram_record!`, and `waddle_xmpp::gauge_record!` in `crates/waddle-xmpp/src/telemetry/`; do not add a standalone registration API.
 - Alert-worthy counters are zero-registered at startup through the emitting helper's own `counter_add!` call site, driven by `telemetry::reliability::register_reliability_counters()` from `waddle-server::telemetry::init`. Counters whose alerts trigger above zero on a healthy pod belong in that path; counters whose alerts trigger only when they remain zero stay unregistered. See the telemetry module docs.
+- Current-state gauges publish a complete successful snapshot, including zero values, through the emitting helper's `gauge_record!` calls. Record snapshot freshness last; a query failure preserves the previous values and freshness.
 - The Prometheus text renderer in `crates/waddle-xmpp/src/prometheus.rs` is frozen; do not add metric families there.
 - Metric names use dot.case, units use UCUM on the instrument, and attributes come only from `telemetry/attributes.rs`'s allowlist. Never use JIDs, room JIDs, stream IDs, or message IDs as metric attributes; use spans or logs and follow the telemetry module's cardinality budget.
 - Test exported metric samples through `telemetry::test_support`'s in-memory reader, not instrument internals.
