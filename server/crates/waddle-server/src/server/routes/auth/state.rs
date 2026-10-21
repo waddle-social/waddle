@@ -285,15 +285,4 @@ impl AuthState {
 
         Ok(url.to_string())
     }
-
-    pub(super) fn extract_session_cookie(headers: &axum::http::HeaderMap) -> Option<String> {
-        let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-        for pair in cookie_header.split(';') {
-            let trimmed = pair.trim();
-            if let Some(v) = trimmed.strip_prefix("waddle_session=") {
-                return Some(v.to_string());
-            }
-        }
-        None
-    }
 }

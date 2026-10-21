@@ -113,6 +113,24 @@ impl TrustedWebOrigins {
         Ok(resolved)
     }
 
+    /// Whether an `Origin` request header names a trusted web origin. The
+    /// value must be a bare http(s) origin (no path, query or fragment);
+    /// the opaque `null` origin is never trusted.
+    pub fn is_trusted_origin(&self, origin: &str) -> bool {
+        let Ok(url) = Url::parse(origin) else {
+            return false;
+        };
+        // `Url` normalises an empty path to `/`; a bare origin header has
+        // no path at all.
+        let is_bare_origin = !origin.ends_with('/')
+            && url.path() == "/"
+            && url.query().is_none()
+            && url.fragment().is_none()
+            && url.username().is_empty()
+            && url.password().is_none();
+        is_http_scheme(&url) && is_bare_origin && self.origins.contains(&url.origin())
+    }
+
     /// The `Location` value for a return URL from [`Self::resolve_return_url`].
     ///
     /// A target on the server's own origin is sent as a path, as before, so
@@ -345,6 +363,37 @@ mod tests {
             TrustedWebOrigins::new("https://a.example", Some("ftp://b.example")),
             Err(RedirectError::InvalidTrustedOrigin { .. })
         ));
+    }
+
+    #[test]
+    fn trusted_origin_accepts_the_server_and_cors_origins() {
+        let origins = production();
+        assert!(origins.is_trusted_origin("https://xmpp.waddle.social"));
+        assert!(origins.is_trusted_origin("https://waddle.chat"));
+        assert!(origins.is_trusted_origin("http://localhost:4321"));
+    }
+
+    #[test]
+    fn trusted_origin_rejects_foreign_null_garbage_and_paths() {
+        let origins = production();
+        for origin in [
+            "https://attacker.example",
+            "http://waddle.chat",
+            "https://waddle.chat:8443",
+            "null",
+            "",
+            "not an origin",
+            "https://waddle.chat/",
+            "https://waddle.chat/settings",
+            "https://waddle.chat?x=1",
+            "https://user@waddle.chat",
+            "javascript:alert(1)",
+        ] {
+            assert!(
+                !origins.is_trusted_origin(origin),
+                "{origin:?} must not be trusted"
+            );
+        }
     }
 
     #[test]

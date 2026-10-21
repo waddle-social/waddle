@@ -5,7 +5,8 @@
 //! (XEP-0160 exemption, D13). Missing or disabled bots, the bare bots domain
 //! and human localparts on the bots domain bounce like a nonexistent account
 //! (RFC 6121 §8.5.1). No client stream can be opened on the bots domain, and
-//! a bot API token is not an XMPP credential.
+//! a bot API token is not an XMPP credential. Deleting a bot through
+//! `/api/bots` takes it out of every room it was a member of.
 #![cfg(feature = "test-support")]
 
 use std::sync::Arc;
@@ -19,7 +20,8 @@ use sha2::Sha256;
 use sqlx::SqlitePool;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::permissions::{
-    CheckPermission, Object, ObjectType, Permission, PermissionActor, Subject,
+    CheckPermission, Object, ObjectType, Permission, PermissionActor, PermissionError, Relation,
+    Subject, Tuple, WriteTuple,
 };
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use xmpp_parsers::message::{Lang, Message, MessageType};
@@ -548,5 +550,245 @@ async fn manage_members_can_grant_bot_room_membership() {
         can_read().await,
         "the member affiliation grants the bot read"
     );
+    admin.close().await.expect("close");
+}
+
+/// Sign `owner` in for the bot management API: a human `users` row, a
+/// browser session keyed like the server's (HMAC of the id under the session
+/// key) and the `server#member` grant that allows `create_bot`.
+async fn sign_in_for_bots_api(fixture: &Fixture, database: &Database, owner: &str) -> String {
+    let jid = format!("{owner}@{DOMAIN}");
+    let now = "2026-01-01T00:00:00+00:00";
+    sqlx::query(
+        "INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT (jid) DO NOTHING",
+    )
+    .bind(&jid)
+    .bind(owner)
+    .bind(owner)
+    .bind(owner)
+    .bind(now)
+    .bind(now)
+    .execute(&fixture.pool)
+    .await
+    .expect("seed owner row");
+    let session_id = uuid::Uuid::new_v4().to_string();
+    let mut mac = Hmac::<Sha256>::new_from_slice(SESSION_KEY).expect("HMAC key");
+    mac.update(session_id.as_bytes());
+    sqlx::query(
+        "INSERT INTO sessions (id, user_jid, token_hash, auth_context_id, auth_context_version, \
+         principal_auth_epoch, created_at, last_used_at) VALUES (?, ?, ?, ?, 0, 0, ?, ?)",
+    )
+    .bind(&session_id)
+    .bind(&jid)
+    .bind(hex::encode(mac.finalize().into_bytes()))
+    .bind(uuid::Uuid::new_v4().to_string())
+    .bind(now)
+    .bind(now)
+    .execute(&fixture.pool)
+    .await
+    .expect("seed owner session");
+    let granted =
+        PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(database.clone())))
+            .ask(WriteTuple {
+                tuple: Tuple::new(
+                    Object::new(ObjectType::Server, "deployment"),
+                    Relation::new("member"),
+                    Subject::user(&jid),
+                ),
+            })
+            .await;
+    match granted {
+        Ok(())
+        | Err(kameo::error::SendError::HandlerError(PermissionError::TupleAlreadyExists)) => {}
+        Err(error) => panic!("grant server membership: {error}"),
+    }
+    session_id
+}
+
+async fn bots_api(
+    fixture: &Fixture,
+    session: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> reqwest::StatusCode {
+    let mut request = reqwest::Client::new()
+        .request(method, format!("{}{path}", fixture.server.http_base_url()))
+        .header("x-waddle-session-id", session);
+    if let Some(body) = body {
+        request = request.json(&body);
+    }
+    request.send().await.expect("bots API request").status()
+}
+
+/// The room's member list, as its owner sees it through XEP-0045 §9.5.
+async fn room_members(client: &mut WsXmppClient, room: &str, id: &str) -> String {
+    send(
+        client,
+        Element::builder("iq", xmpp_parsers::ns::JABBER_CLIENT)
+            .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
+            .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
+            .attr(minidom::rxml::xml_ncname!("to").to_owned(), room)
+            .append(
+                Element::builder("query", NS_MUC_ADMIN)
+                    .append(
+                        Element::builder("item", NS_MUC_ADMIN)
+                            .attr(
+                                minidom::rxml::xml_ncname!("affiliation").to_owned(),
+                                "member",
+                            )
+                            .build(),
+                    )
+                    .build(),
+            )
+            .build(),
+    )
+    .await;
+    let frame = client
+        .recv_matching(|frame| frame.contains("<iq") && frame.contains(id))
+        .await
+        .expect("member list");
+    assert!(
+        frame.contains("type='result'") || frame.contains("type=\"result\""),
+        "expected a member list: {frame}"
+    );
+    frame
+}
+
+/// Durable mirror rows for `member` in `room`. The mirror only exists when
+/// the server runs clustered on Postgres; without it there is nothing left
+/// behind.
+async fn mirror_rows(fixture: &Fixture, room: &str, member: &str) -> i64 {
+    let table: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type = 'table' AND name = 'clustering_muc_room_affiliations'",
+    )
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("schema lookup");
+    if table == 0 {
+        return 0;
+    }
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM clustering_muc_room_affiliations \
+         WHERE room_jid = ? AND member_jid = ?",
+    )
+    .bind(room)
+    .bind(member)
+    .fetch_one(&fixture.pool)
+    .await
+    .expect("mirror rows")
+}
+
+#[tokio::test]
+async fn delete_clears_room_affiliation_and_durable_recipients() {
+    let fixture = Fixture::start().await;
+    let database = Database::from_config(
+        "user-bots-delete",
+        &DatabaseConfig::new(DatabaseDriver::Sqlite, fixture.url.clone()),
+    )
+    .await
+    .expect("inspection database");
+    let session = sign_in_for_bots_api(&fixture, &database, "alice").await;
+    let bot = format!("alice+standup@{BOTS_DOMAIN}");
+    let bot_path = format!("/api/bots/{}", urlencoding::encode(&bot));
+    let create = serde_json::json!({ "name": "standup" });
+
+    assert_eq!(
+        bots_api(
+            &fixture,
+            &session,
+            reqwest::Method::POST,
+            "/api/bots",
+            Some(create.clone())
+        )
+        .await,
+        reqwest::StatusCode::CREATED
+    );
+
+    let channel = format!("bots-{}", uuid::Uuid::new_v4().simple());
+    let room = format!("{channel}@muc.{DOMAIN}");
+    let mut admin = fixture.connect_admin("delete-bot").await;
+    send(
+        &mut admin,
+        Element::builder("presence", xmpp_parsers::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                format!("{room}/admin"),
+            )
+            .append(Element::builder("x", NS_MUC).build())
+            .build(),
+    )
+    .await;
+    admin
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("room join");
+    send(&mut admin, owner_config_iq(&room, "delete-members-only")).await;
+    expect_iq_result(&mut admin, "delete-members-only").await;
+    send(
+        &mut admin,
+        member_affiliation_iq(&room, "delete-grant", &bot),
+    )
+    .await;
+    expect_iq_result(&mut admin, "delete-grant").await;
+    assert!(
+        room_members(&mut admin, &room, "members-before")
+            .await
+            .contains(&bot),
+        "the bot is a member before the delete"
+    );
+
+    // The local checker caches decisions, so each check gets a fresh actor.
+    let can_read = || async {
+        PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(database.clone())))
+            .ask(CheckPermission {
+                subject: Subject::user(&bot),
+                permission: Permission::Read,
+                object: Object::new(ObjectType::Channel, &channel),
+            })
+            .await
+            .expect("permission check")
+            .allowed
+    };
+    assert!(can_read().await);
+
+    assert_eq!(
+        bots_api(&fixture, &session, reqwest::Method::DELETE, &bot_path, None).await,
+        reqwest::StatusCode::NO_CONTENT
+    );
+    let members = room_members(&mut admin, &room, "members-after-delete").await;
+    assert!(
+        !members.contains(&bot),
+        "the room's affiliation list still has the bot: {members}"
+    );
+    assert_eq!(mirror_rows(&fixture, &room, &bot).await, 0);
+    assert!(!can_read().await);
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM users WHERE jid = ?", &bot)
+            .await,
+        0
+    );
+
+    // Recreating the name gives the same JID and none of the old membership.
+    assert_eq!(
+        bots_api(
+            &fixture,
+            &session,
+            reqwest::Method::POST,
+            "/api/bots",
+            Some(create)
+        )
+        .await,
+        reqwest::StatusCode::CREATED
+    );
+    let members = room_members(&mut admin, &room, "members-after-recreate").await;
+    assert!(
+        !members.contains(&bot),
+        "a recreated bot inherited room membership: {members}"
+    );
+    assert!(!can_read().await);
     admin.close().await.expect("close");
 }

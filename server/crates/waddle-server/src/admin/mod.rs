@@ -36,6 +36,7 @@
 //! gate denies access and logs a `warn!`. We never grant admin on a
 //! storage failure.
 
+pub(crate) mod bot_affiliations;
 pub mod channels;
 pub mod spaces;
 pub mod users_list;
