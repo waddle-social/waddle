@@ -6,7 +6,8 @@
 //! and human localparts on the bots domain bounce like a nonexistent account
 //! (RFC 6121 §8.5.1). No client stream can be opened on the bots domain, and
 //! a bot API token is not an XMPP credential. Deleting a bot through
-//! `/api/bots` takes it out of every room it was a member of.
+//! `/api/bots` takes it out of every room it was a member of, unless it is
+//! a room's only owner: then the delete is refused and nothing changes.
 #![cfg(feature = "test-support")]
 
 use std::sync::Arc;
@@ -466,6 +467,10 @@ fn owner_config_iq(room: &str, id: &str) -> Element {
 }
 
 fn member_affiliation_iq(room: &str, id: &str, jid: &str) -> Element {
+    affiliation_iq(room, id, jid, "member")
+}
+
+fn affiliation_iq(room: &str, id: &str, jid: &str, affiliation: &str) -> Element {
     Element::builder("iq", xmpp_parsers::ns::JABBER_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
@@ -477,7 +482,7 @@ fn member_affiliation_iq(room: &str, id: &str, jid: &str) -> Element {
                         .attr(minidom::rxml::xml_ncname!("jid").to_owned(), jid)
                         .attr(
                             minidom::rxml::xml_ncname!("affiliation").to_owned(),
-                            "member",
+                            affiliation,
                         )
                         .build(),
                 )
@@ -613,13 +618,46 @@ async fn bots_api(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> reqwest::StatusCode {
+    bots_api_response(fixture, session, method, path, body)
+        .await
+        .status()
+}
+
+async fn bots_api_response(
+    fixture: &Fixture,
+    session: &str,
+    method: reqwest::Method,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> reqwest::Response {
     let mut request = reqwest::Client::new()
         .request(method, format!("{}{path}", fixture.server.http_base_url()))
         .header("x-waddle-session-id", session);
     if let Some(body) = body {
         request = request.json(&body);
     }
-    request.send().await.expect("bots API request").status()
+    request.send().await.expect("bots API request")
+}
+
+/// Join `room` as the admin, creating it, and make it members-only.
+async fn create_members_only_room(admin: &mut WsXmppClient, room: &str, id: &str) {
+    send(
+        admin,
+        Element::builder("presence", xmpp_parsers::ns::JABBER_CLIENT)
+            .attr(
+                minidom::rxml::xml_ncname!("to").to_owned(),
+                format!("{room}/admin"),
+            )
+            .append(Element::builder("x", NS_MUC).build())
+            .build(),
+    )
+    .await;
+    admin
+        .recv_until(|frame| frame.contains("<subject"))
+        .await
+        .expect("room join");
+    send(admin, owner_config_iq(room, id)).await;
+    expect_iq_result(admin, id).await;
 }
 
 /// The room's member list, as its owner sees it through XEP-0045 §9.5.
@@ -790,5 +828,100 @@ async fn delete_clears_room_affiliation_and_durable_recipients() {
         "a recreated bot inherited room membership: {members}"
     );
     assert!(!can_read().await);
+    admin.close().await.expect("close");
+}
+
+#[tokio::test]
+async fn delete_bot_that_is_a_rooms_only_owner_is_409_and_changes_nothing() {
+    let fixture = Fixture::start().await;
+    let database = Database::from_config(
+        "user-bots-sole-owner",
+        &DatabaseConfig::new(DatabaseDriver::Sqlite, fixture.url.clone()),
+    )
+    .await
+    .expect("inspection database");
+    let session = sign_in_for_bots_api(&fixture, &database, "alice").await;
+    let bot = format!("alice+standup@{BOTS_DOMAIN}");
+    let bot_path = format!("/api/bots/{}", urlencoding::encode(&bot));
+    assert_eq!(
+        bots_api(
+            &fixture,
+            &session,
+            reqwest::Method::POST,
+            "/api/bots",
+            Some(serde_json::json!({ "name": "standup" })),
+        )
+        .await,
+        reqwest::StatusCode::CREATED
+    );
+
+    let mut admin = fixture.connect_admin("sole-owner").await;
+    let member_channel = format!("bots-{}", uuid::Uuid::new_v4().simple());
+    let member_room = format!("{member_channel}@muc.{DOMAIN}");
+    create_members_only_room(&mut admin, &member_room, "sole-member-room").await;
+    send(
+        &mut admin,
+        member_affiliation_iq(&member_room, "sole-member-grant", &bot),
+    )
+    .await;
+    expect_iq_result(&mut admin, "sole-member-grant").await;
+
+    // The bot becomes an owner, then the human owner steps down, leaving the
+    // bot as the room's only owner.
+    let owned_room = format!("bots-{}@muc.{DOMAIN}", uuid::Uuid::new_v4().simple());
+    create_members_only_room(&mut admin, &owned_room, "sole-owned-room").await;
+    send(
+        &mut admin,
+        affiliation_iq(&owned_room, "sole-owner-grant", &bot, "owner"),
+    )
+    .await;
+    expect_iq_result(&mut admin, "sole-owner-grant").await;
+    send(
+        &mut admin,
+        affiliation_iq(
+            &owned_room,
+            "sole-owner-step-down",
+            &format!("admin@{DOMAIN}"),
+            "member",
+        ),
+    )
+    .await;
+    expect_iq_result(&mut admin, "sole-owner-step-down").await;
+
+    for attempt in 0..2 {
+        let response =
+            bots_api_response(&fixture, &session, reqwest::Method::DELETE, &bot_path, None).await;
+        assert_eq!(
+            response.status(),
+            reqwest::StatusCode::CONFLICT,
+            "attempt {attempt}"
+        );
+        let body: serde_json::Value = response.json().await.expect("error body");
+        assert_eq!(body["error"], "bot_sole_room_owner", "attempt {attempt}");
+    }
+
+    // Nothing was cleared: the bot keeps its account and its other room.
+    assert_eq!(
+        fixture
+            .count("SELECT COUNT(*) FROM users WHERE jid = ?", &bot)
+            .await,
+        1
+    );
+    assert!(
+        room_members(&mut admin, &member_room, "sole-members-after")
+            .await
+            .contains(&bot),
+        "a refused delete still removed the bot from another room"
+    );
+    let can_read = PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(database)))
+        .ask(CheckPermission {
+            subject: Subject::user(&bot),
+            permission: Permission::Read,
+            object: Object::new(ObjectType::Channel, &member_channel),
+        })
+        .await
+        .expect("permission check")
+        .allowed;
+    assert!(can_read, "a refused delete still purged the bot's grants");
     admin.close().await.expect("close");
 }

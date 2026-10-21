@@ -33,6 +33,7 @@ use waddle_xmpp::telemetry::attributes::{BotApiOp, RequestOutcome};
 use super::auth::AuthState;
 use super::session_auth::{ApiError, SessionPrincipal};
 use super::websocket::WebSocketState;
+use crate::admin::bot_affiliations::{clear_member_affiliations, ClearAffiliationsError};
 use crate::auth::bots::{
     BotIdError, BotJid, BotName, BotRecord, BotStore, BotTokenError, BotTokenId, BotTokenLabel,
     BotTokenSummary, BotTokenTtl, RevokeOutcome, MAX_ACTIVE_TOKENS_PER_BOT,
@@ -235,6 +236,11 @@ const BOT_TOKEN_LIMIT_REACHED: ApiError = ApiError::new(
     StatusCode::CONFLICT,
     "bot_token_limit_reached",
     "the bot already has the maximum number of active tokens",
+);
+const BOT_SOLE_ROOM_OWNER: ApiError = ApiError::new(
+    StatusCode::CONFLICT,
+    "bot_sole_room_owner",
+    "the bot is the only owner of a channel; make someone else an owner first",
 );
 const NOT_FOUND: ApiError = ApiError::new(StatusCode::NOT_FOUND, "not_found", "not found");
 const UNAVAILABLE: ApiError = ApiError::new(
@@ -525,7 +531,10 @@ async fn delete_bot(
 
 /// D8 hard delete. Each step is idempotent, so a retry after a partial
 /// failure completes the delete; the owner tuple goes last so the owner
-/// keeps `manage` until everything else is gone.
+/// keeps `manage` until everything else is gone. A bot that is the only
+/// owner of a room is refused with 409 `bot_sole_room_owner` before
+/// anything changes: XEP-0045 keeps every room owned, so another owner has
+/// to be made first, and a blind retry would only fail again.
 async fn remove(
     state: &BotsState,
     principal: Result<SessionPrincipal, ApiError>,
@@ -535,19 +544,21 @@ async fn remove(
     let record = managed_bot(state, &principal.user_jid, raw_jid).await?;
     let bot = &record.jid;
 
-    crate::admin::bot_affiliations::clear_member_affiliations(
-        &state.app,
-        &state.websocket,
-        bot.as_bare(),
-    )
-    .await
-    .map_err(|error| {
-        let reason = match *error {
-            waddle_xmpp::commands::CommandResult::Error(error) => error.to_string(),
-            _ => "unexpected command result".to_string(),
-        };
-        unavailable("clearing bot affiliations failed", reason)
-    })?;
+    clear_member_affiliations(&state.app, &state.websocket, bot.as_bare())
+        .await
+        .map_err(|error| match error {
+            ClearAffiliationsError::SoleRoomOwner { room } => {
+                debug!(%bot, %room, "bot is the only owner of a room");
+                BOT_SOLE_ROOM_OWNER
+            }
+            ClearAffiliationsError::Failed(error) => {
+                let reason = match *error {
+                    waddle_xmpp::commands::CommandResult::Error(error) => error.to_string(),
+                    _ => "unexpected command result".to_string(),
+                };
+                unavailable("clearing bot affiliations failed", reason)
+            }
+        })?;
     state
         .auth
         .permission_actor
