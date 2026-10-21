@@ -9,7 +9,7 @@ use waddle_xmpp::XmppError;
 
 use super::devices::{count_active_devices_for_node_tx, validate_len};
 use super::nodes::{get_node_tx, MAX_NODE_ID_LEN};
-use super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx;
+use super::publish_jobs::{cancel_registration_publish_jobs_tx, registration_publish_job_nodes_tx};
 use super::store::{lock_node_tx, lock_owner_tx, DatabasePushServiceStore};
 use super::types::PushNodeStatus;
 
@@ -182,36 +182,22 @@ impl DatabasePushServiceStore {
         )
         .await
         .map_err(push_error_to_xmpp_error)?;
-        if registered_nodes.is_empty() {
-            let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
-                &mut tx,
-                owner_bare_jid,
-                Some(&service),
-                node,
-            )
-            .await
-            .map_err(|error| XmppError::internal(error.to_string()))?;
-            tx.commit()
-                .await
-                .map_err(|error| XmppError::internal(error.to_string()))?;
-            if retired_outbox > 0 {
-                super::publish_jobs::record_registration_revoked();
-            }
-            return Ok(0);
-        }
-
         let mut registered_push_nodes = registered_nodes
             .iter()
             .filter(|node| !node.is_empty())
             .cloned()
             .collect::<Vec<_>>();
+        registered_push_nodes.extend(
+            registration_publish_job_nodes_tx(&mut tx, owner_bare_jid, &service, node).await?,
+        );
         registered_push_nodes.sort();
         registered_push_nodes.dedup();
         let mut retired_provider = 0;
         for node in &registered_push_nodes {
             lock_node_tx(&mut tx, node, now_ms).await?;
             retired_provider +=
-                cancel_retryable_publish_jobs_for_node_tx(&mut tx, owner_bare_jid, node).await?;
+                cancel_registration_publish_jobs_tx(&mut tx, owner_bare_jid, &service, node)
+                    .await?;
         }
         let retired_outbox = crate::notification_outbox::retire_registration_outbox_tx(
             &mut tx,
@@ -367,10 +353,12 @@ mod tests {
             .await
             .expect("registration");
         store
-            .enqueue_notification_publish_job_from_user_server(
+            .enqueue_notification_publish_job_from_user_server_with_publish_options(
                 node.node(),
                 &notification_item("stale-before-disable"),
                 &owner,
+                Some("push.example.com"),
+                None,
             )
             .await
             .expect("enqueue stale job");

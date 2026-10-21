@@ -445,6 +445,18 @@ pub(super) async fn reclaim_stale_job(
         )
         .await
         .expect("make claim stale");
+    assert!(store
+        .claim_due_outbox_jobs(16)
+        .await
+        .expect("schedule expired claim backoff")
+        .is_empty());
+    store
+        .execute(
+            "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE job_id = ?",
+            crate::db_params![stale_claim.job_id().as_str()],
+        )
+        .await
+        .expect("advance retry deadline");
     let fresh_claim = store
         .claim_due_outbox_jobs(16)
         .await

@@ -18,6 +18,268 @@ async fn retry_deadline(store: &NotificationOutboxStore, job: &NotificationOutbo
 }
 
 #[tokio::test]
+async fn terminal_proof_lookup_failure_is_pre_send_storage_without_queue_acceptance() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let store = store().await;
+    let push = crate::push_service::DatabasePushServiceStore::new_with_secret_key(
+        store.db.clone(),
+        &rand::random::<[u8; 32]>(),
+    )
+    .await
+    .expect("provider store");
+    enqueue_jobs_for_test(&store, &candidate("proof-lookup-storage"), &[target()]).await;
+    let queued = store.pending_outbox_jobs().await.expect("queued").remove(0);
+    let payload = queued.to_xep0357_pubsub_item().payload.expect("payload");
+    store
+        .execute(
+            "UPDATE notification_outbox SET approved_payload_xml = ? WHERE job_id = ?",
+            crate::db_params![String::from(&payload), queued.job_id.as_str()],
+        )
+        .await
+        .expect("frozen prior approval");
+    // Keep the real provider query boundary, while making only that lookup fail.
+    store
+        .execute(
+            "ALTER TABLE push_publish_jobs RENAME TO unavailable_publish_jobs",
+            (),
+        )
+        .await
+        .expect("provider storage unavailable");
+    let inbox = inbox_with_unread(&queued.recipient_bare_jid, &queued.conversation_jid, 1).await;
+    let outcomes = store
+        .drain_due_outbox_jobs(
+            &push,
+            &waddle_xmpp::push::InMemoryPushStore::new(),
+            &inbox,
+            &waddle_xmpp::xep::xep0191::InMemoryBlockingStorage::new(),
+            &bare("push.example.com"),
+            1,
+        )
+        .await
+        .expect("storage failure schedules retry");
+    assert!(matches!(
+        outcomes.as_slice(),
+        [NotificationOutboxPublishOutcome::RetryScheduled { .. }]
+    ));
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.outbox_retry_scheduled", &[("reason", "storage")]),
+        Some(1)
+    );
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.failure_class", &[("failure_class", "pre_send")]),
+        Some(1)
+    );
+    assert_eq!(
+        metrics
+            .counter_sum(
+                "xmpp.push.failure_class",
+                &[("failure_class", "unknown_after_send")]
+            )
+            .unwrap_or(0),
+        0
+    );
+    let mut rows = store.query("SELECT queue_acceptance_may_exist, approved_payload_xml, (SELECT COUNT(*) FROM unavailable_publish_jobs) FROM notification_outbox", ()).await.expect("queue unchanged");
+    let row = rows.next().await.expect("row").expect("job");
+    assert_eq!(row.get::<i64>(0).expect("acceptance marker"), 0);
+    assert_eq!(
+        row.get::<String>(1).expect("frozen payload"),
+        String::from(&payload)
+    );
+    assert_eq!(row.get::<i64>(2).expect("provider jobs"), 0);
+}
+
+#[tokio::test]
+async fn expired_claims_persist_backoff_and_consume_budget_before_reclaim() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    for uncertain in [false, true] {
+        let store = store().await;
+        enqueue_jobs_for_test(&store, &candidate("expired-backoff"), &[target()]).await;
+        let mut job = store
+            .claim_due_outbox_jobs(1)
+            .await
+            .expect("first claim")
+            .remove(0);
+        let payload = job.to_xep0357_pubsub_item().payload.expect("payload");
+        store.execute("UPDATE notification_outbox SET queue_acceptance_may_exist = ?, approved_payload_xml = ? WHERE job_id = ?", crate::db_params![i64::from(uncertain), String::from(&payload), job.job_id.as_str()]).await.expect("durable boundary");
+        for count in 1..=5 {
+            store
+                .execute(
+                    "UPDATE notification_outbox SET claimed_at_ms = 1 WHERE job_id = ?",
+                    crate::db_params![job.job_id.as_str()],
+                )
+                .await
+                .expect("expired claim");
+            let before = crate::time::now_ms();
+            assert!(store
+                .claim_due_outbox_jobs(1)
+                .await
+                .expect("expire without replay")
+                .is_empty());
+            let after = crate::time::now_ms();
+            let mut rows = store.query("SELECT status, attempt_count, next_attempt_at_ms, claim_token, queue_acceptance_may_exist, approved_payload_xml FROM notification_outbox WHERE job_id = ?", crate::db_params![job.job_id.as_str()]).await.expect("persisted transition");
+            let row = rows.next().await.expect("row").expect("job");
+            assert_eq!(row.get::<i64>(1).expect("attempts"), count);
+            assert!(row.get::<Option<String>>(3).expect("token").is_none());
+            assert_eq!(
+                row.get::<i64>(4).expect("uncertainty"),
+                i64::from(uncertain)
+            );
+            assert_eq!(
+                row.get::<String>(5).expect("frozen payload"),
+                String::from(&payload)
+            );
+            if count == 5 {
+                assert_eq!(row.get::<String>(0).expect("status"), STATUS_FAILED);
+                assert!(row.get::<Option<i64>>(2).expect("deadline").is_none());
+            } else {
+                assert_eq!(row.get::<String>(0).expect("status"), STATUS_QUEUED);
+                let delay = if uncertain { 300_000 } else { 5_000 } * (1_i64 << (count - 1));
+                let deadline = row.get::<i64>(2).expect("deadline");
+                assert!(deadline >= before + delay * 3 / 4 && deadline <= after + delay * 5 / 4);
+            }
+            drop(rows);
+            assert_eq!(
+                store
+                    .schedule_retry_or_fail_with_failure(&job, PublishFailureClass::ClaimLost)
+                    .await
+                    .expect("old token fenced"),
+                None
+            );
+            assert!(store
+                .claim_due_outbox_jobs(1)
+                .await
+                .expect("no early reclaim")
+                .is_empty());
+            if count < 5 {
+                store
+                    .execute(
+                        "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE job_id = ?",
+                        crate::db_params![job.job_id.as_str()],
+                    )
+                    .await
+                    .expect("advance retry deadline");
+                let fresh = store
+                    .claim_due_outbox_jobs(1)
+                    .await
+                    .expect("due retry")
+                    .remove(0);
+                assert_ne!(fresh.claim_token, job.claim_token);
+                assert_eq!(fresh.attempt_count, count);
+                job = fresh;
+            }
+        }
+        let mut rows = store
+            .query(
+                "SELECT COUNT(*) FROM notification_outbox_lineage WHERE settled_at_ms IS NULL",
+                (),
+            )
+            .await
+            .expect("retained custody");
+        assert_eq!(
+            rows.next()
+                .await
+                .expect("row")
+                .expect("count")
+                .get::<i64>(0)
+                .expect("unsettled"),
+            i64::from(uncertain)
+        );
+        drop(rows);
+        store
+            .execute("UPDATE notification_outbox SET updated_at_ms = 1", ())
+            .await
+            .expect("expire terminal history");
+        store.execute("UPDATE notification_outbox_lineage SET settled_at_ms = 1 WHERE settled_at_ms IS NOT NULL", ()).await.expect("expire settled lineage tail");
+        assert_eq!(
+            store
+                .prune_completed_before(i64::MAX, 1)
+                .await
+                .expect("retention")
+                .jobs_deleted,
+            u64::from(!uncertain)
+        );
+    }
+    assert_eq!(
+        metrics.counter_sum(
+            "xmpp.push.failure_class",
+            &[("failure_class", "unknown_after_send")]
+        ),
+        Some(5)
+    );
+    assert_eq!(
+        metrics.counter_sum("xmpp.push.failure_class", &[("failure_class", "pre_send")]),
+        Some(5)
+    );
+}
+
+#[tokio::test]
+async fn expired_claim_without_token_still_schedules_a_fenced_retry() {
+    let store = store().await;
+    enqueue_jobs_for_test(&store, &candidate("expired-null-token"), &[target()]).await;
+    let job = store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("claim")
+        .remove(0);
+    store
+        .execute(
+            "UPDATE notification_outbox SET claim_token = NULL, claimed_at_ms = 1 WHERE job_id = ?",
+            crate::db_params![job.job_id.as_str()],
+        )
+        .await
+        .expect("legacy missing token");
+    let tokenless = store
+        .pending_outbox_jobs()
+        .await
+        .expect("legacy claim snapshot")
+        .remove(0);
+    assert!(store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("expire legacy claim")
+        .is_empty());
+    let pending = store.pending_outbox_jobs().await.expect("pending");
+    assert_eq!(pending[0].status, NotificationOutboxStatus::Queued);
+    assert_eq!(pending[0].attempt_count, 1);
+    assert!(pending[0].claim_token.is_none());
+    assert!(retry_deadline(&store, &job).await > crate::time::now_ms());
+    assert_eq!(
+        store
+            .schedule_retry_or_fail_with_failure(&job, PublishFailureClass::ClaimLost)
+            .await
+            .expect("former token fenced"),
+        None
+    );
+    store
+        .execute(
+            "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE job_id = ?",
+            crate::db_params![job.job_id.as_str()],
+        )
+        .await
+        .expect("advance retry deadline");
+    let fresh = store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("claim successor")
+        .remove(0);
+    assert!(fresh.claim_token.is_some());
+    assert_eq!(
+        store
+            .schedule_retry_or_fail_with_failure(&tokenless, PublishFailureClass::ClaimLost)
+            .await
+            .expect("missing token cannot mutate successor"),
+        None
+    );
+    assert_eq!(
+        store
+            .pending_outbox_jobs()
+            .await
+            .expect("unchanged successor"),
+        vec![fresh]
+    );
+}
+
+#[tokio::test]
 async fn durable_acceptance_marker_selects_the_hour_scale_retry_window() {
     for (uncertain, bounds) in [
         (

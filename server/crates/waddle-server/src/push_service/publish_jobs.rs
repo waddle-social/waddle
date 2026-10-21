@@ -309,6 +309,13 @@ pub(super) async fn read_publish_job_attempt_count_tx(
         .map_err(|error| XmppError::internal(error.to_string()))
 }
 
+/// Durable transition evidence from a changed claim, for postcommit telemetry.
+pub(super) struct KnownPublishJobFailure {
+    pub(super) disposition: waddle_xmpp::telemetry::attributes::PushDisposition,
+    pub(super) attempt_count: i64,
+    pub(super) uncertain_send: bool,
+}
+
 /// A known failure of this attempt cannot resolve an earlier unknown send.
 /// Decide from the durable row atomically and retain the captured claim fence.
 pub(super) async fn record_known_publish_job_failure_tx(
@@ -316,7 +323,9 @@ pub(super) async fn record_known_publish_job_failure_tx(
     job: &PushPublishJob,
     error: &str,
     now_ms: i64,
-) -> Result<(), XmppError> {
+) -> Result<Option<KnownPublishJobFailure>, XmppError> {
+    use waddle_xmpp::telemetry::attributes::PushDisposition;
+
     let retry_at = retry_deadline_sql(now_ms);
     let mut rows = tx
         .query(
@@ -330,7 +339,7 @@ pub(super) async fn record_known_publish_job_failure_tx(
             claim_token = NULL,
             updated_at_ms = ?
         WHERE job_id = ? AND status = ? AND claim_token = ?
-        RETURNING status
+        RETURNING status, attempt_count, uncertain_send
         "#),
             crate::db_params![
                 PUBLISH_JOB_MAX_TRANSIENT_ATTEMPTS,
@@ -351,16 +360,33 @@ pub(super) async fn record_known_publish_job_failure_tx(
         .await
         .map_err(|error| XmppError::internal(error.to_string()))?
     else {
-        return Ok(());
+        return Ok(None);
     };
     let status: String = row
         .get(0)
         .map_err(|error| XmppError::internal(error.to_string()))?;
+    let attempt_count: i64 = row
+        .get(1)
+        .map_err(|error| XmppError::internal(error.to_string()))?;
+    let uncertain_send = row
+        .get::<i64>(2)
+        .map_err(|error| XmppError::internal(error.to_string()))?
+        != 0;
     drop(rows);
     if status == PUBLISH_JOB_STATUS_FAILED {
         settle_terminal_notification_ancestry_tx(tx, job).await?;
     }
-    Ok(())
+    Ok(Some(KnownPublishJobFailure {
+        disposition: if status == PUBLISH_JOB_STATUS_QUEUED {
+            PushDisposition::Retry
+        } else if uncertain_send {
+            PushDisposition::Parked
+        } else {
+            PushDisposition::DeadLetter
+        },
+        attempt_count,
+        uncertain_send,
+    }))
 }
 
 async fn has_notification_lineage_tx(
@@ -782,11 +808,64 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
     owner_bare_jid: &BareJid,
     node: &str,
 ) -> Result<u64, XmppError> {
-    let pending = pending_notification_custody_sql(tx).await?;
-    let eligible = format!("(status IN ('queued', 'in-progress') OR (status = 'failed' AND terminal_disposition IS NULL AND (uncertain_send = 1 OR ({pending}))))");
+    cancel_retryable_publish_jobs_tx(tx, owner_bare_jid, node, None).await
+}
+
+pub(super) async fn registration_publish_job_nodes_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &BareJid,
+    service: &BareJid,
+    node: Option<&str>,
+) -> Result<Vec<String>, XmppError> {
+    let eligible = retireable_publish_jobs_sql(tx).await?;
     let mut rows = tx.query(
-        &format!("SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send FROM push_publish_jobs WHERE owner_bare_jid = ? AND node = ? AND {eligible} ORDER BY job_id"),
-        crate::db_params![owner_bare_jid.to_string(), node],
+        &format!("SELECT DISTINCT node FROM push_publish_jobs WHERE owner_bare_jid = ? AND push_service_jid = ? AND (? = 0 OR node = ?) AND {eligible} ORDER BY node"),
+        crate::db_params![owner_bare_jid.to_string(), service.to_string(), i64::from(node.is_some()), node.unwrap_or_default()],
+    ).await.map_err(|error| XmppError::internal(error.to_string()))?;
+    let mut nodes = Vec::new();
+    while let Some(row) = rows
+        .next()
+        .await
+        .map_err(|error| XmppError::internal(error.to_string()))?
+    {
+        nodes.push(
+            row.get(0)
+                .map_err(|error| XmppError::internal(error.to_string()))?,
+        );
+    }
+    Ok(nodes)
+}
+
+pub(super) async fn cancel_registration_publish_jobs_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &BareJid,
+    service: &BareJid,
+    node: &str,
+) -> Result<u64, XmppError> {
+    cancel_retryable_publish_jobs_tx(tx, owner_bare_jid, node, Some(service)).await
+}
+
+async fn retireable_publish_jobs_sql(
+    tx: &mut crate::db::Transaction<'_>,
+) -> Result<String, XmppError> {
+    let pending = pending_notification_custody_sql(tx).await?;
+    Ok(format!("(status IN ('queued', 'in-progress') OR (status = 'failed' AND terminal_disposition IS NULL AND (uncertain_send = 1 OR ({pending}))))"))
+}
+
+async fn cancel_retryable_publish_jobs_tx(
+    tx: &mut crate::db::Transaction<'_>,
+    owner_bare_jid: &BareJid,
+    node: &str,
+    service: Option<&BareJid>,
+) -> Result<u64, XmppError> {
+    let eligible = retireable_publish_jobs_sql(tx).await?;
+    // Registration revocation only authorizes this exact service. NULL legacy
+    // rows remain available to the broader explicit node-retirement operation.
+    let scope = "owner_bare_jid = ? AND node = ? AND (? = 0 OR push_service_jid = ?)";
+    let service_value = service.map(ToString::to_string).unwrap_or_default();
+    let mut rows = tx.query(
+        &format!("SELECT job_id, owner_bare_jid, node, item_id, push_service_jid, status, claim_token, ancestry_job_id, acceptance_scope, publication_order, backing_state, uncertain_send FROM push_publish_jobs WHERE {scope} AND {eligible} ORDER BY job_id"),
+        crate::db_params![owner_bare_jid.to_string(), node, i64::from(service.is_some()), &service_value],
     ).await.map_err(|error| XmppError::internal(error.to_string()))?;
     let mut jobs = Vec::new();
     while let Some(row) = rows
@@ -803,8 +882,8 @@ pub(super) async fn cancel_retryable_publish_jobs_for_node_tx(
         // Explicit retirement stays atomic. A contended canonical parent rolls
         // back the request so credentials and registration cannot be half retired.
         lock_notification_ancestry_tx(tx, &job).await?;
-        let changed = tx.execute(&format!("UPDATE push_publish_jobs SET status = ?, terminal_disposition = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND {eligible}"),
-            crate::db_params![PUBLISH_JOB_STATUS_FAILED, REGISTRATION_REVOKED_DISPOSITION, "notification registration revoked", crate::time::now_ms(), job.job_id()],
+        let changed = tx.execute(&format!("UPDATE push_publish_jobs SET status = ?, terminal_disposition = ?, last_error = ?, next_retry_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND {scope} AND {eligible}"),
+            crate::db_params![PUBLISH_JOB_STATUS_FAILED, REGISTRATION_REVOKED_DISPOSITION, "notification registration revoked", crate::time::now_ms(), job.job_id(), owner_bare_jid.to_string(), node, i64::from(service.is_some()), &service_value],
         ).await.map_err(|error| XmppError::internal(error.to_string()))?;
         if changed > 0 {
             retired += changed;

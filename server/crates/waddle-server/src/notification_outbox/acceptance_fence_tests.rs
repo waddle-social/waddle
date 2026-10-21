@@ -27,6 +27,18 @@ async fn reclaim(
         )
         .await
         .expect("stale claim");
+    assert!(store
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("schedule expired claim backoff")
+        .is_empty());
+    store
+        .execute(
+            "UPDATE notification_outbox SET next_attempt_at_ms = 1 WHERE job_id = ?",
+            crate::db_params![job.job_id.as_str()],
+        )
+        .await
+        .expect("advance retry deadline");
     store
         .claim_due_outbox_jobs(1)
         .await

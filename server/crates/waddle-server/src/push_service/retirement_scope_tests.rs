@@ -319,3 +319,188 @@ async fn postgres_retirement_preserves_other_service_custody() {
         retirement_preserves_other_service_custody(fixture).await;
     }
 }
+
+async fn seed_provider_custody(fixture: &IngressFixture, host: &HostState) -> String {
+    let id = uuid::Uuid::new_v4().to_string();
+    fixture.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, ancestry_job_id, acceptance_scope, backing_state, status, uncertain_send, attempt_count, last_error, created_at_ms, updated_at_ms) SELECT ?, recipient_bare_jid, push_service_jid, node, job_id, context_xml, job_id, 'canonical', 'published', 'failed', 1, 24, 'original provider marker', 1, 13 FROM notification_outbox WHERE job_id = ?",
+        crate::db_params![&id, host.pending.to_string()]).await;
+    let history = uuid::Uuid::new_v4().to_string();
+    fixture.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, ancestry_job_id, acceptance_scope, backing_state, status, uncertain_send, attempt_count, last_error, created_at_ms, updated_at_ms) SELECT ?, recipient_bare_jid, push_service_jid, node, job_id, context_xml, job_id, 'canonical', 'published', 'failed', 0, 24, 'original provider history', 1, 23 FROM notification_outbox WHERE job_id = ?",
+        crate::db_params![history, host.history.to_string()]).await;
+    id
+}
+
+async fn provider_snapshot(fixture: &IngressFixture, id: &str) -> Vec<Value> {
+    values(fixture, "SELECT status, uncertain_send, terminal_disposition, last_error, updated_at_ms, ancestry_job_id FROM push_publish_jobs WHERE job_id = ?", crate::db_params![id], 6).await
+}
+
+async fn registration_disable_discovers_orphaned_provider_custody(fixture: IngressFixture) {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
+    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox schema");
+    let service: BareJid = "push.example.com".parse().expect("service");
+    let foreign_service: BareJid = "other-push.example.com".parse().expect("foreign service");
+    let push = configured_store(&fixture, &service).await;
+    let first_node = push
+        .ensure_node(&owner(), "orphan-first")
+        .await
+        .expect("first node");
+    let second_node = push
+        .ensure_node(&owner(), "orphan-second")
+        .await
+        .expect("second node");
+    let first = seed_host(&fixture, first_node.node(), &service).await;
+    let second = seed_host(&fixture, second_node.node(), &service).await;
+    let foreign = seed_host(&fixture, first_node.node(), &foreign_service).await;
+    let first_id = seed_provider_custody(&fixture, &first).await;
+    let second_id = seed_provider_custody(&fixture, &second).await;
+    let foreign_id = seed_provider_custody(&fixture, &foreign).await;
+    let foreign_before = snapshot(&fixture, &push, &foreign).await;
+    let first_history = values(&fixture, "SELECT status, last_error, updated_at_ms, terminal_disposition FROM push_publish_jobs WHERE ancestry_job_id = ?", crate::db_params![first.history.to_string()], 4).await;
+    let second_before = provider_snapshot(&fixture, &second_id).await;
+    let foreign_provider_before = provider_snapshot(&fixture, &foreign_id).await;
+    let mut controls = Vec::new();
+    let owner_jid = owner();
+    for (control_owner, control_service) in [
+        ("another@example.com", Some(service.as_str())),
+        (owner_jid.as_str(), None),
+    ] {
+        let id = uuid::Uuid::new_v4().to_string();
+        fixture.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, status, uncertain_send, attempt_count, last_error, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, 'failed', 1, 24, 'unrelated provider marker', 1, 29)",
+            crate::db_params![&id, control_owner, control_service, first_node.node(), &id, String::from(&notification_item("control").payload.expect("payload"))]).await;
+        controls.push((id.clone(), provider_snapshot(&fixture, &id).await));
+    }
+    // Remove only local metadata: the provider and frozen outbox retain their
+    // exact owner/service/node authority independently of registration rows.
+    fixture
+        .execute(
+            "DELETE FROM push_registrations WHERE owner_bare_jid = ? AND push_service_jid = ?",
+            crate::db_params![owner().to_string(), service.to_string()],
+        )
+        .await;
+    let first_before = provider_snapshot(&fixture, &first_id).await;
+    let first_outbox_before = values(&fixture, "SELECT status, queue_acceptance_may_exist, last_error, updated_at_ms FROM notification_outbox WHERE job_id = ?", crate::db_params![first.pending.to_string()], 4).await;
+
+    // A failure after provider retirement must roll it back together with the
+    // outbox and custody. PostgreSQL exercises real lineage-row contention.
+    if fixture.db.driver() == crate::db::DatabaseDriver::Postgres {
+        let mut held = fixture.db.begin().await.expect("hold lineage");
+        let mut rows = held.query("SELECT candidate_delivery_id FROM notification_outbox_lineage WHERE job_id = ? FOR UPDATE", crate::db_params![first.pending.to_string()]).await.expect("lock lineage");
+        assert!(rows.next().await.expect("locked row").is_some());
+        drop(rows);
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            push.remove_registered_nodes_for_owner(
+                &owner(),
+                service.as_str(),
+                Some(first_node.node()),
+            ),
+        )
+        .await
+        .expect("bounded retirement contention")
+        .expect_err("contention aborts retirement");
+        held.rollback().await.expect("release lineage");
+    } else {
+        fixture.execute("CREATE TRIGGER fail_orphan_outbox_retirement BEFORE UPDATE ON notification_outbox BEGIN SELECT RAISE(ABORT, 'forced orphan retirement failure'); END", ()).await;
+        push.remove_registered_nodes_for_owner(&owner(), service.as_str(), Some(first_node.node()))
+            .await
+            .expect_err("outbox failure aborts retirement");
+        fixture
+            .execute("DROP TRIGGER fail_orphan_outbox_retirement", ())
+            .await;
+    }
+    assert_eq!(provider_snapshot(&fixture, &first_id).await, first_before);
+    assert_eq!(values(&fixture, "SELECT status, queue_acceptance_may_exist, last_error, updated_at_ms FROM notification_outbox WHERE job_id = ?", crate::db_params![first.pending.to_string()], 4).await, first_outbox_before);
+    assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL", crate::db_params![first.pending.to_string()]).await, 1);
+    assert_eq!(
+        telemetry
+            .counter_sum(
+                "xmpp.push.disposition",
+                &[("disposition", "registration_revoked")]
+            )
+            .unwrap_or(0),
+        0
+    );
+
+    assert_eq!(
+        push.remove_registered_nodes_for_owner(&owner(), service.as_str(), Some(first_node.node()))
+            .await
+            .expect("exact orphan registration disable"),
+        0
+    );
+    assert_eq!(
+        provider_snapshot(&fixture, &first_id).await[2],
+        Value::Text("registration-revoked".to_owned())
+    );
+    assert_eq!(
+        provider_snapshot(&fixture, &second_id).await,
+        second_before,
+        "exact-node scope preserves another node"
+    );
+    assert_eq!(
+        telemetry.counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")]
+        ),
+        Some(1)
+    );
+    assert_eq!(
+        push.remove_registered_nodes_for_owner(&owner(), service.as_str(), None)
+            .await
+            .expect("service-wide orphan registration disable"),
+        0
+    );
+    assert_eq!(
+        provider_snapshot(&fixture, &second_id).await[2],
+        Value::Text("registration-revoked".to_owned())
+    );
+    assert_eq!(
+        telemetry.counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")]
+        ),
+        Some(2)
+    );
+    for host in [&first, &second] {
+        assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL", crate::db_params![host.pending.to_string()]).await, 0);
+        assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![host.pending.to_string()]).await, 0);
+    }
+    assert_eq!(snapshot(&fixture, &push, &foreign).await, foreign_before);
+    assert_eq!(
+        provider_snapshot(&fixture, &foreign_id).await,
+        foreign_provider_before
+    );
+    for (id, before) in controls {
+        assert_eq!(provider_snapshot(&fixture, &id).await, before);
+    }
+    assert_eq!(values(&fixture, "SELECT status, last_error, updated_at_ms, terminal_disposition FROM push_publish_jobs WHERE ancestry_job_id = ?", crate::db_params![first.history.to_string()], 4).await, first_history);
+    let first_after = provider_snapshot(&fixture, &first_id).await;
+    assert_eq!(
+        push.remove_registered_nodes_for_owner(&owner(), service.as_str(), None)
+            .await
+            .expect("repeated disable"),
+        0
+    );
+    assert_eq!(provider_snapshot(&fixture, &first_id).await, first_after);
+    assert_eq!(
+        telemetry.counter_sum(
+            "xmpp.push.disposition",
+            &[("disposition", "registration_revoked")]
+        ),
+        Some(2)
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_registration_disable_discovers_orphaned_provider_custody() {
+    registration_disable_discovers_orphaned_provider_custody(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_registration_disable_discovers_orphaned_provider_custody() {
+    if let Some(fixture) = IngressFixture::postgres("registration_provider_orphans").await {
+        registration_disable_discovers_orphaned_provider_custody(fixture).await;
+    }
+}
