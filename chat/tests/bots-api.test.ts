@@ -264,6 +264,18 @@ describe("bots api", () => {
     });
   });
 
+  test("maps a delete refused with 409 bot_sole_room_owner", async () => {
+    const { fetchImpl } = recordingFetch(() => json(409, {
+      error: "bot_sole_room_owner",
+      message: "the bot is the only owner of a channel; make someone else an owner first",
+    }));
+
+    expect(await deleteBot(ctx(fetchImpl), BOT_JID)).toEqual({
+      kind: "conflict",
+      code: "bot_sole_room_owner",
+    });
+  });
+
   test("malformed body yields failed", async () => {
     const bodies: unknown[] = [
       { bots: "nope", limit: 10, token_limit: 10 },

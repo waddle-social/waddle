@@ -139,6 +139,8 @@ function errorMessage(result: Exclude<BotsResult<unknown>, { kind: "ok" }>): str
           return "This bot is disabled. New tokens can be minted once its owner is restored.";
         case "bot_token_limit_reached":
           return tokenLimitMessage();
+        case "bot_sole_room_owner":
+          return "This bot is the only owner of a channel. Make someone else an owner of that channel, then delete the bot.";
       }
       break;
     case "invalid":

@@ -41,7 +41,8 @@ type BotsConflictCode =
   | "bot_exists"
   | "bot_limit_reached"
   | "bot_disabled"
-  | "bot_token_limit_reached";
+  | "bot_token_limit_reached"
+  | "bot_sole_room_owner";
 
 export type BotsResult<T> =
   | { kind: "ok"; value: T }
@@ -67,6 +68,7 @@ const CONFLICT_CODES: readonly BotsConflictCode[] = [
   "bot_limit_reached",
   "bot_disabled",
   "bot_token_limit_reached",
+  "bot_sole_room_owner",
 ];
 
 const DISABLED_REASONS: readonly BotDisabledReason[] = ["owner_missing", "owner_not_member"];
