@@ -69,7 +69,7 @@ async fn assert_error_wire(
     decision: &waddle_server::ingress::IngressDecision,
 ) {
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -348,7 +348,7 @@ struct DetachedRecoveryEnvironment {
 
 impl waddle_server::ingress::RecoveryEnvironment for DetachedRecoveryEnvironment {
     fn recovery_deps(&self) -> Deps<'_> {
-        let mut deps = Deps::new(&self.connections, "example.com");
+        let mut deps = Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.sm_session_registry = Some(&self.sm);
         deps
     }
@@ -533,4 +533,14 @@ async fn postgres_xep0198_user_actor_peer_keyed_append() {
         )
         .await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

@@ -178,7 +178,7 @@ fn transport_closed_emits_info_log() {
 fn open_frame_is_noop_and_close_enters_closing_phase() {
     let mut sm = XmppStateMachine::new("waddle.social", StanzaDispatcher::new());
     assert!(sm
-        .handle(InboundEvent::FrameReceived(InboundFrame::Open))
+        .handle(InboundEvent::FrameReceived(InboundFrame::Open { to: None }))
         .is_empty());
     assert!(sm
         .handle(InboundEvent::FrameReceived(InboundFrame::Close))

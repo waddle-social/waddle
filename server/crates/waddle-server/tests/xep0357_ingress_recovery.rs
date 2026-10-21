@@ -23,7 +23,7 @@ struct OfflineRecoveryEnvironment {
 
 impl RecoveryEnvironment for OfflineRecoveryEnvironment {
     fn recovery_deps(&self) -> Deps<'_> {
-        let mut deps = Deps::new(&self.connections, "example.com");
+        let mut deps = Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.pending_delivery_storage = Some(&self.pending);
         deps
     }
@@ -200,4 +200,14 @@ async fn postgres_extension_frozen_notification_recovers_after_revocation() {
     if let Some(fixture) = IngressFixture::postgres("extension_push_recovery").await {
         lost_offline_notification_candidate_recovers_once(fixture, true).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

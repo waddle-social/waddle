@@ -551,7 +551,7 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
         .await
         .expect("commit carbons");
     drop(middle_rx);
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     let report = execute_effects(
         &fixture.uow,
@@ -672,4 +672,14 @@ async fn postgres_xep0280_closed_resource_preserves_destinations_and_retries_mis
     {
         frozen_carbon_destinations_retry(fixture).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

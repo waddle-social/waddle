@@ -113,7 +113,7 @@ async fn archive_free_invitation_retry(fixture: IngressFixture) {
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     registry.register_with_carbons(recipient, sender, false);
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -407,4 +407,14 @@ async fn ingress_displayed_marker_replay_postgres() {
     if let Some(fixture) = IngressFixture::postgres("displayed_marker_replay").await {
         displayed_marker_replay(fixture).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

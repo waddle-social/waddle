@@ -12,7 +12,8 @@ fn resolved(session: &Session) -> ResolvedPrincipal<'_> {
 #[test]
 fn service_domains_use_authoritative_muc_and_spaces_and_derive_the_rest() {
     let domains =
-        XmppServiceDomains::new("waddle.social", "chat.waddle.social", "rooms.waddle.social");
+        XmppServiceDomains::new("waddle.social", "chat.waddle.social", "rooms.waddle.social")
+            .expect("service domains");
 
     assert_eq!(domains.muc, "chat.waddle.social");
     assert_eq!(domains.spaces, "rooms.waddle.social");
@@ -20,6 +21,20 @@ fn service_domains_use_authoritative_muc_and_spaces_and_derive_the_rest() {
     assert_eq!(domains.push, "push.waddle.social");
     assert_eq!(domains.upload, "upload.waddle.social");
     assert_eq!(domains.community, "community.waddle.social");
+}
+
+#[test]
+fn service_domains_parse_bots_domain() {
+    let domains = XmppServiceDomains::new("Waddle.Social", "chat.waddle.social", "rooms")
+        .expect("service domains");
+    assert_eq!(domains.bots.as_str(), "bots.waddle.social");
+
+    let error = XmppServiceDomains::new("bad domain/", "chat.waddle.social", "rooms")
+        .expect_err("an invalid XMPP domain cannot host bots");
+    assert!(matches!(
+        error,
+        super::super::state::ServiceDomainsError::InvalidBotsDomain { .. }
+    ));
 }
 
 #[tokio::test]

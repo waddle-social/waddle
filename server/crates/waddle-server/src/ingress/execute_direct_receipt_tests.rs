@@ -3,6 +3,7 @@ use super::*;
 use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressEffectCapture,
 };
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::{
     interpret::{effects::PlanSink, interpret},
@@ -378,7 +379,11 @@ async fn archive_delivery_receipt_rejects_late_copy_after_socket_replacement() {
     .await
     .expect("record archive dispatch obligation");
     tx.commit().await.expect("commit ingress transaction");
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.web_socket_state = Some(&state);
     deps.ingress_append_context = Some(SmIngressAppendContext {

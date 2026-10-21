@@ -401,6 +401,9 @@ mod tests {
             extensions: "extensions.example.com".to_string(),
             push: "push.example.com".to_string(),
             community: "community.example.com".to_string(),
+            bots: jid::DomainPart::new("bots.example.com")
+                .expect("bots domain")
+                .into_owned(),
         }
     }
 

@@ -469,7 +469,8 @@ struct Environment {
 }
 impl RecoveryEnvironment for Environment {
     fn recovery_deps(&self) -> waddle_server::ingress::Deps<'_> {
-        let mut deps = waddle_server::ingress::Deps::new(&self.connections, "example.com");
+        let mut deps =
+            waddle_server::ingress::Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.sm_session_registry = Some(&self.sm);
         deps
     }
@@ -484,7 +485,8 @@ struct RoomEnvironment {
 }
 impl RecoveryEnvironment for RoomEnvironment {
     fn recovery_deps(&self) -> waddle_server::ingress::Deps<'_> {
-        let mut deps = waddle_server::ingress::Deps::new(&self.connections, "example.com");
+        let mut deps =
+            waddle_server::ingress::Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.sm_session_registry = Some(&self.sm);
         deps.room_registry = Some(&self.rooms);
         deps
@@ -849,4 +851,14 @@ pub async fn archived_reflection_replay(fixture: IngressFixture) {
     assert_eq!(wire(&sm, &submission.sender).await, reflection);
     assert_eq!(fixture.count("mam_messages").await, 1);
     fixture.close().await;
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

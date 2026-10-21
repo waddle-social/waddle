@@ -1,5 +1,6 @@
 use crate as waddle_server;
 use crate::ingress::test_support::IngressFixture;
+use crate::server::routes::interpret::test_bots_domain;
 use std::time::Duration;
 use waddle_server::ingress::{
     commit::commit_submission, effects::Effect, DurableEffect, IngressSubmission, PlannedEffect,
@@ -164,7 +165,7 @@ async fn rollback(fixture: IngressFixture) {
         .expect("commit recovery plan");
     super::execute_uow::fail_after_recovery_update(decision.message_key.expect("canonical"));
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,

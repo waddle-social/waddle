@@ -1320,3 +1320,41 @@ async fn create_with_limit(
         expected
     );
 }
+
+#[tokio::test]
+async fn bot_account_exists_requires_enabled_bot_row() {
+    let f = fixture("bots-account-exists").await;
+    let owner = member(&f, "rawkode").await;
+    let bot = create(&f, &owner, "standup").await;
+
+    assert!(store::bot_account_exists(&f.actor, bot.as_bare())
+        .await
+        .expect("lookup"));
+    // The owner's human row is not a bot account, on either domain.
+    assert!(!store::bot_account_exists(&f.actor, &owner)
+        .await
+        .expect("lookup"));
+    assert!(
+        !store::bot_account_exists(&f.actor, &jid("rawkode@bots.waddle.social"))
+            .await
+            .expect("lookup")
+    );
+    assert!(
+        !store::bot_account_exists(&f.actor, &jid("rawkode+ghost@bots.waddle.social"))
+            .await
+            .expect("lookup")
+    );
+
+    execute(
+        &f,
+        "UPDATE users SET disabled_at = ?, disabled_reason = 'owner_missing' WHERE jid = ?",
+        vec![
+            Value::from(storage_timestamp(Utc::now())),
+            Value::from(bot.as_bare().as_str()),
+        ],
+    )
+    .await;
+    assert!(!store::bot_account_exists(&f.actor, bot.as_bare())
+        .await
+        .expect("lookup"));
+}

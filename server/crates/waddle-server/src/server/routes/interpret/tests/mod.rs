@@ -6,6 +6,7 @@ use super::groupchat_archive::room_scoped_reply_to_attr;
 use super::groupchat_validation::lookup_groupchat_retraction_target;
 use super::room_dispatch::normalize_thread_create_source;
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 use kameo::actor::Spawn;
 use std::io;
 use waddle_xmpp::xep::{set_thread_create, ThreadCreate};
@@ -225,6 +226,7 @@ fn offline_pass_deps<'a>(
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: Some(blocking),
         message_dispatcher: Some(dispatcher),
         pending_delivery_storage: None,

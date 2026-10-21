@@ -28,7 +28,7 @@ struct OfflineEnvironment {
 }
 impl RecoveryEnvironment for OfflineEnvironment {
     fn recovery_deps(&self) -> Deps<'_> {
-        let mut deps = Deps::new(&self.connections, "example.com");
+        let mut deps = Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.pending_delivery_storage = Some(&self.storage);
         deps
     }
@@ -458,4 +458,14 @@ async fn postgres_offline_quota_recovers_after_retention() {
     if let Some(f) = IngressFixture::postgres("q6age").await {
         offline_quota_recovers_after_retention(f).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

@@ -8,6 +8,13 @@ pub(super) async fn queue_offline_delivery(
     original_receipt_at: chrono::DateTime<chrono::Utc>,
     original_message: Box<Message>,
 ) {
+    // D13: bots never bind a resource, so a queued row would never flush and
+    // would fill the recipient quota. Their DMs are already in the bot's MAM
+    // and inbox, which is where bot clients read them.
+    if deps.is_bots_domain(&recipient) {
+        debug!(recipient = %recipient, "bots domain: no pending_delivery intake");
+        return;
+    }
     let row = waddle_xmpp::pending_delivery::PendingRow {
         id: waddle_xmpp::pending_delivery::PendingRowId::fresh(),
         recipient,

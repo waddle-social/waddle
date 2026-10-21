@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_extensions::{
@@ -53,7 +54,7 @@ async fn execute_with_manager(
         .protocol
         .extension_manager = Arc::new(manager);
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(state.as_ref());
     let report = execute_effects(
         &fixture.uow,

@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, receipt_key, test_support::IngressFixture};
 use crate::ingress_uow::{EffectReceiptRepository, SendClaim};
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::{
     effects::{
         delivery::ExternalDeliveryEffect, Effect, ExternalEffect, ImmediateSink, PlannedEffect,
@@ -32,7 +33,7 @@ async fn run_handoff(
         .expect("pending storage"),
     );
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     deps.delivery_execution_context = DeliveryExecutionContext::MaintenanceRecovery;
     let resource: FullJid = "juliet@example.com/phone".parse().expect("resource");

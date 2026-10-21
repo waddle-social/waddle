@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::{
     config::LineageConfig,
     db::{DatabaseConfig, DatabaseDriver},
@@ -193,7 +194,7 @@ async fn failed_dependency_withholds_and_meters_each_dependent() {
         ],
     );
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let (db, uow) = database().await;
     let report = execute_effects(
         &uow,

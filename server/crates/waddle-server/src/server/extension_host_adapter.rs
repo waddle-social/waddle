@@ -164,6 +164,7 @@ impl ExtensionHostAdapter {
                 crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session,
             ),
             local_domain: self.state.deps.auth_state.xmpp_domain.as_str(),
+            bots_domain: &self.state.deps.service_domains.bots,
             blocking_storage: Some(&self.state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&self.state.deps.protocol.dispatcher),
             pending_delivery_storage: Some(&self.state.deps.protocol.pending_delivery_storage),

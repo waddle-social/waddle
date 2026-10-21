@@ -19,7 +19,7 @@ async fn progress_lock_contention(fixture: IngressFixture) {
         registry.register_with_carbons(resource.clone(), sender, false);
         receivers.push(receiver);
     }
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let mut submission = archive_plan(
         &fixture,
         Some("detached-contention"),
@@ -135,4 +135,14 @@ async fn ingress_detached_progress_lock_contention_postgres() {
     if let Some(fixture) = IngressFixture::postgres("detached_contention").await {
         progress_lock_contention(fixture).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

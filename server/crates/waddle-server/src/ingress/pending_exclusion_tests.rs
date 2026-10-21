@@ -1,5 +1,6 @@
 //! Specialized invitation fallbacks remain outside ordinary offline restoration.
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 
 async fn specialized_replay(fixture: IngressFixture, live: bool, decline: bool) {
     let storage = std::sync::Arc::new(
@@ -109,7 +110,7 @@ async fn specialized_replay(fixture: IngressFixture, live: bool, decline: bool) 
         )),
         "an unexecuted specialized fallback cannot become an ordinary queue effect"
     );
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     let report = execute_effects(
         &fixture.uow,

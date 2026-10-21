@@ -1,5 +1,6 @@
 use super::*;
 use crate::ingress::IngressEffectCapture;
+use crate::server::routes::interpret::test_bots_domain;
 use waddle_xmpp::stream_management::SmSessionRegistry;
 
 struct RecipientCarbonPlanGate {
@@ -45,7 +46,7 @@ async fn headless_carbon_audience(existing_carbon: bool) {
     let dispatcher = pipelined_dispatcher();
     let sink = PlanSink::new();
     let capture = IngressEffectCapture::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     deps.message_dispatcher = Some(&dispatcher);
     deps.blocking_storage = Some(&blocking);
@@ -356,6 +357,7 @@ async fn xep_0280_send_carbons_queues_for_detached_xep_0198_resources() {
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,
@@ -423,6 +425,7 @@ async fn detached_carbon_delivery_still_queues_with_ingress_capture() {
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,
@@ -490,6 +493,7 @@ async fn self_dm_and_sent_carbon_to_same_detached_stream_both_queue() {
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,

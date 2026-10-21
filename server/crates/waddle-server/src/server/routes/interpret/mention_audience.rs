@@ -263,6 +263,7 @@ pub(crate) async fn project_moderation_to_mentioned_non_members(
     let mut deps = Deps::new(
         &state.deps.protocol.connection_registry,
         state.deps.auth_state.xmpp_domain.as_str(),
+        &state.deps.service_domains.bots,
     );
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.mam_storage = Some(&state.deps.protocol.mam_storage);

@@ -108,7 +108,7 @@ pub async fn execute(
     registry: &ConnectionRegistry,
     sm: &Arc<InMemorySmSessionRegistry>,
 ) {
-    let mut deps = Deps::new(registry, "example.com");
+    let mut deps = Deps::new(registry, "example.com", test_bots_domain());
     deps.sm_session_registry = Some(sm);
     let report = execute_effects(
         &fixture.uow,
@@ -356,4 +356,14 @@ pub async fn cross_archive_retry(fixture: IngressFixture) {
     );
     drop(sm);
     fixture.close().await;
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

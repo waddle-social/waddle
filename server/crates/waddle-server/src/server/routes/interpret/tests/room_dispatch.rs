@@ -3,6 +3,7 @@ use super::super::room_dispatch::capture_delivered_remote_room_route;
 use super::super::room_dispatch::push_sender_error_reply;
 use super::*;
 use crate::ingress::IngressEffectCapture;
+use crate::server::routes::interpret::test_bots_domain;
 
 // XEP-0372 — RequestEnrichment callback round-trip
 // -----------------------------------------------------------------
@@ -135,6 +136,7 @@ async fn dispatch_to_room_fanout_span_and_latency_cover_recipient_enqueues() {
         web_socket_state: Some(state.as_ref()),
         authenticated_principal: None,
         local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+        bots_domain: &state.deps.service_domains.bots,
         blocking_storage: Some(&state.deps.protocol.blocking_storage),
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),
@@ -270,6 +272,7 @@ fn successful_room_error_reply_records_error_intent() {
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,
@@ -764,7 +767,11 @@ async fn assert_room_observer_message_planning(
     .expect("occupant");
     let capture = IngressEffectCapture::new();
     let sink = PlanSink::new();
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.effects = &sink;
     deps.ingress_effect_capture = Some(capture.clone());
     deps.web_socket_state = Some(state.as_ref());

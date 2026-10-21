@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 use chrono::TimeZone;
 
 // XEP-0045 §8.1 — PersistRoomSubject interpreter arm
@@ -448,6 +449,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,
@@ -544,6 +546,7 @@ async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: None,
@@ -911,6 +914,7 @@ async fn xep_0045_concurrent_non_serving_fanout_preserves_successor_and_suppress
         web_socket_state: Some(state.as_ref()),
         authenticated_principal: None,
         local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+        bots_domain: &state.deps.service_domains.bots,
         blocking_storage: Some(&state.deps.protocol.blocking_storage),
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),

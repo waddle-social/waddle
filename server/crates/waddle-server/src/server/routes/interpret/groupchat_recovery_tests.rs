@@ -6,6 +6,7 @@ use crate::ingress::{
     test_support::IngressFixture,
     ExternalEffect, IngressEffectCapture,
 };
+use crate::server::routes::interpret::test_bots_domain;
 use std::sync::Arc;
 use waddle_xmpp::ingress::{GroupchatNotificationRecoveryAction, NotificationActivityMutation};
 
@@ -87,8 +88,8 @@ async fn deferred_policy_restart(fixture: IngressFixture, deliver: bool) {
     let capture = IngressEffectCapture::new();
     let sink = PlanSink::new();
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
-    let mut deps =
-        Deps::new(&registry, "example.com").with_ingress_effect_capture(Some(capture.clone()));
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain())
+        .with_ingress_effect_capture(Some(capture.clone()));
     deps.effects = &sink;
     let outcome = insert_groupchat_notification_candidate(GroupchatNotificationCandidateSeed {
         deps: Some(&deps),

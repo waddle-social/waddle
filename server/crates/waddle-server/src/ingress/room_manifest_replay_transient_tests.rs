@@ -7,6 +7,7 @@ use crate::ingress::{
 use crate::ingress_uow::{
     CanonicalMessageRepository, EffectIntentRepository, EffectReceiptRepository,
 };
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::{
     effects::{
         delivery::{ExternalDeliveryEffect, PeerDeliveryKind},
@@ -128,7 +129,11 @@ impl Case {
     }
 
     fn deps(&self) -> Deps<'_> {
-        let mut deps = Deps::new(&self.state.deps.protocol.connection_registry, "example.com");
+        let mut deps = Deps::new(
+            &self.state.deps.protocol.connection_registry,
+            "example.com",
+            test_bots_domain(),
+        );
         deps.room_registry = Some(&self.state.deps.protocol.room_registry);
         deps.web_socket_state = Some(&self.state);
         deps

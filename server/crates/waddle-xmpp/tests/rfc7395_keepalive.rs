@@ -122,7 +122,7 @@ fn client_frames_count_as_liveness_evidence() {
     tick(&mut sm); // probe 1
                    // A parsed client frame (stream open) arrives — the machine path
                    // marks alive without a separate KeepaliveAck.
-    sm.handle(InboundEvent::FrameReceived(InboundFrame::Open));
+    sm.handle(InboundEvent::FrameReceived(InboundFrame::Open { to: None }));
     let events = tick(&mut sm);
     assert!(
         !has_probe(&events) && !has_close(&events),

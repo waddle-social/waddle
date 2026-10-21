@@ -329,6 +329,7 @@ async fn handle_sans_io_iq_with_relay_override(
                 .as_ref()
                 .map(ResolvedPrincipal::from_authenticated_session),
             local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+            bots_domain: &state.deps.service_domains.bots,
             blocking_storage: Some(&state.deps.protocol.blocking_storage),
             message_dispatcher: Some(&state.deps.protocol.dispatcher),
             pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),

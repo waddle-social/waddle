@@ -245,6 +245,77 @@ async fn extension_direct_offline_replay_postgres() {
     }
 }
 
+/// The host `Deps` carry the bots domain: a direct dispatch to a user bot is
+/// archived in the bot's MAM and is not stored offline (D13), exactly like a
+/// connected sender's DM. `send_message` itself never addresses a bot, since
+/// bots are not roster targets (D14).
+async fn direct_to_bot(f: IngressFixture) {
+    let adapter = adapter(&f).await;
+    let bot: BareJid = "romeo+helper@bots.example.com".parse().expect("bot");
+    let now = chrono::Utc::now().to_rfc3339();
+    f.execute(
+        "INSERT INTO users (jid, username, xmpp_localpart, localpart_key, kind, owner_jid, created_at, updated_at) VALUES ('romeo+helper@bots.example.com', 'romeo+helper', 'romeo+helper', 'romeo+helper', 'bot', 'romeo@example.com', ?, ?)",
+        crate::db_params![now.clone(), now],
+    )
+    .await;
+    let mut refused = request("extension-to-bot-refused");
+    refused.target = HostMessageTarget::Direct(Jid::from(bot.clone()));
+    assert!(matches!(
+        adapter.send_message(&invocation(), refused).await,
+        Err(ExtensionHostAdapterError::NotAuthorized)
+    ));
+
+    adapter
+        .dispatch_direct(
+            &invocation(),
+            Jid::from(bot.clone()),
+            DirectDispatchMessage {
+                stanza_id: StanzaId::new("extension-to-bot").expect("origin"),
+                body: "extension bot body".into(),
+                thread_id: None,
+                reply_to: None,
+                markup: vec![],
+            },
+        )
+        .await
+        .expect("dispatched to the bot");
+    assert_eq!(
+        f.count("mam_messages WHERE room_jid = 'romeo+helper@bots.example.com'")
+            .await,
+        1,
+        "the bot's archive holds the DM"
+    );
+    assert_eq!(
+        f.count("mam_messages WHERE room_jid = 'romeo@example.com'")
+            .await,
+        1
+    );
+    assert_eq!(f.count("pending_delivery").await, 0);
+    assert!(
+        adapter
+            .state
+            .deps
+            .protocol
+            .ingress
+            .drain_and_join(Duration::from_secs(10))
+            .await
+    );
+    drop(adapter);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn extension_host_message_to_bot_lands_in_bot_mam_sqlite() {
+    direct_to_bot(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn extension_host_message_to_bot_lands_in_bot_mam_postgres() {
+    if let Some(f) = IngressFixture::postgres("extension_direct_bot").await {
+        direct_to_bot(f).await;
+    }
+}
+
 async fn revoked_between_sends(f: IngressFixture) {
     let adapter = adapter(&f).await;
     adapter

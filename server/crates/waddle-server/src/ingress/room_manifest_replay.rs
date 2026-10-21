@@ -799,7 +799,11 @@ mod tests {
             })
             .await
             .expect("rejoin");
-        let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+        let mut deps = Deps::new(
+            &state.deps.protocol.connection_registry,
+            "example.com",
+            crate::server::routes::interpret::test_bots_domain(),
+        );
         deps.room_registry = registry;
         deps.web_socket_state = Some(&state);
         execute_effects(

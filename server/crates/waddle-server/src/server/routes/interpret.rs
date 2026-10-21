@@ -258,6 +258,8 @@ pub(crate) struct NotificationRecoverySweepOutcome {
     pub(crate) had_failure: bool,
 }
 
+#[cfg(test)]
+pub(crate) use deps::test_bots_domain;
 #[cfg(feature = "clustering")]
 pub use deps::OrderedRelayRouteOriginKind;
 pub use deps::{

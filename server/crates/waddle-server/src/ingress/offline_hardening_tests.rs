@@ -1,3 +1,4 @@
+use crate::server::routes::interpret::test_bots_domain;
 use crate::{
     ingress::{
         commit::commit_submission,
@@ -139,8 +140,8 @@ async fn deferred_policy(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();
     let sink = PlanSink::new();
     let capture = IngressEffectCapture::new();
-    let mut deps =
-        Deps::new(&registry, "example.com").with_ingress_effect_capture(Some(capture.clone()));
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain())
+        .with_ingress_effect_capture(Some(capture.clone()));
     deps.effects = &sink;
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
@@ -179,7 +180,7 @@ async fn deferred_policy(fixture: IngressFixture) {
     let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("commit deferred plan");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let report = execute_effects(
         &fixture.uow,
@@ -338,7 +339,7 @@ async fn missing_pending_obligation(fixture: IngressFixture) {
         )
         .await;
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let report = execute_effects(
         &fixture.uow,
@@ -362,7 +363,7 @@ async fn missing_pending_obligation(fixture: IngressFixture) {
 async fn invalid_candidate_restores_pending(fixture: IngressFixture) {
     let storage = pending_storage(&fixture).await;
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     for (origin, from) in [
         ("offline-no-sender", None),

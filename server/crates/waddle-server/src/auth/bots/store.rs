@@ -6,6 +6,7 @@ use kameo::actor::ActorRef;
 
 use super::parse_storage_timestamp;
 use super::types::{BotJid, BotRecord, DisabledReason, UserKind};
+use crate::auth::AuthError;
 use crate::db::actor::{
     CreateBotAccount, CreateBotOutcome, DbActor, DbExecute, DbQuery, DbQueryOne,
 };
@@ -116,6 +117,19 @@ impl BotStore {
             .map_err(storage)?;
         Ok(row.is_some())
     }
+}
+
+/// Whether `jid` is an enabled bot account. Routing uses this to decide if
+/// a stanza addressed to the bots domain has a recipient: a missing or
+/// disabled bot is treated like a nonexistent account.
+pub async fn bot_account_exists(
+    actor: &ActorRef<DbActor>,
+    jid: &BareJid,
+) -> Result<bool, AuthError> {
+    BotStore::new(actor.clone())
+        .exists_enabled(jid)
+        .await
+        .map_err(|error| AuthError::DatabaseError(error.to_string()))
 }
 
 fn storage(error: impl std::fmt::Display) -> BotStoreError {

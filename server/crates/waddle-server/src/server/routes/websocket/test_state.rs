@@ -235,6 +235,9 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         extensions: "extensions.example.com".to_string(),
         push: "push.example.com".to_string(),
         community: "community.example.com".to_string(),
+        bots: jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned(),
     };
     // Mirror `http.rs`: the bot hat is server-assigned for every bot JID.
     crate::server::extension_bot::install_bot_hats(

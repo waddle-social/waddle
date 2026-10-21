@@ -1,6 +1,7 @@
 //! A frozen remote route retains its receipt identity when execution falls back locally.
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
@@ -53,7 +54,11 @@ async fn relay_fallback_receipt_failure(fixture: IngressFixture, cross_node: boo
     } else {
         None
     };
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.sm_session_registry = Some(&sm);
     #[cfg(feature = "clustering")]
@@ -505,6 +510,7 @@ async fn xep0045_sealed_live_remote_wire_ack_keeps_manifest_pending_without_keye
     let mut deps = Deps::new(
         &receiver.origin_state.deps.protocol.connection_registry,
         "example.com",
+        test_bots_domain(),
     );
     deps.web_socket_state = Some(&receiver.origin_state);
     let report = relay_scope(
@@ -628,7 +634,7 @@ async fn xep0045_sealed_registered_remote_peer_wire_ack_keeps_manifest_pending()
         .await
         .expect("sealed peer route");
     let connections = waddle_xmpp::registry::ConnectionRegistry::new();
-    let mut deps = Deps::new(&connections, "example.com");
+    let mut deps = Deps::new(&connections, "example.com", test_bots_domain());
     let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
     let report = CONTROLLED_REGISTERED_REMOTE_DELIVERY
         .scope(
@@ -687,7 +693,7 @@ async fn xep0045_sealed_live_remote_successor_passes_pending_archive_child_witho
     use waddle_xmpp::ingress::{DigestContext, DigestInput};
     let fixture = IngressFixture::sqlite().await;
     let connections = waddle_xmpp::registry::ConnectionRegistry::new();
-    let mut deps = Deps::new(&connections, "example.com");
+    let mut deps = Deps::new(&connections, "example.com", test_bots_domain());
     let target: jid::FullJid = "alice@example.com/phone".parse().expect("remote occupant");
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let wire = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -1010,7 +1016,11 @@ async fn xep0045_sealed_live_remote_rejoined_occupancy_settles_without_another_w
             .expect("load")
             .expect("envelope");
         tx.commit().await.expect("read commit");
-        let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+        let mut deps = Deps::new(
+            &state.deps.protocol.connection_registry,
+            "example.com",
+            test_bots_domain(),
+        );
         deps.room_registry = Some(&state.deps.protocol.room_registry);
         deps.web_socket_state = Some(&state);
         let wire = Arc::new(std::sync::Mutex::new(Vec::new()));

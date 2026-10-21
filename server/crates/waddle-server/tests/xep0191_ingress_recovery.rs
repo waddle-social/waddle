@@ -30,7 +30,7 @@ struct BlockingRecoveryEnvironment {
 
 impl RecoveryEnvironment for BlockingRecoveryEnvironment {
     fn recovery_deps(&self) -> Deps<'_> {
-        let mut deps = Deps::new(&self.connections, "example.com");
+        let mut deps = Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.sm_session_registry = Some(&self.sm);
         deps.blocking_storage = Some(&self.blocking);
         deps
@@ -356,7 +356,7 @@ async fn extension_sender_receives_terminal_cancel_bounce(fixture: IngressFixtur
         .expect("block extension requester");
     let blocking: Arc<dyn BlockingStorage> = blocking;
     let connections = ConnectionRegistry::new();
-    let mut deps = Deps::new(&connections, "example.com");
+    let mut deps = Deps::new(&connections, "example.com", test_bots_domain());
     deps.blocking_storage = Some(&blocking);
     deps.host_sender = Some(waddle_server::ingress::HostOwnedResources::Sender(
         submission.sender.clone(),
@@ -443,4 +443,14 @@ async fn postgres_extension_sender_receives_terminal_cancel_bounce() {
     if let Some(f) = IngressFixture::postgres("xep0191_extension_bounce").await {
         extension_sender_receives_terminal_cancel_bounce(f).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

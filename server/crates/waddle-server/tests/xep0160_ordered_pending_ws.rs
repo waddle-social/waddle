@@ -124,3 +124,85 @@ async fn unacknowledged_predecessor_defers_then_retries_offline_delivery_on_anot
         .wait_rows(<[waddle_xmpp::pending_delivery::PendingRow]>::is_empty)
         .await;
 }
+
+/// XEP-0160 exemption (D13): a user bot never binds a resource, so a DM to it
+/// is archived in the bot's MAM and is never stored offline. The sender is
+/// not bounced.
+#[tokio::test]
+async fn bot_recipient_is_archived_not_queued_offline() {
+    let fixture = PendingFixture::start().await;
+    let url = format!(
+        "sqlite://{}?mode=rwc",
+        fixture.directory.path().join("pending.db").display()
+    );
+    let pool = sqlx::SqlitePool::connect(&url)
+        .await
+        .expect("seed database");
+    let bot: jid::BareJid = "bob+standup@bots.localhost".parse().expect("bot JID");
+    sqlx::query(
+        "INSERT INTO users (jid, username, xmpp_localpart, localpart_key, kind, owner_jid, \
+         created_at, updated_at) VALUES (?, ?, ?, ?, 'bot', ?, ?, ?)",
+    )
+    .bind(bot.as_str())
+    .bind("bob+standup")
+    .bind("bob+standup")
+    .bind("bob+standup")
+    .bind("bob@localhost")
+    .bind("2026-01-01T00:00:00.000000Z")
+    .bind("2026-01-01T00:00:00.000000Z")
+    .execute(&pool)
+    .await
+    .expect("seed bot account");
+
+    let mut sender = fixture.connect("alice", "sender").await;
+    enable(&mut sender).await;
+    let mut chat = xmpp_parsers::message::Message::new(Some(bot.clone().into()));
+    chat.type_ = xmpp_parsers::message::MessageType::Chat;
+    chat.id = Some(xmpp_parsers::message::Id("to-bot".to_owned()));
+    chat.bodies
+        .insert(xmpp_parsers::message::Lang::new(), "to-bot".to_owned());
+    pending_delivery_ws_support::send(&mut sender, chat.into()).await;
+
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let archived: i64 = sqlx::query_scalar(
+                "SELECT COUNT(*) FROM mam_messages WHERE room_jid = ? AND body = 'to-bot'",
+            )
+            .bind(bot.as_str())
+            .fetch_one(&pool)
+            .await
+            .expect("bot archive count");
+            if archived == 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the bot's archive holds the DM");
+
+    let mut sender_handled = 0;
+    // The DM is the only inbound stanza; a bounce would arrive as a message
+    // before the acknowledgement and fail the barrier.
+    barrier_without_message(&mut sender, &mut sender_handled, 1).await;
+    {
+        use waddle_xmpp::pending_delivery::storage::PendingDeliveryStorage;
+        assert!(
+            fixture
+                .storage
+                .list(&bot)
+                .await
+                .expect("bot pending rows")
+                .is_empty(),
+            "no offline row for a bot recipient"
+        );
+    }
+    let pending: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM pending_delivery WHERE recipient_jid = ?")
+            .bind(bot.as_str())
+            .fetch_one(&pool)
+            .await
+            .expect("pending count");
+    assert_eq!(pending, 0);
+    pool.close().await;
+}

@@ -105,7 +105,7 @@ pub(super) async fn execute(
     decision: &IngressDecision,
 ) -> ExternalOutcome {
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(storage);
     let report = execute_effects(
         &fixture.uow,
@@ -142,4 +142,14 @@ pub(super) async fn complete(fixture: &IngressFixture, archived: bool) {
             .await,
         1
     );
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

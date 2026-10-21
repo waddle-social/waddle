@@ -9,6 +9,7 @@ use crate::ingress::{
     IngressEffectCapture, IngressStreamIdentity, IngressSubmission,
 };
 use crate::ingress_uow::SmIngressStreamRepository;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
@@ -214,7 +215,7 @@ async fn nonexistent_rejection(fixture: IngressFixture) {
             .await
             .expect("MAM"),
     );
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.message_dispatcher = Some(&dispatcher);
     deps.mam_storage = Some(&mam);

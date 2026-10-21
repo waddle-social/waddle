@@ -2,6 +2,7 @@ use super::{
     requeue_failed_accounting, run_maintenance_pass, run_maintenance_pass_with_cursor,
     MaintenanceBudget, MaintenanceCursor, MaintenanceOutcome, RECOVERY_ACCOUNTING_QUEUE_BOUND,
 };
+use crate::server::routes::interpret::test_bots_domain;
 use crate::{
     db::DatabaseDriver,
     ingress::{
@@ -73,7 +74,7 @@ async fn interrupted_delivery(fixture: &IngressFixture, origin: &str) -> Message
     let registry = ConnectionRegistry::new();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     registry.register(resource, sender);
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let gate = test_hooks::pause_before_terminalization(key);
     let execution = execute_effects(
         &fixture.uow,
@@ -884,7 +885,7 @@ fn accounting_attempt(key: MessageKey, generation: u64) -> super::RecoveryAttemp
 struct EmptyRecoveryEnvironment(ConnectionRegistry);
 impl super::RecoveryEnvironment for EmptyRecoveryEnvironment {
     fn recovery_deps(&self) -> Deps<'_> {
-        Deps::new(&self.0, "example.com")
+        Deps::new(&self.0, "example.com", test_bots_domain())
     }
 }
 

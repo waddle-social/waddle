@@ -64,7 +64,7 @@ async fn live_retry(fixture: IngressFixture) {
         1,
         "live subset remains arm-owned"
     );
-    let mut deps = Deps::new(&connections, "example.com");
+    let mut deps = Deps::new(&connections, "example.com", test_bots_domain());
     deps.sm_session_registry = Some(&sm);
     deps.user_registry = Some(&users);
     let report = execute_effects(
@@ -378,7 +378,7 @@ async fn live_effects_complete_independently(fixture: IngressFixture) {
     assert_eq!(decision.external.len(), 2);
     assert_eq!(decision.arm_owned_receipts.len(), 1);
     assert_eq!(decision.external_receipts[0], decision.external_receipts[1]);
-    let mut deps = Deps::new(&connections, "example.com");
+    let mut deps = Deps::new(&connections, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     let baseline = metrics
         .counter_sum("ingress.effects.unresolved", &[("kind", "delivery")])
@@ -433,4 +433,14 @@ async fn detached_progress_live_effects_complete_independently_postgres() {
     if let Some(fixture) = IngressFixture::postgres("dp_live_effects").await {
         live_effects_complete_independently(fixture).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }
