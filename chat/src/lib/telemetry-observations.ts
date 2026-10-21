@@ -115,7 +115,14 @@ export type TelemetryErrorObservation =
     }
   | {
       kind: "http.fetch";
-      operation: "auth-session-get" | "auth-logout-post";
+      operation:
+        | "auth-session-get"
+        | "auth-logout-post"
+        | "bots-list-get"
+        | "bots-create-post"
+        | "bots-delete"
+        | "bot-token-mint-post"
+        | "bot-token-revoke-delete";
       status: number;
       recoverable: boolean;
     }

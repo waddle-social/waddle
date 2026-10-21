@@ -2,6 +2,7 @@
 import { computed, reactive, ref } from "vue";
 import { ChevronLeft, MessageCircle, ScanText, UserRound, Volume2, VolumeX } from "lucide-vue-next";
 import UserAvatar from "@/components/ui/UserAvatar.vue";
+import BotsSettingsSection from "@/components/chat/BotsSettingsSection.vue";
 import ReadReceiptSwitcher from "@/components/chat/ReadReceiptSwitcher.vue";
 import ScrollDirectionSwitcher from "@/components/chat/ScrollDirectionSwitcher.vue";
 import VCardEditor from "@/components/chat/VCardEditor.vue";
@@ -30,6 +31,7 @@ import {
 
 const props = defineProps<{
   session: WaddleSession;
+  serverBaseUrl: string;
   xmppClient?: BrowserXmppClient | null;
   messageSoundsEnabled?: boolean;
   webCommitSha?: string;
@@ -355,7 +357,7 @@ async function clearTuneStatus() {
         </button>
         <div class="min-w-0">
           <h1 class="type-chat-title">Settings</h1>
-          <p class="type-caption text-muted-foreground">Share profile signals, tune reading flow, and check build details.</p>
+          <p class="type-caption text-muted-foreground">Share profile signals, tune reading flow, manage bots, and check build details.</p>
         </div>
       </div>
     </div>
@@ -724,6 +726,8 @@ async function clearTuneStatus() {
           <ReadReceiptSwitcher />
         </div>
       </section>
+
+      <BotsSettingsSection :server-base-url="serverBaseUrl" :session-id="session.session_id" />
 
       <section class="chat-section-card glass-panel">
         <h2 class="type-pane-title">About this build</h2>
