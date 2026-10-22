@@ -838,3 +838,334 @@ async fn bots_api_counter_records_op_and_outcome() {
         Some("{request}".to_string())
     );
 }
+
+// ---------------------------------------------------------------------------
+// Clustering: rooms owned by other nodes
+// ---------------------------------------------------------------------------
+
+/// Two nodes over one database and claim store. The bot is a member of a
+/// room this node owns and of one another node owns; DELETE on either node
+/// clears both, the remote one through its owner.
+#[cfg(feature = "clustering")]
+mod remote_room_owner {
+    use waddle_xmpp::muc::room_actor::{ListAffiliations, RoomActor};
+    use waddle_xmpp::muc::RoomConfig;
+    use waddle_xmpp::ownership::{
+        ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
+    };
+    use waddle_xmpp::Affiliation;
+
+    use super::*;
+    use crate::admin::bot_affiliations::{
+        relayed_member_clear, TestMucMemberClearRelay, TEST_MUC_MEMBER_CLEAR_RELAY,
+    };
+    use crate::admin::channels::{
+        apply_channel_affiliation, ChannelAffiliationChange, ChannelAffiliationSinks,
+    };
+    use crate::clustering::relay::{RelayMucMemberClear, RelayMucMemberClearStep};
+    use crate::clustering::ClusteringHandles;
+    use crate::server::routes::websocket::get_or_create_room_actor;
+    use crate::server::routes::websocket::test_state::{
+        create_test_websocket_state_with_extension_manager, empty_extension_manager,
+        TestStateOverrides,
+    };
+
+    struct Cluster {
+        claims: Arc<dyn ClaimStore>,
+        local: Fixture,
+        remote: Arc<WebSocketState>,
+    }
+
+    fn identity(node: &str) -> NodeIdentity {
+        NodeIdentity::new(node, format!("{node}-epoch"))
+    }
+
+    async fn node(
+        claims: &Arc<dyn ClaimStore>,
+        node_id: &str,
+        db_pool: Option<Arc<crate::db::DatabasePool>>,
+    ) -> Arc<WebSocketState> {
+        create_test_websocket_state_with_extension_manager(
+            empty_extension_manager().await,
+            TestStateOverrides {
+                db_pool,
+                clustering: Some(ClusteringHandles {
+                    claim_store: Some(Arc::clone(claims)),
+                    node_identity: Some(SharedNodeIdentity::new(identity(node_id))),
+                    ..Default::default()
+                }),
+                share_app_room_registry: true,
+                ..Default::default()
+            },
+        )
+        .await
+    }
+
+    async fn cluster() -> Cluster {
+        let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
+        let socket = node(&claims, "node-1", None).await;
+        let remote = node(
+            &claims,
+            "node-2",
+            Some(Arc::clone(&socket.deps.app_state.db_pool)),
+        )
+        .await;
+        let state = BotsState::new(
+            Arc::clone(&socket.deps.auth_state),
+            Arc::clone(&socket.deps.app_state),
+            Arc::clone(&socket),
+            &socket.deps.service_domains.bots,
+            10,
+        );
+        Cluster {
+            claims,
+            local: Fixture { socket, state },
+            remote,
+        }
+    }
+
+    /// A live room on `owner_node`, claimed by it, where `alice` is an owner
+    /// and `bot` holds `bot_affiliation`, both set through the admin core.
+    async fn room_on(
+        cluster: &Cluster,
+        owner_node: &WebSocketState,
+        node_id: &str,
+        channel_id: &str,
+        alice: &BareJid,
+        bot: &BareJid,
+        bot_affiliation: Affiliation,
+    ) -> (BareJid, ActorRef<RoomActor>) {
+        let app = &owner_node.deps.app_state;
+        let room_jid =
+            waddle_xmpp::managed_room_jid(channel_id, app.muc_domain.as_str()).expect("room JID");
+        cluster
+            .claims
+            .acquire(
+                &Entity::new(EntityType::RoomActor, room_jid.to_string()),
+                &identity(node_id),
+            )
+            .await
+            .expect("room claim");
+        let actor = get_or_create_room_actor(
+            owner_node,
+            &room_jid,
+            RoomConfig::default(),
+            "space".to_string(),
+            channel_id.to_string(),
+        )
+        .await
+        .expect("room actor")
+        .actor_ref;
+        for (member, affiliation) in [(alice, Affiliation::Owner), (bot, bot_affiliation)] {
+            apply_channel_affiliation(
+                app,
+                ChannelAffiliationSinks {
+                    websocket_state: Some(owner_node),
+                    connections: &owner_node.deps.protocol.connection_registry,
+                    sfu: None,
+                },
+                &actor,
+                ChannelAffiliationChange {
+                    channel_jid: &room_jid,
+                    channel_id,
+                    member_jid: member,
+                    affiliation,
+                    actor: None,
+                },
+            )
+            .await
+            .unwrap_or_else(|_| panic!("set {member} affiliation in {room_jid}"));
+        }
+        (room_jid, actor)
+    }
+
+    async fn affiliation_of(actor: &ActorRef<RoomActor>, member: &BareJid) -> Option<Affiliation> {
+        actor
+            .ask(ListAffiliations { filter: None })
+            .await
+            .expect("list affiliations")
+            .into_iter()
+            .find(|entry| &entry.jid == member)
+            .map(|entry| entry.affiliation)
+    }
+
+    /// The transport hop to `remote`, answered as its relay would.
+    fn relay_to(
+        remote: Arc<WebSocketState>,
+        asked: Arc<std::sync::Mutex<Vec<RelayMucMemberClear>>>,
+    ) -> TestMucMemberClearRelay {
+        Arc::new(move |node, message: RelayMucMemberClear| {
+            assert_eq!(node, identity("node-2"), "asked the room's claim owner");
+            let remote = remote.clone();
+            asked.lock().expect("asked").push(message.clone());
+            Box::pin(async move { Ok(relayed_member_clear(remote.as_ref(), message).await) })
+        })
+    }
+
+    async fn delete(
+        cluster: &Cluster,
+        session: &str,
+        bot: &str,
+    ) -> (Reply, Vec<RelayMucMemberClear>) {
+        let asked = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let reply = TEST_MUC_MEMBER_CLEAR_RELAY
+            .scope(relay_to(cluster.remote.clone(), asked.clone()), async {
+                cluster
+                    .local
+                    .send(with_header(Request::delete(bot_path(bot)), session))
+                    .await
+            })
+            .await;
+        let asked = asked.lock().expect("asked").clone();
+        (reply, asked)
+    }
+
+    #[tokio::test]
+    async fn delete_clears_rooms_owned_by_another_node() {
+        let cluster = cluster().await;
+        let f = &cluster.local;
+        let (session, alice) = f.member("alice").await;
+        let bot: BareJid = f
+            .create_ok(&session, "standup")
+            .await
+            .parse()
+            .expect("bot JID");
+        let (_, local_room) = room_on(
+            &cluster,
+            f.socket.as_ref(),
+            "node-1",
+            "local-room",
+            &alice,
+            &bot,
+            Affiliation::Member,
+        )
+        .await;
+        let (remote_jid, remote_room) = room_on(
+            &cluster,
+            cluster.remote.as_ref(),
+            "node-2",
+            "remote-room",
+            &alice,
+            &bot,
+            Affiliation::Member,
+        )
+        .await;
+
+        let (reply, asked) = delete(&cluster, &session, bot.as_str()).await;
+
+        assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+        assert_eq!(affiliation_of(&local_room, &bot).await, None);
+        assert_eq!(
+            affiliation_of(&remote_room, &bot).await,
+            None,
+            "the remote owner's room still lists the bot"
+        );
+        assert_eq!(
+            affiliation_of(&remote_room, &alice).await,
+            Some(Affiliation::Owner)
+        );
+        let steps: Vec<_> = asked
+            .iter()
+            .map(|message| (message.room.clone(), message.member.clone(), message.step))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                (
+                    remote_jid.clone(),
+                    bot.clone(),
+                    RelayMucMemberClearStep::Check
+                ),
+                (remote_jid, bot.clone(), RelayMucMemberClearStep::Clear),
+            ],
+            "only the remote room is forwarded, checked before it is cleared"
+        );
+        assert_eq!(
+            f.auth()
+                .bot_store
+                .get(&f.bot(bot.as_str()))
+                .await
+                .expect("get"),
+            None
+        );
+    }
+
+    #[tokio::test]
+    async fn delete_refuses_sole_owner_of_a_remote_room_and_changes_nothing() {
+        let cluster = cluster().await;
+        let f = &cluster.local;
+        let (session, alice) = f.member("alice").await;
+        let bot: BareJid = f
+            .create_ok(&session, "standup")
+            .await
+            .parse()
+            .expect("bot JID");
+        let (_, local_room) = room_on(
+            &cluster,
+            f.socket.as_ref(),
+            "node-1",
+            "local-room",
+            &alice,
+            &bot,
+            Affiliation::Member,
+        )
+        .await;
+        let (remote_jid, remote_room) = room_on(
+            &cluster,
+            cluster.remote.as_ref(),
+            "node-2",
+            "remote-room",
+            &alice,
+            &bot,
+            Affiliation::Owner,
+        )
+        .await;
+        // Alice steps down on the owner node, leaving the bot sole owner.
+        apply_channel_affiliation(
+            &cluster.remote.deps.app_state,
+            ChannelAffiliationSinks {
+                websocket_state: Some(cluster.remote.as_ref()),
+                connections: &cluster.remote.deps.protocol.connection_registry,
+                sfu: None,
+            },
+            &remote_room,
+            ChannelAffiliationChange {
+                channel_jid: &remote_jid,
+                channel_id: "remote-room",
+                member_jid: &alice,
+                affiliation: Affiliation::Member,
+                actor: None,
+            },
+        )
+        .await
+        .unwrap_or_else(|_| panic!("alice steps down"));
+
+        let (reply, asked) = delete(&cluster, &session, bot.as_str()).await;
+
+        assert_eq!(reply.status, StatusCode::CONFLICT, "{}", reply.body);
+        assert_eq!(reply.error(), "bot_sole_room_owner");
+        assert!(
+            asked
+                .iter()
+                .all(|message| message.step == RelayMucMemberClearStep::Check),
+            "a refused delete never asks the owner to clear: {:?}",
+            asked.iter().map(|message| message.step).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            affiliation_of(&remote_room, &bot).await,
+            Some(Affiliation::Owner)
+        );
+        assert_eq!(
+            affiliation_of(&local_room, &bot).await,
+            Some(Affiliation::Member),
+            "a refused delete still cleared another room"
+        );
+        assert!(f
+            .auth()
+            .bot_store
+            .get(&f.bot(bot.as_str()))
+            .await
+            .expect("get")
+            .is_some());
+    }
+}

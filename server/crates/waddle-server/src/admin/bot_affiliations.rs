@@ -8,6 +8,11 @@
 //! through the PubSub affiliation the admin spaces commands write. The
 //! caller is responsible for authorization; for bots that is `bot#manage`.
 //!
+//! Under clustering a room's actor lives on the node holding its claim. A
+//! room another node owns is checked and cleared by that node, over the
+//! `muc_member_clear` relay message, through the same core; any node can
+//! therefore complete a delete.
+//!
 //! XEP-0045 never lets a room lose its last owner, and deletion does not
 //! override that: when the member is the only owner of any room, nothing is
 //! cleared and the caller gets [`ClearAffiliationsError::SoleRoomOwner`], so
@@ -52,11 +57,35 @@ impl From<AdminErr> for ClearAffiliationsError {
     }
 }
 
-/// A channel the member holds a tuple on, with its live room actor.
+/// Where a held channel's room actor lives.
+enum RoomLocation {
+    Local(ActorRef<RoomActor>),
+    /// Another node holds the room's claim.
+    #[cfg(feature = "clustering")]
+    Remote(waddle_xmpp::ownership::NodeIdentity),
+}
+
+/// A channel the member holds a tuple on, with where its room actor lives.
 struct HeldChannel {
     channel_id: String,
     room_jid: BareJid,
-    actor: ActorRef<RoomActor>,
+    location: RoomLocation,
+}
+
+#[derive(Clone, Copy)]
+enum Step {
+    /// Refuse a sole owner; change nothing.
+    Check,
+    /// Set the member's affiliation to `none`, refusing a sole owner.
+    Clear,
+}
+
+enum StepOutcome {
+    Done,
+    SoleOwner,
+    /// The room's owner no longer holds a live actor for it.
+    #[cfg(feature = "clustering")]
+    Moved,
 }
 
 /// Clear every channel and space affiliation `member` holds. Idempotent: a
@@ -95,24 +124,129 @@ pub(crate) async fn clear_member_affiliations(
                 internal_err(format!("channel {channel_id} has no room JID: {error}"))
             })?;
         // No room to clear: its tuples go with the caller's subject purge.
-        let Some(actor) = room_actor(state, websocket_state, &room_jid).await? else {
+        let Some(location) = locate_room(state, websocket_state, &room_jid).await? else {
             continue;
         };
-        if is_sole_owner(&actor, member).await? {
-            return Err(ClearAffiliationsError::SoleRoomOwner { room: room_jid });
-        }
-        channels.push(HeldChannel {
+        let mut channel = HeldChannel {
             channel_id,
             room_jid,
-            actor,
-        });
+            location,
+        };
+        if run_step(state, websocket_state, &mut channel, member, Step::Check).await? {
+            channels.push(channel);
+        }
     }
 
-    for channel in &channels {
-        clear_channel_affiliation(state, websocket_state, channel, member).await?;
+    for channel in &mut channels {
+        run_step(state, websocket_state, channel, member, Step::Clear).await?;
     }
     clear_space_affiliations(state, member, space_tuples).await?;
     Ok(())
+}
+
+/// Run `step` wherever the room lives, following a moved claim once.
+/// `false` when the channel no longer exists.
+async fn run_step(
+    state: &AppState,
+    websocket_state: &WebSocketState,
+    channel: &mut HeldChannel,
+    member: &BareJid,
+    step: Step,
+) -> Result<bool, ClearAffiliationsError> {
+    let outcome = step_once(state, websocket_state, channel, member, step).await?;
+    #[cfg(feature = "clustering")]
+    let outcome = match outcome {
+        StepOutcome::Moved => {
+            match locate_room(state, websocket_state, &channel.room_jid).await? {
+                Some(location) => channel.location = location,
+                None => return Ok(false),
+            }
+            step_once(state, websocket_state, channel, member, step).await?
+        }
+        outcome => outcome,
+    };
+    match outcome {
+        StepOutcome::Done => Ok(true),
+        StepOutcome::SoleOwner => Err(ClearAffiliationsError::SoleRoomOwner {
+            room: channel.room_jid.clone(),
+        }),
+        #[cfg(feature = "clustering")]
+        StepOutcome::Moved => Err(internal_err(format!(
+            "the owner of room {} kept moving",
+            channel.room_jid
+        ))
+        .into()),
+    }
+}
+
+async fn step_once(
+    state: &AppState,
+    websocket_state: &WebSocketState,
+    channel: &HeldChannel,
+    member: &BareJid,
+    step: Step,
+) -> Result<StepOutcome, AdminErr> {
+    match &channel.location {
+        RoomLocation::Local(actor) => {
+            local_step(
+                state,
+                websocket_state,
+                actor,
+                &channel.room_jid,
+                &channel.channel_id,
+                member,
+                step,
+            )
+            .await
+        }
+        #[cfg(feature = "clustering")]
+        RoomLocation::Remote(owner) => {
+            remote_step(websocket_state, owner, &channel.room_jid, member, step).await
+        }
+    }
+}
+
+/// Check or clear through a room actor on this node. The caller resolved
+/// `actor`; a remote owner runs this for the origin.
+async fn local_step(
+    state: &AppState,
+    websocket_state: &WebSocketState,
+    actor: &ActorRef<RoomActor>,
+    room_jid: &BareJid,
+    channel_id: &str,
+    member: &BareJid,
+    step: Step,
+) -> Result<StepOutcome, AdminErr> {
+    let _config_guard = match step {
+        Step::Check => None,
+        Step::Clear => Some(acquire_room_config_lock(room_jid).await),
+    };
+    // A clear re-checks under the lock: ownership may have changed since
+    // the pre-check.
+    if is_sole_owner(actor, member).await? {
+        return Ok(StepOutcome::SoleOwner);
+    }
+    if let Step::Clear = step {
+        let protocol = &websocket_state.deps.protocol;
+        apply_channel_affiliation(
+            state,
+            ChannelAffiliationSinks {
+                websocket_state: Some(websocket_state),
+                connections: &protocol.connection_registry,
+                sfu: protocol.sfu.as_ref(),
+            },
+            actor,
+            ChannelAffiliationChange {
+                channel_jid: room_jid,
+                channel_id,
+                member_jid: member,
+                affiliation: Affiliation::None,
+                actor: None,
+            },
+        )
+        .await?;
+    }
+    Ok(StepOutcome::Done)
 }
 
 async fn is_sole_owner(actor: &ActorRef<RoomActor>, member: &BareJid) -> Result<bool, AdminErr> {
@@ -125,47 +259,14 @@ async fn is_sole_owner(actor: &ActorRef<RoomActor>, member: &BareJid) -> Result<
     Ok(matches!(owners.as_slice(), [only] if &only.jid == member))
 }
 
-async fn clear_channel_affiliation(
-    state: &AppState,
-    websocket_state: &WebSocketState,
-    channel: &HeldChannel,
-    member: &BareJid,
-) -> Result<(), ClearAffiliationsError> {
-    let _config_guard = acquire_room_config_lock(&channel.room_jid).await;
-    // Ownership may have changed since the pre-check.
-    if is_sole_owner(&channel.actor, member).await? {
-        return Err(ClearAffiliationsError::SoleRoomOwner {
-            room: channel.room_jid.clone(),
-        });
-    }
-    let protocol = &websocket_state.deps.protocol;
-    apply_channel_affiliation(
-        state,
-        ChannelAffiliationSinks {
-            websocket_state: Some(websocket_state),
-            connections: &protocol.connection_registry,
-            sfu: protocol.sfu.as_ref(),
-        },
-        &channel.actor,
-        ChannelAffiliationChange {
-            channel_jid: &channel.room_jid,
-            channel_id: &channel.channel_id,
-            member_jid: member,
-            affiliation: Affiliation::None,
-            actor: None,
-        },
-    )
-    .await?;
-    Ok(())
-}
-
-/// The live room actor, loading a dormant channel the way a member join
+/// Where the room's actor lives: a live local actor, the node holding the
+/// room's claim, or a dormant channel loaded here the way a member join
 /// does. `None` when the channel no longer exists.
-async fn room_actor(
+async fn locate_room(
     state: &AppState,
     websocket_state: &WebSocketState,
     room_jid: &BareJid,
-) -> Result<Option<ActorRef<RoomActor>>, AdminErr> {
+) -> Result<Option<RoomLocation>, AdminErr> {
     let live = state
         .room_registry
         .ask(GetRoom {
@@ -173,8 +274,18 @@ async fn room_actor(
         })
         .await
         .map_err(|error| internal_err(format!("room lookup for {room_jid} failed: {error}")))?;
-    if live.is_some() {
-        return Ok(live);
+    if let Some(actor) = live {
+        return Ok(Some(RoomLocation::Local(actor)));
+    }
+    #[cfg(feature = "clustering")]
+    match crate::server::routes::interpret::extension_room_owner(websocket_state, room_jid).await {
+        Ok(Some(owner)) => return Ok(Some(RoomLocation::Remote(owner))),
+        Ok(None) => {}
+        Err(error) => {
+            return Err(internal_err(format!(
+                "owner lookup for {room_jid} failed: {error}"
+            )))
+        }
     }
     let channel = get_managed_channel_for_room(websocket_state, room_jid)
         .await
@@ -191,7 +302,184 @@ async fn room_actor(
     )
     .await
     .map_err(|error| internal_err(format!("loading room {room_jid} failed: {error}")))?;
-    Ok(Some(acquisition.actor_ref))
+    Ok(Some(RoomLocation::Local(acquisition.actor_ref)))
+}
+
+#[cfg(feature = "clustering")]
+use relay::remote_step;
+#[cfg(feature = "clustering")]
+pub(crate) use relay::{
+    relayed_member_clear, MUC_MEMBER_CLEAR_MAILBOX_TIMEOUT, MUC_MEMBER_CLEAR_REPLY_TIMEOUT,
+};
+#[cfg(all(test, feature = "clustering"))]
+pub(crate) use relay::{TestMucMemberClearRelay, TEST_MUC_MEMBER_CLEAR_RELAY};
+
+/// Rooms another node owns: that node checks and clears through its own
+/// actor with [`local_step`].
+#[cfg(feature = "clustering")]
+mod relay {
+    use std::time::Duration;
+
+    use jid::BareJid;
+    use kameo::actor::ActorRef;
+    use waddle_xmpp::muc::room_actor::RoomActor;
+    use waddle_xmpp::muc::room_registry_actor::GetRoom;
+    use waddle_xmpp::ownership::NodeIdentity;
+
+    use super::{internal_err, local_step, AdminErr, Step, StepOutcome};
+    use crate::clustering::relay::{
+        RelayAskError, RelayHandle, RelayMucMemberClear, RelayMucMemberClearReply,
+        RelayMucMemberClearStep, RelaySendEffect, RelaySendFailure,
+    };
+    use crate::server::routes::websocket::WebSocketState;
+
+    pub(crate) const MUC_MEMBER_CLEAR_MAILBOX_TIMEOUT: Duration = Duration::from_secs(1);
+    /// Clearing persists tuples and the room's durable rows on the owner.
+    pub(crate) const MUC_MEMBER_CLEAR_REPLY_TIMEOUT: Duration = Duration::from_secs(10);
+    /// The origin's own bound on one ask, relay lookup included.
+    const ASK_LIMIT: Duration = MUC_MEMBER_CLEAR_MAILBOX_TIMEOUT
+        .saturating_add(MUC_MEMBER_CLEAR_REPLY_TIMEOUT)
+        .saturating_add(Duration::from_millis(500));
+
+    /// Replaces only the transport hop to the owner.
+    #[cfg(test)]
+    pub(crate) type TestMucMemberClearRelay = std::sync::Arc<
+        dyn Fn(
+                NodeIdentity,
+                RelayMucMemberClear,
+            ) -> futures::future::BoxFuture<
+                'static,
+                Result<RelayMucMemberClearReply, RelayAskError>,
+            > + Send
+            + Sync,
+    >;
+
+    #[cfg(test)]
+    tokio::task_local! {
+        pub(crate) static TEST_MUC_MEMBER_CLEAR_RELAY: TestMucMemberClearRelay;
+    }
+
+    /// Origin side: ask the room's owner to run `step`.
+    pub(super) async fn remote_step(
+        websocket_state: &WebSocketState,
+        owner: &NodeIdentity,
+        room_jid: &BareJid,
+        member: &BareJid,
+        step: Step,
+    ) -> Result<StepOutcome, AdminErr> {
+        let message = RelayMucMemberClear {
+            room: room_jid.clone(),
+            member: member.clone(),
+            step: match step {
+                Step::Check => RelayMucMemberClearStep::Check,
+                Step::Clear => RelayMucMemberClearStep::Clear,
+            },
+            trace: Default::default(),
+        };
+        match ask_owner(websocket_state, owner, message).await {
+            Ok(RelayMucMemberClearReply::Clearable | RelayMucMemberClearReply::Cleared) => {
+                Ok(StepOutcome::Done)
+            }
+            Ok(RelayMucMemberClearReply::SoleOwner) => Ok(StepOutcome::SoleOwner),
+            Ok(RelayMucMemberClearReply::NotOwner) => Ok(StepOutcome::Moved),
+            Ok(RelayMucMemberClearReply::Failed) => Err(internal_err(format!(
+                "the owner of room {room_jid} could not clear the member"
+            ))),
+            Err(error) => Err(internal_err(format!(
+                "the owner of room {room_jid} was unreachable: {error}"
+            ))),
+        }
+    }
+
+    async fn ask_owner(
+        websocket_state: &WebSocketState,
+        owner: &NodeIdentity,
+        message: RelayMucMemberClear,
+    ) -> Result<RelayMucMemberClearReply, RelayAskError> {
+        #[cfg(test)]
+        if let Ok(relay) = TEST_MUC_MEMBER_CLEAR_RELAY.try_with(std::sync::Arc::clone) {
+            return relay(owner.clone(), message).await;
+        }
+        let Some(bridge) = websocket_state
+            .deps
+            .app_state
+            .clustering_claims
+            .ordered_relay_delivery_bridge
+            .as_ref()
+        else {
+            return Err(RelayAskError::NotFound {
+                node_id: crate::clustering::NodeId::new(owner.node_id.clone()),
+            });
+        };
+        let mut handle: RelayHandle = bridge.muc_member_clear_handle(owner);
+        tokio::time::timeout(ASK_LIMIT, handle.muc_member_clear(message))
+            .await
+            .unwrap_or_else(|_| {
+                Err(RelayAskError::Send {
+                    failure: RelaySendFailure::ReplyTimeout,
+                    effect: RelaySendEffect::MaybeCommitted,
+                    message: "the room owner did not answer in time".to_owned(),
+                })
+            })
+    }
+
+    /// Owner side: run a forwarded step against the local room actor.
+    pub(crate) async fn relayed_member_clear(
+        websocket_state: &WebSocketState,
+        message: RelayMucMemberClear,
+    ) -> RelayMucMemberClearReply {
+        let state = &websocket_state.deps.app_state;
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&message.room) else {
+            return RelayMucMemberClearReply::Failed;
+        };
+        let actor: Option<ActorRef<RoomActor>> = match state
+            .room_registry
+            .ask(GetRoom {
+                room_jid: message.room.clone(),
+            })
+            .await
+        {
+            Ok(actor) => actor,
+            Err(error) => {
+                tracing::warn!(room = %message.room, %error, "relayed member clear room lookup failed");
+                return RelayMucMemberClearReply::Failed;
+            }
+        };
+        // No live actor here: the claim moved, so the origin re-resolves.
+        let Some(actor) = actor else {
+            return RelayMucMemberClearReply::NotOwner;
+        };
+        let step = match message.step {
+            RelayMucMemberClearStep::Check => Step::Check,
+            RelayMucMemberClearStep::Clear => Step::Clear,
+        };
+        match local_step(
+            state,
+            websocket_state,
+            &actor,
+            &message.room,
+            &channel_id,
+            &message.member,
+            step,
+        )
+        .await
+        {
+            Ok(StepOutcome::SoleOwner) => RelayMucMemberClearReply::SoleOwner,
+            Ok(StepOutcome::Done) => match message.step {
+                RelayMucMemberClearStep::Check => RelayMucMemberClearReply::Clearable,
+                RelayMucMemberClearStep::Clear => RelayMucMemberClearReply::Cleared,
+            },
+            Ok(StepOutcome::Moved) => RelayMucMemberClearReply::NotOwner,
+            Err(error) => {
+                tracing::warn!(
+                    room = %message.room,
+                    error = %super::admin_err_text(&error),
+                    "relayed member clear failed"
+                );
+                RelayMucMemberClearReply::Failed
+            }
+        }
+    }
 }
 
 async fn clear_space_affiliations(
@@ -230,6 +518,14 @@ async fn clear_space_affiliations(
         }
     }
     Ok(())
+}
+
+#[cfg(feature = "clustering")]
+fn admin_err_text(error: &AdminErr) -> String {
+    match error.as_ref() {
+        CommandResult::Error(error) => error.to_string(),
+        _ => "unexpected command result".to_string(),
+    }
 }
 
 fn internal_err(text: String) -> AdminErr {

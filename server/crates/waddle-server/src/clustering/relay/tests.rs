@@ -337,6 +337,67 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
     );
 }
 
+/// Clearing a member in a remotely owned room is a NEW message id; the
+/// ordered relay envelope is untouched. An old peer's `UnknownMessage` is a
+/// no-effect failure.
+#[test]
+fn muc_member_clear_is_a_new_message_id_with_round_tripping_shapes() {
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayMucMemberClear>>::REMOTE_ID,
+        "waddle.clustering.relay.muc_member_clear.v1"
+    );
+    assert_eq!(
+        <RelayActor as kameo::remote::RemoteMessage<RelayDeliverOrdered>>::REMOTE_ID,
+        "waddle.clustering.relay.deliver_ordered.v13",
+        "a new relay message must not bump the ordered-relay envelope id"
+    );
+    let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
+    let member: jid::BareJid = "romeo+bot@bots.example.test".parse().expect("member");
+    for step in [
+        RelayMucMemberClearStep::Check,
+        RelayMucMemberClearStep::Clear,
+    ] {
+        let message = RelayMucMemberClear {
+            room: room.clone(),
+            member: member.clone(),
+            step,
+            trace: RelayTraceContext::default(),
+        };
+        let decoded: RelayMucMemberClear =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&message).expect("encode clear"))
+                .expect("decode clear");
+        assert_eq!(decoded.room, room);
+        assert_eq!(decoded.member, member);
+        assert_eq!(decoded.step, step);
+    }
+    for reply in [
+        RelayMucMemberClearReply::Clearable,
+        RelayMucMemberClearReply::Cleared,
+        RelayMucMemberClearReply::SoleOwner,
+        RelayMucMemberClearReply::NotOwner,
+        RelayMucMemberClearReply::Failed,
+    ] {
+        let decoded: RelayMucMemberClearReply =
+            rmp_serde::from_slice(&rmp_serde::to_vec_named(&reply).expect("encode reply"))
+                .expect("decode reply");
+        assert_eq!(decoded, reply);
+    }
+    let old_peer = send_error::<std::convert::Infallible>(RemoteSendError::UnknownMessage {
+        actor_remote_id: "actor".into(),
+        message_remote_id: "waddle.clustering.relay.muc_member_clear.v1".into(),
+    });
+    assert!(
+        matches!(
+            old_peer,
+            RelayAskError::Send {
+                effect: RelaySendEffect::NoEffect,
+                ..
+            }
+        ),
+        "a peer that predates the message is a no-effect failure: {old_peer:?}"
+    );
+}
+
 /// #1298: forwarding a muc#admin list GET is a NEW message id; the ordered
 /// relay envelope is untouched, so the room's ordered lane never sees it. An
 /// old peer's `UnknownMessage` is a no-effect failure.
