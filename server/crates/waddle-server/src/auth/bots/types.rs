@@ -165,10 +165,6 @@ impl BotJid {
         &self.0
     }
 
-    pub fn into_bare(self) -> BareJid {
-        self.0
-    }
-
     /// The full localpart, `<owner node>+<name>`, stored in
     /// `users.username`, `users.xmpp_localpart` and `users.localpart_key`.
     pub fn localpart(&self) -> &str {
@@ -204,10 +200,6 @@ impl BotTokenId {
         Uuid::parse_str(value)
             .map(Self)
             .map_err(|_| BotIdError::InvalidTokenId)
-    }
-
-    pub fn as_uuid(&self) -> Uuid {
-        self.0
     }
 }
 

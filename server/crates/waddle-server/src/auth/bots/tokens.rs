@@ -111,10 +111,6 @@ impl BotTokenTtl {
         }
     }
 
-    pub fn as_days(self) -> u16 {
-        self.0
-    }
-
     fn duration(self) -> Duration {
         Duration::days(i64::from(self.0))
     }
