@@ -5,6 +5,7 @@ metadata:
   namespace: flux-system
 spec:
   dependsOn:
+    - name: infra-livekit-redis
     - name: infra-onepassword-connect
     - name: infra-external-secrets
     - name: infra-cilium-gateway
