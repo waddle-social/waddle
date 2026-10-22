@@ -10,8 +10,8 @@ use crate::auth::{AuthError, SessionManager};
 use crate::db::actor::{CreateBotOutcome, DbActor, DbExecute, DbQuery, DbQueryOne};
 use crate::db::{Database, DatabaseConfig, DatabaseDriver, MigrationRunner, Value};
 use crate::permissions::{
-    DeleteTuple, Object, ObjectType, Permission, PermissionActor, Relation,
-    ReplaceExclusiveRelation, Subject, Tuple, WriteTuple,
+    CheckPermission, DeleteTuple, Object, ObjectType, Permission, PermissionActor, Relation,
+    ReplaceExclusiveRelation, Subject, SubjectType, Tuple, WriteTuple,
 };
 use crate::server::bootstrap_membership::DEPLOYMENT_SERVER_ID;
 
@@ -1181,29 +1181,47 @@ async fn authorize_bot_requires_owner_and_bot() {
     }
 }
 
-#[tokio::test]
-async fn authorize_bot_denied_after_owner_outcast_from_channel() {
-    let f = fixture("bots-authorize-outcast").await;
-    let owner = jid("rawkode@waddle.social");
-    let bot = bot_of(&owner, "standup");
-    let principal = principal_for(&owner, &bot);
+/// A channel inside a space where the owner and the bot are both members,
+/// with the bot also holding an explicit channel grant. Space membership
+/// alone grants channel `read`/`send_message` through `parent->view`.
+async fn channel_in_space_with_members(f: &Fixture, owner: &BareJid, bot: &BotJid) {
+    const SPACE: &str = "penguin-club";
+    write(
+        f,
+        Tuple::new(
+            channel(),
+            Relation::new("parent"),
+            Subject::userset(SubjectType::Space, SPACE, ""),
+        ),
+    )
+    .await;
     for subject in [owner.to_string(), bot.to_string()] {
         write(
-            &f,
-            Tuple::new(channel(), Relation::new("member"), Subject::user(subject)),
+            f,
+            Tuple::new(
+                Object::new(ObjectType::Space, SPACE),
+                Relation::new("member"),
+                Subject::user(subject),
+            ),
         )
         .await;
     }
-    assert!(
-        authorize_bot(&f.permissions, &principal, Permission::Read, &channel())
-            .await
-            .expect("authorize member")
-    );
+    write(
+        f,
+        Tuple::new(
+            channel(),
+            Relation::new("member"),
+            Subject::user(bot.to_string()),
+        ),
+    )
+    .await;
+}
 
+async fn outcast(f: &Fixture, subject: String) {
     f.permissions
         .ask(ReplaceExclusiveRelation {
             object: channel(),
-            subject: Subject::user(owner.to_string()),
+            subject: Subject::user(subject),
             family: ["owner", "admin", "member", "outcast"]
                 .into_iter()
                 .map(Relation::new)
@@ -1211,21 +1229,59 @@ async fn authorize_bot_denied_after_owner_outcast_from_channel() {
             replacement: Some(Relation::new("outcast")),
         })
         .await
-        .expect("outcast owner");
-    // The bot keeps its own grant but loses access with its owner.
+        .expect("outcast");
+}
+
+async fn assert_bot_channel_access(f: &Fixture, principal: &BotPrincipal, expected: bool) {
+    for permission in [Permission::Read, Permission::SendMessage] {
+        assert_eq!(
+            authorize_bot(&f.permissions, principal, permission.clone(), &channel())
+                .await
+                .expect("authorize"),
+            expected,
+            "{permission:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn authorize_bot_denied_after_owner_outcast_from_channel() {
+    let f = fixture("bots-authorize-owner-outcast").await;
+    let owner = jid("rawkode@waddle.social");
+    let bot = bot_of(&owner, "standup");
+    let principal = principal_for(&owner, &bot);
+    channel_in_space_with_members(&f, &owner, &bot).await;
+    assert_bot_channel_access(&f, &principal, true).await;
+
+    outcast(&f, owner.to_string()).await;
+    // The owner still reaches the channel through the space, but an outcast
+    // owner takes the bot's access with them.
     assert!(
-        !authorize_bot(&f.permissions, &principal, Permission::Read, &channel())
+        f.permissions
+            .ask(CheckPermission {
+                subject: Subject::user(owner.to_string()),
+                permission: Permission::Read,
+                object: channel(),
+            })
             .await
-            .expect("authorize after outcast")
+            .expect("owner read")
+            .allowed,
+        "fixture must keep parent->view for the outcast owner"
     );
-    assert!(!authorize_bot(
-        &f.permissions,
-        &principal,
-        Permission::SendMessage,
-        &channel()
-    )
-    .await
-    .expect("authorize send after outcast"));
+    assert_bot_channel_access(&f, &principal, false).await;
+}
+
+#[tokio::test]
+async fn authorize_bot_denied_after_bot_outcast_from_channel() {
+    let f = fixture("bots-authorize-bot-outcast").await;
+    let owner = jid("rawkode@waddle.social");
+    let bot = bot_of(&owner, "standup");
+    let principal = principal_for(&owner, &bot);
+    channel_in_space_with_members(&f, &owner, &bot).await;
+    assert_bot_channel_access(&f, &principal, true).await;
+
+    outcast(&f, bot.to_string()).await;
+    assert_bot_channel_access(&f, &principal, false).await;
 }
 
 /// The transactional create and mint paths on Postgres. Skipped unless
