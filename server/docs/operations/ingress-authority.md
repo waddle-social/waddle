@@ -1940,8 +1940,8 @@ Two properties bound the settlement, because it permanently drops a copy:
   resumable-session probe for a live attached one — every local signal says
   "gone" about a user who is simply connected to the other replica. A
   roster-absent occupant is therefore only settled once it is absent from this
-  node's own state (connection registry, actor tree, and a resumable XEP-0198
-  session in memory or the shared durable store) AND every unexpired cluster
+  node's locally hosted sockets and resumable XEP-0198 sessions in memory or
+  the shared durable store AND every unexpired cluster
   peer has denied the exact full JID — the same fan-out the ghost eviction
   runs, on a tighter 500 ms budget because the settlement runs inside the
   per-row recovery deadline.
@@ -2103,10 +2103,13 @@ could be torn out of every room. The guard therefore reads the cluster
 membership and asks EVERY other node, concurrently and inside one overall
 1.5-second budget, through a strictly read-only relay message,
 `waddle.clustering.relay.resource_presence.v1`, naming the exact full JID.
-Each node answers only about itself: `Present` when it hosts a socket for that
-resource, when its own `UserActor` tree lists it (a local socket, or a
-registered-remote mirror it holds for a peer's socket), or when it has a
-resumable XEP-0198 session for it; `Absent` when it knows none of those. The
+Each node answers only about itself: `Present` when it hosts a local socket for
+that resource or has a resumable XEP-0198 session for it; `Absent` when neither
+exists. It rechecks the local socket after an absent session read, so a resume
+that publishes a socket while removing the detached session remains present.
+Remote mirrors and actor-tree resource lists are routing state, not socket
+proof: a missed unregister can leave them behind after the socket disappears
+(#2010). They must not bypass the every-peer probe on either side. The
 occupant is evictable only when the membership read succeeded and every peer
 answered `Absent`. The handler reads no claim, spawns no actor and changes no
 client-visible state, so a duplicated or abandoned ask costs nothing.
@@ -2153,11 +2156,10 @@ a cross-node answer simply do not happen and the rows stay owed; they resume
 once both replicas run the new image.
 
 Every guard fails closed; each of these leaves the occupant seated and the
-copy owed: a live entry for the full JID in this node's connection registry
-(which includes the clustered registered-remote mirror), a resumable XEP-0198
+copy owed: a locally hosted entry for the full JID in this node's connection
+registry, a resumable XEP-0198
 session in this node's memory OR in the shared durable store (including a read
-of that store that fails), the actor tree still listing the exact resource (or
-failing to answer), a membership read that errors or is truncated, any peer
+of that store that fails), a membership read that errors or is truncated, any peer
 that answers `Present` or cannot be asked at all (an old replica's
 `UnknownMessage`, a timeout, a transport or decode failure), the whole
 fan-out exceeding its budget, a room this node does not authoritatively host,
@@ -2165,11 +2167,11 @@ a room whose exact claim fence the durable store no longer holds, a room probe
 that does not answer, and a recovery environment with no WebSocket state to
 run the sweep with. The same fan-out guards the departed-copy settlement, so
 both irreversible decisions rest on one shared answer and cannot drift apart.
-Consequently a `route_muc` backlog with
-`unrecoverable_obligations{reason="no_durable_progress"}` ticking while
-`muc.ghost_occupants.evicted` stays flat means the occupants are still
-reachable somewhere (or a probe cannot answer) — not that the eviction is
-broken. A sustained ghost-eviction rate is the signal to chase the upstream
+For a `route_muc` backlog with
+`unrecoverable_obligations{reason="no_durable_progress"}` ticking and
+`muc.ghost_occupants.evicted` staying flat, inspect socket/session reachability
+and failed probes before changing maintenance budgets. A sustained
+ghost-eviction rate is the signal to chase the upstream
 cleanup leak, not to raise the maintenance budget.
 
 A row whose room **no node hosts any more** — a destroyed non-persistent room

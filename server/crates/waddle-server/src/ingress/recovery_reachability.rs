@@ -41,32 +41,33 @@ pub(super) const SETTLEMENT_FANOUT_BUDGET: Duration = Duration::from_millis(500)
 /// `recovery_departed::settle_departed_occupants`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ResourceReachability {
-    /// Nothing anywhere holds this resource: this node's actor tree does not
-    /// list it and every unexpired peer denied it (including the degenerate
-    /// single-node case). The only outcome that permits taking something
-    /// away.
+    /// Every unexpired peer denied this resource (including the degenerate
+    /// single-node case). Combined with local absence, this is the only
+    /// outcome that permits taking something away.
     AbsentEverywhere,
-    /// Something holds it — this node's actor tree (a local socket, or a
-    /// registered-remote mirror for a peer's socket), or a peer that answered
-    /// `Present`. A STABLE fact about the cluster as it is right now, not a
-    /// failure to read it.
+    /// A peer holds a socket or resumable session for this exact resource.
+    /// A stable fact about the cluster, rather than a failure to read it.
+    #[cfg(feature = "clustering")]
     Reachable,
-    /// A probe could not answer: the actor tree read failed, the membership
-    /// read failed or was truncated, a peer ask failed (an old replica's
-    /// `UnknownMessage` mid-rolling-update, a timeout, a transport or decode
+    /// A probe could not answer: the membership read failed or was truncated,
+    /// a peer ask failed (`UnknownMessage` mid-rolling-update, a timeout,
+    /// a transport or decode
     /// failure), or the fan-out budget elapsed. TRANSIENT.
+    #[cfg(feature = "clustering")]
     Unproven,
 }
 
 /// Whether THIS node can still hand the occupant its copy itself.
 ///
 /// A missing SM registry cannot prove anything, so it also counts as
-/// reachable. Note that `is_connected` is also true for the clustered
-/// registered-remote mirror of a peer's socket, which this node cannot
-/// actually deliver to — [`ResourceReachability`] is what distinguishes the
-/// two, and either way the copy stays owed.
+/// reachable. A registered-remote mirror is routing state, not evidence
+/// that the socket still exists: only its hosting peer can answer that.
 pub(super) async fn locally_reachable(deps: &Deps<'_>, occupant: &FullJid) -> bool {
-    if deps.connection_registry.is_connected(occupant) {
+    if deps
+        .connection_registry
+        .get_entry(occupant)
+        .is_some_and(|entry| entry.is_locally_hosted())
+    {
         return true;
     }
     let Some(sm) = deps.sm_session_registry else {
@@ -76,42 +77,25 @@ pub(super) async fn locally_reachable(deps: &Deps<'_>, occupant: &FullJid) -> bo
         // Checks this node's memory AND the shared durable store, so a
         // session resume-stolen by another node still counts as resumable.
         ResumableSessionProbe::Present | ResumableSessionProbe::Failed => true,
-        ResumableSessionProbe::Absent => false,
+        // Resume publishes the local socket before deleting its detached
+        // session. The asynchronous session read may overlap that transition.
+        ResumableSessionProbe::Absent => deps
+            .connection_registry
+            .get_entry(occupant)
+            .is_some_and(|entry| entry.is_locally_hosted()),
     }
 }
 
 /// Whether anything OTHER than this node's own socket/session state can still
-/// reach the exact resource: this node's authoritative actor tree first (it is
-/// free and answers locally), then every unexpired cluster peer.
+/// reach the exact resource: every unexpired cluster peer must answer about
+/// its own sockets and sessions. Neither an actor-tree entry nor a remote
+/// connection mirror can vouch for another node's socket.
 pub(super) async fn reachable_elsewhere(
     deps: &Deps<'_>,
     occupant: &FullJid,
     budget: Duration,
 ) -> ResourceReachability {
-    match registered_resource(deps, occupant).await {
-        ResourceReachability::AbsentEverywhere => {}
-        decided => return decided,
-    }
     reachable_on_a_peer(deps, occupant, budget).await
-}
-
-/// Whether the authoritative actor tree lists this exact resource. That covers
-/// a live local socket and the registered-remote mirror a clustered peer
-/// installs for a socket it hosts. The non-degrading lookup is deliberate: the
-/// routing variant reports an unanswered actor as "no resources", which is the
-/// right default for a route and the wrong one for an irreversible decision.
-async fn registered_resource(deps: &Deps<'_>, occupant: &FullJid) -> ResourceReachability {
-    let Some(registry) = deps.user_registry else {
-        return ResourceReachability::Unproven;
-    };
-    match waddle_xmpp::registry::try_get_resources_for_user(registry, &occupant.to_bare()).await {
-        Ok(resources) if resources.contains(occupant) => ResourceReachability::Reachable,
-        Ok(_) => ResourceReachability::AbsentEverywhere,
-        Err(error) => {
-            tracing::debug!(%occupant, %error, "reachability probe could not read the user's resources");
-            ResourceReachability::Unproven
-        }
-    }
 }
 
 /// Whether any OTHER cluster node can still reach this exact RESOURCE.

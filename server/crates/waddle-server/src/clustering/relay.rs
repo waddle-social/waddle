@@ -1096,8 +1096,8 @@ impl Message<RelayReassertMediaGrants> for RelayActor {
 /// the node that holds it. A `UserActor` claim is routing authority, not
 /// socket liveness: nothing re-registers an idle socket anywhere when that
 /// claim's owner dies or moves, so the claim can neither vouch for a resource
-/// nor deny one. The receiver answers only about its own connection registry,
-/// actor tree and SM store, which it is unconditionally authoritative about.
+/// nor deny one. The receiver answers only about its locally hosted sockets
+/// and SM sessions. Routing mirrors do not prove that a peer still has a socket.
 ///
 /// Strictly read-only: the handler reads no claim, spawns no actor and
 /// performs no side effect, so an ask that times out or is answered twice
@@ -1271,21 +1271,19 @@ impl Message<RelayMucAdminQuery> for RelayActor {
 /// EVERY peer before it may treat the resource as gone.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Reply)]
 pub enum RelayResourcePresenceReply {
-    /// The receiver hosts a socket for that exact full JID, its `UserActor`
-    /// tree lists it (a local socket, or a registered-remote resource it
-    /// mirrors for a peer), or it holds a resumable/detached XEP-0198 session
-    /// for it — including a read that could not answer.
+    /// The receiver hosts a local socket for that exact full JID or holds a
+    /// resumable/detached XEP-0198 session for it — including a read that could
+    /// not answer.
     Present,
-    /// The receiver knows nothing about that resource: no socket, no
-    /// actor-tree entry, no resumable session. The only authoritative
-    /// negative, and only for this one node.
+    /// The receiver has no local socket or resumable session for that resource.
+    /// The only authoritative negative, and only for this one node.
     Absent,
 }
 
 #[kameo::remote_message("waddle.clustering.relay.resource_presence.v1")]
 impl Message<RelayResourcePresence> for RelayActor {
     // Delegated for the same reason as [`RelayReassertMediaGrants`]: the
-    // actor-tree ask and durable session probe are bounded but must not
+    // durable session probe is bounded but must not
     // head-of-line block this node's relay mailbox while they resolve.
     type Reply = kameo::reply::DelegatedReply<RelayResourcePresenceReply>;
 

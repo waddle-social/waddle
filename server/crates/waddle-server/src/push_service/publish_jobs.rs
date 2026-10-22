@@ -1215,7 +1215,6 @@ impl DatabasePushServiceStore {
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let now_ms = crate::time::now_ms();
         lock_owner_tx(&mut tx, publisher, now_ms).await?;
-        lock_node_tx(&mut tx, node, now_ms).await?;
         let push_node = get_node_tx(&mut tx, node)
             .await?
             .ok_or_else(|| XmppError::item_not_found(Some("Push node not found".to_string())))?;
@@ -1228,6 +1227,10 @@ impl DatabasePushServiceStore {
             ))
             .into());
         }
+        // Node disable/reactivation and pruning hold this owner's lock, so an
+        // authorized active node remains valid until we take its device fence.
+        // Validate first: the node-lock row has a foreign key to push_nodes.
+        lock_node_tx(&mut tx, node, now_ms).await?;
         if let Some(push_service_jid) = push_service_jid {
             ensure_active_registration_tx(&mut tx, publisher, push_service_jid.as_str(), node)
                 .await?;
@@ -1695,6 +1698,10 @@ impl DatabasePushServiceStore {
 #[cfg(test)]
 #[path = "publish_jobs_quota_tests.rs"]
 mod quota_tests;
+
+#[cfg(test)]
+#[path = "publish_jobs_admission_tests.rs"]
+mod admission_tests;
 
 #[cfg(test)]
 #[path = "publish_retry_policy_tests.rs"]

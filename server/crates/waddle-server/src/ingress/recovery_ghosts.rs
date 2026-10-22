@@ -91,8 +91,8 @@
 //! leaked occupancy then stays in the roster for another cleanup path, which
 //! is where it already was.
 //!
-//! Every probe here fails closed: a registry that cannot answer, a session
-//! probe that cannot read its durable store, a membership read that errors or
+//! Every probe here fails closed: a locally hosted socket, a session probe
+//! that cannot read its durable store, a membership read that errors or
 //! is truncated, any peer ask that errors or times out, a room this node does
 //! not authoritatively host, a room whose exact claim fence this node no
 //! longer holds, or a missing WebSocket state all mean "not a ghost", and the

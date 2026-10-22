@@ -19,63 +19,43 @@
 use super::*;
 
 /// Owner-side answer to a #1803 cross-node resource-presence probe, executed
-/// against THIS node's connection registry, actor tree and SM store. The relay
+/// against THIS node's locally hosted connections and SM store. The relay
 /// actor maps these onto
 /// [`super::super::relay::RelayResourcePresenceReply`] — kept as a separate
 /// enum so the bridge does not depend on relay wire types, exactly like
 /// [`super::LocalMediaGrantReassertion`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalResourcePresence {
-    /// This node hosts a socket for the exact resource, its `UserActor` tree
-    /// lists it (a local socket or a registered-remote mirror), or it holds a
-    /// resumable XEP-0198 session for it — including every read that could
-    /// not answer.
+    /// This node hosts a socket or holds a resumable XEP-0198 session for
+    /// the exact resource — including every read that could not answer.
     Present,
-    /// This node knows nothing about the resource: no socket, no actor-tree
-    /// entry, and no resumable session. The only authoritative negative.
+    /// This node hosts no socket and holds no resumable session for the
+    /// resource. The only authoritative negative about this node.
     Absent,
 }
 
 impl OrderedRelayDeliveryBridge {
     /// Execute a relayed resource-presence probe on this node — the receiving
     /// side of #1803. Read-only: no claim is read or acquired, no actor is
-    /// spawned (`try_get_resources_for_user` resolves an EXISTING `UserActor`
-    /// and answers `Ok(vec![])` for a bare JID that has none), and no client-
-    /// visible state changes, so a duplicate or abandoned ask costs nothing.
+    /// spawned, and no client-visible state changes.
     pub async fn resource_presence_local(&self, target: &jid::FullJid) -> LocalResourcePresence {
         let Some(services) = self.services.get() else {
             // Not wired yet: this node cannot read its own state, which is
             // never proof that the resource is gone.
             return LocalResourcePresence::Present;
         };
-        // A socket this node holds open is the most direct proof there is,
-        // and the one the old claim gate could hide. It also covers the
-        // clustered registered-remote mirror, which installs a
-        // non-locally-hosted entry for a peer's socket.
-        if services.connection_registry.is_connected(target) {
+        // Only this node can vouch for its own sockets. Remote mirrors are
+        // routing state and can outlive a missed unregister on a healthy peer.
+        if services
+            .connection_registry
+            .get_entry(target)
+            .is_some_and(|entry| entry.is_locally_hosted())
+        {
             return LocalResourcePresence::Present;
         }
-        let bare = target.to_bare();
-        // The non-degrading resource read is deliberate: the routing variant
-        // reports an unanswered actor as "no resources", which is the right
-        // default for a route and the wrong one for an eviction.
-        match waddle_xmpp::registry::try_get_resources_for_user(&services.user_registry, &bare)
-            .await
-        {
-            Ok(resources) if resources.contains(target) => return LocalResourcePresence::Present,
-            Ok(_) => {}
-            Err(error) => {
-                tracing::debug!(
-                    jid = %bare,
-                    %error,
-                    "resource-presence probe could not read the user's resources"
-                );
-                return LocalResourcePresence::Present;
-            }
-        }
-        // A detached resource has no socket and no actor-tree entry but may
-        // resume at any moment; the probe reads this node's memory AND the
-        // shared durable store, and a store it cannot read counts as present.
+        // A detached resource has no socket but may resume at any moment.
+        // The probe reads this node's memory AND the shared durable store,
+        // and a store it cannot read counts as present.
         match services
             .sm_session_registry
             .probe_resumable_session_for_full_jid(target)
@@ -86,7 +66,17 @@ impl OrderedRelayDeliveryBridge {
                 LocalResourcePresence::Present
             }
             waddle_xmpp::stream_management::ResumableSessionProbe::Absent => {
-                LocalResourcePresence::Absent
+                // Resume publishes its socket before removing the detached
+                // session; the asynchronous session read may overlap it.
+                if services
+                    .connection_registry
+                    .get_entry(target)
+                    .is_some_and(|entry| entry.is_locally_hosted())
+                {
+                    LocalResourcePresence::Present
+                } else {
+                    LocalResourcePresence::Absent
+                }
             }
         }
     }

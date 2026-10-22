@@ -385,9 +385,11 @@ enum ElsewhereCase {
     /// The membership read itself cannot answer, so the set of nodes that
     /// would have to deny the resource is unknown. Fail closed.
     MembershipUnreadable,
-    /// A registered-remote mirror for the exact full JID, installed here by
-    /// the socket's host. Decided locally, without any probe.
+    /// A registered-remote mirror for the exact full JID whose socket host
+    /// confirms that the socket is still present.
     RegisteredRemote,
+    /// A missed unregister leaves a mirror after every peer lost the socket.
+    StaleRegisteredRemote,
 }
 
 /// Where the account's `UserActor` claim sits while a peer holds the socket.
@@ -443,7 +445,9 @@ impl crate::clustering::resource_presence::ResourcePresenceAsker for ScriptedRes
             // ONLY the node actually holding the socket knows about it. Every
             // other peer — including whichever one happens to hold the
             // account's claim — answers a truthful `Absent`.
-            ElsewhereCase::PeerHoldsTheSocket(_) if peer == &self.socket_host => {
+            ElsewhereCase::PeerHoldsTheSocket(_) | ElsewhereCase::RegisteredRemote
+                if peer == &self.socket_host =>
+            {
                 Ok(RelayResourcePresenceReply::Present)
             }
             // Exactly what kameo reports for a peer that does not know the
@@ -504,7 +508,10 @@ impl crate::clustering::resource_presence::ClusterMembership for ScriptedMembers
 /// resource EVERY peer authoritatively denies is a ghost, even while its
 /// account stays online on one of them.
 async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase) {
-    let evictable = case == ElsewhereCase::AbsentOnEveryPeer;
+    let evictable = matches!(
+        case,
+        ElsewhereCase::AbsentOnEveryPeer | ElsewhereCase::StaleRegisteredRemote
+    );
     let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
     let before = metrics
         .counter_sum("muc.ghost_occupants.evicted", &[])
@@ -539,7 +546,9 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         }
         // The registered-remote mirror is installed by the socket's host, so
         // that case leaves the claim here and isolates the resource lookup.
-        ElsewhereCase::RegisteredRemote => Some(local.clone()),
+        ElsewhereCase::RegisteredRemote | ElsewhereCase::StaleRegisteredRemote => {
+            Some(local.clone())
+        }
         _ => Some(socket_node.clone()),
     };
     // Every unexpired peer must be asked, not just whichever one the claim
@@ -585,7 +594,10 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         SharedNodeIdentity::new(local),
     )
     .await;
-    if case == ElsewhereCase::RegisteredRemote {
+    if matches!(
+        case,
+        ElsewhereCase::RegisteredRemote | ElsewhereCase::StaleRegisteredRemote
+    ) {
         assert_eq!(
             bridge
                 .register_remote_user_resource_on_owner(
@@ -632,10 +644,10 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
         .connection_registry
         .is_connected(&occupant);
     match case {
-        ElsewhereCase::RegisteredRemote => {
+        ElsewhereCase::RegisteredRemote | ElsewhereCase::StaleRegisteredRemote => {
             // The production mirror installs both a non-locally-hosted
-            // connection entry and an actor-tree resource; either one alone
-            // is enough to keep the seat.
+            // connection entry and an actor-tree resource. Neither proves
+            // the socket still exists on the other node.
             assert!(locally_registered, "the remote mirror is registered here");
             assert!(
                 waddle_xmpp::registry::try_get_resources_for_user(
@@ -688,10 +700,6 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
     tx.commit().await.expect("read commit");
     let asked = asked.lock().expect("probe log").clone();
     match case {
-        ElsewhereCase::RegisteredRemote => assert!(
-            asked.is_empty(),
-            "a locally mirrored resource needs no cross-node ask: {asked:?}"
-        ),
         ElsewhereCase::MembershipUnreadable => assert!(
             asked.is_empty(),
             "no peer may be asked without a membership answer: {asked:?}"
@@ -707,7 +715,7 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
                     .all(|(node, jid)| peers.contains(node) && jid == &occupant),
                 "each peer must be asked about the EXACT full JID: {asked:?}"
             );
-            if case == ElsewhereCase::AbsentOnEveryPeer {
+            if evictable {
                 assert!(
                     peers
                         .iter()
@@ -783,6 +791,24 @@ async fn sqlite_stalled_ghost_resource_of_a_live_remote_user_is_evicted() {
         ElsewhereCase::AbsentOnEveryPeer,
     )
     .await;
+}
+
+/// A lost unregister must not let an owner mirror vouch for a socket that
+/// every node has authoritatively denied, while that socket node stays healthy.
+#[tokio::test]
+async fn sqlite_stalled_stale_registered_remote_occupant_is_evicted() {
+    stalled_remote_occupant_recovery(
+        IngressFixture::sqlite().await,
+        ElsewhereCase::StaleRegisteredRemote,
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn postgres_stalled_stale_registered_remote_occupant_is_evicted() {
+    if let Some(f) = IngressFixture::postgres("stale_registered_remote_ghost").await {
+        stalled_remote_occupant_recovery(f, ElsewhereCase::StaleRegisteredRemote).await;
+    }
 }
 
 #[tokio::test]
