@@ -1,12 +1,16 @@
-//! Removing a member from every channel and space it is affiliated with.
+//! Removing a member from every room and space it is affiliated with.
 //!
 //! Deleting a bot (D8) must take it out of room state that lives outside
 //! the permission tuples: the room actor's affiliation list, its durable
 //! inbox recipients and, under clustering, the
-//! `clustering_muc_room_affiliations` mirror. Each channel goes through the
-//! same core as the admin `channels:set-affiliation` command, and each space
-//! through the PubSub affiliation the admin spaces commands write. The
-//! caller is responsible for authorization; for bots that is `bot#manage`.
+//! `clustering_muc_room_affiliations` mirror. A room's affiliation can exist
+//! without a channel tuple, so rooms are found three ways: the member's
+//! channel tuples, the live rooms on this node that list the member, and,
+//! under clustering, the durable mirror, which covers rooms other nodes own
+//! and dormant rooms. Each room goes through the same core as the admin
+//! `channels:set-affiliation` command, and each space through the PubSub
+//! affiliation the admin spaces commands write. The caller is responsible
+//! for authorization; for bots that is `bot#manage`.
 //!
 //! Under clustering a room's actor lives on the node holding its claim. A
 //! room another node owns is checked and cleared by that node, over the
@@ -18,13 +22,14 @@
 //! cleared and the caller gets [`ClearAffiliationsError::SoleRoomOwner`], so
 //! someone can make another owner first.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use jid::BareJid;
 use kameo::actor::ActorRef;
 use waddle_xmpp::commands::CommandResult;
-use waddle_xmpp::muc::room_actor::{ListAffiliations, RoomActor};
-use waddle_xmpp::muc::room_registry_actor::GetRoom;
+use waddle_xmpp::muc::room_actor::{GetAffiliation, ListAffiliations, RoomActor};
+use waddle_xmpp::muc::room_registry_actor::{GetRoom, ListRooms};
+use waddle_xmpp::muc::RoomConfig;
 use waddle_xmpp::pubsub::Affiliation as PubSubAffiliation;
 use waddle_xmpp::{Affiliation, XmppError};
 
@@ -65,11 +70,15 @@ enum RoomLocation {
     Remote(waddle_xmpp::ownership::NodeIdentity),
 }
 
-/// A channel the member holds a tuple on, with where its room actor lives.
+/// A room the member is affiliated with, with where its room actor lives.
 struct HeldChannel {
     channel_id: String,
     room_jid: BareJid,
     location: RoomLocation,
+    /// The durable mirror holds the room, so a room no node holds live is
+    /// loaded from it even without a managed channel record.
+    #[cfg(feature = "clustering")]
+    durable: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -88,7 +97,7 @@ enum StepOutcome {
     Moved,
 }
 
-/// Clear every channel and space affiliation `member` holds. Idempotent: a
+/// Clear every room and space affiliation `member` holds. Idempotent: a
 /// retry after a partial failure finishes the job.
 pub(crate) async fn clear_member_affiliations(
     state: &AppState,
@@ -103,34 +112,56 @@ pub(crate) async fn clear_member_affiliations(
         .await
         .map_err(|error| internal_err(format!("listing member tuples failed: {error}")))?;
 
-    let mut channel_ids = BTreeSet::new();
+    // Room JID to whether the durable mirror holds it.
+    let mut rooms = BTreeMap::new();
     let mut space_tuples = Vec::new();
     for tuple in tuples {
         match tuple.object.object_type {
             ObjectType::Channel => {
-                channel_ids.insert(tuple.object.id.clone());
+                let channel_id = &tuple.object.id;
+                let room_jid = waddle_xmpp::managed_room_jid(channel_id, state.muc_domain.as_str())
+                    .map_err(|error| {
+                        internal_err(format!("channel {channel_id} has no room JID: {error}"))
+                    })?;
+                rooms.insert(room_jid, false);
             }
             ObjectType::Space => space_tuples.push(tuple),
             _ => {}
         }
     }
+    for room_jid in live_affiliated_rooms(state, member).await? {
+        rooms.entry(room_jid).or_insert(false);
+    }
+    #[cfg(feature = "clustering")]
+    if let Some(store) = state.clustering_claims.muc_durable_store.as_ref() {
+        let durable = store
+            .list_member_affiliated_rooms(member)
+            .await
+            .map_err(|error| {
+                internal_err(format!("listing durable affiliations failed: {error}"))
+            })?;
+        for room_jid in durable {
+            rooms.insert(room_jid, true);
+        }
+    }
 
     // Check every room before touching any, so a sole-owner refusal leaves
     // the member's other memberships intact.
-    let mut channels = Vec::with_capacity(channel_ids.len());
-    for channel_id in channel_ids {
-        let room_jid = waddle_xmpp::managed_room_jid(&channel_id, state.muc_domain.as_str())
-            .map_err(|error| {
-                internal_err(format!("channel {channel_id} has no room JID: {error}"))
-            })?;
+    let mut channels = Vec::with_capacity(rooms.len());
+    for (room_jid, durable) in rooms {
+        let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(&room_jid) else {
+            return Err(internal_err(format!("room {room_jid} has no channel id")).into());
+        };
         // No room to clear: its tuples go with the caller's subject purge.
-        let Some(location) = locate_room(state, websocket_state, &room_jid).await? else {
+        let Some(location) = locate_room(state, websocket_state, &room_jid, durable).await? else {
             continue;
         };
         let mut channel = HeldChannel {
             channel_id,
             room_jid,
             location,
+            #[cfg(feature = "clustering")]
+            durable,
         };
         if run_step(state, websocket_state, &mut channel, member, Step::Check).await? {
             channels.push(channel);
@@ -157,7 +188,7 @@ async fn run_step(
     #[cfg(feature = "clustering")]
     let outcome = match outcome {
         StepOutcome::Moved => {
-            match locate_room(state, websocket_state, &channel.room_jid).await? {
+            match locate_room(state, websocket_state, &channel.room_jid, channel.durable).await? {
                 Some(location) => channel.location = location,
                 None => return Ok(false),
             }
@@ -259,13 +290,53 @@ async fn is_sole_owner(actor: &ActorRef<RoomActor>, member: &BareJid) -> Result<
     Ok(matches!(owners.as_slice(), [only] if &only.jid == member))
 }
 
+/// The live rooms on this node whose affiliation list names `member`.
+async fn live_affiliated_rooms(
+    state: &AppState,
+    member: &BareJid,
+) -> Result<Vec<BareJid>, AdminErr> {
+    let live = state
+        .room_registry
+        .ask(ListRooms)
+        .await
+        .map_err(|error| internal_err(format!("listing live rooms failed: {error}")))?;
+    let mut held = Vec::new();
+    for room_jid in live {
+        let actor = state
+            .room_registry
+            .ask(GetRoom {
+                room_jid: room_jid.clone(),
+            })
+            .await
+            .map_err(|error| internal_err(format!("room lookup for {room_jid} failed: {error}")))?;
+        // Gone since the listing: nothing left to clear.
+        let Some(actor) = actor else {
+            continue;
+        };
+        let affiliation = actor
+            .ask(GetAffiliation {
+                jid: member.clone(),
+            })
+            .await
+            .map_err(|error| {
+                internal_err(format!("affiliation lookup in {room_jid} failed: {error}"))
+            })?;
+        if affiliation != Affiliation::None {
+            held.push(room_jid);
+        }
+    }
+    Ok(held)
+}
+
 /// Where the room's actor lives: a live local actor, the node holding the
-/// room's claim, or a dormant channel loaded here the way a member join
-/// does. `None` when the channel no longer exists.
+/// room's claim, or a dormant room loaded here the way a join does. A
+/// dormant room is a channel's, or one the durable mirror holds (`durable`).
+/// `None` when the room no longer exists.
 async fn locate_room(
     state: &AppState,
     websocket_state: &WebSocketState,
     room_jid: &BareJid,
+    durable: bool,
 ) -> Result<Option<RoomLocation>, AdminErr> {
     let live = state
         .room_registry
@@ -290,18 +361,30 @@ async fn locate_room(
     let channel = get_managed_channel_for_room(websocket_state, room_jid)
         .await
         .map_err(|error| internal_err(format!("channel lookup for {room_jid} failed: {error}")))?;
-    let Some(channel) = channel else {
-        return Ok(None);
+    let (waddle_id, channel_id) = parse_room_jid_context(room_jid);
+    let (config, waddle_id, channel_id) = match channel {
+        Some(channel) => (channel.room_config(), waddle_id, channel.id),
+        // A room without a channel record: the actor restores its config
+        // and affiliations from the durable mirror, so this placeholder
+        // config, the one a join creates such a room with, is replaced.
+        None if durable => (
+            RoomConfig {
+                name: room_jid
+                    .node()
+                    .map(|node| node.to_string())
+                    .unwrap_or_else(|| "Room".to_string()),
+                members_only: false,
+                ..Default::default()
+            },
+            waddle_id,
+            channel_id,
+        ),
+        None => return Ok(None),
     };
-    let acquisition = get_or_create_room_actor(
-        websocket_state,
-        room_jid,
-        channel.room_config(),
-        parse_room_jid_context(room_jid).0,
-        channel.id,
-    )
-    .await
-    .map_err(|error| internal_err(format!("loading room {room_jid} failed: {error}")))?;
+    let acquisition =
+        get_or_create_room_actor(websocket_state, room_jid, config, waddle_id, channel_id)
+            .await
+            .map_err(|error| internal_err(format!("loading room {room_jid} failed: {error}")))?;
     Ok(Some(RoomLocation::Local(acquisition.actor_ref)))
 }
 

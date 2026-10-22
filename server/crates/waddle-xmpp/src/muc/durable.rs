@@ -528,6 +528,19 @@ pub trait MucDurableStore: Send + Sync {
         Box::pin(async { Ok(None) })
     }
 
+    /// Every room in which `member` holds a durable affiliation other than
+    /// `none`, whichever node owns the room and whether or not it is live.
+    /// Deleting an account uses it to find room state that lives outside
+    /// the permission tuples. The default answers an empty list: a store
+    /// that never commits durable affiliations holds none.
+    fn list_member_affiliated_rooms<'a>(
+        &'a self,
+        member: &'a BareJid,
+    ) -> MucDurableFuture<'a, Vec<BareJid>> {
+        let _ = member;
+        Box::pin(async { Ok(Vec::new()) })
+    }
+
     /// Establish the exact claim fence for forthcoming actor-owned durable
     /// work before the room is published. This is separate from
     /// [`Self::record_claim_fence`]: preparation-time fenced loads/commits

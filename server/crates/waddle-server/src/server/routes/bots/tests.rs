@@ -849,7 +849,10 @@ async fn bots_api_counter_records_op_and_outcome() {
 #[cfg(feature = "clustering")]
 mod remote_room_owner {
     use waddle_xmpp::muc::room_actor::{ListAffiliations, RoomActor};
-    use waddle_xmpp::muc::RoomConfig;
+    use waddle_xmpp::muc::{
+        DurableRoomState, MucDurableFuture, MucDurableStore, RoomClaimFenceContext,
+        RoomCommitFuture, RoomConfig, RoomDurableMutation, RoomMutationEffects,
+    };
     use waddle_xmpp::ownership::{
         ClaimStore, Entity, EntityType, InProcessClaimStore, NodeIdentity, SharedNodeIdentity,
     };
@@ -884,6 +887,7 @@ mod remote_room_owner {
         claims: &Arc<dyn ClaimStore>,
         node_id: &str,
         db_pool: Option<Arc<crate::db::DatabasePool>>,
+        muc_durable_store: Option<Arc<dyn MucDurableStore>>,
     ) -> Arc<WebSocketState> {
         create_test_websocket_state_with_extension_manager(
             empty_extension_manager().await,
@@ -892,6 +896,7 @@ mod remote_room_owner {
                 clustering: Some(ClusteringHandles {
                     claim_store: Some(Arc::clone(claims)),
                     node_identity: Some(SharedNodeIdentity::new(identity(node_id))),
+                    muc_durable_store,
                     ..Default::default()
                 }),
                 share_app_room_registry: true,
@@ -902,12 +907,18 @@ mod remote_room_owner {
     }
 
     async fn cluster() -> Cluster {
+        cluster_with_mirror(None).await
+    }
+
+    /// `mirror` is node-1's view of the durable affiliation mirror.
+    async fn cluster_with_mirror(mirror: Option<Arc<dyn MucDurableStore>>) -> Cluster {
         let claims: Arc<dyn ClaimStore> = Arc::new(InProcessClaimStore::new());
-        let socket = node(&claims, "node-1", None).await;
+        let socket = node(&claims, "node-1", None, mirror).await;
         let remote = node(
             &claims,
             "node-2",
             Some(Arc::clone(&socket.deps.app_state.db_pool)),
+            None,
         )
         .await;
         let state = BotsState::new(
@@ -1167,5 +1178,123 @@ mod remote_room_owner {
             .await
             .expect("get")
             .is_some());
+    }
+
+    /// The durable affiliation mirror, as far as the delete reads it:
+    /// `(room, member)` rows.
+    #[derive(Default)]
+    struct AffiliationMirror {
+        rows: std::sync::Mutex<Vec<(BareJid, BareJid)>>,
+    }
+
+    impl MucDurableStore for AffiliationMirror {
+        fn load_room_state_fenced<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, Option<DurableRoomState>> {
+            Box::pin(async { Ok(None) })
+        }
+
+        fn commit_room_mutation<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
+            _intent: RoomDurableMutation,
+            _effects: RoomMutationEffects,
+        ) -> RoomCommitFuture<'a> {
+            panic!("the delete only reads the affiliation mirror")
+        }
+
+        fn check_exact_claim_fence<'a>(
+            &'a self,
+            _room_jid: &'a BareJid,
+            _fence: &'a RoomClaimFenceContext,
+        ) -> MucDurableFuture<'a, bool> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn list_member_affiliated_rooms<'a>(
+            &'a self,
+            member: &'a BareJid,
+        ) -> MucDurableFuture<'a, Vec<BareJid>> {
+            let rooms = self
+                .rows
+                .lock()
+                .expect("mirror rows")
+                .iter()
+                .filter(|(_, held_by)| held_by == member)
+                .map(|(room, _)| room.clone())
+                .collect();
+            Box::pin(async move { Ok(rooms) })
+        }
+    }
+
+    /// A room another node owns can list the bot without any channel tuple
+    /// naming it; the durable mirror is what finds it.
+    #[tokio::test]
+    async fn delete_clears_an_untupled_remote_room_found_through_the_mirror() {
+        let mirror = Arc::new(AffiliationMirror::default());
+        let cluster = cluster_with_mirror(Some(mirror.clone())).await;
+        let f = &cluster.local;
+        let (session, alice) = f.member("alice").await;
+        let bot: BareJid = f
+            .create_ok(&session, "standup")
+            .await
+            .parse()
+            .expect("bot JID");
+        let (remote_jid, remote_room) = room_on(
+            &cluster,
+            cluster.remote.as_ref(),
+            "node-2",
+            "remote-room",
+            &alice,
+            &bot,
+            Affiliation::Member,
+        )
+        .await;
+        mirror
+            .rows
+            .lock()
+            .expect("mirror rows")
+            .push((remote_jid.clone(), bot.clone()));
+        // Leave the grant only in the room and its mirror row.
+        let permissions = &f.socket.deps.app_state.permission_actor;
+        let tuples = permissions
+            .ask(crate::permissions::ListSubjectTuples {
+                subject: Subject::user(bot.as_str()),
+            })
+            .await
+            .expect("list bot tuples");
+        for tuple in tuples
+            .into_iter()
+            .filter(|tuple| tuple.object.object_type == ObjectType::Channel)
+        {
+            permissions
+                .ask(crate::permissions::DeleteTuple { tuple })
+                .await
+                .expect("drop channel tuple");
+        }
+
+        let (reply, asked) = delete(&cluster, &session, bot.as_str()).await;
+
+        assert_eq!(reply.status, StatusCode::NO_CONTENT, "{}", reply.body);
+        assert_eq!(
+            affiliation_of(&remote_room, &bot).await,
+            None,
+            "the remote room still lists the bot"
+        );
+        let steps: Vec<_> = asked
+            .iter()
+            .map(|message| (message.room.clone(), message.step))
+            .collect();
+        assert_eq!(
+            steps,
+            [
+                (remote_jid.clone(), RelayMucMemberClearStep::Check),
+                (remote_jid, RelayMucMemberClearStep::Clear),
+            ],
+            "the mirror's room is checked, then cleared, by its owner"
+        );
     }
 }

@@ -21,8 +21,8 @@ use sha2::Sha256;
 use sqlx::SqlitePool;
 use waddle_server::db::{Database, DatabaseConfig, DatabaseDriver};
 use waddle_server::permissions::{
-    CheckPermission, Object, ObjectType, Permission, PermissionActor, PermissionError, Relation,
-    Subject, Tuple, WriteTuple,
+    CheckPermission, DeleteTuple, ListSubjectTuples, Object, ObjectType, Permission,
+    PermissionActor, PermissionError, Relation, Subject, Tuple, WriteTuple,
 };
 use waddle_ws_test_support::{TestServer, WsXmppClient};
 use xmpp_parsers::message::{Lang, Message, MessageType};
@@ -828,6 +828,103 @@ async fn delete_clears_room_affiliation_and_durable_recipients() {
         "a recreated bot inherited room membership: {members}"
     );
     assert!(!can_read().await);
+    admin.close().await.expect("close");
+}
+
+/// A room can list the bot without any channel tuple naming it, so the
+/// delete must find rooms by affiliation, not only through tuples.
+#[tokio::test]
+async fn delete_clears_room_affiliation_without_a_channel_tuple() {
+    let fixture = Fixture::start().await;
+    let database = Database::from_config(
+        "user-bots-delete-untupled",
+        &DatabaseConfig::new(DatabaseDriver::Sqlite, fixture.url.clone()),
+    )
+    .await
+    .expect("inspection database");
+    let session = sign_in_for_bots_api(&fixture, &database, "alice").await;
+    let bot = format!("alice+standup@{BOTS_DOMAIN}");
+    let bot_path = format!("/api/bots/{}", urlencoding::encode(&bot));
+    let create = serde_json::json!({ "name": "standup" });
+    assert_eq!(
+        bots_api(
+            &fixture,
+            &session,
+            reqwest::Method::POST,
+            "/api/bots",
+            Some(create.clone())
+        )
+        .await,
+        reqwest::StatusCode::CREATED
+    );
+
+    let room = format!("bots-{}@muc.{DOMAIN}", uuid::Uuid::new_v4().simple());
+    let mut admin = fixture.connect_admin("delete-untupled").await;
+    create_members_only_room(&mut admin, &room, "untupled-members-only").await;
+    send(
+        &mut admin,
+        member_affiliation_iq(&room, "untupled-grant", &bot),
+    )
+    .await;
+    expect_iq_result(&mut admin, "untupled-grant").await;
+
+    // Leave the grant only in the room: drop every channel tuple naming the
+    // bot.
+    let permissions =
+        PermissionActor::spawn(PermissionActor::new_for_tests(Arc::new(database.clone())));
+    let tuples = permissions
+        .ask(ListSubjectTuples {
+            subject: Subject::user(&bot),
+        })
+        .await
+        .expect("list bot tuples");
+    let channel_tuples: Vec<Tuple> = tuples
+        .into_iter()
+        .filter(|tuple| tuple.object.object_type == ObjectType::Channel)
+        .collect();
+    assert!(
+        !channel_tuples.is_empty(),
+        "the grant wrote a channel tuple"
+    );
+    for tuple in channel_tuples {
+        permissions
+            .ask(DeleteTuple { tuple })
+            .await
+            .expect("drop channel tuple");
+    }
+    assert!(
+        room_members(&mut admin, &room, "untupled-members-before")
+            .await
+            .contains(&bot),
+        "the room still lists the bot"
+    );
+
+    assert_eq!(
+        bots_api(&fixture, &session, reqwest::Method::DELETE, &bot_path, None).await,
+        reqwest::StatusCode::NO_CONTENT
+    );
+    let members = room_members(&mut admin, &room, "untupled-members-after-delete").await;
+    assert!(
+        !members.contains(&bot),
+        "the room's affiliation list still has the bot: {members}"
+    );
+
+    assert_eq!(
+        bots_api(
+            &fixture,
+            &session,
+            reqwest::Method::POST,
+            "/api/bots",
+            Some(create)
+        )
+        .await,
+        reqwest::StatusCode::CREATED
+    );
+    let members = room_members(&mut admin, &room, "untupled-members-after-recreate").await;
+    assert!(
+        !members.contains(&bot),
+        "a recreated bot inherited room membership: {members}"
+    );
     admin.close().await.expect("close");
 }
 
