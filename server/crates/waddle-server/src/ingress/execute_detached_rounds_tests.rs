@@ -5,6 +5,7 @@ use crate::ingress_uow::DeliveryProgressRepository;
 use crate::server::routes::interpret::effects::{
     direct::DurableDirectEffect, DurableEffect, Effect,
 };
+use crate::server::routes::interpret::test_bots_domain;
 use waddle_xmpp::ingress::IngressEffectIntent;
 use waddle_xmpp::mam::{ArchiveExpectation, ArchivedMessage};
 
@@ -48,7 +49,11 @@ async fn sqlite_partial_detached_fanout_rechecks_preserve_accepted_resource() {
         .expect("detached session");
     }
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.sm_session_registry = Some(&sm);
     let mut decisions = Vec::new();

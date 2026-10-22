@@ -226,7 +226,7 @@ async fn reversed_live_execution(fixture: IngressFixture) {
         })
         .await
         .expect("register recipient");
-    let mut deps = Deps::new(&connections, "example.com");
+    let mut deps = Deps::new(&connections, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     let targets = std::slice::from_ref(&target);
     let mut a = submission(&fixture, &fixture.principal, "dispatch-a", targets, false);
@@ -312,7 +312,7 @@ struct Recovery {
 
 impl RecoveryEnvironment for Recovery {
     fn recovery_deps(&self) -> Deps<'_> {
-        let mut deps = Deps::new(&self.connections, "example.com");
+        let mut deps = Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.sm_session_registry = Some(&self.sm);
         deps
     }
@@ -624,7 +624,7 @@ async fn pending_stream_progress(fixture: IngressFixture) {
     let live = commit_submission(&fixture.uow, &live, 5)
         .await
         .expect("commit live submission");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     execute_effects(
         &fixture.uow,
@@ -722,4 +722,14 @@ async fn archived_headline_dispatch_postgres() {
     if let Some(fixture) = IngressFixture::postgres("ord_head").await {
         reversed_execution(fixture, true, true).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

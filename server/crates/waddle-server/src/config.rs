@@ -1131,6 +1131,53 @@ pub struct ServerConfig {
     /// Origins a browser sign-in may return to: the origin of `base_url`
     /// plus every origin in `WADDLE_CORS_ORIGINS`.
     pub trusted_web_origins: crate::auth::redirect::TrustedWebOrigins,
+    /// User bot account limits from `WADDLE_BOTS_*`.
+    pub bots: BotConfig,
+}
+
+/// User bot account limits.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BotConfig {
+    /// Most bots one user may own, disabled bots included. `0` disables
+    /// bot creation.
+    pub per_user_limit: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum BotConfigError {
+    #[error("WADDLE_BOTS_PER_USER_LIMIT must be a non-negative integer")]
+    PerUserLimit,
+}
+
+impl Default for BotConfig {
+    fn default() -> Self {
+        Self { per_user_limit: 10 }
+    }
+}
+
+impl BotConfig {
+    pub fn from_env() -> Result<Self, BotConfigError> {
+        Self::from_vars(std::env::vars())
+    }
+
+    pub fn from_vars<I, K, V>(vars: I) -> Result<Self, BotConfigError>
+    where
+        I: IntoIterator<Item = (K, V)>,
+        K: AsRef<str>,
+        V: AsRef<str>,
+    {
+        let mut config = Self::default();
+        for (key, value) in vars {
+            if key.as_ref() == "WADDLE_BOTS_PER_USER_LIMIT" {
+                config.per_user_limit = value
+                    .as_ref()
+                    .trim()
+                    .parse()
+                    .map_err(|_| BotConfigError::PerUserLimit)?;
+            }
+        }
+        Ok(config)
+    }
 }
 
 /// Dedicated ingress authority transaction limits.
@@ -1606,6 +1653,7 @@ impl Default for ServerConfig {
             apns: None,
             fcm: None,
             trusted_web_origins: test_trusted_web_origins(),
+            bots: BotConfig::default(),
         }
     }
 }
@@ -1643,6 +1691,7 @@ impl ServerConfig {
             std::env::var("WADDLE_CORS_ORIGINS").ok().as_deref(),
         )
         .map_err(|error| error.to_string())?;
+        let bots = BotConfig::from_env().map_err(|error| error.to_string())?;
 
         Ok(Self {
             mode,
@@ -1659,6 +1708,7 @@ impl ServerConfig {
             apns,
             fcm,
             trusted_web_origins,
+            bots,
         })
     }
 
@@ -1697,6 +1747,7 @@ impl ServerConfig {
             apns: None,
             fcm: None,
             trusted_web_origins: test_trusted_web_origins(),
+            bots: BotConfig::default(),
         }
     }
 
@@ -1717,6 +1768,7 @@ impl ServerConfig {
             apns: None,
             fcm: None,
             trusted_web_origins: test_trusted_web_origins(),
+            bots: BotConfig::default(),
         }
     }
 }
@@ -3030,6 +3082,38 @@ mod ingress_authority_config_tests {
             assert_eq!(
                 IngressConfig::from_vars([("WADDLE_INGRESS_RETRY_ATTEMPTS", value)]),
                 Err(IngressConfigError::RetryAttempts)
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod bot_config_tests {
+    use super::{BotConfig, BotConfigError};
+
+    #[test]
+    fn bot_limit_defaults_to_10() {
+        assert_eq!(
+            BotConfig::from_vars(std::iter::empty::<(&str, &str)>()).expect("defaults"),
+            BotConfig { per_user_limit: 10 }
+        );
+        assert_eq!(
+            BotConfig::from_vars([("WADDLE_BOTS_PER_USER_LIMIT", "0")]).expect("zero"),
+            BotConfig { per_user_limit: 0 }
+        );
+        assert_eq!(
+            BotConfig::from_vars([("WADDLE_BOTS_PER_USER_LIMIT", "25")]).expect("override"),
+            BotConfig { per_user_limit: 25 }
+        );
+    }
+
+    #[test]
+    fn bot_limit_rejects_garbage() {
+        for value in ["", "-1", "ten", "1.5", "4294967296"] {
+            assert_eq!(
+                BotConfig::from_vars([("WADDLE_BOTS_PER_USER_LIMIT", value)]),
+                Err(BotConfigError::PerUserLimit),
+                "{value:?}"
             );
         }
     }

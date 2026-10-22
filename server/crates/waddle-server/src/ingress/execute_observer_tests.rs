@@ -4,6 +4,7 @@ use crate::ingress::{
     test_support::{capture_room_message, IngressFixture},
 };
 use crate::server::routes::interpret::effects::{room::ExternalRoomEffect, PlanSuppressionPolicy};
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
 use xmpp_parsers::message::Message;
@@ -59,7 +60,7 @@ async fn observer_retry_preserves_payload_without_synchronous_invocation(fixture
     assert_eq!(fixture.count("ingress_effect_intents").await, 1);
     assert_eq!(first.external_receipts[0].len(), 1);
     let registry = ConnectionRegistry::new();
-    let unavailable_deps = Deps::new(&registry, "example.com");
+    let unavailable_deps = Deps::new(&registry, "example.com", test_bots_domain());
     let deferred = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -289,7 +290,7 @@ async fn two_observer_plugins_record_distinct_obligations(fixture: IngressFixtur
         .all(|receipts| receipts.len() == 1));
     assert_ne!(decision.external_receipts[0], decision.external_receipts[1]);
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let report = tokio::time::timeout(
         Duration::from_millis(500),
         execute_effects(

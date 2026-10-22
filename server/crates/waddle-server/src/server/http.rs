@@ -496,6 +496,13 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
             Arc::clone(&websocket_state.deps.protocol.pubsub_storage),
             server_config.session_key.as_bytes(),
         )));
+    let bots_router = routes::bots::router(Arc::new(routes::bots::BotsState::new(
+        Arc::clone(&auth_state),
+        Arc::clone(&websocket_state.deps.app_state),
+        Arc::clone(&websocket_state),
+        &websocket_state.deps.service_domains.bots,
+        server_config.bots.per_user_limit,
+    )));
 
     // Upload router for XEP-0363 HTTP File Upload
     let upload_state = Arc::new(UploadState::new(state.clone()));
@@ -541,7 +548,8 @@ pub(crate) async fn create_router(deps: RouterDeps) -> Result<Router> {
         .merge(auth_page_router)
         .merge(extension_webhooks_router)
         .merge(livekit_webhook_router)
-        .merge(calendar_feed_router);
+        .merge(calendar_feed_router)
+        .merge(bots_router);
 
     // Test-only profile-publish route. Only mounted when:
     // 1. The fixed-account flag is on (the test harness opt-in).
@@ -702,7 +710,7 @@ async fn create_websocket_state(
         // (`target_to == spaces_domain`); take the domain part so a
         // node-qualified `WADDLE_SPACES_JID` cannot break the comparison.
         xmpp_config.spaces_jid.domain().as_str(),
-    );
+    )?;
     let room_registry = state.room_registry.clone();
     let pubsub_storage = Arc::clone(&state.pubsub_storage);
 
@@ -989,6 +997,7 @@ async fn create_websocket_state(
             state.db_pool.global_actor(),
             &state.permission_actor,
             &crate::server::bootstrap_membership::BootstrapMembershipConfig::from_env(),
+            auth_state.caps_server_domain.as_jid().domain(),
         )
         .await;
         if let Err(error) = bootstrap_fresh_xmpp_topology(
@@ -1395,6 +1404,7 @@ fn promote_to_serving_and_spawn_janitors(
     spawn_room_effect_outbox_janitor(websocket_state);
     spawn_push_service_publish_job_janitor(websocket_state);
     spawn_auth_state_janitor(websocket_state);
+    crate::server::bot_janitor::spawn_bot_lifecycle_janitor(websocket_state);
     crate::auth::directory::spawn_account_key_backfill(
         websocket_state.deps.app_state.db_pool.global_actor(),
         crate::auth::directory::ACCOUNT_KEY_BACKFILL_INTERVAL,

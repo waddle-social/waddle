@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::ingress::{
     DmCallThreadKey, IngressEffectIntent, PendingDmCallOffer, PlannedDmCallState,
@@ -59,7 +60,7 @@ async fn cancelled_call_offer_replays(fixture: IngressFixture) {
     assert_eq!(retry.external_receipts[0].len(), 1);
     let socket = crate::server::routes::websocket::tests::create_test_websocket_state().await;
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(socket.as_ref());
     let completed = execute_effects(
         &fixture.uow,
@@ -93,7 +94,7 @@ async fn cancelled_call_offer_replays(fixture: IngressFixture) {
     let duplicate = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("receipted retry");
-    let unavailable = Deps::new(&registry, "example.com");
+    let unavailable = Deps::new(&registry, "example.com", test_bots_domain());
     let skipped = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -289,7 +290,11 @@ async fn confirmed_proceed_state_supersedes_pending_transition(fixture: IngressF
     assert_eq!(retry.external.len(), 3);
     // No execution dependency is supplied: every old transition must be discharged
     // from the later confirmed state, rather than reinstalling any snapshot.
-    let unavailable = Deps::new(&protocol.connection_registry, "example.com");
+    let unavailable = Deps::new(
+        &protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     let replay = execute_effects(
         &fixture.uow,
         &fixture.db,

@@ -2080,7 +2080,11 @@ mod audience_tests {
     fn xep0372_mentioned_non_member_plans_a_notification_recovery_row() {
         let registry = waddle_xmpp::registry::ConnectionRegistry::new();
         let sink = PlanSink::new();
-        let mut deps = Deps::new(&registry, "example.com");
+        let mut deps = Deps::new(
+            &registry,
+            "example.com",
+            crate::server::routes::interpret::test_bots_domain(),
+        );
         deps.effects = &sink;
         let room = bare("lobby@muc.example.com");
         let carol = bare("carol@example.com");
@@ -2112,7 +2116,11 @@ mod audience_tests {
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let registry = waddle_xmpp::registry::ConnectionRegistry::new();
         let sink = PlanSink::new();
-        let mut deps = Deps::new(&registry, "example.com");
+        let mut deps = Deps::new(
+            &registry,
+            "example.com",
+            crate::server::routes::interpret::test_bots_domain(),
+        );
         deps.effects = &sink;
         deps.web_socket_state = Some(&state);
         let room = bare("lobby@muc.example.com");
@@ -2161,7 +2169,11 @@ mod audience_tests {
         let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
         let registry = waddle_xmpp::registry::ConnectionRegistry::new();
         let sink = PlanSink::new();
-        let mut deps = Deps::new(&registry, "example.com");
+        let mut deps = Deps::new(
+            &registry,
+            "example.com",
+            crate::server::routes::interpret::test_bots_domain(),
+        );
         deps.effects = &sink;
         deps.web_socket_state = Some(&state);
         let room = bare("lobby@muc.example.com");

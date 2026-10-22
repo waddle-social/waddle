@@ -467,7 +467,8 @@ async fn load_users(db_actor: &ActorRef<DbActor>) -> Result<Vec<BackfillRow>, Ba
                 FROM users u
                 LEFT JOIN user_avatar_fetch_state s
                   ON s.xmpp_localpart = u.xmpp_localpart
-                WHERE u.avatar_url IS NOT NULL OR u.display_name IS NOT NULL
+                WHERE u.kind = 'human'
+                  AND (u.avatar_url IS NOT NULL OR u.display_name IS NOT NULL)
             "#
             .to_string(),
             params: vec![],
@@ -828,5 +829,55 @@ mod tests {
             PERMANENT_KINDS.contains(&"invalid_url"),
             "synthesized 'invalid_url' kind must be in PERMANENT_KINDS"
         );
+    }
+
+    #[tokio::test]
+    async fn profile_backfill_skips_bots() {
+        use crate::db::actor::DbExecute;
+        use crate::db::{Database, MigrationRunner};
+        use kameo::actor::Spawn;
+
+        let db = Database::in_memory("profile-backfill-bots")
+            .await
+            .expect("database");
+        MigrationRunner::global()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let actor = DbActor::spawn(DbActor::new(db));
+        for (jid, localpart, kind, owner) in [
+            ("alice@localhost", "alice", "human", None),
+            (
+                "alice+standup@bots.localhost",
+                "alice+standup",
+                "bot",
+                Some("alice@localhost"),
+            ),
+        ] {
+            actor
+                .ask(DbExecute {
+                    sql: "INSERT INTO users \
+                          (jid, username, xmpp_localpart, display_name, avatar_url, kind, owner_jid, created_at, updated_at) \
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
+                        .to_string(),
+                    params: vec![
+                        jid.into(),
+                        localpart.into(),
+                        localpart.into(),
+                        localpart.into(),
+                        "https://example.com/a.png".into(),
+                        kind.into(),
+                        owner.map_or(crate::db::Value::NullText, Into::into),
+                        "2026-01-01T00:00:00Z".into(),
+                        "2026-01-01T00:00:00Z".into(),
+                    ],
+                })
+                .await
+                .expect("seed account");
+        }
+
+        let rows = load_users(&actor).await.expect("load users");
+        let localparts: Vec<&str> = rows.iter().map(|row| row.xmpp_localpart.as_str()).collect();
+        assert_eq!(localparts, vec!["alice"]);
     }
 }

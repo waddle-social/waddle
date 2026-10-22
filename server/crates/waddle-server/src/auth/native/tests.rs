@@ -224,6 +224,49 @@ async fn test_validate_username() {
     assert!(validate_username("alice\tbob").is_err());
 }
 
+#[test]
+fn validate_username_rejects_plus() {
+    assert!(matches!(
+        validate_username("alice+work"),
+        Err(AuthError::InvalidUsername(_))
+    ));
+    assert!(matches!(
+        validate_username("+"),
+        Err(AuthError::InvalidUsername(_))
+    ));
+}
+
+/// `+` is reserved for bot JIDs, so registration refuses it (XEP-0077
+/// `<not-acceptable/>`) before writing anything.
+#[tokio::test]
+async fn register_with_plus_is_not_acceptable() {
+    let db = create_test_db().await;
+    let actor = crate::db::actor::DbActor::spawn(crate::db::actor::DbActor::new((*db).clone()));
+    let store = NativeUserStore::new(actor.clone());
+
+    let result = store
+        .register(RegisterRequest {
+            username: "rawkode+standup".to_string(),
+            domain: "example.com".to_string(),
+            password: test_password(),
+            email: None,
+        })
+        .await;
+    assert!(matches!(result, Err(AuthError::InvalidUsername(_))));
+
+    let rows = actor
+        .ask(DbQuery {
+            sql: "SELECT COUNT(*) FROM native_users".to_string(),
+            params: vec![],
+        })
+        .await
+        .expect("count native users");
+    assert!(matches!(
+        rows.first().and_then(|row| row.first()),
+        Some(crate::db::Value::Integer(0))
+    ));
+}
+
 /// A native account is its canonical JID: names that nodeprep to the same
 /// localpart are one account for registration and SCRAM lookup.
 #[tokio::test]

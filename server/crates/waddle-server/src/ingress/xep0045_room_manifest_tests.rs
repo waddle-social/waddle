@@ -197,7 +197,11 @@ async fn postgres_clustered_legacy_remote_completion_releases_local_successor() 
     let target: jid::FullJid = "alice@example.com/phone".parse().expect("target");
     let fence = fixture.room_fence(&room).await;
     let connections = waddle_xmpp::registry::ConnectionRegistry::new();
-    let deps = Deps::new(&connections, "example.com");
+    let deps = Deps::new(
+        &connections,
+        "example.com",
+        crate::server::routes::interpret::test_bots_domain(),
+    );
     let wire = Arc::new(Mutex::new(Vec::new()));
     let mut original = None;
     let mut local_rx = None;

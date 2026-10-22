@@ -146,6 +146,7 @@ impl Default for PermissionSchema {
             .with_type(ObjectType::Message, message_schema())
             .with_type(ObjectType::Dm, dm_schema())
             .with_type(ObjectType::Role, role_schema())
+            .with_type(ObjectType::Bot, bot_schema())
     }
 }
 
@@ -159,6 +160,7 @@ definition server {
 
   permission create_space = owner
   permission create_muc = owner
+  permission create_bot = owner + admin + member
 }
 
 definition space {
@@ -222,6 +224,12 @@ definition role {
   permission assign = manager + parent->admin
   permission manage = manager + parent->admin
 }
+
+definition bot {
+  relation owner: user
+
+  permission manage = owner
+}
 "#;
 
 /// Schema for deployment/server objects.
@@ -248,6 +256,14 @@ fn server_schema() -> ObjectTypeSchema {
         )
         .with_permission("create_space", ComputedPermission::direct("owner"))
         .with_permission("create_muc", ComputedPermission::direct("owner"))
+        .with_permission(
+            "create_bot",
+            ComputedPermission::union(vec![
+                ComputedPermission::direct("member"),
+                ComputedPermission::direct("admin"),
+                ComputedPermission::direct("owner"),
+            ]),
+        )
 }
 
 /// Schema for Space objects
@@ -470,6 +486,16 @@ fn role_schema() -> ObjectTypeSchema {
                 ComputedPermission::arrow("space", "admin"),
             ]),
         )
+}
+
+/// Schema for user-owned bot accounts. Bots are `user:` subjects elsewhere;
+/// this object only records who may manage the bot.
+fn bot_schema() -> ObjectTypeSchema {
+    ObjectTypeSchema::new()
+        // Relations
+        .with_relation("owner")
+        // Permissions
+        .with_permission("manage", ComputedPermission::direct("owner"))
 }
 
 #[cfg(test)]

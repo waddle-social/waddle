@@ -303,7 +303,7 @@ async fn route_planned_direct_message(
         inventory.select(requested)
     };
     if selection.originals.is_empty() {
-        if bare.domain().as_str() != deps.local_domain {
+        if !deps.is_hosted_account_domain(&bare) {
             return Vec::new();
         }
         if let Some(reply) = reject_unknown_local_account(deps, &bare, &stanza).await {
@@ -485,7 +485,7 @@ async fn route_to_full_jid(
                 )
         ) {
             let bare = full.to_bare();
-            if bare.domain().as_str() == deps.local_domain {
+            if deps.is_hosted_account_domain(&bare) {
                 if let Some(reply) = reject_unknown_local_account(deps, &bare, &stanza).await {
                     return reply;
                 }
@@ -767,7 +767,7 @@ async fn route_to_bare_jid(
         // selected target turning out stale.
         let live_targets = select_bare_jid_live_targets(deps, &bare).await;
         if live_targets.is_empty() && detached_targets.is_empty() {
-            if bare.domain().as_str() != deps.local_domain {
+            if !deps.is_hosted_account_domain(&bare) {
                 debug!(
                     bare_jid = %bare,
                     local_domain = %deps.local_domain,
@@ -1042,7 +1042,7 @@ async fn route_to_bare_jid(
                 capture_route_direct_intent(deps, &bare, captured_fanout);
             }
             if !any_landed {
-                if bare.domain().as_str() != deps.local_domain {
+                if !deps.is_hosted_account_domain(&bare) {
                     debug!(
                         bare_jid = %bare,
                         local_domain = %deps.local_domain,
@@ -1070,18 +1070,29 @@ async fn route_to_bare_jid(
     }
 }
 
-/// Before offline storage, require a known OIDC or native account. A failed
-/// lookup produces a temporary stanza rejection, never evidence of existence.
-/// Domain-only services and state-free routing fixtures have no account lookup.
+/// Before offline storage, require a known OIDC or native account, or an
+/// enabled bot on the bots domain. A failed lookup produces a temporary
+/// stanza rejection, never evidence of existence. Other domain-only services
+/// and state-free routing fixtures have no account lookup. The bare bots
+/// domain hosts no entity: it answers `<service-unavailable/>` exactly like
+/// an absent account, for messages as well as IQs (RFC 6121 §8.5.1).
 async fn reject_unknown_local_account(
     deps: &Deps<'_>,
     bare: &BareJid,
     stanza: &Stanza,
 ) -> Option<Vec<Stanza>> {
     let state = deps.web_socket_state?;
-    let node = bare.node()?;
     let actor = state.deps.app_state.db_pool.global_actor();
-    match crate::auth::local_account_exists(actor, node.as_str(), bare.domain().as_str()).await {
+    let exists = if deps.is_bots_domain(bare) {
+        if bare.node().is_none() {
+            return Some(plan::bounce_nonexistent(deps, stanza));
+        }
+        crate::auth::bots::store::bot_account_exists(actor, bare).await
+    } else {
+        let node = bare.node()?;
+        crate::auth::local_account_exists(actor, node.as_str(), bare.domain().as_str()).await
+    };
+    match exists {
         Ok(true) => None,
         Ok(false) => Some(plan::bounce_nonexistent(deps, stanza)),
         Err(error) => {

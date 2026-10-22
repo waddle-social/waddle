@@ -247,7 +247,7 @@ pub async fn run_users_list_query(
     let limit = args.page_size as i64 + 1;
     let mut sql = String::from(
         "SELECT localpart, display_name FROM (\
-             SELECT xmpp_localpart AS localpart, display_name FROM users \
+             SELECT xmpp_localpart AS localpart, display_name FROM users WHERE kind = 'human' \
              UNION \
              SELECT username AS localpart, NULL AS display_name FROM native_users\
          ) WHERE 1 = 1",
@@ -410,5 +410,70 @@ mod tests {
         };
         let form = build_result_form(&page);
         assert!(form.field("next_cursor").is_none());
+    }
+
+    #[tokio::test]
+    async fn admin_users_list_excludes_bots() {
+        use crate::db::actor::DbExecute;
+        use crate::db::{Database, MigrationRunner};
+        use kameo::actor::Spawn;
+
+        let db = Database::in_memory("admin-users-list-bots")
+            .await
+            .expect("database");
+        MigrationRunner::global()
+            .run(&db)
+            .await
+            .expect("migrations");
+        let actor = DbActor::spawn(DbActor::new(db));
+        for (jid, localpart, kind, owner) in [
+            ("alice@localhost", "alice", "human", None),
+            (
+                "alice+standup@bots.localhost",
+                "alice+standup",
+                "bot",
+                Some("alice@localhost"),
+            ),
+        ] {
+            actor
+                .ask(DbExecute {
+                    sql: "INSERT INTO users \
+                          (jid, username, xmpp_localpart, display_name, kind, owner_jid, created_at, updated_at) \
+                          VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
+                        .to_string(),
+                    params: vec![
+                        jid.into(),
+                        localpart.into(),
+                        localpart.into(),
+                        localpart.into(),
+                        kind.into(),
+                        owner.map_or(Value::NullText, Into::into),
+                        "2026-01-01T00:00:00Z".into(),
+                        "2026-01-01T00:00:00Z".into(),
+                    ],
+                })
+                .await
+                .expect("seed account");
+        }
+
+        for prefix in [None, Some("alice".to_string())] {
+            let page = run_users_list_query(
+                &actor,
+                &[],
+                "localhost",
+                &UsersListArgs {
+                    prefix,
+                    ..UsersListArgs::default()
+                },
+            )
+            .await
+            .expect("users list");
+            let jids: Vec<String> = page
+                .entries
+                .iter()
+                .map(|entry| entry.jid.to_string())
+                .collect();
+            assert_eq!(jids, vec!["alice@localhost".to_string()]);
+        }
     }
 }

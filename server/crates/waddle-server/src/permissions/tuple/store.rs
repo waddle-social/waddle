@@ -470,6 +470,49 @@ impl TupleStore {
         Self::rows_to_tuples(rows)
     }
 
+    /// Delete every tuple held by `subject`, whatever the object or relation.
+    /// Returns the number of tuples removed.
+    #[instrument(skip(self))]
+    pub async fn delete_by_subject(&self, subject: &Subject) -> Result<u64, PermissionError> {
+        self.actor
+            .ask(DbExecute {
+                sql: r#"
+                    DELETE FROM permission_tuples
+                    WHERE subject_type = ? AND subject_id = ?
+                "#
+                .to_string(),
+                params: vec![
+                    subject.subject_type.to_string().into(),
+                    subject.id.as_str().into(),
+                ],
+            })
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))
+    }
+
+    /// List every tuple held by `subject`, whatever the object or relation.
+    #[instrument(skip(self))]
+    pub async fn list_by_subject(&self, subject: &Subject) -> Result<Vec<Tuple>, PermissionError> {
+        let rows = self
+            .actor
+            .ask(DbQuery {
+                sql: r#"
+                    SELECT id, object_type, object_id, relation, subject_type, subject_id, subject_relation, created_at
+                    FROM permission_tuples
+                    WHERE subject_type = ? AND subject_id = ?
+                "#
+                .to_string(),
+                params: vec![
+                    subject.subject_type.to_string().into(),
+                    subject.id.as_str().into(),
+                ],
+            })
+            .await
+            .map_err(|e| PermissionError::DatabaseError(e.to_string()))?;
+
+        Self::rows_to_tuples(rows)
+    }
+
     fn rows_to_tuples(rows: Vec<RowValues>) -> Result<Vec<Tuple>, PermissionError> {
         let mut tuples = Vec::new();
 

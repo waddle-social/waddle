@@ -899,6 +899,7 @@ async function recoverSupersededFromShell() {
       <UserSettingsPage
         v-else-if="ui.activePage.value === 'settings' && connectionStore.session"
         :session="connectionStore.session"
+        :server-base-url="connectionStore.activeServerUrl"
         :xmpp-client="xmppClient"
         :message-sounds-enabled="notifications.messageSoundsEnabled.value"
         :web-commit-sha="version.webCommitSha.value"

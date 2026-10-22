@@ -1367,6 +1367,21 @@ pub struct XmppServiceDomains {
     /// from `spaces` so the spaces disco#items enumeration only
     /// surfaces actual community spaces.
     pub community: String,
+    /// Hosts user bot accounts, `<owner>+<name>@bots.<xmpp domain>`. Parsed
+    /// once here; routing, disco and the bot APIs borrow this value.
+    pub bots: jid::DomainPart,
+}
+
+/// A service domain derived from `WADDLE_XMPP_DOMAIN` is not a valid JID
+/// domain.
+#[derive(Debug, thiserror::Error)]
+pub enum ServiceDomainsError {
+    #[error("invalid bots domain {domain:?}: {source}")]
+    InvalidBotsDomain {
+        domain: String,
+        #[source]
+        source: jid::Error,
+    },
 }
 
 impl XmppServiceDomains {
@@ -1376,16 +1391,25 @@ impl XmppServiceDomains {
     /// from. disco#info routing compares targets against `muc` (#757); a
     /// re-derived `muc.<domain>` would diverge from the registry under an
     /// override and silently break room disco#info. The remaining components
-    /// have no override and are derived from `xmpp_domain`.
-    pub fn new(xmpp_domain: &str, muc: &str, spaces: &str) -> Self {
-        Self {
+    /// have no override and are derived from `xmpp_domain`; `bots.<domain>`
+    /// must parse as a JID domain.
+    pub fn new(xmpp_domain: &str, muc: &str, spaces: &str) -> Result<Self, ServiceDomainsError> {
+        let bots = format!("bots.{xmpp_domain}");
+        let bots = jid::DomainPart::new(&bots)
+            .map(std::borrow::Cow::into_owned)
+            .map_err(|source| ServiceDomainsError::InvalidBotsDomain {
+                domain: bots.clone(),
+                source,
+            })?;
+        Ok(Self {
             muc: muc.to_string(),
             spaces: spaces.to_string(),
             upload: format!("upload.{xmpp_domain}"),
             extensions: format!("extensions.{xmpp_domain}"),
             push: format!("push.{xmpp_domain}"),
             community: format!("community.{xmpp_domain}"),
-        }
+            bots,
+        })
     }
 }
 

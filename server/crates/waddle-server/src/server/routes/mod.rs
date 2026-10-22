@@ -2,6 +2,7 @@
 pub mod auth; // Provider auth broker, session management
 pub mod auth_page; // Web-based auth page for XMPP credentials
 mod auth_telemetry; // Unified auth rejection/success observability (#1328)
+pub mod bots; // User bot management API (/api/bots)
 pub mod calendar_feed; // Read-only iCalendar projection of xCal community events
 pub mod call_thread_end; // Durable call-thread ended summary + outbox retry
 pub mod device; // OAuth Device Flow for CLI
@@ -10,6 +11,7 @@ pub mod interpret; // OutboundEvent effect interpreter for sans-I/O protocol
 mod livekit_grant_relay; // #1594 cross-node routing for participant_joined grant re-assertion
 pub mod livekit_webhook; // LiveKit SFU webhook → MUC Muji-presence bridge
 pub mod muc_muji_clear; // Shared Muji clear + broadcast for SFU/Jingle teardown
+pub(crate) mod session_auth; // Shared browser-session extractor and CSRF guard for JSON APIs
 mod sfu_voice_reconcile; // periodic XEP-0045 voice → LiveKit grant convergence
 pub mod uploads; // File upload endpoints (XEP-0363)
 mod webhook_delivery; // Durable LiveKit webhook delivery ledger

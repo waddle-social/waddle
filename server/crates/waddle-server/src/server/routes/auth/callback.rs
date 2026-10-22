@@ -303,6 +303,7 @@ pub(super) async fn callback_handler(
     if let Err(err) = reconcile_user_membership(
         &state.permission_actor,
         &state.bootstrap_membership,
+        state.caps_server_domain.as_jid().domain(),
         &linked.user.jid,
         &linked.user.xmpp_localpart,
     )

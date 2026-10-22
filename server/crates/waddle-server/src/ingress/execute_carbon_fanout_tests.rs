@@ -1,5 +1,6 @@
 //! Actual owner fanout replies must only prove complete remote obligations.
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     clustering::{
@@ -67,7 +68,7 @@ async fn owner_fanout_receipts(fixture: IngressFixture, fail_append: bool) {
         }
     );
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let outcome = remote_carbon_delivery(
         RemoteCarbonFanout::from_reply(reply).expect("authoritative owner reply"),
         &deps,
@@ -213,7 +214,7 @@ async fn remote_carbons_partial_retry(fixture: IngressFixture) {
         },
         carbon_recipients: outcome.completed.carbon_recipients,
     };
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let partial = remote_carbon_delivery(
         RemoteCarbonFanout::from_reply(reply).expect("reply"),
         &deps,
@@ -427,7 +428,7 @@ async fn remote_carbon_lost_reply_does_not_repeat_resource_send(
         registry.register(target.clone(), sender);
         assert!(registry.set_carbons_enabled(&target, true));
     }
-    let mut delivery = Deps::new(&registry, "example.com");
+    let mut delivery = Deps::new(&registry, "example.com", test_bots_domain());
     delivery.ingress_delivery_uow = Some(fixture.uow.clone());
     delivery.sm_session_registry = Some(&sm);
     delivery.ingress_append_context = carbon_progress::append_context(

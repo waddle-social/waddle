@@ -1,5 +1,6 @@
 use super::*;
 use crate::ingress::IngressEffectCapture;
+use crate::server::routes::interpret::test_bots_domain;
 use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use waddle_xmpp::inbox::storage::InboxStorageError;
@@ -523,6 +524,7 @@ async fn archived_offline_delivery_captures_without_immediate_storage() {
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: Some(&pending),
@@ -601,6 +603,7 @@ async fn transient_offline_delivery_records_pending_delivery_intent() {
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: None,
         message_dispatcher: None,
         pending_delivery_storage: Some(&pending),

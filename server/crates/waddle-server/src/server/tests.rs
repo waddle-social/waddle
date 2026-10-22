@@ -582,6 +582,53 @@ async fn http_request_metrics_use_route_template_and_status_class() {
 }
 
 #[tokio::test]
+async fn bots_routes_mounted_behind_admission_gate_and_emit_route_template() {
+    let metrics = waddle_xmpp::telemetry::test_support::acquire().await;
+    let state = create_test_state().await;
+    let lifecycle = state.node_lifecycle.clone();
+    lifecycle.begin_fenced_recovery();
+    let app = test_app_for_state(state).await;
+
+    let gated = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .uri("/api/bots")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        gated.status(),
+        StatusCode::SERVICE_UNAVAILABLE,
+        "a node that is not serving must not reach the bots API"
+    );
+
+    lifecycle.serve();
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri("/api/bots")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+    let body = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&body).unwrap();
+    assert_eq!(json["error"], "invalid_session");
+    assert_eq!(
+        metrics.histogram_count(
+            "http.server.request.duration",
+            &[("route", "/api/bots"), ("status_class", "4xx")],
+        ),
+        Some(1),
+    );
+}
+
+#[tokio::test]
 async fn test_healthz_alias_endpoint() {
     let app = test_app().await;
 

@@ -4,6 +4,7 @@ use crate::notification_activity::{
     NotificationActivityReader, NotificationActivityStore, NotificationChatState,
 };
 use crate::server::routes::interpret::effects::PlanSuppressionPolicy;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{
     ingress::{IngressEffectIntent, NotificationActivityMutation},
@@ -82,7 +83,7 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
     let canonical = first.message_key.expect("canonical key");
     let registry = ConnectionRegistry::new();
     let socket = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(socket.as_ref());
     let completed = execute_effects(
         &fixture.uow,
@@ -143,7 +144,7 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
             (),
         )
         .await;
-    let unavailable = Deps::new(&registry, "example.com");
+    let unavailable = Deps::new(&registry, "example.com", test_bots_domain());
     let skipped = execute_effects(
         &fixture.uow,
         &fixture.db,

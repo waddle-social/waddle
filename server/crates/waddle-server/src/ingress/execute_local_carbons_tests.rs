@@ -4,6 +4,7 @@ use crate::ingress::{
     commit::commit_submission, test_support::IngressFixture, IngressEffectCapture,
     IngressSubmission,
 };
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{
     effects::{EffectSink, PlanSink},
@@ -25,7 +26,7 @@ async fn plan_carbons(
     let sink = PlanSink::new();
     sink.observe_sender(&submission.sender);
     let capture = IngressEffectCapture::new();
-    let mut deps = Deps::new(registry, "example.com");
+    let mut deps = Deps::new(registry, "example.com", test_bots_domain());
     deps.user_registry = Some(users);
     deps.effects = &sink;
     deps.ingress_effect_capture = Some(capture.clone());
@@ -111,7 +112,7 @@ async fn local_carbons_receipts(
     if partial {
         drop(receivers[1].take());
     }
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     let report = execute_effects(
         &fixture.uow,
@@ -337,7 +338,7 @@ async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
     } else {
         assert!(registry.set_carbons_enabled(&target, false));
     }
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     let report = execute_effects(
         &fixture.uow,

@@ -1,4 +1,5 @@
 mod acme;
+mod bot_janitor;
 pub(crate) mod caps_resolution;
 mod config;
 pub(crate) mod dual_registration;

@@ -61,7 +61,7 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
     let decision = commit_submission(&fixture.uow, &submission, 5)
         .await
         .expect("commit local delivery");
-    let mut deps = Deps::new(&connections, "example.com");
+    let mut deps = Deps::new(&connections, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     let report = execute_effects(
         &fixture.uow,
@@ -153,4 +153,14 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
     users.kill();
     drop(sm);
     fixture.close().await;
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

@@ -41,6 +41,7 @@ pub enum Permission {
     CreateChannel,
     CreateSpace,
     CreateMuc,
+    CreateBot,
     Update,
     View,
     Manage,
@@ -70,6 +71,7 @@ impl Permission {
             Permission::CreateChannel => "create_channel",
             Permission::CreateSpace => "create_space",
             Permission::CreateMuc => "create_muc",
+            Permission::CreateBot => "create_bot",
             Permission::Update => "update",
             Permission::View => "view",
             Permission::Manage => "manage",
@@ -164,6 +166,26 @@ impl PermissionActor {
         match &self.backend {
             PermissionActorBackend::SpiceDb(backend) => backend.delete_tuple(tuple).await,
             PermissionActorBackend::Local { tuple_store, .. } => tuple_store.delete(tuple).await,
+        }
+    }
+
+    async fn delete_subject_tuples(&self, subject: &Subject) -> Result<u64, PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => {
+                backend.delete_subject_tuples(subject).await
+            }
+            PermissionActorBackend::Local { tuple_store, .. } => {
+                tuple_store.delete_by_subject(subject).await
+            }
+        }
+    }
+
+    async fn list_subject_tuples(&self, subject: &Subject) -> Result<Vec<Tuple>, PermissionError> {
+        match &self.backend {
+            PermissionActorBackend::SpiceDb(backend) => backend.list_subject_tuples(subject).await,
+            PermissionActorBackend::Local { tuple_store, .. } => {
+                tuple_store.list_by_subject(subject).await
+            }
         }
     }
 
@@ -363,6 +385,44 @@ impl kameo::message::Message<DeleteTuple> for PermissionActor {
         self.delete_tuple(&msg.tuple).await?;
         self.clear_cache().await;
         Ok(())
+    }
+}
+
+/// Delete every tuple whose subject is `subject`, across every object type
+/// and relation. Replies with the number of tuples removed.
+pub struct DeleteSubjectTuples {
+    pub subject: Subject,
+}
+
+impl kameo::message::Message<DeleteSubjectTuples> for PermissionActor {
+    type Reply = Result<u64, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: DeleteSubjectTuples,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        let deleted = self.delete_subject_tuples(&msg.subject).await?;
+        self.clear_cache().await;
+        Ok(deleted)
+    }
+}
+
+/// List every tuple whose subject is `subject`, across every object type and
+/// relation.
+pub struct ListSubjectTuples {
+    pub subject: Subject,
+}
+
+impl kameo::message::Message<ListSubjectTuples> for PermissionActor {
+    type Reply = Result<Vec<Tuple>, PermissionError>;
+
+    async fn handle(
+        &mut self,
+        msg: ListSubjectTuples,
+        _ctx: &mut Context<Self, Self::Reply>,
+    ) -> Self::Reply {
+        self.list_subject_tuples(&msg.subject).await
     }
 }
 

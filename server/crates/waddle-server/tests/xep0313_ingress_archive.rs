@@ -537,7 +537,7 @@ async fn receipts_retention(fixture: IngressFixture) {
         0
     );
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let mut report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -771,7 +771,7 @@ async fn assert_inbox_wire(
         })
         .await
         .expect("register");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     execute_effects(
         &fixture.uow,
@@ -1024,3 +1024,13 @@ backend_tests!(
     direct_retry_preserves_wire_identity_postgres,
     direct_restore
 );
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
+}

@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 
 // -----------------------------------------------------------------
 // #1106 — shared fan-out recipient pass: blocklist-load failure
@@ -110,6 +111,7 @@ async fn fanout_pass_blocklist_failure_falls_back_to_legacy_per_resource_deliver
         web_socket_state: None,
         authenticated_principal: None,
         local_domain: "example.com",
+        bots_domain: test_bots_domain(),
         blocking_storage: Some(&blocking),
         message_dispatcher: Some(&dispatcher),
         pending_delivery_storage: None,

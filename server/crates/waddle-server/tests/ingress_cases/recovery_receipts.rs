@@ -188,7 +188,7 @@ async fn committed(
 
 async fn execute(fixture: &IngressFixture, decision: &IngressDecision) -> ExternalOutcome {
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -646,7 +646,7 @@ async fn deferred(fixture: IngressFixture, deliver: bool) {
 
 async fn execute_without_candidate(fixture: &IngressFixture, decision: &IngressDecision) {
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let report = execute_effects(
         &fixture.uow,
         &fixture.db,
@@ -746,3 +746,13 @@ dialect_tests!(
     recovery_canonical_gone_postgres,
     canonical_gone
 );
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
+}

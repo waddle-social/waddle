@@ -48,7 +48,8 @@ pub(crate) async fn get_user_avatar_url(
 
     let row = global_db_actor
         .ask(DbQueryOne {
-            sql: "SELECT avatar_url FROM users WHERE xmpp_localpart = ? LIMIT 1".to_string(),
+            sql: "SELECT avatar_url FROM users WHERE xmpp_localpart = ? AND kind = 'human' LIMIT 1"
+                .to_string(),
             params: vec![Value::from(localpart)],
         })
         .await

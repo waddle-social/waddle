@@ -26,7 +26,11 @@ pub const MAX_FRAME_SIZE: usize = 1024 * 1024;
 #[derive(Debug, Clone)]
 pub enum InboundFrame {
     /// RFC 7395 `<open>` stream header.
-    Open,
+    ///
+    /// `to` is the service the client addressed (RFC 6120 §4.7.2). An absent
+    /// or unparseable value is `None`; the server then answers for its own
+    /// domain.
+    Open { to: Option<jid::Jid> },
     /// RFC 7395 `<close>` stream termination.
     Close,
     /// SASL `<auth>` initial client message.
@@ -185,8 +189,9 @@ fn parse_open(frame: &str) -> Result<ParsedFrame, ParseError> {
         Element::from_str(frame).map_err(|err| ParseError::InvalidXml(err.to_string()))?;
     require_namespace(&element, "open", "urn:ietf:params:xml:ns:xmpp-framing")?;
     require_empty_element(&element, "open")?;
+    let to = element.attr("to").and_then(|to| jid::Jid::new(to).ok());
     Ok(ParsedFrame {
-        frame: InboundFrame::Open,
+        frame: InboundFrame::Open { to },
         message_stanza_lang: None,
     })
 }

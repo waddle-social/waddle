@@ -805,7 +805,8 @@ struct StanzaIdRecoveryEnvironment {
 
 impl waddle_server::ingress::RecoveryEnvironment for StanzaIdRecoveryEnvironment {
     fn recovery_deps(&self) -> waddle_server::ingress::Deps<'_> {
-        let mut deps = waddle_server::ingress::Deps::new(&self.connections, "example.com");
+        let mut deps =
+            waddle_server::ingress::Deps::new(&self.connections, "example.com", test_bots_domain());
         deps.sm_session_registry = Some(&self.sm);
         deps
     }
@@ -1117,4 +1118,14 @@ async fn xep0359_ingress_alias_muc_rebuilt_stamps_postgres() {
     if let Some(fixture) = IngressFixture::postgres("xep0359_muc_recovery_stamps").await {
         muc_progress_support::maintenance(fixture).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

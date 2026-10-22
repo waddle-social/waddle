@@ -282,6 +282,10 @@ pub struct Deps<'a> {
     /// bare JIDs only — cross-domain bare JIDs (future s2s) drop
     /// without the recipient pass.
     pub local_domain: &'a str,
+    /// Domain hosting user bot accounts (`bots.<local_domain>`). Bot JIDs
+    /// are hosted accounts for routing and archiving, but never bind a
+    /// resource, so they are not stored offline (XEP-0160 exemption).
+    pub bots_domain: &'a jid::DomainPart,
     /// XEP-0191 blocklist persistence backend. Used by the headless
     /// recipient-pass runner to seed a transient
     /// [`XmppStateMachine`]'s [`Blocklist`] for an offline local
@@ -338,6 +342,17 @@ impl<'a> Deps<'a> {
         self
     }
 
+    /// A JID whose accounts this server hosts: the primary domain or the
+    /// user bots domain. Any other domain (s2s) has no local account.
+    pub fn is_hosted_account_domain(&self, bare: &BareJid) -> bool {
+        bare.domain().as_str() == self.local_domain || self.is_bots_domain(bare)
+    }
+
+    /// An address on the user bots domain, bare domain included.
+    pub fn is_bots_domain(&self, bare: &BareJid) -> bool {
+        bare.domain() == &**self.bots_domain
+    }
+
     pub fn capture_intent(&self, intent: IngressEffectIntent) {
         if let Some(capture) = self.ingress_effect_capture.as_ref() {
             capture.record_intent(intent);
@@ -346,7 +361,11 @@ impl<'a> Deps<'a> {
 
     /// Build an immediate execution context with optional capabilities disabled.
     /// Callers attach the storage and actor handles required by their effects.
-    pub fn new(connection_registry: &'a ConnectionRegistry, local_domain: &'a str) -> Self {
+    pub fn new(
+        connection_registry: &'a ConnectionRegistry,
+        local_domain: &'a str,
+        bots_domain: &'a jid::DomainPart,
+    ) -> Self {
         Self {
             dispatch_probe_budget: None,
             delivery_execution_context: DeliveryExecutionContext::Live,
@@ -361,6 +380,7 @@ impl<'a> Deps<'a> {
             web_socket_state: None,
             authenticated_principal: None,
             local_domain,
+            bots_domain,
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
@@ -379,7 +399,7 @@ impl<'a> Deps<'a> {
     /// Test fixture with the conventional example domain and no optional handles.
     #[cfg(test)]
     pub fn registry_only(connection_registry: &'a ConnectionRegistry) -> Self {
-        Self::new(connection_registry, "example.com")
+        Self::new(connection_registry, "example.com", test_bots_domain())
     }
 
     /// Build a `Deps` with the connection registry AND the
@@ -407,6 +427,7 @@ impl<'a> Deps<'a> {
             web_socket_state: None,
             authenticated_principal: None,
             local_domain: "example.com",
+            bots_domain: test_bots_domain(),
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
@@ -445,6 +466,7 @@ impl<'a> Deps<'a> {
             web_socket_state: None,
             authenticated_principal: None,
             local_domain: "example.com",
+            bots_domain: test_bots_domain(),
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
@@ -481,6 +503,7 @@ impl<'a> Deps<'a> {
             web_socket_state: None,
             authenticated_principal: None,
             local_domain: "example.com",
+            bots_domain: test_bots_domain(),
             blocking_storage: None,
             message_dispatcher: None,
             pending_delivery_storage: None,
@@ -494,5 +517,39 @@ impl<'a> Deps<'a> {
             ingress_delivery_uow: None,
             ingress_delivery_stop: None,
         }
+    }
+}
+
+/// Bots domain of the `example.com` unit-test fixtures.
+#[cfg(test)]
+pub(crate) fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
+}
+
+#[cfg(test)]
+mod hosted_domain_tests {
+    use super::*;
+
+    #[test]
+    fn is_hosted_account_domain_matches_primary_and_bots_only() {
+        let registry = ConnectionRegistry::new();
+        let deps = Deps::registry_only(&registry);
+        let jid = |value: &str| value.parse::<BareJid>().expect("bare jid");
+
+        assert!(deps.is_hosted_account_domain(&jid("alice@example.com")));
+        assert!(deps.is_hosted_account_domain(&jid("alice+standup@bots.example.com")));
+        assert!(deps.is_hosted_account_domain(&jid("bots.example.com")));
+        assert!(!deps.is_hosted_account_domain(&jid("alice@muc.example.com")));
+        assert!(!deps.is_hosted_account_domain(&jid("alice@bots.example.org")));
+        assert!(!deps.is_hosted_account_domain(&jid("alice@elsewhere.test")));
+
+        assert!(deps.is_bots_domain(&jid("alice+standup@bots.example.com")));
+        assert!(deps.is_bots_domain(&jid("bots.example.com")));
+        assert!(!deps.is_bots_domain(&jid("alice@example.com")));
     }
 }

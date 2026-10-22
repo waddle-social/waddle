@@ -174,6 +174,67 @@ impl SpiceDbPermissionBackend {
         Ok(())
     }
 
+    /// Delete every relationship whose subject is `subject`, across every
+    /// object type. SpiceDB does not report how many relationships a delete
+    /// removed, so the count comes from reading them first; a relationship
+    /// written between the read and the delete is still deleted but is not
+    /// counted.
+    pub async fn delete_subject_tuples(&self, subject: &Subject) -> Result<u64, PermissionError> {
+        let mut deleted = 0u64;
+        for object_type in ObjectType::ALL {
+            let filter = filter_for_object_type_and_subject(object_type, subject);
+            let existing = self.read_relationship_count(filter.clone()).await?;
+            self.client
+                .delete_relationships(filter)
+                .await
+                .map_err(map_spicedb_error)?;
+            deleted += existing;
+        }
+        Ok(deleted)
+    }
+
+    /// List every relationship whose subject is `subject`, across every
+    /// object type.
+    pub async fn list_subject_tuples(
+        &self,
+        subject: &Subject,
+    ) -> Result<Vec<Tuple>, PermissionError> {
+        let mut tuples = Vec::new();
+        for object_type in ObjectType::ALL {
+            let mut stream = self
+                .client
+                .read_relationships(filter_for_object_type_and_subject(object_type, subject))
+                .consistency(Consistency::FullyConsistent)
+                .send()
+                .await
+                .map_err(map_spicedb_error)?;
+            while let Some(item) = stream.next().await {
+                let item = item.map_err(map_spicedb_error)?;
+                tuples.push(tuple_from_relationship(&item.relationship)?);
+            }
+        }
+        Ok(tuples)
+    }
+
+    async fn read_relationship_count(
+        &self,
+        filter: RelationshipFilter,
+    ) -> Result<u64, PermissionError> {
+        let mut stream = self
+            .client
+            .read_relationships(filter)
+            .consistency(Consistency::FullyConsistent)
+            .send()
+            .await
+            .map_err(map_spicedb_error)?;
+        let mut count = 0u64;
+        while let Some(item) = stream.next().await {
+            item.map_err(map_spicedb_error)?;
+            count += 1;
+        }
+        Ok(count)
+    }
+
     pub async fn list_relations(
         &self,
         subject: &Subject,
@@ -368,6 +429,18 @@ fn subject_from_reference(reference: &SubjectReference) -> Result<Subject, Permi
     })
 }
 
+fn tuple_from_relationship(relationship: &Relationship) -> Result<Tuple, PermissionError> {
+    let object_type = ObjectType::from_str(relationship.resource.object_type())?;
+    Ok(Tuple::new(
+        Object::new(
+            object_type,
+            decode_spicedb_id(relationship.resource.object_id()),
+        ),
+        Relation::new(relationship.relation.clone()),
+        subject_from_reference(&relationship.subject)?,
+    ))
+}
+
 fn relationship_from_tuple(tuple: &Tuple) -> Result<Relationship, PermissionError> {
     Ok(Relationship::new(
         object_reference(&tuple.object)?,
@@ -388,6 +461,13 @@ fn filter_for_object_and_subject(object: &Object, subject: &Subject) -> Relation
     RelationshipFilter::new(object.object_type.to_string())
         .resource_id(encode_spicedb_id(&object.id))
         .subject_filter(subject_filter(subject))
+}
+
+fn filter_for_object_type_and_subject(
+    object_type: ObjectType,
+    subject: &Subject,
+) -> RelationshipFilter {
+    RelationshipFilter::new(object_type.to_string()).subject_filter(subject_filter(subject))
 }
 
 fn filter_for_object_and_relation(object: &Object, relation: &str) -> RelationshipFilter {

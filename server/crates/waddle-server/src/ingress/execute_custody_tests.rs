@@ -4,6 +4,7 @@ use crate::ingress::{
     commit::commit_submission, execute_uow::FAIL_DELIVERY_PROGRESS_TX, test_support::IngressFixture,
 };
 use crate::ingress_uow::DeliveryProgressRepository;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
@@ -91,7 +92,11 @@ async fn custody_survives_transition(fixture: IngressFixture, transition: Custod
     .await
     .expect("detached recipient");
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.sm_session_registry = Some(&sm);
     let mut submission = fixture.submission(Some("custody-transition"), "retained delivery");

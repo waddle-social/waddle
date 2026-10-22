@@ -451,7 +451,7 @@ pub async fn session_handler(
 ) -> impl IntoResponse {
     let session_id = query
         .session_id
-        .or_else(|| AuthState::extract_session_cookie(&headers));
+        .or_else(|| super::session_auth::extract_session_cookie(&headers));
 
     let Some(session_id) = session_id else {
         return auth_error_to_response(AuthError::SessionNotFound(
@@ -503,7 +503,7 @@ pub async fn logout_handler(
     body: Option<Json<LogoutRequest>>,
 ) -> impl IntoResponse {
     let requested = body.and_then(|Json(payload)| payload.session_id);
-    let session_id = requested.or_else(|| AuthState::extract_session_cookie(&headers));
+    let session_id = requested.or_else(|| super::session_auth::extract_session_cookie(&headers));
 
     if let Some(session_id) = session_id {
         if let Err(err) = state.session_manager.delete_session(&session_id).await {

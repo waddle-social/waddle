@@ -37,6 +37,7 @@ pub(crate) fn build_interpret_deps<'a>(
         web_socket_state: Some(state),
         authenticated_principal,
         local_domain: state.deps.auth_state.xmpp_domain.as_str(),
+        bots_domain: &state.deps.service_domains.bots,
         blocking_storage: Some(&state.deps.protocol.blocking_storage),
         message_dispatcher: Some(&state.deps.protocol.dispatcher),
         pending_delivery_storage: Some(&state.deps.protocol.pending_delivery_storage),

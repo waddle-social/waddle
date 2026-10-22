@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::{invite::MucUserRoute, EffectSink, PlanSink};
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{
     ingress::{EffectMessageIdentity, IngressEffectIntent, PendingDeliveryMutation},
@@ -87,7 +88,7 @@ async fn invite_delivered(fixture: IngressFixture, live: bool) {
         decision.arm_owned_receipts.is_empty(),
         "specialized invitation delivery keeps generic settlement"
     );
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     let report = execute_effects(
@@ -159,7 +160,7 @@ async fn sqlite_invite_lost_receipts_retry_without_second_live_copy() {
     let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
         .await
         .expect("commit invitation");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     fixture.execute("CREATE TRIGGER fail_invite_receipt BEFORE INSERT ON ingress_effect_receipts BEGIN SELECT RAISE(ABORT, 'lost receipt'); END", ()).await;
@@ -215,7 +216,7 @@ async fn sqlite_invite_concurrent_executions_accept_one_live_copy() {
     let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
         .await
         .expect("commit invitation");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     let (first, second) = tokio::join!(
@@ -273,7 +274,7 @@ async fn sqlite_invite_partial_live_fanout_retries_only_missing_resource() {
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit invitation");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     let partial = execute_effects(
@@ -331,7 +332,7 @@ async fn sqlite_invite_uncertain_live_send_falls_back_only_after_its_deadline() 
     let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
         .await
         .expect("commit invitation");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     fixture.execute("CREATE TRIGGER fail_invite_completion BEFORE UPDATE ON ingress_send_attempts WHEN NEW.state = 2 BEGIN SELECT RAISE(ABORT, 'lost completion'); END", ()).await;
@@ -413,7 +414,7 @@ async fn invite_quota_preserves_authorization_until_delivery(fixture: IngressFix
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit invitation");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     let quota = execute_effects(
@@ -557,7 +558,7 @@ async fn invite_live_acceptance_after_offline_probe_prevents_pending_fallback(
     let decision = commit_submission(&fixture.uow, &invite_submission(&fixture, &target), 1)
         .await
         .expect("commit invitation");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     let entered = Arc::new(Notify::new());
@@ -773,7 +774,7 @@ async fn invite_quota_recovers_generated_notification(
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("commit invitation grant");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     let report = execute_effects(
@@ -947,7 +948,7 @@ async fn sqlite_invite_remote_hosted_resource_uses_gateway_without_pending_fallb
     let decision = commit_submission(&fixture.uow, &submission, 1)
         .await
         .expect("record invitation");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.pending_delivery_storage = Some(&storage);
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -986,7 +987,7 @@ async fn sqlite_invite_remote_hosted_resource_uses_gateway_without_pending_fallb
 
 async fn remote_carbons_failure(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let mut submission = fixture.submission(Some("remote-carbon"), "carbon body");
     let owner = submission.sender.to_bare();
     let exclude = vec![submission.sender.clone()];
@@ -1122,7 +1123,7 @@ async fn remote_carbons_planning_requires_owner_inventory_before_commit() {
     let sink = PlanSink::new();
     sink.observe_sender(&sender);
     let capture = crate::ingress::IngressEffectCapture::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     deps.effects = &sink;
     deps.ingress_effect_capture = Some(capture.clone());
@@ -1221,7 +1222,7 @@ async fn sqlite_invite_expired_partial_start_hands_off_without_repeating_live_si
         .await
         .expect("started"));
     tx.commit().await.expect("commit");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let before = execute_effects(
         &fixture.uow,
@@ -1338,7 +1339,7 @@ async fn sqlite_invite_expired_partial_claim_without_start_hands_off() {
         panic!("fresh")
     };
     tx.commit().await.expect("commit");
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let before = execute_effects(
         &fixture.uow,

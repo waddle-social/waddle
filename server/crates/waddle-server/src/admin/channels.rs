@@ -517,7 +517,7 @@ pub async fn register(
 // Handler shells
 // ---------------------------------------------------------------------------
 
-type AdminErr = Box<CommandResult>;
+pub(crate) type AdminErr = Box<CommandResult>;
 
 async fn caller_or_forbidden(ctx: &CommandContext, state: &AppState) -> Result<BareJid, AdminErr> {
     let bare = ctx.from.to_bare();
@@ -4982,6 +4982,68 @@ async fn run_set_affiliation(
                 format!("no channel '{}'", args.channel_jid),
             ))))
         })?;
+    apply_channel_affiliation(
+        state,
+        ChannelAffiliationSinks {
+            websocket_state,
+            connections,
+            sfu,
+        },
+        &actor,
+        ChannelAffiliationChange {
+            channel_jid: &args.channel_jid,
+            channel_id: &channel_id,
+            member_jid: &args.member_jid,
+            affiliation: args.affiliation.to_muc(),
+            actor: Some(caller_bare),
+        },
+    )
+    .await?;
+    Ok(ChannelsSetAffiliationResult {
+        member_jid: args.member_jid.clone(),
+        affiliation: args.affiliation,
+    })
+}
+
+/// Where an applied affiliation change is delivered: local sockets for the
+/// XEP-0045 presence updates and the SFU for any call participation it
+/// ends.
+pub(crate) struct ChannelAffiliationSinks<'a> {
+    pub(crate) websocket_state: Option<&'a WebSocketState>,
+    pub(crate) connections: &'a ConnectionRegistry,
+    pub(crate) sfu: Option<&'a Arc<dyn waddle_sfu::SfuService>>,
+}
+
+/// One affiliation change on a managed channel.
+pub(crate) struct ChannelAffiliationChange<'a> {
+    pub(crate) channel_jid: &'a BareJid,
+    pub(crate) channel_id: &'a str,
+    pub(crate) member_jid: &'a BareJid,
+    pub(crate) affiliation: Affiliation,
+    /// Stamped as the XEP-0045 `<actor/>`; `None` for server-initiated
+    /// changes.
+    pub(crate) actor: Option<&'a BareJid>,
+}
+
+/// The authorization-free core of `channels:set-affiliation`: persist the
+/// channel tuples, apply the change in the room actor (which also commits
+/// its durable recipients and, under clustering, the
+/// `clustering_muc_room_affiliations` mirror), then deliver the resulting
+/// presence and SFU updates. Callers authorize the change and hold the
+/// room's config lock.
+pub(crate) async fn apply_channel_affiliation(
+    state: &AppState,
+    sinks: ChannelAffiliationSinks<'_>,
+    actor: &ActorRef<RoomActor>,
+    change: ChannelAffiliationChange<'_>,
+) -> Result<(), AdminErr> {
+    let ChannelAffiliationChange {
+        channel_jid,
+        channel_id,
+        member_jid,
+        affiliation: next_affiliation,
+        actor: change_actor,
+    } = change;
     // Group-DM membership belongs to the group-dm:* commands, which only
     // ever admit local people.
     let config = actor
@@ -4995,11 +5057,10 @@ async fn run_set_affiliation(
     }
     let previous_affiliation = actor
         .ask(GetAffiliation {
-            jid: args.member_jid.clone(),
+            jid: member_jid.clone(),
         })
         .await
         .map_err(send_err("room actor GetAffiliation"))?;
-    let next_affiliation = args.affiliation.to_muc();
     if next_affiliation != Affiliation::Owner && previous_affiliation == Affiliation::Owner {
         let owners = actor
             .ask(ListAffiliations {
@@ -5007,14 +5068,14 @@ async fn run_set_affiliation(
             })
             .await
             .map_err(send_err("room actor ListAffiliations"))?;
-        if owners.len() == 1 && owners[0].jid == args.member_jid {
+        if owners.len() == 1 && &owners[0].jid == member_jid {
             return Err(Box::new(CommandResult::Error(XmppError::conflict(Some(
                 "cannot remove the last owner from a room".to_string(),
             )))));
         }
     }
     let durable_previous_affiliation =
-        explicit_channel_affiliations_for_jids(state, &channel_id, [args.member_jid.clone()])
+        explicit_channel_affiliations_for_jids(state, channel_id, [member_jid.clone()])
             .await
             .map_err(internal_err)?
             .into_iter()
@@ -5023,16 +5084,16 @@ async fn run_set_affiliation(
             .unwrap_or(Affiliation::None);
     persist_channel_affiliation_or_restore(
         state,
-        &channel_id,
-        &args.member_jid,
+        channel_id,
+        member_jid,
         durable_previous_affiliation,
         next_affiliation,
     )
     .await?;
     let applied = match actor
         .ask(ApplyAffiliationChange {
-            actor: Some(caller_bare.clone()),
-            jid: args.member_jid.clone(),
+            actor: change_actor.cloned(),
+            jid: member_jid.clone(),
             affiliation: next_affiliation,
         })
         .await
@@ -5043,8 +5104,8 @@ async fn run_set_affiliation(
         )) => {
             let _ = persist_channel_affiliation(
                 state,
-                &channel_id,
-                &args.member_jid,
+                channel_id,
+                member_jid,
                 durable_previous_affiliation,
             )
             .await;
@@ -5055,8 +5116,8 @@ async fn run_set_affiliation(
         Err(error) => {
             let _ = persist_channel_affiliation(
                 state,
-                &channel_id,
-                &args.member_jid,
+                channel_id,
+                member_jid,
                 durable_previous_affiliation,
             )
             .await;
@@ -5076,26 +5137,23 @@ async fn run_set_affiliation(
     // must revoke their SFU publish rights.
     if outbox_reservation.is_none() {
         crate::server::routes::websocket::muc_call_sfu::converge_moderation_deltas_via_sfu(
-            sfu,
-            &args.channel_jid,
+            sinks.sfu,
+            channel_jid,
             &removed_by_moderation,
             &voice_changes,
         );
     } else {
-        evict_moderation_removals(sfu, &args.channel_jid, &removed_by_moderation);
+        evict_moderation_removals(sinks.sfu, channel_jid, &removed_by_moderation);
     }
     deliver_admin_affiliation_updates(
-        websocket_state,
-        connections,
-        &args.channel_jid,
+        sinks.websocket_state,
+        sinks.connections,
+        channel_jid,
         presence_updates,
         outbox_reservation.as_ref(),
     )
     .await;
-    Ok(ChannelsSetAffiliationResult {
-        member_jid: args.member_jid.clone(),
-        affiliation: args.affiliation,
-    })
+    Ok(())
 }
 
 /// Identifies one private-kick revocation: which channel member loses their

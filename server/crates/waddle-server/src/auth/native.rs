@@ -414,6 +414,9 @@ fn db_err<E: std::fmt::Display>(e: E) -> AuthError {
 /// - Not be empty
 /// - Not exceed 1023 bytes in UTF-8
 /// - Not contain prohibited characters
+///
+/// `+` is also rejected: it is reserved for bot JIDs, which join the owner's
+/// node and the bot name as `<owner>+<name>`.
 fn validate_username(username: &str) -> Result<(), AuthError> {
     if username.is_empty() {
         return Err(AuthError::InvalidUsername(
@@ -426,7 +429,9 @@ fn validate_username(username: &str) -> Result<(), AuthError> {
     }
 
     // Check for prohibited characters in JID localpart
-    let prohibited = ['@', '/', '"', '&', '\'', '<', '>', ' ', '\t', '\n', '\r'];
+    let prohibited = [
+        '@', '/', '"', '&', '\'', '<', '>', ' ', '\t', '\n', '\r', '+',
+    ];
     for ch in prohibited {
         if username.contains(ch) {
             return Err(AuthError::InvalidUsername(format!(

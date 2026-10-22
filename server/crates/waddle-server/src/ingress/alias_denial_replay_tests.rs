@@ -3,6 +3,7 @@ use crate::ingress::{
     execute::{execute_effects, terminalize_if_complete},
     test_support::IngressFixture,
 };
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::server::routes::interpret::{
     effects::{AuthorizationDeniedReason, ImmediateSink, PlanRejection},
@@ -64,7 +65,11 @@ async fn accepted_alias_precedes_denial(fixture: IngressFixture) {
         "recorded mutation reconstructed despite denial"
     );
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.web_socket_state = Some(state.as_ref());
     let report = execute_effects(
         &fixture.uow,

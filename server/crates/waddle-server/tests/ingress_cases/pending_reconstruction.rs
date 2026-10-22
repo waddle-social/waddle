@@ -33,7 +33,7 @@ async fn lost_execute(fixture: IngressFixture, archived: bool) {
         .await
         .expect("initial commit");
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     execute_effects(
         &fixture.uow,
@@ -412,7 +412,7 @@ async fn quota_bounce(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     registry.register_with_carbons(submission.sender.clone(), sender, false);
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let report = execute_effects(
         &fixture.uow,
@@ -535,7 +535,7 @@ async fn live_recipient(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();
     let (sender, mut receiver) = tokio::sync::mpsc::channel(4);
     registry.register_with_carbons(full, sender, false);
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let report = execute_effects(
         &fixture.uow,
@@ -642,3 +642,13 @@ dialect_tests!(
     payload_kind_drift,
     false
 );
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
+}

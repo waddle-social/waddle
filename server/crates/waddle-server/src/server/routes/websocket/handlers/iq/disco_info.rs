@@ -9,6 +9,7 @@ mod muc;
 mod server_info;
 mod services;
 mod spaces;
+mod user_bots;
 
 #[derive(Clone, Copy)]
 struct DiscoInfoRequest<'a> {
@@ -24,6 +25,7 @@ struct DiscoInfoRequest<'a> {
     community_domain: &'a str,
     extensions_domain: &'a str,
     push_domain: &'a str,
+    bots_domain: &'a jid::DomainPart,
     response_from: Option<&'a str>,
     response_to: Option<&'a str>,
 }
@@ -106,7 +108,7 @@ pub(super) async fn handle_disco_info_iq(
 
     // The per-handler "answered" debug below is the load-bearing trace
     // for #750-style silent-drops: every disco#info that reaches this
-    // dispatcher ends in exactly one such line (one of the ten arms or
+    // dispatcher ends in exactly one such line (one of the handler arms or
     // the fallback). Absence of any "answered" line for a request id is
     // the silent-drop signature. `parse_disco_info_query` already emits
     // a "Parsed disco#info query" debug per request, so we do not need
@@ -125,6 +127,7 @@ pub(super) async fn handle_disco_info_iq(
         community_domain: ctx.community_domain,
         extensions_domain: ctx.extensions_domain,
         push_domain: ctx.push_domain,
+        bots_domain: &state.deps.service_domains.bots,
         response_from: ctx.response_from,
         response_to: ctx.response_to,
     };
@@ -146,6 +149,11 @@ pub(super) async fn handle_disco_info_iq(
 
     if let Some(response) = extensions::handle_extensions_disco_info(&request, state).await {
         info!(id = %ctx.id, target = %target, handler = "extensions", "disco#info answered");
+        return disco_info_xml(response);
+    }
+
+    if let Some(response) = user_bots::handle_user_bot_disco_info(&request, state).await {
+        info!(id = %ctx.id, target = %target, handler = "user_bots", "disco#info answered");
         return disco_info_xml(response);
     }
 

@@ -267,7 +267,7 @@ impl XmppStateMachine {
         // is owned by the WebSocket frame dispatcher in websocket.rs.
         // The state machine delegates silently.
         match frame {
-            InboundFrame::Open => Vec::new(),
+            InboundFrame::Open { .. } => Vec::new(),
             InboundFrame::Close => {
                 self.phase = ConnectionPhase::closing(self.phase.bound_jid().cloned());
                 Vec::new()

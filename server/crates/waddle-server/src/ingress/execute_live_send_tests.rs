@@ -2,6 +2,7 @@
 use super::*;
 use crate::ingress::{execute::ExternalOutcome, execute_uow::FAIL_DELIVERY_PROGRESS_TX};
 use crate::server::routes::interpret::effects::delivery::PeerDeliveryKind;
+use crate::server::routes::interpret::test_bots_domain;
 
 fn live_submission(
     fixture: &IngressFixture,
@@ -244,7 +245,7 @@ async fn sqlite_local_only_delivery_cannot_fall_through_to_replacement_socket() 
         .expect("commit");
     let key = decision.message_key.expect("key");
     let gate = crate::ingress::live_delivery::test_hooks::pause_after_start(key, target.clone());
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.ingress_delivery_uow = Some(fixture.uow.clone());
     deps.ingress_append_context = Some(crate::server::routes::interpret::SmIngressAppendContext {
         message_key: key,

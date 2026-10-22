@@ -409,7 +409,9 @@ impl ExtensionHostAdapter {
             .global_actor()
             .ask(DbQueryOne {
                 // `localpart` is canonical, the form account keys are stored in.
-                sql: "SELECT jid, username, xmpp_localpart FROM users WHERE localpart_key = ? LIMIT 1"
+                // `kind <> 'bot'` keeps SQLite on the key index (see
+                // `ACCOUNT_EXISTS_SQL`).
+                sql: "SELECT jid, username, xmpp_localpart FROM users WHERE localpart_key = ? AND kind <> 'bot' LIMIT 1"
                     .to_string(),
                 params: vec![localpart.as_str().into()],
             })

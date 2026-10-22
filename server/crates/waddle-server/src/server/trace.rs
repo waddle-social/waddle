@@ -40,6 +40,10 @@ const HTTP_ROUTE_TEMPLATES: &[&str] = &[
     "/api/v1/livekit/webhook",
     "/api/calendar/community-feed-url",
     "/api/calendar/community/{token}/events.ics",
+    "/api/bots",
+    "/api/bots/{jid}",
+    "/api/bots/{jid}/tokens",
+    "/api/bots/{jid}/tokens/{token_id}",
     "/api/test/profile-publish",
     "/debug/state-inventory",
     "/ws",
@@ -524,6 +528,25 @@ mod tests {
             assert!(
                 HTTP_ROUTE_TEMPLATES.contains(probe),
                 "{probe} must be listed in HTTP_ROUTE_TEMPLATES",
+            );
+        }
+    }
+
+    #[test]
+    fn bots_route_templates_listed_and_not_probes() {
+        for template in [
+            "/api/bots",
+            "/api/bots/{jid}",
+            "/api/bots/{jid}/tokens",
+            "/api/bots/{jid}/tokens/{token_id}",
+        ] {
+            assert!(
+                HTTP_ROUTE_TEMPLATES.contains(&template),
+                "{template} must be listed in HTTP_ROUTE_TEMPLATES",
+            );
+            assert!(
+                !PROBE_ROUTE_TEMPLATES.contains(&template),
+                "{template} must stay traced",
             );
         }
     }

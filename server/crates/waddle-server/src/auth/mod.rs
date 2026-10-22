@@ -6,6 +6,7 @@
 //! - Local session management with UUID principals
 //! - Optional native XMPP auth (XEP-0077/SCRAM)
 
+pub mod bots;
 pub mod directory;
 pub mod identity;
 pub mod jid;
@@ -15,6 +16,7 @@ pub mod oidc;
 pub mod providers;
 pub mod redirect;
 pub mod session;
+pub(crate) mod token_hash;
 
 use thiserror::Error;
 

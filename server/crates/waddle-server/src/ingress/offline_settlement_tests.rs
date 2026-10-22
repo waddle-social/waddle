@@ -1,3 +1,4 @@
+use crate::server::routes::interpret::test_bots_domain;
 use crate::{
     ingress::{
         commit::commit_submission,
@@ -98,7 +99,7 @@ async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress_uo
         super::execute_uow::fail_before_offline_settlement(key);
     }
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let failed = execute_effects(
         &fixture.uow,
@@ -218,7 +219,7 @@ async fn stale_completed_decision(fixture: IngressFixture) {
         .expect("commit pending plan");
     assert_eq!(decision.receipts_pending.len(), 1);
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.pending_delivery_storage = Some(&storage);
     let baseline = metrics
         .counter_sum("ingress.effects.unresolved", &[("kind", "delivery")])
@@ -277,7 +278,7 @@ struct QuotaEnvironment {
 
 impl crate::ingress::RecoveryEnvironment for QuotaEnvironment {
     fn recovery_deps(&self) -> Deps<'_> {
-        let mut deps = Deps::new(&self.registry, "example.com");
+        let mut deps = Deps::new(&self.registry, "example.com", test_bots_domain());
         deps.pending_delivery_storage = Some(&self.storage);
         deps
     }

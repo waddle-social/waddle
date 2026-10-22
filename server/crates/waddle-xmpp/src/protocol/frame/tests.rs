@@ -4,7 +4,23 @@ use super::*;
 fn parses_open_frame() {
     let xml =
         r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" version="1.0" to="waddle.social"/>"#;
-    assert!(matches!(parse_frame(xml), Ok(InboundFrame::Open)));
+    let Ok(InboundFrame::Open { to }) = parse_frame(xml) else {
+        panic!("open frame");
+    };
+    assert_eq!(to.as_ref().map(jid::Jid::as_str), Some("waddle.social"));
+}
+
+#[test]
+fn open_frame_without_valid_to_has_no_target() {
+    for xml in [
+        r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" version="1.0"/>"#,
+        r#"<open xmlns="urn:ietf:params:xml:ns:xmpp-framing" version="1.0" to="bad domain/"/>"#,
+    ] {
+        assert!(matches!(
+            parse_frame(xml),
+            Ok(InboundFrame::Open { to: None })
+        ));
+    }
 }
 
 #[test]

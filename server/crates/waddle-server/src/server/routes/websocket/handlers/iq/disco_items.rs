@@ -606,6 +606,43 @@ pub(super) async fn handle_disco_items_iq(
             )];
         }
 
+        // A user bot is a leaf entity with no items. The bare bots domain,
+        // unknown or disabled bots, nodes on a bot and full JIDs (bots never
+        // bind a resource) do not exist.
+        if let Some(target) = target_to
+            .and_then(|target| target.parse::<jid::Jid>().ok())
+            .filter(|target| target.domain() == &*state.deps.service_domains.bots)
+        {
+            let exists =
+                if target.node().is_some() && target.resource().is_none() && query.node.is_none() {
+                    crate::auth::bots::store::bot_account_exists(
+                        state.deps.app_state.db_pool.global_actor(),
+                        &target.to_bare(),
+                    )
+                    .await
+                } else {
+                    Ok(false)
+                };
+            return match exists {
+                Ok(true) => vec![iq_to_xml(build_disco_items_response(request_iq, &[], None))],
+                Ok(false) => vec![build_iq_error_xml_typed(
+                    id,
+                    response_from,
+                    response_to,
+                    item_not_found_iq_error("Requested item not found."),
+                )],
+                Err(error) => {
+                    warn!(target = %target, error = %error, "Failed to resolve user bot disco target");
+                    vec![build_iq_error_xml_typed(
+                        id,
+                        response_from,
+                        response_to,
+                        internal_server_error_iq_error("Internal server error."),
+                    )]
+                }
+            };
+        }
+
         if let Some(target) = target_to {
             if query.node.is_none() {
                 if let Ok(target_bare) = target.parse::<BareJid>() {

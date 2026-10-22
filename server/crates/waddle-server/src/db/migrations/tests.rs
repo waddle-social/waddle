@@ -38,7 +38,7 @@ async fn test_migration_runner_global() {
 
     // Check version (global + shared waddle schema). `current_version` reads
     // the ledger max, which the waddle namespace (V1027) still dominates
-    // after global V0015.
+    // after global V0016.
     let version = runner.current_version(&db).await.unwrap();
     assert_eq!(version, Some(1027));
 }
@@ -247,7 +247,7 @@ async fn test_global_v0004_adds_policy_digest_to_existing_v0003_schema() {
     assert_eq!(
         applied,
         vec![
-            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
+            4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1001, 1002, 1003, 1004, 1005, 1006, 1007,
             1008, 1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021,
             1022, 1023, 1024, 1025, 1026, 1027
         ]
@@ -2326,7 +2326,7 @@ async fn postgres_v0006_widens_existing_upload_slot_size_bytes() {
     assert_eq!(
         applied,
         vec![
-            6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
+            6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
             1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
             1023, 1024, 1025, 1026, 1027
         ]
@@ -2404,9 +2404,9 @@ async fn sqlite_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026, 1027
+            7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
+            1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
+            1023, 1024, 1025, 1026, 1027
         ]
     );
 
@@ -2526,7 +2526,7 @@ async fn sqlite_v0008_repairs_marked_but_missing_global_tables() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13, 14, 15]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13, 14, 15, 16]);
 
     let conn = db.guard().await.unwrap();
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {
@@ -2591,7 +2591,7 @@ async fn sqlite_v0010_drops_retired_isr_token_store() {
     drop(conn);
 
     let applied = MigrationRunner::global().run(&db).await.unwrap();
-    assert_eq!(applied, vec![10, 11, 12, 13, 14, 15]);
+    assert_eq!(applied, vec![10, 11, 12, 13, 14, 15, 16]);
 
     let conn = db.guard().await.unwrap();
     for table in [
@@ -2782,7 +2782,7 @@ async fn sqlite_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12, 13, 14, 15]
+        vec![12, 13, 14, 15, 16]
     );
 
     let conn = db.guard().await.expect("database guard");
@@ -2853,7 +2853,7 @@ async fn postgres_v0012_makes_auth_context_total() {
             .run(&db)
             .await
             .expect("apply V0012"),
-        vec![12, 13, 14, 15]
+        vec![12, 13, 14, 15, 16]
     );
     assert_postgres_column_type(&db, "sessions", "auth_context_id", "text").await;
 
@@ -2939,7 +2939,7 @@ async fn assert_v0014_account_reconciliation(db: &Database) {
             .run(db)
             .await
             .expect("apply V0014"),
-        vec![14, 15]
+        vec![14, 15, 16]
     );
     let actor = kameo::actor::Spawn::spawn(crate::db::actor::DbActor::new(db.clone()));
     for _ in 0..2 {
@@ -3008,6 +3008,366 @@ async fn query_text_pairs(db: &Database, sql: &str) -> Vec<(String, Option<Strin
 }
 
 #[tokio::test]
+async fn sqlite_v0016_user_bots() {
+    let db = Database::in_memory("test-global-v0016-user-bots")
+        .await
+        .expect("in-memory database");
+    migrate_to_v0016_with_human_row(&db).await;
+
+    let conn = db.guard().await.expect("database guard");
+    let mut foreign_keys = conn
+        .query("PRAGMA foreign_key_list('bot_tokens')", ())
+        .await
+        .expect("inspect bot_tokens foreign keys");
+    let foreign_key = foreign_keys
+        .next()
+        .await
+        .expect("read foreign key")
+        .expect("bot_tokens foreign key");
+    assert_eq!(
+        foreign_key.get::<String>(2).expect("foreign table"),
+        "users"
+    );
+    assert_eq!(
+        foreign_key.get::<String>(3).expect("foreign column"),
+        "bot_jid"
+    );
+    assert_eq!(foreign_key.get::<String>(4).expect("target column"), "jid");
+    assert_eq!(
+        foreign_key.get::<String>(6).expect("delete action"),
+        "CASCADE"
+    );
+    drop(foreign_keys);
+
+    assert_v0016_user_bot_constraints(&conn).await;
+}
+
+#[tokio::test]
+async fn postgres_v0016_user_bots() {
+    let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
+        eprintln!("skipping: WADDLE_TEST_POSTGRES_URL not set (V0016 user bots)");
+        return;
+    };
+    let schema = unique_postgres_schema_name("user_bots");
+    let (db, admin) = open_isolated_postgres_database(&database_url, &schema).await;
+    migrate_to_v0016_with_human_row(&db).await;
+
+    assert_eq!(
+        query_text_pairs(
+            &db,
+            "SELECT column_name, is_nullable || ':' || COALESCE(column_default, '') \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'users' \
+               AND column_name IN ('kind', 'owner_jid', 'disabled_at', 'disabled_reason') \
+             ORDER BY column_name"
+        )
+        .await,
+        [
+            ("disabled_at", "YES:"),
+            ("disabled_reason", "YES:"),
+            ("kind", "NO:'human'::text"),
+            ("owner_jid", "YES:"),
+        ]
+        .map(|(column, shape)| (column.to_string(), Some(shape.to_string())))
+    );
+    assert_eq!(
+        query_text_pairs(
+            &db,
+            "SELECT column_name, is_nullable \
+             FROM information_schema.columns \
+             WHERE table_schema = current_schema() AND table_name = 'bot_tokens' \
+             ORDER BY column_name"
+        )
+        .await,
+        [
+            ("bot_jid", "NO"),
+            ("created_at", "NO"),
+            ("expires_at", "NO"),
+            ("id", "NO"),
+            ("label", "NO"),
+            ("last_used_at", "YES"),
+            ("revoked_at", "YES"),
+            ("token_hash", "NO"),
+        ]
+        .map(|(column, nullable)| (column.to_string(), Some(nullable.to_string())))
+    );
+    assert_eq!(
+        query_text_pairs(
+            &db,
+            // Resolves the referenced column through `key_column_usage`;
+            // joining `constraint_column_usage` here takes minutes.
+            "SELECT fk.column_name, pk.table_name || '.' || pk.column_name || ':' || rc.delete_rule \
+             FROM information_schema.key_column_usage fk \
+             JOIN information_schema.referential_constraints rc \
+               ON rc.constraint_schema = fk.constraint_schema \
+              AND rc.constraint_name = fk.constraint_name \
+             JOIN information_schema.key_column_usage pk \
+               ON pk.constraint_schema = rc.unique_constraint_schema \
+              AND pk.constraint_name = rc.unique_constraint_name \
+              AND pk.ordinal_position = fk.position_in_unique_constraint \
+             WHERE fk.table_schema = current_schema() AND fk.table_name = 'bot_tokens' \
+               AND pk.table_schema = current_schema()"
+        )
+        .await,
+        [(
+            "bot_jid".to_string(),
+            Some("users.jid:CASCADE".to_string())
+        )]
+    );
+    assert_eq!(
+        query_text_pairs(
+            &db,
+            "SELECT kcu.column_name, tc.constraint_type \
+             FROM information_schema.table_constraints tc \
+             JOIN information_schema.key_column_usage kcu \
+               ON kcu.constraint_schema = tc.constraint_schema \
+              AND kcu.constraint_name = tc.constraint_name \
+             WHERE tc.table_schema = current_schema() AND tc.table_name = 'bot_tokens' \
+               AND tc.constraint_type IN ('PRIMARY KEY', 'UNIQUE') \
+             ORDER BY kcu.column_name"
+        )
+        .await,
+        [("id", "PRIMARY KEY"), ("token_hash", "UNIQUE")]
+            .map(|(column, kind)| (column.to_string(), Some(kind.to_string())))
+    );
+    let conn = db.guard().await.expect("postgres guard");
+    let mut rows = conn
+        .query(
+            "SELECT COUNT(*) FROM information_schema.check_constraints cc \
+             JOIN information_schema.constraint_column_usage ccu \
+               ON ccu.constraint_schema = cc.constraint_schema \
+              AND ccu.constraint_name = cc.constraint_name \
+             WHERE ccu.table_schema = current_schema() AND ccu.table_name = 'users' \
+               AND ccu.column_name IN ('kind', 'disabled_reason')",
+            (),
+        )
+        .await
+        .expect("query users check constraints");
+    let row = rows
+        .next()
+        .await
+        .expect("read check row")
+        .expect("check row");
+    let check_count: i64 = row.get(0).expect("decode check count");
+    assert_eq!(check_count, 2, "kind and disabled_reason carry CHECKs");
+    drop(rows);
+
+    assert_v0016_user_bot_constraints(&conn).await;
+    drop(conn);
+
+    drop_postgres_schema(&admin, &schema).await;
+}
+
+#[tokio::test]
+async fn v0016_applies_to_legacy_session_schema() {
+    let db = Database::in_memory("test-global-v0016-legacy-session-schema")
+        .await
+        .expect("in-memory database");
+    let conn = db.guard().await.expect("database guard");
+    conn.execute(sql::migrations_table_sql(DatabaseDriver::Sqlite), ())
+        .await
+        .expect("create migration table");
+    seed_applied_migrations(
+        &conn,
+        global::all().into_iter().filter(|m| m.version < 11),
+        DatabaseDriver::Sqlite,
+    )
+    .await;
+    seed_applied_migrations(&conn, waddle::all(), DatabaseDriver::Sqlite).await;
+    create_legacy_session_schema(&conn).await;
+    insert_v0016_human_row(&conn).await;
+    drop(conn);
+
+    assert_eq!(
+        MigrationRunner::global()
+            .run(&db)
+            .await
+            .expect("apply V0011 through V0016"),
+        vec![11, 12, 13, 14, 15, 16]
+    );
+
+    let conn = db.guard().await.expect("database guard");
+    assert_v0016_user_bot_constraints(&conn).await;
+}
+
+/// Migrates through V0015, seeds a human `users` row, then applies V0016
+/// alone, so the row predates the bot columns.
+async fn migrate_to_v0016_with_human_row(db: &Database) {
+    let through_v0015 = MigrationRunner::new(
+        global::all()
+            .into_iter()
+            .filter(|migration| migration.version <= 15)
+            .chain(waddle::all())
+            .collect(),
+    );
+    through_v0015.run(db).await.expect("migrate through V0015");
+
+    let conn = db.guard().await.expect("database guard");
+    insert_v0016_human_row(&conn).await;
+    drop(conn);
+
+    assert_eq!(
+        MigrationRunner::global()
+            .run(db)
+            .await
+            .expect("apply V0016"),
+        vec![16]
+    );
+}
+
+async fn insert_v0016_human_row(conn: &crate::db::ConnectionGuard) {
+    conn.execute(
+        "INSERT INTO users (jid, username, xmpp_localpart, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?)",
+        crate::db_params![
+            "alice@example.com",
+            "alice",
+            "alice",
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("seed human user");
+}
+
+/// A pre-existing user reads back as a human with no bot state; `kind` and
+/// `disabled_reason` reject values outside their sets; a token needs an
+/// expiry and a unique hash; deleting a bot row removes its tokens.
+async fn assert_v0016_user_bot_constraints(conn: &crate::db::ConnectionGuard) {
+    let mut rows = conn
+        .query(
+            "SELECT kind, owner_jid, disabled_at, disabled_reason FROM users WHERE jid = ?",
+            crate::db_params!["alice@example.com"],
+        )
+        .await
+        .expect("read human user");
+    let row = rows.next().await.expect("read user row").expect("user row");
+    assert_eq!(row.get::<String>(0).expect("kind"), "human");
+    assert_eq!(row.get::<Option<String>>(1).expect("owner_jid"), None);
+    assert_eq!(row.get::<Option<String>>(2).expect("disabled_at"), None);
+    assert_eq!(row.get::<Option<String>>(3).expect("disabled_reason"), None);
+    drop(rows);
+
+    let insert_user = "INSERT INTO users \
+         (jid, username, xmpp_localpart, created_at, updated_at, kind, owner_jid, disabled_reason) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
+    let now = "2026-01-01T00:00:00Z";
+    let bad_kind = conn
+        .execute(
+            insert_user,
+            crate::db_params![
+                "alice+robot@bots.example.com",
+                "alice+robot",
+                "alice+robot",
+                now,
+                now,
+                "robot",
+                "alice@example.com",
+                Option::<String>::None
+            ],
+        )
+        .await;
+    assert!(bad_kind.is_err(), "kind must be 'human' or 'bot'");
+    let bad_reason = conn
+        .execute(
+            insert_user,
+            crate::db_params![
+                "alice+reason@bots.example.com",
+                "alice+reason",
+                "alice+reason",
+                now,
+                now,
+                "bot",
+                "alice@example.com",
+                "x"
+            ],
+        )
+        .await;
+    assert!(
+        bad_reason.is_err(),
+        "disabled_reason must be a known reason"
+    );
+    conn.execute(
+        insert_user,
+        crate::db_params![
+            "alice+standup@bots.example.com",
+            "alice+standup",
+            "alice+standup",
+            now,
+            now,
+            "bot",
+            "alice@example.com",
+            "owner_not_member"
+        ],
+    )
+    .await
+    .expect("insert bot user");
+
+    let insert_token = "INSERT INTO bot_tokens \
+         (id, bot_jid, token_hash, label, created_at, expires_at) VALUES (?, ?, ?, ?, ?, ?)";
+    conn.execute(
+        insert_token,
+        crate::db_params![
+            "token-1",
+            "alice+standup@bots.example.com",
+            "hash-1",
+            "ci",
+            now,
+            "2026-04-01T00:00:00Z"
+        ],
+    )
+    .await
+    .expect("insert bot token");
+    let missing_expiry = conn
+        .execute(
+            insert_token,
+            crate::db_params![
+                "token-2",
+                "alice+standup@bots.example.com",
+                "hash-2",
+                "ci",
+                now,
+                Option::<String>::None
+            ],
+        )
+        .await;
+    assert!(missing_expiry.is_err(), "expires_at must be NOT NULL");
+    let duplicate_hash = conn
+        .execute(
+            insert_token,
+            crate::db_params![
+                "token-3",
+                "alice+standup@bots.example.com",
+                "hash-1",
+                "ci",
+                now,
+                "2026-04-01T00:00:00Z"
+            ],
+        )
+        .await;
+    assert!(duplicate_hash.is_err(), "token_hash must be UNIQUE");
+
+    conn.execute(
+        "DELETE FROM users WHERE jid = ?",
+        crate::db_params!["alice+standup@bots.example.com"],
+    )
+    .await
+    .expect("delete bot user");
+    let mut rows = conn
+        .query("SELECT COUNT(*) FROM bot_tokens", ())
+        .await
+        .expect("count bot tokens");
+    let row = rows
+        .next()
+        .await
+        .expect("read token count")
+        .expect("token count row");
+    let token_count: i64 = row.get(0).expect("decode token count");
+    assert_eq!(token_count, 0, "deleting a bot cascades to its tokens");
+}
+
+#[tokio::test]
 async fn postgres_v0007_tracks_link_preview_media_refs() {
     let Ok(database_url) = std::env::var("WADDLE_TEST_POSTGRES_URL") else {
         eprintln!(
@@ -3058,9 +3418,9 @@ async fn postgres_v0007_tracks_link_preview_media_refs() {
     assert_eq!(
         applied,
         vec![
-            7, 8, 9, 10, 11, 12, 13, 14, 15, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008, 1009,
-            1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022, 1023,
-            1024, 1025, 1026, 1027
+            7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 1001, 1002, 1003, 1004, 1005, 1006, 1007, 1008,
+            1009, 1010, 1011, 1012, 1013, 1014, 1015, 1016, 1017, 1018, 1019, 1020, 1021, 1022,
+            1023, 1024, 1025, 1026, 1027
         ]
     );
 
@@ -3205,7 +3565,7 @@ async fn postgres_v0008_repairs_marked_but_missing_global_tables() {
         .run(&db)
         .await
         .expect("run global migration");
-    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13, 14, 15]);
+    assert_eq!(applied, vec![8, 9, 10, 11, 12, 13, 14, 15, 16]);
 
     let conn = db.guard().await.expect("postgres guard");
     for table in ["provider_webhook_deliveries", "link_preview_media_refs"] {

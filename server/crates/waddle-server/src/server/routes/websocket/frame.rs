@@ -437,9 +437,25 @@ async fn handle_xmpp_frame_impl(
     let stanza_lang = parsed.message_stanza_lang;
 
     match parsed.frame {
-        InboundFrame::Open => {
+        InboundFrame::Open { to } => {
             info!("XMPP stream open requested");
             let open_element = websocket_stream_open_element(domain);
+            // Bot accounts authenticate only with API tokens over HTTP; no
+            // client stream may be opened on the bots domain (RFC 6120
+            // §4.9.3.6: the server does not offer a C2S service there).
+            if to
+                .as_ref()
+                .is_some_and(|to| to.domain() == &*state.deps.service_domains.bots)
+            {
+                warn!("XMPP stream open addressed to the bots domain; refusing");
+                *phase = ConnectionPhase::closing(phase.bound_jid().cloned());
+                conn.begin_server_stream_open_response();
+                return ResponseBatch::from_frames([
+                    open_element,
+                    host_unknown_stream_error(),
+                    websocket_stream_close_element(),
+                ]);
+            }
             let features_element = build_stream_features_for_phase_element(phase);
             conn.begin_server_stream_open_response();
             vec![open_element, features_element].into()
@@ -1207,6 +1223,15 @@ pub(super) async fn execute_committed_message(
         }
         Err(_) => ResponseBatch::default(),
     }
+}
+
+fn host_unknown_stream_error() -> Element {
+    xmpp_parsers::stream_error::StreamError {
+        condition: xmpp_parsers::stream_error::DefinedCondition::HostUnknown,
+        texts: Default::default(),
+        application_specific: Vec::new(),
+    }
+    .into()
 }
 
 fn ingress_failure_stream_error(class: crate::ingress::IngressDecisionClass) -> Element {

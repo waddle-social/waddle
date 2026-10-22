@@ -1,6 +1,7 @@
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
 use crate::server::routes::interpret::effects::{EffectSink, PlanSink};
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use waddle_xmpp::{
     ingress::IngressEffectIntent, protocol::CarbonKind, registry::ConnectionRegistry,
@@ -65,7 +66,7 @@ async fn local_carbons_retry_on_remote_owner(fixture: IngressFixture) {
     )));
     submission.plan.plan = sink.take().0;
     let registry = ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     for _ in 0..2 {
         let retry = commit_submission(&fixture.uow, &submission, 1)
             .await

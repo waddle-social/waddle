@@ -1,5 +1,6 @@
 //! Durable progress survives executor cancellation and rolls back on storage faults.
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress::{
@@ -101,7 +102,11 @@ async fn detached_delivery_fault(
             store_detached(&sm, resource).await;
         }
     }
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.sm_session_registry = Some(&sm);
     let mut submission = fixture.submission(Some("detached-fault"), "canonical delivery");
@@ -299,7 +304,11 @@ async fn detached_muc_records_occupant_progress(fixture: IngressFixture) {
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.sm_session_registry = Some(&sm);
     let mut submission = fixture.submission(Some("detached-muc"), "room message");
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("occupant");
@@ -437,7 +446,11 @@ async fn mixed_direct_muc_context_isolation(fixture: IngressFixture) {
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let state = crate::server::routes::websocket::tests::create_test_websocket_state().await;
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.sm_session_registry = Some(&sm);
     let mut submission = fixture.submission(Some("mixed-detached"), "mixed delivery");
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("target");
@@ -593,7 +606,7 @@ async fn sqlite_present_detached_session_append_failure_is_uncertain() {
     let target: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
     store_detached(&sm, &target).await;
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.sm_session_registry = Some(&sm);
     let mut submission = fixture.submission(Some("append-storage-error"), "durable copy");
     let identity = EffectMessageIdentity::capture_ordinal(1);

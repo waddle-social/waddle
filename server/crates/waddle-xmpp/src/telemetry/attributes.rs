@@ -167,6 +167,8 @@ pub enum Janitor {
     RemoteMucMembership,
     /// Retained local MUC departure reconciliation.
     LocalMucDeparture,
+    /// User bot owner-health and bot-token cleanup.
+    BotLifecycle,
 }
 
 impl sealed::Sealed for Janitor {}
@@ -189,6 +191,7 @@ impl MetricAttribute for Janitor {
             Self::RemoteOwnerMirror => "remote_owner_mirror",
             Self::RemoteMucMembership => "remote_muc_membership",
             Self::LocalMucDeparture => "local_muc_departure",
+            Self::BotLifecycle => "bot_lifecycle",
         }
     }
 }
@@ -1437,6 +1440,43 @@ impl MetricAttribute for AdminOp {
     }
 }
 
+/// `operation` — which `/api/bots` management request was served.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BotApiOp {
+    List,
+    Create,
+    Delete,
+    MintToken,
+    RevokeToken,
+}
+
+impl BotApiOp {
+    /// Every allowed value.
+    pub const ALL: [Self; 5] = [
+        Self::List,
+        Self::Create,
+        Self::Delete,
+        Self::MintToken,
+        Self::RevokeToken,
+    ];
+}
+
+impl sealed::Sealed for BotApiOp {}
+impl MetricAttribute for BotApiOp {
+    fn key(&self) -> &'static str {
+        "operation"
+    }
+    fn value(&self) -> &'static str {
+        match self {
+            Self::List => "list",
+            Self::Create => "create",
+            Self::Delete => "delete",
+            Self::MintToken => "mint_token",
+            Self::RevokeToken => "revoke_token",
+        }
+    }
+}
+
 /// `stage` — where in the push-notification pipeline a sample was
 /// taken (#531). One variant per observable pipeline transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1711,8 +1751,26 @@ impl MetricAttribute for MentionAudienceCheck {
 
 #[cfg(test)]
 mod tests {
-    use super::MetricAttribute;
+    use super::{BotApiOp, MetricAttribute};
     use crate::ingress::{IngressEffectIntent, IngressEffectKind};
+
+    #[test]
+    fn bot_api_op_values_are_stable() {
+        let values: Vec<(&str, &str)> = BotApiOp::ALL
+            .iter()
+            .map(|op| (op.key(), op.value()))
+            .collect();
+        assert_eq!(
+            values,
+            [
+                ("operation", "list"),
+                ("operation", "create"),
+                ("operation", "delete"),
+                ("operation", "mint_token"),
+                ("operation", "revoke_token"),
+            ]
+        );
+    }
 
     #[test]
     fn ingress_effect_kind_labels_match_storage_kind_names() {

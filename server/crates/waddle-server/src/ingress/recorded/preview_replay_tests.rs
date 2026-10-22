@@ -1,4 +1,5 @@
 use super::*;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     db::{DatabaseConfig, DatabasePool, PoolConfig},
@@ -38,7 +39,7 @@ async fn preview_reference_policy_drift(fixture: IngressFixture) {
     )
     .await;
     let registry = ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.web_socket_state = Some(&state);
     let mut submission = fixture.submission(Some("preview-policy-drift"), "preview");
     let mut saved = IngressEffectIntent::storage_round_trip_samples()

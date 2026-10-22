@@ -92,7 +92,7 @@ async fn two_resource_inbox_push(fixture: IngressFixture) {
         decision.arm_owned_receipts.is_empty(),
         "multi-resource inbox pushes retain generic receipt ownership"
     );
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.user_registry = Some(&users);
     let report = execute_effects(
         &fixture.uow,
@@ -137,4 +137,14 @@ async fn ingress_settlement_two_resource_inbox_push_postgres() {
     if let Some(fixture) = IngressFixture::postgres("settlement_inbox").await {
         two_resource_inbox_push(fixture).await;
     }
+}
+
+/// Bots domain of the `example.com` interpreter fixtures.
+pub fn test_bots_domain() -> &'static jid::DomainPart {
+    static BOTS_DOMAIN: std::sync::LazyLock<jid::DomainPart> = std::sync::LazyLock::new(|| {
+        jid::DomainPart::new("bots.example.com")
+            .expect("bots domain")
+            .into_owned()
+    });
+    &BOTS_DOMAIN
 }

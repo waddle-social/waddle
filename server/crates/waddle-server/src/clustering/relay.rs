@@ -21,10 +21,14 @@
 
 pub(crate) mod frame_receipts;
 mod muc_cleanup;
+mod muc_member_clear;
 mod remote_resource_compat;
 use frame_receipts::PendingReplyReceipts;
 pub use frame_receipts::RelayReplyReceiptToken;
 pub use muc_cleanup::{RelayMucCleanup, RelayMucCleanupOutcome};
+pub use muc_member_clear::{
+    RelayMucMemberClear, RelayMucMemberClearReply, RelayMucMemberClearStep,
+};
 
 use super::codec::RemoteStanza;
 use super::local_claims::RoomLocalClaims;
@@ -120,6 +124,7 @@ enum RelayDispatchKind {
     RecipientInventory,
     ExtensionRoomSend,
     MucAdminQuery,
+    MucMemberClear,
 }
 
 impl RelayDispatchKind {
@@ -142,6 +147,7 @@ impl RelayDispatchKind {
             Self::RecipientInventory => "recipient_inventory",
             Self::ExtensionRoomSend => "extension_room_send",
             Self::MucAdminQuery => "muc_admin_query",
+            Self::MucMemberClear => "muc_member_clear",
         }
     }
 }

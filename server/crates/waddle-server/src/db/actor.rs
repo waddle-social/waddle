@@ -8,6 +8,13 @@ use sqlx::query;
 
 use super::{Database, DatabaseError};
 
+mod bots;
+
+pub use bots::{
+    CreateBotAccount, CreateBotOutcome, DisableBot, DisableBotReport, EnableBot, MintBotToken,
+    MintOutcome,
+};
+
 fn mark_actor_result<T>(result: Result<T, DatabaseError>) -> Result<T, DatabaseError> {
     if result.is_err() {
         crate::telemetry::mark_span_error("database actor operation failed");
@@ -106,7 +113,7 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                     r#"
                     INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (jid) DO NOTHING
                     "#,
                 )
                 .bind(&msg.user_jid)
@@ -151,7 +158,7 @@ impl kameo::message::Message<CreateAuthSession> for DbActor {
                     r#"
                     INSERT INTO users (jid, username, xmpp_localpart, localpart_key, created_at, updated_at)
                     VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT DO NOTHING
+                    ON CONFLICT (jid) DO NOTHING
                     "#,
                 )
                 .bind(&msg.user_jid)

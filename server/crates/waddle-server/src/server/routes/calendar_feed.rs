@@ -25,6 +25,7 @@ use waddle_xmpp::pubsub::{AccessModel, PubSubStorage, StoredItem};
 use waddle_xmpp_core::xcal::{CalendarDateValue, CalendarItem, Rrule, RruleEnd, VEvent};
 
 use super::auth::AuthState;
+use super::session_auth::{extract_session_cookie, extract_session_header};
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -35,7 +36,6 @@ const ICS_PRODUCT_ID: &str = "-//Waddle//Community xCal Events//EN";
 const MAX_CONTENT_LINE_BYTES: usize = 75;
 const CALENDAR_FEED_MAX_ITEMS: usize = 1_000;
 const CALENDAR_FEED_RAW_ITEM_SCAN_LIMIT: u32 = 10_000;
-const SESSION_ID_HEADER: &str = "x-waddle-session-id";
 const NO_STORE: &str = "no-store";
 
 #[derive(Clone)]
@@ -613,28 +613,6 @@ fn expected_community_jid(xmpp_domain: &str) -> Result<BareJid, String> {
         .map_err(|error| format!("invalid community service JID: {error}"))
 }
 
-fn extract_session_cookie(headers: &HeaderMap) -> Option<String> {
-    let cookie_header = headers.get(header::COOKIE)?.to_str().ok()?;
-    for pair in cookie_header.split(';') {
-        let trimmed = pair.trim();
-        let Some((name, value)) = trimmed.split_once('=') else {
-            continue;
-        };
-        if name == "waddle_session" && !value.is_empty() {
-            return Some(value.to_string());
-        }
-    }
-    None
-}
-
-fn extract_session_header(headers: &HeaderMap) -> Option<String> {
-    let session_id = headers.get(SESSION_ID_HEADER)?.to_str().ok()?.trim();
-    if session_id.is_empty() {
-        return None;
-    }
-    Some(session_id.to_string())
-}
-
 fn json_error(status: StatusCode, error: &'static str, message: impl Into<String>) -> Response {
     (
         status,
@@ -665,6 +643,7 @@ mod tests {
     use crate::auth::Session;
     use crate::config::ServerConfig;
     use crate::db::{DatabaseConfig, DatabasePool, MigrationRunner, PoolConfig};
+    use crate::server::routes::session_auth::SESSION_ID_HEADER;
     use crate::server::AppState;
     use axum::body::Body;
     use axum::http::Request;

@@ -236,7 +236,10 @@ fn text(row: &[crate::db::Value], index: usize) -> Result<String, AuthError> {
 }
 
 /// Exact matches on the indexed keys: (canonical localpart, canonical JID).
-const ACCOUNT_EXISTS_SQL: &str = "SELECT 1 FROM users WHERE localpart_key = ? \
+/// Bot rows are excluded with `kind <> 'bot'` rather than `kind = 'human'`:
+/// an equality would let SQLite pick `idx_users_kind` over the key index and
+/// scan every human row.
+const ACCOUNT_EXISTS_SQL: &str = "SELECT 1 FROM users WHERE localpart_key = ? AND kind <> 'bot' \
      UNION ALL \
      SELECT 1 FROM native_users WHERE jid_key = ? \
      LIMIT 1";
@@ -314,7 +317,7 @@ pub(crate) async fn search_local_accounts(
             sql: r#"
                 WITH accounts AS (
                     SELECT username, xmpp_localpart, display_name, avatar_url, 0 AS source
-                    FROM users
+                    FROM users WHERE kind = 'human'
                     UNION ALL
                     SELECT username, username, NULL, NULL, 1
                     FROM native_users WHERE domain = ?
@@ -362,7 +365,7 @@ pub(crate) async fn search_local_accounts(
             .and_then(ValueExt::as_string)
             .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
         // Parse the stored localpart as a JID; username slug generation would
-        // change valid native names such as `alice+work` into another account.
+        // change valid native names such as `alice~work` into another account.
         let jid = jid::BareJid::new(&format!("{localpart}@{domain}"))
             .map_err(|error| AuthError::DatabaseError(error.to_string()))?;
         if !seen.insert(jid.clone()) {

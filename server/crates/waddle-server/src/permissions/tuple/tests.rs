@@ -18,6 +18,20 @@ fn test_object_parse() {
 }
 
 #[test]
+fn object_type_round_trips_through_display() {
+    for object_type in ObjectType::ALL {
+        let parsed: ObjectType = object_type.to_string().parse().unwrap();
+        assert_eq!(parsed, object_type);
+    }
+    assert_eq!(ObjectType::Bot.to_string(), "bot");
+    assert_eq!("bot".parse::<ObjectType>().unwrap(), ObjectType::Bot);
+
+    let obj = Object::parse("bot:rawkode+standup@bots.localhost").unwrap();
+    assert_eq!(obj.object_type, ObjectType::Bot);
+    assert_eq!(obj.id, "rawkode+standup@bots.localhost");
+}
+
+#[test]
 fn test_object_display() {
     let obj = Object::new(ObjectType::Space, "penguin-club");
     assert_eq!(obj.to_string(), "space:penguin-club");

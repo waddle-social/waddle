@@ -1,6 +1,7 @@
 //! Phase C records each successful resource before settling the frozen batch.
 use super::*;
 use crate::ingress::{commit::commit_submission, test_support::IngressFixture};
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use std::sync::Arc;
 use waddle_xmpp::{
@@ -62,7 +63,11 @@ async fn detached_receipts(fixture: IngressFixture, missing_second: bool, live_s
         crate::server::routes::websocket::tests::register_test_connection(&state, &second, tx)
             .await;
     }
-    let mut deps = Deps::new(&state.deps.protocol.connection_registry, "example.com");
+    let mut deps = Deps::new(
+        &state.deps.protocol.connection_registry,
+        "example.com",
+        test_bots_domain(),
+    );
     deps.user_registry = Some(&state.deps.protocol.user_registry);
     deps.sm_session_registry = Some(&sm);
     let mut submission = fixture.submission(Some("detached-proof"), "detached fanout");

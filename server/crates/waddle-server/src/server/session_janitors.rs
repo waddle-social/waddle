@@ -26,7 +26,7 @@ use waddle_xmpp::telemetry::attributes::{Janitor, MetricAttribute, SweepOutcome}
 /// `parent: None` guarantees root semantics even if a caller is
 /// instrumented. The span name is documented in `telemetry::span_noise`
 /// and must never be added to its suppression lists.
-fn janitor_sweep_span(janitor: Janitor) -> tracing::Span {
+pub(crate) fn janitor_sweep_span(janitor: Janitor) -> tracing::Span {
     tracing::info_span!(parent: None, "janitor.sweep", janitor = janitor.value())
 }
 

@@ -2467,6 +2467,37 @@ impl MucDurableStore for PostgresMucRoomStore {
         })
     }
 
+    fn list_member_affiliated_rooms<'a>(
+        &'a self,
+        member: &'a BareJid,
+    ) -> MucDurableFuture<'a, Vec<BareJid>> {
+        Box::pin(async move {
+            let conn = self.db.guard().await.map_err(db_err)?;
+            let mut rows = conn
+                .query(
+                    "SELECT room_jid FROM clustering_muc_room_affiliations \
+                     WHERE member_jid = ? AND affiliation <> ? ORDER BY room_jid",
+                    crate::db_params![
+                        member.to_string(),
+                        affiliation_to_db_str(Affiliation::None).to_string(),
+                    ],
+                )
+                .await
+                .map_err(db_err)?;
+            let mut rooms = Vec::new();
+            while let Some(row) = rows.next().await.map_err(db_err)? {
+                let room_jid: String = row.get(0).map_err(db_err)?;
+                let room_jid = room_jid.parse::<BareJid>().map_err(|error| {
+                    XmppError::internal(format!(
+                        "durable affiliation row has an unparseable room JID: {error}"
+                    ))
+                })?;
+                rooms.push(room_jid);
+            }
+            Ok(rooms)
+        })
+    }
+
     fn load_room_state_fenced<'a>(
         &'a self,
         room_jid: &'a BareJid,
@@ -3358,6 +3389,75 @@ mod tests {
             waiter.is_ok(),
             "MUC schema bootstrap must show an ungranted advisory waiter in pg_locks"
         );
+    }
+
+    #[tokio::test]
+    async fn list_member_affiliated_rooms_finds_every_room_naming_the_member() {
+        let _guard = clustering_control_plane_table_lock().lock().await;
+        let Some((store, claim_store, _db, me)) = clean_store().await else {
+            return;
+        };
+        let member: BareJid = "alice+standup@bots.example.com".parse().expect("valid jid");
+        let other: BareJid = "bob@example.com".parse().expect("valid jid");
+        let held = unique_room_jid("member-rooms-held");
+        let banned = unique_room_jid("member-rooms-banned");
+        let unrelated = unique_room_jid("member-rooms-unrelated");
+        for (room_jid, affiliations) in [
+            (
+                &held,
+                vec![
+                    (other.clone(), Affiliation::Owner),
+                    (member.clone(), Affiliation::Member),
+                ],
+            ),
+            (&banned, vec![(member.clone(), Affiliation::Outcast)]),
+            (&unrelated, vec![(other.clone(), Affiliation::Owner)]),
+        ] {
+            let entity = Entity::new(EntityType::RoomActor, room_jid.to_string());
+            let epoch = claim_store
+                .ensure_claimed(&entity, &me)
+                .await
+                .expect("claim");
+            let fence = RoomClaimFenceContext::new(entity, me.clone(), epoch);
+            store.record_claim_fence(room_jid, fence.clone());
+            store
+                .commit_room_mutation(
+                    room_jid,
+                    &fence,
+                    RoomDurableMutation::Create {
+                        waddle_id: waddle_id("waddle-member-rooms"),
+                        channel_id: channel_id("channel-member-rooms"),
+                        config: RoomConfig::default(),
+                        initial_affiliations: affiliations
+                            .into_iter()
+                            .map(|(jid, affiliation)| {
+                                waddle_xmpp::muc::durable::AffiliationEntry::new(
+                                    jid,
+                                    Some(affiliation),
+                                )
+                            })
+                            .collect(),
+                    },
+                    waddle_xmpp::muc::RoomMutationEffects::none(),
+                )
+                .await
+                .expect("create room");
+        }
+
+        let mut expected = vec![held, banned];
+        expected.sort();
+        let mut found = store
+            .list_member_affiliated_rooms(&member)
+            .await
+            .expect("list member rooms");
+        found.sort();
+        assert_eq!(found, expected);
+        let stranger: BareJid = "carol@example.com".parse().expect("valid jid");
+        assert!(store
+            .list_member_affiliated_rooms(&stranger)
+            .await
+            .expect("list stranger rooms")
+            .is_empty());
     }
 
     #[tokio::test]

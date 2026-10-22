@@ -1,6 +1,7 @@
 //! Maintenance regressions against committed obligations and their actual sinks.
 #[path = "recovery_prepared_direct_tests.rs"]
 mod prepared_direct;
+use crate::server::routes::interpret::test_bots_domain;
 use crate::server::routes::interpret::DeliveryExecutionContext;
 use crate::{
     ingress::{
@@ -176,7 +177,7 @@ fn direct_submission(
     }];
     let sink = PlanSink::new();
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
-    let mut deps = Deps::new(&registry, "example.com");
+    let mut deps = Deps::new(&registry, "example.com", test_bots_domain());
     deps.effects = &sink;
     crate::server::routes::interpret::effects::delivery::record(
         &deps,
@@ -2716,7 +2717,7 @@ async fn sqlite_unresolved_effects_distinguish_recovery_from_live_execution() {
         .expect("commit");
     let key = decision.message_key.expect("key");
     let registry = waddle_xmpp::registry::ConnectionRegistry::new();
-    let deps = Deps::new(&registry, "example.com");
+    let deps = Deps::new(&registry, "example.com", test_bots_domain());
     let before_live = metrics
         .counter_sum("ingress.effects.unresolved", &[("phase", "live")])
         .unwrap_or(0);
