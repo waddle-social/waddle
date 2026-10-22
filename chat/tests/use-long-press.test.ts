@@ -38,7 +38,10 @@ async function waitMs(ms: number): Promise<void> {
 describe("useLongPress", () => {
   // Node's globalThis needs a stub window for the click-swallow path.
   const originalWindow = globalThis.window;
-  const originalNavigator = globalThis.navigator;
+  // Bun exposes `navigator` as a read-only accessor, so swap the descriptor
+  // rather than assigning; plain assignment only worked when an earlier test
+  // file had already left a writable `navigator` behind.
+  const originalNavigator = Object.getOwnPropertyDescriptor(globalThis, "navigator");
   const clickListeners: Array<(event: MouseEvent) => void> = [];
 
   beforeEach(() => {
@@ -53,12 +56,16 @@ describe("useLongPress", () => {
         if (idx >= 0) clickListeners.splice(idx, 1);
       },
     } as unknown as Window & typeof globalThis;
-    globalThis.navigator = { vibrate: () => true } as unknown as Navigator;
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { vibrate: () => true },
+    });
   });
 
   afterEach(() => {
     globalThis.window = originalWindow;
-    globalThis.navigator = originalNavigator;
+    if (originalNavigator) Object.defineProperty(globalThis, "navigator", originalNavigator);
+    else Reflect.deleteProperty(globalThis, "navigator");
   });
 
   test("fires after the delay when the finger stays still", async () => {
