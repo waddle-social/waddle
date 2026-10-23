@@ -1171,9 +1171,8 @@ async fn cluster_exit_criteria_end_to_end() {
     );
 
     // --- #1803: the cross-node resource-presence probe over the real wire.
-    // Node A holds this account's `UserActor` claim and hosts two of its
-    // resources — one local socket and one registered-remote mirror for the
-    // socket on node B — while a third, never-bound resource is exactly the
+    // Node A holds this account's `UserActor` claim, hosts one local socket,
+    // and mirrors a socket hosted by node B. A third, never-bound resource is the
     // ghost shape that pinned stalled `route_muc` rows in production. Every
     // node answers about the sockets IT holds; the claim decides nothing.
     assert_eq!(
@@ -1189,8 +1188,8 @@ async fn cluster_exit_criteria_end_to_end() {
             .resource_presence(remote_target_full.clone())
             .await
             .expect("presence probe for the mirrored resource"),
-        RelayResourcePresenceReply::Present,
-        "a registered-remote mirror is present"
+        RelayResourcePresenceReply::Absent,
+        "a remote mirror does not make node A the socket's host"
     );
     // The #1803 regression, over the wire: node B holds NO claim for this
     // account — A does — yet B hosts this socket, and B is the only node that

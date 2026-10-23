@@ -115,6 +115,9 @@ fn record_failure_transition(
     };
     let disposition = match (terminal, uncertain) {
         (true, true) => PushDisposition::Parked,
+        (true, false) if matches!(failure.class, PublishFailureClass::RegistrationGone) => {
+            PushDisposition::RegistrationRevoked
+        }
         (true, false) => PushDisposition::DeadLetter,
         (false, _) => PushDisposition::Retry,
     };
@@ -127,6 +130,7 @@ fn record_failure_transition(
     let push_stage = match disposition {
         PushDisposition::Retry => "retry_scheduled",
         PushDisposition::Parked => "parked",
+        PushDisposition::RegistrationRevoked => "registration_gone",
         _ => "dead_lettered",
     };
     tracing::warn!(job_id, notification_class, push_stage, failure = reason.as_str(), failure_class = class.as_str(), custody_uncertain = uncertain, disposition = disposition.as_str(), error = %failure, "push pipeline transition");
@@ -580,16 +584,8 @@ impl NotificationOutboxStore {
                 && registration.node.as_deref() == Some(job.node.as_str())
         });
         let Some(registration) = registration else {
-            if self
-                .mark_job_failed_with_failure(job, PublishFailureClass::RegistrationGone)
-                .await?
-            {
-                return Ok(NotificationOutboxPublishOutcome::Failed {
-                    job_id: job.job_id.clone(),
-                });
-            }
             return self
-                .retry_or_fail_outcome_for_claimed_job(job, PublishFailureClass::RegistrationGone)
+                .fail_claimed_job_for_gone_registration(job, false)
                 .await;
         };
 
@@ -678,6 +674,18 @@ impl NotificationOutboxStore {
                 })
             }
             Err(crate::push_service::PushQueueAcceptanceError::KnownNotAccepted(error)) => {
+                if matches!(
+                    error,
+                    waddle_xmpp::XmppError::Stanza {
+                        condition: waddle_xmpp::StanzaErrorCondition::ItemNotFound,
+                        ..
+                    }
+                ) {
+                    tracing::warn!(job_id = job.job_id.as_str(), failure = "registration_gone", %error, "notification registration no longer accepts publications");
+                    return self
+                        .fail_claimed_job_for_gone_registration(job, !prior_acceptance_may_exist)
+                        .await;
+                }
                 self.record_known_queue_refusal(job, prior_acceptance_may_exist)
                     .await?;
                 tracing::warn!(job_id = job.job_id.as_str(), failure = "queue_refused", %error, "notification queue refused invocation");
@@ -925,6 +933,56 @@ impl NotificationOutboxStore {
             ).await?;
         }
         Ok(())
+    }
+
+    /// A gone target cannot recover through retries of this registration. Stop
+    /// this exact claim without discharging any earlier uncertain acceptance.
+    /// The Push Service retires its configured registration under the node's
+    /// owner lock during admission; a delayed refusal must not disable a later
+    /// re-enable or acquire authority over a separate registration store.
+    async fn fail_claimed_job_for_gone_registration(
+        &self,
+        job: &NotificationOutboxJob,
+        clear_invocation_uncertainty: bool,
+    ) -> Result<NotificationOutboxPublishOutcome, NotificationOutboxError> {
+        let mut tx = self.db.begin_immediate().await?;
+        lock_outbox_ancestry_tx(&mut tx, job.job_id.as_str()).await?;
+        let lock = if tx.driver() == crate::db::DatabaseDriver::Postgres {
+            " FOR UPDATE"
+        } else {
+            ""
+        };
+        let mut rows = tx
+            .query(
+                &format!("SELECT queue_acceptance_may_exist FROM notification_outbox WHERE job_id = ? AND status = ? AND claim_token = ?{lock}"),
+                crate::db_params![job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+            )
+            .await?;
+        let Some(row) = rows.next().await? else {
+            return Ok(NotificationOutboxPublishOutcome::RetryScheduled {
+                job_id: job.job_id.clone(),
+            });
+        };
+        let uncertain = row.get::<i64>(0)? != 0 && !clear_invocation_uncertainty;
+        drop(rows);
+        tx.execute(
+            "UPDATE notification_outbox SET status = ?, queue_acceptance_may_exist = ?, policy_error_count = 0, last_error = ?, next_attempt_at_ms = NULL, claimed_at_ms = NULL, claim_token = NULL, updated_at_ms = ? WHERE job_id = ? AND status = ? AND claim_token = ?",
+            crate::db_params![STATUS_FAILED, i64::from(uncertain), PublishFailureClass::RegistrationGone.reason().as_str(), crate::time::now_ms(), job.job_id.as_str(), STATUS_IN_PROGRESS, job.claim_token.as_deref()],
+        ).await?;
+        if !uncertain {
+            settle_outbox_if_unowned_tx(&mut tx, job.job_id.as_str()).await?;
+        }
+        tx.commit().await?;
+        record_failure_transition(
+            job.job_id.as_str(),
+            job.class.as_db_value(),
+            &PublishFailureClass::RegistrationGone.into(),
+            true,
+            uncertain,
+        );
+        Ok(NotificationOutboxPublishOutcome::Failed {
+            job_id: job.job_id.clone(),
+        })
     }
 
     /// Freeze the approved notification before crossing the durable acceptance
@@ -1653,3 +1711,7 @@ mod malformed_outbox_tests;
 #[cfg(test)]
 #[path = "retry_policy_tests.rs"]
 mod retry_policy_tests;
+
+#[cfg(test)]
+#[path = "gone_registration_tests.rs"]
+mod gone_registration_tests;

@@ -184,6 +184,7 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.maintenance.unrecoverable_obligations{kind,reason}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported evaluations and stalled recovery classifications; read alongside `IngressNonTerminalBacklog` |
 | `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | Frozen groupchat copies settled for occupants the room no longer lists; not zero-registered, so read it as "did this ever tick" |
 | `muc.ghost_occupants.evicted` | `muc_ghost_occupants_evicted_total` | XEP-0045 ghost occupants removed from a room by a stalled groupchat obligation; not zero-registered, and every tick means a cleanup leak happened upstream |
+| `ingress.recovery.reachability_blocked{reason}` | `ingress_recovery_reachability_blocked_total{reason}` | Diagnostic absence probes blocked by local sockets, resumable sessions, or unavailable evidence; repeated observations, not unique occupants/messages; not zero-registered |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind,phase}` (local executions only) | `ingress_effects_unresolved_total` | Dashboard diagnostics only; incomplete attempts, including repeated observations of the same obligation, are not leakage |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
@@ -1940,8 +1941,8 @@ Two properties bound the settlement, because it permanently drops a copy:
   resumable-session probe for a live attached one — every local signal says
   "gone" about a user who is simply connected to the other replica. A
   roster-absent occupant is therefore only settled once it is absent from this
-  node's own state (connection registry, actor tree, and a resumable XEP-0198
-  session in memory or the shared durable store) AND every unexpired cluster
+  node's locally hosted sockets and resumable XEP-0198 sessions in memory or
+  the shared durable store AND every unexpired cluster
   peer has denied the exact full JID — the same fan-out the ghost eviction
   runs, on a tighter 500 ms budget because the settlement runs inside the
   per-row recovery deadline.
@@ -2103,10 +2104,13 @@ could be torn out of every room. The guard therefore reads the cluster
 membership and asks EVERY other node, concurrently and inside one overall
 1.5-second budget, through a strictly read-only relay message,
 `waddle.clustering.relay.resource_presence.v1`, naming the exact full JID.
-Each node answers only about itself: `Present` when it hosts a socket for that
-resource, when its own `UserActor` tree lists it (a local socket, or a
-registered-remote mirror it holds for a peer's socket), or when it has a
-resumable XEP-0198 session for it; `Absent` when it knows none of those. The
+Each node answers only about itself: `Present` when it hosts a local socket for
+that resource or has a resumable XEP-0198 session for it; `Absent` when neither
+exists. It rechecks the local socket after an absent session read, so a resume
+that publishes a socket while removing the detached session remains present.
+Remote mirrors and actor-tree resource lists are routing state, not socket
+proof: a missed unregister can leave them behind after the socket disappears
+(#2010). They must not bypass the every-peer probe on either side. The
 occupant is evictable only when the membership read succeeded and every peer
 answered `Absent`. The handler reads no claim, spawns no actor and changes no
 client-visible state, so a duplicated or abandoned ask costs nothing.
@@ -2153,11 +2157,10 @@ a cross-node answer simply do not happen and the rows stay owed; they resume
 once both replicas run the new image.
 
 Every guard fails closed; each of these leaves the occupant seated and the
-copy owed: a live entry for the full JID in this node's connection registry
-(which includes the clustered registered-remote mirror), a resumable XEP-0198
+copy owed: a locally hosted entry for the full JID in this node's connection
+registry, a resumable XEP-0198
 session in this node's memory OR in the shared durable store (including a read
-of that store that fails), the actor tree still listing the exact resource (or
-failing to answer), a membership read that errors or is truncated, any peer
+of that store that fails), a membership read that errors or is truncated, any peer
 that answers `Present` or cannot be asked at all (an old replica's
 `UnknownMessage`, a timeout, a transport or decode failure), the whole
 fan-out exceeding its budget, a room this node does not authoritatively host,
@@ -2165,11 +2168,11 @@ a room whose exact claim fence the durable store no longer holds, a room probe
 that does not answer, and a recovery environment with no WebSocket state to
 run the sweep with. The same fan-out guards the departed-copy settlement, so
 both irreversible decisions rest on one shared answer and cannot drift apart.
-Consequently a `route_muc` backlog with
-`unrecoverable_obligations{reason="no_durable_progress"}` ticking while
-`muc.ghost_occupants.evicted` stays flat means the occupants are still
-reachable somewhere (or a probe cannot answer) — not that the eviction is
-broken. A sustained ghost-eviction rate is the signal to chase the upstream
+For a `route_muc` backlog with
+`unrecoverable_obligations{reason="no_durable_progress"}` ticking and
+`muc.ghost_occupants.evicted` staying flat, inspect socket/session reachability
+and failed probes before changing maintenance budgets. A sustained
+ghost-eviction rate is the signal to chase the upstream
 cleanup leak, not to raise the maintenance budget.
 
 A row whose room **no node hosts any more** — a destroyed non-persistent room
@@ -2891,3 +2894,72 @@ and pending claims. A separate retained-session store would leave replay copies
 bound to claims that the reset released, allowing expiry promotion to enqueue
 the same pending delivery again. Split SM stores are therefore rejected even
 when clustering is disabled.
+
+## Production validation for PR #2014
+
+Merging #2014 deploys the server. Code rollback does not undo ghost evictions or
+policy progress that already committed. Before rollout, take a fresh read-only
+snapshot using this runbook's pending-intent/progress queries and record exporter
+freshness. The earlier investigation observed 15 newer unsealed `route_muc`
+intents sharing one unfinished resource; those counts are a historical baseline,
+not an assertion about the current backlog. Keep any row identifiers in the
+restricted operational record, never in metrics or a public issue.
+
+Compare the same pending intent/progress pairs after rollout, alongside:
+
+```promql
+cnpg_waddle_ingress_nonterminal_messages{role="primary",kind="route_muc"}
+sum(increase(muc_ghost_occupants_evicted_total[15m]))
+sum by (reason) (increase(ingress_recovery_reachability_blocked_total[15m]))
+```
+
+If stale routing mirrors caused the pending copies, the backlog should decrease
+as an abandoned occupancy is removed. One eviction can release several intents;
+do not expect one eviction per pending message. A flat aged-message gauge does
+not prove that no progress occurred: inspect the same rows and the ten-minute
+age threshold, and verify that the zero sentinel and primary exporter are fresh.
+
+The diagnostic `reason` values are `local_socket`, `resumable_session`,
+`session_probe_failed`, `session_registry_missing`, `peer_present`, and
+`peer_probe_unproven`. They identify the signal that prevented a recovery probe
+from proving absence. They cover shared departed-copy and stalled-ghost probes,
+count repeated observations, and carry no endpoint identifiers. The family is
+created on first use; a missing series is not proof of absence or a successful
+probe. `peer_present` records the peer's conservative reply, which can also mean
+that its local session probe failed. A room/occupancy/claim check can prevent
+repair before reachability is queried, so read these observations with the
+maintenance outcomes and logs.
+Healthy sockets, resumable custody, failed probes, and newer generations must
+remain protected. Do not manufacture receipts or relax fences to make a gauge
+fall. The remaining routing-mirror lifecycle work is tracked in #2015.
+
+For gone push nodes, configured admission now disables only the authenticated
+owner's matching configured service/node registration under the owner lifecycle
+lock. This does not cancel accepted provider work. The outbox records a terminal
+`registration_gone` outcome once, using the `registration_revoked` disposition;
+prior uncertain acceptance is parked with its frozen payload and custody intact.
+Neither outcome schedules admission retries or increments the dead-letter
+counter. A newer re-enable wins after the admission transaction, and a delayed
+outbox response cannot disable it. Standalone stores retain their existing
+boundary from host registration state.
+
+Check aggregate retry/dead-letter trends and restricted transition records:
+
+```promql
+sum(increase(xmpp_push_outbox_retry_scheduled_total{reason="queue_refused"}[15m]))
+sum(increase(xmpp_push_outbox_dead_lettered_total[15m]))
+```
+
+Other transient queue refusals can still retry, so global counters alone cannot
+attribute an event to a gone node. Inspect `failure="registration_gone"`, its
+terminal disposition, absence of a next retry, and exact target registration
+state without publishing identifiers. Current production wiring always supplies
+the PubSub boundary; the optional standalone constructor is not established as
+the historical cause. The read-only October 23 investigation found an enabled
+legacy-shaped registration predating local provider-node provisioning, sharing
+the retained FK-failure target. This supports an unprovisioned legacy target;
+deletion is not established, and the retained rows do not match the exact
+October 21 incident window. Legacy registration/outbox state can also survive
+provider-node pruning, whose checks protect provider custody rather than host
+registration state. Historical attribution and that broader invariant are
+tracked in #2016.

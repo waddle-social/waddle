@@ -307,6 +307,24 @@ async fn ghost_recovery(fixture: IngressFixture, case: GhostCase) {
         "a repaired row is never classified no_durable_progress"
     );
     assert_eq!(super::super::super::attempt_count(f.key), 4);
+    let reason = match case {
+        GhostCase::Evictable => None,
+        GhostCase::Connected => Some("local_socket"),
+        GhostCase::Resumable => Some("resumable_session"),
+        GhostCase::ProbeFailed => Some("session_probe_failed"),
+    };
+    if let Some(reason) = reason {
+        assert!(
+            metrics
+                .counter_sum(
+                    "ingress.recovery.reachability_blocked",
+                    &[("reason", reason)]
+                )
+                .unwrap_or(0)
+                > 0,
+            "retained occupancy reports its reachability blocker: {reason}"
+        );
+    }
     if case == GhostCase::ProbeFailed {
         f.f.execute("ALTER TABLE sm_sessions_hidden RENAME TO sm_sessions", ())
             .await;

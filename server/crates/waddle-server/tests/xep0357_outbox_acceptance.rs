@@ -191,6 +191,98 @@ impl Fixture {
         self.push_db.execute("WITH RECURSIVE items(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM items WHERE n < 10000) INSERT INTO push_publish_jobs (job_id, owner_bare_jid, push_service_jid, node, item_id, payload_xml, status, created_at_ms, updated_at_ms) SELECT CAST(n AS TEXT), ?, ?, ?, CAST(n AS TEXT), ?, 'queued', 1, 1 FROM items", waddle_server::db_params![self.owner.to_string(), self.service.to_string(), self.node.clone(), String::from(&payload)]).await;
     }
 
+    async fn attach_upstream_custody(&self) {
+        use sha2::{Digest, Sha256};
+        use waddle_server::ingress_uow::{
+            CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
+            EffectReceiptRepository,
+        };
+        use waddle_xmpp::ingress::{
+            IngressEffectIntent, MessageKey, NotificationActivityMutation,
+            NotificationCandidateOutcome, SemanticDigest,
+        };
+        let parent = MessageKey::new();
+        let intent = IngressEffectIntent::NotificationActivityPreview {
+            owner: self.owner.clone(),
+            mutation: NotificationActivityMutation::NotificationCandidate {
+                conversation: "bob@example.com".parse().expect("conversation"),
+                archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
+                    "revocation-custody",
+                    self.owner.clone().into(),
+                ),
+                outcome: NotificationCandidateOutcome::Inserted,
+            },
+        };
+        let mut tx = self
+            .outbox_db
+            .uow
+            .begin()
+            .await
+            .expect("upstream canonical parent");
+        CanonicalMessageRepository::record_message(
+            &mut tx,
+            parent,
+            &SemanticDigest::from_storage(1, [81; 32]).expect("digest"),
+            None,
+        )
+        .await
+        .expect("canonical parent");
+        EffectIntentRepository::reconcile(&mut tx, parent, std::slice::from_ref(&intent), false)
+            .await
+            .expect("recorded obligation");
+        EffectDescendantRepository::attach(&mut tx, parent, &intent.semantic_key(), self.job_id)
+            .await
+            .expect("unsettled upstream custody");
+        let kind = intent
+            .with_encoded_v1(|kind, _| kind)
+            .expect("encoded receipt kind");
+        let identity: [u8; 32] =
+            Sha256::digest(intent.semantic_key().storage_identity().as_bytes()).into();
+        EffectReceiptRepository::record_receipt(
+            &mut tx,
+            parent,
+            waddle_server::ingress_substrate::EffectReceiptKind::from_storage(kind),
+            &identity,
+        )
+        .await
+        .expect("candidate completion receipt");
+        CanonicalMessageRepository::terminalize(
+            &mut tx,
+            parent,
+            chrono::Utc::now() - chrono::Duration::days(20),
+        )
+        .await
+        .expect("parent awaits descendant");
+        tx.commit().await.expect("pending custody committed");
+    }
+
+    async fn assert_upstream_custody_retained(&self) {
+        assert_eq!(
+            self.outbox_db
+                .count("ingress_effect_descendants WHERE settled_at IS NULL")
+                .await,
+            1
+        );
+        let budget = waddle_server::ingress_substrate::AliasGcBudget {
+            deadline: tokio::time::Instant::now() + std::time::Duration::from_secs(10),
+            lock_timeout: std::time::Duration::from_secs(1),
+            statement_timeout: std::time::Duration::from_secs(2),
+            scan_timeout: std::time::Duration::from_secs(2),
+            progress: waddle_server::ingress_substrate::AliasGcProgress::default(),
+        };
+        assert_eq!(
+            waddle_server::ingress_substrate::gc_expired_aliases(
+                &self.outbox_db.db,
+                chrono::Utc::now() + chrono::Duration::days(9),
+                budget,
+            )
+            .await
+            .expect("uncertain custody blocks canonical GC")
+            .deleted_messages,
+            0
+        );
+    }
+
     async fn close(self) {
         drop(self.outbox);
         drop(self.push);
@@ -199,12 +291,8 @@ impl Fixture {
     }
 }
 
-async fn known_refusal_reaches_attempt_limit(fixture: Fixture, full: bool) {
-    if full {
-        fixture.full().await;
-    } else {
-        fixture.inactive().await;
-    }
+async fn queue_full_refusal_reaches_attempt_limit(fixture: Fixture) {
+    fixture.full().await;
     for attempt in 1..=5 {
         let job = fixture.claim().await;
         let outcome = fixture.publish(&job).await;
@@ -237,14 +325,64 @@ async fn known_refusal_reaches_attempt_limit(fixture: Fixture, full: bool) {
     fixture.close().await;
 }
 
-async fn known_refusal_can_still_suppress_unread_zero(fixture: Fixture) {
+async fn inactive_node_fails_once_and_disables_registration(fixture: Fixture) {
     fixture.inactive().await;
+    let job = fixture.claim().await;
+    assert!(matches!(
+        fixture.publish(&job).await,
+        NotificationOutboxPublishOutcome::Failed { .. }
+    ));
+    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 0 AND queue_acceptance_may_exist = 0 AND claim_token IS NULL AND next_attempt_at_ms IS NULL AND last_error = 'registration_gone'").await, 1);
+    let registrations = waddle_server::push_registrations::DatabasePushRegistrationStore::new(
+        fixture.push_db.db.clone(),
+    )
+    .await
+    .expect("provider registrations");
+    assert!(registrations
+        .get_for_user(&fixture.owner.to_string())
+        .await
+        .expect("inactive registration disabled")
+        .is_empty());
+    assert_eq!(
+        fixture
+            .push_db
+            .count("push_registrations WHERE status = 'disabled'")
+            .await,
+        1
+    );
+    assert_eq!(fixture.push_db.count("push_publish_jobs").await, 0);
+    assert!(fixture
+        .outbox
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("gone job stays terminal")
+        .is_empty());
+    assert_eq!(
+        fixture
+            .subscriptions
+            .get_for_user(&fixture.owner.to_string())
+            .await
+            .expect("separate user store untouched")
+            .len(),
+        1
+    );
+    fixture.close().await;
+}
+
+async fn known_refusal_can_still_suppress_unread_zero(fixture: Fixture) {
+    fixture.full().await;
     let first = fixture.claim().await;
     assert!(matches!(
         fixture.publish(&first).await,
         NotificationOutboxPublishOutcome::RetryScheduled { .. }
     ));
-    assert_eq!(fixture.push_db.count("push_publish_jobs").await, 0);
+    assert_eq!(
+        fixture
+            .push_db
+            .count("push_publish_jobs WHERE acceptance_scope = 'canonical'")
+            .await,
+        0
+    );
     fixture
         .inbox
         .mark_read(
@@ -257,31 +395,36 @@ async fn known_refusal_can_still_suppress_unread_zero(fixture: Fixture) {
     let job = fixture.claim().await;
     assert!(matches!(fixture.publish(&job).await, NotificationOutboxPublishOutcome::Suppressed { .. }), "a frozen preview never accepted by the queue may be suppressed after the recipient reads it");
     assert_eq!(fixture.outbox_db.count("notification_outbox").await, 0);
-    assert_eq!(fixture.push_db.count("push_publish_jobs").await, 0);
+    assert_eq!(
+        fixture
+            .push_db
+            .count("push_publish_jobs WHERE acceptance_scope = 'canonical'")
+            .await,
+        0
+    );
+    assert_eq!(fixture.push_db.count("push_publish_jobs").await, 10_000);
     fixture.close().await;
 }
 
 #[tokio::test]
 async fn sqlite_queue_full_refusals_reach_attempt_limit() {
-    known_refusal_reaches_attempt_limit(
+    queue_full_refusal_reaches_attempt_limit(
         Fixture::new(
             IngressFixture::sqlite().await,
             IngressFixture::sqlite().await,
         )
         .await,
-        true,
     )
     .await;
 }
 #[tokio::test]
-async fn sqlite_inactive_node_refusals_reach_attempt_limit() {
-    known_refusal_reaches_attempt_limit(
+async fn sqlite_inactive_node_fails_once_and_disables_registration() {
+    inactive_node_fails_once_and_disables_registration(
         Fixture::new(
             IngressFixture::sqlite().await,
             IngressFixture::sqlite().await,
         )
         .await,
-        false,
     )
     .await;
 }
@@ -304,17 +447,17 @@ async fn postgres_queue_full_refusals_reach_attempt_limit() {
     let Some(push) = IngressFixture::postgres("queue_refusal_push").await else {
         return;
     };
-    known_refusal_reaches_attempt_limit(Fixture::new(outbox, push).await, true).await;
+    queue_full_refusal_reaches_attempt_limit(Fixture::new(outbox, push).await).await;
 }
 #[tokio::test]
-async fn postgres_inactive_node_refusals_reach_attempt_limit() {
+async fn postgres_inactive_node_fails_once_and_disables_registration() {
     let Some(outbox) = IngressFixture::postgres("inactive_refusal_outbox").await else {
         return;
     };
     let Some(push) = IngressFixture::postgres("inactive_refusal_push").await else {
         return;
     };
-    known_refusal_reaches_attempt_limit(Fixture::new(outbox, push).await, false).await;
+    inactive_node_fails_once_and_disables_registration(Fixture::new(outbox, push).await).await;
 }
 #[tokio::test]
 async fn postgres_frozen_unaccepted_preview_is_suppressed_when_read() {
@@ -328,6 +471,7 @@ async fn postgres_frozen_unaccepted_preview_is_suppressed_when_read() {
 }
 
 async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fixture) {
+    fixture.attach_upstream_custody().await;
     fixture
         .backing
         .set_affiliation(
@@ -368,19 +512,25 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
         )
         .await
         .expect("read");
-    for attempt in 2..=5 {
-        let job = fixture.claim().await;
-        let outcome = fixture.publish(&job).await;
-        if attempt < 5 {
-            assert!(matches!(outcome, NotificationOutboxPublishOutcome::RetryScheduled { .. }), "later known refusal cannot erase prior queue acceptance or suppress read-zero uncertainty");
-        } else {
-            assert!(
-                matches!(outcome, NotificationOutboxPublishOutcome::Failed { .. }),
-                "the shared attempt budget parks uncertain work after five attempts"
-            );
-        }
-    }
-    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL AND next_attempt_at_ms IS NULL").await, 1);
+    let job = fixture.claim().await;
+    assert!(matches!(fixture.publish(&job).await, NotificationOutboxPublishOutcome::Failed { .. }), "a gone target parks prior queue acceptance immediately without suppressing read-zero uncertainty");
+    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 1 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL AND next_attempt_at_ms IS NULL").await, 1);
+    assert_eq!(
+        fixture
+            .push_db
+            .count("push_registrations WHERE status = 'disabled'")
+            .await,
+        1
+    );
+    assert_eq!(
+        fixture
+            .outbox_db
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1,
+        "gone admission is not proof that the prior provider acceptance relinquished custody"
+    );
+    assert_eq!(fixture.push_db.count("push_publish_jobs WHERE acceptance_scope = 'canonical' AND status = 'queued' AND terminal_disposition IS NULL AND upstream_completed = 0").await, 1);
     assert_eq!(
         fixture
             .outbox
@@ -390,23 +540,25 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
             .jobs_deleted,
         0
     );
+    assert_eq!(
+        fixture
+            .push
+            .ensure_node(&fixture.owner, "web")
+            .await
+            .expect("reactivate owned node")
+            .node(),
+        fixture.node
+    );
     fixture
-        .push_db
-        .execute(
-            "UPDATE push_nodes SET status = ? WHERE node = ?",
-            waddle_server::db_params!["active", fixture.node.clone()],
-        )
-        .await;
-    fixture
-        .backing
-        .set_affiliation(
-            &fixture.service,
-            &fixture.node,
+        .push
+        .register_first_party_node_for_owner(
             &fixture.owner,
-            Affiliation::PublishOnly,
+            fixture.service.as_str(),
+            &fixture.node,
+            Some(&publish_options("open")),
         )
         .await
-        .expect("restore backing affiliation");
+        .expect("fresh owner-authorized enable restores registration and affiliation");
     fixture
         .subscriptions
         .register(PushSubscription {
@@ -435,7 +587,7 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
                 .await
                 .expect("parked drain after service recovery")
                 .is_empty(),
-            "restoring service availability cannot resume an exhausted owner's sends"
+            "restoring service availability cannot resume a parked owner's sends"
         );
     }
     assert_eq!(
@@ -454,7 +606,15 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
         Some(String::from(&publish_options("whitelist"))),
         "registration changes cannot mutate parked publish options"
     );
-    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 5 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL").await, 1, "proof-only probes never reopen the parked owner");
+    assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 1 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL").await, 1, "proof-only probes never reopen the parked owner");
+    assert_eq!(
+        fixture
+            .outbox_db
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1,
+        "reenabling the registration cannot settle an earlier acceptance"
+    );
     assert!(
         fixture
             .backing
@@ -477,6 +637,17 @@ async fn queue_commit_followed_by_backing_failure_keeps_uncertainty(fixture: Fix
         "queue acceptance is not provider acceptance"
     );
     assert_eq!(fixture.push_db.optional_text("SELECT publish_options_xml FROM push_publish_jobs WHERE acceptance_scope = 'canonical'").await, Some(String::from(&publish_options("whitelist"))), "later registration changes cannot alter frozen publish options");
+    assert_eq!(
+        fixture
+            .push_db
+            .optional_text(
+                "SELECT payload_xml FROM push_publish_jobs WHERE acceptance_scope = 'canonical'"
+            )
+            .await,
+        accepted.payload.as_ref().map(String::from),
+        "the accepted provider payload remains byte-for-byte frozen"
+    );
+    fixture.assert_upstream_custody_retained().await;
     fixture.close().await;
 }
 
@@ -516,68 +687,7 @@ async fn explicit_revocation_retires_accepted_outbox_after_crash_gap(
     fixture: Fixture,
     control: RevocationControl,
 ) {
-    use sha2::{Digest, Sha256};
-    use waddle_server::ingress_uow::{
-        CanonicalMessageRepository, EffectDescendantRepository, EffectIntentRepository,
-        EffectReceiptRepository,
-    };
-    use waddle_xmpp::ingress::{
-        IngressEffectIntent, MessageKey, NotificationActivityMutation,
-        NotificationCandidateOutcome, SemanticDigest,
-    };
-    let parent = MessageKey::new();
-    let intent = IngressEffectIntent::NotificationActivityPreview {
-        owner: fixture.owner.clone(),
-        mutation: NotificationActivityMutation::NotificationCandidate {
-            conversation: "bob@example.com".parse().expect("conversation"),
-            archive_stanza_id: waddle_xmpp_core::xep0359::StanzaId::new(
-                "revocation-custody",
-                fixture.owner.clone().into(),
-            ),
-            outcome: NotificationCandidateOutcome::Inserted,
-        },
-    };
-    let mut tx = fixture
-        .outbox_db
-        .uow
-        .begin()
-        .await
-        .expect("upstream canonical parent");
-    CanonicalMessageRepository::record_message(
-        &mut tx,
-        parent,
-        &SemanticDigest::from_storage(1, [81; 32]).expect("digest"),
-        None,
-    )
-    .await
-    .expect("canonical parent");
-    EffectIntentRepository::reconcile(&mut tx, parent, std::slice::from_ref(&intent), false)
-        .await
-        .expect("recorded obligation");
-    EffectDescendantRepository::attach(&mut tx, parent, &intent.semantic_key(), fixture.job_id)
-        .await
-        .expect("unsettled upstream custody");
-    let kind = intent
-        .with_encoded_v1(|kind, _| kind)
-        .expect("encoded receipt kind");
-    let identity: [u8; 32] =
-        Sha256::digest(intent.semantic_key().storage_identity().as_bytes()).into();
-    EffectReceiptRepository::record_receipt(
-        &mut tx,
-        parent,
-        waddle_server::ingress_substrate::EffectReceiptKind::from_storage(kind),
-        &identity,
-    )
-    .await
-    .expect("candidate completion receipt");
-    CanonicalMessageRepository::terminalize(
-        &mut tx,
-        parent,
-        chrono::Utc::now() - chrono::Duration::days(20),
-    )
-    .await
-    .expect("parent awaits descendant");
-    tx.commit().await.expect("pending custody committed");
+    fixture.attach_upstream_custody().await;
     fixture
         .backing
         .set_affiliation(
@@ -797,6 +907,7 @@ async fn postgres_explicit_revocation_retires_crash_gap_outbox() {
 }
 
 async fn generic_failed_acceptance_is_not_revocation_proof(fixture: Fixture) {
+    fixture.attach_upstream_custody().await;
     fixture
         .backing
         .set_affiliation(
@@ -812,6 +923,11 @@ async fn generic_failed_acceptance_is_not_revocation_proof(fixture: Fixture) {
         fixture.publish(&first).await,
         NotificationOutboxPublishOutcome::RetryScheduled { .. }
     ));
+    let approved = fixture
+        .outbox_db
+        .optional_text("SELECT approved_payload_xml FROM notification_outbox")
+        .await
+        .expect("frozen accepted payload");
     fixture
         .push_db
         .execute(
@@ -832,17 +948,75 @@ async fn generic_failed_acceptance_is_not_revocation_proof(fixture: Fixture) {
     assert!(
         matches!(
             fixture.publish(&retry).await,
-            NotificationOutboxPublishOutcome::RetryScheduled { .. }
+            NotificationOutboxPublishOutcome::Failed { .. }
         ),
         "a generic FAILED row or matching human last_error cannot resolve prior uncertainty"
     );
     assert_eq!(
         fixture
             .outbox_db
-            .count("notification_outbox WHERE status = 'queued' AND queue_acceptance_may_exist = 1")
+            .count("notification_outbox WHERE status = 'failed' AND attempt_count = 1 AND queue_acceptance_may_exist = 1 AND claim_token IS NULL AND next_attempt_at_ms IS NULL")
             .await,
         1
     );
+    assert_eq!(
+        fixture
+            .push_db
+            .optional_text(
+                "SELECT payload_xml FROM push_publish_jobs WHERE acceptance_scope = 'canonical'"
+            )
+            .await,
+        Some(approved.clone()),
+        "a generic failed row retains its exact accepted provider payload"
+    );
+    assert_eq!(
+        fixture
+            .push_db
+            .optional_text("SELECT publish_options_xml FROM push_publish_jobs WHERE acceptance_scope = 'canonical'")
+            .await,
+        Some(String::from(&publish_options("whitelist")))
+    );
+    assert_eq!(
+        fixture
+            .outbox_db
+            .optional_text("SELECT approved_payload_xml FROM notification_outbox")
+            .await,
+        Some(approved),
+        "a misleading failure message cannot erase the accepted payload"
+    );
+    assert_eq!(
+        fixture
+            .outbox_db
+            .optional_text("SELECT approved_publish_options_xml FROM notification_outbox")
+            .await,
+        Some(String::from(&publish_options("whitelist")))
+    );
+    assert_eq!(
+        fixture
+            .outbox_db
+            .count("ingress_effect_descendants WHERE settled_at IS NULL")
+            .await,
+        1,
+        "generic failure text cannot settle upstream custody"
+    );
+    assert_eq!(fixture.push_db.count("push_publish_jobs WHERE status = 'failed' AND terminal_disposition IS NULL AND upstream_completed = 0").await, 1, "human error text is not an exact revocation proof or completion acknowledgment");
+    assert_eq!(fixture.push_db.count("push_delivery_attempts").await, 0);
+    assert_eq!(
+        fixture
+            .outbox
+            .prune_completed_before(i64::MAX, 16)
+            .await
+            .expect("retain parked proof")
+            .jobs_deleted,
+        0
+    );
+    assert!(fixture
+        .outbox
+        .claim_due_outbox_jobs(1)
+        .await
+        .expect("parked custody does not retry")
+        .is_empty());
+    fixture.assert_upstream_custody_retained().await;
     fixture.close().await;
 }
 #[tokio::test]

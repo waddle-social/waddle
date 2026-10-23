@@ -70,12 +70,11 @@ async fn resource_presence_local_reports_a_live_local_resource_present() {
     );
 }
 
-/// The exact production shape the guard exists for: the owner mirrors a
-/// resource whose socket lives on ANOTHER node. The mirror is in the actor
-/// tree, so the probe must answer `Present` even though nothing here has a
-/// socket.
+/// A registered mirror is routing state for ANOTHER node's socket. Only
+/// that node can prove whether its socket still exists; this node's mirror
+/// must not turn every-peer availability checks into circular proof.
 #[tokio::test]
-async fn resource_presence_local_reports_a_registered_remote_mirror_present() {
+async fn resource_presence_local_reports_a_registered_remote_mirror_absent() {
     let services = services_with_claims(
         origin_identity(),
         receiver_identity(),
@@ -103,7 +102,7 @@ async fn resource_presence_local_reports_a_registered_remote_mirror_present() {
 
     assert_eq!(
         bridge.resource_presence_local(&target).await,
-        LocalResourcePresence::Present
+        LocalResourcePresence::Absent
     );
 }
 
@@ -223,13 +222,54 @@ async fn resource_presence_local_with_a_failed_resumable_probe_is_present() {
     .await;
     services.sm_session_registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(Arc::new(UnreadableSmPersistence::default())),
+            .with_persistence(Arc::new(ControllableSessionProbePersistence::default())),
     );
     let target = probe_target();
     let bridge = bridge_owning_target(services).await;
 
     assert_eq!(
         bridge.resource_presence_local(&target).await,
+        LocalResourcePresence::Present
+    );
+}
+
+/// Resume publishes its socket before removing the detached SM session. A
+/// session read that overlaps that transition must recheck the socket before
+/// reporting absence to the room host.
+#[tokio::test]
+async fn resource_presence_local_rechecks_a_socket_published_during_the_session_probe() {
+    let mut services = services_with_claims(
+        origin_identity(),
+        receiver_identity(),
+        receiver_identity(),
+        test_peer_id(),
+    )
+    .await;
+    let gate = Arc::new(SessionProbeGate::default());
+    services.sm_session_registry = Arc::new(
+        waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_persistence(
+            Arc::new(ControllableSessionProbePersistence {
+                probe_gate: Some(Arc::clone(&gate)),
+                ..Default::default()
+            }),
+        ),
+    );
+    let connections = Arc::clone(&services.connection_registry);
+    let bridge = bridge_owning_target(services).await;
+    let target = probe_target();
+    let probing = {
+        let bridge = Arc::clone(&bridge);
+        let target = target.clone();
+        tokio::spawn(async move { bridge.resource_presence_local(&target).await })
+    };
+    tokio::time::timeout(Duration::from_secs(3), gate.entered.notified())
+        .await
+        .expect("presence probe reached the session read");
+    let (tx, _socket) = mpsc::channel(4);
+    let _owner = connections.register(target, tx);
+    gate.release.notify_one();
+    assert_eq!(
+        probing.await.expect("presence probe"),
         LocalResourcePresence::Present
     );
 }
@@ -300,18 +340,26 @@ fn detached_session(resource: &jid::FullJid) -> DetachedSession {
     }
 }
 
-/// Durable SM store whose enumeration always fails — the shape a pool
-/// exhaustion or a lost connection takes at the probe seam. Every other
-/// operation delegates, so the registry behaves normally otherwise.
+/// Durable SM store whose enumeration fails unless a test gates the scoped
+/// probe read. Every other operation delegates to the in-memory store.
 #[derive(Default)]
-struct UnreadableSmPersistence {
+struct ControllableSessionProbePersistence {
     inner: waddle_xmpp::stream_management::persistence::InMemorySmPersistence,
+    probe_gate: Option<Arc<SessionProbeGate>>,
+}
+
+#[derive(Default)]
+struct SessionProbeGate {
+    entered: tokio::sync::Notify,
+    release: tokio::sync::Notify,
 }
 
 type SmResult<T> = Result<T, waddle_xmpp::stream_management::persistence::SmPersistenceError>;
 
 #[async_trait::async_trait]
-impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for UnreadableSmPersistence {
+impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
+    for ControllableSessionProbePersistence
+{
     async fn acknowledge_claimed_session(
         &self,
         stream: &waddle_xmpp::pending_delivery::SmSessionId,
@@ -448,8 +496,13 @@ impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for Unrea
     /// moment a backend overrides it.
     async fn list_sessions_for_full_jid(
         &self,
-        _jid: &jid::FullJid,
+        jid: &jid::FullJid,
     ) -> SmResult<Vec<waddle_xmpp::stream_management::persistence::PersistedSession>> {
+        if let Some(gate) = &self.probe_gate {
+            gate.entered.notify_one();
+            gate.release.notified().await;
+            return self.inner.list_sessions_for_full_jid(jid).await;
+        }
         Err(
             waddle_xmpp::stream_management::persistence::SmPersistenceError::Other(
                 "simulated durable read failure".to_string(),

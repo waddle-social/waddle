@@ -413,9 +413,11 @@ async fn departed_verdict(
         // stable fact must still be able to accumulate its stall streak and
         // reach ghost repair, which is the path that resolves a resource
         // nothing can actually deliver to.
+        #[cfg(feature = "clustering")]
         recovery_reachability::ResourceReachability::Reachable => OccupantVerdict::Owed,
         // A read failed or the budget elapsed. Transient, and the row must not
         // be parked on evidence this attempt never gathered.
+        #[cfg(feature = "clustering")]
         recovery_reachability::ResourceReachability::Unproven => OccupantVerdict::Inconclusive,
     }
 }
