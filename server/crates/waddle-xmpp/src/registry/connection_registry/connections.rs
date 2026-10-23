@@ -223,6 +223,14 @@ impl ConnectionRegistry {
         self.connections.contains_key(jid)
     }
 
+    /// Whether this node hosts the socket registered for this exact full JID.
+    /// Remote routing mirrors and absent entries both return false.
+    pub fn is_locally_hosted(&self, jid: &FullJid) -> bool {
+        self.connections
+            .get(jid)
+            .is_some_and(|entry| entry.is_locally_hosted())
+    }
+
     /// Look up the [`ConnectionEntry`] for a registered full JID.
     ///
     /// Used by handlers that need to inspect or atomically transition

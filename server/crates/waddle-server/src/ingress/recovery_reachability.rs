@@ -16,6 +16,10 @@ use std::time::Duration;
 
 use jid::FullJid;
 use waddle_xmpp::stream_management::ResumableSessionProbe;
+use waddle_xmpp::telemetry::{
+    attributes::IngressReachabilityBlockReason as BlockReason,
+    reliability::increment_ingress_recovery_reachability_blocked,
+};
 
 use crate::server::routes::interpret::Deps;
 
@@ -50,9 +54,8 @@ pub(super) enum ResourceReachability {
     #[cfg(feature = "clustering")]
     Reachable,
     /// A probe could not answer: the membership read failed or was truncated,
-    /// a peer ask failed (`UnknownMessage` mid-rolling-update, a timeout,
-    /// a transport or decode
-    /// failure), or the fan-out budget elapsed. TRANSIENT.
+    /// a peer ask failed (`UnknownMessage` mid-rolling-update, a timeout, a
+    /// transport or decode failure), or the fan-out budget elapsed. TRANSIENT.
     #[cfg(feature = "clustering")]
     Unproven,
 }
@@ -63,26 +66,34 @@ pub(super) enum ResourceReachability {
 /// reachable. A registered-remote mirror is routing state, not evidence
 /// that the socket still exists: only its hosting peer can answer that.
 pub(super) async fn locally_reachable(deps: &Deps<'_>, occupant: &FullJid) -> bool {
-    if deps
-        .connection_registry
-        .get_entry(occupant)
-        .is_some_and(|entry| entry.is_locally_hosted())
-    {
+    if deps.connection_registry.is_locally_hosted(occupant) {
+        increment_ingress_recovery_reachability_blocked(BlockReason::LocalSocket);
         return true;
     }
     let Some(sm) = deps.sm_session_registry else {
+        increment_ingress_recovery_reachability_blocked(BlockReason::SessionRegistryMissing);
         return true;
     };
     match sm.probe_resumable_session_for_full_jid(occupant).await {
         // Checks this node's memory AND the shared durable store, so a
         // session resume-stolen by another node still counts as resumable.
-        ResumableSessionProbe::Present | ResumableSessionProbe::Failed => true,
+        ResumableSessionProbe::Present => {
+            increment_ingress_recovery_reachability_blocked(BlockReason::ResumableSession);
+            true
+        }
+        ResumableSessionProbe::Failed => {
+            increment_ingress_recovery_reachability_blocked(BlockReason::SessionProbeFailed);
+            true
+        }
         // Resume publishes the local socket before deleting its detached
         // session. The asynchronous session read may overlap that transition.
-        ResumableSessionProbe::Absent => deps
-            .connection_registry
-            .get_entry(occupant)
-            .is_some_and(|entry| entry.is_locally_hosted()),
+        ResumableSessionProbe::Absent => {
+            let connected = deps.connection_registry.is_locally_hosted(occupant);
+            if connected {
+                increment_ingress_recovery_reachability_blocked(BlockReason::LocalSocket);
+            }
+            connected
+        }
     }
 }
 
@@ -95,7 +106,19 @@ pub(super) async fn reachable_elsewhere(
     occupant: &FullJid,
     budget: Duration,
 ) -> ResourceReachability {
-    reachable_on_a_peer(deps, occupant, budget).await
+    let reachability = reachable_on_a_peer(deps, occupant, budget).await;
+    match reachability {
+        ResourceReachability::AbsentEverywhere => {}
+        #[cfg(feature = "clustering")]
+        ResourceReachability::Reachable => {
+            increment_ingress_recovery_reachability_blocked(BlockReason::PeerPresent);
+        }
+        #[cfg(feature = "clustering")]
+        ResourceReachability::Unproven => {
+            increment_ingress_recovery_reachability_blocked(BlockReason::PeerProbeUnproven);
+        }
+    }
+    reachability
 }
 
 /// Whether any OTHER cluster node can still reach this exact RESOURCE.

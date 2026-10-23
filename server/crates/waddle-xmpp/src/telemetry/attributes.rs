@@ -1841,6 +1841,37 @@ impl MetricAttribute for MentionAudienceCheck {
     }
 }
 
+/// `reason` — why a recovery probe could not establish resource absence.
+/// These are observations, not unique messages or occupants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IngressReachabilityBlockReason {
+    LocalSocket,
+    ResumableSession,
+    SessionProbeFailed,
+    SessionRegistryMissing,
+    PeerPresent,
+    PeerProbeUnproven,
+}
+
+impl sealed::Sealed for IngressReachabilityBlockReason {}
+
+impl MetricAttribute for IngressReachabilityBlockReason {
+    fn key(&self) -> &'static str {
+        "reason"
+    }
+
+    fn value(&self) -> &'static str {
+        match self {
+            Self::LocalSocket => "local_socket",
+            Self::ResumableSession => "resumable_session",
+            Self::SessionProbeFailed => "session_probe_failed",
+            Self::SessionRegistryMissing => "session_registry_missing",
+            Self::PeerPresent => "peer_present",
+            Self::PeerProbeUnproven => "peer_probe_unproven",
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::MetricAttribute;

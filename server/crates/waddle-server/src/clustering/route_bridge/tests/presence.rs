@@ -222,7 +222,7 @@ async fn resource_presence_local_with_a_failed_resumable_probe_is_present() {
     .await;
     services.sm_session_registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new()
-            .with_persistence(Arc::new(UnreadableSmPersistence::default())),
+            .with_persistence(Arc::new(ControllableSessionProbePersistence::default())),
     );
     let target = probe_target();
     let bridge = bridge_owning_target(services).await;
@@ -248,7 +248,7 @@ async fn resource_presence_local_rechecks_a_socket_published_during_the_session_
     let gate = Arc::new(SessionProbeGate::default());
     services.sm_session_registry = Arc::new(
         waddle_xmpp::stream_management::InMemorySmSessionRegistry::new().with_persistence(
-            Arc::new(UnreadableSmPersistence {
+            Arc::new(ControllableSessionProbePersistence {
                 probe_gate: Some(Arc::clone(&gate)),
                 ..Default::default()
             }),
@@ -343,7 +343,7 @@ fn detached_session(resource: &jid::FullJid) -> DetachedSession {
 /// Durable SM store whose enumeration fails unless a test gates the scoped
 /// probe read. Every other operation delegates to the in-memory store.
 #[derive(Default)]
-struct UnreadableSmPersistence {
+struct ControllableSessionProbePersistence {
     inner: waddle_xmpp::stream_management::persistence::InMemorySmPersistence,
     probe_gate: Option<Arc<SessionProbeGate>>,
 }
@@ -357,7 +357,9 @@ struct SessionProbeGate {
 type SmResult<T> = Result<T, waddle_xmpp::stream_management::persistence::SmPersistenceError>;
 
 #[async_trait::async_trait]
-impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage for UnreadableSmPersistence {
+impl waddle_xmpp::stream_management::persistence::SmPersistenceStorage
+    for ControllableSessionProbePersistence
+{
     async fn acknowledge_claimed_session(
         &self,
         stream: &waddle_xmpp::pending_delivery::SmSessionId,

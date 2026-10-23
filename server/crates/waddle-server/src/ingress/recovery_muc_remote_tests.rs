@@ -699,6 +699,27 @@ async fn stalled_remote_occupant_recovery(f: IngressFixture, case: ElsewhereCase
     );
     tx.commit().await.expect("read commit");
     let asked = asked.lock().expect("probe log").clone();
+    let reason = match case {
+        ElsewhereCase::PeerHoldsTheSocket(_) | ElsewhereCase::RegisteredRemote => {
+            Some("peer_present")
+        }
+        ElsewhereCase::PeerAskFails | ElsewhereCase::MembershipUnreadable => {
+            Some("peer_probe_unproven")
+        }
+        _ => None,
+    };
+    if let Some(reason) = reason {
+        assert!(
+            metrics
+                .counter_sum(
+                    "ingress.recovery.reachability_blocked",
+                    &[("reason", reason)]
+                )
+                .unwrap_or(0)
+                > 0,
+            "retained remote occupancy reports its blocker: {reason}"
+        );
+    }
     match case {
         ElsewhereCase::MembershipUnreadable => assert!(
             asked.is_empty(),

@@ -46,11 +46,7 @@ impl OrderedRelayDeliveryBridge {
         };
         // Only this node can vouch for its own sockets. Remote mirrors are
         // routing state and can outlive a missed unregister on a healthy peer.
-        if services
-            .connection_registry
-            .get_entry(target)
-            .is_some_and(|entry| entry.is_locally_hosted())
-        {
+        if services.connection_registry.is_locally_hosted(target) {
             return LocalResourcePresence::Present;
         }
         // A detached resource has no socket but may resume at any moment.
@@ -68,11 +64,7 @@ impl OrderedRelayDeliveryBridge {
             waddle_xmpp::stream_management::ResumableSessionProbe::Absent => {
                 // Resume publishes its socket before removing the detached
                 // session; the asynchronous session read may overlap it.
-                if services
-                    .connection_registry
-                    .get_entry(target)
-                    .is_some_and(|entry| entry.is_locally_hosted())
-                {
+                if services.connection_registry.is_locally_hosted(target) {
                     LocalResourcePresence::Present
                 } else {
                     LocalResourcePresence::Absent

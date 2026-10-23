@@ -719,6 +719,21 @@ pub fn add_muc_ghost_occupants_evicted(count: u64) {
     );
 }
 
+/// Diagnostic observations that kept recovery from proving a resource absent.
+/// Repeated probes count separately; there are no endpoint identifiers.
+/// Not zero-registered: this is a diagnostic event counter, not an alert input.
+pub fn increment_ingress_recovery_reachability_blocked(
+    reason: super::attributes::IngressReachabilityBlockReason,
+) {
+    crate::counter_add!(
+        "ingress.recovery.reachability_blocked",
+        "{probe}",
+        "Recovery absence probes blocked by endpoint presence or unavailable evidence, by reason.",
+        1,
+        reason,
+    );
+}
+
 pub fn increment_ingress_maintenance_unrecoverable_obligations(
     count: u64,
     kind: IngressEffectKind,
@@ -760,6 +775,36 @@ mod tests {
 
     async fn setup() -> crate::telemetry::test_support::MetricsTestGuard {
         crate::telemetry::test_support::acquire().await
+    }
+
+    #[tokio::test]
+    async fn recovery_reachability_blockers_export_bounded_reasons() {
+        use crate::telemetry::attributes::IngressReachabilityBlockReason as Reason;
+        let guard = setup().await;
+        for (reason, label) in [
+            (Reason::LocalSocket, "local_socket"),
+            (Reason::ResumableSession, "resumable_session"),
+            (Reason::SessionProbeFailed, "session_probe_failed"),
+            (Reason::SessionRegistryMissing, "session_registry_missing"),
+            (Reason::PeerPresent, "peer_present"),
+            (Reason::PeerProbeUnproven, "peer_probe_unproven"),
+        ] {
+            increment_ingress_recovery_reachability_blocked(reason);
+            assert_eq!(
+                guard.counter_sum(
+                    "ingress.recovery.reachability_blocked",
+                    &[("reason", label)]
+                ),
+                Some(1),
+            );
+        }
+        let samples = guard
+            .counter_samples("ingress.recovery.reachability_blocked")
+            .expect("diagnostic samples");
+        assert_eq!(samples.len(), 6);
+        assert!(samples
+            .iter()
+            .all(|(_, attributes)| { attributes.len() == 1 && attributes[0].0 == "reason" }));
     }
 
     #[tokio::test]

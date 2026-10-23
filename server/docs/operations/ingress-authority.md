@@ -184,6 +184,7 @@ latency is a seconds histogram; confirm `le`-labelled buckets are present.
 | `ingress.maintenance.unrecoverable_obligations{kind,reason}` | `ingress_maintenance_unrecoverable_obligations_total` | Unsupported evaluations and stalled recovery classifications; read alongside `IngressNonTerminalBacklog` |
 | `ingress.maintenance.departed_occupant_copies` | `ingress_maintenance_departed_occupant_copies_total` | Frozen groupchat copies settled for occupants the room no longer lists; not zero-registered, so read it as "did this ever tick" |
 | `muc.ghost_occupants.evicted` | `muc_ghost_occupants_evicted_total` | XEP-0045 ghost occupants removed from a room by a stalled groupchat obligation; not zero-registered, and every tick means a cleanup leak happened upstream |
+| `ingress.recovery.reachability_blocked{reason}` | `ingress_recovery_reachability_blocked_total{reason}` | Diagnostic absence probes blocked by local sockets, resumable sessions, or unavailable evidence; repeated observations, not unique occupants/messages; not zero-registered |
 | `ingress.tx.duration` | `ingress_tx_duration_seconds_bucket` (also `_sum`, `_count`) | `IngressTxSlow` |
 | `ingress.effects.unresolved{kind,phase}` (local executions only) | `ingress_effects_unresolved_total` | Dashboard diagnostics only; incomplete attempts, including repeated observations of the same obligation, are not leakage |
 | CNPG old non-terminal canonical messages by pending intent family | `cnpg_waddle_ingress_nonterminal_messages{kind}` | `IngressNonTerminalBacklog` |
@@ -2893,3 +2894,72 @@ and pending claims. A separate retained-session store would leave replay copies
 bound to claims that the reset released, allowing expiry promotion to enqueue
 the same pending delivery again. Split SM stores are therefore rejected even
 when clustering is disabled.
+
+## Production validation for PR #2014
+
+Merging #2014 deploys the server. Code rollback does not undo ghost evictions or
+policy progress that already committed. Before rollout, take a fresh read-only
+snapshot using this runbook's pending-intent/progress queries and record exporter
+freshness. The earlier investigation observed 15 newer unsealed `route_muc`
+intents sharing one unfinished resource; those counts are a historical baseline,
+not an assertion about the current backlog. Keep any row identifiers in the
+restricted operational record, never in metrics or a public issue.
+
+Compare the same pending intent/progress pairs after rollout, alongside:
+
+```promql
+cnpg_waddle_ingress_nonterminal_messages{role="primary",kind="route_muc"}
+sum(increase(muc_ghost_occupants_evicted_total[15m]))
+sum by (reason) (increase(ingress_recovery_reachability_blocked_total[15m]))
+```
+
+If stale routing mirrors caused the pending copies, the backlog should decrease
+as an abandoned occupancy is removed. One eviction can release several intents;
+do not expect one eviction per pending message. A flat aged-message gauge does
+not prove that no progress occurred: inspect the same rows and the ten-minute
+age threshold, and verify that the zero sentinel and primary exporter are fresh.
+
+The diagnostic `reason` values are `local_socket`, `resumable_session`,
+`session_probe_failed`, `session_registry_missing`, `peer_present`, and
+`peer_probe_unproven`. They identify the signal that prevented a recovery probe
+from proving absence. They cover shared departed-copy and stalled-ghost probes,
+count repeated observations, and carry no endpoint identifiers. The family is
+created on first use; a missing series is not proof of absence or a successful
+probe. `peer_present` records the peer's conservative reply, which can also mean
+that its local session probe failed. A room/occupancy/claim check can prevent
+repair before reachability is queried, so read these observations with the
+maintenance outcomes and logs.
+Healthy sockets, resumable custody, failed probes, and newer generations must
+remain protected. Do not manufacture receipts or relax fences to make a gauge
+fall. The remaining routing-mirror lifecycle work is tracked in #2015.
+
+For gone push nodes, configured admission now disables only the authenticated
+owner's matching configured service/node registration under the owner lifecycle
+lock. This does not cancel accepted provider work. The outbox records a terminal
+`registration_gone` outcome once, using the `registration_revoked` disposition;
+prior uncertain acceptance is parked with its frozen payload and custody intact.
+Neither outcome schedules admission retries or increments the dead-letter
+counter. A newer re-enable wins after the admission transaction, and a delayed
+outbox response cannot disable it. Standalone stores retain their existing
+boundary from host registration state.
+
+Check aggregate retry/dead-letter trends and restricted transition records:
+
+```promql
+sum(increase(xmpp_push_outbox_retry_scheduled_total{reason="queue_refused"}[15m]))
+sum(increase(xmpp_push_outbox_dead_lettered_total[15m]))
+```
+
+Other transient queue refusals can still retry, so global counters alone cannot
+attribute an event to a gone node. Inspect `failure="registration_gone"`, its
+terminal disposition, absence of a next retry, and exact target registration
+state without publishing identifiers. Current production wiring always supplies
+the PubSub boundary; the optional standalone constructor is not established as
+the historical cause. The read-only October 23 investigation found an enabled
+legacy-shaped registration predating local provider-node provisioning, sharing
+the retained FK-failure target. This supports an unprovisioned legacy target;
+deletion is not established, and the retained rows do not match the exact
+October 21 incident window. Legacy registration/outbox state can also survive
+provider-node pruning, whose checks protect provider custody rather than host
+registration state. Historical attribution and that broader invariant are
+tracked in #2016.

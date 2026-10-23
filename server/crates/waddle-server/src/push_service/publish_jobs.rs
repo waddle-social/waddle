@@ -1199,6 +1199,33 @@ impl DatabasePushServiceStore {
         .await
     }
 
+    /// XEP-0357 §6: a configured user-server registration cannot deliver to a
+    /// missing or inactive node. Admission holds the owner lifecycle lock, so
+    /// this cleanup precedes any subsequent node reactivation or re-enable.
+    /// Standalone stores have no authority over host registration state.
+    async fn disable_gone_node_registration_tx(
+        &self,
+        tx: &mut crate::db::Transaction<'_>,
+        owner: &BareJid,
+        service: Option<&BareJid>,
+        node: &str,
+    ) -> Result<(), XmppError> {
+        if let Some(boundary) = &self.pubsub_boundary {
+            if service == Some(&boundary.service_jid) {
+                crate::push_registrations::disable_registration_tx(
+                    tx,
+                    owner,
+                    &boundary.service_jid,
+                    node,
+                    "XEP-0357 §6: push node missing or inactive",
+                )
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            }
+        }
+        Ok(())
+    }
+
     async fn enqueue_notification_publish_job(
         &self,
         node: &str,
@@ -1215,10 +1242,22 @@ impl DatabasePushServiceStore {
             .map_err(|error| XmppError::internal(error.to_string()))?;
         let now_ms = crate::time::now_ms();
         lock_owner_tx(&mut tx, publisher, now_ms).await?;
-        let push_node = get_node_tx(&mut tx, node)
-            .await?
-            .ok_or_else(|| XmppError::item_not_found(Some("Push node not found".to_string())))?;
+        let Some(push_node) = get_node_tx(&mut tx, node).await? else {
+            self.disable_gone_node_registration_tx(&mut tx, publisher, push_service_jid, node)
+                .await?;
+            tx.commit()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
+            return Err(XmppError::item_not_found(Some("Push node not found".to_string())).into());
+        };
         if push_node.status != PushNodeStatus::Active {
+            if push_node.owner_bare_jid == *publisher {
+                self.disable_gone_node_registration_tx(&mut tx, publisher, push_service_jid, node)
+                    .await?;
+            }
+            tx.commit()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?;
             return Err(XmppError::item_not_found(Some("Push node not active".to_string())).into());
         }
         if push_node.owner_bare_jid != *publisher {

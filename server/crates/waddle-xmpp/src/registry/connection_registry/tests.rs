@@ -56,6 +56,24 @@ fn test_register_connection() {
 }
 
 #[test]
+fn locally_hosted_lookup_tracks_socket_mirror_and_absence() {
+    let registry = ConnectionRegistry::new();
+    let jid = test_jid("user1");
+    assert!(!registry.is_locally_hosted(&jid));
+
+    let (local_tx, _local_rx) = mpsc::channel(1);
+    registry.register(jid.clone(), local_tx);
+    assert!(registry.is_locally_hosted(&jid));
+
+    let (remote_tx, _remote_rx) = mpsc::channel(1);
+    registry.register_entry(jid.clone(), ConnectionEntry::remote_hosted(remote_tx));
+    assert!(!registry.is_locally_hosted(&jid));
+
+    registry.unregister(&jid);
+    assert!(!registry.is_locally_hosted(&jid));
+}
+
+#[test]
 fn locally_hosted_send_excludes_remote_owner_mirror() {
     let registry = ConnectionRegistry::new();
     let jid = test_jid("remote");

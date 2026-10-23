@@ -1097,7 +1097,8 @@ impl Message<RelayReassertMediaGrants> for RelayActor {
 /// socket liveness: nothing re-registers an idle socket anywhere when that
 /// claim's owner dies or moves, so the claim can neither vouch for a resource
 /// nor deny one. The receiver answers only about its locally hosted sockets
-/// and SM sessions. Routing mirrors do not prove that a peer still has a socket.
+/// and SM sessions. Routing mirrors do not prove that a peer still has a
+/// socket.
 ///
 /// Strictly read-only: the handler reads no claim, spawns no actor and
 /// performs no side effect, so an ask that times out or is answered twice

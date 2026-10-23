@@ -88,6 +88,13 @@ async fn stale_claim_neither_enters_nor_clears_boundary(fixture: IngressFixture)
         .mark_job_failed(&stale, "stale refusal")
         .await
         .expect("stale failure"));
+    assert!(matches!(
+        store
+            .fail_claimed_job_for_gone_registration(&stale, true)
+            .await
+            .expect("stale gone target"),
+        NotificationOutboxPublishOutcome::RetryScheduled { .. }
+    ));
     assert_eq!(
         store
             .schedule_retry_or_fail(&stale, "stale failure".into())
