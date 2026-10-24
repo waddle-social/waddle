@@ -5872,6 +5872,62 @@ fn closed_release_channel_retains_restart_inventory() {
         .contains_key(&candidate_key));
 }
 
+#[cfg(all(test, unix, feature = "clustering"))]
+#[test]
+fn poisoned_orphan_inventory_aborts_instead_of_losing_the_supervisor() {
+    use std::os::unix::process::ExitStatusExt;
+
+    const CHILD_ENV: &str = "WADDLE_POISONED_ORPHAN_INVENTORY_CHILD";
+    if std::env::var_os(CHILD_ENV).is_some() {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("test runtime")
+            .block_on(async {
+                let registry =
+                    Arc::new(waddle_xmpp::stream_management::InMemorySmSessionRegistry::new());
+                let cancel = tokio_util::sync::CancellationToken::new();
+                let supervisor = OrphanReaperSupervisor::new(registry.clone(), cancel.clone());
+                let pending = supervisor.workers.hydration_pending.clone();
+                std::thread::spawn(move || {
+                    let _pending = pending.lock().expect("unpoisoned inventory");
+                    panic!("writer failed while changing exact ownership inventory");
+                })
+                .join()
+                .expect_err("writer panicked while holding the pending-map lock");
+
+                // Restart snapshots the poisoned map before shutting workers
+                // down. A panic contained by Tokio must not strand live node
+                // authority after killing only the supervisor task.
+                let _ = tokio::spawn(async move {
+                    let restarted = supervisor.restarted(registry, cancel).await;
+                    restarted.shutdown().await;
+                })
+                .await;
+            });
+        return;
+    }
+
+    let output = std::process::Command::new(
+        std::env::current_exe().expect("current test binary"),
+    )
+    .args([
+        "--exact",
+        "server::session_janitors::poisoned_orphan_inventory_aborts_instead_of_losing_the_supervisor",
+        "--nocapture",
+    ])
+    .env(CHILD_ENV, "1")
+    .output()
+    .expect("isolated poisoned supervisor process");
+    assert_eq!(
+        output.status.signal(),
+        Some(libc::SIGABRT),
+        "poisoned restart inventory must abort the process, not disappear with its supervisor task: {}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 #[cfg(all(test, feature = "clustering"))]
 #[tokio::test]
 async fn supervisor_restart_preserves_orphan_scan_cursors() {

@@ -78,6 +78,59 @@ impl SmResumeCheckpointHandle {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn poisoned_resume_checkpoint_aborts_even_in_a_detached_task() {
+        use std::os::unix::process::ExitStatusExt;
+
+        const CHILD_ENV: &str = "WADDLE_POISONED_CHECKPOINT_CHILD";
+        if std::env::var_os(CHILD_ENV).is_some() {
+            let handle = SmResumeCheckpointHandle::default();
+            let writer = handle.clone();
+            std::thread::spawn(move || {
+                let mut checkpoint = writer.0.lock().expect("unpoisoned checkpoint");
+                checkpoint.resumable = true;
+                panic!("writer failed before completing checkpoint counters");
+            })
+            .join()
+            .expect_err("writer panicked while holding the checkpoint lock");
+
+            tokio::runtime::Builder::new_current_thread()
+                .build()
+                .expect("test runtime")
+                .block_on(async move {
+                    let (completed, observed) = tokio::sync::oneshot::channel();
+                    // Intentionally drop the JoinHandle. A contained task panic
+                    // must not leave a healthy process continuing beside it.
+                    drop(tokio::spawn(async move {
+                        let result = handle.validate(0);
+                        let _ = completed.send(result);
+                    }));
+                    let _ = observed.await;
+                });
+            return;
+        }
+
+        let output = std::process::Command::new(
+            std::env::current_exe().expect("current test binary"),
+        )
+        .args([
+            "--exact",
+            "stream_management::resume_checkpoint::tests::poisoned_resume_checkpoint_aborts_even_in_a_detached_task",
+            "--nocapture",
+        ])
+        .env(CHILD_ENV, "1")
+        .output()
+        .expect("isolated poisoned checkpoint process");
+        assert_eq!(
+            output.status.signal(),
+            Some(6), // SIGABRT on the supported Unix server platforms.
+            "checkpoint validation must stop sibling tasks instead of returning uncertain replay authority: {}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr),
+        );
+    }
+
     #[test]
     fn resume_checkpoint_uses_detached_session_wrapping_and_gap_rules() {
         let handle = SmResumeCheckpointHandle::default();

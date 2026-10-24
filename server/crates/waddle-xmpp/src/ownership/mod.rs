@@ -792,6 +792,60 @@ mod tests {
         assert!(ClaimEpoch(0) < ClaimEpoch(1));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn poisoned_node_identity_reads_abort_the_process() {
+        use std::os::unix::process::ExitStatusExt;
+
+        const CHILD_ENV: &str = "WADDLE_POISONED_IDENTITY_CHILD";
+        if let Some(operation) = std::env::var_os(CHILD_ENV) {
+            let shared = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-0"));
+            let writer = shared.clone();
+            std::thread::spawn(move || {
+                let mut identity = writer.identity.write().expect("unpoisoned identity");
+                identity.node_id = "partially-rotated-node".to_string();
+                panic!("writer failed before updating its incarnation");
+            })
+            .join()
+            .expect_err("writer panicked while holding the identity lock");
+
+            match operation.to_str().expect("test operation") {
+                "current" => {
+                    let _ = shared.current();
+                }
+                "with_current" => shared.with_current(|_| ()),
+                "guard_if_current" => {
+                    let _ = tokio::runtime::Builder::new_current_thread()
+                        .build()
+                        .expect("test runtime")
+                        .block_on(shared.guard_if_current(&NodeIdentity::new("node-a", "epoch-0")));
+                }
+                _ => panic!("unknown test operation"),
+            }
+            return;
+        }
+
+        for operation in ["current", "with_current", "guard_if_current"] {
+            let output =
+                std::process::Command::new(std::env::current_exe().expect("current test binary"))
+                    .args([
+                        "--exact",
+                        "ownership::tests::poisoned_node_identity_reads_abort_the_process",
+                        "--nocapture",
+                    ])
+                    .env(CHILD_ENV, operation)
+                    .output()
+                    .expect("isolated poisoned identity process");
+            assert_eq!(
+                output.status.signal(),
+                Some(6), // SIGABRT on the supported Unix server platforms.
+                "{operation} must abort instead of returning recovered authority or merely unwinding: {}\n{}",
+                output.status,
+                String::from_utf8_lossy(&output.stderr),
+            );
+        }
+    }
+
     #[tokio::test]
     async fn shared_node_identity_rotation_is_visible_through_every_clone() {
         let shared = SharedNodeIdentity::new(NodeIdentity::new("node-a", "epoch-0"));
