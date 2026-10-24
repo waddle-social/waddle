@@ -33,7 +33,7 @@ mod worker;
 
 pub use apns_config::{ApnsConfig, ApnsConfigError, ApnsConfigVar};
 pub use fcm_config::{FcmConfig, FcmConfigError, FcmConfigVar, FcmTokenSourceLoadError};
-pub use observability::PushProviderQueueObservation;
+pub use observability::{PushLocalRegistrationObservation, PushProviderQueueObservation};
 pub use operator_inventory::{PushOperatorInventory, PushOperatorNode, PushOperatorNodeStatus};
 pub(crate) use publish_jobs::acknowledge_completed_outbox_tx;
 pub use pubsub_backing::ensure_xep0060_push_node;

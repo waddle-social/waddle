@@ -405,6 +405,8 @@ async fn services_with_claims_and_blocking(
             peer_id: origin_peer_id,
         }),
         node_lease_ttl: crate::config::ClusteringNodeLeaseConfig::default().lease_ttl,
+        resource_presence: None,
+        cluster_membership: None,
         node_identity: SharedNodeIdentity::new(receiver),
         connection_registry: Arc::new(ConnectionRegistry::new()),
         user_registry: UserRegistryActor::spawn(UserRegistryActor::new()),

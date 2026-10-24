@@ -1292,6 +1292,8 @@ async fn create_websocket_state(
                     ),
                     node_lease: Arc::clone(node_lease),
                     node_lease_ttl,
+                    resource_presence: state.clustering_claims.resource_presence.clone(),
+                    cluster_membership: state.clustering_claims.cluster_membership.clone(),
                     node_identity,
                     connection_registry: Arc::clone(
                         &websocket_state.deps.protocol.connection_registry,

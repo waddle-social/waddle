@@ -131,6 +131,43 @@ service. An identical owner/node pair on another service is outside that
 authority. A standalone provider store without a configured service can retire
 its own provider state but leaves service-keyed host records untouched.
 
+### Legacy registrations and disabled-node retention
+
+Provider node names are opaque. Older registrations can name a local service
+without a provisioned provider node; a missing node does not establish whether
+it was deleted or never created. Foreign-service registrations intentionally
+have no foreign key to local `push_nodes`.
+
+Automatic disabled-node pruning retains 64 recent disabled nodes per owner,
+plus nodes protected by delivery custody or an enabled registration at the
+configured local service. The latter prevents pruning from creating a new
+enabled local orphan. Foreign-service registrations do not pin local provider
+nodes, and a standalone store cannot infer which host service is local.
+
+Pruning is retention-only: it does not cancel provider jobs, clear active
+claims, rewrite frozen payloads, assign a retirement disposition, or settle
+outbox/ingress custody. Queued, in-progress, uncertain unsettled, ancestry-linked
+and recent historical provider work continues to protect its node. The
+64-node retention target can therefore be exceeded while these protections
+remain. Use authenticated inspection and explicit retirement when disposition
+is required; do not delete registrations or nodes to force the count down.
+
+For an already missing or inactive local target, distinguish an enabled
+registration from a retained outbox target. Gone-target admission may disable
+the registration and stop retrying a known-unaccepted job, but cannot discharge
+prior uncertain acceptance. Explicit retirement remains the recovery action for
+unsettled work, including a target whose node is already absent. Re-enabling
+requires a provisioned active owned node and an active device; it does not
+replay historical payloads. See the [aggregate evidence and attribution limits](
+evidence/legacy-push-targets-2016.md).
+
+Explicit XEP-0357 disable can also revoke a legacy registration whose local
+provider node is missing or belongs to another owner. It still removes only
+the requesting owner's exact service/node scope, and does not mutate another
+owner's provider node, devices or work. Provider locks apply only to existing
+owned nodes; an absent node must not prevent the user from disabling that
+registration.
+
 Canonical acceptance rows, candidate lineage and required replay evidence remain
 protected until authoritative disposition and the configured alias-retention
 tail have elapsed. A retry budget must never substitute for that retention rule.
@@ -231,6 +268,9 @@ Current-state gauges supplement transition counters:
 | `xmpp.push.queue.snapshot_at{queue=outbox\|provider}` | Unix seconds of the last successful database inventory for that queue. |
 | `xmpp.push.provider.retained_max_per_node` | Largest current retained provider-job count on one node, including terminal tails. |
 | `xmpp.push.provider.near_capacity_nodes` | Number of nodes retaining at least 9,000 jobs, against the 10,000 admission cap. |
+| `xmpp.push.registration.missing_node` | Enabled registrations at the configured local service without a provider node owned by the registered owner. |
+| `xmpp.push.registration.inactive_node` | Enabled registrations at the configured local service whose owned provider node is disabled. |
+| `xmpp.push.registration.snapshot_at` | Unix seconds of the last successful configured-local registration inventory. |
 
 Count gauges use annotation units `{job}` and `{node}` so their Prometheus
 names remain unsuffixed, such as `xmpp_push_queue_parked`. The snapshot gauge
@@ -238,6 +278,15 @@ uses `s` and translates to `xmpp_push_queue_snapshot_at_seconds`. The Rust test
 checks exported units against the shared fixture. Verifying their translated
 names against the actual recording rules requires the manual real OTLP
 ingestion test below; a dimensionless gauge unit `1` would add `_ratio`.
+
+Registration gauges carry no labels or identities. They publish complete
+successful snapshots, including zeros, and freshness is recorded last. A
+standalone store or absent host-registration schema cannot assert local-service
+health and emits no registration snapshot. A failed query preserves prior
+values and freshness. Interpret missing or stale registration snapshots as
+unknown; compare replica values using the same fresh-per-replica `max` rule as
+queue inventories. These counts distinguish enabled registrations from retained
+outbox targets and do not grant automatic retirement authority.
 
 Infrastructure PR CI currently lints rule syntax; it does not run
 `rules/tests/run.sh`. Run the behavioral rule tests and OTLP translation check

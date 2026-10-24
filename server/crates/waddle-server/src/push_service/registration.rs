@@ -194,7 +194,16 @@ impl DatabasePushServiceStore {
         registered_push_nodes.dedup();
         let mut retired_provider = 0;
         for node in &registered_push_nodes {
-            lock_node_tx(&mut tx, node, now_ms).await?;
+            // A legacy registration may name an unprovisioned or another
+            // owner's node. Only this owner's provider lifecycle is held
+            // stable by our owner lock; do not create an FK-backed lock for
+            // absent state or cross another owner's lifecycle boundary.
+            if get_node_tx(&mut tx, node)
+                .await?
+                .is_some_and(|provider| provider.owner_bare_jid == *owner_bare_jid)
+            {
+                lock_node_tx(&mut tx, node, now_ms).await?;
+            }
             retired_provider +=
                 cancel_registration_publish_jobs_tx(&mut tx, owner_bare_jid, &service, node)
                     .await?;

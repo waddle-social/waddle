@@ -575,7 +575,16 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        let node = ensure_node_tx(&mut tx, owner_bare_jid, app_id, now_ms).await?;
+        let node = ensure_node_tx(
+            &mut tx,
+            owner_bare_jid,
+            app_id,
+            now_ms,
+            self.pubsub_boundary
+                .as_ref()
+                .map(|boundary| &boundary.service_jid),
+        )
+        .await?;
         let registration = registration_for_node(node.node());
         let device = upsert_device_tx(
             &mut tx,

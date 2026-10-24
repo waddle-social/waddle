@@ -34,6 +34,8 @@ async fn ordered_delivery_timeout_aborts_reserved_effect_before_commit() {
         allowlist_store: Arc::new(NoopAllowlist),
         node_lease: Arc::new(NoopNodeLease),
         node_lease_ttl: crate::config::ClusteringNodeLeaseConfig::default().lease_ttl,
+        resource_presence: None,
+        cluster_membership: None,
         node_identity: SharedNodeIdentity::new(NodeIdentity::new("receiver", "epoch")),
         connection_registry: Arc::new(ConnectionRegistry::new()),
         user_registry: UserRegistryActor::spawn(UserRegistryActor::new()),

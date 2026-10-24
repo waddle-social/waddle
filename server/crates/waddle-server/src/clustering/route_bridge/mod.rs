@@ -200,6 +200,9 @@ pub struct OrderedRelayDeliveryServices {
     pub node_lease: Arc<dyn NodeLeaseStore>,
     /// Match the node-lease writer's configured TTL when committing demand expiry.
     pub node_lease_ttl: Duration,
+    /// Missing cluster capabilities leave healthy-node mirror absence unproven.
+    pub resource_presence: Option<Arc<dyn super::resource_presence::ResourcePresenceAsker>>,
+    pub cluster_membership: Option<Arc<dyn super::resource_presence::ClusterMembership>>,
     pub node_identity: SharedNodeIdentity,
     pub connection_registry: Arc<ConnectionRegistry>,
     pub user_registry: ActorRef<UserRegistryActor>,
