@@ -50,6 +50,20 @@ row predates that PR's merge and process replacement. The October 17 body-bearin
 row still requires authoritative owner-side evidence before delivery can be
 classified.
 
+Independent source review ruled out an automatic failure merely because a
+composing notification produces no sender frames. Successful remote execution
+with an empty reply is classified as complete, and its dispatch receipt does
+not wait for a client write. The retained intent could instead follow cancelled
+execution, unavailable routing, a transport/NACK outcome, an execution timeout,
+or a failed receipt write. The record cannot select among them. In particular,
+`capture_delivered_remote_room_route` captures an intent even for a
+`MaybeCommitted` outcome; its name is not completion proof.
+
+A bounded production-log inspection around 19:51:00–19:51:20 UTC found no
+attributable ingress/remote-dispatch error. Its sole warning was from Kademlia,
+without correlation establishing a cause. This negative log result does not
+establish successful execution.
+
 ## Supported next action
 
 Use the bounded [read-only shape diagnostic](../../server/docs/operations/remote-dispatch-backlog.sql)
