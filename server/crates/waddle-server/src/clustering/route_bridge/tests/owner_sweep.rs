@@ -785,7 +785,13 @@ async fn owner_sweep_budget_preserves_unattempted_candidates_for_later_passes() 
     // time can auto-advance its pool-acquisition deadlines.
     tokio::time::pause();
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Stalled;
-    for _ in 0..11 {
+    for pass in 0..11 {
+        // Ten bounded virtual passes attempt the first 60 stalled entries.
+        // The final page reaches the pending target after three more stalls;
+        // its SQLite ownership proof needs a real clock, as in production.
+        if pass == 10 {
+            tokio::time::resume();
+        }
         let started = tokio::time::Instant::now();
         assert_eq!(
             bridge.sweep_remote_owner_resources().await,
