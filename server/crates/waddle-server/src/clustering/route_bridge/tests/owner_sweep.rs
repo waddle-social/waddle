@@ -650,6 +650,9 @@ async fn owner_sweep_bounds_stalled_lease_reads_and_retries_next_pass() {
     );
     assert!(started.elapsed() <= Duration::from_secs(5) + TIMER_GRANULARITY);
     assert_mirror_exists(&bridge, &services, true).await;
+    // Recovery performs real background SQLite reads; virtual deadlines must
+    // not overtake that work after the stalled-dependency assertion.
+    tokio::time::resume();
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert_eq!(
         bridge.sweep_remote_owner_resources().await,
@@ -808,6 +811,7 @@ async fn owner_sweep_cancellation_keeps_attempted_mirror_available_for_retry() {
         "cancel the sweep while its lease lookup is in flight"
     );
     assert_mirror_exists(&bridge, &services, true).await;
+    tokio::time::resume();
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert_eq!(
         bridge.sweep_remote_owner_resources().await,
@@ -1054,6 +1058,7 @@ async fn owner_sweep_busy_child_reply_is_deferred_after_its_full_timeout() {
     assert!(started.elapsed() >= waddle_xmpp::registry::user_registry::CHILD_ACTOR_TIMEOUT);
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(bridge.remote_owner_resources.lock().await[&target_full()].unregister_pending);
+    tokio::time::resume();
     release.send(()).expect("release owner actor");
     assert_eq!(
         bridge.sweep_remote_owner_resources().await,
@@ -1080,6 +1085,7 @@ async fn owner_sweep_page_deadline_during_lease_read_is_deferred() {
     assert!(started.elapsed() >= Duration::from_secs(30));
     assert!(started.elapsed() <= Duration::from_secs(30) + TIMER_GRANULARITY);
     assert_mirror_exists(&bridge, &services, true).await;
+    tokio::time::resume();
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert_eq!(
         bridge.sweep_remote_owner_resources().await,
@@ -1111,6 +1117,7 @@ async fn owner_sweep_page_deadline_during_busy_actor_is_deferred() {
     assert!(started.elapsed() >= Duration::from_secs(30));
     assert!(started.elapsed() <= Duration::from_secs(30) + TIMER_GRANULARITY);
     assert!(bridge.remote_owner_resources.lock().await[&target_full()].unregister_pending);
+    tokio::time::resume();
     release.send(()).expect("release owner actor");
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert_eq!(
