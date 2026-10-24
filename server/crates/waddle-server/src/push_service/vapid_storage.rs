@@ -10,14 +10,13 @@
 //! crate owns the durable lifecycle (env-var bootstrap, fresh
 //! generation, DB persistence); the lower crate owns pure crypto.
 //!
-//! ## Safety
+//! ## Environment policy
 //!
-//! `load_or_provision` calls `std::env::remove_var(WADDLE_VAPID_PRIVATE_KEY)`
-//! after the env-supplied scalar is persisted to the DB. The unsafe call is
-//! justified by the invariant that no other code in this crate reads or
-//! writes `WADDLE_VAPID_PRIVATE_KEY`. Operators MUST NOT pass the same env
-//! variable name to other tooling expecting steady-state availability —
-//! the value lives only for the boot window.
+//! Bootstrap reads never mutate the process environment: database and telemetry
+//! workers may already be reading it. The bootstrap variable remains available
+//! to the running process after success and failure. See
+//! `docs/planning/startup-safety-2020-2024.md` for the trust boundary and the
+//! requirement that future child launchers exclude bootstrap secrets explicitly.
 
 use std::env;
 use std::sync::Arc;
@@ -53,9 +52,9 @@ const CURRENT_ROOT_KEY_VERSION: u32 = 1;
 ///
 /// Construct via [`Self::load_or_provision`], which executes the boot
 /// lifecycle:
-///   1. If `WADDLE_VAPID_PRIVATE_KEY` env var is set: parse, **DB write
-///      FIRST**, on `Ok` call `std::env::remove_var(...)`; on `Err`,
-///      leave env set and fail boot loudly.
+///   1. If `WADDLE_VAPID_PRIVATE_KEY` env var is set: parse, initialize
+///      the signer and persist. Fail boot loudly on any error. Retain the
+///      environment variable on both success and failure.
 ///   2. Else read the latest non-retired row.
 ///   3. Else generate a fresh P-256 keypair and persist.
 pub struct VapidStorage {
@@ -109,17 +108,9 @@ impl VapidStorage {
 
         // 1. Env-var bootstrap path.
         //
-        // Ordering matters: `env::remove_var` MUST be the last fallible
-        // operation in this branch. If it ran before any later step that
-        // can fail (signer init, DB insert), a failure would leave the
-        // process without the env var even though `load_or_provision`
-        // returns `Err`, breaking the documented invariant
-        // ("remove only after successful bootstrap").
-        //
-        // We therefore derive scalar/public bytes BEFORE the signer
-        // consumes `secret_key`, then sequence: signer-init → persist →
-        // remove_var. If any step fails, env remains set so the
-        // operator can fix and retry.
+        // Initialize the signer before persisting, so any error fails boot
+        // without persisting a key that cannot sign. Never clear the process
+        // environment: other runtime/database threads may be reading it.
         if let Ok(raw) = env::var(VAPID_ENV_VAR) {
             let raw = Zeroizing::new(raw);
             let secret_key = parse_env_scalar(raw.as_str())?;
@@ -137,13 +128,6 @@ impl VapidStorage {
             storage
                 .persist_keypair(&kid, &scalar_bytes[..], &public_bytes)
                 .await?;
-            // (c) all fallible steps succeeded — clear env.
-            // SAFETY: see module-level invariant — `WADDLE_VAPID_PRIVATE_KEY`
-            // is read exactly once at boot via `load_or_provision`; no other
-            // code in this crate reads or writes it.
-            unsafe {
-                env::remove_var(VAPID_ENV_VAR);
-            }
             return Ok(Arc::new(signer));
         }
 
@@ -244,8 +228,8 @@ impl VapidStorage {
     ///
     /// Taking bytes rather than the `SecretKey` itself lets callers
     /// construct the in-process signer (which consumes the `SecretKey`)
-    /// before the persist step, so `remove_var(WADDLE_VAPID_PRIVATE_KEY)`
-    /// can be deferred until ALL fallible operations succeed.
+    /// before the persist step, so signer initialization failure cannot leave
+    /// behind a newly persisted unusable key.
     ///
     /// `scalar_bytes` MUST be 32 bytes (a raw P-256 secret scalar) and
     /// is wrapped in `Zeroizing` by the caller. `public_bytes` is the

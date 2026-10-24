@@ -1,20 +1,16 @@
 //! # waddle-ecdysis
 //!
-//! Graceful restart support for Waddle, implementing the
-//! [Cloudflare Ecdysis pattern](https://blog.cloudflare.com/ecdysis-rust-graceful-restarts/).
+//! Inherited listeners and graceful shutdown support for Waddle.
 //!
-//! ## Overview
-//!
-//! Ecdysis enables zero-downtime restarts by:
-//! 1. Passing listening sockets from the old process to the new process via fd inheritance
-//! 2. The new process immediately accepts connections on the inherited sockets
-//! 3. The old process gracefully drains in-flight connections
-//! 4. After drain (or timeout), the old process exits
+//! A launcher may pass listening sockets using `LISTEN_FDS` and
+//! `LISTEN_FD_NAMES`. Capture those descriptors before starting runtime threads,
+//! then convert them to Tokio listeners inside the runtime. The server drains
+//! connections on shutdown; it does not spawn or re-exec a replacement process.
 //!
 //! ## Signal Conventions
 //!
 //! - `SIGTERM` — Graceful shutdown (drain connections, then exit)
-//! - `SIGQUIT` — Graceful restart (spawn new process with fd inheritance, then drain and exit)
+//! - `SIGQUIT` — Drain and exit with restart intent; replacement is supervisor-managed
 //!
 //! ## Environment Variables
 //!
@@ -30,9 +26,7 @@
 compile_error!("waddle-ecdysis requires a Unix platform (Linux or macOS)");
 
 mod listener;
-mod restart;
 mod shutdown;
 
-pub use listener::ListenerSet;
-pub use restart::{restart, RestartError};
+pub use listener::{InheritedListeners, ListenerSet};
 pub use shutdown::{ConnectionGuard, GracefulShutdown, ShutdownHandle, ShutdownSignal};

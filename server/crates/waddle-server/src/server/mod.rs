@@ -66,10 +66,10 @@ use kameo::actor::Spawn;
 use std::{net::SocketAddr, sync::Arc};
 use tracing::info;
 
-/// Start both HTTP and XMPP servers with Ecdysis graceful restart support.
+/// Start HTTP and XMPP services with inherited listeners and graceful shutdown.
 ///
 /// On SIGTERM: graceful drain and exit.
-/// On SIGQUIT: re-exec with fd passing, then drain and exit.
+/// On SIGQUIT: record restart intent, then drain and exit.
 pub async fn start(
     db_pool: DatabasePool,
     server_config: ServerConfig,
@@ -114,7 +114,7 @@ pub async fn start_with_config(
     // Acquire listeners: inherited from parent process, or bind fresh.
     // Two explicit paths — no silent fallback.
     let http_listener = if let Some(ref mut set) = inherited {
-        // Ecdysis restart path: all listeners MUST be inherited
+        // Launcher inheritance path: all listeners MUST be inherited
         set.take("http")
     } else {
         // Cold start path: bind listeners fresh
@@ -426,14 +426,8 @@ pub async fn start_with_config(
     let shutdown_handle = tokio::spawn(async move {
         let signal = shutdown
             .run(|| async {
-                // SIGQUIT restart: the new process will read the same binary
-                // and bind fresh listeners. The old process drains gracefully.
-                // True fd-passing requires stopping accept loops first to
-                // extract listeners — implemented here as a clean restart.
-                info!("SIGQUIT received — new process will start, old process draining");
-                // In the future, we could extract listeners from the tasks
-                // and call waddle_ecdysis::restart() for zero-gap fd passing.
-                // For now, the new process binds fresh (brief listen gap).
+                // Replacement startup is managed by the supervisor/operator.
+                info!("SIGQUIT received — draining for supervisor-managed restart");
             })
             .await;
 

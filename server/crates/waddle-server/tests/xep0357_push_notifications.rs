@@ -5,7 +5,7 @@
 //! `src/push_service/vapid_storage.rs`. This file exercises the
 //! `VapidStorage::load_or_provision` boot path end-to-end against an
 //! in-memory database — fresh generation, persisted reuse, env-var
-//! bootstrap with write-before-remove, and the AAD-kid binding that
+//! bootstrap without process environment mutation, and the AAD-kid binding that
 //! makes a sealed blob inseparable from the `kid` it was sealed against
 //! (the AAD includes `label || kid`, so cross-row blob swaps fail the
 //! GCM tag check). `kid` is the table's primary key — there is no
@@ -15,15 +15,9 @@ use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use base64::Engine as _;
 use p256::elliptic_curve::sec1::ToEncodedPoint;
 use std::env;
-use tokio::sync::{Mutex, MutexGuard};
+use std::process::Command;
 use waddle_server::db::Database;
 use waddle_server::push_service::vapid_storage::VapidStorage;
-
-/// Serializes tests that mutate `WADDLE_VAPID_PRIVATE_KEY`. The env is
-/// process-global; cargo runs tests in parallel by default. We use
-/// `tokio::sync::Mutex` so the guard can be held across the `.await`s
-/// inside `load_or_provision` without triggering `await_holding_lock`.
-static ENV_MUTATION_LOCK: Mutex<()> = Mutex::const_new(());
 
 const ROOT_KEY: &[u8] = b"vapid-test-root-key-32-bytes-min";
 const VAPID_ENV_VAR: &str = "WADDLE_VAPID_PRIVATE_KEY";
@@ -36,45 +30,36 @@ fn b64u(bytes: &[u8]) -> String {
     URL_SAFE_NO_PAD.encode(bytes)
 }
 
-/// RAII guard: acquires `ENV_MUTATION_LOCK` and clears the env var; on
-/// drop (even via panic) the env var is cleared again so no test sees
-/// state left behind by a previous one.
-struct EnvGuard<'a> {
-    _lock: MutexGuard<'a, ()>,
-}
-
-impl<'a> EnvGuard<'a> {
-    async fn acquire() -> EnvGuard<'a> {
-        let lock = ENV_MUTATION_LOCK.lock().await;
-        // SAFETY: see vapid_storage.rs SAFETY note. The lock guarantees
-        // exclusive env access for the duration of this guard's lifetime.
-        unsafe {
-            env::remove_var(VAPID_ENV_VAR);
-        }
-        EnvGuard { _lock: lock }
+/// Configure a fresh process before runtime/database threads exist. A lock in
+/// this process cannot protect libc/third-party environment readers.
+fn run_in_subprocess(test_name: &str, key: Option<&str>) -> bool {
+    const CHILD_MARKER: &str = "WADDLE_VAPID_TEST_CHILD";
+    if env::var(CHILD_MARKER).as_deref() == Ok(test_name) {
+        return true;
     }
-
-    fn set(&self, value: &str) {
-        // SAFETY: same as above.
-        unsafe {
-            env::set_var(VAPID_ENV_VAR, value);
-        }
+    let mut command = Command::new(env::current_exe().expect("test executable"));
+    command
+        .args(["--exact", test_name, "--nocapture"])
+        .env(CHILD_MARKER, test_name)
+        .env_remove(VAPID_ENV_VAR);
+    if let Some(key) = key {
+        command.env(VAPID_ENV_VAR, key);
     }
-}
-
-impl Drop for EnvGuard<'_> {
-    fn drop(&mut self) {
-        // SAFETY: same as above; runs unconditionally so a panicking test
-        // does not leak env state into subsequent tests.
-        unsafe {
-            env::remove_var(VAPID_ENV_VAR);
-        }
-    }
+    let output = command.output().expect("run VAPID lifecycle subprocess");
+    assert!(
+        output.status.success(),
+        "VAPID lifecycle subprocess failed: {}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+    false
 }
 
 #[tokio::test]
 async fn fresh_boot_generates_and_persists_keypair() {
-    let _guard = EnvGuard::acquire().await;
+    if !run_in_subprocess("fresh_boot_generates_and_persists_keypair", None) {
+        return;
+    }
     let db = fresh_db("vapid-fresh-generate").await;
 
     let signer = VapidStorage::load_or_provision(db.clone(), ROOT_KEY)
@@ -105,11 +90,15 @@ async fn fresh_boot_generates_and_persists_keypair() {
 }
 
 #[tokio::test]
-async fn env_var_bootstrap_writes_before_remove() {
-    let guard = EnvGuard::acquire().await;
+async fn env_var_bootstrap_persists_without_mutating_environment() {
     let scalar = [0xAEu8; 32];
     let encoded = b64u(&scalar);
-    guard.set(&encoded);
+    if !run_in_subprocess(
+        "env_var_bootstrap_persists_without_mutating_environment",
+        Some(&encoded),
+    ) {
+        return;
+    }
 
     let db = fresh_db("vapid-env-bootstrap").await;
 
@@ -118,16 +107,14 @@ async fn env_var_bootstrap_writes_before_remove() {
         .expect("env-bootstrap path provisions");
     let kid = signer.current_kid();
 
-    // The env var MUST be unset after a successful bootstrap.
-    assert!(
-        env::var(VAPID_ENV_VAR).is_err(),
-        "WADDLE_VAPID_PRIVATE_KEY must be removed from process env after DB write"
+    assert_eq!(
+        env::var(VAPID_ENV_VAR).expect("bootstrap environment retained"),
+        encoded,
     );
 
-    // Second boot (env unset, no env path) loads the same kid from DB —
-    // proves the env-supplied key was actually persisted before the env was
-    // cleared.
-    let signer2 = VapidStorage::load_or_provision(db, ROOT_KEY)
+    // The read-only loader ignores bootstrap inputs and proves the env-supplied
+    // key is durably available without clearing a process-global variable.
+    let signer2 = VapidStorage::load_or_ephemeral(db, ROOT_KEY)
         .await
         .expect("reload");
     assert_eq!(
@@ -154,24 +141,28 @@ async fn env_var_bootstrap_writes_before_remove() {
 
 #[tokio::test]
 async fn env_var_malformed_does_not_brick_boot_silently() {
-    let guard = EnvGuard::acquire().await;
-    guard.set("not-base64url-and-also-wrong-length");
+    if !run_in_subprocess(
+        "env_var_malformed_does_not_brick_boot_silently",
+        Some("not-base64url-and-also-wrong-length"),
+    ) {
+        return;
+    }
 
     let db = fresh_db("vapid-env-malformed").await;
     let result = VapidStorage::load_or_provision(db, ROOT_KEY).await;
     assert!(result.is_err(), "malformed env scalar must surface as Err");
-    // Env var must still be set so the operator can fix and retry —
-    // write-before-remove ordering protects against silent key loss.
+    // The bootstrap secret remains available on failure for diagnosis/retry.
     assert!(
         env::var(VAPID_ENV_VAR).is_ok(),
         "env var must NOT be removed on parse error"
     );
-    // EnvGuard's Drop cleans up.
 }
 
 #[tokio::test]
 async fn sign_and_verify_round_trip_under_loaded_key() {
-    let _guard = EnvGuard::acquire().await;
+    if !run_in_subprocess("sign_and_verify_round_trip_under_loaded_key", None) {
+        return;
+    }
     let db = fresh_db("vapid-sign-verify").await;
 
     let signer = VapidStorage::load_or_provision(db, ROOT_KEY)
