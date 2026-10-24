@@ -279,6 +279,18 @@ pub(crate) async fn disable_node_registrations_tx(
     service: &jid::BareJid,
     node: Option<&str>,
 ) -> Result<u64, PushError> {
+    if !registration_table_exists_tx(tx).await? {
+        return Ok(0);
+    }
+    tx.execute(
+        "UPDATE push_registrations SET status = ?, next_retry_at_ms = NULL, last_error = 'push node explicitly retired', updated_at_ms = ? WHERE owner_bare_jid = ? AND push_service_jid = ? AND (node = ? OR ? = 0) AND status <> ?",
+        crate::db_params![STATUS_DISABLED, crate::time::now_ms(), owner.to_string(), service.to_string(), node, i64::from(node.is_some()), STATUS_DISABLED],
+    ).await.map_err(|error| PushError::StorageError(error.to_string()))
+}
+
+pub(crate) async fn registration_table_exists_tx(
+    tx: &mut crate::db::Transaction<'_>,
+) -> Result<bool, PushError> {
     let probe = if tx.driver() == crate::db::DatabaseDriver::Postgres {
         "SELECT 1 WHERE to_regclass('push_registrations') IS NOT NULL"
     } else {
@@ -293,14 +305,7 @@ pub(crate) async fn disable_node_registrations_tx(
         .await
         .map_err(|error| PushError::StorageError(error.to_string()))?
         .is_some();
-    drop(rows);
-    if !exists {
-        return Ok(0);
-    }
-    tx.execute(
-        "UPDATE push_registrations SET status = ?, next_retry_at_ms = NULL, last_error = 'push node explicitly retired', updated_at_ms = ? WHERE owner_bare_jid = ? AND push_service_jid = ? AND (node = ? OR ? = 0) AND status <> ?",
-        crate::db_params![STATUS_DISABLED, crate::time::now_ms(), owner.to_string(), service.to_string(), node, i64::from(node.is_some()), STATUS_DISABLED],
-    ).await.map_err(|error| PushError::StorageError(error.to_string()))
+    Ok(exists)
 }
 
 pub(crate) async fn registered_nodes_for_disable_tx(

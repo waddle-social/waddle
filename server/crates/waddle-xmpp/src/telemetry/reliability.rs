@@ -59,6 +59,33 @@ pub fn record_push_provider_capacity(retained_max_per_node: u64, near_capacity_n
     );
 }
 
+/// Successful configured-local registration inventory. Missing or failed
+/// reads must preserve the previous values and freshness rather than emit zero.
+pub fn record_push_registration_snapshot(
+    missing_nodes: u64,
+    inactive_nodes: u64,
+    snapshot_at_seconds: u64,
+) {
+    crate::gauge_record!(
+        "xmpp.push.registration.missing_node",
+        "{registration}",
+        "Enabled configured-local push registrations without an owned provider node.",
+        missing_nodes,
+    );
+    crate::gauge_record!(
+        "xmpp.push.registration.inactive_node",
+        "{registration}",
+        "Enabled configured-local push registrations whose owned provider node is inactive.",
+        inactive_nodes,
+    );
+    crate::gauge_record!(
+        "xmpp.push.registration.snapshot_at",
+        "s",
+        "Unix time of the last successful configured-local registration snapshot.",
+        snapshot_at_seconds,
+    );
+}
+
 use super::attributes::{
     IngressAliasOutcome, IngressDecisionClass, IngressEffectExecutionPhase, IngressGcOutcome,
     IngressMaintenanceOutcome, IngressMaintenancePhase, IngressUnrecoverableReason,

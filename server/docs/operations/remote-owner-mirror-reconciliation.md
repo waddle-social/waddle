@@ -3,8 +3,11 @@
 An owner-side mirror is routing state for a socket hosted on another cluster
 node. Retire it only after an authoritative node lookup proves that the socket
 incarnation is missing, committed expired, or replaced by a different epoch,
-or after an exact unregister request established an owed retirement. Failed
-lookups and transport unreachability do not establish death.
+after complete cluster membership and every node's own socket/session probe
+prove the exact resource absent, or after an exact unregister request
+established an owed retirement. A healthy node lease alone does not prove that
+its socket still exists. Failed lookups, uncertain membership, and transport
+unreachability do not establish absence.
 
 ## Schedule and latency
 
@@ -29,6 +32,31 @@ One socket-node lease result is shared by mirrors on the same page. The cache
 is discarded after the page, so expiry and epoch changes are observed again on
 later pages. It never becomes a process-wide liveness cache.
 
+Healthy-node mirrors are checked against locally hosted connections and
+resumable XEP-0198 sessions on every unexpired peer, using the same read-only
+presence probes as recovery. Remote mirrors and UserActor resource lists are
+excluded from that evidence. Cleanup rechecks the exact registration and socket
+incarnation under the per-resource registration gate before recording owed work.
+Actor and connection-registry removal compare the old connection owner; a
+rebound socket or successor registration must survive an old retry.
+
+Current account ownership and occupancy generations govern publication, not
+removal of obsolete local routing copies. Ownership moving to another node, or
+a fresh bind advancing the generation before its registration rolls back, must
+not pin an old mirror. Cleanup never rewrites occupancy authority or detaches a
+remote socket. Any user-claim release uses the local actor's captured owner and
+epoch, preserving foreign and successor claims. The expiry, exact unregister or
+complete-absence evidence above remains required; an unavailable peer or unknown
+membership cannot establish new healthy-node cleanup authority.
+
+Routing reconciliation removes the connection-registry mirror and UserActor
+resource and retries interrupted removal without requiring a new stanza.
+Recovery retirement instead settles a frozen delivery obligation after proving
+that it can no longer reach its resource. Recovery can make progress despite a
+stale routing mirror, and its success does not prove that either routing copy
+has been removed. Neither path grants authority to retire durable remote MUC
+membership; that separate lifecycle remains tracked in #1825.
+
 ## Outcomes
 
 `waddle.janitor.sweeps` uses `janitor="remote_owner_mirror"` and an enumerated
@@ -36,7 +64,8 @@ later pages. It never becomes a process-wide liveness cache.
 
 - `completed`: the selected page completed its checks and retirements.
 - `deferred`: work remains because of normal contention, an explicitly busy
-  actor, or a page budget. This is progress/backlog information, not a failure.
+  actor, uncertain presence/membership, or a page budget. This is
+  progress/backlog information, not proof of absence.
 - `failed`: a lease lookup, actor operation, or its dependency deadline failed.
   A retained mirror remains available for retry; failure never licenses removal.
 
@@ -69,7 +98,7 @@ Backlog observations are emitted only when the inventory lock is available;
 missing samples during contention must not be interpreted as zero backlog.
 
 Pending age starts when this process learns that retirement is owed. It does
-not include time before expiry is detected, and it is not durable across a
+not include time before expiry or exact-resource absence is detected, and it is not durable across a
 restart. Same-JID successor registrations do not inherit the predecessor's
 pending age. Persistent remote membership recovery is tracked separately in
 [#1825](https://github.com/waddle-social/waddle/issues/1825), and the remote

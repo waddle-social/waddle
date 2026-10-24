@@ -314,7 +314,7 @@ async fn resource_presence_local_never_touches_the_claim_store() {
     );
 }
 
-fn detached_session(resource: &jid::FullJid) -> DetachedSession {
+pub(super) fn detached_session(resource: &jid::FullJid) -> DetachedSession {
     DetachedSession {
         promotion_custody: waddle_xmpp::stream_management::PromotionCaptureCustody::never_claimed(),
         stream_id: resource.to_string(),

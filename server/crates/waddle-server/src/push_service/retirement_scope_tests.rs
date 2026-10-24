@@ -54,12 +54,12 @@ async fn snapshot(
     push: &DatabasePushServiceStore,
     host: &HostState,
 ) -> HostSnapshot {
-    const OUTBOX: &str = "SELECT status, queue_acceptance_may_exist, last_error, updated_at_ms, published_at_ms, next_attempt_at_ms, context_xml FROM notification_outbox WHERE job_id = ?";
+    const OUTBOX: &str = "SELECT status, queue_acceptance_may_exist, last_error, updated_at_ms, published_at_ms, next_attempt_at_ms, context_xml, approved_payload_xml, approved_publish_options_xml, claimed_at_ms, claim_token FROM notification_outbox WHERE job_id = ?";
     HostSnapshot {
         registration: values(fixture, "SELECT status, last_error, failure_count, next_retry_at_ms, created_at_ms, updated_at_ms, publish_options_xml FROM push_registrations WHERE owner_bare_jid = ? AND push_service_jid = ? AND node = ?",
             crate::db_params![owner().to_string(), host.service.to_string(), &host.node], 7).await,
-        pending: values(fixture, OUTBOX, crate::db_params![host.pending.to_string()], 7).await,
-        history: values(fixture, OUTBOX, crate::db_params![host.history.to_string()], 7).await,
+        pending: values(fixture, OUTBOX, crate::db_params![host.pending.to_string()], 11).await,
+        history: values(fixture, OUTBOX, crate::db_params![host.history.to_string()], 11).await,
         unsettled_lineage: scalar_i64(push, "SELECT COUNT(*) FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL", crate::db_params![host.pending.to_string()]).await,
         unsettled_foundation: scalar_i64(push, "SELECT COUNT(*) FROM ingress_effect_descendants WHERE descendant_key = ? AND settled_at IS NULL", crate::db_params![host.pending.to_string()]).await,
     }
@@ -146,6 +146,446 @@ async fn configured_store(fixture: &IngressFixture, service: &BareJid) -> Databa
     )
     .await
     .expect("configured store")
+}
+
+async fn seed_disabled_pruning_tail(fixture: &IngressFixture) {
+    for index in 0..64 {
+        fixture.execute("INSERT INTO push_nodes (node, owner_bare_jid, app_id, status, created_at_ms, updated_at_ms) VALUES (?, ?, ?, 'disabled', 2, 2)",
+            crate::db_params![format!("retained-node-{index}"), owner().to_string(), format!("retained-app-{index}")]).await;
+    }
+}
+
+async fn pruning_preserves_legacy_enabled_local_registration(fixture: IngressFixture) {
+    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox schema");
+    let service = "push.example.com".parse().expect("service");
+    let push = configured_store(&fixture, &service).await;
+    let legacy = seed_host(&fixture, "legacy-node", &service).await;
+    fixture.execute("INSERT INTO push_nodes (node, owner_bare_jid, app_id, status, created_at_ms, updated_at_ms) VALUES ('legacy-node', ?, 'legacy-app', 'disabled', 1, 1)", crate::db_params![owner().to_string()]).await;
+    let before = snapshot(&fixture, &push, &legacy).await;
+    seed_disabled_pruning_tail(&fixture).await;
+
+    push.ensure_node(&owner(), "trigger-pruning")
+        .await
+        .expect("new node triggers retained-disabled pruning");
+
+    assert!(
+        push.get_node(&legacy.node)
+            .await
+            .expect("legacy node")
+            .is_some(),
+        "automatic pruning must not turn an enabled configured-local registration into an orphan"
+    );
+    assert_eq!(
+        snapshot(&fixture, &push, &legacy).await,
+        before,
+        "retention must not impersonate explicit retirement of host custody"
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_pruning_preserves_legacy_enabled_local_registration() {
+    pruning_preserves_legacy_enabled_local_registration(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_pruning_preserves_legacy_enabled_local_registration() {
+    if let Some(fixture) = IngressFixture::postgres("push_prune_enabled_legacy").await {
+        pruning_preserves_legacy_enabled_local_registration(fixture).await;
+    }
+}
+
+async fn pruning_preserves_provider_and_foreign_custody(fixture: IngressFixture) {
+    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox schema");
+    let service = "push.example.com".parse().expect("service");
+    let foreign_service = "other-push.example.com".parse().expect("foreign service");
+    let push = configured_store(&fixture, &service).await;
+    let node = push
+        .ensure_node(&owner(), "provider-custody")
+        .await
+        .expect("node");
+    // No enabled local registration can short-circuit this candidate. The
+    // provider rows themselves must prevent automatic cancellation/deletion.
+    let foreign = seed_host(&fixture, node.node(), &foreign_service).await;
+    let accepted = seed_provider_custody(&fixture, &foreign).await;
+    fixture.execute("UPDATE notification_outbox SET approved_payload_xml = context_xml, claimed_at_ms = 17, claim_token = 'outbox-current-claim' WHERE job_id = ?", crate::db_params![foreign.pending.to_string()]).await;
+    fixture.execute("UPDATE push_publish_jobs SET status = 'in-progress', claimed_at_ms = 19, claim_token = 'provider-current-claim' WHERE job_id = ?", crate::db_params![&accepted]).await;
+    let mut provider_before = Vec::new();
+    for (name, status, uncertain) in [("queued", "queued", 0_i64), ("parked", "failed", 1_i64)] {
+        let id = uuid::Uuid::new_v4().to_string();
+        fixture.execute("INSERT INTO push_publish_jobs (job_id, owner_bare_jid, node, item_id, payload_xml, status, uncertain_send, created_at_ms, updated_at_ms) SELECT ?, owner_bare_jid, node, ?, payload_xml, ?, ?, 1, 1 FROM push_publish_jobs WHERE job_id = ?", crate::db_params![&id, name, status, uncertain, &accepted]).await;
+        provider_before.push((id.clone(), provider_snapshot(&fixture, &id).await));
+    }
+    provider_before.push((
+        accepted.clone(),
+        provider_snapshot(&fixture, &accepted).await,
+    ));
+    let foreign_before = snapshot(&fixture, &push, &foreign).await;
+
+    let foreign_only = push
+        .ensure_node(&owner(), "foreign-only")
+        .await
+        .expect("foreign-only node");
+    let foreign_host = seed_host(&fixture, foreign_only.node(), &foreign_service).await;
+    let foreign_host_before = snapshot(&fixture, &push, &foreign_host).await;
+    fixture
+        .execute(
+            "UPDATE push_nodes SET status = 'disabled', updated_at_ms = 1",
+            (),
+        )
+        .await;
+    seed_disabled_pruning_tail(&fixture).await;
+    push.register_device_for_owner(&owner(), "trigger-device-pruning", |node| {
+        PushDeviceRegistration::new("new-device", node, PushDevicePlatform::Web, "test")
+            .with_provider_endpoint(Some("https://push.example.com/opaque".to_owned()))
+    })
+    .await
+    .expect("device provisioning triggers real pruning");
+
+    for (id, before) in provider_before {
+        assert_eq!(provider_snapshot(&fixture, &id).await, before,
+            "automatic pruning must preserve current claims, acceptance, frozen payloads and prior uncertainty");
+    }
+    assert!(push
+        .get_node(node.node())
+        .await
+        .expect("provider node")
+        .is_some());
+    assert_eq!(snapshot(&fixture, &push, &foreign).await, foreign_before);
+    assert!(
+        push.get_node(foreign_only.node())
+            .await
+            .expect("foreign-only node")
+            .is_none(),
+        "an unrelated foreign-service registration must not pin local provider retention"
+    );
+    assert_eq!(
+        snapshot(&fixture, &push, &foreign_host).await,
+        foreign_host_before
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_pruning_preserves_provider_and_foreign_custody() {
+    pruning_preserves_provider_and_foreign_custody(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_pruning_preserves_provider_and_foreign_custody() {
+    if let Some(fixture) = IngressFixture::postgres("push_prune_custody").await {
+        pruning_preserves_provider_and_foreign_custody(fixture).await;
+    }
+}
+
+async fn configured_enable_retire_then_prune(fixture: IngressFixture) {
+    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox schema");
+    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+        .await
+        .expect("registration schema");
+    let service = "push.example.com".parse().expect("service");
+    let push = configured_store(&fixture, &service).await;
+    let node = push
+        .ensure_node(&owner(), "normal-lifecycle")
+        .await
+        .expect("node");
+    push.upsert_device(
+        &owner(),
+        PushDeviceRegistration::new("device", node.node(), PushDevicePlatform::Web, "test")
+            .with_provider_endpoint(Some("https://push.example.com/opaque".to_owned())),
+    )
+    .await
+    .expect("device");
+    push.register_first_party_node_for_owner(&owner(), service.as_str(), node.node(), None)
+        .await
+        .expect("configured first-party enable");
+    let accepted = push
+        .enqueue_notification_publish_job_from_user_server(
+            node.node(),
+            &notification_item("retire-then-prune"),
+            &owner(),
+        )
+        .await
+        .expect("accepted provider job");
+    // This is the same exact-node operation used by authenticated admin retire.
+    push.disable_nodes_for_owner(&owner(), Some(node.node()))
+        .await
+        .expect("admin retirement");
+    assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM push_registrations WHERE push_service_jid = ? AND status = 'enabled'", crate::db_params![service.to_string()]).await, 0);
+    assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM push_publish_jobs WHERE job_id = ? AND status IN ('queued', 'in-progress')", crate::db_params![accepted.job_id().to_string()]).await, 0);
+    fixture
+        .execute(
+            "UPDATE push_nodes SET updated_at_ms = 1 WHERE node = ?",
+            crate::db_params![node.node()],
+        )
+        .await;
+    fixture
+        .execute(
+            "UPDATE push_publish_jobs SET updated_at_ms = 1 WHERE node = ?",
+            crate::db_params![node.node()],
+        )
+        .await;
+    seed_disabled_pruning_tail(&fixture).await;
+    push.ensure_node(&owner(), "after-retirement")
+        .await
+        .expect("pruning");
+    assert!(push
+        .get_node(node.node())
+        .await
+        .expect("retired node")
+        .is_none());
+    assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM push_registrations r LEFT JOIN push_nodes n ON n.node = r.node AND n.owner_bare_jid = r.owner_bare_jid WHERE r.push_service_jid = ? AND r.status = 'enabled' AND n.node IS NULL", crate::db_params![service.to_string()]).await, 0);
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_configured_enable_retire_then_prune() {
+    configured_enable_retire_then_prune(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_configured_enable_retire_then_prune() {
+    if let Some(fixture) = IngressFixture::postgres("push_normal_lifecycle_prune").await {
+        configured_enable_retire_then_prune(fixture).await;
+    }
+}
+
+async fn configured_local_registration_diagnostics(fixture: IngressFixture) {
+    let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
+    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox schema");
+    let service = "push.example.com".parse().expect("service");
+    let foreign_service = "other-push.example.com".parse().expect("foreign service");
+    let push = configured_store(&fixture, &service).await;
+    let inactive = push
+        .ensure_node(&owner(), "inactive-local")
+        .await
+        .expect("inactive node");
+    let inactive_host = seed_host(&fixture, inactive.node(), &service).await;
+    fixture
+        .execute(
+            "UPDATE push_nodes SET status = 'disabled' WHERE node = ?",
+            crate::db_params![inactive.node()],
+        )
+        .await;
+    let missing_host = seed_host(&fixture, "unprovisioned-local-node", &service).await;
+    let foreign_host = seed_host(&fixture, "foreign-unprovisioned-node", &foreign_service).await;
+    let active = push
+        .ensure_node(&owner(), "active-local")
+        .await
+        .expect("active node");
+    seed_host(&fixture, active.node(), &service).await;
+    let other_owner = "another@example.com".parse().expect("another owner");
+    let other_node = push
+        .ensure_node(&other_owner, "other-owner-node")
+        .await
+        .expect("other owner's node");
+    seed_host(&fixture, other_node.node(), &service).await;
+    let before = [
+        snapshot(&fixture, &push, &inactive_host).await,
+        snapshot(&fixture, &push, &missing_host).await,
+        snapshot(&fixture, &push, &foreign_host).await,
+    ];
+
+    let observation = push
+        .queue_observation()
+        .await
+        .expect("local registration inventory");
+    assert_eq!(
+        observation.local_registrations,
+        Some(super::PushLocalRegistrationObservation {
+            missing_nodes: 2,
+            inactive_nodes: 1,
+        })
+    );
+    observation.record();
+    for (name, expected, unit) in [
+        ("xmpp.push.registration.missing_node", 2, "{registration}"),
+        ("xmpp.push.registration.inactive_node", 1, "{registration}"),
+    ] {
+        assert_eq!(
+            telemetry.gauge_samples(name),
+            Some(vec![(expected, vec![])])
+        );
+        assert_eq!(telemetry.metric_unit(name).as_deref(), Some(unit));
+    }
+    assert_eq!(
+        telemetry
+            .metric_unit("xmpp.push.registration.snapshot_at")
+            .as_deref(),
+        Some("s")
+    );
+    assert_eq!(
+        [
+            snapshot(&fixture, &push, &inactive_host).await,
+            snapshot(&fixture, &push, &missing_host).await,
+            snapshot(&fixture, &push, &foreign_host).await,
+        ],
+        before,
+        "aggregate inventory must not acquire retirement authority"
+    );
+
+    // A standalone instance cannot infer a host-service boundary, even with
+    // registrations present in its database; it must not overwrite the sample.
+    let standalone = DatabasePushServiceStore::new(fixture.db.clone())
+        .await
+        .expect("standalone");
+    let unconfigured = standalone
+        .queue_observation()
+        .await
+        .expect("unconfigured inventory");
+    assert_eq!(unconfigured.local_registrations, None);
+    unconfigured.record();
+    assert_eq!(
+        telemetry.gauge_samples("xmpp.push.registration.missing_node"),
+        Some(vec![(2, vec![])])
+    );
+
+    push.remove_registered_nodes_for_owner(&owner(), service.as_str(), None)
+        .await
+        .expect("explicit registration revocation");
+    let recovered = push
+        .queue_observation()
+        .await
+        .expect("recovered local inventory");
+    assert_eq!(
+        recovered.local_registrations,
+        Some(super::PushLocalRegistrationObservation {
+            missing_nodes: 0,
+            inactive_nodes: 0,
+        })
+    );
+    recovered.record();
+    assert_eq!(
+        telemetry.gauge_samples("xmpp.push.registration.missing_node"),
+        Some(vec![(0, vec![])])
+    );
+    assert_eq!(
+        telemetry.gauge_samples("xmpp.push.registration.inactive_node"),
+        Some(vec![(0, vec![])])
+    );
+    assert_eq!(snapshot(&fixture, &push, &foreign_host).await, before[2]);
+    let freshness = telemetry.gauge_samples("xmpp.push.registration.snapshot_at");
+    fixture
+        .execute(
+            "ALTER TABLE push_registrations RENAME COLUMN node TO unavailable_node",
+            (),
+        )
+        .await;
+    assert!(
+        push.queue_observation().await.is_err(),
+        "a failed aggregate must not return a recordable partial snapshot"
+    );
+    assert_eq!(
+        telemetry.gauge_samples("xmpp.push.registration.snapshot_at"),
+        freshness
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_configured_local_registration_diagnostics() {
+    configured_local_registration_diagnostics(IngressFixture::sqlite().await).await;
+}
+
+#[tokio::test]
+async fn postgres_configured_local_registration_diagnostics() {
+    if let Some(fixture) = IngressFixture::postgres("push_local_registration_inventory").await {
+        configured_local_registration_diagnostics(fixture).await;
+    }
+}
+
+async fn explicit_disable_recovers_missing_or_unowned_legacy_target(fixture: IngressFixture) {
+    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        .await
+        .expect("outbox schema");
+    let service = "push.example.com".parse().expect("service");
+    let foreign_service = "other-push.example.com".parse().expect("foreign service");
+    let push = configured_store(&fixture, &service).await;
+    let other_owner = "another@example.com".parse().expect("other owner");
+    let other_node = push
+        .ensure_node(&other_owner, "other-owner-device")
+        .await
+        .expect("other node");
+    push.upsert_device(
+        &other_owner,
+        PushDeviceRegistration::new(
+            "other-device",
+            other_node.node(),
+            PushDevicePlatform::Web,
+            "test",
+        )
+        .with_provider_endpoint(Some("https://push.example.com/other-device".to_owned())),
+    )
+    .await
+    .expect("other device");
+    let other_job = push
+        .enqueue_notification_publish_job_from_user_server(
+            other_node.node(),
+            &notification_item("other-owner-accepted"),
+            &other_owner,
+        )
+        .await
+        .expect("other owner's accepted work");
+    fixture.execute("UPDATE push_publish_jobs SET status = 'in-progress', claimed_at_ms = 19, claim_token = 'other-owner-current-claim', uncertain_send = 1 WHERE job_id = ?", crate::db_params![other_job.job_id().to_string()]).await;
+    let provider_before = provider_snapshot(&fixture, &other_job.job_id().to_string()).await;
+
+    for node in ["unprovisioned-legacy-node", other_node.node()] {
+        let local = seed_host(&fixture, node, &service).await;
+        let foreign = seed_host(&fixture, node, &foreign_service).await;
+        let foreign_before = snapshot(&fixture, &push, &foreign).await;
+        assert_eq!(
+            push.remove_registered_nodes_for_owner(&owner(), service.as_str(), Some(node))
+                .await
+                .expect("explicit exact legacy disable"),
+            1
+        );
+        assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM push_registrations WHERE owner_bare_jid = ? AND push_service_jid = ? AND node = ?", crate::db_params![owner().to_string(), service.to_string(), node]).await, 0);
+        assert_eq!(scalar_i64(&push, "SELECT COUNT(*) FROM notification_outbox_lineage WHERE job_id = ? AND settled_at_ms IS NULL", crate::db_params![local.pending.to_string()]).await, 0);
+        assert_eq!(snapshot(&fixture, &push, &foreign).await, foreign_before);
+    }
+    assert_eq!(
+        provider_snapshot(&fixture, &other_job.job_id().to_string()).await,
+        provider_before,
+        "a user's explicit disable cannot touch another owner's accepted work or current claim"
+    );
+    assert_eq!(
+        push.get_node(other_node.node())
+            .await
+            .expect("other node")
+            .expect("preserved node")
+            .status,
+        super::types::PushNodeStatus::Active
+    );
+    assert_eq!(
+        push.get_device_for_owner_on_node(&other_owner, other_node.node(), "other-device")
+            .await
+            .expect("other device")
+            .expect("preserved device")
+            .provider_endpoint(),
+        Some("https://push.example.com/other-device")
+    );
+    fixture.close().await;
+}
+
+#[tokio::test]
+async fn sqlite_explicit_disable_recovers_missing_or_unowned_legacy_target() {
+    explicit_disable_recovers_missing_or_unowned_legacy_target(IngressFixture::sqlite().await)
+        .await;
+}
+
+#[tokio::test]
+async fn postgres_explicit_disable_recovers_missing_or_unowned_legacy_target() {
+    if let Some(fixture) = IngressFixture::postgres("push_legacy_disable").await {
+        explicit_disable_recovers_missing_or_unowned_legacy_target(fixture).await;
+    }
 }
 
 async fn retirement_preserves_other_service_custody(fixture: IngressFixture) {
@@ -331,7 +771,7 @@ async fn seed_provider_custody(fixture: &IngressFixture, host: &HostState) -> St
 }
 
 async fn provider_snapshot(fixture: &IngressFixture, id: &str) -> Vec<Value> {
-    values(fixture, "SELECT status, uncertain_send, terminal_disposition, last_error, updated_at_ms, ancestry_job_id FROM push_publish_jobs WHERE job_id = ?", crate::db_params![id], 6).await
+    values(fixture, "SELECT status, uncertain_send, terminal_disposition, last_error, updated_at_ms, ancestry_job_id, claim_token, claimed_at_ms, payload_xml, publish_options_xml, acceptance_scope, backing_state, upstream_completed FROM push_publish_jobs WHERE job_id = ?", crate::db_params![id], 13).await
 }
 
 async fn registration_disable_discovers_orphaned_provider_custody(fixture: IngressFixture) {

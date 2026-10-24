@@ -2931,7 +2931,9 @@ repair before reachability is queried, so read these observations with the
 maintenance outcomes and logs.
 Healthy sockets, resumable custody, failed probes, and newer generations must
 remain protected. Do not manufacture receipts or relax fences to make a gauge
-fall. The remaining routing-mirror lifecycle work is tracked in #2015.
+fall. The [routing-mirror reconciliation janitor](remote-owner-mirror-reconciliation.md)
+separately removes stale routing copies after authoritative absence (#2015).
+Recovery progress alone does not establish that those copies were removed.
 
 For gone push nodes, configured admission now disables only the authenticated
 owner's matching configured service/node registration under the owner lifecycle
