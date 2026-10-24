@@ -35,15 +35,19 @@ later pages. It never becomes a process-wide liveness cache.
 Healthy-node mirrors are checked against locally hosted connections and
 resumable XEP-0198 sessions on every unexpired peer, using the same read-only
 presence probes as recovery. Remote mirrors and UserActor resource lists are
-excluded from that evidence. Cleanup rechecks the exact registration and its
-ownership fence under the per-resource registration gate before recording owed
-work. Actor and connection-registry removal compare the old connection owner;
-a rebound resource or successor registration must survive an old retry.
-An absent or stale UserActor ownership fence defers a first cleanup attempt;
-absence of a claim alone is not permission to mutate a routing owner. Once
-exact-generation cleanup is recorded as pending, an absent claim can mean its
-actor removal already completed. That retry may finish the matching local
-registry/inventory removal, still preserving a successor generation or owner.
+excluded from that evidence. Cleanup rechecks the exact registration and socket
+incarnation under the per-resource registration gate before recording owed work.
+Actor and connection-registry removal compare the old connection owner; a
+rebound socket or successor registration must survive an old retry.
+
+Current account ownership and occupancy generations govern publication, not
+removal of obsolete local routing copies. Ownership moving to another node, or
+a fresh bind advancing the generation before its registration rolls back, must
+not pin an old mirror. Cleanup never rewrites occupancy authority or detaches a
+remote socket. Any user-claim release uses the local actor's captured owner and
+epoch, preserving foreign and successor claims. The expiry, exact unregister or
+complete-absence evidence above remains required; an unavailable peer or unknown
+membership cannot establish new healthy-node cleanup authority.
 
 Routing reconciliation removes the connection-registry mirror and UserActor
 resource and retries interrupted removal without requiring a new stanza.
@@ -60,7 +64,7 @@ membership; that separate lifecycle remains tracked in #1825.
 
 - `completed`: the selected page completed its checks and retirements.
 - `deferred`: work remains because of normal contention, an explicitly busy
-  actor, uncertain presence/membership or ownership, or a page budget. This is
+  actor, uncertain presence/membership, or a page budget. This is
   progress/backlog information, not proof of absence.
 - `failed`: a lease lookup, actor operation, or its dependency deadline failed.
   A retained mirror remains available for retry; failure never licenses removal.

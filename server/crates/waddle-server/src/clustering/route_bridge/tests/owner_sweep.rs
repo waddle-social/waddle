@@ -57,6 +57,7 @@ struct HealthyMirror {
     socket: Arc<OrderedRelayDeliveryBridge>,
     presence: Arc<SweepPresence>,
     membership: Arc<SweepMembership>,
+    lease: Arc<std::sync::Mutex<SocketLeaseRead>>,
 }
 
 impl HealthyMirror {
@@ -85,7 +86,7 @@ impl HealthyMirror {
             Some(gate) => gate.clone(),
             None => presence.clone(),
         };
-        let (owner, services, _) = setup_with_presence(asker, membership.clone()).await;
+        let (owner, services, lease) = setup_with_presence(asker, membership.clone()).await;
         (
             Self {
                 owner,
@@ -93,6 +94,7 @@ impl HealthyMirror {
                 socket,
                 presence,
                 membership,
+                lease,
             },
             gate,
         )
@@ -308,7 +310,7 @@ async fn owner_sweep_preserves_real_peer_socket_and_peer_or_local_resumable_sess
 }
 
 #[tokio::test]
-async fn owner_sweep_rechecks_rebound_generation_after_peer_absence_reply() {
+async fn owner_sweep_retires_obsolete_mirror_but_preserves_rebound_socket() {
     let (fixture, gate) = HealthyMirror::with_gate(true).await;
     let gate = gate.expect("probe gate");
     let sweep = {
@@ -319,29 +321,62 @@ async fn owner_sweep_rechecks_rebound_generation_after_peer_absence_reply() {
         .await
         .expect("peer absence probe started");
     let (tx, _rx) = mpsc::channel(1);
+    let entry = ConnectionEntry::new(tx);
+    let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+    *entry.occupancy_session.lock().expect("occupancy mutex") = Some(generation);
+    let socket_owner = entry.carbons_handle();
     fixture
         .socket
         .services
         .get()
         .expect("socket services")
         .connection_registry
-        .register(target_full(), tx);
+        .register_entry(target_full(), entry.clone());
     crate::occupancy_authority::publish(
         &fixture.services.occupancy_database,
         &target_full(),
-        waddle_xmpp_core::OccupancySessionGeneration::mint(),
+        generation,
     )
     .await
     .expect("rebound binding authority");
     gate.release.notify_one();
-    assert_eq!(sweep.await.expect("sweep task"), SweepOutcome::Deferred);
-    assert_mirror_exists(&fixture.owner, &fixture.services, true).await;
-    assert!(!fixture.owner.remote_owner_resources.lock().await[&target_full()].unregister_pending);
+    assert_eq!(sweep.await.expect("sweep task"), SweepOutcome::Completed);
+    assert_mirror_exists(&fixture.owner, &fixture.services, false).await;
+    let socket_registry = &fixture
+        .socket
+        .services
+        .get()
+        .expect("socket services")
+        .connection_registry;
+    assert!(socket_registry
+        .entry_if_owner(&target_full(), &socket_owner)
+        .is_some());
+    fixture
+        .services
+        .claim_store
+        .ensure_claimed(&target_entity(), &receiver_identity())
+        .await
+        .expect("successor owner claim");
+    assert_eq!(
+        fixture
+            .owner
+            .register_remote_user_resource_on_owner(remote_registration_request_from_entry(
+                target_full(),
+                NodeId::new("socket-node".into()),
+                &entry,
+            ))
+            .await
+            .status,
+        RelayRemoteResourceRegistrationStatus::Registered
+    );
     assert_eq!(
         fixture.owner.sweep_remote_owner_resources().await,
         SweepOutcome::Completed
     );
     assert_mirror_exists(&fixture.owner, &fixture.services, true).await;
+    assert!(socket_registry
+        .entry_if_owner(&target_full(), &socket_owner)
+        .is_some());
 }
 
 #[tokio::test]
@@ -456,84 +491,165 @@ async fn owner_sweep_retries_healthy_cleanup_after_actor_release_and_inventory_c
 }
 
 #[tokio::test]
-async fn owner_sweep_defers_absent_or_foreign_claim_before_new_or_pending_cleanup() {
-    for pending in [false, true] {
+async fn owner_sweep_retires_expired_mirror_without_releasing_foreign_claim() {
+    let (bridge, services, lease) = setup().await;
+    let original = services
+        .claim_store
+        .current_claim(&target_entity())
+        .await
+        .expect("original claim read")
+        .expect("original owner claim");
+    services
+        .claim_store
+        .release(&target_entity(), &original.owner, original.claim_epoch)
+        .await
+        .expect("release original claim");
+    services
+        .claim_store
+        .acquire(&target_entity(), &other_identity())
+        .await
+        .expect("acquire foreign claim");
+    let successor = services
+        .claim_store
+        .current_claim(&target_entity())
+        .await
+        .expect("successor claim read")
+        .expect("foreign successor claim");
+    *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
+
+    assert_eq!(
+        bridge.sweep_remote_owner_resources().await,
+        SweepOutcome::Completed,
+        "lost publication authority must not pin expired local routing copies"
+    );
+    assert_mirror_exists(&bridge, &services, false).await;
+    let retained = services
+        .claim_store
+        .current_claim(&target_entity())
+        .await
+        .expect("retained claim read")
+        .expect("foreign claim must survive local cleanup");
+    assert_eq!(retained.owner, successor.owner);
+    assert_eq!(retained.claim_epoch, successor.claim_epoch);
+}
+
+#[tokio::test]
+async fn owner_sweep_retires_rolled_back_bind_mirror_without_rewriting_new_generation() {
+    for expired_socket in [false, true] {
         let fixture = HealthyMirror::new().await;
-        // Resolving through GetUser after changing the claim would itself
-        // initiate stale-actor retirement. Observe the captured actor directly.
-        let actor = fixture
-            .services
-            .user_registry
-            .ask(waddle_xmpp::registry::GetUser {
-                bare_jid: target_bare(),
-            })
-            .await
-            .expect("owner actor lookup")
-            .expect("owner actor");
-        let claim = fixture
-            .services
-            .claim_store
-            .current_claim(&target_entity())
-            .await
-            .expect("claim read")
-            .expect("owner claim");
-        fixture
-            .services
-            .claim_store
-            .release(&target_entity(), &claim.owner, claim.claim_epoch)
-            .await
-            .expect("release ownership");
-        if !pending {
+        let generation = waddle_xmpp_core::OccupancySessionGeneration::mint();
+        // A fresh bind published authority, then rolled back its registration.
+        // The mirror must not wait for its old generation to become current again.
+        crate::occupancy_authority::publish(
+            &fixture.services.occupancy_database,
+            &target_full(),
+            generation,
+        )
+        .await
+        .expect("replacement binding authority");
+        if expired_socket {
+            *fixture.lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
+        }
+        assert_eq!(
+            fixture.owner.sweep_remote_owner_resources().await,
+            SweepOutcome::Completed,
+            "obsolete local generation must converge; expired_socket={expired_socket}"
+        );
+        assert_mirror_exists(&fixture.owner, &fixture.services, false).await;
+        assert!(crate::occupancy_authority::is_current(
+            &fixture.services.occupancy_database,
+            &target_full(),
+            generation,
+        )
+        .await
+        .expect("replacement generation read"));
+    }
+}
+
+#[tokio::test]
+async fn owner_sweep_retires_old_claim_mirrors_without_releasing_successor_claims() {
+    for pending in [false, true] {
+        for foreign in [false, true] {
+            let fixture = HealthyMirror::new().await;
+            // Capture the actor before changing ownership so this assertion cannot
+            // initiate stale-actor retirement through a separate GetUser lookup.
+            let actor = fixture
+                .services
+                .user_registry
+                .ask(waddle_xmpp::registry::GetUser {
+                    bare_jid: target_bare(),
+                })
+                .await
+                .expect("owner actor lookup")
+                .expect("owner actor");
+            let claim = fixture
+                .services
+                .claim_store
+                .current_claim(&target_entity())
+                .await
+                .expect("claim read")
+                .expect("owner claim");
+            fixture
+                .services
+                .claim_store
+                .release(&target_entity(), &claim.owner, claim.claim_epoch)
+                .await
+                .expect("release ownership");
+            if foreign {
+                fixture
+                    .services
+                    .claim_store
+                    .acquire(&target_entity(), &other_identity())
+                    .await
+                    .expect("foreign owner");
+            }
+            let successor = fixture
+                .services
+                .claim_store
+                .current_claim(&target_entity())
+                .await
+                .expect("successor claim read");
+            if pending {
+                let registration =
+                    fixture.owner.remote_owner_resources.lock().await[&target_full()].clone();
+                fixture
+                    .owner
+                    .mark_remote_owner_unregister_pending(&target_full(), &registration)
+                    .await;
+            }
             assert_eq!(
                 fixture.owner.sweep_remote_owner_resources().await,
-                SweepOutcome::Deferred
+                SweepOutcome::Completed,
+                "local cleanup must converge; pending={pending}, foreign={foreign}"
             );
-            assert!(fixture
+            assert!(!fixture
                 .services
                 .connection_registry
                 .is_connected(&target_full()));
-            assert!(fixture
+            assert!(!fixture
                 .owner
                 .remote_owner_resources
                 .lock()
                 .await
                 .contains_key(&target_full()));
-        }
-        fixture
-            .services
-            .claim_store
-            .acquire(&target_entity(), &other_identity())
-            .await
-            .expect("foreign owner");
-        if pending {
-            let registration =
-                fixture.owner.remote_owner_resources.lock().await[&target_full()].clone();
-            fixture
-                .owner
-                .mark_remote_owner_unregister_pending(&target_full(), &registration)
-                .await;
-        }
-        assert_eq!(
-            fixture.owner.sweep_remote_owner_resources().await,
-            SweepOutcome::Deferred
-        );
-        assert!(fixture
-            .services
-            .connection_registry
-            .is_connected(&target_full()));
-        assert!(fixture
-            .owner
-            .remote_owner_resources
-            .lock()
-            .await
-            .contains_key(&target_full()));
-        assert_eq!(
-            actor
-                .ask(waddle_xmpp::registry::user_actor::GetResources)
+            assert_eq!(
+                actor
+                    .ask(waddle_xmpp::registry::user_actor::GetResources)
+                    .await
+                    .expect("retired actor resources"),
+                Vec::<jid::FullJid>::new()
+            );
+            let retained = fixture
+                .services
+                .claim_store
+                .current_claim(&target_entity())
                 .await
-                .expect("unchanged actor resources"),
-            vec![target_full()]
-        );
+                .expect("retained successor claim read");
+            assert_eq!(
+                retained.map(|claim| (claim.owner, claim.claim_epoch)),
+                successor.map(|claim| (claim.owner, claim.claim_epoch))
+            );
+        }
     }
 }
 
@@ -650,8 +766,7 @@ async fn owner_sweep_bounds_stalled_lease_reads_and_retries_next_pass() {
     );
     assert!(started.elapsed() <= Duration::from_secs(5) + TIMER_GRANULARITY);
     assert_mirror_exists(&bridge, &services, true).await;
-    // Recovery performs real background SQLite reads; virtual deadlines must
-    // not overtake that work after the stalled-dependency assertion.
+    // Check recovery on real dependency time after the simulated stall.
     tokio::time::resume();
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     assert_eq!(
@@ -788,7 +903,7 @@ async fn owner_sweep_budget_preserves_unattempted_candidates_for_later_passes() 
     for pass in 0..11 {
         // Ten bounded virtual passes attempt the first 60 stalled entries.
         // The final page reaches the pending target after three more stalls;
-        // its SQLite ownership proof needs a real clock, as in production.
+        // measure its registry cleanup on real dependency time.
         if pass == 10 {
             tokio::time::resume();
         }
@@ -926,8 +1041,8 @@ async fn owner_sweep_retires_1024_mirrors_within_thirty_seconds() {
         1024
     );
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
-    // Exercise real ticker and database latency. With virtual time paused,
-    // background SQLite work can be overtaken by an auto-advanced deadline.
+    // Exercise the production ticker and real registry latency rather than
+    // auto-advancing through maintenance intervals.
     let started = tokio::time::Instant::now();
     let mut ticker = crate::server::session_janitors::remote_owner_mirror_ticker();
     for _ in 0..16 {
@@ -1053,8 +1168,7 @@ async fn add_six_live_socket_mirrors(bridge: &OrderedRelayDeliveryBridge) {
 #[tokio::test]
 async fn owner_sweep_busy_child_reply_is_deferred_after_its_full_timeout() {
     let (bridge, services, lease) = setup().await;
-    // The ownership proof reads SQLite before reaching the actor. Measure
-    // the real child timeout so virtual time cannot overtake that proof.
+    // Measure the actual child reply timeout and subsequent registry convergence.
     let release = gate_mirror_actor(&services).await;
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     let started = tokio::time::Instant::now();

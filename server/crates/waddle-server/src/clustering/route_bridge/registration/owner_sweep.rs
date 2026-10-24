@@ -220,46 +220,10 @@ impl OrderedRelayDeliveryBridge {
             let Ok(_registration_guard) = lock.try_lock() else {
                 return RemoteOwnerMirrorOutcome::Deferred;
             };
-            // A successor may register while the presence probe is in flight.
-            // This same gate serializes remote admission and local bind retirement.
-            let pending = {
-                let Ok(registrations) = self.remote_owner_resources.try_lock() else {
-                    return RemoteOwnerMirrorOutcome::Deferred;
-                };
-                let Some(current) = registrations
-                    .get(jid)
-                    .filter(|current| remote_owner_registration_matches(current, registration))
-                else {
-                    return RemoteOwnerMirrorOutcome::Superseded;
-                };
-                current.unregister_pending
-            };
-            match crate::occupancy_authority::is_current(
-                &services.occupancy_database,
-                jid,
-                registration.occupancy_session,
-            )
-            .await
-            {
-                Ok(true) => {}
-                Ok(false) | Err(_) => return RemoteOwnerMirrorOutcome::Deferred,
-            }
-            match services
-                .claim_store
-                .current_claim(&Entity::new(
-                    EntityType::UserActor,
-                    jid.to_bare().to_string(),
-                ))
-                .await
-            {
-                Ok(Some(claim))
-                    if claim.owner_lease_fresh
-                        && claim.owner == services.node_identity.current() => {}
-                // A cancelled actor ask can release the last claim before
-                // inventory cleanup. Finish only its recorded exact-owner work.
-                Ok(None) if pending => {}
-                _ => return RemoteOwnerMirrorOutcome::Deferred,
-            }
+            // A successor may register while the absence probe is in flight.
+            // Keep its registration/owner fences, but do not require current
+            // publication authority to remove an obsolete local routing copy.
+            // The registry releases only its captured claim owner and epoch.
             {
                 let Ok(mut registrations) = self.remote_owner_resources.try_lock() else {
                     return RemoteOwnerMirrorOutcome::Deferred;
