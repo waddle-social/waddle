@@ -322,7 +322,7 @@ impl IngressAuthority {
         let mut streams = self
             .streams
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         streams.retain(|_, activity| activity.strong_count() > 0);
         if let Some(activity) = streams.get(stream_id).and_then(Weak::upgrade) {
             return activity;
@@ -362,7 +362,7 @@ impl IngressAuthority {
         *self
             .stream_wait_observer
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(observer.clone());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(observer.clone());
         observer
     }
 
@@ -516,7 +516,7 @@ impl IngressAuthority {
         let gate = self
             .retirement_batch_gate
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone();
         if let Some(gate) = gate {
             gate.notify_one();
@@ -541,7 +541,7 @@ impl IngressAuthority {
                 if let Some(observer) = self
                     .stream_wait_observer
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                     .as_ref()
                 {
                     observer.notify_one();
@@ -651,7 +651,7 @@ impl IngressAuthority {
             let receipt_task = self
                 .frame_receipt_retries
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .task
                 .take();
             if let Some(task) = receipt_task {
@@ -979,7 +979,7 @@ mod lifecycle_tests {
         *authority
             .retirement_batch_gate
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(gate.clone());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(gate.clone());
         {
             let retirement = authority.forget_stream(&stream);
             tokio::pin!(retirement);
@@ -994,7 +994,7 @@ mod lifecycle_tests {
         *authority
             .retirement_batch_gate
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = None;
         assert_eq!(
             authority
                 .lookup_stream(&stream)

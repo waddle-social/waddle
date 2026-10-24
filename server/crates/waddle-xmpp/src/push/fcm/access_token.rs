@@ -354,12 +354,11 @@ impl OAuthFcmTokenSource {
         self.token_url.as_str()
     }
 
-    /// A cached entry is independent of any panicking writer, so a
-    /// poisoned lock is recovered rather than disabling the cache.
+    /// Terminate the process if a prior writer left the cache uncertain.
     fn lock_cache(&self) -> MutexGuard<'_, Option<CachedAccessToken>> {
         self.cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn fresh_cached(&self) -> Option<FcmAccessToken> {

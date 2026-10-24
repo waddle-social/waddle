@@ -92,7 +92,7 @@ impl RoomEffectArmSupervisor {
         *self
             .drain_state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Arc::downgrade(state));
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(Arc::downgrade(state));
     }
 
     /// Retain the arming of a row whose commit was confirmed durable but whose
@@ -147,7 +147,7 @@ impl RoomEffectArmSupervisor {
             let mut state = self
                 .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             state.pending.insert(ReservationKey::from(&reservation));
             if state.running {
                 return;
@@ -165,7 +165,7 @@ impl RoomEffectArmSupervisor {
                 let reservations = {
                     let mut state = state
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                     state
                         .pending
                         .drain()
@@ -182,7 +182,7 @@ impl RoomEffectArmSupervisor {
                         ArmOutcome::StillStaged => {
                             state
                                 .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                                 .pending
                                 .insert(ReservationKey::from(&reservation));
                         }
@@ -191,7 +191,7 @@ impl RoomEffectArmSupervisor {
                 }
                 let mut state = state
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                 if state.pending.is_empty() {
                     state.running = false;
                     break;
@@ -209,7 +209,7 @@ impl RoomEffectArmSupervisor {
         self.runtime.spawn(async move {
             let state = drain_state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .as_ref()
                 .and_then(Weak::upgrade);
             let Some(state) = state else {
@@ -235,7 +235,7 @@ impl RoomEffectArmSupervisor {
         let state = self
             .state
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         (state.running, state.pending.len())
     }
 }
@@ -243,7 +243,7 @@ impl RoomEffectArmSupervisor {
 fn nudge_drain(runtime: &Handle, drain_state: &Arc<Mutex<Option<Weak<WebSocketState>>>>) {
     let state = drain_state
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
         .as_ref()
         .and_then(Weak::upgrade);
     let Some(state) = state else {

@@ -153,21 +153,16 @@ impl InProcessVapidSigner {
     /// Drop every cached JWT — used on VAPID key rotation so stale
     /// `(old_kid, *)` entries don't linger until LRU pressure evicts them.
     pub fn invalidate_all(&self) {
-        let mut cache = self.lock_cache_recovering();
+        let mut cache = self.lock_cache();
         cache.clear();
     }
 
-    /// Lock the cache, recovering from a poisoned mutex by extracting the
-    /// inner guard. The cache's invariants don't depend on prior writers
-    /// having completed successfully — every entry is independent — so
-    /// poison recovery is safe and matches what `parking_lot::Mutex` would
-    /// do natively. Without this recovery, a single panic anywhere in the
-    /// signer would silently bypass the cache for the rest of the process
-    /// lifetime, forcing unbounded re-signing.
-    fn lock_cache_recovering(&self) -> std::sync::MutexGuard<'_, LruCache<CacheKey, CachedJwt>> {
+    /// Lock the cache, terminating the process if a prior writer panicked.
+    /// A detached signer task must not leave the service using uncertain state.
+    fn lock_cache(&self) -> std::sync::MutexGuard<'_, LruCache<CacheKey, CachedJwt>> {
         self.cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn cache_key(&self, aud: &url::Origin, sub: &VapidSub) -> CacheKey {
@@ -193,7 +188,7 @@ impl VapidSigner for InProcessVapidSigner {
         let now = now_unix_seconds();
         // Cache hit path — short critical section, then return.
         {
-            let mut cache = self.lock_cache_recovering();
+            let mut cache = self.lock_cache();
             if let Some(entry) = cache.get(&key) {
                 if entry.exp_unix_seconds > now + CACHE_EVICT_MARGIN.as_secs() {
                     return Ok(entry.jwt.clone());
@@ -224,7 +219,7 @@ impl VapidSigner for InProcessVapidSigner {
             .map_err(VapidSignError::Signing)?;
         let jwt = VapidJwt::new(&token)?;
 
-        let mut cache = self.lock_cache_recovering();
+        let mut cache = self.lock_cache();
         cache.put(
             key,
             CachedJwt {

@@ -17,7 +17,7 @@ fn env_lock() -> std::sync::MutexGuard<'static, ()> {
     ENV_MUTEX
         .get_or_init(|| std::sync::Mutex::new(()))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
 }
 
 /// XmppConfig for unit tests: uses in-memory SQLite for all storage backends.

@@ -34,12 +34,15 @@ impl ClientHandle {
         self.events.subscribe()
     }
 
-    /// Current session snapshot (reads from shared state without blocking).
+    /// Current session snapshot.
+    ///
+    /// Terminates the process if a panicking writer poisoned the shared state;
+    /// an uncertain snapshot must not authorize continued session operations.
     pub fn snapshot(&self) -> SessionSnapshot {
-        match self.state.read() {
-            Ok(snapshot) => snapshot.clone(),
-            Err(poisoned) => poisoned.into_inner().clone(),
-        }
+        self.state
+            .read()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
+            .clone()
     }
 
     /// Current high-level client state.
@@ -227,13 +230,10 @@ enum DeferredXmppCommand {
 impl DriverTask {
     fn publish_snapshot(&self) {
         let snapshot = self.runtime.snapshot().clone();
-        match self.state.write() {
-            Ok(mut current) => *current = snapshot,
-            Err(poisoned) => {
-                *poisoned.into_inner() = snapshot;
-                self.state.clear_poison();
-            }
-        }
+        *self
+            .state
+            .write()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = snapshot;
     }
 
     async fn run(mut self) {

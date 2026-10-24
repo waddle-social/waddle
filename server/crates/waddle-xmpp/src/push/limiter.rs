@@ -122,15 +122,12 @@ impl Limiter {
         // this before the global permit means a backed-up pair waits
         // without holding a slot the rest of the process could use.
         let sleep_until = {
-            // Recover from a poisoned mutex instead of propagating the
-            // panic — each entry's `next_available` is self-contained
-            // (no inter-entry invariant), so a panicking sibling task
-            // cannot leave the map in an inconsistent state. Matches
-            // the pattern used by `InProcessVapidSigner`'s cache lock.
+            // A partially advanced bucket cannot safely authorize sends. Fail
+            // the process rather than silently losing this detached worker.
             let mut pairs = self
                 .pairs
                 .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner());
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             // `LruCache::get_or_insert_mut` looks up + LRU-promotes
             // an existing entry, or constructs a new one (evicting
             // the oldest if at capacity).

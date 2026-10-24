@@ -20,7 +20,7 @@ impl RemoteMucCleanupWarnings {
         let mut warnings = self
             .last_warnings
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         warnings.retain(|_, last| now.saturating_duration_since(*last) < WARNING_INTERVAL);
         if let std::collections::hash_map::Entry::Vacant(entry) = warnings.entry(jid.clone()) {
             entry.insert(now);

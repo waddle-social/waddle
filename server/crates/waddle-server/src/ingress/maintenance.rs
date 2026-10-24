@@ -121,7 +121,7 @@ impl MaintenanceCursor {
             &mut *self
                 .accounting_tasks
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison),
         );
         for task in tasks {
             task.await.expect("accounting worker");
@@ -132,20 +132,20 @@ impl MaintenanceCursor {
         *self
             .after
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn set(&self, after: Option<MaintenancePosition>) {
         *self
             .after
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = after;
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = after;
     }
 
     pub(super) fn observer_retention_due(&self) -> bool {
         self.observer_retention_due_at
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .is_none_or(|at| tokio::time::Instant::now() >= at)
     }
 
@@ -155,7 +155,7 @@ impl MaintenanceCursor {
         *self
             .observer_retention_due_at
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = (outcome
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = (outcome
             == MaintenanceOutcome::Complete)
             .then(|| tokio::time::Instant::now() + OBSERVER_RETENTION_INTERVAL);
     }
@@ -165,7 +165,7 @@ impl MaintenanceCursor {
         *self
             .observer_retention_due_at
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = None;
     }
 }
 
@@ -529,7 +529,7 @@ async fn recover_candidates(
     let mut after = *cursor
         .recovery_after
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     let resumed = after.is_some();
     let mut outcome = MaintenanceOutcome::Complete;
     let mut attempts = 0;
@@ -551,7 +551,7 @@ async fn recover_candidates(
                 *cursor
                     .recovery_after
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner) =
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) =
                     Some((candidate.created_at, candidate.key));
                 after = Some((candidate.created_at, candidate.key));
                 continue;
@@ -559,7 +559,7 @@ async fn recover_candidates(
             let unsupported = cursor
                 .recovery_unsupported
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .get(candidate.key, candidate.evidence)
                 .is_some();
             if !unsupported && attempts >= budget.recovery_max_attempts {
@@ -570,14 +570,14 @@ async fn recover_candidates(
             *cursor
                 .recovery_after
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = after;
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = after;
             if unsupported {
                 continue;
             }
             cursor
                 .recovery_unsupported
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .remove(candidate.key);
             attempts += 1;
             // Queue accounting before the attempt: the phase deadline can cancel
@@ -586,7 +586,7 @@ async fn recover_candidates(
             cursor
                 .recovery_accounting
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .push(RecoveryAttempt {
                     key: candidate.key,
                     attempted_at: tokio::time::Instant::now(),
@@ -616,7 +616,7 @@ async fn recover_candidates(
                 if let Some(attempt) = cursor
                     .recovery_accounting
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                     .iter_mut()
                     .find(|attempt| attempt.generation == generation)
                 {
@@ -641,7 +641,7 @@ async fn recover_candidates(
                     Ok(Ok(Some((evidence, until)))) => cursor
                         .recovery_unsupported
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                         .insert(candidate.key, evidence, Suppression::WaitingUntil(until)),
                     Ok(Ok(None)) => {}
                     Ok(Err(error)) => {
@@ -669,7 +669,7 @@ async fn recover_candidates(
                             cursor
                                 .recovery_unsupported
                                 .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                                 .insert(candidate.key, evidence, Suppression::Unsupported);
                         }
                         Ok(Err(error)) => {
@@ -687,7 +687,7 @@ async fn recover_candidates(
             *cursor
                 .recovery_after
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = None;
             return if resumed {
                 MaintenanceOutcome::Partial
             } else {
@@ -715,7 +715,7 @@ fn spawn_recovery_accounting(
         &mut *cursor
             .recovery_accounting
             .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner),
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison),
     );
     if attempted.is_empty() {
         return;
@@ -745,7 +745,7 @@ fn spawn_recovery_accounting(
                 Ok(now) => {
                     recovered += credited
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner)
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                         .credit(
                             key,
                             u64::from(attempt.observed.receipts),
@@ -764,14 +764,14 @@ fn spawn_recovery_accounting(
             };
             let verdict = stalled
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .account(
                     &attempt,
                     fresh,
                     budget,
                     &mut suppressed
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner),
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison),
                 );
             if verdict == stalls::StallVerdict::Open {
                 continue;
@@ -784,10 +784,10 @@ fn spawn_recovery_accounting(
                 repair_stalled_row(&uow, environment.as_deref(), key, &attempt.pending).await;
             let mut stalled = stalled
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             let mut suppressed = suppressed
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             if repaired {
                 stalled.repaired(key, &mut suppressed);
             } else {
@@ -806,7 +806,7 @@ fn spawn_recovery_accounting(
     cursor
         .accounting_tasks
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
         .push(task);
     #[cfg(not(test))]
     drop(task);
@@ -822,7 +822,7 @@ fn requeue_failed_accounting(queue: &Mutex<Vec<RecoveryAttempt>>, failed: Vec<Re
     }
     let mut queue = queue
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     // Retries precede the rows the running pass has queued since, so the
     // oldest credit is read first.
     let pending = std::mem::take(&mut *queue);

@@ -1144,10 +1144,9 @@ impl JingleHandler {
     }
 
     fn lock_pending_dm_invites(&self) -> MutexGuard<'_, HashMap<CallId, PendingDmInvite>> {
-        self.pending_dm_invites.lock().unwrap_or_else(|err| {
-            tracing::warn!("recovering poisoned pending DM invite lock");
-            err.into_inner()
-        })
+        self.pending_dm_invites
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn check_terminate_rate_limit(

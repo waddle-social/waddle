@@ -3166,7 +3166,7 @@ impl OrphanReaperWorkers {
         let mut pending = self
             .hydration_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if pending.contains_key(&entity.id) {
             return false;
         }
@@ -3195,7 +3195,7 @@ impl OrphanReaperWorkers {
         let mut pending = self
             .hydration_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         pending.remove(&entity.id);
         crate::clustering::metrics::record_orphan_work_queue_depth(
             crate::clustering::metrics::OrphanWorkQueue::SmHydration,
@@ -3218,7 +3218,7 @@ impl OrphanReaperWorkers {
         let key = Self::hydration_key(&work);
         self.hydration_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .insert(key.clone(), PendingSmHydration::Won(work.clone()));
         match self.hydration_tx.try_send(work) {
             Ok(()) => WorkEnqueueOutcome::Enqueued,
@@ -3254,7 +3254,7 @@ impl OrphanReaperWorkers {
     fn has_release_capacity(&self) -> bool {
         self.release_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .len()
             < ORPHAN_WORK_QUEUE_CAPACITY
     }
@@ -3274,7 +3274,7 @@ impl OrphanReaperWorkers {
         if self
             .hydration_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .contains_key(&Self::hydration_key(&work))
         {
             return WorkEnqueueOutcome::AlreadyTracked;
@@ -3290,7 +3290,7 @@ impl OrphanReaperWorkers {
         let mut pending = self
             .release_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if pending.contains_key(&key) {
             return WorkEnqueueOutcome::AlreadyTracked;
         }
@@ -3333,7 +3333,7 @@ impl OrphanReaperWorkers {
     fn pending_hydrations(&self) -> Vec<SmHydrationWork> {
         self.hydration_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .values()
             .filter_map(|pending| match pending {
                 PendingSmHydration::Won(work) => Some(work.clone()),
@@ -3351,7 +3351,7 @@ impl OrphanReaperWorkers {
     )> {
         self.hydration_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .values()
             .filter_map(|pending| match pending {
                 PendingSmHydration::Reserved {
@@ -3367,7 +3367,7 @@ impl OrphanReaperWorkers {
     fn pending_releases(&self) -> Vec<ExactReleaseWork> {
         self.release_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .values()
             .cloned()
             .collect()
@@ -3385,7 +3385,7 @@ impl OrphanReaperWorkers {
         let mut hydration_pending = self
             .hydration_pending
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         for work in hydrations {
             hydration_pending.insert(Self::hydration_key(&work), PendingSmHydration::Won(work));
         }
@@ -3399,7 +3399,7 @@ impl OrphanReaperWorkers {
         let mut release_pending = self
             .release_pending
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         for work in releases {
             release_pending.insert(Self::release_key(&work), work);
         }
@@ -3418,7 +3418,7 @@ impl OrphanReaperWorkers {
         let mut handoffs = self
             .room_handoff_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if handoffs.contains_key(&key) {
             return;
         }
@@ -3442,7 +3442,7 @@ impl OrphanReaperWorkers {
         let mut handoffs = self
             .room_handoff_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         handoffs.remove(&(room_jid.clone(), claim_fence.clone()));
         crate::clustering::metrics::record_orphan_work_queue_depth(
             crate::clustering::metrics::OrphanWorkQueue::RoomHandoff,
@@ -3455,7 +3455,7 @@ impl OrphanReaperWorkers {
     ) -> Vec<waddle_xmpp::muc::room_registry_actor::PendingReclaimedRoom> {
         self.room_handoff_pending
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .values()
             .cloned()
             .collect()
@@ -3464,23 +3464,29 @@ impl OrphanReaperWorkers {
     fn sm_cursor(&self) -> Option<crate::clustering::claims::SmOrphanScanCursor> {
         self.sm_cursor
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone()
     }
 
     fn set_sm_cursor(&self, cursor: Option<crate::clustering::claims::SmOrphanScanCursor>) {
-        *self.sm_cursor.lock().unwrap_or_else(|e| e.into_inner()) = cursor;
+        *self
+            .sm_cursor
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = cursor;
     }
 
     fn room_cursor(&self) -> Option<crate::clustering::claims::RoomOrphanScanCursor> {
         self.room_cursor
             .lock()
-            .unwrap_or_else(|e| e.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone()
     }
 
     fn set_room_cursor(&self, cursor: Option<crate::clustering::claims::RoomOrphanScanCursor>) {
-        *self.room_cursor.lock().unwrap_or_else(|e| e.into_inner()) = cursor;
+        *self
+            .room_cursor
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = cursor;
     }
 }
 
@@ -3566,8 +3572,9 @@ impl OrphanReaperSupervisor {
                         | waddle_xmpp::stream_management::ReclaimedHydrationOutcome::LostClaim,
                     )) => {
                         let key = OrphanReaperWorkers::hydration_key(&work);
-                        let mut pending =
-                            hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut pending = hydration_pending
+                            .lock()
+                            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                         pending.remove(&key);
                         crate::clustering::metrics::record_orphan_work_queue_depth(
                             crate::clustering::metrics::OrphanWorkQueue::SmHydration,
@@ -3597,8 +3604,9 @@ impl OrphanReaperSupervisor {
                         match cleanup {
                             Ok(Ok(_)) => {
                                 let key = OrphanReaperWorkers::hydration_key(&work);
-                                let mut pending =
-                                    hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut pending = hydration_pending
+                                    .lock()
+                                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                                 pending.remove(&key);
                                 crate::clustering::metrics::record_orphan_work_queue_depth(
                                     crate::clustering::metrics::OrphanWorkQueue::SmHydration,
@@ -3633,8 +3641,9 @@ impl OrphanReaperSupervisor {
                         match cleanup {
                             Ok(Ok(_)) => {
                                 let key = OrphanReaperWorkers::hydration_key(&work);
-                                let mut pending =
-                                    hydration_pending.lock().unwrap_or_else(|e| e.into_inner());
+                                let mut pending = hydration_pending
+                                    .lock()
+                                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                                 pending.remove(&key);
                                 crate::clustering::metrics::record_orphan_work_queue_depth(
                                     crate::clustering::metrics::OrphanWorkQueue::SmHydration,
@@ -3664,7 +3673,7 @@ impl OrphanReaperSupervisor {
             }
             hydration_pending
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .clear();
             crate::clustering::metrics::record_orphan_work_queue_depth(
                 crate::clustering::metrics::OrphanWorkQueue::SmHydration,
@@ -3705,7 +3714,9 @@ impl OrphanReaperSupervisor {
                 match result {
                     Ok(Ok(_)) => {
                         let key = OrphanReaperWorkers::release_key(&work);
-                        let mut pending = release_pending.lock().unwrap_or_else(|e| e.into_inner());
+                        let mut pending = release_pending
+                            .lock()
+                            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                         pending.remove(&key);
                         crate::clustering::metrics::record_orphan_work_queue_depth(
                             crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
@@ -3730,7 +3741,7 @@ impl OrphanReaperSupervisor {
             }
             release_pending
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .clear();
             crate::clustering::metrics::record_orphan_work_queue_depth(
                 crate::clustering::metrics::OrphanWorkQueue::RoomRelease,
@@ -5211,7 +5222,7 @@ async fn failed_worker_restart_retains_captured_won_work_for_terminal_cleanup() 
         .workers
         .hydration_pending
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
         .insert(won_sm.id.clone(), PendingSmHydration::Won(won_work));
 
     let uncertain = Entity::new(EntityType::SmSession, "unobserved-during-failed-restart");
@@ -5241,7 +5252,7 @@ async fn failed_worker_restart_retains_captured_won_work_for_terminal_cleanup() 
         .workers
         .release_pending
         .lock()
-        .unwrap_or_else(|error| error.into_inner())
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
         .insert(
             OrphanReaperWorkers::release_key(&release_work),
             release_work,
@@ -6662,12 +6673,12 @@ async fn run_orphan_reaper_sweep(state: &Arc<WebSocketState>) {
             let hydration_empty = workers
                 .hydration_pending
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .is_empty();
             let release_empty = workers
                 .release_pending
                 .lock()
-                .unwrap_or_else(|e| e.into_inner())
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                 .is_empty();
             if hydration_empty && release_empty {
                 break;

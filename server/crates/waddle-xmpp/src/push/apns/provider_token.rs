@@ -136,12 +136,11 @@ impl CachingApnsTokenSigner {
         })
     }
 
-    /// Every cached entry is independent of any panicking writer, so a
-    /// poisoned lock is recovered rather than disabling the cache.
+    /// Terminate the process if a prior writer left the cache uncertain.
     fn lock_cache(&self) -> MutexGuard<'_, Option<CachedToken>> {
         self.cache
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
     }
 
     fn sign(&self, issued_at: u64) -> Result<ApnsProviderJwt, ApnsSignError> {

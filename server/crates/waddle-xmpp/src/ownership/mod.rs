@@ -316,16 +316,13 @@ impl SharedNodeIdentity {
     /// rather than returned by reference so callers never hold the lock
     /// across an `.await`.
     ///
-    /// A poisoned lock (a panicking holder) still yields a usable
-    /// identity: `NodeIdentity` has no invariant `rotate` can partially
-    /// break (both fields are plain, independently-assigned `String`s),
-    /// so recovering via the poison error's inner guard is safe and keeps
-    /// one panicking holder from cascading into every future
-    /// claim-fencing call this process ever makes.
+    /// A poisoned identity is a process-fatal invariant violation. Its fields
+    /// jointly identify publication authority; no caller may observe a partial
+    /// rotation, and unwinding one async task would leave other publishers live.
     pub fn current(&self) -> NodeIdentity {
         self.identity
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .clone()
     }
 
@@ -336,7 +333,7 @@ impl SharedNodeIdentity {
         let identity = self
             .identity
             .read()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         inspect(&identity)
     }
 
@@ -384,7 +381,7 @@ impl SharedNodeIdentity {
         *self
             .identity
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner) = identity;
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = identity;
         self.rotation_notifications.send_replace(());
     }
 
@@ -396,7 +393,7 @@ impl SharedNodeIdentity {
         let _rotation_guard = self.rotation_gate.write().await;
         self.identity
             .write()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .authority = NodeAuthority::TerminallyDisabled;
     }
 }

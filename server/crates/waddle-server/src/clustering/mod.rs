@@ -222,7 +222,7 @@ impl NodeAdmissionPermit {
         let state = self
             .state
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if !matches!(state.admission, NodeAdmission::Serving) {
             return Err(NodeAdmissionError::NotServing(state.admission.clone()));
         }
@@ -295,7 +295,7 @@ impl NodeLifecycle {
     pub fn admission(&self) -> NodeAdmission {
         self.state
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .admission
             .clone()
     }
@@ -304,7 +304,7 @@ impl NodeLifecycle {
         let state = self
             .state
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         match state.admission {
             NodeAdmission::Serving => Ok(NodeAdmissionPermit {
                 state: std::sync::Arc::clone(&self.state),
@@ -337,7 +337,7 @@ impl NodeLifecycle {
         let mut state = self
             .state
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         state.startup_blocked = true;
         if state.admission == NodeAdmission::Serving {
             tracing::warn!(
@@ -353,7 +353,7 @@ impl NodeLifecycle {
     pub fn startup_blocked(&self) -> bool {
         self.state
             .read()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
             .startup_blocked
     }
 
@@ -364,7 +364,7 @@ impl NodeLifecycle {
         let mut state = self
             .state
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if state.startup_blocked {
             return StartupServingTransition::Blocked(state.admission.clone());
         }
@@ -393,7 +393,7 @@ impl NodeLifecycle {
         let mut state = self
             .state
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let next = NodeAdmission::Failed(failure);
         if state.admission != next {
             state.generation_revoked.cancel();
@@ -416,7 +416,7 @@ impl NodeLifecycle {
         let mut state = self
             .state
             .write()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if state.startup_blocked && next == NodeAdmission::Serving {
             tracing::warn!(
                 current = ?state.admission,

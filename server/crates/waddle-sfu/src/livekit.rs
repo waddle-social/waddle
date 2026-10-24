@@ -383,7 +383,7 @@ impl TeardownReporter {
             let mut state = self
                 .state
                 .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             state.pending.extend(intents);
             if state.running {
                 return;
@@ -397,7 +397,7 @@ impl TeardownReporter {
                 let batch = {
                     let mut state = state
                         .lock()
-                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                     state.pending.drain().collect::<Vec<_>>()
                 };
                 for intent in batch {
@@ -405,7 +405,7 @@ impl TeardownReporter {
                 }
                 let mut state = state
                     .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
                 if state.pending.is_empty() {
                     state.running = false;
                     break;

@@ -123,7 +123,7 @@ pub async fn complete_after_write(
     let pending = completion
         .pending_local_acceptances
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
         .take()
         .unwrap_or_default();
     // The aggregate deadline bounds the inline DRAIN PASS under the dispatch

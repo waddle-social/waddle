@@ -3534,7 +3534,7 @@ fn install_recovery_publication_hook(
     let mut slot = RECOVERY_PUBLICATION_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     (*slot).replace(RecoveryPublicationHookEntry { room_jid, hook })
 }
 
@@ -3543,7 +3543,7 @@ fn restore_recovery_publication_hook(previous: Option<RecoveryPublicationHookEnt
     let mut slot = RECOVERY_PUBLICATION_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
     *slot = previous;
 }
 
@@ -3552,7 +3552,7 @@ async fn run_recovery_publication_hook(room_jid: &BareJid, actor: &ActorRef<Room
     let hook = RECOVERY_PUBLICATION_HOOK
         .get_or_init(|| std::sync::Mutex::new(None))
         .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
         .clone()
         .filter(|entry| entry.room_jid == *room_jid)
         .map(|entry| entry.hook);

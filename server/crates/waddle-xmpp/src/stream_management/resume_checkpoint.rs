@@ -28,16 +28,24 @@ pub(super) struct SmResumeCheckpoint {
 
 /// Shared checkpoint. Only the owning connection task may validate it and
 /// authorize a destructive takeover; requesters only enqueue their request.
+/// Poisoning terminates the process: a partial checkpoint must never authorize
+/// takeover, and unwinding a connection task would leave sibling tasks live.
 #[derive(Debug, Clone, Default)]
 pub struct SmResumeCheckpointHandle(Arc<Mutex<SmResumeCheckpoint>>);
 
 impl SmResumeCheckpointHandle {
     pub(super) fn update(&self, checkpoint: SmResumeCheckpoint) {
-        *self.0.lock().unwrap_or_else(|error| error.into_inner()) = checkpoint;
+        *self
+            .0
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = checkpoint;
     }
 
     pub(crate) fn validate(&self, h: u32) -> Result<(), SmResumeRejection> {
-        let checkpoint = *self.0.lock().unwrap_or_else(|error| error.into_inner());
+        let checkpoint = *self
+            .0
+            .lock()
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if !checkpoint.resumable {
             return Err(SmResumeRejection::NotResumable);
         }

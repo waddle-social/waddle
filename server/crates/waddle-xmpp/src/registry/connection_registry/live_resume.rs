@@ -89,14 +89,14 @@ impl LiveResumeControl {
         let requests = self
             .requests
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         if requests.closed {
             return false;
         }
         *self
             .binding
             .lock()
-            .unwrap_or_else(|error| error.into_inner()) = Some(Binding {
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison) = Some(Binding {
             owner,
             stream_id,
             force_detach,
@@ -127,12 +127,12 @@ impl LiveResumeControl {
             let mut requests = self
                 .requests
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             if requests.closed
                 || self
                     .binding
                     .lock()
-                    .unwrap_or_else(|error| error.into_inner())
+                    .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison)
                     .is_none()
             {
                 return LocalResumeReply::NotPersisted;
@@ -156,7 +156,7 @@ impl LiveResumeControl {
         let mut requests = self
             .requests
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         let mut serviced = false;
         while let Some(request) = requests.pending.pop_front() {
             serviced = true;
@@ -166,7 +166,7 @@ impl LiveResumeControl {
             let binding = self
                 .binding
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             let Some(binding) = binding.as_ref() else {
                 let _ = request.response.send(LocalResumeReply::NotPersisted);
                 continue;
@@ -178,7 +178,7 @@ impl LiveResumeControl {
             let stream_id = binding
                 .stream_id
                 .lock()
-                .unwrap_or_else(|error| error.into_inner());
+                .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
             if stream_id.as_ref() != Some(&request.stream_id) {
                 let _ = request.response.send(LocalResumeReply::NotPersisted);
                 continue;
@@ -226,7 +226,7 @@ impl LiveResumeControl {
         let mut requests = self
             .requests
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(waddle_xmpp_core::sync::abort_on_poison);
         requests.closed = true;
         for request in requests.pending.drain(..) {
             let _ = request.response.send(LocalResumeReply::NotPersisted);

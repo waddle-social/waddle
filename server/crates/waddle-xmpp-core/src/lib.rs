@@ -13,6 +13,7 @@ pub mod presence;
 pub mod pubsub;
 pub mod roster;
 pub mod stanza;
+pub mod sync;
 pub mod types;
 pub mod waddle_status_preference;
 pub mod waddle_story_reads;
