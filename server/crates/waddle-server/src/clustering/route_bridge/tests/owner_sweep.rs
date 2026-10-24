@@ -1047,7 +1047,8 @@ async fn add_six_live_socket_mirrors(bridge: &OrderedRelayDeliveryBridge) {
 #[tokio::test]
 async fn owner_sweep_busy_child_reply_is_deferred_after_its_full_timeout() {
     let (bridge, services, lease) = setup().await;
-    tokio::time::pause();
+    // The ownership proof reads SQLite before reaching the actor. Measure
+    // the real child timeout so virtual time cannot overtake that proof.
     let release = gate_mirror_actor(&services).await;
     *lease.lock().expect("socket lease fixture lock") = SocketLeaseRead::Gone;
     let started = tokio::time::Instant::now();
@@ -1058,7 +1059,6 @@ async fn owner_sweep_busy_child_reply_is_deferred_after_its_full_timeout() {
     assert!(started.elapsed() >= waddle_xmpp::registry::user_registry::CHILD_ACTOR_TIMEOUT);
     assert!(started.elapsed() < Duration::from_secs(5));
     assert!(bridge.remote_owner_resources.lock().await[&target_full()].unregister_pending);
-    tokio::time::resume();
     release.send(()).expect("release owner actor");
     assert_eq!(
         bridge.sweep_remote_owner_resources().await,

@@ -2284,6 +2284,13 @@ async fn remote_owner_unregister_reply_reports_recorded_retry() {
         socket_generation: RemoteResourceSocketGeneration::next(None),
         owner: Arc::clone(&old_owner),
     };
+    crate::occupancy_authority::publish(
+        &services.occupancy_database,
+        &target,
+        registration.occupancy_session,
+    )
+    .await
+    .expect("publish mirrored resource authority");
     bridge
         .remote_owner_resources
         .lock()
