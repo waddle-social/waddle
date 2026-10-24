@@ -12,14 +12,9 @@
 /// unwinding would allow detached workers or their supervisors to disappear
 /// while the process continued advertising healthy authority.
 ///
-/// The diagnostic does not print protected state.
+/// No logging or I/O precedes termination: a blocked diagnostic must not leave
+/// sibling tasks running with authority derived from inconsistent state.
 /// This function never returns, including when invoked inside a Tokio task.
 pub fn abort_on_poison<T>(_poisoned: std::sync::PoisonError<T>) -> T {
-    use std::io::Write;
-
-    let _ = writeln!(
-        std::io::stderr().lock(),
-        "fatal invariant: poisoned lock; terminating process without recovering state",
-    );
     std::process::abort()
 }
