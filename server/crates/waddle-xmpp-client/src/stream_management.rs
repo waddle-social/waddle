@@ -281,7 +281,9 @@ impl SmResumeState {
         self.inbound_h
     }
 
-    /// Return the peer-handled outbound counter modulo 2^32.
+    /// Return the total number of sent outbound stanzas modulo 2^32, including
+    /// the pending unacknowledged tail. Restore derives the peer-handled frontier
+    /// by subtracting that tail's length.
     #[must_use]
     pub fn outbound_h(&self) -> u32 {
         self.outbound_h

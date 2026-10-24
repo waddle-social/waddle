@@ -208,7 +208,10 @@ where
     ///
     /// # Errors
     ///
-    /// Returns configuration, WebSocket connection, authentication, binding, or stream-management bootstrap errors before an established session is available.
+    /// Returns an error if the initial connect request cannot be queued or the
+    /// transport connection fails. The handle is returned before authentication,
+    /// resource binding and stream-management negotiation finish; their outcomes
+    /// are reported asynchronously through client events.
     pub async fn connect(mut self) -> ClientResult<ClientHandle>
     where
         TFactory: Send + 'static,

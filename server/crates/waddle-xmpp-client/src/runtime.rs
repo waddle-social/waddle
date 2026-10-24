@@ -29,7 +29,8 @@ mod tests;
 pub enum RuntimeStatus {
     /// The runtime is configured but has no active session lifecycle.
     Prepared,
-    /// The user is actively viewing the conversation.
+    /// The session lifecycle has left its disconnected phase; transport or XMPP
+    /// negotiation may still be in progress.
     Active,
 }
 

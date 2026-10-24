@@ -102,11 +102,15 @@ pub struct ArchivedPayload {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
-/// Archive-assigned identifier used to page through history.
+/// Non-empty identifier text used by history APIs.
+///
+/// In [`ArchivedMessage::id`], this wraps the sender-chosen inner message ID,
+/// not the archive-assigned [`ArchivedMessage::mam_id`]. When constructing a
+/// pagination cursor, wrap the archive's result ID explicitly.
 pub struct ArchivedMessageId(String);
 
 impl ArchivedMessageId {
-    /// Wrap an archive identifier used for history pagination.
+    /// Wrap non-empty identifier text without inferring its source or authority.
     #[must_use]
     pub fn try_new(id: impl Into<String>) -> Option<Self> {
         let id = id.into();
