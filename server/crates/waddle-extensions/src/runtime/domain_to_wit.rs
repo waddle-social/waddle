@@ -1,3 +1,5 @@
+//! Conversion of framework events and domain values into component-interface values.
+
 use super::waddle::extension::types as wit_types;
 use crate::types::{
     ActionId, CommandAction, CommandInvocation, CommandNode, CommandSessionId, DataForm,

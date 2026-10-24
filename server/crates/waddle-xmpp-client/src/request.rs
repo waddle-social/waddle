@@ -1,3 +1,5 @@
+//! Request identities, stanza correlation, and pending-request lifecycle tracking.
+
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
@@ -11,6 +13,7 @@ use crate::error::{ClientError, ClientResult};
 pub struct RequestId(u64);
 
 impl RequestId {
+    /// Return the underlying numeric request identifier.
     pub fn get(self) -> u64 {
         self.0
     }
@@ -38,6 +41,11 @@ impl fmt::Display for RequestId {
 pub struct StanzaId(String);
 
 impl StanzaId {
+    /// Validate and retain a non-blank client IQ-correlation identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::EmptyStanzaId` when the identifier is blank after trimming.
     pub fn new(stanza_id: impl Into<String>) -> ClientResult<Self> {
         let stanza_id = stanza_id.into();
         if stanza_id.trim().is_empty() {
@@ -47,6 +55,7 @@ impl StanzaId {
         Ok(Self(stanza_id))
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -67,29 +76,42 @@ impl fmt::Display for StanzaId {
 /// High-level client requests queued through the runtime boundary.
 #[derive(Debug, Clone)]
 pub enum ClientRequest {
+    /// Establish an authenticated XMPP session.
     Connect,
+    /// Close the XMPP session explicitly.
     Disconnect,
+    /// Send an IQ stanza and correlate its response.
     SendIq {
+        /// Identifier used for stanza correlation.
         stanza_id: StanzaId,
         // Boxed because xmpp-parsers 0.22's `Iq` is now an enum with
         // embedded variant payloads (~448 bytes). Boxing keeps the
         // enclosing `ClientRequest` enum compact and satisfies clippy
         // `large_enum_variant` without a lint-suppression escape.
+        /// Typed IQ stanza to send.
         iq: Box<Iq>,
     },
+    /// Send an outbound message stanza.
     SendMessage {
+        /// Typed message payload or human-readable failure description.
         message: Message,
     },
+    /// Send an outbound presence stanza.
     SendPresence {
+        /// Typed presence stanza to send.
         presence: Presence,
     },
+    /// Send an already parsed XML stanza.
     SendElement {
+        /// Identifier used for stanza correlation.
         stanza_id: Option<StanzaId>,
+        /// Parsed XML element retained at the protocol boundary.
         element: Element,
     },
 }
 
 impl ClientRequest {
+    /// Return the category used to dispatch or serialize this value.
     pub fn kind(&self) -> RequestKind {
         match self {
             Self::Connect => RequestKind::Connect,
@@ -101,6 +123,7 @@ impl ClientRequest {
         }
     }
 
+    /// Borrow the request's stanza correlation identifier, if it has one.
     pub fn stanza_id(&self) -> Option<&StanzaId> {
         match self {
             Self::SendIq { stanza_id, .. } => Some(stanza_id),
@@ -116,30 +139,41 @@ impl ClientRequest {
 /// Stable request categories exposed in diagnostics and event routing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RequestKind {
+    /// Establish an authenticated XMPP session.
     Connect,
+    /// Close the XMPP session explicitly.
     Disconnect,
+    /// Send an IQ stanza and correlate its response.
     SendIq,
+    /// Send an outbound message stanza.
     SendMessage,
+    /// Send an outbound presence stanza.
     SendPresence,
+    /// Send an already parsed XML stanza.
     SendElement,
 }
 
 /// A queued request retained for correlation and completion.
 #[derive(Debug, Clone)]
 pub struct PendingRequest {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: RequestId,
+    /// Typed operation retained until it completes.
     pub request: ClientRequest,
 }
 
 impl PendingRequest {
+    /// Return the category used to dispatch or serialize this value.
     pub fn kind(&self) -> RequestKind {
         self.request.kind()
     }
 
+    /// Borrow the request's stanza correlation identifier, if it has one.
     pub fn stanza_id(&self) -> Option<&StanzaId> {
         self.request.stanza_id()
     }
 
+    /// Return owned request and stanza identifiers for completion callbacks.
     pub fn correlation(&self) -> RequestCorrelation {
         RequestCorrelation {
             request_id: self.id,
@@ -151,7 +185,9 @@ impl PendingRequest {
 /// Public correlation token used across runtime and transport callbacks.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RequestCorrelation {
+    /// Identifier used to correlate the pending client request.
     pub request_id: RequestId,
+    /// Identifier used for stanza correlation.
     pub stanza_id: Option<StanzaId>,
 }
 
@@ -164,6 +200,11 @@ pub struct RequestTracker {
 }
 
 impl RequestTracker {
+    /// Assign a request identifier and register the request and its optional stanza correlation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if request identifiers are exhausted or the request/stanza correlation identifier is already pending.
     pub fn register(&mut self, request: ClientRequest) -> ClientResult<PendingRequest> {
         let id = self.next_request_id()?;
         if self.pending.contains_key(&id) {
@@ -188,10 +229,16 @@ impl RequestTracker {
         Ok(pending)
     }
 
+    /// Return the number of requests still awaiting completion.
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
 
+    /// Remove and return the pending request with this request identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::UnknownRequest` when the request is not pending.
     pub fn resolve(&mut self, request_id: RequestId) -> ClientResult<PendingRequest> {
         let pending = self
             .pending
@@ -205,6 +252,11 @@ impl RequestTracker {
         Ok(pending)
     }
 
+    /// Remove and return the pending request correlated with this stanza identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::UnknownStanzaCorrelation` when no pending request uses this stanza identifier.
     pub fn resolve_by_stanza_id(&mut self, stanza_id: &StanzaId) -> ClientResult<PendingRequest> {
         let request_id = self.pending_by_stanza.get(stanza_id).copied().ok_or(
             ClientError::UnknownStanzaCorrelation {
@@ -214,6 +266,7 @@ impl RequestTracker {
         self.resolve(request_id)
     }
 
+    /// Return the current session state or an owned snapshot of pending requests.
     pub fn snapshot(&self) -> Vec<PendingRequest> {
         self.pending.values().cloned().collect()
     }

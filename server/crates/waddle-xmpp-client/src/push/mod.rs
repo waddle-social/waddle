@@ -57,12 +57,16 @@ pub const REGISTER_DEVICE_RESULT_DEVICE_ID_FIELD: &str = "device-id";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PushPlatform {
+    /// Browser Web Push registration.
     Web,
+    /// Apple Push Notification service registration.
     Apns,
+    /// Firebase Cloud Messaging registration.
     Fcm,
 }
 
 impl PushPlatform {
+    /// Return the canonical token used in protocol attributes or forms.
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Web => "web",
@@ -83,8 +87,10 @@ impl PushPlatform {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PushEnvironment {
     #[serde(rename = "prod")]
+    /// Use the provider's production push endpoint.
     Production,
     #[serde(rename = "sandbox")]
+    /// Use the provider's sandbox push endpoint.
     Sandbox,
 }
 
@@ -95,6 +101,11 @@ pub enum PushEnvironment {
 pub struct PushServiceJid(BareJid);
 
 impl PushServiceJid {
+    /// Validate that a push service address is a bare domain JID without a localpart.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MalformedResultForm` when the service JID or application identifier does not satisfy the registration contract.
     pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
@@ -118,6 +129,7 @@ impl PushServiceJid {
         Ok(Self(jid))
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -130,6 +142,11 @@ impl PushServiceJid {
 pub struct PushAppId(String);
 
 impl PushAppId {
+    /// Validate an application identifier permitted by the push-registration contract.
+    ///
+    /// # Errors
+    ///
+    /// Returns `MalformedResultForm` when the service JID or application identifier does not satisfy the registration contract.
     pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
@@ -140,6 +157,7 @@ impl PushAppId {
         Ok(Self(value.to_string()))
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -151,25 +169,41 @@ impl PushAppId {
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum PushRegistrationError {
     #[error("missing <command/> response during {stage}")]
-    MissingCommandResponse { stage: &'static str },
-    #[error("unexpected command status during {stage}; expected {expected}")]
-    UnexpectedStatus {
+    /// Missing `<command/>` response during `stage`.
+    MissingCommandResponse {
+        #[doc = "Protocol handshake stage at which the operation failed."]
         stage: &'static str,
+    },
+    #[error("unexpected command status during {stage}; expected {expected}")]
+    /// Unexpected command status during `stage`; expected `expected`.
+    UnexpectedStatus {
+        /// Protocol handshake stage at which the operation failed.
+        stage: &'static str,
+        /// Expected protocol status or value for this stage.
         expected: &'static str,
     },
     #[error("missing sessionid in stage 2")]
+    /// Missing sessionid in stage 2.
     MissingSessionId,
     #[error("stage 4 sessionid did not match the session opened in stage 2")]
+    /// Stage 4 sessionid did not match the session opened in stage 2.
     SessionIdMismatch,
     #[error("missing result form in stage 4")]
+    /// Missing result form in stage 4.
     MissingResultForm,
     #[error("malformed register-device result form: {reason}")]
-    MalformedResultForm { reason: String },
+    /// Malformed register-device result form: `reason`.
+    MalformedResultForm {
+        #[doc = "Human-readable explanation for the operation."]
+        reason: String,
+    },
     #[error("XEP-0050 command session expired")]
+    /// XEP-0050 command session expired.
     SessionExpired,
 }
 
 impl PushEnvironment {
+    /// Return the canonical token used in protocol attributes or forms.
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Production => "prod",
@@ -183,12 +217,18 @@ impl PushEnvironment {
 /// hard rule (no shared `Option<&str>` bag at the boundary).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PushDeviceCredentials {
+    /// Browser push delivery using an endpoint and encryption keys.
     WebPush {
+        /// WebSocket URL used to establish the XMPP transport.
         endpoint: String,
+        /// Base64url-encoded P-256 client key for Web Push encryption.
         p256dh: String,
+        /// Authentication credentials and mechanism selection.
         auth: String,
     },
+    /// Apple Push Notification service registration.
     Apns {
+        /// Provider-issued device address for native push delivery.
         device_token: String,
     },
     /// FCM (Android push). `p256dh` / `auth` are the device's
@@ -196,13 +236,17 @@ pub enum PushDeviceCredentials {
     /// Push Service encrypts every notification to them, so FCM only
     /// carries ciphertext.
     Fcm {
+        /// Opaque token returned by the push service for later registration use.
         registration_token: String,
+        /// Base64url-encoded P-256 client key for Web Push encryption.
         p256dh: String,
+        /// Authentication credentials and mechanism selection.
         auth: String,
     },
 }
 
 impl PushDeviceCredentials {
+    /// Return the registration platform implied by this push endpoint.
     pub fn platform(&self) -> PushPlatform {
         match self {
             Self::WebPush { .. } => PushPlatform::Web,
@@ -218,10 +262,12 @@ impl PushDeviceCredentials {
 pub struct PushNodeId(String);
 
 impl PushNodeId {
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume this value and return its owned text without copying.
     pub fn into_string(self) -> String {
         self.0
     }
@@ -236,10 +282,12 @@ impl PushNodeId {
 pub struct PushDeviceId(String);
 
 impl PushDeviceId {
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Consume this value and return its owned text without copying.
     pub fn into_string(self) -> String {
         self.0
     }
@@ -252,7 +300,9 @@ impl PushDeviceId {
 /// the matching `disable-device` opt-out.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RegisterDeviceResult {
+    /// PubSub or discovery node selected by the request.
     pub node: PushNodeId,
+    /// Identifier of the device associated with this value.
     pub device_id: PushDeviceId,
 }
 
@@ -278,6 +328,11 @@ pub struct RegisterDeviceResult {
 /// that need `Send` futures get them structurally because the
 /// `ClientHandle` impl's future is `Send` anyway.
 pub trait CommandDriver {
+    /// Send a parsed IQ request and await its correlated result or stanza error.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn send_iq(&self, iq: Element)
         -> impl std::future::Future<Output = ClientResult<Element>> + '_;
 }
@@ -480,6 +535,10 @@ fn verify_iq_from_matches(iq: &Element, push_service_jid: &PushServiceJid) -> Cl
 ///
 /// Errors flow through `ClientResult<StanzaError>` typed values —
 /// never stringly-typed payloads (CLAUDE.md typed-payloads hard rule).
+///
+/// # Errors
+///
+/// Returns typed registration errors for incomplete command responses, unexpected statuses, expired or mismatched sessions, malformed forms, or a rejected final registration; transport and IQ errors are propagated.
 pub async fn register_push_device<D: CommandDriver>(
     driver: &D,
     push_service_jid: &PushServiceJid,

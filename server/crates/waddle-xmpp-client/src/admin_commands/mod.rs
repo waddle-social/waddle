@@ -61,20 +61,32 @@ pub const NODE_ADMIN_USERS_LIST: &str = "urn:waddle:admin:users:list:0";
 
 /// V2 spaces panel command nodes.
 pub const NODE_ADMIN_SPACES_LIST: &str = "urn:waddle:admin:spaces:list:0";
+/// Protocol token `urn:waddle:admin:spaces:create:0`.
 pub const NODE_ADMIN_SPACES_CREATE: &str = "urn:waddle:admin:spaces:create:0";
+/// Protocol token `urn:waddle:admin:spaces:update:0`.
 pub const NODE_ADMIN_SPACES_UPDATE: &str = "urn:waddle:admin:spaces:update:0";
+/// Protocol token `urn:waddle:admin:spaces:delete:0`.
 pub const NODE_ADMIN_SPACES_DELETE: &str = "urn:waddle:admin:spaces:delete:0";
+/// Protocol token `urn:waddle:admin:spaces:members:0`.
 pub const NODE_ADMIN_SPACES_MEMBERS: &str = "urn:waddle:admin:spaces:members:0";
+/// Protocol token `urn:waddle:admin:spaces:set-role:0`.
 pub const NODE_ADMIN_SPACES_SET_ROLE: &str = "urn:waddle:admin:spaces:set-role:0";
 
 /// V2 channels panel command nodes.
 pub const NODE_ADMIN_CHANNELS_LIST: &str = "urn:waddle:admin:channels:list:0";
+/// Protocol token `urn:waddle:admin:channels:create:0`.
 pub const NODE_ADMIN_CHANNELS_CREATE: &str = "urn:waddle:admin:channels:create:0";
+/// Protocol token `urn:waddle:admin:channels:update:0`.
 pub const NODE_ADMIN_CHANNELS_UPDATE: &str = "urn:waddle:admin:channels:update:0";
+/// Protocol token `urn:waddle:admin:channels:delete:0`.
 pub const NODE_ADMIN_CHANNELS_DELETE: &str = "urn:waddle:admin:channels:delete:0";
+/// Protocol token `urn:waddle:admin:channels:occupants:0`.
 pub const NODE_ADMIN_CHANNELS_OCCUPANTS: &str = "urn:waddle:admin:channels:occupants:0";
+/// Protocol token `urn:waddle:admin:channels:affiliations:0`.
 pub const NODE_ADMIN_CHANNELS_AFFILIATIONS: &str = "urn:waddle:admin:channels:affiliations:0";
+/// Protocol token `urn:waddle:admin:channels:set-affiliation:0`.
 pub const NODE_ADMIN_CHANNELS_SET_AFFILIATION: &str = "urn:waddle:admin:channels:set-affiliation:0";
+/// Protocol token `urn:waddle:admin:channels:kick:0`.
 pub const NODE_ADMIN_CHANNELS_KICK: &str = "urn:waddle:admin:channels:kick:0";
 
 /// Literal value the delete commands require in their `confirm`

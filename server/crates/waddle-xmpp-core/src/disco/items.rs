@@ -16,19 +16,25 @@ pub const NODE_WADDLE_ROOM_BOTS: &str = "urn:waddle:room:bots:0";
 /// Parsed disco#items query.
 #[derive(Debug, Clone)]
 pub struct DiscoItemsQuery {
+    /// Optional destination JID supplied by the request.
     pub target: Option<String>,
+    /// PubSub or discovery node selected by the request.
     pub node: Option<String>,
 }
 
 /// Item element for disco#items response.
 #[derive(Debug, Clone)]
 pub struct DiscoItem {
+    /// XMPP address identifying the referenced entity.
     pub jid: String,
+    /// Human-readable name advertised to clients.
     pub name: Option<String>,
+    /// PubSub or discovery node selected by the request.
     pub node: Option<String>,
 }
 
 impl DiscoItem {
+    /// Create a discovery item from its address, optional display name, and optional node.
     pub fn new(jid: &str, name: Option<&str>, node: Option<&str>) -> Self {
         Self {
             jid: jid.to_string(),
@@ -37,6 +43,7 @@ impl DiscoItem {
         }
     }
 
+    /// Create a discovery item for the conference service at the supplied domain.
     pub fn muc_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
@@ -49,18 +56,22 @@ impl DiscoItem {
         Self::new(domain, name, None)
     }
 
+    /// Create a discovery item for a named conference room.
     pub fn muc_room(jid: &str, name: &str) -> Self {
         Self::new(jid, Some(name), None)
     }
 
+    /// Create a discovery item for the HTTP upload service.
     pub fn upload_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
 
+    /// Create a discovery item for the PubSub service.
     pub fn pubsub_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
 
+    /// Create a discovery item for the Waddle spaces service.
     pub fn spaces_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
@@ -71,6 +82,7 @@ impl DiscoItem {
         Self::new(domain, name, None)
     }
 
+    /// Create a named discovery item for a space node on the spaces service.
     pub fn spaces_node(jid: &str, node: &str, name: Option<&str>) -> Self {
         Self {
             jid: jid.to_string(),
@@ -79,10 +91,12 @@ impl DiscoItem {
         }
     }
 
+    /// Create a discovery item for a PubSub node at the supplied JID.
     pub fn pubsub_node(jid: &str, node: &str) -> Self {
         Self::new(jid, None, Some(node))
     }
 
+    /// Create a named discovery item for an ad-hoc command node.
     pub fn command(jid: &str, node: &str, name: &str) -> Self {
         Self::new(jid, Some(name), Some(node))
     }
@@ -97,6 +111,10 @@ pub fn is_disco_items_query(iq: &Iq) -> bool {
 }
 
 /// Parse a disco#items query from an IQ stanza.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` unless this is an IQ-get containing a disco#items query.
 pub fn parse_disco_items_query(iq: &Iq) -> Result<DiscoItemsQuery, CoreError> {
     let query_elem = match iq {
         Iq::Get { payload, .. } => {

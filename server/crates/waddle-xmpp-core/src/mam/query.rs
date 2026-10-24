@@ -1,3 +1,5 @@
+//! Validation and parsing of MAM data forms and result-set constraints.
+
 use chrono::{DateTime, Utc};
 use jid::Jid;
 use minidom::Element;
@@ -14,6 +16,10 @@ use super::{
 use crate::{CoreError, CoreResult};
 
 /// Parse a MAM query from an IQ stanza.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` unless this is a MAM IQ-set query with valid data-form fields, timestamps, identifiers, and result-set constraints.
 pub fn parse_mam_query(iq: &Iq) -> CoreResult<(String, MamQuery)> {
     let query_elem = match iq {
         Iq::Set { payload, .. } if payload.name() == "query" && payload.ns() == MAM_NS => payload,

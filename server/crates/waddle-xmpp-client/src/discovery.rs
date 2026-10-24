@@ -39,8 +39,11 @@ pub use types::{
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 pub use ext::DiscoveryExt;
 
+/// Protocol token `http://jabber.org/protocol/disco#info`.
 pub const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
+/// Protocol token `http://jabber.org/protocol/disco#items`.
 pub const DISCO_ITEMS_NS: &str = "http://jabber.org/protocol/disco#items";
+/// Protocol token `urn:xmpp:http:upload:0`.
 pub const UPLOAD_NS: &str = "urn:xmpp:http:upload:0";
 /// Waddle-private namespace retained for the legacy `<mark-read/>` IQ.
 ///
@@ -49,14 +52,23 @@ pub const UPLOAD_NS: &str = "urn:xmpp:http:upload:0";
 /// that crate. The native discovery client doesn't consume the stream
 /// today; the WASM browser client does, via the inbox-streaming flow.
 pub const WADDLE_INBOX_NS: &str = "urn:waddle:inbox:0";
+/// Protocol token `urn:xmpp:push:0`.
 pub const PUSH_NS: &str = "urn:xmpp:push:0";
+/// Protocol token `jabber:client`.
 pub const CLIENT_NS: &str = "jabber:client";
+/// Protocol token `jabber:x:data`.
 pub const DATA_FORMS_NS: &str = "jabber:x:data";
+/// Protocol token `http://jabber.org/protocol/rsm`.
 pub const RSM_NS: &str = "http://jabber.org/protocol/rsm";
+/// Protocol token `http://jabber.org/protocol/pubsub`.
 pub const PUBSUB_NS: &str = "http://jabber.org/protocol/pubsub";
+/// Protocol token `http://jabber.org/protocol/pubsub#meta-data`.
 pub const PUBSUB_METADATA_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#meta-data";
+/// Protocol token `urn:xmpp:bookmarks:1`.
 pub const BOOKMARKS_NS: &str = "urn:xmpp:bookmarks:1";
+/// Protocol token `urn:xmpp:spaces:0`.
 pub const SPACES_NS: &str = "urn:xmpp:spaces:0";
+/// Protocol token `urn:waddle:room:0`.
 pub const WADDLE_ROOM_METADATA_FORM_TYPE: &str = "urn:waddle:room:0";
 /// `http://jabber.org/protocol/muc` — the XEP-0045 feature
 /// advertised by Multi-User Chat services. Used at service
@@ -73,7 +85,9 @@ pub const WADDLE_GROUP_DM_FEATURE_NS: &str = "urn:waddle:group-dm:0";
 /// administration first. Keep stable: clients may store the id as
 /// part of their last-selected-space state.
 pub const STANDALONE_SPACE_ID: &str = "standalone";
+/// Protocol token `jabber:iq:search`.
 pub const USER_SEARCH_NS: &str = "jabber:iq:search";
+/// Protocol token `http://jabber.org/protocol/muc#admin`.
 pub const MUC_ADMIN_NS: &str = "http://jabber.org/protocol/muc#admin";
 pub use waddle_xmpp_core::disco::NODE_WADDLE_ROOM_BOTS;
 pub use waddle_xmpp_core::roster::ROSTER_NS;

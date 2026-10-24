@@ -1,3 +1,5 @@
+//! Parsing of message markup, references, and broadcast mentions.
+
 use minidom::Element;
 
 use super::super::types::*;

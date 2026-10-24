@@ -1,3 +1,5 @@
+//! Deserialization and validation of JavaScript message and client options.
+
 use super::*;
 
 /// Build an optional `ThreadRef` from a pair of `Option<String>` wasm

@@ -1,3 +1,5 @@
+//! XEP-0198 counters, acknowledgements, resumable sessions, and outbound replay.
+
 use std::collections::VecDeque;
 
 use chrono::{DateTime, Duration, SecondsFormat, Utc};
@@ -8,19 +10,27 @@ use crate::error::{ClientError, ClientResult};
 use crate::request::StanzaId;
 use crate::state::StreamId;
 
+/// Protocol token `urn:xmpp:sm:3`.
 pub const NS_SM: &str = "urn:xmpp:sm:3";
 const NS_CLIENT: &str = "jabber:client";
 const NS_DELAY: &str = "urn:xmpp:delay";
 const NS_STANZA_ERRORS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
 const ACK_RETRY_DELAYS_MS: [i64; 5] = [250, 500, 1_000, 2_000, 5_000];
 const ACK_REQUEST_TIMEOUT_MS: i64 = 5_000;
+/// Sm progress timeout ms used by this protocol implementation.
 pub const SM_PROGRESS_TIMEOUT_MS: i64 = 30_000;
 
 /// A bounded outcome for the Rust-owned XEP-0198 acknowledgement clock.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SmAcknowledgementClockAction {
-    Retry { attempt: u8 },
+    /// The host should retry sending the pending acknowledgement request.
+    Retry {
+        #[doc = "One-based acknowledgement retry attempt."]
+        attempt: u8,
+    },
+    /// The outstanding acknowledgement request exceeded its response deadline.
     RequestTimedOut,
+    /// The peer has made no acknowledgement progress within the allowed deadline.
     ProgressTimedOut,
 }
 
@@ -31,19 +41,30 @@ pub enum SmAcknowledgementClockAction {
 /// can happen before the control's XEP-0198 shape has been checked.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SmInboundControl {
+    /// The peer requests the client's handled-stanza counter.
     RequestAck,
+    /// The peer reports its handled-stanza counter.
     Ack {
+        /// Peer stanza-handled counter modulo 2^32.
         h: u32,
     },
+    /// Stream management was enabled with the peer's resumption parameters.
     Enabled {
+        /// Identifier of the resumable stream session.
         previd: Option<StreamId>,
+        /// Maximum period the server permits for stream resumption.
         max_resume_seconds: Option<u32>,
     },
+    /// The peer accepted stream resumption and reports its handled count.
     Resumed {
+        /// Peer stanza-handled counter modulo 2^32.
         h: u32,
+        /// Identifier of the resumable stream session.
         previd: StreamId,
     },
+    /// Stream-management negotiation or resumption failed.
     Failed {
+        /// Peer stanza-handled counter modulo 2^32.
         h: Option<u32>,
     },
 }
@@ -117,6 +138,10 @@ impl UnhandledOutboundEntry {
     ///
     /// The XML parser has already produced one [`Element`]; this converts it
     /// once into a validated countable stanza before it can reach SM replay.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidPersistedSmStanza` unless the element is a valid `jabber:client` message, presence, or IQ stanza.
     pub fn try_new(
         element: Element,
         sent_at: DateTime<Utc>,
@@ -136,6 +161,7 @@ impl UnhandledOutboundEntry {
         self
     }
 
+    /// Whether an authoritative stanza error has marked this entry as rejected.
     pub fn is_rejected(&self) -> bool {
         self.rejected
     }
@@ -145,10 +171,12 @@ impl UnhandledOutboundEntry {
         &self.stanza.element
     }
 
+    /// Return the original send timestamp retained for delayed fresh-stream retry.
     pub fn sent_at(&self) -> DateTime<Utc> {
         self.sent_at
     }
 
+    /// Borrow the outbound message identifier used for delivery correlation.
     pub fn message_stanza_id(&self) -> Option<&StanzaId> {
         self.message_stanza_id.as_ref()
     }
@@ -166,6 +194,11 @@ pub struct SmResumeState {
 }
 
 impl SmResumeState {
+    /// Create a resumable stream snapshot with the supplied counters and an empty outbound queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::EmptyStanzaId` if `previd` is blank after trimming.
     pub fn new(previd: StreamId, inbound_h: u32, outbound_h: u32) -> ClientResult<Self> {
         if previd.as_str().trim().is_empty() {
             return Err(ClientError::EmptyStanzaId);
@@ -181,6 +214,7 @@ impl SmResumeState {
         })
     }
 
+    /// Set the max resume seconds and return the updated value.
     pub fn with_max_resume_seconds(mut self, max_resume_seconds: Option<u32>) -> Self {
         self.max_resume_seconds = max_resume_seconds;
         self
@@ -197,6 +231,11 @@ impl SmResumeState {
         Ok(state)
     }
 
+    /// Restore stream-management counters and the validated, still-unhandled outbound queue.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::EmptyStanzaId` if `previd` is blank after trimming; entries are already validated at construction.
     pub fn from_unhandled_outbound_entries(
         previd: StreamId,
         inbound_h: u32,
@@ -207,6 +246,7 @@ impl SmResumeState {
         Self::from_outbound_queue(previd, inbound_h, outbound_h, outbound_queue)
     }
 
+    /// Borrow the server-assigned stream identifier used in a resume request.
     pub fn previd(&self) -> &StreamId {
         &self.previd
     }
@@ -226,26 +266,32 @@ impl SmResumeState {
         self
     }
 
+    /// Return the number of inbound stanzas handled modulo 2^32.
     pub fn inbound_h(&self) -> u32 {
         self.inbound_h
     }
 
+    /// Return the peer-handled outbound counter modulo 2^32.
     pub fn outbound_h(&self) -> u32 {
         self.outbound_h
     }
 
+    /// Return the maximum stream-resumption window advertised by the server, in seconds.
     pub fn max_resume_seconds(&self) -> Option<u32> {
         self.max_resume_seconds
     }
 
+    /// Whether the outbound replay queue still contains entries awaiting acknowledgement.
     pub fn has_unhandled_outbound_stanzas(&self) -> bool {
         !self.outbound_queue.is_empty()
     }
 
+    /// Borrow the retained outbound entries awaiting peer acknowledgement.
     pub fn unhandled_outbound_entries(&self) -> impl Iterator<Item = &UnhandledOutboundEntry> {
         self.outbound_queue.iter()
     }
 
+    /// Return identifiers of unrejected outbound messages still awaiting acknowledgement.
     pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
         self.outbound_queue
             .iter()
@@ -302,10 +348,12 @@ pub struct SmState {
 }
 
 impl SmState {
+    /// Create inactive stream-management state with zero counters and no pending stanzas.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Restore stream-management counters, session identity, and queued stanzas from a resume snapshot.
     pub fn from_resume_state(resume_state: &SmResumeState) -> Self {
         let queue_len = u32::try_from(resume_state.outbound_queue.len()).unwrap_or(u32::MAX);
         // The queue contains only stanzas not yet handled by the server.
@@ -325,6 +373,7 @@ impl SmState {
         }
     }
 
+    /// Return the resumable stream state, including an outstanding fallback replay tail.
     pub fn resume_state(&self) -> Option<SmResumeState> {
         self.previd.as_ref().and_then(|previd| {
             SmResumeState::from_outbound_queue(
@@ -591,6 +640,7 @@ impl SmState {
         }
     }
 
+    /// Cancel pending acknowledgement deadlines and retry scheduling.
     pub fn cancel_acknowledgement_clock(&mut self) {
         self.suspension_restart_spent = false;
         self.ack_request_outstanding = false;
@@ -614,6 +664,7 @@ impl SmState {
         self.ack_request_outstanding || self.last_ack_progress_at.is_some()
     }
 
+    /// Whether the peer's handled counter acknowledges more stanzas than have been sent.
     pub fn handled_count_too_high(&self, h: u32) -> bool {
         h.wrapping_sub(self.server_h) > self.outbound_count.wrapping_sub(self.server_h)
     }
@@ -644,6 +695,7 @@ impl SmState {
         replay
     }
 
+    /// Return unrejected message and presence stanzas eligible for a fresh-stream retry; IQs are excluded.
     pub fn unhandled_stanzas_for_fallback_retry(&self) -> Vec<Element> {
         self.outbound_queue
             .iter()
@@ -659,6 +711,7 @@ impl SmState {
             .collect()
     }
 
+    /// Return identifiers of unrejected outbound messages still awaiting acknowledgement.
     pub fn unhandled_message_stanza_ids(&self) -> Vec<StanzaId> {
         self.outbound_queue
             .iter()
@@ -735,6 +788,10 @@ impl SmState {
     }
 
     /// Parse an inbound XEP-0198 control after validating its schema shape.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidSmInboundControl` for the wrong namespace, unsupported control element, malformed attributes or children, invalid counters, or missing required stream identifiers.
     pub fn parse_inbound_control(
         element: &Element,
     ) -> Result<SmInboundControl, InvalidSmInboundControl> {

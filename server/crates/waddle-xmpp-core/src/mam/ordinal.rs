@@ -1,13 +1,18 @@
+//! Stable ordering and selection of archived messages for MAM pagination.
+
 /// Durable position within one archive, independent of message timestamps.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize)]
 #[serde(transparent)]
 pub struct ArchiveOrdinal(i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+/// Invalid stored archive ordering values, which must be strictly positive.
 pub enum ArchiveOrdinalError {
     #[error("archive ordinal must not be zero")]
+    /// Archive ordinal must not be zero.
     Zero,
     #[error("archive ordinal must not be negative: {0}")]
+    /// Archive ordinal must not be negative: `0`.
     Negative(i64),
 }
 
@@ -15,6 +20,11 @@ impl ArchiveOrdinal {
     /// The first position in any archive.
     pub const FIRST: Self = Self(1);
 
+    /// Validate a persisted archive ordinal before using it for pagination.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ArchiveOrdinalError::Zero` or `ArchiveOrdinalError::Negative` when the stored ordinal is not strictly positive.
     pub fn from_storage(value: i64) -> Result<Self, ArchiveOrdinalError> {
         match value {
             0 => Err(ArchiveOrdinalError::Zero),
@@ -23,10 +33,12 @@ impl ArchiveOrdinal {
         }
     }
 
+    /// Return the strictly positive integer used by archive storage.
     pub fn to_storage(self) -> i64 {
         self.0
     }
 
+    /// Return the next archive ordinal, or `None` if the integer range is exhausted.
     pub fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
     }

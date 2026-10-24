@@ -177,6 +177,10 @@ impl RosterItem {
     }
 
     /// Parse a roster item from an XML element.
+    ///
+    /// # Errors
+    ///
+    /// Returns `CoreError::BadRequest` for a missing/invalid JID, invalid subscription/ask token, or duplicate groups; returns `CoreError::NotAcceptable` for a blank group name.
     pub fn from_element(elem: &Element) -> Result<Self, CoreError> {
         let jid_str = elem.attr("jid").ok_or_else(|| {
             CoreError::bad_request(Some("Roster item missing 'jid' attribute".to_string()))

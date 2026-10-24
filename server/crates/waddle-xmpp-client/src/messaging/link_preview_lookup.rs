@@ -37,7 +37,9 @@ pub struct LinkPreviewLookupReady {
     pub normalized_url: Url,
     /// Token expiry; stale tokens must not be attached to sends.
     pub expires_at: DateTime<Utc>,
+    /// Human-readable title rendered by the host.
     pub title: Option<String>,
+    /// Longer human-readable description.
     pub description: Option<String>,
     /// Server-cached preview image (trusted-path check applied on parse).
     pub image: Option<LinkPreviewImageData>,

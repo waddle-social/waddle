@@ -1,3 +1,5 @@
+//! Conversion and delivery of typed client events to JavaScript callbacks.
+
 use super::*;
 
 pub(crate) async fn event_dispatch_loop(

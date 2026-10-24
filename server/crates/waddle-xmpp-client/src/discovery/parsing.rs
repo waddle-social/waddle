@@ -1,3 +1,5 @@
+//! Validation of service discovery, upload, roster, and search IQ payloads.
+
 use jid::BareJid;
 use minidom::Element;
 
@@ -192,6 +194,7 @@ pub fn resolve_component_services(
     }
 }
 
+/// Build a space only when the service, node, and discovery metadata consistently identify a Waddle space.
 pub fn space_from_disco_item(
     spaces_jid: &BareJid,
     item: DiscoItem,
@@ -225,6 +228,7 @@ pub fn space_from_disco_item(
     })
 }
 
+/// Read channel bookmarks and their metadata from the selected space response.
 pub fn parse_space_channels_result(
     iq: &Element,
     space_id: &SpaceNode,

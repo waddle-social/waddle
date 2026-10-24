@@ -1,3 +1,5 @@
+//! Conversion of component UI blocks and forms into validated host models.
+
 use anyhow::Result;
 
 use super::waddle::extension::types as wit_types;

@@ -1,3 +1,5 @@
+//! Encoding and validation of RFC 7395 XMPP WebSocket frames.
+
 use jid::BareJid;
 use minidom::Element;
 use std::str::FromStr;
@@ -15,6 +17,10 @@ const MAX_FRAME_SIZE: usize = 1024 * 1024;
 ///
 /// Browser integrations can use this with a JavaScript-owned `WebSocket`
 /// while keeping XMPP stream state in [`crate::runtime::XmppRuntime`].
+///
+/// # Errors
+///
+/// Returns `ClientError::InvalidTransportFrame` if XML serialization or UTF-8 conversion fails, or `ClientError::TransportFrameTooLarge` if the serialized frame exceeds the transport limit.
 pub fn encode_message(message: &TransportMessage) -> ClientResult<String> {
     let encoded = match message {
         TransportMessage::Open(open) => serialize_element(&stream_open_element(open))?,
@@ -72,6 +78,10 @@ fn stream_open_element(open: &StreamOpen) -> Element {
 ///
 /// Incoming bare client stanzas without an explicit default namespace are
 /// normalised to `jabber:client`, matching the native transport.
+///
+/// # Errors
+///
+/// Returns a typed client error for an empty or oversized frame, malformed XML/framing, invalid stream JIDs, or an unsupported stream version.
 pub fn decode_message(frame: &str) -> ClientResult<TransportMessage> {
     let trimmed = frame.trim();
     if trimmed.is_empty() {

@@ -10,13 +10,18 @@ use crate::CoreError;
 /// Presence subscription stanza type.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SubscriptionType {
+    /// Request a subscription to another user's presence.
     Subscribe,
+    /// Approve a presence subscription.
     Subscribed,
+    /// Request removal of a presence subscription.
     Unsubscribe,
+    /// Reject or revoke a presence subscription.
     Unsubscribed,
 }
 
 impl SubscriptionType {
+    /// Recognize a presence subscription operation, returning `None` for unrelated presence types.
     pub fn from_presence_type(ptype: &PresenceType) -> Option<Self> {
         match ptype {
             PresenceType::Subscribe => Some(SubscriptionType::Subscribe),
@@ -27,6 +32,7 @@ impl SubscriptionType {
         }
     }
 
+    /// Convert this subscription operation to the corresponding XMPP presence type.
     pub fn to_presence_type(&self) -> PresenceType {
         match self {
             SubscriptionType::Subscribe => PresenceType::Subscribe,
@@ -36,6 +42,7 @@ impl SubscriptionType {
         }
     }
 
+    /// Borrow the stored text or canonical protocol token without allocating.
     pub fn as_str(&self) -> &'static str {
         match self {
             SubscriptionType::Subscribe => "subscribe",
@@ -49,15 +56,22 @@ impl SubscriptionType {
 /// A parsed presence subscription request.
 #[derive(Debug, Clone)]
 pub struct PresenceSubscriptionRequest {
+    /// Presence subscription operation requested by the stanza.
     pub subscription_type: SubscriptionType,
+    /// XMPP address of the sender.
     pub from: BareJid,
+    /// XMPP address of the recipient.
     pub to: BareJid,
+    /// Optional human-readable status text.
     pub status: Option<String>,
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: Option<String>,
+    /// Extension payload elements carried alongside the standard protocol fields.
     pub payloads: Vec<minidom::Element>,
 }
 
 impl PresenceSubscriptionRequest {
+    /// Create a subscription request with sender and recipient JIDs and no optional payloads.
     pub fn new(subscription_type: SubscriptionType, from: BareJid, to: BareJid) -> Self {
         Self {
             subscription_type,
@@ -69,11 +83,13 @@ impl PresenceSubscriptionRequest {
         }
     }
 
+    /// Set the status and return the updated value.
     pub fn with_status(mut self, status: impl Into<String>) -> Self {
         self.status = Some(status.into());
         self
     }
 
+    /// Set the id and return the updated value.
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
         self
@@ -83,16 +99,26 @@ impl PresenceSubscriptionRequest {
 /// Result of parsing a presence stanza for subscription handling.
 #[derive(Debug)]
 pub enum PresenceAction {
+    /// A presence subscription request, approval, or revocation.
     Subscription(PresenceSubscriptionRequest),
+    /// An available or unavailable presence suitable for subscriber broadcast.
     PresenceUpdate(Presence),
+    /// Query another entity's current presence.
     Probe {
+        /// XMPP address of the sender.
         from: BareJid,
+        /// XMPP address of the recipient.
         to: BareJid,
+        /// Whether the original recipient address included a resource.
         to_was_full: bool,
     },
 }
 
 /// Parse a presence stanza and determine if it's subscription-related.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` when a probe/subscription lacks a recipient, or when another presence type is neither available nor unavailable (for example an error stanza). Full recipient JIDs are reduced to their bare JIDs.
 pub fn parse_subscription_presence(
     pres: &Presence,
     sender_jid: &BareJid,
@@ -220,12 +246,16 @@ pub fn build_available_presence(
 /// Storage for pending inbound subscription requests.
 #[derive(Debug, Clone)]
 pub struct PendingSubscription {
+    /// XMPP address of the sender.
     pub from: BareJid,
+    /// Optional human-readable status text.
     pub status: Option<String>,
+    /// Time the subscription request was received.
     pub received_at: chrono::DateTime<chrono::Utc>,
 }
 
 impl PendingSubscription {
+    /// Record a pending inbound subscription with the current receipt time and no status text.
     pub fn new(from: BareJid) -> Self {
         Self {
             from,
@@ -234,6 +264,7 @@ impl PendingSubscription {
         }
     }
 
+    /// Capture a pending subscription request and its receipt timestamp.
     pub fn from_request(request: &PresenceSubscriptionRequest) -> Self {
         Self {
             from: request.from.clone(),

@@ -70,10 +70,13 @@ const STATUS_DND: &str = "dnd";
 /// the chat client's `ManualStatus` (`available | chat | away | dnd`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ManualStatus {
+    /// Available for message delivery.
     Available,
     /// RFC 6121 `<show>chat</show>` — "free for chat" (ADR-010 Phase 5b).
     Chat,
+    /// Temporarily away from the client.
     Away,
+    /// Requests that contacts avoid interruptions.
     Dnd,
 }
 
@@ -89,6 +92,10 @@ impl ManualStatus {
     }
 
     /// Parse a wire token into a [`ManualStatus`].
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnknownStatus` unless the token is `available`, `away`, or `dnd`.
     pub fn from_token(raw: &str) -> Result<Self, StatusPreferenceParseError> {
         match raw {
             STATUS_AVAILABLE => Ok(ManualStatus::Available),
@@ -104,7 +111,9 @@ impl ManualStatus {
 /// auto-away timer govern; `Manual` pins a specific status.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusPreference {
+    /// Availability follows the host's automatic presence policy.
     Automatic,
+    /// Availability is explicitly selected by the user.
     Manual(ManualStatus),
 }
 
@@ -115,24 +124,39 @@ pub enum StatusPreferenceParseError {
         "expected <status-preference xmlns='{NS_WADDLE_STATUS_PREFERENCE}'> root, \
          got <{name} xmlns='{ns}'>"
     )]
-    WrongRoot { name: String, ns: String },
+    /// The element's local name or namespace does not match the expected root.
+    WrongRoot {
+        #[doc = "Local name of the received root element."]
+        name: String,
+        #[doc = "XML namespace URI received on the root element."]
+        ns: String,
+    },
     #[error("<status-preference> requires the 'mode' attribute")]
+    /// `<status-preference>` requires the 'mode' attribute.
     MissingMode,
     #[error("unknown mode '{0}' (expected 'automatic' or 'manual')")]
+    /// Unknown mode '`0`' (expected 'automatic' or 'manual').
     UnknownMode(String),
     #[error("mode='manual' requires the 'status' attribute")]
+    /// Mode='manual' requires the 'status' attribute.
     MissingStatus,
     #[error("'status' attribute is not allowed when mode='automatic'")]
+    /// 'status' attribute is not allowed when mode='automatic'.
     UnexpectedStatus,
     #[error("unknown status '{0}' (expected 'available', 'chat', 'away', or 'dnd')")]
+    /// Unknown status '`0`' (expected 'available', 'chat', 'away', or 'dnd').
     UnknownStatus(String),
     #[error("unknown attribute '{0}' on <status-preference>")]
+    /// Unknown attribute '`0`' on `<status-preference>`.
     UnknownAttribute(String),
     #[error("namespaced attribute '{0}' is not allowed on <status-preference>")]
+    /// Namespaced attribute '`0`' is not allowed on `<status-preference>`.
     NamespacedAttribute(String),
     #[error("unexpected child element <{0}> in <status-preference>")]
+    /// Unexpected child element <`0`> in `<status-preference>`.
     UnexpectedChild(String),
     #[error("unexpected text content in <status-preference>")]
+    /// Unexpected text content in `<status-preference>`.
     UnexpectedTextContent,
 }
 
@@ -157,6 +181,10 @@ impl StatusPreference {
     /// wire tokens. The single source of truth for the mode×status
     /// validation rules, shared by [`parse`](Self::parse) (XML) and the
     /// wasm/JS bridge (camelCase string fields).
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed parse error for an unknown mode, a missing or unknown manual status, or a status supplied with automatic mode.
     pub fn from_tokens(
         mode: &str,
         status: Option<&str>,
@@ -188,6 +216,10 @@ impl StatusPreference {
 
     /// Parse a `<status-preference xmlns='urn:waddle:status-preference:0'>`
     /// element into a typed [`StatusPreference`].
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed parse error for the wrong root, unknown or namespaced attributes, child elements or text, or invalid mode/status tokens.
     pub fn parse(element: &Element) -> Result<Self, StatusPreferenceParseError> {
         if element.name() != ELEMENT_STATUS_PREFERENCE
             || element.ns() != NS_WADDLE_STATUS_PREFERENCE

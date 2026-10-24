@@ -25,15 +25,29 @@ use super::types::{
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum AdminResponseError {
     #[error("admin response missing <command/>")]
+    /// Admin response missing `<command/>`.
     MissingCommand,
     #[error("admin response missing <x xmlns='jabber:x:data'/>")]
+    /// Admin response missing `<x xmlns='jabber:x:data'/>`.
     MissingForm,
     #[error("admin response missing required field `{var}`")]
-    MissingField { var: String },
+    /// Admin response missing required field `var`.
+    MissingField {
+        #[doc = "XEP-0004 field name whose value is being accessed or validated."]
+        var: String,
+    },
     #[error("admin response field `{var}` is not a boolean")]
-    InvalidBool { var: String },
+    /// Admin response field `var` is not a boolean.
+    InvalidBool {
+        #[doc = "XEP-0004 field name whose value is being accessed or validated."]
+        var: String,
+    },
     #[error("admin response field `{var}` is not a u32")]
-    InvalidCount { var: String },
+    /// Admin response field `var` is not a u32.
+    InvalidCount {
+        #[doc = "XEP-0004 field name whose value is being accessed or validated."]
+        var: String,
+    },
 }
 
 type ParseResult<T> = Result<T, AdminResponseError>;
@@ -103,6 +117,11 @@ fn next_cursor(form: &Element) -> Option<String> {
 
 // ── V1 users panel ───────────────────────────────────────────────────
 
+/// Decode the administrative users list command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_users_list_result(iq: &Element) -> ParseResult<AdminUsersPage> {
     let command = iq
         .get_child("command", NS_COMMANDS)
@@ -128,6 +147,11 @@ pub fn parse_admin_users_list_result(iq: &Element) -> ParseResult<AdminUsersPage
 
 // ── V2 spaces panel ──────────────────────────────────────────────────
 
+/// Decode the administrative spaces list command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_spaces_list_result(iq: &Element) -> ParseResult<AdminSpacesListResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(AdminSpacesListResult::default());
@@ -150,6 +174,11 @@ pub fn parse_admin_spaces_list_result(iq: &Element) -> ParseResult<AdminSpacesLi
     })
 }
 
+/// Decode the administrative space ref command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_space_ref_result(iq: &Element) -> ParseResult<AdminSpaceRef> {
     let form = command_form(iq)?;
     Ok(AdminSpaceRef {
@@ -161,6 +190,11 @@ pub fn parse_admin_space_ref_result(iq: &Element) -> ParseResult<AdminSpaceRef> 
     })
 }
 
+/// Decode the administrative spaces members command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_spaces_members_result(iq: &Element) -> ParseResult<AdminSpacesMembersResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(AdminSpacesMembersResult::default());
@@ -178,6 +212,11 @@ pub fn parse_admin_spaces_members_result(iq: &Element) -> ParseResult<AdminSpace
     })
 }
 
+/// Decode the administrative spaces set role command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_spaces_set_role_result(iq: &Element) -> ParseResult<AdminSpacesSetRoleResult> {
     let form = command_form(iq)?;
     Ok(AdminSpacesSetRoleResult {
@@ -188,6 +227,11 @@ pub fn parse_admin_spaces_set_role_result(iq: &Element) -> ParseResult<AdminSpac
 
 // ── V2 channels panel ────────────────────────────────────────────────
 
+/// Decode the administrative channels list command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_channels_list_result(iq: &Element) -> ParseResult<AdminChannelsListResult> {
     let Some(form) = maybe_command_form(iq) else {
         return Ok(AdminChannelsListResult::default());
@@ -214,6 +258,11 @@ pub fn parse_admin_channels_list_result(iq: &Element) -> ParseResult<AdminChanne
     })
 }
 
+/// Decode the administrative channel ref command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_channel_ref_result(iq: &Element) -> ParseResult<AdminChannelRef> {
     let form = command_form(iq)?;
     Ok(AdminChannelRef {
@@ -226,6 +275,11 @@ pub fn parse_admin_channel_ref_result(iq: &Element) -> ParseResult<AdminChannelR
     })
 }
 
+/// Decode the administrative channels occupants command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_channels_occupants_result(
     iq: &Element,
 ) -> ParseResult<AdminChannelsOccupantsResult> {
@@ -247,6 +301,11 @@ pub fn parse_admin_channels_occupants_result(
     })
 }
 
+/// Decode the administrative channels affiliations command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_channels_affiliations_result(
     iq: &Element,
 ) -> ParseResult<AdminChannelsAffiliationsResult> {
@@ -267,6 +326,11 @@ pub fn parse_admin_channels_affiliations_result(
     })
 }
 
+/// Decode the administrative channels set affiliation command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_channels_set_affiliation_result(
     iq: &Element,
 ) -> ParseResult<AdminChannelsSetAffiliationResult> {
@@ -277,6 +341,11 @@ pub fn parse_admin_channels_set_affiliation_result(
     })
 }
 
+/// Decode the administrative channels kick command response and validate its required result-form fields.
+///
+/// # Errors
+///
+/// Returns a typed administration response error for a missing command or result form, missing required fields, or malformed field values such as JIDs, booleans, and counts.
 pub fn parse_admin_channels_kick_result(iq: &Element) -> ParseResult<AdminChannelsKickResult> {
     let form = command_form(iq)?;
     Ok(AdminChannelsKickResult {

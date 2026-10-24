@@ -1,12 +1,20 @@
+//! Browser client configuration, shared connection state, and exported client ownership.
+
 use super::*;
 
 pub(crate) type DriverResult<T> = Result<T, ClientError>;
 
+/// Opaque cloneable stream-resumption snapshot for passing between client configurations.
 #[wasm_bindgen]
 pub struct WaddleResumeState {
     pub(crate) inner: waddle_xmpp_client::SmResumeState,
 }
 
+/// Connection credentials and optional stream-resumption state for a browser client.
+///
+/// `server_url` is the XMPP WebSocket endpoint. `jid` is the account address,
+/// `access_token` authenticates using OAUTHBEARER, and `resource` identifies
+/// the bound client resource. Creating a configuration does not open a socket.
 #[wasm_bindgen]
 pub struct WaddleConfig {
     pub(crate) server_url: String,
@@ -18,6 +26,8 @@ pub struct WaddleConfig {
 
 #[wasm_bindgen]
 impl WaddleConfig {
+    /// Configure the WebSocket URL, account JID, OAuth access token, and resource;
+    /// validation occurs on connect.
     #[wasm_bindgen(constructor)]
     pub fn new(
         server_url: String,
@@ -34,6 +44,13 @@ impl WaddleConfig {
         }
     }
 
+    /// Replace the configured resume state with a stream ID and handled-stanza counters.
+    ///
+    /// `previd` is the previous server-issued stream ID. `inbound_h` counts
+    /// handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error when the previous stream ID is empty or whitespace-only.
     pub fn with_resume_state(
         &mut self,
         previd: String,
@@ -51,6 +68,13 @@ impl WaddleConfig {
         Ok(())
     }
 
+    /// Restore resume counters and the server's maximum resumption interval in seconds.
+    ///
+    /// `previd` is the previous server-issued stream ID. `inbound_h` counts
+    /// handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error when the previous stream ID is empty or whitespace-only.
     pub fn with_resume_state_with_max(
         &mut self,
         previd: String,
@@ -70,6 +94,18 @@ impl WaddleConfig {
         Ok(())
     }
 
+    /// Restore resume counters and the persisted unhandled outbound stanza queue.
+    ///
+    /// `previd` is the previous server-issued stream ID. `inbound_h` counts
+    /// handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+    /// `entries` is an ordered array of `{ xml, sentAt, rejected }` objects;
+    /// timestamps use RFC 3339 and XML must be a message, presence, or IQ
+    /// in the client namespace. Failed validation preserves the existing state.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error for an empty or whitespace-only stream ID, malformed
+    /// entry objects, invalid XML or RFC 3339 timestamps, or entries that are not
+    /// countable client stanzas.
     pub fn with_resume_state_entries(
         &mut self,
         previd: String,
@@ -90,6 +126,19 @@ impl WaddleConfig {
         Ok(())
     }
 
+    /// Restore the persisted outbound queue together with counters and a resumption
+    /// interval in seconds.
+    ///
+    /// `previd` is the previous server-issued stream ID. `inbound_h` counts
+    /// handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+    /// `entries` is an ordered array of `{ xml, sentAt, rejected }` objects;
+    /// timestamps use RFC 3339 and XML must be a message, presence, or IQ
+    /// in the client namespace. Failed validation preserves the existing state.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error for an empty or whitespace-only stream ID, malformed
+    /// entry objects, invalid XML or RFC 3339 timestamps, or entries that are not
+    /// countable client stanzas.
     pub fn with_resume_state_entries_with_max(
         &mut self,
         previd: String,
@@ -114,6 +163,17 @@ impl WaddleConfig {
 
     /// Restore a durable message/presence retry tail after a previous stream
     /// explicitly declined XEP-0198. It must never issue `<resume/>`.
+    ///
+    /// `previd` is the previous server-issued stream ID. `inbound_h` counts
+    /// handled inbound stanzas; `outbound_h` counts sent outbound stanzas.
+    /// `entries` is an ordered array of `{ xml, sentAt, rejected }` objects;
+    /// timestamps use RFC 3339 and XML must be a message, presence, or IQ
+    /// in the client namespace. Failed validation preserves the existing state.
+    ///
+    /// # Errors
+    /// Returns a JavaScript error for an empty or whitespace-only stream ID, malformed
+    /// entry objects, invalid XML or RFC 3339 timestamps, or entries that are not
+    /// countable client stanzas.
     pub fn with_fresh_stream_retry_state_entries(
         &mut self,
         previd: String,
@@ -135,6 +195,7 @@ impl WaddleConfig {
         Ok(())
     }
 
+    /// Copy an opaque resume snapshot into this configuration for the next connection.
     pub fn with_resume_state_handle(&mut self, state: &WaddleResumeState) {
         self.resume_state = Some(state.inner.clone());
     }
@@ -257,6 +318,7 @@ fn resume_entry_from_persisted_js(
         .map_err(|_| PersistedResumeEntryError::UncountableStanza)
 }
 
+/// Browser XMPP client that owns callbacks and an asynchronously driven WebSocket session.
 #[wasm_bindgen]
 pub struct WaddleClient {
     pub(crate) inner: Rc<RefCell<WaddleClientInner>>,

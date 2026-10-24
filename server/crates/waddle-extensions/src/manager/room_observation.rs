@@ -1,3 +1,5 @@
+//! Room-message observer selection, invocation, and outcome classification.
+
 use super::*;
 use crate::types::{
     ConfiguredRoomObserver, ObservationFailure, ObservationSkip, RoomMessageObserve,
@@ -5,6 +7,8 @@ use crate::types::{
 };
 
 impl ExtensionManager {
+    /// Clone the loaded observers' frozen configuration identities, scopes, generations,
+    /// and concurrency limits.
     pub fn configured_room_observers(&self) -> Vec<ConfiguredRoomObserver> {
         self.actors
             .iter()
@@ -29,6 +33,8 @@ impl ExtensionManager {
             .collect()
     }
 
+    /// Validate the subscription, source room, body digest, timestamp, and origin ID,
+    /// then invoke a durable observer and classify its completion or retry outcome.
     pub async fn observe_room_message(
         &self,
         subscription: &RoomObservationSubscription,
@@ -39,6 +45,8 @@ impl ExtensionManager {
             .await
     }
 
+    /// Validate and invoke a durable observer with server-owned delivery authority kept
+    /// outside the guest event payload.
     pub async fn observe_room_message_with_delivery(
         &self,
         subscription: &RoomObservationSubscription,

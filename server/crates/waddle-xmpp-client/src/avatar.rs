@@ -34,9 +34,13 @@ use crate::client::ClientHandle;
 use crate::error::{ClientError, ClientResult};
 use tracing::warn;
 
+/// Protocol token `urn:xmpp:avatar:data`.
 pub const NS_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
+/// Protocol token `urn:xmpp:avatar:metadata`.
 pub const NS_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
+/// Protocol token `http://jabber.org/protocol/pubsub`.
 pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+/// Protocol token `vcard-temp`.
 pub const NS_VCARD_TEMP: &str = "vcard-temp";
 
 const NS_CLIENT: &str = "jabber:client";
@@ -54,12 +58,14 @@ pub const AVATAR_REMOVE_ITEM_ID: &str = "current";
 pub struct AvatarItemId(String);
 
 impl AvatarItemId {
+    /// Validate a 40-character hexadecimal avatar digest while preserving its original case; invalid digests return None.
     pub fn new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
             .then_some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -85,7 +91,9 @@ impl std::fmt::Display for VcardPhotoId {
 /// fallback which has no pubsub item.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum AvatarId {
+    /// A content-addressed avatar published through XEP-0084 PEP items.
     Item(AvatarItemId),
+    /// An in-band vCard PHOTO identified by its content hash.
     VcardPhoto(VcardPhotoId),
 }
 
@@ -105,8 +113,11 @@ pub struct AvatarInfo {
     pub id: AvatarItemId,
     /// MIME type of the image (e.g. `image/png`).
     pub mime_type: String,
+    /// Media width in pixels.
     pub width: Option<u32>,
+    /// Media height in pixels.
     pub height: Option<u32>,
+    /// Binary content of the resource.
     pub bytes: Option<u64>,
 }
 
@@ -126,7 +137,9 @@ pub struct Avatar {
 /// vCard `PHOTO` payload from XEP-0054.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VcardPhoto {
+    /// MIME media type of the referenced content.
     pub mime_type: Option<String>,
+    /// Content carried by the request or response.
     pub data: Option<Vec<u8>>,
 }
 
@@ -134,7 +147,9 @@ pub struct VcardPhoto {
 /// "not available" failures from transport/runtime failures.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AvatarRequestFailure<E> {
+    /// The peer returned an XMPP stanza-level error.
     StanzaError,
+    /// A non-definitive fetch failure that should be reported to the caller.
     Other(E),
 }
 
@@ -248,7 +263,9 @@ pub struct AvatarPublishInfo {
     pub id: AvatarItemId,
     /// MIME type, e.g. `image/png` (REQUIRED).
     pub mime_type: String,
+    /// Media width in pixels.
     pub width: Option<u32>,
+    /// Media height in pixels.
     pub height: Option<u32>,
 }
 
@@ -479,11 +496,17 @@ pub fn parse_vcard_photo_response(iq: &Element) -> Option<VcardPhoto> {
 /// serves the bytes from its own cache.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvatarFetch {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: AvatarId,
+    /// Avatar metadata or immutable avatar artifact for this profile.
     pub avatar: Option<Avatar>,
 }
 
 /// Request an avatar using XEP-0084 first, then XEP-0054 vCard PHOTO fallback.
+///
+/// # Errors
+///
+/// Propagates non-stanza failures from `send_iq`. Stanza errors and invalid or unsupported avatar items are treated as absent avatars and allow fallback candidates.
 pub async fn request_avatar_with_iq<F, Fut, E>(
     jid: &BareJid,
     send_iq: F,
@@ -503,6 +526,10 @@ where
 /// fetch data as usual; when the metadata path yields nothing the
 /// XEP-0054 vCard PHOTO fallback runs (never skipped — its synthetic id
 /// does not address a pubsub data item).
+///
+/// # Errors
+///
+/// Propagates non-stanza failures from `send_iq`. Stanza errors and invalid or unsupported avatar items are treated as absent avatars and allow fallback candidates.
 pub async fn request_avatar_with_iq_skipping<F, Fut, E>(
     jid: &BareJid,
     known_ids: &[AvatarItemId],
@@ -615,6 +642,10 @@ pub trait AvatarExt {
     /// PHOTO when avatar metadata or data is unavailable. Item ids in
     /// `known_ids` honor the §4.2 no-refetch rule: an advertised id the
     /// caller already holds answers id-only, without the data IQ.
+    ///
+    /// # Errors
+    ///
+    /// Propagates transport/IQ failures and transient stanza errors. Definitive missing-avatar responses allow fallback or return None.
     fn request_avatar<'a>(
         &'a self,
         jid: &'a BareJid,

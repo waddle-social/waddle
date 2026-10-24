@@ -1,3 +1,5 @@
+//! Message enrichment and effect collection across configured extensions.
+
 use super::*;
 
 impl ExtensionManager {
@@ -92,17 +94,28 @@ impl ExtensionManager {
         Some(ObserverOutcome { effects })
     }
 
+    /// Apply message hooks in the default `local` community and return the number of
+    /// enrichments appended to the stanza.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the fixed nonblank `local` community identifier violates the
+    /// identifier constructor invariant.
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
         self.enrich_message_for_waddle(msg, WaddleId::new("local").expect("static waddle id"))
             .await
     }
 
+    /// Apply message hooks in the specified community and return the number of
+    /// enrichments appended to the stanza.
     pub async fn enrich_message_for_waddle(&self, msg: &mut Message, waddle_id: WaddleId) -> usize {
         self.process_message_for_waddle(msg, waddle_id)
             .await
             .enrichments_added
     }
 
+    /// Apply hooks with requester authority derived from the stanza, returning appended
+    /// enrichment count and separately actionable effects.
     pub async fn process_message_for_waddle(
         &self,
         msg: &mut Message,
@@ -112,6 +125,8 @@ impl ExtensionManager {
             .await
     }
 
+    /// Apply enrichment and observation hooks using the supplied requester override,
+    /// append validated enrichment envelopes, and return remaining host effects.
     pub async fn process_message_for_waddle_with_requester(
         &self,
         msg: &mut Message,
@@ -127,6 +142,8 @@ impl ExtensionManager {
         .await
     }
 
+    /// Apply enrichment hooks using the requester override, append validated envelopes,
+    /// and return remaining effects without dispatching observation hooks.
     pub async fn process_message_enrichments_for_waddle_with_requester(
         &self,
         msg: &mut Message,

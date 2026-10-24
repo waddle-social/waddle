@@ -1,3 +1,5 @@
+//! Browser methods for room presence, avatars, and HTTP upload service discovery.
+
 use super::*;
 
 /// In-call presence sub-state flags (`urn:waddle:in-call:0`) the chat
@@ -9,7 +11,9 @@ use super::*;
 #[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct InCallPresenceFlags {
+    /// Advertise that the participant has raised their hand in the call.
     pub hand_raised: bool,
+    /// Advertise that the participant has muted their call microphone.
     pub muted: bool,
 }
 
@@ -52,7 +56,7 @@ fn resolve_in_call_flags(
 }
 
 /// Best-effort parse of the `in_call` FFI argument into
-/// [`InCallPresenceFlags`]. This NEVER fails: presence sends — and in
+/// `InCallPresenceFlags`. This NEVER fails: presence sends — and in
 /// particular the call-teardown leave marker that clears `<muji/>` for
 /// remote occupants — must not be blocked by a malformed or stale
 /// `in_call` value. Each non-object shape degrades to a sensible flag set
@@ -116,6 +120,7 @@ impl WaddleClient {
         })
     }
 
+    /// Send unavailable presence to `room_jid/nick` and leave the room.
     pub fn leave_room(&self, room_jid: String, nick: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -141,7 +146,7 @@ impl WaddleClient {
     ///   first, awaits the room's echo, then re-emits with contents
     ///   declared.
     /// - `in_call`: a plain JS object `{ handRaised, muted }`
-    ///   ([`InCallPresenceFlags`]) appended as an `<in-call
+    ///   (`InCallPresenceFlags`) appended as an `<in-call
     ///   xmlns='urn:waddle:in-call:0'>` presence child *alongside*
     ///   `<muji/>` (#1029 raised hand / #1030 mute), one marker child per
     ///   set flag. This is the FFI in-call "set method": the caller
@@ -266,6 +271,8 @@ impl WaddleClient {
         })
     }
 
+    /// Discover an HTTP upload service on the account domain; resolves to its JID or
+    /// `null` when none is advertised.
     pub fn discover_upload_service(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -292,6 +299,8 @@ impl WaddleClient {
         })
     }
 
+    /// Allocate an HTTP upload slot for a filename, byte size, and MIME type; resolves to
+    /// `WaddleUploadSlot`.
     pub fn request_upload_slot(
         &self,
         service_jid: String,

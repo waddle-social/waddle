@@ -1,3 +1,5 @@
+//! Permission and resource enforcement for extension outbound HTTP requests.
+
 use bytes::BytesMut;
 use futures::StreamExt;
 
@@ -11,6 +13,11 @@ pub(super) struct HttpRuntime {
     pub permits: std::sync::Arc<tokio::sync::Semaphore>,
 }
 impl HttpRuntime {
+    /// Initialize the host HTTP client with the extension network policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be initialized with the host network policy.
     pub fn new() -> anyhow::Result<Self> {
         Ok(Self {
             client: reqwest::Client::builder()

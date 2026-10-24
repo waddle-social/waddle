@@ -76,6 +76,7 @@ fn command_iq(server_domain: &str, node: &str, fields: Vec<Field>) -> Element {
 
 // ── V1 users panel ───────────────────────────────────────────────────
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative users list command.
 pub fn build_admin_users_list_iq(server_domain: &str, args: &AdminUsersListArgs) -> Element {
     let mut fields = Vec::new();
     push_opt_text(&mut fields, "prefix", args.prefix.as_deref());
@@ -85,6 +86,7 @@ pub fn build_admin_users_list_iq(server_domain: &str, args: &AdminUsersListArgs)
 
 // ── V2 spaces panel ──────────────────────────────────────────────────
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative spaces list command.
 pub fn build_admin_spaces_list_iq(server_domain: &str, args: &AdminSpacesListArgs) -> Element {
     let mut fields = Vec::new();
     push_opt_text(&mut fields, "prefix", args.prefix.as_deref());
@@ -92,6 +94,7 @@ pub fn build_admin_spaces_list_iq(server_domain: &str, args: &AdminSpacesListArg
     command_iq(server_domain, NODE_ADMIN_SPACES_LIST, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative spaces create command.
 pub fn build_admin_spaces_create_iq(server_domain: &str, args: &AdminSpacesCreateArgs) -> Element {
     let mut fields = vec![text_single("name", &args.name)];
     push_opt_text(&mut fields, "description", args.description.as_deref());
@@ -99,6 +102,7 @@ pub fn build_admin_spaces_create_iq(server_domain: &str, args: &AdminSpacesCreat
     command_iq(server_domain, NODE_ADMIN_SPACES_CREATE, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative spaces update command.
 pub fn build_admin_spaces_update_iq(server_domain: &str, args: &AdminSpacesUpdateArgs) -> Element {
     let mut fields = vec![jid_single("space_jid", &args.space_jid)];
     push_opt_text(&mut fields, "space_node", args.space_node.as_deref());
@@ -108,6 +112,7 @@ pub fn build_admin_spaces_update_iq(server_domain: &str, args: &AdminSpacesUpdat
     command_iq(server_domain, NODE_ADMIN_SPACES_UPDATE, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative spaces delete command.
 pub fn build_admin_spaces_delete_iq(server_domain: &str, args: &AdminSpacesDeleteArgs) -> Element {
     let mut fields = vec![jid_single("space_jid", &args.space_jid)];
     push_opt_text(&mut fields, "space_node", args.space_node.as_deref());
@@ -115,6 +120,7 @@ pub fn build_admin_spaces_delete_iq(server_domain: &str, args: &AdminSpacesDelet
     command_iq(server_domain, NODE_ADMIN_SPACES_DELETE, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative spaces members command.
 pub fn build_admin_spaces_members_iq(
     server_domain: &str,
     args: &AdminSpacesMembersArgs,
@@ -125,6 +131,7 @@ pub fn build_admin_spaces_members_iq(
     command_iq(server_domain, NODE_ADMIN_SPACES_MEMBERS, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative spaces set role command.
 pub fn build_admin_spaces_set_role_iq(
     server_domain: &str,
     args: &AdminSpacesSetRoleArgs,
@@ -138,6 +145,7 @@ pub fn build_admin_spaces_set_role_iq(
 
 // ── V2 channels panel ────────────────────────────────────────────────
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels list command.
 pub fn build_admin_channels_list_iq(server_domain: &str, args: &AdminChannelsListArgs) -> Element {
     let mut fields = Vec::new();
     if let Some(space_jid) = args.space_jid.as_deref() {
@@ -149,6 +157,7 @@ pub fn build_admin_channels_list_iq(server_domain: &str, args: &AdminChannelsLis
     command_iq(server_domain, NODE_ADMIN_CHANNELS_LIST, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels create command.
 pub fn build_admin_channels_create_iq(
     server_domain: &str,
     args: &AdminChannelsCreateArgs,
@@ -169,6 +178,7 @@ pub fn build_admin_channels_create_iq(
     command_iq(server_domain, NODE_ADMIN_CHANNELS_CREATE, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels update command.
 pub fn build_admin_channels_update_iq(
     server_domain: &str,
     args: &AdminChannelsUpdateArgs,
@@ -186,6 +196,7 @@ pub fn build_admin_channels_update_iq(
     command_iq(server_domain, NODE_ADMIN_CHANNELS_UPDATE, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels delete command.
 pub fn build_admin_channels_delete_iq(
     server_domain: &str,
     args: &AdminChannelsDeleteArgs,
@@ -197,6 +208,7 @@ pub fn build_admin_channels_delete_iq(
     command_iq(server_domain, NODE_ADMIN_CHANNELS_DELETE, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels occupants command.
 pub fn build_admin_channels_occupants_iq(
     server_domain: &str,
     args: &AdminChannelsOccupantsArgs,
@@ -206,6 +218,7 @@ pub fn build_admin_channels_occupants_iq(
     command_iq(server_domain, NODE_ADMIN_CHANNELS_OCCUPANTS, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels affiliations command.
 pub fn build_admin_channels_affiliations_iq(
     server_domain: &str,
     args: &AdminChannelsAffiliationsArgs,
@@ -216,6 +229,7 @@ pub fn build_admin_channels_affiliations_iq(
     command_iq(server_domain, NODE_ADMIN_CHANNELS_AFFILIATIONS, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels set affiliation command.
 pub fn build_admin_channels_set_affiliation_iq(
     server_domain: &str,
     args: &AdminChannelsSetAffiliationArgs,
@@ -229,6 +243,7 @@ pub fn build_admin_channels_set_affiliation_iq(
     command_iq(server_domain, NODE_ADMIN_CHANNELS_SET_AFFILIATION, fields)
 }
 
+/// Build an XEP-0050 execute IQ with a submit form for the administrative channels kick command.
 pub fn build_admin_channels_kick_iq(server_domain: &str, args: &AdminChannelsKickArgs) -> Element {
     let mut fields = vec![
         jid_single("channel_jid", &args.channel_jid),

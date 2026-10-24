@@ -1,3 +1,5 @@
+//! Native client handles and the asynchronous command and transport driver.
+
 use std::collections::{HashMap, VecDeque};
 use std::sync::{Arc, RwLock};
 
@@ -51,6 +53,10 @@ impl ClientHandle {
     }
 
     /// Fire-and-forget: queue a raw stanza for sending.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     pub async fn send_stanza(&self, stanza: Element) -> ClientResult<()> {
         self.commands
             .send(XmppCommand::SendStanza(stanza))
@@ -59,6 +65,10 @@ impl ClientHandle {
     }
 
     /// Send an IQ stanza and await a correlated result or error response.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the command channel or response channel closes; otherwise propagates the IQ timeout, stanza error, or transport failure reported by the driver.
     pub async fn send_iq(&self, stanza: Element) -> ClientResult<Element> {
         let (tx, rx) = oneshot::channel();
         self.commands
@@ -72,6 +82,10 @@ impl ClientHandle {
     }
 
     /// Request a clean disconnect.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed.
     pub async fn disconnect(&self) -> ClientResult<()> {
         self.commands
             .send(XmppCommand::Disconnect)
@@ -103,24 +117,44 @@ pub struct XmppClient {
 }
 
 impl XmppClient {
+    /// Validate configuration before creating a native client facade.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
         Ok(Self { config })
     }
 
+    /// Borrow the validated configuration used by this client or runtime.
     pub fn config(&self) -> &ClientConfig {
         &self.config
     }
 
     /// Create a fresh runtime for standalone inspection or testing.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn runtime(&self) -> ClientResult<XmppRuntime> {
         XmppRuntime::new(self.config.clone())
     }
 
+    /// Create the native asynchronous client driver using the default WebSocket transport.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn driver(&self) -> ClientResult<ClientDriver<DefaultTransportFactory>> {
         self.driver_with_factory(DefaultTransportFactory)
     }
 
+    /// Create the asynchronous client driver using the supplied transport factory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn driver_with_factory<TFactory>(
         &self,
         transport_factory: TFactory,
@@ -145,6 +179,11 @@ impl<TFactory> ClientDriver<TFactory>
 where
     TFactory: WebSocketTransportFactory,
 {
+    /// Create a client driver from validated configuration and the selected transport factory.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn new(config: ClientConfig, transport_factory: TFactory) -> ClientResult<Self> {
         Ok(Self {
             runtime: XmppRuntime::new(config)?,
@@ -152,6 +191,7 @@ where
         })
     }
 
+    /// Borrow the immutable configuration used to create this client or runtime.
     pub fn config(&self) -> &ClientConfig {
         self.runtime.config()
     }
@@ -160,6 +200,10 @@ where
     ///
     /// Consumes the driver, spawns a background task that owns the transport,
     /// and returns a [`ClientHandle`] that can be cloned and used concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns configuration, WebSocket connection, authentication, binding, or stream-management bootstrap errors before an established session is available.
     pub async fn connect(mut self) -> ClientResult<ClientHandle>
     where
         TFactory: Send + 'static,

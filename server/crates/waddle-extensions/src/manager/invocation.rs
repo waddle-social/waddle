@@ -1,6 +1,16 @@
+//! Dispatch of typed extension events with runtime limits and result handling.
+
 use super::*;
 
 impl ExtensionManager {
+    /// Dispatch to the first command-granted plugin declaring the node and sign its
+    /// effects. Unknown or invalid nodes return no effects; deadline expiry returns a
+    /// host warning.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if construction of a nonempty timeout warning violates the
+    /// display-text invariant.
     pub async fn invoke_command(
         &self,
         request: CommandInvocationRequest<'_>,
@@ -45,6 +55,9 @@ impl ExtensionManager {
         Vec::new()
     }
 
+    /// Verify the signed launch context and payload fields, dispatch to the
+    /// launch-granted owning plugin, and sign returned effects. Invalid tokens,
+    /// identities, or unloaded plugins return no effects.
     pub async fn invoke_launch(
         &self,
         request: LaunchInvocationRequest<'_>,
@@ -103,6 +116,14 @@ impl ExtensionManager {
         Vec::new()
     }
 
+    /// Dispatch a provider event to the selected plugin using the event's community
+    /// context. Invalid or missing plugins return no effects; deadline expiry returns a
+    /// host warning.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if construction of a nonempty timeout warning violates the
+    /// display-text invariant.
     pub async fn invoke_provider_webhook(
         &self,
         plugin_name: &str,
@@ -134,6 +155,8 @@ impl ExtensionManager {
         Vec::new()
     }
 
+    /// Whether the plugin/action IDs, signed context, submitted payload fields, token,
+    /// and optional expiry validate against this manager's signing key.
     pub fn validates_launch_invocation(&self, request: LaunchValidationRequest<'_>) -> bool {
         let Ok(plugin_id) = PluginId::new(request.plugin_name.to_string()) else {
             return false;

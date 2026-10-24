@@ -26,10 +26,12 @@ impl OccupancySessionGeneration {
         Self(Uuid::new_v4())
     }
 
+    /// Wrap an existing UUID as an occupancy-session generation.
     pub const fn from_uuid(uuid: Uuid) -> Self {
         Self(uuid)
     }
 
+    /// Return the UUID identifying this occupancy generation.
     pub const fn as_uuid(self) -> Uuid {
         self.0
     }

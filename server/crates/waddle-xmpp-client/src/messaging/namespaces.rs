@@ -1,18 +1,27 @@
+//! Namespace constants used by the messaging payload parsers and builders.
+
 pub(crate) const NS_DELAY: &str = "urn:xmpp:delay";
 /// `urn:xmpp:sid:0` — XEP-0359 Unique and Stable Stanza IDs. `pub` so the
 /// XEP-0115 caps advertisement references the canonical constant.
 pub const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
 pub(crate) const NS_ORIGIN_ID: &str = "urn:xmpp:sid:0";
+/// Protocol token `urn:xmpp:reactions:0`.
 pub const NS_REACTIONS: &str = "urn:xmpp:reactions:0";
 pub(crate) const NS_MARKUP: &str = "urn:xmpp:markup:0";
 pub(crate) const NS_WADDLE_MARKUP: &str = "urn:waddle:markup:0";
+/// Protocol token `http://jabber.org/protocol/chatstates`.
 pub const NS_CHAT_STATES: &str = "http://jabber.org/protocol/chatstates";
+/// Protocol token `urn:xmpp:chat-markers:0`.
 pub const NS_CHAT_MARKERS: &str = "urn:xmpp:chat-markers:0";
 pub(crate) const NS_REFERENCES: &str = "urn:xmpp:reference:0";
+/// Protocol token `urn:xmpp:message-retract:1`.
 pub const NS_MESSAGE_RETRACT: &str = "urn:xmpp:message-retract:1";
+/// Protocol token `urn:xmpp:message-moderate:1`.
 pub const NS_MESSAGE_MODERATE: &str = "urn:xmpp:message-moderate:1";
+/// Protocol token `urn:xmpp:message-correct:0`.
 pub const NS_MESSAGE_CORRECT: &str = "urn:xmpp:message-correct:0";
 pub(crate) const NS_HINTS: &str = "urn:xmpp:hints";
+/// Protocol token `urn:waddle:in-call:0`.
 pub const NS_WADDLE_IN_CALL: &str = "urn:waddle:in-call:0";
 pub(crate) const NS_HATS: &str = "urn:xmpp:hats:0";
 pub(crate) const NS_SIMS: &str = "urn:xmpp:sims:1";
@@ -26,6 +35,7 @@ pub(crate) const NS_URL_DATA: &str = "http://jabber.org/protocol/url-data";
 /// call sites).
 pub const NS_CLIENT: &str = "jabber:client";
 pub(crate) const NS_WADDLE_EXTENSION: &str = "urn:waddle:extension:1";
+/// Protocol token `urn:waddle:link-preview:0`.
 pub const NS_WADDLE_LINK_PREVIEW: &str = "urn:waddle:link-preview:0";
 pub(crate) const NS_RDF_SYNTAX: &str = "http://www.w3.org/1999/02/22-rdf-syntax-ns#";
 pub(crate) const NS_OPENGRAPH: &str = "https://ogp.me/ns#";
@@ -35,6 +45,7 @@ pub(crate) const NS_MUC: &str = "http://jabber.org/protocol/muc";
 pub(crate) const NS_MUC_USER: &str = "http://jabber.org/protocol/muc#user";
 pub(crate) const NS_STICKERS: &str = "urn:xmpp:stickers:0";
 pub(crate) const NS_VCARD_UPDATE: &str = "vcard-temp:x:update";
+/// Protocol token `urn:waddle:pin:0`.
 pub const NS_WADDLE_PIN_V0: &str = "urn:waddle:pin:0";
 
 /// `urn:xmpp:idle:1` — XEP-0319 Last User Interaction in Presence. Stamped on

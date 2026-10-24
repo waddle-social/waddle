@@ -1,3 +1,5 @@
+//! JavaScript client methods for in-call signals and call-thread state.
+
 use super::*;
 use waddle_xmpp_client::messaging::{
     build_finish, build_finish_migrated, build_muji_session_initiate, build_muji_session_terminate,
@@ -112,6 +114,7 @@ impl WaddleClient {
         })
     }
 
+    /// Send an XEP-0353 proceed signal to a full peer JID; rejects an invalid JID or failed send.
     pub fn send_call_proceed(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -133,6 +136,7 @@ impl WaddleClient {
         })
     }
 
+    /// Reject the identified call proposal at the proposing peer's full JID.
     pub fn send_call_reject(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -142,6 +146,7 @@ impl WaddleClient {
         })
     }
 
+    /// Reject a simultaneous proposal with the XEP-0353 tie-break marker.
     pub fn send_call_reject_tie_break(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -170,6 +175,7 @@ impl WaddleClient {
         })
     }
 
+    /// Retract a simultaneous proposal with the XEP-0353 tie-break marker.
     pub fn send_call_retract_tie_break(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -182,6 +188,7 @@ impl WaddleClient {
         })
     }
 
+    /// Send the XEP-0353 finish bookend for a completed call to the peer's full JID.
     pub fn send_call_finish(&self, peer_full_jid: String, sid_str: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -191,6 +198,7 @@ impl WaddleClient {
         })
     }
 
+    /// Finish the old call while identifying the new session to which it migrated.
     pub fn send_call_finish_migrated(
         &self,
         peer_full_jid: String,
@@ -419,6 +427,8 @@ impl WaddleClient {
         })
     }
 
+    /// Terminate a DM Jingle session; rejects unknown reason tokens, invalid full JIDs,
+    /// or failed IQs.
     pub fn send_call_session_terminate(
         &self,
         peer_full_jid: String,
@@ -444,6 +454,8 @@ impl WaddleClient {
         })
     }
 
+    /// Terminate a DM Jingle session and resolve to a typed success, orphaned-session, or
+    /// stanza-error outcome.
     pub fn send_call_session_terminate_with_outcome(
         &self,
         peer_full_jid: String,

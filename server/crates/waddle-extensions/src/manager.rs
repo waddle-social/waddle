@@ -1,3 +1,5 @@
+//! Extension loading, invocation, message processing, and room-observer orchestration.
+
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
@@ -41,39 +43,63 @@ enum MessageHookMode {
     EnrichOnly,
 }
 
+/// Number of enrichment entries appended to a stanza and effects requiring host handling.
 #[derive(Debug, Clone, Default)]
 pub struct MessageExtensionOutcome {
+    /// Number of enrichment entries appended to the processed message.
     pub enrichments_added: usize,
+    /// Host operations requested by the extension response.
     pub effects: Vec<ExtensionEffect>,
 }
 
 /// Result of invoking one explicitly selected message observer.
 #[derive(Debug, Clone, Default)]
 pub struct ObserverOutcome {
+    /// Host operations requested by the extension response.
     pub effects: Vec<ExtensionEffect>,
 }
 
+/// Owned launch submission plus signed context and token used to authorize guest dispatch.
 pub struct LaunchInvocationRequest<'a> {
+    /// Identifier of the loaded plugin selected for this invocation.
     pub plugin_name: &'a str,
+    /// Identifier of the action associated with this value.
     pub action_id: &'a str,
+    /// Identifier of the launch associated with this value.
     pub launch_id: LaunchId,
+    /// Community and source-message context bound to the launch authorization.
     pub context: LaunchContext,
+    /// Full JID of the authenticated client submitting the launch.
     pub requester: FullJidValue,
+    /// Identifier of the session associated with this value.
     pub session_id: Option<CommandSessionId>,
+    /// Action requested by the client or exposed by the UI.
     pub action: Option<CommandAction>,
+    /// Fields carried by the data form or provider payload.
     pub fields: Vec<crate::types::FormFieldValue>,
+    /// Optional structured form supplied with the command action.
     pub form: Option<crate::types::DataForm>,
+    /// Optional RFC 3339 deadline bound into the signed launch token.
     pub expires_at: Option<crate::types::Timestamp>,
+    /// Signed token authorizing this exact launch context and submitted payload fields.
     pub launch_token: &'a str,
 }
 
+/// Borrowed launch parameters used to verify the submitted token without invoking a guest.
 pub struct LaunchValidationRequest<'a> {
+    /// Identifier of the loaded plugin selected for this invocation.
     pub plugin_name: &'a str,
+    /// Identifier of the action associated with this value.
     pub action_id: &'a str,
+    /// Identifier of the launch associated with this value.
     pub launch_id: &'a LaunchId,
+    /// Community and source-message context bound to the launch authorization.
     pub context: &'a LaunchContext,
+    /// Fields carried by the data form or provider payload.
     pub fields: &'a [crate::types::FormFieldValue],
+    /// Optional RFC 3339 deadline bound into the signed launch token.
     pub expires_at: Option<&'a crate::types::Timestamp>,
+    /// Signed token authorizing this exact launch context and submitted payload fields.
     pub launch_token: &'a str,
 }
 
@@ -87,14 +113,23 @@ struct LaunchTokenVerification<'a> {
     token: &'a str,
 }
 
+/// Ad-hoc command submission and requester authority dispatched by the extension manager.
 pub struct CommandInvocationRequest<'a> {
+    /// PubSub or discovery node selected by the request.
     pub node: &'a str,
+    /// Identifier of the Waddle community providing invocation context.
     pub waddle_id: WaddleId,
+    /// Bare JID of the room in scope.
     pub room: Option<RoomJid>,
+    /// Full JID of the authenticated client submitting the command.
     pub requester: FullJidValue,
+    /// Identifier of the session associated with this value.
     pub session_id: Option<CommandSessionId>,
+    /// Action requested by the client or exposed by the UI.
     pub action: Option<CommandAction>,
+    /// Fields carried by the data form or provider payload.
     pub fields: Vec<crate::types::FormFieldValue>,
+    /// Optional structured form supplied with the command action.
     pub form: Option<crate::types::DataForm>,
 }
 
@@ -112,6 +147,7 @@ enum EffectiveModuleConfigError {
     },
 }
 
+/// Loaded extension actors, discovery metadata, and launch-signing authority for one host.
 #[derive(Debug)]
 pub struct ExtensionManager {
     actors: Vec<Arc<WasmExtensionActor>>,

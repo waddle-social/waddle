@@ -1,3 +1,5 @@
+//! Construction of message bodies, delivery markers, reactions, and moderation stanzas.
+
 use minidom::Element;
 use uuid::Uuid;
 
@@ -12,6 +14,11 @@ use super::namespaces::*;
 use super::parsing::payloads::validate_chat_state;
 use super::types::*;
 
+/// Build an XEP-0085 chat-state message with a generated stanza identifier and optional thread.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` unless `state` is active, composing, paused, inactive, or gone.
 pub fn build_chat_state_message(
     to: &str,
     state: &str,
@@ -34,6 +41,7 @@ pub fn build_chat_state_message(
     Ok(builder.build())
 }
 
+/// Build an XEP-0333 displayed marker with storage-suppression hints and optional thread.
 pub fn build_displayed_message(
     to: &str,
     message_id: &str,
@@ -65,6 +73,7 @@ pub fn build_displayed_message(
     builder.build()
 }
 
+/// Build an XEP-0444 complete reaction update with a generated stanza/origin identifier and storage hint.
 pub fn build_reaction_message(
     to: &str,
     message_type: &str,
@@ -101,6 +110,7 @@ pub fn build_reaction_message(
         .build()
 }
 
+/// Build a call-session reaction addressed as chat or groupchat according to the typed recipient.
 pub fn build_in_call_reaction_message(
     recipient: &InCallReactionRecipient,
     sid: &InCallSessionId,
@@ -201,6 +211,7 @@ fn build_pin_message(
         .build()
 }
 
+/// Build an XEP-0424 retraction with a generated stanza/origin identifier and optional thread.
 pub fn build_retraction_message(
     to: &str,
     message_type: &str,
@@ -256,6 +267,10 @@ pub fn build_retraction_message(
 /// Typed-payloads rule: the occupant JID is built from a typed
 /// [`jid::BareJid`] + resource (nick validation happens here, not via
 /// string concatenation); an invalid nick surfaces as a bad-request error.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` if `nick` cannot be used as the room JID resource.
 pub fn build_muc_join_presence(room: &jid::BareJid, nick: &str) -> ClientResult<Element> {
     let occupant = room
         .with_resource_str(nick)
@@ -287,6 +302,7 @@ pub fn is_muc_join_presence(stanza: &Element) -> bool {
     })
 }
 
+/// Build an XEP-0425 moderation IQ-set targeting the selected message, with an optional reason.
 pub fn build_moderation_message(
     to: &str,
     _message_type: &str,
@@ -315,6 +331,11 @@ pub fn build_moderation_message(
         .build()
 }
 
+/// Build an outbound message with the XEP-0308 replacement identifier attached.
+///
+/// # Errors
+///
+/// Returns a file-sharing validation error if encrypted attachments lack a plaintext hash or a non-blank ciphertext source URL. Recipient and message-type strings are retained as supplied.
 pub fn build_correction_message(
     to: &str,
     message_type: &str,
@@ -334,6 +355,10 @@ pub fn build_correction_message(
 /// Build a `<message/>` stanza carrying the body plus any XEP payloads from
 /// `options`. All XML construction goes through typed `minidom::Element`
 /// builders — never `format!` — per the project XML hard rule.
+///
+/// # Errors
+///
+/// Returns a file-sharing validation error if encrypted attachments lack a plaintext hash or a non-blank ciphertext source URL. Recipient and message-type strings are retained as supplied.
 pub fn build_outbound_message(
     to: &str,
     message_type: &str,
@@ -563,6 +588,11 @@ fn build_origin_id(stanza_id: &str) -> Element {
         .build()
 }
 
+/// Build XEP-0447 file metadata and sources, nesting XEP-0448 encryption metadata when supplied.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` if an encrypted file lacks a plaintext content hash or has no non-blank ciphertext source URL.
 pub fn build_file_sharing_element(file: &SharedFile) -> ClientResult<Element> {
     // XEP-0448 §2.1: for encrypted transfers the `<file/>` metadata MUST
     // carry at least one plaintext `<hash/>` so recipients can verify the

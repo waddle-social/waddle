@@ -2,20 +2,28 @@
 
 use minidom::Element;
 
+/// Protocol token `urn:xmpp:fallback:0`.
 pub const NS_FALLBACK: &str = "urn:xmpp:fallback:0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Half-open Unicode-character range marking fallback text in a message body.
 pub struct FallbackRange {
+    /// Inclusive character offset in the message body.
     pub start: usize,
+    /// Exclusive character offset in the message body.
     pub end: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// A whole-body or character-range XEP-0428 fallback declaration.
 pub enum BodyFallback {
+    /// The entire message body is fallback text for the feature.
     Whole,
+    /// Only the supplied body ranges are fallback text for this feature.
     Ranges(Vec<FallbackRange>),
 }
 
+/// Whether this message declares its entire body as fallback text for the supplied feature namespace.
 pub fn has_whole_body_fallback_for(message: &Element, feature_ns: &str) -> bool {
     message.children().any(|child| {
         child.name() == "fallback"
@@ -35,6 +43,7 @@ fn fallback_marks_whole_body(fallback: &Element) -> bool {
     body.attr("start").is_none() && body.attr("end").is_none() && body_children.next().is_none()
 }
 
+/// Collect valid body fallback declarations for the requested feature, ignoring malformed declarations.
 pub fn body_fallbacks_for(message: &Element, feature_ns: &str) -> Vec<BodyFallback> {
     message
         .children()
@@ -77,6 +86,7 @@ fn parse_body_fallback(fallback: &Element) -> Option<BodyFallback> {
     Some(BodyFallback::Ranges(ranges))
 }
 
+/// Remove the specified Unicode-character ranges from the body, clamping ranges to its length.
 pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
     if ranges.is_empty() {
         return body.to_string();

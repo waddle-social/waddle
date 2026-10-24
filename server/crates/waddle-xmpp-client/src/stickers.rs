@@ -50,16 +50,19 @@ pub const NS_HASHES: &str = "urn:xmpp:hashes:2";
 /// the parse boundary rather than smuggled through as strings.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HashAlgo {
+    /// SHA-256 content hashing.
     Sha256,
 }
 
 impl HashAlgo {
+    /// Borrow the stored text or canonical protocol token without allocating.
     pub fn as_str(self) -> &'static str {
         match self {
             HashAlgo::Sha256 => "sha-256",
         }
     }
 
+    /// Interpret a protocol attribute, preserving the documented default for unknown or missing values.
     pub fn from_attr(value: &str) -> Option<Self> {
         match value {
             "sha-256" => Some(HashAlgo::Sha256),
@@ -71,6 +74,7 @@ impl HashAlgo {
 /// One XEP-0300 `<hash xmlns='urn:xmpp:hashes:2'/>` value.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerHash {
+    /// Hash algorithm token advertised with the digest.
     pub algo: HashAlgo,
     /// Base64 text content of the `<hash/>` element.
     pub value_b64: String,
@@ -81,11 +85,14 @@ pub struct StickerHash {
 /// carries no language tag.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerText {
+    /// Language tag for the advertised name.
     pub lang: Option<String>,
+    /// Human-readable text associated with this value.
     pub text: String,
 }
 
 impl StickerText {
+    /// Create sticker text with no language tag.
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             lang: None,
@@ -100,7 +107,9 @@ impl StickerText {
 /// is accepted on parse and normalized into this pair.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StickerDimensions {
+    /// Media width in pixels.
     pub width: u32,
+    /// Media height in pixels.
     pub height: u32,
 }
 
@@ -110,13 +119,17 @@ pub struct StickerDimensions {
 pub struct PackSticker {
     /// Mandatory lang-less textual fallback (usually emoji).
     pub desc: String,
+    /// MIME media type of the referenced content.
     pub media_type: Option<String>,
+    /// Content size in bytes.
     pub size: Option<u64>,
+    /// Pixel dimensions advertised for the media.
     pub dimensions: Option<StickerDimensions>,
     /// ≥1 per XEP-0449; all stickers in a pack MUST share one algorithm.
     pub hashes: Vec<StickerHash>,
     /// XEP-0447 `<url-data target='…'/>` source URLs.
     pub sources: Vec<String>,
+    /// Suggested response or presentation metadata supplied by the provider.
     pub suggests: Vec<StickerText>,
 }
 
@@ -127,6 +140,7 @@ pub struct PackSticker {
 pub struct PackId(String);
 
 impl PackId {
+    /// Create `PackId` from non-blank text, returning `None` for empty or whitespace-only input.
     pub fn new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         if value.trim().is_empty() {
@@ -135,6 +149,7 @@ impl PackId {
         Some(Self(value))
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -150,6 +165,7 @@ impl std::fmt::Display for PackId {
 /// whose id is the pack id and whose payload is the `<pack/>` element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerPackDoc {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: PackId,
     /// `<name/>` entries; multiple entries differ by `xml:lang`.
     pub name: Vec<StickerText>,
@@ -157,6 +173,7 @@ pub struct StickerPackDoc {
     pub summary: Vec<StickerText>,
     /// `<restricted/>` marker: the pack may not be imported by others.
     pub restricted: bool,
+    /// Stickers contained in this pack or attached to the message.
     pub stickers: Vec<PackSticker>,
     /// Trailing pack-level `<hash/>` as seen on the wire. `None` only
     /// for locally assembled docs that have not been serialized yet;
@@ -639,8 +656,11 @@ pub fn build_pack_retract_iq(iq_id: &str, pack_id: &PackId) -> Element {
 /// sender's own PEP `urn:xmpp:stickers:0` node.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackRef {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: PackId,
+    /// XMPP address identifying the referenced entity.
     pub jid: Option<BareJid>,
+    /// PubSub or discovery node selected by the request.
     pub node: Option<String>,
 }
 
@@ -649,6 +669,7 @@ pub struct PackRef {
 /// (XEP-0449 §send: the `pack` attribute is a MAY).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StickerMarker {
+    /// Sticker pack containing this sticker.
     pub pack: Option<PackRef>,
 }
 

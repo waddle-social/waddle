@@ -37,6 +37,7 @@ pub struct PinEntry {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Message excerpt and media metadata suitable for rendering a pinned-message preview.
 pub struct PinPreview {
     /// Bare JID of the message author at pin time.
     pub author_jid: String,
@@ -123,8 +124,11 @@ pub struct PinEvent {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a pin notification adds or removes a pinned message.
 pub enum PinEventAction {
+    /// The target message was pinned.
     Pinned,
+    /// The target message was unpinned.
     Unpinned,
 }
 

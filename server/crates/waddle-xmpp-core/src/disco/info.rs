@@ -23,20 +23,27 @@ pub const DISCO_INFO_NS: &str = "http://jabber.org/protocol/disco#info";
 /// Parsed disco#info query.
 #[derive(Debug, Clone)]
 pub struct DiscoInfoQuery {
+    /// Optional destination JID supplied by the request.
     pub target: Option<String>,
+    /// PubSub or discovery node selected by the request.
     pub node: Option<String>,
 }
 
 /// Identity element for disco#info response.
 #[derive(Debug, Clone)]
 pub struct Identity {
+    /// XEP-0030 identity category.
     pub category: String,
+    /// Protocol identity subtype within the category.
     pub type_: String,
+    /// Language tag for the advertised name.
     pub lang: Option<String>,
+    /// Human-readable name advertised to clients.
     pub name: Option<String>,
 }
 
 impl Identity {
+    /// Create a discovery identity with a category, subtype, optional name, and no language tag.
     pub fn new(category: &str, type_: &str, name: Option<&str>) -> Self {
         Self {
             category: category.to_string(),
@@ -46,19 +53,23 @@ impl Identity {
         }
     }
 
+    /// Set the lang and return the updated value.
     pub fn with_lang(mut self, lang: Option<&str>) -> Self {
         self.lang = lang.map(str::to_string);
         self
     }
 
+    /// Create an identity advertising category `server` and type `im` with the supplied display name.
     pub fn server(name: Option<&str>) -> Self {
         Self::new("server", "im", name)
     }
 
+    /// Create an identity advertising category `conference` and type `text` with the supplied display name.
     pub fn muc_service(name: Option<&str>) -> Self {
         Self::new("conference", "text", name)
     }
 
+    /// Create an identity advertising category `conference` and type `text` with the supplied display name.
     pub fn muc_room(name: Option<&str>) -> Self {
         Self::new("conference", "text", name)
     }
@@ -72,22 +83,27 @@ impl Identity {
         Self::new("conference", "audio-video", name)
     }
 
+    /// Create an identity advertising category `store` and type `file` with the supplied display name.
     pub fn upload_service(name: Option<&str>) -> Self {
         Self::new("store", "file", name)
     }
 
+    /// Create an identity advertising category `pubsub` and type `service` with the supplied display name.
     pub fn pubsub_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
 
+    /// Create an identity advertising category `pubsub` and type `push` with the supplied display name.
     pub fn pubsub_push(name: Option<&str>) -> Self {
         Self::new("pubsub", "push", name)
     }
 
+    /// Create an identity advertising category `pubsub` and type `leaf` with the supplied display name.
     pub fn pubsub_leaf(name: Option<&str>) -> Self {
         Self::new("pubsub", "leaf", name)
     }
 
+    /// Create an identity advertising category `pubsub` and type `service` with the supplied display name.
     pub fn spaces_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
@@ -100,6 +116,7 @@ impl Identity {
         Self::new("pubsub", "service", name)
     }
 
+    /// Create an identity advertising category `automation` and type `command-node` with the supplied display name.
     pub fn automation(name: Option<&str>) -> Self {
         Self::new("automation", "command-node", name)
     }
@@ -109,6 +126,7 @@ impl Identity {
         Self::new("client", "bot", name)
     }
 
+    /// Create an identity advertising category `automation` and type `command-list` with the supplied display name.
     pub fn command_list(name: Option<&str>) -> Self {
         Self::new("automation", "command-list", name)
     }
@@ -123,6 +141,10 @@ pub fn is_disco_info_query(iq: &Iq) -> bool {
 }
 
 /// Parse a disco#info query from an IQ stanza.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` unless this is an IQ-get containing a disco#info query.
 pub fn parse_disco_info_query(iq: &Iq) -> Result<DiscoInfoQuery, CoreError> {
     let query_elem = match iq {
         Iq::Get { payload, .. } => {
@@ -172,17 +194,25 @@ const NS_DATA_FORMS: &str = "jabber:x:data";
 /// as invalid (do not cache).
 #[derive(Debug, Clone)]
 pub struct DiscoInfoResponse {
+    /// PubSub or discovery node selected by the request.
     pub node: Option<String>,
+    /// Service identities advertised in the discovery response.
     pub identities: Vec<Identity>,
+    /// Protocol feature namespaces advertised by the entity.
     pub features: Vec<Feature>,
     /// XEP-0128 service-discovery extension forms preserved verbatim
     /// (typically `<x xmlns="jabber:x:data" type="result">…</x>`).
     pub extensions: Vec<Element>,
+    /// Whether duplicate identities/features or invalid FORM_TYPE cardinality make this response unsuitable for capability verification.
     pub ill_formed: bool,
 }
 
 /// Parse the `<query/>` element of a disco#info IQ result into typed
 /// identities + features + verbatim XEP-0128 extension forms.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` for the wrong query root or identities/features missing their required attributes.
 pub fn parse_disco_info_response(query: &Element) -> Result<DiscoInfoResponse, CoreError> {
     if query.name() != "query" || query.ns() != DISCO_INFO_NS {
         return Err(CoreError::bad_request(Some(

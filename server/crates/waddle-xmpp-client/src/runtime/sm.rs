@@ -1,3 +1,5 @@
+//! Stream-management negotiation, acknowledgement clocks, and replay coordination.
+
 use crate::bootstrap::NS_STREAMS;
 
 use crate::error::{ClientError, ClientResult};

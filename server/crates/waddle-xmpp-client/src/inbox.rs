@@ -13,47 +13,69 @@ use minidom::Element;
 /// Namespace constant — kept local to the client so the wasm bindings
 /// don't need a transitive dep on `waddle-xmpp`.
 pub const NS_INBOX: &str = "urn:xmpp:inbox:1";
+/// Protocol token `urn:waddle:inbox:0`.
 pub const NS_WADDLE_INBOX: &str = "urn:waddle:inbox:0";
 const NS_MAM: &str = "urn:xmpp:mam:2";
 
 /// Source surface for one streamed XEP-0430 inbox `<entry/>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboxStreamEntrySource {
+    /// An entry streamed in response to an explicit query.
     QueryResponse,
+    /// An unsolicited service notification.
     Push,
 }
 
 /// Typed projection of one streamed `<entry/>` element.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InboxStreamEntry {
+    /// Typed source data used by the invocation.
     pub source: InboxStreamEntrySource,
+    /// Identifier of the query associated with this value.
     pub query_id: Option<String>,
+    /// Other participant in the direct-message conversation.
     pub partner: String,
+    /// Discriminator selecting the interpretation of this payload.
     pub kind: Option<String>,
+    /// Identifier of the last stanza associated with this value.
     pub last_stanza_id: String,
+    /// Last update time reported by the service.
     pub last_updated: Option<i64>,
+    /// Number of unread messages or the unread state reported by the service.
     pub unread: u32,
+    /// Preview content suitable for display without loading the full item.
     pub preview: Option<String>,
+    /// Conversation thread identifier.
     pub thread_id: Option<String>,
+    /// Display title reported for the conversation thread.
     pub thread_title: Option<String>,
+    /// Number of replies reported for this thread.
     pub reply_count: Option<u32>,
+    /// Identity of the user who authored this content.
     pub author: Option<String>,
 }
 
 /// Counts carried in the closing `<fin/>` element.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct InboxFinCounts {
+    /// Total number of matching entries reported by the service.
     pub total: u32,
+    /// Number of unread messages or the unread state reported by the service.
     pub unread: u32,
+    /// Whether every conversation is marked unread.
     pub all_unread: u32,
 }
 
 /// Closing fin payload.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InboxFin {
+    /// Counts grouped by the corresponding status or affiliation.
     pub counts: InboxFinCounts,
+    /// First identifier in the result-set page.
     pub rsm_first: Option<String>,
+    /// Last identifier in the result-set page.
     pub rsm_last: Option<String>,
+    /// Total number of matching entries reported by the archive.
     pub rsm_count: Option<u32>,
 }
 
@@ -63,7 +85,9 @@ pub struct InboxFin {
 /// (cfg-gated) and the wasm driver's pending-query reducer.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct InboxPage {
+    /// Entries returned in their protocol-defined order.
     pub entries: Vec<InboxStreamEntry>,
+    /// Final MAM query metadata received from the archive.
     pub fin: InboxFin,
 }
 

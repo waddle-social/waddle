@@ -1,3 +1,5 @@
+//! Shared browser-client stanza, error, and request helpers.
+
 use super::*;
 
 pub(crate) fn build_client_config(config: &StoredConfig) -> Result<ClientConfig, JsValue> {

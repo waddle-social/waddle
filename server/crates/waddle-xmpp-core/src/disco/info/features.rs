@@ -1,44 +1,58 @@
+//! Feature advertisements for Waddle services and XMPP discovery responses.
+
 use crate::mam::{FULLTEXT_MAM_NS, WADDLE_MAM_THREAD_NS};
 
 use super::{DISCO_INFO_NS, NS_CHATSTATES, NS_COMMANDS, NS_MUC_SELF_PING_OPTIMIZATION};
 
 /// Feature element for disco#info response.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Feature(pub String);
+pub struct Feature(
+    /// Namespace token advertised by the feature element.
+    pub String,
+);
 
 impl Feature {
+    /// Create a feature advertisement from its protocol namespace token.
     pub fn new(var: &str) -> Self {
         Self(var.to_string())
     }
 
+    /// Create a discovery feature advertisement for `DISCO_INFO_NS`.
     pub fn disco_info() -> Self {
         Self::new(DISCO_INFO_NS)
     }
 
+    /// Create a discovery feature advertisement for `super::super::items::DISCO_ITEMS_NS`.
     pub fn disco_items() -> Self {
         Self::new(super::super::items::DISCO_ITEMS_NS)
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/muc`.
     pub fn muc() -> Self {
         Self::new("http://jabber.org/protocol/muc")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:mam:2`.
     pub fn mam() -> Self {
         Self::new("urn:xmpp:mam:2")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:mam:2#extended`.
     pub fn mam_extended() -> Self {
         Self::new("urn:xmpp:mam:2#extended")
     }
 
+    /// Create a discovery feature advertisement for `FULLTEXT_MAM_NS`.
     pub fn fulltext_mam() -> Self {
         Self::new(FULLTEXT_MAM_NS)
     }
 
+    /// Create a discovery feature advertisement for `WADDLE_MAM_THREAD_NS`.
     pub fn waddle_mam_thread() -> Self {
         Self::new(WADDLE_MAM_THREAD_NS)
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:reply:0`.
     pub fn replies() -> Self {
         Self::new("urn:xmpp:reply:0")
     }
@@ -50,22 +64,27 @@ impl Feature {
         Self::new("urn:waddle:threads:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:sid:0`.
     pub fn stanza_ids() -> Self {
         Self::new("urn:xmpp:sid:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:message-correct:0`.
     pub fn message_correction() -> Self {
         Self::new("urn:xmpp:message-correct:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:chat-markers:0`.
     pub fn chat_markers() -> Self {
         Self::new("urn:xmpp:chat-markers:0")
     }
 
+    /// Create a discovery feature advertisement for `NS_CHATSTATES`.
     pub fn chat_states() -> Self {
         Self::new(NS_CHATSTATES)
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:message-retract:1`.
     pub fn message_retraction() -> Self {
         Self::new("urn:xmpp:message-retract:1")
     }
@@ -81,118 +100,147 @@ impl Feature {
         Self::new("urn:xmpp:message-retract:1#tombstone")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:message-moderate:1`.
     pub fn message_moderation() -> Self {
         Self::new("urn:xmpp:message-moderate:1")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:reactions:0`.
     pub fn reactions() -> Self {
         Self::new("urn:xmpp:reactions:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:reference:0`.
     pub fn references() -> Self {
         Self::new("urn:xmpp:reference:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:fallback:0`.
     pub fn fallback_indication() -> Self {
         Self::new("urn:xmpp:fallback:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:sm:3`.
     pub fn stream_management() -> Self {
         Self::new("urn:xmpp:sm:3")
     }
 
+    /// Create a discovery feature advertisement for `jabber:iq:roster`.
     pub fn roster() -> Self {
         Self::new("jabber:iq:roster")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:carbons:2`.
     pub fn carbons() -> Self {
         Self::new("urn:xmpp:carbons:2")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/caps`.
     pub fn caps() -> Self {
         Self::new("http://jabber.org/protocol/caps")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:features:rosterver`.
     pub fn roster_versioning() -> Self {
         Self::new("urn:xmpp:features:rosterver")
     }
 
+    /// Create a discovery feature advertisement for `vcard-temp`.
     pub fn vcard() -> Self {
         Self::new("vcard-temp")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:http:upload:0`.
     pub fn http_upload() -> Self {
         Self::new("urn:xmpp:http:upload:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:push:0`.
     pub fn push() -> Self {
         Self::new("urn:xmpp:push:0")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/bytestreams`.
     pub fn socks5_bytestreams() -> Self {
         Self::new("http://jabber.org/protocol/bytestreams")
     }
 
+    /// Create a discovery feature advertisement for `jabber:iq:last`.
     pub fn last_activity() -> Self {
         Self::new("jabber:iq:last")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:blocking`.
     pub fn blocking() -> Self {
         Self::new("urn:xmpp:blocking")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:ping`.
     pub fn ping() -> Self {
         Self::new("urn:xmpp:ping")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:time`.
     pub fn entity_time() -> Self {
         Self::new("urn:xmpp:time")
     }
 
+    /// Create a discovery feature advertisement for `jabber:iq:version`.
     pub fn software_version() -> Self {
         Self::new("jabber:iq:version")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/ibb`.
     pub fn ibb() -> Self {
         Self::new("http://jabber.org/protocol/ibb")
     }
 
+    /// Create a discovery feature advertisement for `NS_COMMANDS`.
     pub fn commands() -> Self {
         Self::new(NS_COMMANDS)
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:csi:0`.
     pub fn csi() -> Self {
         Self::new("urn:xmpp:csi:0")
     }
 
+    /// Create a discovery feature advertisement for `NS_MUC_SELF_PING_OPTIMIZATION`.
     pub fn muc_self_ping_optimization() -> Self {
         Self::new(NS_MUC_SELF_PING_OPTIMIZATION)
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub`.
     pub fn pubsub() -> Self {
         Self::new("http://jabber.org/protocol/pubsub")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#pep`.
     pub fn pep() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#pep")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#auto-create`.
     pub fn pubsub_auto_create() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#auto-create")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#persistent-items`.
     pub fn pubsub_persistent_items() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#persistent-items")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#publish`.
     pub fn pubsub_publish() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#publish")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#retrieve-items`.
     pub fn pubsub_retrieve_items() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#retrieve-items")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:bookmarks:1`.
     pub fn bookmarks2() -> Self {
         Self::new("urn:xmpp:bookmarks:1")
     }
@@ -215,46 +263,57 @@ impl Feature {
         Self::new("urn:ietf:params:xml:ns:xcal")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:bookmarks:1#compat`.
     pub fn bookmarks_compat() -> Self {
         Self::new("urn:xmpp:bookmarks:1#compat")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:carbons:rules:0`.
     pub fn carbons_rules() -> Self {
         Self::new("urn:xmpp:carbons:rules:0")
     }
 
+    /// Create a discovery feature advertisement for `msgoffline`.
     pub fn offline_messages() -> Self {
         Self::new("msgoffline")
     }
 
+    /// Create a discovery feature advertisement for `super::SERVER_INFO_FORM_TYPE`.
     pub fn server_info() -> Self {
         Self::new(super::SERVER_INFO_FORM_TYPE)
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:occupant-id:0`.
     pub fn occupant_id() -> Self {
         Self::new("urn:xmpp:occupant-id:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:hats:0`.
     pub fn hats() -> Self {
         Self::new("urn:xmpp:hats:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:mentions:0`.
     pub fn explicit_mentions() -> Self {
         Self::new("urn:xmpp:mentions:0")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:mentions:0#channel`.
     pub fn channel_mentions() -> Self {
         Self::new("urn:xmpp:mentions:0#channel")
     }
 
+    /// Create a discovery feature advertisement for `muc_persistent`.
     pub fn muc_persistent() -> Self {
         Self::new("muc_persistent")
     }
 
+    /// Create a discovery feature advertisement for `muc_temporary`.
     pub fn muc_temporary() -> Self {
         Self::new("muc_temporary")
     }
 
+    /// Create a discovery feature advertisement for `muc_unsecured`.
     pub fn muc_unsecured() -> Self {
         Self::new("muc_unsecured")
     }
@@ -265,58 +324,72 @@ impl Feature {
         Self::new("http://jabber.org/protocol/muc#stable_id")
     }
 
+    /// Create a discovery feature advertisement for `muc_open`.
     pub fn muc_open() -> Self {
         Self::new("muc_open")
     }
 
+    /// Create a discovery feature advertisement for `muc_membersonly`.
     pub fn muc_membersonly() -> Self {
         Self::new("muc_membersonly")
     }
 
+    /// Create a discovery feature advertisement for `muc_public`.
     pub fn muc_public() -> Self {
         Self::new("muc_public")
     }
 
+    /// Create a discovery feature advertisement for `muc_hidden`.
     pub fn muc_hidden() -> Self {
         Self::new("muc_hidden")
     }
 
+    /// Create a discovery feature advertisement for `muc_nonanonymous`.
     pub fn muc_nonanonymous() -> Self {
         Self::new("muc_nonanonymous")
     }
 
+    /// Create a discovery feature advertisement for `muc_unmoderated`.
     pub fn muc_unmoderated() -> Self {
         Self::new("muc_unmoderated")
     }
 
+    /// Create a discovery feature advertisement for `muc_moderated`.
     pub fn muc_moderated() -> Self {
         Self::new("muc_moderated")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#subscribe`.
     pub fn pubsub_subscribe() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#subscribe")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#access-whitelist`.
     pub fn pubsub_access_whitelist() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#access-whitelist")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#publish-only-affiliation`.
     pub fn pubsub_publish_only_affiliation() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#publish-only-affiliation")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#access-presence`.
     pub fn pubsub_access_presence() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#access-presence")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#auto-subscribe`.
     pub fn pubsub_auto_subscribe() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#auto-subscribe")
     }
 
+    /// Create a discovery feature advertisement for `http://jabber.org/protocol/pubsub#filtered-notifications`.
     pub fn pubsub_filtered_notifications() -> Self {
         Self::new("http://jabber.org/protocol/pubsub#filtered-notifications")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:avatar:metadata+notify`.
     pub fn avatar_metadata_notify() -> Self {
         Self::new("urn:xmpp:avatar:metadata+notify")
     }
@@ -353,10 +426,12 @@ impl Feature {
         Self::new("urn:xmpp:mds:displayed:0+notify")
     }
 
+    /// Create a discovery feature advertisement for `jabber:iq:private`.
     pub fn private_storage() -> Self {
         Self::new("jabber:iq:private")
     }
 
+    /// Create a discovery feature advertisement for `urn:xmpp:spaces:0`.
     pub fn spaces() -> Self {
         Self::new("urn:xmpp:spaces:0")
     }

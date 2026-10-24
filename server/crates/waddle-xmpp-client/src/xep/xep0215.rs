@@ -57,7 +57,9 @@ impl ExternalServiceType {
 /// Transport of a `<service transport='…'/>` entry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalServiceTransport {
+    /// UDP transport for the external service.
     Udp,
+    /// TCP transport for the external service.
     Tcp,
 }
 
@@ -83,14 +85,19 @@ impl ExternalServiceTransport {
 /// `<service/>` element. Credentials are present only on TURN/TURNS entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ExternalService {
+    /// Discovered service classification.
     pub service_type: ExternalServiceType,
+    /// Network host included in the authentication request.
     pub host: String,
     /// `port` is RECOMMENDED but optional in XEP-0215; `None` when the server
     /// omits it (the ICE URI then carries no explicit port and the client uses
     /// the scheme default).
     pub port: Option<u16>,
+    /// WebSocket endpoint, origin, and connection timeout settings.
     pub transport: Option<ExternalServiceTransport>,
+    /// Account name entered in the search form.
     pub username: Option<String>,
+    /// Optional room password required when joining.
     pub password: Option<String>,
     /// When the credentials expire (XEP-0215 §3.6.5 `expires`, an XEP-0082
     /// dateTime). Parsed to a typed value so the client's refresh logic never

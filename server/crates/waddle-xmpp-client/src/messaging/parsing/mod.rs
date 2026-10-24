@@ -1,3 +1,5 @@
+//! Conversion of incoming message XML into structured client events.
+
 mod files;
 mod markup;
 pub(super) mod payloads;

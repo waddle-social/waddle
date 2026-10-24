@@ -89,6 +89,10 @@ pub fn parse_managed_room_jid(room_jid: &jid::BareJid) -> Option<String> {
 }
 
 /// Build the canonical bare JID for a managed channel room.
+///
+/// # Errors
+///
+/// Returns a JID parsing error if the channel localpart and MUC domain do not form a valid bare JID.
 pub fn managed_room_jid(channel_id: &str, muc_domain: &str) -> Result<jid::BareJid, jid::Error> {
     format!("{}@{}", managed_room_localpart(channel_id), muc_domain).parse()
 }

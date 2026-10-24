@@ -1,3 +1,5 @@
+//! Room-presence recognition and conversion into typed messaging events.
+
 use chrono::{DateTime, Utc};
 use minidom::Element;
 use xmpp_parsers::presence::{Presence, Show, Type as PresenceType};

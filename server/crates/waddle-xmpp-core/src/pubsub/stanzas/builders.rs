@@ -1,3 +1,5 @@
+//! PubSub result, error, and notification stanza construction.
+
 use jid::Jid;
 use minidom::Element;
 use xmpp_parsers::iq::Iq;

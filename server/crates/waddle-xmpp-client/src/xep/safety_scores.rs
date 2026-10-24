@@ -111,6 +111,7 @@ impl SafetyProbability {
         (value.is_finite() && (0.0..=1.0).contains(&value)).then_some(Self(value))
     }
 
+    /// Return the finite probability within 0.0..=1.0.
     pub fn value(self) -> f64 {
         self.0
     }
@@ -122,10 +123,12 @@ impl SafetyProbability {
 pub struct JudgmentModelVersion(String);
 
 impl JudgmentModelVersion {
+    /// Create a trimmed, non-blank model-version token, returning None for blank input.
     pub fn new(value: &str) -> Option<Self> {
         non_empty(value).map(Self)
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -137,10 +140,12 @@ impl JudgmentModelVersion {
 pub struct TaxonomyVersion(String);
 
 impl TaxonomyVersion {
+    /// Create a trimmed, non-blank taxonomy-version token, returning None for blank input.
     pub fn new(value: &str) -> Option<Self> {
         non_empty(value).map(Self)
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -149,14 +154,18 @@ impl TaxonomyVersion {
 /// One `<score/>`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScore {
+    /// XEP-0030 identity category.
     pub category: SafetyCategory,
+    /// Model probability constrained to the supported unit interval.
     pub probability: SafetyProbability,
+    /// Version of the category taxonomy used by the scoring model.
     pub taxonomy_version: TaxonomyVersion,
 }
 
 /// One `<safety-scores/>` batch: every score one model call produced.
 #[derive(Debug, Clone, PartialEq)]
 pub struct SafetyScores {
+    /// Version of the scoring model that produced these values.
     pub model_version: JudgmentModelVersion,
     /// Known categories only, in document order, one per category.
     pub scores: Vec<SafetyScore>,
@@ -171,6 +180,7 @@ pub struct SafetyScoresFastening {
     pub target_stanza_id: StanzaId,
     /// Room-assigned identity of the body revision that was judged.
     pub source_revision_id: StanzaId,
+    /// Model-produced safety scores for the referenced message revision.
     pub scores: SafetyScores,
 }
 

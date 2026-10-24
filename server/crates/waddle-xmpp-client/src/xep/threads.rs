@@ -21,7 +21,9 @@ const NS_RSM: &str = "http://jabber.org/protocol/rsm";
 /// emits a `<call kind=… media=…/>` child).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ThreadCallSummary {
+    /// Discriminator selecting the interpretation of this payload.
     pub kind: CallThreadKind,
+    /// Media types supported by this call.
     pub media: CallThreadMedia,
 }
 
@@ -33,7 +35,9 @@ pub struct ThreadCallSummary {
 /// the wasm boundary unchanged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadCallEndedSummary {
+    /// Timestamp when the call ended.
     pub ended: String,
+    /// Duration associated with this operation.
     pub duration: String,
 }
 
@@ -44,15 +48,25 @@ pub struct ThreadCallEndedSummary {
 /// conversion happens in the server's `build_thread_entry`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ThreadEntry {
+    /// Channel metadata returned by the discovery service.
     pub channel: String,
+    /// Conversation thread identifier.
     pub thread_id: String,
+    /// Identifier of the last stanza associated with this value.
     pub last_stanza_id: String,
+    /// Most recent activity timestamp reported by the service.
     pub last_activity: String,
+    /// Number of unread messages or the unread state reported by the service.
     pub unread: u32,
+    /// Number of replies reported for this thread.
     pub reply_count: u32,
+    /// Whether this value carries unread.
     pub has_unread: bool,
+    /// Author of the thread's root message.
     pub root_author: Option<String>,
+    /// Preview content suitable for display without loading the full item.
     pub preview: Option<String>,
+    /// Display title reported for the conversation thread.
     pub thread_title: Option<String>,
     /// Call-thread anchor summary, present when this thread anchors a call.
     pub call_thread: Option<ThreadCallSummary>,
@@ -63,8 +77,11 @@ pub struct ThreadEntry {
 /// Full response payload.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ThreadsPage {
+    /// Total number of matching entries reported by the service.
     pub total: u64,
+    /// Number of threads containing unread messages.
     pub unread_threads: u64,
+    /// Entries returned in their protocol-defined order.
     pub entries: Vec<ThreadEntry>,
     /// Opaque RSM `<last>` cursor — pass to the next request to
     /// continue paginating.
@@ -75,8 +92,11 @@ pub struct ThreadsPage {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThreadStatusFilter {
     #[default]
+    /// Include all matching entries regardless of read or subscription state.
     All,
+    /// Include only threads with unread messages.
     Unread,
+    /// Include only threads followed by the current user.
     Following,
 }
 
@@ -94,8 +114,11 @@ impl ThreadStatusFilter {
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ThreadSort {
     #[default]
+    /// Order threads by their most recent activity.
     Recent,
+    /// Include only threads with unread messages.
     Unread,
+    /// Order threads by their reply count.
     Replies,
 }
 
@@ -112,12 +135,19 @@ impl ThreadSort {
 /// Request options for `urn:waddle:threads:0`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FetchThreadsQuery<'a> {
+    /// Maximum number of entries requested per page.
     pub page_size: Option<u32>,
+    /// RSM cursor after which results should be returned.
     pub after_cursor: Option<&'a str>,
+    /// Protocol status returned by the peer.
     pub status: ThreadStatusFilter,
+    /// Timestamp when the current activity began.
     pub active_since: Option<DateTime<Utc>>,
+    /// Channel metadata returned by the discovery service.
     pub channel: Option<BareJid>,
+    /// Text entered for the user or archive search.
     pub search: Option<&'a str>,
+    /// Ordering requested for the result set.
     pub sort: ThreadSort,
 }
 

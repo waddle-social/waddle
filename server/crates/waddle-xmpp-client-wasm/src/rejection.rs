@@ -1,3 +1,5 @@
+//! Structured JavaScript promise rejections for XMPP message failures.
+
 use serde::ser::SerializeStruct;
 use serde::{Serialize, Serializer};
 use waddle_xmpp_client::messaging::MessageRejection;

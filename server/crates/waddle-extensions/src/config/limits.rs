@@ -1,9 +1,14 @@
+//! Resource, network, observation, and execution limits applied to extension invocations.
+
 use crate::types::{ObservationGeneration, RoomObservationScope};
 use serde::{Deserialize, Serialize};
 
+/// Explicit operator opt-in to a generated, scoped, concurrency-bounded room observer.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct RoomObservationConfig {
+    /// Positive operator generation used to fence stale observation configuration.
     pub generation: ObservationGeneration,
+    /// Scope in which the route, command, or observation applies.
     pub scope: RoomObservationScope,
     /// Per-node limit; each replica has its own bounded executor.
     #[serde(default = "default_concurrency")]
@@ -13,6 +18,13 @@ fn default_concurrency() -> u32 {
     4
 }
 impl RoomObservationConfig {
+    /// Validate positive generation, per-node concurrency bounds, and uniqueness of
+    /// explicitly selected rooms.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error for a zero generation, concurrency outside 1..=64, or
+    /// duplicate explicit room selections.
     pub fn validate(&self) -> Result<(), String> {
         if self.generation.get() == 0 {
             return Err("observation generation must be positive".into());
@@ -30,16 +42,23 @@ impl RoomObservationConfig {
     }
 }
 
+/// Per-invocation deadlines, Wasm resource budgets, and outbound HTTP bounds.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(default)]
 pub struct RuntimeLimits {
+    /// Maximum elapsed time for one guest initialization or event call, in milliseconds.
     pub invocation_timeout_ms: u32,
+    /// Wasmtime instruction-fuel budget for one invocation.
     pub wasm_fuel: u64,
     /// Per linear memory, with at most four memories per store.
     pub memory_bytes: usize,
+    /// Maximum elapsed time for each outbound HTTP request, in milliseconds.
     pub http_timeout_ms: u32,
+    /// Maximum body size in bytes for one outbound HTTP request.
     pub http_max_request_bytes: u32,
+    /// Maximum response body bytes accepted from one outbound HTTP request.
     pub http_max_response_bytes: u32,
+    /// Maximum outbound HTTP requests admitted during one invocation.
     pub http_max_requests: u32,
 }
 impl Default for RuntimeLimits {
@@ -56,6 +75,13 @@ impl Default for RuntimeLimits {
     }
 }
 impl RuntimeLimits {
+    /// Validate bounded deadlines, fuel, memory, HTTP body sizes, and request counts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error if deadlines, Wasm fuel/memory, HTTP body-size
+    /// limits, or request count exceed the host bounds, or if the HTTP timeout exceeds
+    /// the invocation timeout.
     pub fn validate(&self) -> Result<(), String> {
         if !(1..=120_000).contains(&self.invocation_timeout_ms)
             || !(1..=self.invocation_timeout_ms).contains(&self.http_timeout_ms)

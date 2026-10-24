@@ -16,10 +16,15 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Show {
     #[default]
+    /// Available for message delivery.
     Available,
+    /// Temporarily away from the client.
     Away,
+    /// Away for an extended period.
     Xa,
+    /// Requests that contacts avoid interruptions.
     Dnd,
+    /// Available and actively interested in chatting.
     Chat,
 }
 
@@ -38,14 +43,20 @@ impl std::fmt::Display for Show {
 /// User presence information.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct UserPresence {
+    /// XMPP address identifying the referenced entity.
     pub jid: String,
+    /// Advertised availability state.
     pub show: Show,
+    /// Optional human-readable status text.
     pub status: Option<String>,
+    /// Resource priority used by XMPP presence routing.
     pub priority: i8,
+    /// Time this presence state was last updated.
     pub updated_at: DateTime<Utc>,
 }
 
 impl UserPresence {
+    /// Create online presence with default priority and the current update timestamp.
     pub fn online(jid: FullJid) -> Self {
         Self {
             jid: jid.to_string(),
@@ -56,6 +67,7 @@ impl UserPresence {
         }
     }
 
+    /// Whether this presence state permits message delivery.
     pub fn is_available(&self) -> bool {
         !matches!(self.show, Show::Dnd | Show::Xa)
     }
@@ -64,10 +76,15 @@ impl UserPresence {
 /// Chat state (XEP-0085).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatState {
+    /// The user is composing a message.
     Composing,
+    /// The user has paused composition.
     Paused,
+    /// The user is actively viewing the conversation.
     Active,
+    /// The user is no longer actively viewing the conversation.
     Inactive,
+    /// The user has left the conversation.
     Gone,
 }
 

@@ -25,7 +25,9 @@ pub struct ReplyMarker {
 /// count Unicode code points and `end` is exclusive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FallbackRange {
+    /// Inclusive character offset in the message body.
     pub start: u32,
+    /// Exclusive character offset in the message body.
     pub end: u32,
 }
 

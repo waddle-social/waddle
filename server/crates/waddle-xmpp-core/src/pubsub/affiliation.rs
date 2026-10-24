@@ -5,13 +5,20 @@ use std::{fmt, str::FromStr};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+/// XEP-0060 affiliation governing a user's access to a PubSub node.
 pub enum Affiliation {
     #[default]
+    /// No affiliation, subscription, or optional protocol value is assigned.
     None,
+    /// Persistent owner affiliation with full administrative authority.
     Owner,
+    /// May publish items to the node.
     Publisher,
+    /// May publish items without receiving subscription notifications.
     PublishOnly,
+    /// Persistent member affiliation permitting access to a restricted node or room.
     Member,
+    /// Persistent ban preventing access to the node or room.
     Outcast,
 }
 

@@ -12,7 +12,9 @@ use crate::error::ClientResult;
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
 use uuid::Uuid;
 
+/// Protocol token `http://jabber.org/protocol/mood`.
 pub const NS_MOOD: &str = "http://jabber.org/protocol/mood";
+/// Protocol token `http://jabber.org/protocol/activity`.
 pub const NS_ACTIVITY: &str = "http://jabber.org/protocol/activity";
 /// XEP-0163 §3 notification filter for the activity node: a roster contact
 /// receives a peer's in-call overlay (ADR-010 Phase 3) only if it advertises
@@ -24,8 +26,11 @@ pub const NS_ACTIVITY_NOTIFY: &str = "http://jabber.org/protocol/activity+notify
 /// `waddle_xmpp_core::waddle_status_preference::PEP_NODE_WADDLE_STATUS_PREFERENCE`
 /// by `caps::tests::status_preference_notify_matches_core_node`.
 pub const NS_STATUS_PREFERENCE_NOTIFY: &str = "urn:waddle:status-preference:0+notify";
+/// Protocol token `http://jabber.org/protocol/tune`.
 pub const NS_TUNE: &str = "http://jabber.org/protocol/tune";
+/// Protocol token `http://jabber.org/protocol/pubsub`.
 pub const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
+/// Protocol token `http://jabber.org/protocol/pubsub#event`.
 pub const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 /// XEP-0402 bookmarks PEP node + payload namespace.
 pub const NS_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
@@ -33,36 +38,58 @@ pub const NS_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
 const NS_CLIENT: &str = "jabber:client";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// XEP-0107 mood token and optional explanatory text published through PEP.
 pub struct UserMood {
+    /// Selected XEP-0107 mood token.
     pub mood: String,
+    /// Human-readable text associated with this value.
     pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// XEP-0108 broad and specific activity tokens with optional text.
 pub struct UserActivity {
+    /// Selected broad XEP-0108 activity token.
     pub activity: String,
+    /// More specific activity token nested under the broad activity category.
     pub specific: Option<String>,
+    /// Human-readable text associated with this value.
     pub text: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// XEP-0118 metadata describing the tune currently being played.
 pub struct UserTune {
+    /// Artist credited for the current tune.
     pub artist: Option<String>,
+    /// Human-readable title rendered by the host.
     pub title: Option<String>,
+    /// Album or other collection containing the tune.
     pub source: Option<String>,
+    /// Duration of the tune in seconds.
     pub length: Option<u32>,
+    /// Rating reported for the tune.
     pub rating: Option<u8>,
+    /// Track number of the current tune.
     pub track: Option<String>,
+    /// URI identifying the referenced resource.
     pub uri: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Supported user mood, activity, and tune publications or retractions.
 pub enum PepItem {
+    /// A published XEP-0107 user mood.
     Mood(UserMood),
+    /// A published XEP-0108 user activity.
     Activity(UserActivity),
+    /// A published XEP-0118 tune.
     Tune(UserTune),
+    /// The user retracted their published mood.
     MoodCleared,
+    /// The user retracted their published activity.
     ActivityCleared,
+    /// The user retracted their published tune.
     TuneCleared,
 }
 
@@ -175,6 +202,7 @@ fn parse_tune_payload(element: &Element) -> Option<UserTune> {
     }
 }
 
+/// Build an XEP-0107 mood element from the selected mood token and optional text.
 pub fn build_mood_element(mood: &str, text: Option<&str>) -> Element {
     let mut builder =
         Element::builder("mood", NS_MOOD).append(Element::builder(mood, NS_MOOD).build());
@@ -184,14 +212,17 @@ pub fn build_mood_element(mood: &str, text: Option<&str>) -> Element {
     builder.build()
 }
 
+/// Build an empty XEP-0107 mood element that clears the current publication.
 pub fn build_mood_clear_element() -> Element {
     Element::builder("mood", NS_MOOD).build()
 }
 
+/// Build an XEP-0108 activity element from a broad activity token and optional text.
 pub fn build_activity_element(activity: &str, text: Option<&str>) -> Element {
     build_activity_element_with_specific(activity, None, text)
 }
 
+/// Build an XEP-0108 broad activity with an optional specific subactivity and explanatory text.
 pub fn build_activity_element_with_specific(
     general: &str,
     specific: Option<&str>,
@@ -208,10 +239,12 @@ pub fn build_activity_element_with_specific(
     builder.build()
 }
 
+/// Build an empty XEP-0108 activity element that clears the current publication.
 pub fn build_activity_clear_element() -> Element {
     Element::builder("activity", NS_ACTIVITY).build()
 }
 
+/// Build an XEP-0118 tune element containing the supplied optional track metadata.
 pub fn build_tune_element(tune: &UserTune) -> Element {
     let mut builder = Element::builder("tune", NS_TUNE);
     if let Some(artist) = tune.artist.as_deref() {
@@ -246,10 +279,12 @@ pub fn build_tune_element(tune: &UserTune) -> Element {
     builder.build()
 }
 
+/// Build an empty XEP-0118 tune element that clears the current publication.
 pub fn build_tune_clear_element() -> Element {
     Element::builder("tune", NS_TUNE).build()
 }
 
+/// Build an IQ-set publishing the supplied payload to the selected PEP node.
 pub fn build_pep_publish_iq(id: &str, node: &str, payload: Element) -> Element {
     build_pep_publish_iq_with_item_id(id, node, "current", payload)
 }
@@ -284,6 +319,7 @@ pub fn build_pep_publish_iq_with_item_id(
         .build()
 }
 
+/// Build an IQ-set clearing the selected PEP user-state node using its empty payload.
 pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
     let payload = match node {
         NS_MOOD => build_mood_clear_element(),
@@ -299,14 +335,17 @@ pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
 // mint a fresh one (the FFI and wasm callers use UUIDs) — a fixed id
 // would misroute a slow reply onto a later request's waiter.
 
+/// Build a PEP publication IQ-set carrying the supplied XEP-0107 mood.
 pub fn build_publish_mood_iq(id: &str, mood: &str, text: Option<&str>) -> Element {
     build_pep_publish_iq(id, NS_MOOD, build_mood_element(mood, text))
 }
 
+/// Build a PEP publication IQ-set clearing the XEP-0107 mood.
 pub fn build_retract_mood_iq(id: &str) -> Element {
     build_pep_clear_iq(id, NS_MOOD)
 }
 
+/// Build a PEP publication IQ-set carrying the supplied XEP-0108 activity.
 pub fn build_publish_activity_iq(
     id: &str,
     general: &str,
@@ -320,18 +359,22 @@ pub fn build_publish_activity_iq(
     )
 }
 
+/// Build a PEP publication IQ-set clearing the XEP-0108 activity.
 pub fn build_retract_activity_iq(id: &str) -> Element {
     build_pep_clear_iq(id, NS_ACTIVITY)
 }
 
+/// Build a PEP publication IQ-set carrying the supplied XEP-0118 tune.
 pub fn build_publish_tune_iq(id: &str, tune: &UserTune) -> Element {
     build_pep_publish_iq(id, NS_TUNE, build_tune_element(tune))
 }
 
+/// Build a PEP publication IQ-set clearing the XEP-0118 tune.
 pub fn build_retract_tune_iq(id: &str) -> Element {
     build_pep_clear_iq(id, NS_TUNE)
 }
 
+/// Build an IQ-get retrieving the selected PEP user-state node.
 pub fn build_pep_items_iq(id: &str, target_jid: &str, node: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -362,10 +405,12 @@ fn find_pep_iq_payload<'a>(
         .get_child(name, ns)
 }
 
+/// Read the XEP-0107 mood payload from a PEP-items IQ result; missing or cleared values return None.
 pub fn parse_pep_mood(iq: &Element) -> Option<UserMood> {
     parse_mood_payload(find_pep_iq_payload(iq, NS_MOOD, "mood", NS_MOOD)?)
 }
 
+/// Read the XEP-0108 activity payload from a PEP-items IQ result; missing or cleared values return None.
 pub fn parse_pep_activity(iq: &Element) -> Option<UserActivity> {
     parse_activity_payload(find_pep_iq_payload(
         iq,
@@ -375,24 +420,51 @@ pub fn parse_pep_activity(iq: &Element) -> Option<UserActivity> {
     )?)
 }
 
+/// Read the XEP-0118 tune payload from a PEP-items IQ result; missing or cleared values return None.
 pub fn parse_pep_tune(iq: &Element) -> Option<UserTune> {
     parse_tune_payload(find_pep_iq_payload(iq, NS_TUNE, "tune", NS_TUNE)?)
 }
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+/// Native client operations for publishing and clearing PEP user state.
 pub trait PepExt {
+    /// Queue a PEP mood publication with optional explanatory text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn publish_mood<'a>(
         &'a self,
         mood: &'a str,
         text: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue an empty PEP mood publication to clear the current mood.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn clear_mood(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
+    /// Queue a PEP activity publication with optional explanatory text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn publish_activity<'a>(
         &'a self,
         activity: &'a str,
         text: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue an empty PEP activity publication to clear the current activity.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn clear_activity(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
+    /// Queue a PEP tune publication with the supplied track metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn publish_tune<'a>(
         &'a self,
         artist: Option<&'a str>,
@@ -401,6 +473,11 @@ pub trait PepExt {
         length: Option<u32>,
         uri: Option<&'a str>,
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
+    /// Queue an empty PEP tune publication to clear the current tune.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::Disconnected` if the driver command channel is closed. Successful completion means the publication was queued, without waiting for the server IQ result.
     fn clear_tune(&self) -> impl std::future::Future<Output = ClientResult<()>> + Send + '_;
 }
 

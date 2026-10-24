@@ -8,11 +8,15 @@ use jid::BareJid;
 use minidom::Element;
 use xmpp_parsers::jingle::SessionId;
 
+/// Protocol token `urn:waddle:call-thread:0`.
 pub const NS_WADDLE_CALL_THREAD: &str = "urn:waddle:call-thread:0";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Whether a call-thread anchor belongs to a direct message or MUC room.
 pub enum CallThreadKind {
+    /// A direct-message conversation with a single peer.
     Dm,
+    /// A multi-user chat room or service.
     Muc,
 }
 
@@ -26,6 +30,10 @@ impl CallThreadKind {
     }
 
     /// Parse a wire token (`"dm"`/`"muc"`) into a typed kind.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidKind` unless the token names a supported call-thread kind.
     pub fn parse_token(token: &str) -> Result<Self, CallThreadParseError> {
         match token {
             "dm" => Ok(CallThreadKind::Dm),
@@ -36,12 +44,16 @@ impl CallThreadKind {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Supported media advertised by a call-thread anchor.
 pub struct CallThreadMedia {
+    /// Whether this call supports audio media.
     pub audio: bool,
+    /// Whether this call supports video media.
     pub video: bool,
 }
 
 impl CallThreadMedia {
+    /// Create media capabilities with audio enabled and video disabled.
     pub const fn audio_only() -> Self {
         Self {
             audio: true,
@@ -49,6 +61,7 @@ impl CallThreadMedia {
         }
     }
 
+    /// Create media capabilities with audio and video enabled.
     pub const fn audio_video() -> Self {
         Self {
             audio: true,
@@ -57,6 +70,10 @@ impl CallThreadMedia {
     }
 
     /// Parse a space-separated media token list (e.g. `"audio video"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidMedia` for an empty media list or tokens other than `audio` and `video`; repeated supported tokens are accepted.
     pub fn parse_tokens(value: &str) -> Result<Self, CallThreadParseError> {
         parse_media(value)
     }
@@ -75,25 +92,41 @@ impl CallThreadMedia {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Stable call-session identity, initiator, media, and start time attached to a conversation thread.
 pub struct CallThreadAnchor {
+    /// Discriminator selecting the interpretation of this payload.
     pub kind: CallThreadKind,
+    /// Call-session identifier used to correlate call signals.
     pub sid: SessionId,
+    /// Media types supported by this call.
     pub media: CallThreadMedia,
+    /// XMPP address of the user who initiated the call.
     pub initiator: BareJid,
+    /// Timestamp when the call started.
     pub started: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// End timestamp and duration targeting a previously announced call-thread anchor.
 pub struct CallThreadEnded {
+    /// Identifier of the anchor associated with this value.
     pub anchor_id: String,
+    /// Timestamp when the call ended.
     pub ended: DateTime<Utc>,
+    /// Duration associated with this operation.
     pub duration: CallThreadDuration,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Validated duration token used by a call-thread end annotation.
 pub struct CallThreadDuration(String);
 
 impl CallThreadDuration {
+    /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    ///
+    /// # Errors
+    ///
+    /// Returns `InvalidDuration` unless the token uses the supported nonnegative duration syntax.
     pub fn parse(value: &str) -> Result<Self, CallThreadParseError> {
         if is_valid_call_thread_duration(value) {
             Ok(Self(value.to_owned()))
@@ -102,23 +135,38 @@ impl CallThreadDuration {
         }
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Validation failures for call-thread roots, required attributes, media, identities, and timestamps.
 pub enum CallThreadParseError {
+    /// The payload is not a supported call-thread anchor.
     NotCallThread,
+    /// A required call-thread attribute was missing; contains its local name.
     MissingAttribute(&'static str),
+    /// The call-thread kind is unsupported.
     InvalidKind,
+    /// The call advertises unsupported media.
     InvalidMedia,
+    /// The call initiator is not a valid JID.
     InvalidInitiator,
+    /// The call start timestamp is not valid.
     InvalidStarted,
+    /// The call end timestamp is not valid.
     InvalidEnded,
+    /// The call duration is not in the supported format.
     InvalidDuration,
 }
 
+/// Build the call-thread anchor linking a conversation thread to its media session.
+///
+/// # Panics
+///
+/// Panics if both `anchor.media.audio` and `anchor.media.video` are false.
 pub fn build_call_thread_anchor(anchor: &CallThreadAnchor) -> Element {
     let kind = match anchor.kind {
         CallThreadKind::Dm => "dm",
@@ -146,6 +194,11 @@ pub fn build_call_thread_anchor(anchor: &CallThreadAnchor) -> Element {
         .build()
 }
 
+/// Validate a call-thread marker and decode its session, media, initiator, and start timestamp.
+///
+/// # Errors
+///
+/// Returns a typed parse error for a non-call-thread element or a missing/invalid identifier, kind, media, initiator JID, or start timestamp.
 pub fn parse_call_thread_anchor(
     element: &Element,
 ) -> Result<CallThreadAnchor, CallThreadParseError> {
@@ -173,12 +226,14 @@ pub fn parse_call_thread_anchor(
     })
 }
 
+/// Find a call-thread anchor among the message children; absent or malformed anchors return None.
 pub fn parse_call_thread_anchor_child(message: &Element) -> Option<CallThreadAnchor> {
     message
         .get_child("call-thread", NS_WADDLE_CALL_THREAD)
         .and_then(|child| parse_call_thread_anchor(child).ok())
 }
 
+/// Find and decode a call-ended annotation among the message children.
 pub fn parse_call_thread_ended_child(message: &Element) -> Option<CallThreadEnded> {
     let apply_to = message.get_child("apply-to", "urn:xmpp:fasten:0")?;
     let anchor_id = required_attr(apply_to, "id").ok()?.to_string();

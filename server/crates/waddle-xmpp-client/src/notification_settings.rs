@@ -21,41 +21,71 @@ use crate::xep::xep0492::{
 };
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Inputs for updating a room bookmark's notification policy.
 pub struct SetRoomNotificationMode {
+    /// Bare JID of the room in scope.
     pub room_jid: BareJid,
+    /// Human-readable name advertised to clients.
     pub name: Option<String>,
+    /// Selected notification or availability policy.
     pub mode: NotifyMode,
+    /// Whether the archive query requests rich message metadata.
     pub rich_payload_opt_in: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Outcome of updating a room bookmark notification policy.
 pub enum SetRoomNotificationModeOutcome {
-    Ok { item: BookmarkItem },
+    /// The requested update succeeded and returns the resulting item.
+    Ok {
+        #[doc = "Item to publish."]
+        item: BookmarkItem,
+    },
+    /// Existing node configuration does not satisfy the requested publish options.
     NodeConfigMismatch,
+    /// The operation failed; inspect the associated error details.
     Error,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Inputs for updating a direct-message bookmark's notification policy.
 pub struct SetDmNotificationMode {
+    /// Bare JID identifying the direct-message peer.
     pub dm_jid: BareJid,
+    /// Selected notification or availability policy.
     pub mode: NotifyMode,
+    /// Whether the archive query requests rich message metadata.
     pub rich_payload_opt_in: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Outcome of updating a direct-message bookmark notification policy.
 pub enum SetDmNotificationModeOutcome {
+    /// The requested update succeeded and returns the resulting item.
     Ok {
+        /// XMPP address identifying the referenced entity.
         jid: BareJid,
+        /// Selected notification or availability policy.
         mode: NotifyMode,
+        /// Whether the archive query requests rich message metadata.
         rich_payload_opt_in: bool,
     },
+    /// The target item or membership has been removed.
     Removed {
+        /// XMPP address identifying the referenced entity.
         jid: BareJid,
     },
+    /// Existing node configuration does not satisfy the requested publish options.
     NodeConfigMismatch,
+    /// The operation failed; inspect the associated error details.
     Error,
 }
 
+/// Set the room notification mode and return the updated value.
+///
+/// # Errors
+///
+/// Propagates transport, IQ timeout, and unhandled stanza errors from the supplied IQ sender. Missing nodes and documented publish conflicts use the fallback paths described above.
 pub async fn set_room_notification_mode<D: CommandDriver>(
     driver: &D,
     options: SetRoomNotificationMode,
@@ -98,6 +128,11 @@ pub async fn set_room_notification_mode<D: CommandDriver>(
     }
 }
 
+/// Set the dm notification mode and return the updated value.
+///
+/// # Errors
+///
+/// Propagates transport, IQ timeout, and unhandled stanza errors from the supplied IQ sender. Missing nodes and documented publish conflicts use the fallback paths described above.
 pub async fn set_dm_notification_mode<D: CommandDriver>(
     driver: &D,
     options: SetDmNotificationMode,
@@ -156,6 +191,7 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
     }
 }
 
+/// Read direct-message bookmark items from a PubSub result, ignoring malformed or unrelated payloads.
 pub fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(BareJid, Element)> {
     let Some(items) = iq
         .get_child("pubsub", crate::pep::NS_PUBSUB)

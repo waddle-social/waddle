@@ -22,14 +22,20 @@ pub const NS_DATA_FORMS: &str = "jabber:x:data";
 /// pass this enum, not a `&str`, so a typo can't reach the wire.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdHocAction {
+    /// Start the ad-hoc command or execute its default action.
     Execute,
+    /// Cancel the active ad-hoc command session.
     Cancel,
+    /// Advance to the next command stage.
     Next,
+    /// Return to the previous command stage.
     Prev,
+    /// Request completion of the active command session.
     Complete,
 }
 
 impl AdHocAction {
+    /// Return the canonical token used in protocol attributes or forms.
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Execute => "execute",
@@ -44,12 +50,16 @@ impl AdHocAction {
 /// XEP-0050 §3 `status` attribute on responses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AdHocStatus {
+    /// The command session remains active and may require another form submission.
     Executing,
+    /// The command completed and has no further stages.
     Completed,
+    /// The ad-hoc command was canceled.
     Canceled,
 }
 
 impl AdHocStatus {
+    /// Parse a supported wire value, rejecting unrecognized or malformed input.
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "executing" => Some(Self::Executing),
@@ -63,9 +73,13 @@ impl AdHocStatus {
 /// Parsed `<command/>` payload extracted from an IQ result.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CommandResponse {
+    /// PubSub or discovery node selected by the request.
     pub node: String,
+    /// Identifier of the session associated with this value.
     pub session_id: Option<String>,
+    /// Protocol status returned by the peer.
     pub status: AdHocStatus,
+    /// Data form carried by the command response.
     pub form: Option<DataForm>,
 }
 

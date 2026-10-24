@@ -27,23 +27,28 @@ use xmpp_parsers::message::{Message, MessageType};
 /// list.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CallMedia {
+    /// Whether this call supports audio media.
     pub audio: bool,
+    /// Whether this call supports video media.
     pub video: bool,
 }
 
 impl CallMedia {
+    /// Create media capabilities with both audio and video disabled.
     pub const fn none() -> Self {
         Self {
             audio: false,
             video: false,
         }
     }
+    /// Create media capabilities with audio enabled and video disabled.
     pub const fn audio_only() -> Self {
         Self {
             audio: true,
             video: false,
         }
     }
+    /// Create media capabilities with audio and video enabled.
     pub const fn audio_video() -> Self {
         Self {
             audio: true,
@@ -59,9 +64,13 @@ impl CallMedia {
 /// re-parses them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LiveKitJoin {
+    /// Resource URL exposed to the host or user.
     pub url: String,
+    /// Bare JID of the room in scope.
     pub room: String,
+    /// Service identity selected from discovery results.
     pub identity: String,
+    /// Opaque token used to authorize or correlate this operation.
     pub token: String,
 }
 
@@ -70,30 +79,50 @@ pub struct LiveKitJoin {
 // the call-event use cases (we compare variants and IDs, never any
 // f-prefixed numerics).
 #[derive(Debug, Clone, PartialEq)]
+/// Call proposal, response, and session actions recognized by the message parser.
 pub enum CallEventKind {
+    /// Propose a call session to the recipient.
     Propose {
+        /// Media types supported by this call.
         media: CallMedia,
     },
+    /// The recipient indicates that the incoming call is ringing.
     Ringing,
+    /// Accept the call proposal and proceed with session establishment.
     Proceed,
+    /// Reject the incoming call proposal.
     Reject {
+        /// Human-readable explanation for the operation.
         reason: Option<JingleReason>,
+        /// Stable secondary value used to order entries with matching timestamps.
         tie_break: bool,
     },
+    /// Retract an item from the selected PubSub node.
     Retract {
+        /// Human-readable explanation for the operation.
         reason: Option<JingleReason>,
+        /// Stable secondary value used to order entries with matching timestamps.
         tie_break: bool,
     },
+    /// Finish the active command session.
     Finish {
+        /// Human-readable explanation for the operation.
         reason: Option<JingleReason>,
+        /// Replacement room JID advertised when the room was destroyed.
         migrated_to: Option<SessionId>,
     },
+    /// Initiate a media session with the recipient.
     SessionInitiate {
+        /// Join control payload for the call session.
         join: LiveKitJoin,
+        /// Media types supported by this call.
         media: CallMedia,
     },
+    /// Accept the incoming media session.
     SessionAccept {
+        /// Join control payload for the call session.
         join: LiveKitJoin,
+        /// Media types supported by this call.
         media: CallMedia,
     },
     /// XEP-0166 §7.4 session-terminate. `reason` is the typed
@@ -102,11 +131,13 @@ pub enum CallEventKind {
     /// than passing them through — typed-payloads hard rule in
     /// `CLAUDE.md`).
     SessionTerminate {
+        /// Human-readable explanation for the operation.
         reason: Option<JingleReason>,
     },
 }
 
 #[derive(Debug, Clone, PartialEq)]
+/// Parsed incoming call-control action together with sender and recipient identities.
 pub struct InboundCallEvent {
     /// The originator JID, preserved as-sent by the server's `from`
     /// stamp. For `<propose/>` and Jingle session-initiate this is
@@ -120,7 +151,9 @@ pub struct InboundCallEvent {
     /// need this to let sibling resources associate self-originated
     /// JMI events with the peer conversation.
     pub to: Option<Jid>,
+    /// Call-session identifier used to correlate call signals.
     pub sid: SessionId,
+    /// Discriminator selecting the interpretation of this payload.
     pub kind: CallEventKind,
 }
 
@@ -402,22 +435,26 @@ pub fn build_propose(sid: &SessionId, media: CallMedia) -> Element {
     builder.build()
 }
 
+/// Build an XEP-0353 proceed signal accepting the identified call proposal.
 pub fn build_proceed(sid: &SessionId) -> Element {
     Element::builder("proceed", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .build()
 }
 
+/// Build an XEP-0353 ringing signal for the identified call proposal.
 pub fn build_ringing(sid: &SessionId) -> Element {
     Element::builder("ringing", NS_JINGLE_MESSAGE)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), sid.0.as_str())
         .build()
 }
 
+/// Build an XEP-0353 rejection without a reason or tie-break marker.
 pub fn build_reject(sid: &SessionId) -> Element {
     build_reject_with_options(sid, None, false)
 }
 
+/// Build an XEP-0353 rejection with an optional Jingle reason and tie-break marker.
 pub fn build_reject_with_options(
     sid: &SessionId,
     reason: Option<JingleReason>,
@@ -432,10 +469,12 @@ pub fn build_reject_with_options(
     builder.build()
 }
 
+/// Build an XEP-0353 proposal withdrawal without a reason or tie-break marker.
 pub fn build_retract(sid: &SessionId) -> Element {
     build_retract_with_options(sid, None, false)
 }
 
+/// Build an XEP-0353 proposal withdrawal with an optional Jingle reason and tie-break marker.
 pub fn build_retract_with_options(
     sid: &SessionId,
     reason: Option<JingleReason>,
@@ -450,14 +489,17 @@ pub fn build_retract_with_options(
     builder.build()
 }
 
+/// Build an XEP-0353 session-finish signal without a reason or migration target.
 pub fn build_finish(sid: &SessionId) -> Element {
     build_finish_with_reason(sid, None)
 }
 
+/// Build an XEP-0353 session-finish signal with an optional Jingle reason.
 pub fn build_finish_with_reason(sid: &SessionId, reason: Option<JingleReason>) -> Element {
     build_finish_with_options(sid, reason, None)
 }
 
+/// Build an XEP-0353 session-finish signal with optional reason and replacement-session identity.
 pub fn build_finish_with_options(
     sid: &SessionId,
     reason: Option<JingleReason>,
@@ -476,6 +518,7 @@ pub fn build_finish_with_options(
     builder.build()
 }
 
+/// Build a session-finish signal identifying the reason and replacement session.
 pub fn build_finish_migrated(
     sid: &SessionId,
     reason: JingleReason,
@@ -655,6 +698,7 @@ pub fn build_muji_jingle_content(media: &str) -> Element {
         .build()
 }
 
+/// Build a Jingle session-initiate with the Muji room marker, audio content, and optional video content.
 pub fn build_muji_session_initiate(
     sid: &SessionId,
     initiator: &FullJid,
@@ -682,6 +726,7 @@ pub fn build_muji_session_initiate(
     jingle.build()
 }
 
+/// Build a Jingle session-terminate with the Muji room marker and success reason.
 pub fn build_muji_session_terminate(room_jid: &str, sid: &SessionId) -> Element {
     let muji = Element::builder("muji", NS_MUJI)
         .attr(minidom::rxml::xml_ncname!("room").to_owned(), room_jid)

@@ -1,3 +1,5 @@
+//! Discovery and decoding of extension route descriptors at the JavaScript boundary.
+
 use super::*;
 
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";

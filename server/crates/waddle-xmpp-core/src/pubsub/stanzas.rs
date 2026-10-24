@@ -39,12 +39,16 @@ pub const NS_PUBSUB_ERRORS: &str = "http://jabber.org/protocol/pubsub#errors";
 /// authoritative publisher from the IQ `from` — never trust the item.
 #[derive(Debug, Clone)]
 pub struct PubSubItem {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: Option<String>,
+    /// Bare JID of the item publisher, when supplied.
     pub publisher: Option<BareJid>,
+    /// Optional typed payload carried by this item.
     pub payload: Option<Element>,
 }
 
 impl PubSubItem {
+    /// Create an item with the supplied identifier and payload and no publisher attribution.
     pub fn new(id: Option<String>, payload: Option<Element>) -> Self {
         Self {
             id,
@@ -53,11 +57,13 @@ impl PubSubItem {
         }
     }
 
+    /// Set the publisher and return the updated value.
     pub fn with_publisher(mut self, publisher: Option<BareJid>) -> Self {
         self.publisher = publisher;
         self
     }
 
+    /// Parse the supported protocol fields from an XML element.
     pub fn from_element(elem: &Element) -> Self {
         let publisher = elem
             .attr("publisher")
@@ -69,6 +75,7 @@ impl PubSubItem {
         }
     }
 
+    /// Serialize this value as a typed XML element.
     pub fn to_element(&self, ns: &str) -> Element {
         let mut builder = Element::builder("item", ns);
 
@@ -94,11 +101,14 @@ impl PubSubItem {
 /// Parsed PubSub event notification.
 #[derive(Debug, Clone)]
 pub struct PubSubEvent {
+    /// PubSub or discovery node selected by the request.
     pub node: String,
+    /// Items carried in the publication or response.
     pub items: Vec<PubSubItem>,
 }
 
 impl PubSubEvent {
+    /// Create a publication event for the node and its supplied items.
     pub fn new(node: impl Into<String>, items: Vec<PubSubItem>) -> Self {
         Self {
             node: node.into(),
@@ -110,67 +120,103 @@ impl PubSubEvent {
 /// Parsed PubSub request types.
 #[derive(Debug, Clone)]
 pub enum PubSubRequest {
+    /// Publish an item to the selected PubSub node.
     Publish {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// Item to publish.
         item: PubSubItem,
+        /// Publish-options data form supplied with the publication.
         publish_options: Option<Box<Element>>,
     },
+    /// Retract an item from the selected PubSub node.
     Retract {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// Identifier of the PubSub item.
         item_id: String,
+        /// Whether the operation requests subscriber notification.
         notify: bool,
     },
+    /// Retrieve items from the selected PubSub node.
     Items {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// Maximum number of retained or returned items.
         max_items: Option<u32>,
+        /// Item identifiers selected by the request.
         item_ids: Vec<String>,
     },
+    /// Create a PubSub node.
     CreateNode {
+        /// PubSub or discovery node selected by the request.
         node: String,
     },
+    /// Request the node's configuration form.
     ConfigureNode {
+        /// PubSub or discovery node selected by the request.
         node: String,
     },
+    /// Delete the selected PubSub node.
     DeleteNode {
+        /// PubSub or discovery node selected by the request.
         node: String,
     },
+    /// Request a subscription to another user's presence.
     Subscribe {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// XMPP address identifying the referenced entity.
         jid: Jid,
     },
+    /// Request removal of a presence subscription.
     Unsubscribe {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// XMPP address identifying the referenced entity.
         jid: Jid,
+        /// Service-assigned identifier distinguishing this subscription.
         subid: Option<String>,
     },
     /// XEP-0060 §8.5 `<purge node='...'/>` (owner-only).
     PurgeNode {
+        /// PubSub or discovery node selected by the request.
         node: String,
     },
     /// XEP-0060 §6.4 `<configure node='...'><x.../>` (owner-only, set form).
     ConfigureNodeSet {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// Configuration applied to this operation.
         config: NodeConfigPatch,
     },
     /// XEP-0060 §8.9 `<affiliations node='...'/>` get on owner namespace.
     AffiliationsGet {
+        /// PubSub or discovery node selected by the request.
         node: String,
     },
     /// XEP-0060 §8.9.4 `<affiliations node='...'><affiliation jid='...' affiliation='...'/></affiliations>` set.
     AffiliationsSet {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// Requested changes, applied in the order supplied.
         changes: Vec<(jid::BareJid, Affiliation)>,
     },
     /// XEP-0060 §8.8 `<subscriptions node='...'/>` get on owner namespace.
     OwnerSubscriptionsGet {
+        /// PubSub or discovery node selected by the request.
         node: String,
     },
     /// XEP-0060 §8.8 owner subscription delta update.
     OwnerSubscriptionsSet {
+        /// PubSub or discovery node selected by the request.
         node: String,
+        /// Requested changes, applied in the order supplied.
         changes: Vec<(jid::Jid, SubscriptionState, Option<String>)>,
     },
+    /// The requested operation requires an unsupported feature.
     Unsupported {
+        /// Feature required by the request or advertised by the service.
         feature: PubSubUnsupportedFeature,
     },
 }
@@ -178,10 +224,12 @@ pub enum PubSubRequest {
 /// PubSub features understood by the parser but not implemented by this server.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubSubUnsupportedFeature {
+    /// The service does not support subscription administration.
     ManageSubscriptions,
 }
 
 impl PubSubUnsupportedFeature {
+    /// Borrow the stored text or canonical protocol token without allocating.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ManageSubscriptions => "manage-subscriptions",
@@ -192,12 +240,19 @@ impl PubSubUnsupportedFeature {
 /// PubSub-specific error conditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubSubError {
+    /// The selected PubSub node does not exist.
     NodeNotFound,
+    /// The selected PubSub item does not exist.
     ItemNotFound,
+    /// The requester does not have permission to perform the operation.
     Forbidden,
+    /// The node does not accept additional subscriptions.
     ClosedNode,
+    /// The requested node already exists.
     NodeExists,
+    /// The request is malformed, with optional explanatory text.
     BadRequest,
+    /// The supplied address is not a valid JID.
     InvalidJid,
     /// XEP-0060 §7.1.3.4: `<bad-request/>` + pubsub-namespaced
     /// `<invalid-payload/>` extension. Used when a publish item's
@@ -208,11 +263,14 @@ pub enum PubSubError {
     /// `<payload-required/>` extension. Used when a publish that
     /// requires a payload arrives without one.
     PayloadRequired,
+    /// The node does not satisfy the supplied publish-options preconditions.
     PreconditionNotMet,
+    /// The requester has no matching subscription to remove.
     NotSubscribed,
     /// An unexpected backend/storage failure unrelated to the requested resource.
     /// Maps to XEP-0060 §8.1.3 `<internal-server-error/>` (error type: wait).
     InternalServerError,
+    /// The operation requires a PubSub feature unsupported by this service.
     UnsupportedFeature(PubSubUnsupportedFeature),
 }
 
@@ -236,6 +294,10 @@ pub fn is_pubsub_event(message: &Message) -> bool {
 }
 
 /// Parse a PubSub event notification from a message.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` when the event, items, or required node attribute is missing.
 pub fn parse_pubsub_event(message: &Message) -> CoreResult<PubSubEvent> {
     let event_elem = message
         .payloads
@@ -262,6 +324,10 @@ pub fn parse_pubsub_event(message: &Message) -> CoreResult<PubSubEvent> {
 }
 
 /// Parse a PubSub IQ stanza into a structured request.
+///
+/// # Errors
+///
+/// Returns `CoreError::BadRequest` for a missing PubSub payload, malformed operation, invalid JID or subscription state, or missing required attributes.
 pub fn parse_pubsub_iq(iq: &Iq) -> CoreResult<PubSubRequest> {
     let pubsub_elem = match iq {
         Iq::Get { payload, .. } | Iq::Set { payload, .. }

@@ -1,3 +1,5 @@
+//! Validation and assembly of loaded extension manifests and routes.
+
 use super::*;
 
 pub(super) fn validate_manifest_against_module(

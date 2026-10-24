@@ -1,7 +1,11 @@
+//! Browser discovery of extension routes and retrieval of their PubSub-backed items.
+
 use super::*;
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// Discover extension routes for `user_jid`, defaulting to the configured account,
+    /// and resolve to route objects.
     pub fn discover_extension_routes(&self, user_jid: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -46,6 +50,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch at most 100 items from a route's state node after substituting `room_jid`
+    /// for `{room}`.
     pub fn fetch_extension_route_items(&self, route: JsValue, room_jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

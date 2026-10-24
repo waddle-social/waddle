@@ -35,6 +35,10 @@ const NS_DATA_FORMS: &str = "jabber:x:data";
 /// stories, and xCal events nodes. Mirrors
 /// [`crate::extension_commands::fallback_extension_service_jid`] for
 /// the extensions component.
+///
+/// # Errors
+///
+/// Returns a JID parsing error if the derived community-service address is not a valid bare JID.
 pub fn community_service_jid(domain: &str) -> Result<BareJid, jid::Error> {
     BareJid::from_str(&format!("community.{domain}"))
 }
@@ -43,14 +47,20 @@ pub fn community_service_jid(domain: &str) -> Result<BareJid, jid::Error> {
 /// publish-options preconditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubAccessModel {
+    /// Access is open to any requester.
     Open,
+    /// Access depends on an existing presence subscription.
     Presence,
+    /// An entity discovered through the account roster.
     Roster,
+    /// Subscription requires approval from a node owner.
     Authorize,
+    /// Only explicitly authorized affiliates may access the node.
     Whitelist,
 }
 
 impl PubsubAccessModel {
+    /// Borrow the stored text or canonical protocol token without allocating.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Open => "open",
@@ -66,12 +76,16 @@ impl PubsubAccessModel {
 /// values accepted in publish-options preconditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubSendLastPublishedItem {
+    /// Do not send the last published item automatically.
     Never,
+    /// Send the last published item when a subscription is created.
     OnSub,
+    /// Send the last item on subscription and when the subscriber becomes available.
     OnSubAndPresence,
 }
 
 impl PubsubSendLastPublishedItem {
+    /// Borrow the stored text or canonical protocol token without allocating.
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Never => "never",
@@ -87,9 +101,13 @@ impl PubsubSendLastPublishedItem {
 /// field alongside the mandatory hidden FORM_TYPE.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PubsubPublishOptions {
+    /// Whether published items persist in node storage.
     pub persist_items: Option<bool>,
+    /// Policy governing who may subscribe to or retrieve node items.
     pub access_model: Option<PubsubAccessModel>,
+    /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: Option<PubsubSendLastPublishedItem>,
+    /// Maximum number of retained or returned items.
     pub max_items: Option<u32>,
 }
 
@@ -275,9 +293,13 @@ pub fn build_pubsub_unsubscribe_iq(
 /// (or §8.8.4 notification).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PubsubSubscriptionState {
+    /// Approve a presence subscription.
     Subscribed,
+    /// The subscription awaits owner approval.
     Pending,
+    /// Subscription configuration must be completed before notifications are sent.
     Unconfigured,
+    /// No affiliation, subscription, or optional protocol value is assigned.
     None,
 }
 
@@ -298,9 +320,13 @@ impl PubsubSubscriptionState {
 /// present.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubsubSubscription {
+    /// PubSub or discovery node selected by the request.
     pub node: String,
+    /// XMPP address identifying the referenced entity.
     pub jid: Option<Jid>,
+    /// Service-assigned identifier distinguishing this subscription.
     pub subid: Option<String>,
+    /// Current lifecycle or protocol state.
     pub state: PubsubSubscriptionState,
 }
 
@@ -351,7 +377,9 @@ pub fn build_pubsub_retract_iq(
 /// every payload child, preserved as typed elements.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PubsubResultItem {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: String,
+    /// Extension payload elements carried alongside the standard protocol fields.
     pub payloads: Vec<Element>,
 }
 

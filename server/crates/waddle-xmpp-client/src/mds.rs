@@ -15,12 +15,17 @@ const NS_CLIENT: &str = "jabber:client";
 const NS_PUBSUB: &str = "http://jabber.org/protocol/pubsub";
 const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 const NS_DATA_FORMS: &str = "jabber:x:data";
+/// Ns pubsub publish options feature used by this protocol implementation.
 pub const NS_PUBSUB_PUBLISH_OPTIONS_FEATURE: &str =
     "http://jabber.org/protocol/pubsub#publish-options";
 
+/// Protocol token `urn:xmpp:mds:displayed:0`.
 pub const NS_MDS: &str = "urn:xmpp:mds:displayed:0";
+/// Protocol token `urn:xmpp:mds:displayed:0`.
 pub const MDS_NODE: &str = "urn:xmpp:mds:displayed:0";
+/// Protocol token `urn:xmpp:mds:displayed:0+notify`.
 pub const NS_MDS_NOTIFY: &str = "urn:xmpp:mds:displayed:0+notify";
+/// Protocol token `urn:xmpp:sid:0`.
 pub const NS_STANZA_ID: &str = "urn:xmpp:sid:0";
 const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsub#publish-options";
 
@@ -30,8 +35,11 @@ const PUBSUB_PUBLISH_OPTIONS_FORM_TYPE: &str = "http://jabber.org/protocol/pubsu
 /// entity required by XEP-0490 for room and account-server stanza IDs.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MdsCatchupEntry {
+    /// Identifier of the chat associated with this value.
     pub chat_id: Jid,
+    /// Identifier used for stanza correlation.
     pub stanza_id: StanzaId,
+    /// JID of the archive that assigned the XEP-0359 stanza identifier.
     pub stanza_id_by: BareJid,
 }
 

@@ -1,3 +1,7 @@
+//! Typed Waddle extension framework, Wasm runtime, and extension management APIs.
+
+#![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 pub mod actor;
 pub mod config;
 pub mod host_tools;

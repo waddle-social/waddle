@@ -1,3 +1,7 @@
+//! WebAssembly bindings for Waddle XMPP clients and deterministic color helpers.
+
+#![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::rc::Rc;

@@ -1,3 +1,5 @@
+//! Message-envelope, body, link, and context helpers for extension processing.
+
 use super::*;
 
 pub(super) fn message_hook_effect_launches_match_room(

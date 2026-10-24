@@ -136,6 +136,10 @@ impl WaddleClient {
     /// enforces publish authorisation via XEP-0060 affiliations;
     /// callers without Publisher access receive a Forbidden stanza
     /// error which surfaces as a rejected Promise.
+    ///
+    /// # Panics
+    /// Panics if the feed builder fails to retain the publication timestamp set
+    /// immediately before publishing; this indicates a broken internal builder invariant.
     pub fn feed_publish(&self, spaces_jid: String, entry: JsValue) -> js_sys::Promise {
         let inner = self.inner.clone();
         wasm_bindgen_futures::future_to_promise(async move {

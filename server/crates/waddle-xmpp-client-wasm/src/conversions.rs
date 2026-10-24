@@ -1,3 +1,5 @@
+//! Conversion between Rust protocol values and JavaScript-facing result models.
+
 use super::*;
 
 pub(crate) fn upload_slot_to_js(slot: discovery::UploadSlot) -> WaddleUploadSlot {

@@ -1,3 +1,5 @@
+//! JavaScript boundary conversion for encrypted-file payloads.
+
 use super::*;
 
 pub(crate) fn encrypted_file_to_js(

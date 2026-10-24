@@ -94,11 +94,14 @@ impl FromStr for PublishModel {
 /// XEP-0060 `pubsub#type` profile identifier for a PubSub node.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PubSubNodeType {
+    /// A node containing social-feed posts.
     PubsubSocialFeed,
+    /// A node containing social-feed stories.
     PubsubSocialFeedStories,
 }
 
 impl PubSubNodeType {
+    /// Borrow the stored text or canonical protocol token without allocating.
     pub fn as_str(self) -> &'static str {
         match self {
             PubSubNodeType::PubsubSocialFeed => crate::xep0472::NS_SOCIAL_FEED,
@@ -164,32 +167,51 @@ impl FromStr for SendLastPublishedItem {
 /// Shared node configuration for PubSub / PEP nodes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeConfig {
+    /// Policy governing who may subscribe to or retrieve node items.
     pub access_model: AccessModel,
+    /// Policy governing who may publish items to the node.
     pub publish_model: PublishModel,
+    /// Whether the node is a leaf or a collection.
     pub node_type: Option<PubSubNodeType>,
+    /// Maximum number of retained or returned items.
     pub max_items: u32,
+    /// Whether published items persist in node storage.
     pub persist_items: bool,
+    /// Whether notifications include item payloads.
     pub deliver_payloads: bool,
+    /// Whether item retractions generate notifications.
     pub notify_retract: bool,
+    /// Whether deleting the node generates notifications.
     pub notify_delete: bool,
+    /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: SendLastPublishedItem,
 }
 
 /// Partial node configuration submitted by an XEP-0060 configure form.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct NodeConfigPatch {
+    /// Policy governing who may subscribe to or retrieve node items.
     pub access_model: Option<AccessModel>,
+    /// Policy governing who may publish items to the node.
     pub publish_model: Option<PublishModel>,
+    /// Whether the node is a leaf or a collection.
     pub node_type: Option<PubSubNodeType>,
+    /// Maximum number of retained or returned items.
     pub max_items: Option<u32>,
+    /// Whether published items persist in node storage.
     pub persist_items: Option<bool>,
+    /// Whether notifications include item payloads.
     pub deliver_payloads: Option<bool>,
+    /// Whether item retractions generate notifications.
     pub notify_retract: Option<bool>,
+    /// Whether deleting the node generates notifications.
     pub notify_delete: Option<bool>,
+    /// Policy for sending the most recently published item to subscribers.
     pub send_last_published_item: Option<SendLastPublishedItem>,
 }
 
 impl NodeConfigPatch {
+    /// Apply only the supplied configuration fields, preserving all unspecified node settings.
     pub fn apply_to(&self, mut config: NodeConfig) -> NodeConfig {
         if let Some(access_model) = self.access_model {
             config.access_model = access_model;

@@ -1,3 +1,5 @@
+//! Keyed authentication of extension launch context and descriptor content.
+
 use super::*;
 
 impl ExtensionManager {
@@ -18,6 +20,8 @@ impl ExtensionManager {
         effects
     }
 
+    /// Sign every launch in an enrichment envelope using the current time; descriptors
+    /// are unchanged when no signing key is installed.
     pub fn sign_envelope(&self, envelope: &mut ExtensionEnvelope) {
         self.sign_envelope_at(envelope, Utc::now());
     }
@@ -31,6 +35,8 @@ impl ExtensionManager {
         }
     }
 
+    /// Whether the named loaded plugin may emit this enrichment envelope under its
+    /// manifest and grants.
     pub fn validate_envelope_for_plugin(
         &self,
         plugin: &PluginId,
@@ -44,6 +50,8 @@ impl ExtensionManager {
             })
     }
 
+    /// Extract the first valid bare room JID from a matching declared node's `{room}`
+    /// placeholder across loaded plugins.
     pub fn room_for_pubsub_node(&self, node: &crate::types::PubSubNode) -> Option<RoomJid> {
         for actor in &self.actors {
             let manifest = actor.manifest();
@@ -57,6 +65,7 @@ impl ExtensionManager {
         None
     }
 
+    /// Extract a valid bare room JID from the named plugin's matching PubSub node pattern.
     pub fn room_for_plugin_pubsub_node(
         &self,
         plugin: &PluginId,

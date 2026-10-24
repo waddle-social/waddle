@@ -110,6 +110,10 @@ pub fn should_copy_message(msg: &Message) -> bool {
 }
 
 /// Build a "sent" carbon message wrapper.
+///
+/// # Errors
+///
+/// Returns a JID parsing error if `from_jid` or `to_jid` is not a valid JID.
 pub fn build_sent_carbon(
     original_msg: &Message,
     from_jid: &str,
@@ -134,6 +138,10 @@ pub fn build_sent_carbon(
 }
 
 /// Build a "received" carbon message wrapper.
+///
+/// # Errors
+///
+/// Returns a JID parsing error if `from_jid` or `to_jid` is not a valid JID.
 pub fn build_received_carbon(
     original_msg: &Message,
     from_jid: &str,

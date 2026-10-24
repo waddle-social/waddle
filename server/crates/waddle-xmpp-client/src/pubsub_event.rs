@@ -1,3 +1,5 @@
+//! Typed interpretation of PubSub notifications and Waddle summary payloads.
+
 use jid::{BareJid, Jid};
 use minidom::Element;
 
@@ -5,36 +7,58 @@ const NS_PUBSUB_EVENT: &str = "http://jabber.org/protocol/pubsub#event";
 const NS_PUBSUB_ATTACHMENTS_SUMMARY: &str = "urn:xmpp:pubsub-attachments:summary:1";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Published item identifier and its interpreted or opaque payload.
 pub struct PubsubEventItem {
+    /// Identifier used to correlate this value with its protocol or domain record.
     pub id: Option<String>,
+    /// Whether the referenced item has been retracted.
     pub retracted: bool,
+    /// Typed payload carried by this item.
     pub payload: PubsubEventPayload,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// PubSub node and items delivered in a publication notification.
 pub struct PubsubEvent {
+    /// XMPP address of the sender.
     pub from: Option<Jid>,
+    /// PubSub or discovery node selected by the request.
     pub node: String,
+    /// Items carried in the publication or response.
     pub items: Vec<PubsubEventItem>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Known PubSub summaries or an unrecognized payload preserved as XML.
 pub enum PubsubEventPayload {
+    /// An XEP-0470 attachment-summary update targeting an earlier message.
     AttachmentSummary(AttachmentSummaryEvent),
-    Opaque { element: Element },
+    /// An unrecognized payload preserved as parsed XML.
+    Opaque {
+        #[doc = "Parsed XML element retained at the protocol boundary."]
+        element: Element,
+    },
+    /// The item contains no payload element.
     Empty,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// XEP-0470 attachment summary targeting a message.
 pub struct AttachmentSummaryEvent {
+    /// Reaction sets or summary counts attached to this message.
     pub reactions: Vec<ReactionSummaryEvent>,
+    /// Number of mentions or notices included in the summary.
     pub noticed_count: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+/// Aggregated reactions and reactor identities targeting a message.
 pub struct ReactionSummaryEvent {
+    /// Emoji text carried by the reaction.
     pub emoji: String,
+    /// Number of entries or operations represented by this value.
     pub count: u32,
+    /// Identities of users who applied the reaction.
     pub reactors: Vec<BareJid>,
 }
 
@@ -46,7 +70,9 @@ pub struct PubsubRetractedItems {
     /// Notifying service (`from` of the event message); `None` when
     /// the stanza carried no `from` (the account's own PEP service).
     pub service: Option<Jid>,
+    /// PubSub or discovery node selected by the request.
     pub node: String,
+    /// Item identifiers selected by the request.
     pub item_ids: Vec<String>,
 }
 
@@ -63,6 +89,7 @@ pub struct PubsubAttachmentSummaryUpdate {
     pub node: String,
     /// ItemID of the attached-to item the summary describes.
     pub item_id: Option<String>,
+    /// Human-readable summary of the event or content.
     pub summary: AttachmentSummaryEvent,
 }
 
@@ -106,6 +133,7 @@ impl PubsubEvent {
     }
 }
 
+/// Collect PubSub publication events from the message, interpreting known summaries and preserving opaque payloads.
 pub fn parse_pubsub_events(message: &Element) -> Vec<PubsubEvent> {
     if message.name() != "message" {
         return Vec::new();

@@ -1,3 +1,5 @@
+//! Identifiers used to correlate service-discovery and roster requests.
+
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);

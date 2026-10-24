@@ -1,3 +1,5 @@
+//! Validation of component responses, effects, and payloads at the host boundary.
+
 use anyhow::Result;
 
 use super::exports::waddle::extension as wit_exports;

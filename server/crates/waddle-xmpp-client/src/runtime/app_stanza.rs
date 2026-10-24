@@ -1,3 +1,5 @@
+//! Application stanza dispatch and request-result correlation inside the runtime.
+
 use minidom::Element;
 
 use crate::event::{ClientEvent, ConnectionEvent};

@@ -1,7 +1,10 @@
+//! JavaScript client methods for roster, profiles, avatars, and account discovery.
+
 use super::*;
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// Request a presence subscription from `peer_jid`; resolves after the stanza is sent.
     pub fn subscribe_to_presence(&self, peer_jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -202,7 +205,7 @@ impl WaddleClient {
     /// * Find the item whose id matches `room_jid`; if missing,
     ///   construct a fresh item with the given `name` (or `None`).
     /// * Replace the fallback `<notify/>` child via
-    ///   [`merge_notify_into_extensions`] — foreign `<advanced/>`
+    ///   `merge_notify_into_extensions` — foreign `<advanced/>`
     ///   children and identity-scoped siblings written by other
     ///   clients are preserved verbatim (XEP-0492 §3). The same call
     ///   toggles the Waddle rich XEP-0357 push-summary opt-in
@@ -315,13 +318,13 @@ impl WaddleClient {
     /// * Fetch existing DM items (first-publish `item-not-found` →
     ///   empty); find the one whose id == `dmJid` and read its hosted
     ///   `<notify/>` via [`read_dm_bookmark_notify`].
-    /// * Merge the new mode via [`merge_notify`] (the single §3-conformant
+    /// * Merge the new mode via `merge_notify` (the single §3-conformant
     ///   core shared with the MUC carrier — foreign `<advanced/>` and
     ///   identity-scoped siblings preserved verbatim; rich opt-in (#719)
     ///   toggled).
     /// * The node is sparse / override-only: if the merged `<notify/>`
     ///   collapses to the §3 direct-chat default (`always`, no opt-in, no
-    ///   foreign `<advanced/>`) per [`dm_notify_is_default`], RETRACT the
+    ///   foreign `<advanced/>`) per `dm_notify_is_default`, RETRACT the
     ///   item and resolve to `Removed` instead of publishing. Otherwise
     ///   publish and resolve to `Ok` with the surfaced item — the chat
     ///   reconciles without a refetch.
@@ -383,6 +386,8 @@ impl WaddleClient {
         })
     }
 
+    /// Resolve to the server's software identity, or `null` if querying it fails or
+    /// yields no version payload.
     pub fn get_server_version(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -419,6 +424,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch persistent room members with the requested affiliation; rejects unsupported
+    /// affiliation names.
     pub fn list_room_members(&self, room_jid: String, affiliation: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -462,6 +469,8 @@ impl WaddleClient {
         })
     }
 
+    /// Set a user's persistent room affiliation; rejects invalid affiliation names or
+    /// failed admin IQs.
     pub fn set_room_affiliation(
         &self,
         room_jid: String,
@@ -571,6 +580,7 @@ impl WaddleClient {
         })
     }
 
+    /// Mark a conversation, or its selected thread, read through the server inbox command.
     pub fn mark_inbox_read(&self, partner_jid: String, thread_id: Option<String>) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -590,6 +600,7 @@ impl WaddleClient {
         })
     }
 
+    /// Resolve to the account's roster contacts, including subscription states and groups.
     pub fn list_roster_contacts(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -613,6 +624,8 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleMoodOpts` object to the account's mood PEP node; rejects invalid
+    /// input or a failed publish.
     pub fn publish_mood(&self, mood_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -628,6 +641,7 @@ impl WaddleClient {
         })
     }
 
+    /// Retract the account's current mood PEP item; resolves after the server acknowledges it.
     pub fn retract_mood(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -640,6 +654,8 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleActivityOpts` object to PEP; rejects invalid activity names or
+    /// failed publication.
     pub fn publish_activity(&self, activity_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -656,6 +672,7 @@ impl WaddleClient {
         })
     }
 
+    /// Retract the account's current activity PEP item.
     pub fn retract_activity(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -668,6 +685,7 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleTuneOpts` object to PEP; rejects malformed options or failed publication.
     pub fn publish_tune(&self, tune_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -690,6 +708,7 @@ impl WaddleClient {
         })
     }
 
+    /// Retract the account's current tune PEP item.
     pub fn retract_tune(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -702,6 +721,7 @@ impl WaddleClient {
         })
     }
 
+    /// Resolve to the peer's vCard4 properties, or `null` when no vCard4 item is present.
     pub fn fetch_vcard4(&self, jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -725,6 +745,8 @@ impl WaddleClient {
         })
     }
 
+    /// Publish a `WaddleVCard4` object on the account's vCard4 PEP node; omitted
+    /// properties are excluded.
     pub fn publish_vcard4(&self, vcard_json: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -745,6 +767,8 @@ impl WaddleClient {
         })
     }
 
+    /// Fetch a user's mood, activity, and tune; unavailable individual PEP values are
+    /// returned as absent.
     pub fn fetch_user_pep_profile(&self, jid: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

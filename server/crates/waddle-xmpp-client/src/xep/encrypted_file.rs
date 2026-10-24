@@ -47,6 +47,7 @@ pub enum Cipher {
 }
 
 impl Cipher {
+    /// Return the registered XMPP URI identifying this cipher.
     pub fn as_uri(self) -> &'static str {
         match self {
             Cipher::Aes128GcmNoPadding => "urn:xmpp:ciphers:aes-128-gcm-nopadding:0",
@@ -54,6 +55,7 @@ impl Cipher {
         }
     }
 
+    /// Recognize a supported cipher URI; unknown ciphers return None.
     pub fn from_uri(raw: &str) -> Option<Cipher> {
         Some(match raw {
             "urn:xmpp:ciphers:aes-128-gcm-nopadding:0" => Cipher::Aes128GcmNoPadding,
@@ -68,13 +70,16 @@ impl Cipher {
 /// servers and peers to advertise hashes Waddle does not itself produce.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedHash {
+    /// Hash algorithm token advertised with the digest.
     pub algo: String,
+    /// Base64-encoded digest bytes.
     pub value_b64: String,
 }
 
 /// A typed encrypted stateless file-sharing envelope.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EncryptedFile {
+    /// Symmetric cipher used to encrypt the shared file.
     pub cipher: Cipher,
     /// Base64-encoded symmetric key.
     pub key_b64: String,

@@ -1,3 +1,5 @@
+//! Native client service-discovery and roster request operations.
+
 use jid::BareJid;
 
 use crate::client::ClientHandle;
@@ -35,8 +37,13 @@ fn parse_error() -> ClientError {
 // ── Extension trait ──────────────────────────────────────────────────────────
 
 #[cfg(all(feature = "native", not(target_arch = "wasm32")))]
+/// Native client operations for discovery, upload slots, push settings, and channel topology.
 pub trait DiscoveryExt {
     /// Query `disco#info` for a JID, optionally scoped to a node.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn discover_info<'a>(
         &'a self,
         jid: &'a str,
@@ -44,6 +51,10 @@ pub trait DiscoveryExt {
     ) -> impl std::future::Future<Output = ClientResult<DiscoInfoResult>> + Send + 'a;
 
     /// Query `disco#items` for a JID.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn discover_items<'a>(
         &'a self,
         jid: &'a str,
@@ -53,6 +64,10 @@ pub trait DiscoveryExt {
     /// The extension bots that have posted in `room` (Waddle's
     /// [`NODE_WADDLE_ROOM_BOTS`](super::NODE_WADDLE_ROOM_BOTS) disco#items
     /// node). Empty for a requester who may not enter the room.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn discover_room_bots<'a>(
         &'a self,
         room: &'a BareJid,
@@ -63,12 +78,20 @@ pub trait DiscoveryExt {
     /// Queries `disco#items` on the domain and then `disco#info` on each item
     /// until one advertises `urn:xmpp:http:upload:0`.  Returns its JID, or
     /// `None` if no matching component is found.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn discover_upload_service<'a>(
         &'a self,
         server_domain: &'a str,
     ) -> impl std::future::Future<Output = ClientResult<Option<String>>> + Send + 'a;
 
     /// Request an HTTP upload slot from `service_jid` (XEP-0363).
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response. Returns a bad-request error if the response lacks a valid upload slot.
     fn request_upload_slot<'a>(
         &'a self,
         service_jid: &'a str,
@@ -84,6 +107,10 @@ pub trait DiscoveryExt {
     /// user server passes it through verbatim. Provider credentials
     /// MUST NOT be carried here; they live behind the Push Service
     /// component (registered separately via XEP-0050).
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn enable_push_notifications<'a>(
         &'a self,
         push_service_jid: &'a str,
@@ -93,6 +120,10 @@ pub trait DiscoveryExt {
 
     /// Disable push notifications. A `None` `node` disables ALL nodes
     /// at the service for this user (XEP-0357 §6.1).
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn disable_push_notifications<'a>(
         &'a self,
         push_service_jid: &'a str,
@@ -100,12 +131,20 @@ pub trait DiscoveryExt {
     ) -> impl std::future::Future<Output = ClientResult<()>> + Send + 'a;
 
     /// Discover XEP-0503 spaces from the spaces service.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn discover_spaces<'a>(
         &'a self,
         spaces_jid: &'a BareJid,
     ) -> impl std::future::Future<Output = ClientResult<Vec<DiscoveredSpace>>> + Send + 'a;
 
     /// Discover bookmark-backed MUC channels within one XEP-0503 space.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response.
     fn discover_space_channels<'a>(
         &'a self,
         spaces_jid: &'a BareJid,
@@ -118,6 +157,10 @@ pub trait DiscoveryExt {
     /// server does not explicitly advertise the relevant features
     /// (XEP-0045 `http://jabber.org/protocol/muc` for MUC, the
     /// `urn:xmpp:spaces:0` feature for Spaces).
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response. Invalid derived service JIDs also return a validation error.
     fn discover_component_services<'a>(
         &'a self,
         server_domain: &'a str,
@@ -132,6 +175,10 @@ pub trait DiscoveryExt {
     /// attached to a synthetic space with id [`STANDALONE_SPACE_ID`]
     /// so a single channel list can be rendered without
     /// special-casing.
+    ///
+    /// # Errors
+    ///
+    /// Propagates disconnection, IQ timeout, stanza-error, or transport failures while awaiting the response. Invalid derived service JIDs also return a validation error.
     fn discover_topology<'a>(
         &'a self,
         server_domain: &'a str,

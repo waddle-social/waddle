@@ -1,3 +1,5 @@
+//! Transport-independent authentication, session, request, and stream-management coordination.
+
 use std::collections::VecDeque;
 
 use crate::bootstrap::{
@@ -25,7 +27,9 @@ mod tests;
 /// High-level lifecycle of the scaffolded runtime wrapper.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RuntimeStatus {
+    /// The runtime is configured but has no active session lifecycle.
     Prepared,
+    /// The user is actively viewing the conversation.
     Active,
 }
 
@@ -34,7 +38,9 @@ pub enum RuntimeStatus {
 /// [`XmppRuntime::commit_pagehide_ack_written`] confirms the transport write.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PagehideAckRequest {
+    /// The host may write the prepared acknowledgement request.
     Ready,
+    /// An acknowledgement request is already outstanding.
     AlreadyPending,
 }
 
@@ -84,6 +90,11 @@ enum BootstrapState {
 const SM_CLOCK_HOST_SUSPENSION_GAP_MS: i64 = 5_000;
 
 impl XmppRuntime {
+    /// Validate client configuration and restore any retained stream-management replay state.
+    ///
+    /// # Errors
+    ///
+    /// Returns the configuration validation error for an invalid WebSocket endpoint, origin, or blank resource.
     pub fn new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
         let persisted_resume_state = config.session.stream_management.resume_state.clone();
@@ -113,14 +124,17 @@ impl XmppRuntime {
         })
     }
 
+    /// Borrow the validated configuration used by this client or runtime.
     pub fn config(&self) -> &ClientConfig {
         &self.config
     }
 
+    /// Borrow the current session snapshot.
     pub fn snapshot(&self) -> &SessionSnapshot {
         &self.snapshot
     }
 
+    /// Return the resumable stream state, including an outstanding fallback replay tail.
     pub fn resume_state(&self) -> Option<SmResumeState> {
         if self.fallback_resume_state.is_some()
             && (!self.pending_fallback_retries.is_empty()
@@ -132,10 +146,12 @@ impl XmppRuntime {
         self.sm_state.resume_state()
     }
 
+    /// Return a snapshot of pending requests in request-identifier order.
     pub fn pending_requests(&self) -> Vec<PendingRequest> {
         self.requests.snapshot()
     }
 
+    /// Return whether the runtime is prepared or has an active session lifecycle.
     pub fn status(&self) -> RuntimeStatus {
         match self.snapshot.phase {
             SessionPhase::Disconnected => RuntimeStatus::Prepared,
@@ -143,6 +159,7 @@ impl XmppRuntime {
         }
     }
 
+    /// Whether the session is established and any advertised stream-management negotiation has completed.
     pub fn can_send_app_stanza(&self) -> bool {
         if !matches!(self.snapshot.phase, SessionPhase::Established) {
             return false;
@@ -162,6 +179,11 @@ impl XmppRuntime {
         self.sm_state.acknowledgement_clock_pending()
     }
 
+    /// Register a request, update the session phase when needed, and emit the resulting lifecycle events.
+    ///
+    /// # Errors
+    ///
+    /// Returns request-correlation errors or an invalid session-phase transition when the request cannot be queued.
     pub fn queue_request(&mut self, request: ClientRequest) -> ClientResult<Vec<ClientEvent>> {
         let previous = self.snapshot.clone();
         let pending = self.requests.register(request)?;
@@ -189,6 +211,11 @@ impl XmppRuntime {
         Ok(events)
     }
 
+    /// Install the resource binding and emit the session and state-change events.
+    ///
+    /// # Errors
+    ///
+    /// Returns a session-phase transition error if the current session cannot complete binding.
     pub fn bind_session(&mut self, binding: SessionBinding) -> ClientResult<Vec<ClientEvent>> {
         let previous = self.snapshot.clone();
         let mut events = Vec::new();
@@ -197,6 +224,11 @@ impl XmppRuntime {
         Ok(events)
     }
 
+    /// Remove a completed request and emit its correlation event.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::UnknownRequest` when the request is not pending.
     pub fn resolve_request(
         &mut self,
         request_id: crate::request::RequestId,
@@ -206,6 +238,11 @@ impl XmppRuntime {
         Ok(self.resolved_event(pending))
     }
 
+    /// Complete the pending request correlated with this stanza identifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::UnknownStanzaCorrelation` when the stanza has no pending request.
     pub fn resolve_request_by_stanza_id(
         &mut self,
         stanza_id: &StanzaId,
@@ -215,6 +252,11 @@ impl XmppRuntime {
         Ok(self.resolved_event(pending))
     }
 
+    /// Apply an incoming transport event to authentication, session, and request state.
+    ///
+    /// # Errors
+    ///
+    /// Returns errors for invalid session transitions, missing bootstrap features, rejected or malformed authentication/binding responses, or a failed request correlation.
     pub fn apply_transport_event(
         &mut self,
         event: TransportEvent,
@@ -247,6 +289,7 @@ impl XmppRuntime {
         self.poll_stream_management_clock(now)
     }
 
+    /// Advance acknowledgement timers and emit retry, timeout, or reconnect events.
     pub fn poll_stream_management_clock(&mut self, now: DateTime<Utc>) -> Vec<ClientEvent> {
         let mut events = Vec::new();
         for action in self.sm_state.poll_acknowledgement_clock(now) {

@@ -1,5 +1,7 @@
 //! Native XMPP client scaffold for Waddle.
 
+#![warn(missing_docs, clippy::missing_errors_doc, clippy::missing_panics_doc)]
+
 pub mod admin_commands;
 pub mod avatar;
 pub mod bootstrap;

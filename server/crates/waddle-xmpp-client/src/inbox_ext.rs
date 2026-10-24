@@ -31,6 +31,10 @@ pub trait InboxExt {
     /// the same invariant the wasm driver enforces by deferring
     /// overlapping `SendInboxQuery` commands. The FFI verb serializes
     /// its calls behind a gate for this reason.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the account is not bound or the IQ request fails with a timeout, disconnection, stanza error, or transport failure.
     fn fetch_inbox(
         &self,
         unread_only: bool,
@@ -40,6 +44,10 @@ pub trait InboxExt {
     /// Mark one conversation (optionally one thread) read via the
     /// Waddle `urn:waddle:inbox:0` `<mark-read/>` IQ addressed to the
     /// account's own bare JID.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the account is not bound or the IQ request fails with a timeout, disconnection, stanza error, or transport failure.
     fn mark_inbox_read<'a>(
         &'a self,
         partner: &'a str,

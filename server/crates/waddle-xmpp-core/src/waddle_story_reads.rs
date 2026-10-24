@@ -57,6 +57,10 @@ pub struct StoryId(String);
 
 impl StoryId {
     /// Construct a [`StoryId`], rejecting empty strings.
+    ///
+    /// # Errors
+    ///
+    /// Returns `StoryReadsParseError::EmptyId` if the identifier is blank after trimming.
     pub fn new(id: impl Into<String>) -> Result<Self, StoryReadsParseError> {
         let value = id.into();
         if value.is_empty() {
@@ -185,6 +189,10 @@ impl StoryReads {
 
     /// Parse a `<reads/>` element. Unknown child elements and unknown
     /// attributes on `<read>` are ignored for forward-compat.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed parse error for the wrong root or namespace, missing item identifiers or timestamps, or an invalid RFC 3339 timestamp.
     pub fn parse(el: &Element) -> Result<Self, StoryReadsParseError> {
         if el.name() != "reads" {
             return Err(StoryReadsParseError::WrongElementName(el.name().to_owned()));

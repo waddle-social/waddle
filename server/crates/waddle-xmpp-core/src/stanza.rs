@@ -10,8 +10,11 @@
 /// `large_enum_variant` lint without a lint-suppression escape hatch.
 #[derive(Debug, Clone)]
 pub enum Stanza {
+    /// An XMPP message stanza with its parsed standard fields and extension payloads.
     Message(xmpp_parsers::message::Message),
+    /// An XMPP presence stanza describing availability or subscription state.
     Presence(xmpp_parsers::presence::Presence),
+    /// An XMPP information/query request, result, or error stanza.
     Iq(Box<xmpp_parsers::iq::Iq>),
 }
 

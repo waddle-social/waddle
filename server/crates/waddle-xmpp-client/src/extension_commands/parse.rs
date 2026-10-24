@@ -144,12 +144,18 @@ pub fn extension_command_descriptor(
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ExtensionResponseError {
     #[error("extension command response missing <command/>")]
+    /// Extension command response missing `<command/>`.
     MissingCommand,
     #[error("extension command response missing or unknown status")]
+    /// Extension command response missing or unknown status.
     InvalidStatus,
 }
 
 /// Parse a command IQ result into a typed [`ExtensionCommandResult`].
+///
+/// # Errors
+///
+/// Returns `ExtensionResponseError` for a missing command, invalid status, or malformed forms, identifiers, payloads, and extension result values.
 pub fn parse_extension_command_result(
     iq: &Element,
 ) -> Result<ExtensionCommandResult, ExtensionResponseError> {

@@ -1,3 +1,5 @@
+//! Parsing of message corrections, reactions, markers, and retractions.
+
 use minidom::Element;
 
 use crate::error::{ClientError, ClientResult};
@@ -14,6 +16,7 @@ pub(crate) fn validate_chat_state(state: &str) -> ClientResult<&str> {
     }
 }
 
+/// Read the first supported XEP-0085 child; return None when no valid chat state is present.
 pub fn parse_chat_state_payload(element: &Element) -> Option<ChatStatePayload> {
     element
         .children()
@@ -24,6 +27,7 @@ pub fn parse_chat_state_payload(element: &Element) -> Option<ChatStatePayload> {
         })
 }
 
+/// Read a nonempty XEP-0333 displayed target identifier; absent or empty identifiers return None.
 pub fn parse_displayed_marker_payload(element: &Element) -> Option<DisplayedMarkerPayload> {
     element
         .get_child("displayed", NS_CHAT_MARKERS)
@@ -32,6 +36,7 @@ pub fn parse_displayed_marker_payload(element: &Element) -> Option<DisplayedMark
         .map(|id| DisplayedMarkerPayload { id: id.to_string() })
 }
 
+/// Recognize an XEP-0333 markable child only when the enclosing message has a nonblank identifier.
 pub fn parse_markable_marker_payload(
     element: &Element,
     message_id: Option<&str>,
@@ -45,6 +50,7 @@ pub fn parse_markable_marker_payload(
         .map(|_| MarkableMarkerPayload)
 }
 
+/// Read extension enrichments from the Waddle envelope, returning None when no valid enrichments remain.
 pub fn parse_extension_envelope(element: &Element) -> Option<ExtensionEnvelopeData> {
     let envelope = element.get_child("extensions", NS_WADDLE_EXTENSION)?;
     let version = envelope
@@ -200,6 +206,7 @@ fn parse_extension_payload_element(element: &Element) -> Option<ExtensionPayload
     })
 }
 
+/// Read an XEP-0444 target identifier and its complete reaction set; absent or malformed payloads return None.
 pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
     let reactions = element.get_child("reactions", NS_REACTIONS)?;
     let target_id = reactions.attr("id")?.trim();
@@ -218,6 +225,7 @@ pub fn parse_reaction_payload(element: &Element) -> Option<ReactionPayload> {
     })
 }
 
+/// Read the call-session reaction marker and validate its session and emoji fields.
 pub fn parse_in_call_reaction_payload(element: &Element) -> Option<InCallReactionPayload> {
     let carrier = element.get_child("in-call", NS_WADDLE_IN_CALL)?;
     let sid = carrier.attr("sid")?.trim();
@@ -237,6 +245,7 @@ pub fn parse_in_call_reaction_payload(element: &Element) -> Option<InCallReactio
     })
 }
 
+/// Read an XEP-0424 retraction target and optional metadata from the message.
 pub fn parse_retraction_payload(element: &Element) -> Option<RetractionPayload> {
     let retract = element.get_child("retract", NS_MESSAGE_RETRACT)?;
     if retract
@@ -253,6 +262,7 @@ pub fn parse_retraction_payload(element: &Element) -> Option<RetractionPayload> 
         })
 }
 
+/// Read an XEP-0424 tombstone, preserving optional retraction and moderation attribution.
 pub fn parse_retraction_tombstone_payload(element: &Element) -> Option<RetractionTombstonePayload> {
     let retracted = element.get_child("retracted", NS_MESSAGE_RETRACT)?;
     let retraction_id = retracted
@@ -278,6 +288,7 @@ fn is_bare_jid(value: &str) -> bool {
     !value.contains('/')
 }
 
+/// Read the XEP-0425 moderator, retraction target, and optional reason from the message.
 pub fn parse_moderation_payload(element: &Element) -> Option<ModerationPayload> {
     let from = element.attr("from")?;
     if element.attr("type") != Some("groupchat") || !is_bare_jid(from) {
@@ -303,6 +314,7 @@ pub fn parse_moderation_payload(element: &Element) -> Option<ModerationPayload> 
     })
 }
 
+/// Read the nonempty XEP-0308 replacement target identifier from the message.
 pub fn parse_correction_payload(element: &Element) -> Option<CorrectionPayload> {
     element
         .get_child("replace", NS_MESSAGE_CORRECT)

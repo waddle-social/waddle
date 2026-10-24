@@ -53,11 +53,14 @@ pub const FIELD_PIN_PERMISSION: &str = "urn:waddle:roomconfig:pinpermission";
 /// `waddle_xmpp::muc::PinPermission` server-side.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RoomPinPermission {
+    /// Only room owners and administrators may pin messages.
     AdminsOnly,
+    /// Any room occupant may pin messages.
     Anyone,
 }
 
 impl RoomPinPermission {
+    /// Return the canonical value used in the room-configuration data form.
     pub fn as_form_value(self) -> &'static str {
         match self {
             Self::AdminsOnly => "admins-only",
@@ -65,6 +68,7 @@ impl RoomPinPermission {
         }
     }
 
+    /// Recognize a room pin-permission token; unknown values return None.
     pub fn from_form_value(value: &str) -> Option<Self> {
         match value {
             "admins-only" => Some(Self::AdminsOnly),
@@ -82,7 +86,9 @@ impl RoomPinPermission {
 /// option values into the submit would corrupt the round-trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoomConfigField {
+    /// XEP-0004 field name whose value is being accessed or validated.
     pub var: String,
+    /// Values associated with this field.
     pub values: Vec<String>,
 }
 
@@ -91,6 +97,7 @@ pub struct RoomConfigField {
 /// unmodified settings losslessly.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoomConfigForm {
+    /// Fields carried by the data form or provider payload.
     pub fields: Vec<RoomConfigField>,
 }
 
@@ -135,9 +142,13 @@ impl RoomConfigForm {
 /// a present-but-empty roomdesc as authoritative).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RoomConfigPatch {
+    /// Human-readable name advertised to clients.
     pub name: Option<String>,
+    /// Longer human-readable description.
     pub description: Option<String>,
+    /// Whether the room uses forum-style conversations.
     pub forum: Option<bool>,
+    /// Policy controlling which room occupants may pin messages.
     pub pin_permission: Option<RoomPinPermission>,
 }
 

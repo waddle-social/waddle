@@ -1,3 +1,5 @@
+//! Compilation, instantiation, and execution of extension Wasm components.
+
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -21,6 +23,12 @@ pub struct WasmRuntime {
 }
 
 impl WasmRuntime {
+    /// Create the fuel-metered component engine and policy-constrained HTTP client shared
+    /// by loaded extensions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the Wasmtime engine or HTTP client cannot be initialized.
     pub fn new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
@@ -34,6 +42,7 @@ impl WasmRuntime {
         })
     }
 
+    /// Borrow the shared Wasmtime engine configured for components and fuel metering.
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
@@ -55,6 +64,13 @@ impl std::fmt::Debug for LoadedExtension {
 }
 
 impl LoadedExtension {
+    /// Compile a component file and link its WASI, logging, extension host-tool,
+    /// delivery, and runtime imports.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the component cannot be read/compiled or its WASI and
+    /// extension host imports cannot be linked.
     pub fn load(runtime: &WasmRuntime, wasm_path: &Path) -> Result<Self> {
         let engine = runtime.engine().clone();
         let component = Component::from_file(&engine, wasm_path)
@@ -89,6 +105,11 @@ impl LoadedExtension {
         })
     }
 
+    /// Replace the execution and network resource limits used when creating invocation stores.
+    ///
+    /// # Errors
+    ///
+    /// Returns an explanatory error if the limits are outside host-supported bounds.
     pub fn with_limits(mut self, limits: crate::config::RuntimeLimits) -> Result<Self> {
         limits.validate().map_err(anyhow::Error::msg)?;
         self.limits = limits;
@@ -102,6 +123,13 @@ impl LoadedExtension {
         Ok(())
     }
 
+    /// Instantiate a fresh guest store and invoke lifecycle initialization with the
+    /// supplied configuration, under the configured deadline and resource limits.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for initialization deadline/resource failures, component
+    /// instantiation/traps, a guest-reported error, or an invalid manifest.
     pub async fn call_init(&self, config: &str) -> Result<ExtensionManifest> {
         tokio::time::timeout(
             std::time::Duration::from_millis(u64::from(self.limits.invocation_timeout_ms)),
@@ -137,6 +165,14 @@ impl LoadedExtension {
         }
     }
 
+    /// Instantiate a fresh guest store and dispatch an event with the supplied host
+    /// tools, authority, configuration, capability grants, and HTTP origins. Failures
+    /// retain diagnostic context.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
     pub async fn call_handle_event(
         &self,
         event: ExtensionEvent,
@@ -166,6 +202,13 @@ impl LoadedExtension {
         })
     }
 
+    /// Dispatch an event in a fresh bounded store, returning a stable observation failure
+    /// category rather than a diagnostic string.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
     pub async fn call_handle_event_typed(
         &self,
         event: ExtensionEvent,
@@ -191,6 +234,11 @@ impl LoadedExtension {
     }
 
     /// Invoke with server-owned authority, without serializing the canonical key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an invocation failure for deadline/resource exhaustion, runtime traps,
+    /// rejected host access, guest-reported failures, or invalid guest response values.
     pub async fn call_handle_event_typed_with_delivery(
         &self,
         event: ExtensionEvent,

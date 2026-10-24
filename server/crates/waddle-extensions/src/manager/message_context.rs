@@ -1,3 +1,5 @@
+//! Construction of typed extension context from XMPP message payloads.
+
 use super::*;
 
 pub(super) fn room_stanza_id_from_payloads(msg: &Message, room: &str) -> Option<StanzaId> {

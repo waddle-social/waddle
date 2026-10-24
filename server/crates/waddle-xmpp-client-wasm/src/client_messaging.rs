@@ -1,7 +1,11 @@
+//! Browser methods for messages, read markers, reactions, corrections, pins, and raw IQs.
+
 use super::*;
 
 #[wasm_bindgen]
 impl WaddleClient {
+    /// Send a direct message using `WaddleSendOptions`; resolve to
+    /// `WaddleSendMessageOutcome` for validation and delivery results.
     pub fn send_chat_message(&self, peer_jid: String, body: String, options: JsValue) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -26,6 +30,8 @@ impl WaddleClient {
         })
     }
 
+    /// Send a room message using `WaddleSendOptions`; resolve to
+    /// `WaddleSendMessageOutcome` for validation and delivery results.
     pub fn send_groupchat_message(
         &self,
         room_jid: String,
@@ -55,6 +61,8 @@ impl WaddleClient {
         })
     }
 
+    /// Send an XEP-0085 chat state with optional thread context; rejects unsupported
+    /// chat-state tokens.
     pub fn send_chat_state(
         &self,
         to: String,
@@ -74,6 +82,7 @@ impl WaddleClient {
         })
     }
 
+    /// Send an XEP-0333 displayed marker for the message ID with optional thread context.
     pub fn send_displayed(
         &self,
         to: String,
@@ -122,6 +131,8 @@ impl WaddleClient {
         })
     }
 
+    /// Resolve to whether account discovery advertises the publish-options feature
+    /// required for displayed-state publication.
     pub fn supports_mds_publish_options(&self) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -180,6 +191,8 @@ impl WaddleClient {
         })
     }
 
+    /// Replace this sender's reactions on a message with `emojis`, retaining optional
+    /// thread context.
     pub fn send_reaction(
         &self,
         to: String,
@@ -200,6 +213,8 @@ impl WaddleClient {
         })
     }
 
+    /// Send an ephemeral emoji reaction for a call; rejects invalid recipients, session
+    /// IDs, or emoji values.
     pub fn send_in_call_reaction(
         &self,
         to: String,
@@ -279,6 +294,7 @@ impl WaddleClient {
         })
     }
 
+    /// Request retraction of the selected message with optional thread context.
     pub fn send_retraction(
         &self,
         to: String,
@@ -297,6 +313,7 @@ impl WaddleClient {
         })
     }
 
+    /// Request moderator removal of a message, including an optional explanation.
     pub fn send_moderation(
         &self,
         to: String,
@@ -313,6 +330,8 @@ impl WaddleClient {
         })
     }
 
+    /// Send replacement body text for an earlier message using `WaddleSendOptions` for
+    /// its annotations.
     pub fn send_correction(
         &self,
         to: String,
@@ -333,6 +352,8 @@ impl WaddleClient {
         })
     }
 
+    /// Parse and send an IQ XML document, resolving to the response XML; rejects invalid
+    /// XML or a failed IQ.
     pub fn send_raw_iq(&self, xml: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
@@ -342,6 +363,8 @@ impl WaddleClient {
         })
     }
 
+    /// Cancel a pending IQ by its stanza ID; rejects an invalid ID or a failed
+    /// cancellation command.
     pub fn cancel_raw_iq(&self, id: String) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {

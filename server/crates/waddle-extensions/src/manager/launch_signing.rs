@@ -1,3 +1,5 @@
+//! Generation and verification of signed extension launch tokens.
+
 use super::*;
 
 pub(super) fn sign_launch_token(

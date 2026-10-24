@@ -1,3 +1,5 @@
+//! Validated endpoints, credentials, session resources, and stream-management settings.
+
 use std::fmt;
 use std::time::Duration;
 
@@ -11,13 +13,22 @@ use crate::stream_management::SmResumeState;
 /// Immutable client bootstrap configuration.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ClientConfig {
+    /// XMPP server identity used by this client.
     pub connection: ConnectionConfig,
+    /// WebSocket endpoint, origin, and connection timeout settings.
     pub transport: WebSocketConfig,
+    /// Authentication credentials and mechanism selection.
     pub auth: AuthenticationConfig,
+    /// Session resource and stream-management settings.
     pub session: SessionConfig,
 }
 
 impl ClientConfig {
+    /// Create and validate an OAUTHBEARER client with default session and stream-management settings.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error if the endpoint is not `ws`/`wss`, lacks a host, the origin is not `http`/`https`, or the client resource is blank.
     pub fn new(
         connection: ConnectionConfig,
         transport: WebSocketConfig,
@@ -33,6 +44,11 @@ impl ClientConfig {
         Ok(config)
     }
 
+    /// Check this configuration's endpoint, resource, and authentication invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns a validation error if the endpoint is not `ws`/`wss`, lacks a host, the origin is not `http`/`https`, or the client resource is blank.
     pub fn validate(&self) -> ClientResult<()> {
         self.transport.validate()?;
         self.auth.validate()?;
@@ -43,10 +59,16 @@ impl ClientConfig {
 /// v1 auth boundary: OAUTHBEARER only.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AuthenticationConfig {
+    /// SASL OAUTHBEARER credentials and the requested account resource.
     OAuthBearer(OAuthBearerConfig),
 }
 
 impl AuthenticationConfig {
+    /// Check this configuration's endpoint, resource, and authentication invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns the selected authentication configuration's resource validation error.
     pub fn validate(&self) -> ClientResult<()> {
         match self {
             Self::OAuthBearer(config) => config.validate(),
@@ -57,12 +79,20 @@ impl AuthenticationConfig {
 /// WebSocket-only transport settings for the native client runtime.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WebSocketConfig {
+    /// WebSocket URL used to establish the XMPP transport.
     pub endpoint: Url,
+    /// HTTP Origin header supplied when opening the WebSocket connection.
     pub origin: Option<Url>,
+    /// Maximum time allowed to establish the WebSocket connection.
     pub connect_timeout: Duration,
 }
 
 impl WebSocketConfig {
+    /// Validate a WebSocket endpoint and use no origin with a 15-second connection timeout.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the endpoint is not `ws`/`wss`, lacks a host, or the optional origin is not `http`/`https`.
     pub fn new(endpoint: Url) -> ClientResult<Self> {
         let config = Self {
             endpoint,
@@ -73,6 +103,11 @@ impl WebSocketConfig {
         Ok(config)
     }
 
+    /// Check this configuration's endpoint, resource, and authentication invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the endpoint is not `ws`/`wss`, lacks a host, or the optional origin is not `http`/`https`.
     pub fn validate(&self) -> ClientResult<()> {
         match self.endpoint.scheme() {
             "ws" | "wss" => {}
@@ -105,12 +140,20 @@ impl WebSocketConfig {
 /// OAUTHBEARER credentials and bind target for v1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OAuthBearerConfig {
+    /// Bare JID of the account being authenticated.
     pub account: BareJid,
+    /// Requested XMPP resource name for account binding.
     pub resource: ClientResource,
+    /// Bearer credential used during OAUTHBEARER authentication.
     pub access_token: AccessToken,
 }
 
 impl OAuthBearerConfig {
+    /// Create authentication credentials and validate the requested resource name.
+    ///
+    /// # Errors
+    ///
+    /// Returns the resource validation error if the requested resource is blank.
     pub fn new(
         account: BareJid,
         resource: ClientResource,
@@ -125,6 +168,11 @@ impl OAuthBearerConfig {
         Ok(config)
     }
 
+    /// Check this configuration's endpoint, resource, and authentication invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns the resource validation error if the requested resource is blank.
     pub fn validate(&self) -> ClientResult<()> {
         self.resource.validate()
     }
@@ -135,16 +183,27 @@ impl OAuthBearerConfig {
 pub struct ClientResource(String);
 
 impl ClientResource {
+    /// Validate a non-blank resource name while retaining its original text.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::EmptyResource` if the requested resource is blank after trimming.
     pub fn new(resource: impl Into<String>) -> ClientResult<Self> {
         let resource = Self(resource.into());
         resource.validate()?;
         Ok(resource)
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
+    /// Check this configuration's endpoint, resource, and authentication invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns `ClientError::EmptyResource` if the requested resource is blank after trimming.
     pub fn validate(&self) -> ClientResult<()> {
         if self.0.trim().is_empty() {
             return Err(ClientError::EmptyResource);
@@ -165,10 +224,12 @@ impl fmt::Display for ClientResource {
 pub struct AccessToken(String);
 
 impl AccessToken {
+    /// Wrap bearer token material without exposing it in Debug output.
     pub fn new(token: impl Into<String>) -> Self {
         Self(token.into())
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -183,16 +244,22 @@ impl fmt::Debug for AccessToken {
 /// Session-scoped bootstrap flags owned by the client runtime.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct SessionConfig {
+    /// Whether the server advertised XEP-0198 support.
     pub stream_management: StreamManagementConfig,
+    /// Language tag associated with the displayed text.
     pub language: Option<String>,
 }
 
 /// Stream management feature flags reserved for future parity slices.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StreamManagementConfig {
+    /// Whether to negotiate XEP-0198 after binding.
     pub enable_stream_management: bool,
+    /// Whether the client requests stream resumption.
     pub allow_resume: bool,
+    /// Requested maximum stream resumption window in seconds.
     pub resume_max: Option<u32>,
+    /// Persisted XEP-0198 counters and unhandled outbound entries.
     pub resume_state: Option<SmResumeState>,
 }
 

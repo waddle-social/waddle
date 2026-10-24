@@ -1,3 +1,5 @@
+//! Per-invocation Wasmtime state and host capability access.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -31,6 +33,7 @@ pub struct HostState {
     delivery: Option<Resource<DeliveryKey>>,
     tools: Arc<dyn ExtensionHostTools>,
     context: InvocationContext,
+    /// Guest configuration returned by the runtime configuration host import.
     pub config: String,
     grants: HashSet<ExtensionCapability>,
     allowed_http_origins: Vec<String>,

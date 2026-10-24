@@ -1,8 +1,15 @@
+//! Construction of real fixture actors with deterministic observation controls.
+
 use super::*;
 use crate::observer_test_support::ObserverTestPlugin;
 
 impl ExtensionManager {
     /// Load real fixture actors with independent deterministic invocation controls.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `CARGO_MANIFEST_DIR` is absent, the fixture engine or component cannot
+    /// load, or fixture initialization fails.
     pub async fn with_observer_test_plugins(plugins: Vec<Arc<ObserverTestPlugin>>) -> Self {
         let runtime = WasmRuntime::new().expect("fixture runtime");
         // This helper also runs inside sibling crates' test binaries.

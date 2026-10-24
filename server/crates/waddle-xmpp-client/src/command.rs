@@ -1,3 +1,5 @@
+//! Commands exchanged between native client handles and their driver.
+
 use minidom::Element;
 use tokio::sync::oneshot;
 
@@ -10,7 +12,9 @@ pub enum XmppCommand {
     SendStanza(Element),
     /// Send an IQ stanza and await a correlated result or error response.
     SendIq {
+        /// Typed stanza carried by this event or request.
         stanza: Element,
+        /// Peer expected to answer the pending IQ request.
         responder: oneshot::Sender<ClientResult<Element>>,
     },
     /// Disconnect the session cleanly.

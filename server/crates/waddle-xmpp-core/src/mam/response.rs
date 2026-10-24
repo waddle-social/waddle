@@ -1,3 +1,5 @@
+//! MAM forwarded-result messages and final result-set IQ construction.
+
 use jid::Jid;
 use minidom::Element;
 use tracing::warn;

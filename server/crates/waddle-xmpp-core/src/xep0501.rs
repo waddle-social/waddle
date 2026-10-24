@@ -52,6 +52,7 @@ pub const DEFAULT_EXPIRY_HOURS: i64 = 24;
 pub struct StoryMediaType(String);
 
 impl StoryMediaType {
+    /// Parse a supported wire value, rejecting unrecognized or malformed input.
     pub fn parse(value: &str) -> Option<Self> {
         let value = value.trim();
         let (top, sub) = value.split_once('/')?;
@@ -66,6 +67,7 @@ impl StoryMediaType {
         Some(Self(value.to_owned()))
     }
 
+    /// Borrow the stored text without allocating.
     pub fn as_str(&self) -> &str {
         &self.0
     }

@@ -1,3 +1,5 @@
+//! Browser event loop coordinating commands, WebSocket frames, and runtime events.
+
 use super::*;
 
 #[derive(Serialize)]

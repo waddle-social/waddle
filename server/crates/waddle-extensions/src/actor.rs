@@ -1,3 +1,5 @@
+//! Actor-facing extension invocation and observation request contracts.
+
 use std::collections::HashSet;
 use std::sync::Arc;
 
@@ -47,6 +49,12 @@ impl WasmExtensionActor {
     /// Load the extension and run its lifecycle `init` to obtain the extension info.
     ///
     /// `config` is the JSON config payload to forward to the guest's `init` function.
+    ///
+    /// # Errors
+    ///
+    /// Returns an initialization error for deadline/resource exhaustion, component traps,
+    /// guest-reported failure, or a manifest that cannot be converted to validated host
+    /// types.
     pub async fn initialize(extension: LoadedExtension, config: &str) -> Result<Self> {
         let manifest = extension.call_init(config).await?;
         Ok(Self {
@@ -89,21 +97,27 @@ impl WasmExtensionActor {
             .avatar = Some(avatar);
     }
 
+    /// Install the host service implementation used by future invocations; capabilities
+    /// still require explicit grants.
     pub fn with_host_tools(mut self, host_tools: Arc<dyn ExtensionHostTools>) -> Self {
         self.host_tools = host_tools;
         self
     }
 
+    /// Replace the operator-granted capability set used to authorize host calls and
+    /// returned effects.
     pub fn with_grants(mut self, grants: HashSet<ExtensionCapability>) -> Self {
         self.grants = grants;
         self
     }
 
+    /// Replace the HTTPS origin allowlist used by outbound HTTP calls during guest execution.
     pub fn with_allowed_http_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_http_origins = origins;
         self
     }
 
+    /// Replace the rooms that provider webhook invocations may target without a user requester.
     pub fn with_provider_room_grants(mut self, rooms: Vec<xmpp_parsers::jid::BareJid>) -> Self {
         self.provider_room_grants = rooms;
         self
@@ -178,10 +192,13 @@ impl WasmExtensionActor {
         result.map_err(ObservationInvocationError::Invoked)
     }
 
+    /// Clone the manifest returned by this component's successful initialization.
     pub fn manifest(&self) -> ExtensionManifest {
         self.manifest.clone()
     }
 
+    /// Whether the operator granted this capability; test fixtures additionally honor
+    /// observation revocation.
     pub fn has_grant(&self, capability: ExtensionCapability) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if capability == ExtensionCapability::MessageObserve
@@ -195,15 +212,25 @@ impl WasmExtensionActor {
         self.grants.contains(&capability)
     }
 
+    /// Whether the effect matches both the manifest's declarations and this actor's
+    /// granted capabilities.
     pub fn validate_effect(&self, effect: &ExtensionEffect) -> bool {
         effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
     }
 
+    /// Run an event in the default `local` community and return only permitted effects;
+    /// guest failures become host warnings.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the fixed nonblank `local` community identifier violates the
+    /// identifier constructor invariant.
     pub async fn handle_event(&self, event: ExtensionEvent) -> Vec<ExtensionEffect> {
         self.handle_event_for_waddle(event, WaddleId::new("local").expect("static waddle id"))
             .await
     }
 
+    /// Run an event in the specified community, deriving requester authority from the event.
     pub async fn handle_event_for_waddle(
         &self,
         event: ExtensionEvent,
@@ -213,6 +240,15 @@ impl WasmExtensionActor {
             .await
     }
 
+    /// Run an event using explicit requester authority when supplied, otherwise deriving
+    /// it from the event. Guest failures become warnings; undeclared effects, room-result
+    /// effects, and durable observation events are excluded.
+    ///
+    /// # Panics
+    ///
+    /// Panics if construction of the nonempty host-warning diagnostic violates the
+    /// display-text invariant. Test-support fixtures can also panic if their
+    /// recorded-invocation mutex was poisoned.
     pub async fn handle_event_for_waddle_with_requester(
         &self,
         event: ExtensionEvent,

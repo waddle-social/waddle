@@ -1,3 +1,5 @@
+//! Conversion between component host-tool requests and typed framework contracts.
+
 use chrono::{DateTime, Utc};
 use xmpp_parsers::jid::BareJid;
 

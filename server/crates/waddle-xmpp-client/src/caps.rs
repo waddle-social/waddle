@@ -1,3 +1,5 @@
+//! XEP-0115 entity-capabilities hashing and client capability advertisements.
+
 use base64::{engine::general_purpose::STANDARD as BASE64_STANDARD, Engine as _};
 use minidom::Element;
 use sha1::{Digest, Sha1};
@@ -7,7 +9,9 @@ use crate::messaging::{
     NS_CHAT_MARKERS, NS_CHAT_STATES, NS_MESSAGE_CORRECT, NS_MESSAGE_RETRACT, NS_REACTIONS,
 };
 
+/// Protocol token `http://jabber.org/protocol/caps`.
 pub const NS_CAPS: &str = "http://jabber.org/protocol/caps";
+/// Protocol token `https://waddle.social/caps`.
 pub const CAPS_NODE: &str = "https://waddle.social/caps";
 /// XEP-0084 §4.1 PEP notification filter for peer avatar metadata changes.
 pub const NS_AVATAR_METADATA_NOTIFY: &str = "urn:xmpp:avatar:metadata+notify";
@@ -16,6 +20,7 @@ const IDENTITY_CATEGORY: &str = "client";
 const IDENTITY_TYPE: &str = "pc";
 const IDENTITY_NAME: &str = "Waddle";
 
+/// Return the protocol feature namespaces included in the client's capability advertisement.
 pub fn client_caps_features() -> Vec<&'static str> {
     vec![
         DISCO_INFO_NS,
@@ -63,6 +68,7 @@ pub fn client_caps_features() -> Vec<&'static str> {
     ]
 }
 
+/// Compute the XEP-0115 verification string for the client's identities and features.
 pub fn client_caps_verification_string() -> String {
     let mut s = String::new();
     s.push_str(IDENTITY_CATEGORY);
@@ -82,10 +88,12 @@ pub fn client_caps_verification_string() -> String {
     BASE64_STANDARD.encode(Sha1::digest(s.as_bytes()))
 }
 
+/// Return the capability node combined with its verification hash.
 pub fn client_caps_node_ver() -> String {
     format!("{}#{}", CAPS_NODE, client_caps_verification_string())
 }
 
+/// Build the XEP-0115 c element advertising the client node and SHA-1 verification hash.
 pub fn build_client_caps_element() -> Element {
     Element::builder("c", NS_CAPS)
         .attr(minidom::rxml::xml_ncname!("hash").to_owned(), "sha-1")
@@ -97,6 +105,7 @@ pub fn build_client_caps_element() -> Element {
         .build()
 }
 
+/// Build the disco#info IQ-result matching the client capability node and feature hash.
 pub fn build_client_caps_disco_info_response(
     request: &Element,
     from: Option<&jid::FullJid>,

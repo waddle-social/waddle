@@ -1,3 +1,5 @@
+//! Internal commands and result channels used by the browser client driver.
+
 use super::*;
 
 pub(crate) async fn send_stanza_command(

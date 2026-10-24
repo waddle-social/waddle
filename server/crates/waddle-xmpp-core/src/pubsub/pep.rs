@@ -7,8 +7,11 @@ use super::node::AccessModel;
 use super::stanzas::is_pubsub_iq;
 use crate::disco::{Feature, Identity};
 
+/// Protocol token `urn:xmpp:bookmarks:1`.
 pub const PEP_NODE_BOOKMARKS: &str = "urn:xmpp:bookmarks:1";
+/// Protocol token `urn:xmpp:avatar:data`.
 pub const PEP_NODE_AVATAR_DATA: &str = "urn:xmpp:avatar:data";
+/// Protocol token `urn:xmpp:avatar:metadata`.
 pub const PEP_NODE_AVATAR_METADATA: &str = "urn:xmpp:avatar:metadata";
 
 /// XEP-0490 §3 Message Displayed Synchronization PEP node + namespace.

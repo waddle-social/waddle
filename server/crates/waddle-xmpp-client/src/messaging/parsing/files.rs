@@ -1,3 +1,5 @@
+//! Parsing of shared-file metadata and attachment payloads.
+
 use minidom::Element;
 
 use super::super::namespaces::*;

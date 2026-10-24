@@ -10,13 +10,18 @@ use tokio::sync::Notify;
 
 use crate::types::{DisplayText, ExtensionEffect, MessageHook, PluginId};
 
+/// Deterministic success, warning, or blocked execution for observation fixtures.
 #[derive(Debug)]
 pub enum ObserverTestBehavior {
+    /// Continue into the real fixture component after recording the hook.
     Success,
+    /// Return a deterministic host warning after recording the hook.
     Warning,
+    /// Wait for the supplied notification before continuing into the real fixture component.
     Blocked(Arc<Notify>),
 }
 
+/// Shared observation fixture that records hooks and supports grant revocation.
 #[derive(Debug)]
 pub struct ObserverTestPlugin {
     pub(crate) id: PluginId,
@@ -26,6 +31,8 @@ pub struct ObserverTestPlugin {
 }
 
 impl ObserverTestPlugin {
+    /// Create a shared deterministic observer fixture with no recorded invocations and no
+    /// revocation.
     pub fn new(id: PluginId, behavior: ObserverTestBehavior) -> Arc<Self> {
         Arc::new(Self {
             id,
@@ -35,6 +42,11 @@ impl ObserverTestPlugin {
         })
     }
 
+    /// Clone the message hooks recorded so far by this deterministic test plugin.
+    ///
+    /// # Panics
+    ///
+    /// Panics if an earlier panic poisoned the recorded-invocation mutex.
     pub fn invocations(&self) -> Vec<MessageHook> {
         self.invocations
             .lock()
@@ -42,6 +54,7 @@ impl ObserverTestPlugin {
             .clone()
     }
 
+    /// Make subsequent observation grant checks fail for this test plugin.
     pub fn revoke(&self) {
         self.revoked.store(true, Ordering::SeqCst);
     }

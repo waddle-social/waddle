@@ -1,3 +1,5 @@
+//! OCI extension artifact resolution, fetching, and content verification.
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -18,6 +20,7 @@ use crate::config::ExtensionModuleConfig;
 /// configured OCI reference and writes the module payload into `cache_dir`.
 #[derive(Debug, Clone)]
 pub struct OciExtensionPuller {
+    /// Filesystem directory in which downloaded Wasm components are cached.
     pub cache_dir: PathBuf,
 }
 
@@ -28,6 +31,8 @@ const CORE_WASM_VERSION: [u8; 4] = [0x01, 0x00, 0x00, 0x00];
 const COMPONENT_WASM_VERSION: [u8; 4] = [0x0d, 0x00, 0x01, 0x00];
 
 impl OciExtensionPuller {
+    /// Create an artifact resolver using the supplied cache directory; no files or
+    /// network connections are created yet.
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
         Self {
             cache_dir: cache_dir.into(),
@@ -35,6 +40,12 @@ impl OciExtensionPuller {
     }
 
     /// Resolve a module config to a concrete WASM file path on disk.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the local path does not exist, cache configuration is
+    /// invalid, invalid cached files cannot be removed, or the required registry download
+    /// and verification fails.
     pub async fn resolve_wasm_path(&self, module: &ExtensionModuleConfig) -> Result<PathBuf> {
         if let Some(local) = module.local_path.as_ref() {
             let path = PathBuf::from(local);
@@ -87,6 +98,14 @@ impl OciExtensionPuller {
             .join(format!("{digest}.wasm")))
     }
 
+    /// Download the digest-pinned OCI artifact, validate its type and Wasm layer, then
+    /// atomically replace the cached component and write its digest sidecar.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid digest-pinned registry configuration,
+    /// download/filesystem failures, invalid artifact type, absent or multiple Wasm
+    /// layers, oversized or invalid Wasm bytes, or failed cache verification.
     pub async fn pull_module(&self, module: &ExtensionModuleConfig) -> Result<PathBuf> {
         let reference = self.reference_for(module)?;
         let cached = self.cached_wasm_path(module)?;
@@ -147,6 +166,7 @@ impl OciExtensionPuller {
         Ok(cached)
     }
 
+    /// Borrow the filesystem directory used for downloaded extension components.
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }
