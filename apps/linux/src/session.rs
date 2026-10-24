@@ -20,7 +20,7 @@ use std::time::Duration;
 use chrono::DateTime;
 use jid::{BareJid, Jid};
 use waddle_client_session::{
-    Attachment, Encryption, IncomingMessage, ReactionUpdate, ReplyTo, strip_fallback,
+    strip_fallback, Attachment, Encryption, IncomingMessage, ReactionUpdate, ReplyTo,
 };
 use waddle_xmpp_client_ffi::{
     WaddleArchivedMessage, WaddleCarbonDirection, WaddleChannel, WaddleClient, WaddleClientEvent,
@@ -260,12 +260,9 @@ impl Session {
     pub async fn inbox(&self) -> Vec<WaddleInboxEntry> {
         let client = Arc::clone(&self.client);
         match runtime::spawn(async move {
-            client
-                .fetch_inbox(
-                    waddle_xmpp_client::inbox::InboxReadFilter::All,
-                    waddle_xmpp_client::inbox::InboxMessageContent::Include,
-                )
-                .await
+            let only_unread = false;
+            let no_messages = true;
+            client.fetch_inbox(only_unread, no_messages).await
         })
         .await
         {
@@ -1460,13 +1457,11 @@ mod tests {
         assert!(arrived.message.safety_scores.is_some());
         assert_eq!(arrived.thread, None);
         score.from = Some(format!("{room}/mallory"));
-        assert!(
-            arrival(score.clone(), &me())
-                .expect("occupant content")
-                .message
-                .safety_scores
-                .is_none()
-        );
+        assert!(arrival(score.clone(), &me())
+            .expect("occupant content")
+            .message
+            .safety_scores
+            .is_none());
         score.from = Some(room.to_string());
         score.safety_scores = Some(judgment("other@muc.waddle.social"));
         assert!(arrival(score, &me()).is_none());
@@ -1474,12 +1469,10 @@ mod tests {
         let mut score = archived(None);
         score.from = Some(room.to_string());
         score.safety_scores = Some(judgment(room.as_str()));
-        assert!(
-            archived_from(score.clone(), &room, Kind::Room, &me())
-                .expect("scores")
-                .safety_scores
-                .is_some()
-        );
+        assert!(archived_from(score.clone(), &room, Kind::Room, &me())
+            .expect("scores")
+            .safety_scores
+            .is_some());
         score.from = Some("other@muc.waddle.social".into());
         assert!(archived_from(score, &room, Kind::Room, &me()).is_none());
     }

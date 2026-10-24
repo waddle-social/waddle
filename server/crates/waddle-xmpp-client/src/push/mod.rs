@@ -61,7 +61,7 @@ pub enum PushPlatform {
     Web,
     /// Apple Push Notification service registration.
     Apns,
-    /// Firebase Cloud Messaging registration.
+    /// Cloud push registration using FCM device tokens.
     Fcm,
 }
 

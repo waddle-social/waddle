@@ -19,7 +19,6 @@ impl ObservationGeneration {
         Ok(Self(value))
     }
     /// Return the host-assigned configuration generation.
-
     #[must_use]
     pub fn get(self) -> u64 {
         self.0
@@ -38,7 +37,6 @@ impl MessageRevision {
         Self(value)
     }
     /// Return the host-assigned message revision number.
-
     #[must_use]
     pub fn get(self) -> u64 {
         self.0

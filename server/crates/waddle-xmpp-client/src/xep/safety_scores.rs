@@ -133,7 +133,6 @@ impl JudgmentModelVersion {
         non_empty(value).map(Self)
     }
     /// Borrow the stored text without allocating.
-
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -152,7 +151,6 @@ impl TaxonomyVersion {
         non_empty(value).map(Self)
     }
     /// Borrow the stored text without allocating.
-
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

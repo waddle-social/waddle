@@ -152,7 +152,6 @@ impl ProviderFieldText {
         Ok(Self(value.into()))
     }
     /// Borrow the stored text without allocating or changing whitespace.
-
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0

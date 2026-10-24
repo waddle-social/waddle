@@ -9,10 +9,10 @@
 
 use std::net::IpAddr;
 
-use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use base64::Engine;
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
-use ring::digest::{SHA256, digest};
+use ring::digest::{digest, SHA256};
 use ring::rand::{SecureRandom, SystemRandom};
 use thiserror::Error;
 use url::{Host, Url};
@@ -146,7 +146,11 @@ pub fn disposition(media_type: &str) -> &'static str {
         .iter()
         .any(|prefix| media_type.starts_with(prefix))
         || media_type == "application/pdf";
-    if inline { "inline" } else { "attachment" }
+    if inline {
+        "inline"
+    } else {
+        "attachment"
+    }
 }
 
 /// The name the ciphertext is uploaded under, as the web client names it.
