@@ -18,6 +18,7 @@ use std::env;
 use std::process::Command;
 use waddle_server::db::Database;
 use waddle_server::push_service::vapid_storage::VapidStorage;
+use waddle_xmpp::push::types::{VapidDbWriteStage, VapidLoadError};
 
 const ROOT_KEY: &[u8] = b"vapid-test-root-key-32-bytes-min";
 const VAPID_ENV_VAR: &str = "WADDLE_VAPID_PRIVATE_KEY";
@@ -137,6 +138,63 @@ async fn env_var_bootstrap_persists_without_mutating_environment() {
         .as_bytes()
         .to_vec();
     assert_eq!(got_pk, expected_pk);
+}
+
+#[tokio::test]
+async fn env_var_persist_failure_retains_bootstrap_without_storing_key() {
+    let encoded = b64u(&[0xAE; 32]);
+    if !run_in_subprocess(
+        "env_var_persist_failure_retains_bootstrap_without_storing_key",
+        Some(&encoded),
+    ) {
+        return;
+    }
+
+    let db = fresh_db("vapid-env-persist-failure").await;
+    // The read-only loader initializes the schema without inserting a key.
+    drop(
+        VapidStorage::load_or_ephemeral(db.clone(), ROOT_KEY)
+            .await
+            .expect("initialize VAPID storage"),
+    );
+    {
+        let connection = db.guard().await.expect("SQLite fixture connection");
+        connection
+            .execute(
+                "CREATE TRIGGER reject_vapid_insert BEFORE INSERT ON push_service_vapid_keys \
+                 BEGIN SELECT RAISE(ABORT, 'fixture rejected VAPID persistence'); END",
+                (),
+            )
+            .await
+            .expect("install SQLite persistence failure");
+    }
+
+    let Err(error) = VapidStorage::load_or_provision(db.clone(), ROOT_KEY).await else {
+        panic!("failed persistence must fail bootstrap");
+    };
+    assert!(matches!(
+        error,
+        VapidLoadError::DbWrite {
+            stage: VapidDbWriteStage::InsertRow,
+            ..
+        }
+    ));
+    assert_eq!(
+        env::var(VAPID_ENV_VAR).expect("bootstrap secret retained after failed persist"),
+        encoded,
+    );
+    let connection = db.guard().await.expect("inspect durable fixture state");
+    let mut rows = connection
+        .query("SELECT COUNT(*) FROM push_service_vapid_keys", ())
+        .await
+        .expect("count stored VAPID keys");
+    let row = rows
+        .next()
+        .await
+        .expect("read count row")
+        .expect("count row");
+    let stored_keys: i64 = row.get(0).expect("stored key count");
+    assert_eq!(stored_keys, 0, "failed bootstrap must not store a key");
 }
 
 #[tokio::test]
