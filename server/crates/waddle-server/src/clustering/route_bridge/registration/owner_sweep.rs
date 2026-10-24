@@ -1,6 +1,7 @@
-//! Owner mirrors outlive transport failures, but not committed node expiry.
+//! Reconcile routing mirrors using committed expiry or exact-resource absence.
 use super::super::*;
 use super::owner::remote_owner_registration_matches;
+use crate::clustering::resource_presence::{peer_resource_reachability, PeerResourceReachability};
 use waddle_xmpp::registry::user_registry::UnregisterAndReleaseRetryableFailure;
 use waddle_xmpp::registry::{UnregisterAndReleaseIfEmpty, UnregisterAndReleaseOutcome};
 use waddle_xmpp::telemetry::attributes::{RemoteOwnerMirrorOutcome, SweepOutcome};
@@ -112,7 +113,14 @@ impl OrderedRelayDeliveryBridge {
                 };
                 match lease {
                     Ok(Some(identity)) if identity == registration.socket_identity => {
-                        RemoteOwnerMirrorOutcome::Live
+                        self.reconcile_healthy_remote_owner_mirror(
+                            services,
+                            &jid,
+                            &registration,
+                            entry_deadline,
+                            timeout_outcome,
+                        )
+                        .await
                     }
                     Ok(_) => {
                         self.retire_remote_owner_mirror(
@@ -143,6 +151,55 @@ impl OrderedRelayDeliveryBridge {
         outcome
     }
 
+    async fn reconcile_healthy_remote_owner_mirror(
+        &self,
+        services: &OrderedRelayDeliveryServices,
+        jid: &jid::FullJid,
+        registration: &RemoteOwnerRegistration,
+        deadline: tokio::time::Instant,
+        timeout_outcome: RemoteOwnerMirrorOutcome,
+    ) -> RemoteOwnerMirrorOutcome {
+        let (Some(membership), Some(presence)) = (
+            services.cluster_membership.as_ref(),
+            services.resource_presence.as_ref(),
+        ) else {
+            return RemoteOwnerMirrorOutcome::Deferred;
+        };
+        match tokio::time::timeout_at(deadline, async {
+            // Mirrors never prove liveness. Ask about hosted sockets and
+            // resumable sessions here and on every unexpired cluster peer.
+            if self.resource_presence_local(jid).await == LocalResourcePresence::Present {
+                return RemoteOwnerMirrorOutcome::Live;
+            }
+            match peer_resource_reachability(
+                membership.as_ref(),
+                presence.as_ref(),
+                jid,
+                deadline.saturating_duration_since(tokio::time::Instant::now()),
+            )
+            .await
+            {
+                PeerResourceReachability::AbsentOnEveryPeer => {
+                    self.retire_remote_owner_mirror(
+                        services,
+                        jid,
+                        registration,
+                        deadline,
+                        timeout_outcome,
+                    )
+                    .await
+                }
+                PeerResourceReachability::PresentOnAPeer => RemoteOwnerMirrorOutcome::Live,
+                PeerResourceReachability::Unproven => RemoteOwnerMirrorOutcome::Deferred,
+            }
+        })
+        .await
+        {
+            Ok(outcome) => outcome,
+            Err(_) => timeout_outcome,
+        }
+    }
+
     async fn retire_remote_owner_mirror(
         &self,
         services: &OrderedRelayDeliveryServices,
@@ -151,9 +208,22 @@ impl OrderedRelayDeliveryBridge {
         deadline: tokio::time::Instant,
         timeout_outcome: RemoteOwnerMirrorOutcome,
     ) -> RemoteOwnerMirrorOutcome {
+        let lock =
+            match tokio::time::timeout_at(deadline, self.lock_for_remote_owner_registration(jid))
+                .await
+            {
+                Ok(Some(lock)) => lock,
+                Ok(None) => return RemoteOwnerMirrorOutcome::Deferred,
+                Err(_) => return timeout_outcome,
+            };
         let result = tokio::time::timeout_at(deadline, async {
-            // Recheck the full incarnation after the lease read. Registry
-            // cleanup also compares the owner handle, preserving successors.
+            let Ok(_registration_guard) = lock.try_lock() else {
+                return RemoteOwnerMirrorOutcome::Deferred;
+            };
+            // A successor may register while the absence probe is in flight.
+            // Keep its registration/owner fences, but do not require current
+            // publication authority to remove an obsolete local routing copy.
+            // The registry releases only its captured claim owner and epoch.
             {
                 let Ok(mut registrations) = self.remote_owner_resources.try_lock() else {
                     return RemoteOwnerMirrorOutcome::Deferred;
@@ -217,6 +287,13 @@ impl OrderedRelayDeliveryBridge {
                 }
             }
         })
+        .await;
+        // Best-effort bookkeeping shares the entry budget. The bounded map
+        // also prunes unused locks before admitting a new key at capacity.
+        let _ = tokio::time::timeout_at(
+            deadline,
+            self.remove_remote_owner_registration_lock_if_unused(jid, &lock),
+        )
         .await;
         match result {
             Ok(outcome) => outcome,

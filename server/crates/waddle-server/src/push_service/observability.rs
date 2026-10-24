@@ -14,19 +14,37 @@ pub struct PushProviderQueueObservation {
     pub unresolved_failed: u64,
     pub retained_max_per_node: u64,
     pub near_capacity_nodes: u64,
+    /// Unknown for standalone stores or an absent host registration schema.
+    pub local_registrations: Option<PushLocalRegistrationObservation>,
+}
+
+/// Enabled registrations for the configured service, not historical outbox
+/// targets. Counts reveal no owner, node, job or message identifiers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PushLocalRegistrationObservation {
+    pub missing_nodes: u64,
+    pub inactive_nodes: u64,
 }
 
 impl PushProviderQueueObservation {
     pub(crate) fn record(self) {
+        let snapshot_at = crate::time::now_ms().max(0) as u64 / 1_000;
+        waddle_xmpp::telemetry::reliability::record_push_provider_capacity(
+            self.retained_max_per_node,
+            self.near_capacity_nodes,
+        );
+        if let Some(registrations) = self.local_registrations {
+            waddle_xmpp::telemetry::reliability::record_push_registration_snapshot(
+                registrations.missing_nodes,
+                registrations.inactive_nodes,
+                snapshot_at,
+            );
+        }
         waddle_xmpp::telemetry::reliability::record_push_queue_snapshot(
             PushQueue::Provider,
             self.parked,
             self.unresolved_failed,
-            crate::time::now_ms().max(0) as u64 / 1_000,
-        );
-        waddle_xmpp::telemetry::reliability::record_push_provider_capacity(
-            self.retained_max_per_node,
-            self.near_capacity_nodes,
+            snapshot_at,
         );
     }
 }
@@ -66,18 +84,46 @@ impl DatabasePushServiceStore {
         } else {
             "FALSE"
         };
+        let registration_schema = if self.pubsub_boundary.is_some() {
+            let probe = match self.db.driver() {
+                DatabaseDriver::Postgres => "SELECT 1 WHERE to_regclass('push_registrations') IS NOT NULL",
+                DatabaseDriver::Sqlite => "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'push_registrations'",
+            };
+            self.query(probe, ())
+                .await?
+                .next()
+                .await
+                .map_err(|error| XmppError::internal(error.to_string()))?
+                .is_some()
+        } else {
+            false
+        };
+        let local_service = self
+            .pubsub_boundary
+            .as_ref()
+            .filter(|_| registration_schema);
+        let mut params = crate::db_params![];
+        let registrations = if let Some(boundary) = local_service {
+            params.push(crate::db::Value::from(boundary.service_jid.to_string()));
+            "SELECT CAST(COALESCE(SUM(CASE WHEN n.node IS NULL THEN 1 ELSE 0 END), 0) AS BIGINT) AS missing_nodes,
+                CAST(COALESCE(SUM(CASE WHEN n.node IS NOT NULL AND n.status <> 'active' THEN 1 ELSE 0 END), 0) AS BIGINT) AS inactive_nodes
+             FROM push_registrations r LEFT JOIN push_nodes n ON n.node = r.node AND n.owner_bare_jid = r.owner_bare_jid
+             WHERE r.push_service_jid = ? AND r.status = 'enabled'"
+        } else {
+            "SELECT 0 AS missing_nodes, 0 AS inactive_nodes"
+        };
+        params.push(crate::db::Value::from(MAX_PUBLISH_JOBS_PER_NODE * 9 / 10));
         let sql = format!(
             "WITH node_inventory AS (SELECT node, COUNT(*) AS retained,
                 SUM(CASE WHEN status = 'failed' AND uncertain_send = 1 AND terminal_disposition IS NULL THEN 1 ELSE 0 END) AS parked,
                 SUM(CASE WHEN status = 'failed' AND uncertain_send = 0 AND ({lineage_guard} OR {foundation_guard}) THEN 1 ELSE 0 END) AS unresolved_failed
-                FROM push_publish_jobs p GROUP BY node)
+                FROM push_publish_jobs p GROUP BY node), registration_inventory AS ({registrations})
              SELECT CAST(COALESCE(SUM(parked), 0) AS BIGINT), CAST(COALESCE(SUM(unresolved_failed), 0) AS BIGINT),
-                COALESCE(MAX(retained), 0), COALESCE(SUM(CASE WHEN retained >= ? THEN 1 ELSE 0 END), 0)
+                COALESCE(MAX(retained), 0), COALESCE(SUM(CASE WHEN retained >= ? THEN 1 ELSE 0 END), 0),
+                (SELECT missing_nodes FROM registration_inventory), (SELECT inactive_nodes FROM registration_inventory)
              FROM node_inventory"
         );
-        let mut rows = self
-            .query(&sql, crate::db_params![MAX_PUBLISH_JOBS_PER_NODE * 9 / 10])
-            .await?;
+        let mut rows = self.query(&sql, params).await?;
         let row = rows
             .next()
             .await
@@ -94,6 +140,14 @@ impl DatabasePushServiceStore {
             unresolved_failed: count(1)?,
             retained_max_per_node: count(2)?,
             near_capacity_nodes: count(3)?,
+            local_registrations: if local_service.is_some() {
+                Some(PushLocalRegistrationObservation {
+                    missing_nodes: count(4)?,
+                    inactive_nodes: count(5)?,
+                })
+            } else {
+                None
+            },
         })
     }
 }
@@ -133,6 +187,7 @@ mod tests {
                 unresolved_failed: 0,
                 retained_max_per_node: 0,
                 near_capacity_nodes: 0,
+                local_registrations: None,
             }
         );
         assert_eq!(
@@ -156,6 +211,7 @@ mod tests {
                 unresolved_failed: 0,
                 retained_max_per_node: 8999,
                 near_capacity_nodes: 0,
+                local_registrations: None,
             }
         );
         fixture.execute(
@@ -171,6 +227,7 @@ mod tests {
                 unresolved_failed: 0,
                 retained_max_per_node: 9000,
                 near_capacity_nodes: 1,
+                local_registrations: None,
             }
         );
         fixture.execute(
@@ -208,6 +265,7 @@ mod tests {
                 unresolved_failed: 1,
                 retained_max_per_node: 9000,
                 near_capacity_nodes: 1,
+                local_registrations: None,
             }
         );
         // Foundation custody also exists without a notification lineage row.
@@ -299,6 +357,7 @@ mod tests {
                 unresolved_failed: 0,
                 retained_max_per_node: 0,
                 near_capacity_nodes: 0,
+                local_registrations: None,
             }
         );
         assert_eq!(
@@ -339,6 +398,7 @@ mod tests {
                 unresolved_failed: 0,
                 retained_max_per_node: 0,
                 near_capacity_nodes: 0,
+                local_registrations: None,
             }
         );
     }

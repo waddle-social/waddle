@@ -825,6 +825,74 @@ async fn xep0444_reaction_only_dm_is_suppressed_not_published() {
 }
 
 #[tokio::test]
+async fn xep0357_disable_recovers_legacy_targets_without_provider_authority() {
+    let temp_dir = tempfile::TempDir::new().expect("test directory");
+    let database_url = format!(
+        "sqlite://{}?mode=rwc",
+        temp_dir.path().join("legacy-disable.sqlite3").display()
+    );
+    let server =
+        TestServer::start_persistent_with_extra_accounts(&database_url, &[("bob", "bob-password")]);
+    let mut client = WsXmppClient::connect_and_auth(
+        &server.ws_url(),
+        DOMAIN,
+        USERNAME,
+        server.fixed_account_password(),
+        "xep0357-legacy-disable",
+    )
+    .await
+    .expect("connection");
+    let pool = sqlx::SqlitePool::connect(&database_url)
+        .await
+        .expect("legacy fixture database");
+    sqlx::query("INSERT INTO push_nodes (node, owner_bare_jid, app_id, status, created_at_ms, updated_at_ms) VALUES ('other-owner-node', 'bob@localhost', 'other-owner-app', 'active', 1, 1)")
+        .execute(&pool).await.expect("other owner's provider node");
+    for (service, node) in [
+        (PUSH_SERVICE_JID, "legacy-exact-node"),
+        (PUSH_SERVICE_JID, "legacy-service-wide-node"),
+        (PUSH_SERVICE_JID, "other-owner-node"),
+        ("foreign-push.example.com", "legacy-exact-node"),
+    ] {
+        sqlx::query("INSERT INTO push_registrations (owner_bare_jid, push_service_jid, node, status, created_at_ms, updated_at_ms) VALUES ('admin@localhost', ?, ?, 'enabled', 1, 1)")
+            .bind(service).bind(node).execute(&pool).await.expect("legacy registration");
+    }
+
+    // XEP-0357 §5: an exact disable removes only the JID/node pair;
+    // service-wide disable removes all that user's entries at that service.
+    for (id, node) in [
+        ("legacy-exact-disable", Some("legacy-exact-node")),
+        ("legacy-service-disable", None),
+    ] {
+        let mut disable = Element::builder("disable", NS_PUSH).attr(
+            minidom::rxml::xml_ncname!("jid").to_owned(),
+            PUSH_SERVICE_JID,
+        );
+        if let Some(node) = node {
+            disable = disable.attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
+        }
+        let response = send_iq(
+            &mut client,
+            iq_frame("set", id, DOMAIN, disable.build()),
+            id,
+        )
+        .await;
+        let result = parse_iq_element(&response, id, "result");
+        assert!(result.children().next().is_none());
+        let remaining: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_registrations WHERE owner_bare_jid = 'admin@localhost' AND push_service_jid = ?")
+            .bind(PUSH_SERVICE_JID).fetch_one(&pool).await.expect("remaining local registrations");
+        assert_eq!(remaining, if node.is_some() { 2 } else { 0 });
+    }
+    let foreign: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM push_registrations WHERE owner_bare_jid = 'admin@localhost' AND push_service_jid = 'foreign-push.example.com' AND status = 'enabled'")
+        .fetch_one(&pool).await.expect("foreign registration");
+    assert_eq!(foreign, 1);
+    let other_status: String = sqlx::query_scalar("SELECT status FROM push_nodes WHERE node = 'other-owner-node' AND owner_bare_jid = 'bob@localhost'")
+        .fetch_one(&pool).await.expect("other owner's preserved provider node");
+    assert_eq!(other_status, "active");
+    pool.close().await;
+    let _ = client.close().await;
+}
+
+#[tokio::test]
 async fn xep0357_first_party_enable_requires_owned_active_node_with_device() {
     let (_server, mut client) = setup().await;
 

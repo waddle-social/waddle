@@ -138,6 +138,7 @@ async fn node_names_for_owner_tx(
 async fn prune_disabled_nodes_for_owner_tx(
     tx: &mut crate::db::Transaction<'_>,
     owner_bare_jid: &BareJid,
+    local_service: Option<&BareJid>,
     retain: i64,
 ) -> Result<(), XmppError> {
     let mut rows = tx
@@ -167,12 +168,34 @@ async fn prune_disabled_nodes_for_owner_tx(
             );
         }
     }
+    drop(rows);
+    let guard_local_registrations = local_service.is_some()
+        && crate::push_registrations::registration_table_exists_tx(tx)
+            .await
+            .map_err(|error| XmppError::internal(error.to_string()))?;
+    let registration_guard = if guard_local_registrations {
+        "AND NOT EXISTS (SELECT 1 FROM push_registrations r WHERE r.owner_bare_jid = push_nodes.owner_bare_jid AND r.node = push_nodes.node AND r.push_service_jid = ? AND r.status = 'enabled')"
+    } else {
+        ""
+    };
     for node in stale_nodes {
-        super::publish_jobs::cancel_retryable_publish_jobs_for_node_tx(tx, owner_bare_jid, &node)
-            .await?;
+        // Automatic retention never revokes registrations or settles accepted
+        // work. Keep legacy enabled local targets until explicit retirement;
+        // existing provider guards preserve claims, uncertainty and history.
+        let mut params = crate::db_params![
+            owner_bare_jid.to_string(),
+            node,
+            NODE_STATUS_DISABLED,
+            crate::time::now_ms().saturating_sub(8 * 24 * 60 * 60 * 1_000)
+        ];
+        if guard_local_registrations {
+            params.push(crate::db::Value::from(
+                local_service.map(ToString::to_string),
+            ));
+        }
         tx.execute(
-            "DELETE FROM push_nodes WHERE owner_bare_jid = ? AND node = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM push_publish_jobs WHERE push_publish_jobs.node = push_nodes.node AND (push_publish_jobs.status IN ('queued', 'in-progress') OR (push_publish_jobs.uncertain_send = 1 AND push_publish_jobs.terminal_disposition IS NULL) OR push_publish_jobs.ancestry_job_id IS NOT NULL OR push_publish_jobs.updated_at_ms > ?))",
-            crate::db_params![owner_bare_jid.to_string(), node, NODE_STATUS_DISABLED, crate::time::now_ms().saturating_sub(8 * 24 * 60 * 60 * 1_000)],
+            &format!("DELETE FROM push_nodes WHERE owner_bare_jid = ? AND node = ? AND status = ? AND NOT EXISTS (SELECT 1 FROM push_publish_jobs WHERE push_publish_jobs.node = push_nodes.node AND (push_publish_jobs.status IN ('queued', 'in-progress') OR (push_publish_jobs.uncertain_send = 1 AND push_publish_jobs.terminal_disposition IS NULL) OR push_publish_jobs.ancestry_job_id IS NOT NULL OR push_publish_jobs.updated_at_ms > ?)) {registration_guard}"),
+            params,
         )
         .await
         .map_err(|error| XmppError::internal(error.to_string()))?;
@@ -194,6 +217,7 @@ pub(super) async fn ensure_node_tx(
     owner_bare_jid: &BareJid,
     app_id: &str,
     now_ms: i64,
+    local_service: Option<&BareJid>,
 ) -> Result<PushServiceNode, XmppError> {
     validate_app_id(app_id)?;
     lock_owner_tx(tx, owner_bare_jid, now_ms).await?;
@@ -220,8 +244,13 @@ pub(super) async fn ensure_node_tx(
             .await?
             .ok_or_else(|| XmppError::internal("Push Service node was not persisted"));
     }
-    prune_disabled_nodes_for_owner_tx(tx, owner_bare_jid, MAX_RETAINED_DISABLED_NODES_PER_OWNER)
-        .await?;
+    prune_disabled_nodes_for_owner_tx(
+        tx,
+        owner_bare_jid,
+        local_service,
+        MAX_RETAINED_DISABLED_NODES_PER_OWNER,
+    )
+    .await?;
     if count_active_nodes_for_owner_tx(tx, owner_bare_jid).await? >= MAX_PUSH_NODES_PER_OWNER {
         return Err(XmppError::bad_request(Some(format!(
             "Push Service active node quota exceeded; max {MAX_PUSH_NODES_PER_OWNER} active nodes per owner"
@@ -297,7 +326,16 @@ impl DatabasePushServiceStore {
             .begin_immediate()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
-        let node = ensure_node_tx(&mut tx, owner_bare_jid, app_id, now_ms).await?;
+        let node = ensure_node_tx(
+            &mut tx,
+            owner_bare_jid,
+            app_id,
+            now_ms,
+            self.pubsub_boundary
+                .as_ref()
+                .map(|boundary| &boundary.service_jid),
+        )
+        .await?;
         tx.commit()
             .await
             .map_err(|error| XmppError::internal(error.to_string()))?;
