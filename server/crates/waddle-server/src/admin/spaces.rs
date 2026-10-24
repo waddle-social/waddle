@@ -445,7 +445,7 @@ async fn handle_set_role(ctx: CommandContext, state: Arc<AppState>) -> CommandRe
 // ---------------------------------------------------------------------------
 
 fn parse_optional_text(form: &DataForm, var: &str) -> Option<String> {
-    form.get_value(var)
+    form.value(var)
         .map(str::to_string)
         .filter(|s| !s.is_empty())
 }
@@ -461,7 +461,7 @@ fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String
 }
 
 fn parse_page_size(form: &DataForm) -> Result<u32, String> {
-    match form.get_value("page_size") {
+    match form.value("page_size") {
         Some(raw) if !raw.is_empty() => {
             let parsed: u32 = raw
                 .parse()
@@ -488,7 +488,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<SpacesListArgs, String
         });
     }
     let prefix = form
-        .get_value("prefix")
+        .value("prefix")
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
     let page_size = parse_page_size(form)?;
@@ -1681,7 +1681,7 @@ mod tests {
         assert!(matches!(form.form_type, FormType::Result));
         assert_eq!(form.reported.len(), 7);
         assert_eq!(form.items.len(), 1);
-        assert_eq!(form.get_value("next_cursor"), Some("eng"));
+        assert_eq!(form.value("next_cursor"), Some("eng"));
     }
 
     #[test]
@@ -1707,7 +1707,7 @@ mod tests {
         };
         let form = build_space_form(NODE_UPDATE, &space);
         assert!(matches!(form.form_type, FormType::Result));
-        assert_eq!(form.get_value("FORM_TYPE"), Some(NODE_UPDATE));
+        assert_eq!(form.value("FORM_TYPE"), Some(NODE_UPDATE));
     }
 
     #[test]

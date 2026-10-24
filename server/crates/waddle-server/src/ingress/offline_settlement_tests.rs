@@ -30,7 +30,7 @@ async fn rollback(fixture: IngressFixture, retry_class: Option<crate::ingress_uo
             .await
             .expect("pending schema"),
     );
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let mut submission = fixture.submission(Some("offline-atomic"), "canonical pending body");
@@ -306,7 +306,7 @@ async fn quota_refusal(fixture: IngressFixture, capacity_returns: bool) {
             .expect("pending schema"),
         ),
     });
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let mut submission =

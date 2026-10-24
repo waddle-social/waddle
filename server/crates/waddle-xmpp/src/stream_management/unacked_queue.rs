@@ -173,7 +173,7 @@ impl UnackedQueue {
     /// which stanza it last received. Each entry carries the original
     /// receipt time so the resume path can stamp the XEP-0203
     /// `<delay/>` with the true send time (issue #1178).
-    pub fn get_unacked_after(&self, h: u32) -> Vec<super::ReplayStanza> {
+    pub fn unacked_after(&self, h: u32) -> Vec<super::ReplayStanza> {
         // Resume handling validates `h` against its exact SM window before
         // replay. Thus the comparator's 2^31 antipode is not a replayable
         // client acknowledgement in normal protocol operation.
@@ -192,7 +192,7 @@ impl UnackedQueue {
     /// for storage on a detached SM session. Preserves the original
     /// receipt time so the Q6 SM-expiry promotion path can stamp the
     /// XEP-0203 `<delay/>` correctly on offline replays.
-    pub fn get_all_unacked(&self) -> Vec<super::session_registry::DetachedUnackedStanza> {
+    pub fn all_unacked(&self) -> Vec<super::session_registry::DetachedUnackedStanza> {
         self.stanzas
             .iter()
             .map(|s| super::session_registry::DetachedUnackedStanza {
@@ -330,13 +330,13 @@ mod tests {
         push_accepted(&mut queue, 4, "<msg4/>");
 
         // Get stanzas after h=2 (should be 3 and 4)
-        let unacked = queue.get_unacked_after(2);
+        let unacked = queue.unacked_after(2);
         assert_eq!(unacked.len(), 2);
         assert_eq!(unacked[0].stanza_xml, "<msg3/>");
         assert_eq!(unacked[1].stanza_xml, "<msg4/>");
 
         // Get stanzas after h=0 (all of them)
-        let unacked = queue.get_unacked_after(0);
+        let unacked = queue.unacked_after(0);
         assert_eq!(unacked.len(), 4);
     }
 
@@ -447,13 +447,13 @@ mod ingress_receipt_tests {
             UnackedPushResult::Accepted
         ));
         original.attach_ingress_receipts(vec![receipt.clone()]);
-        let detached = original.get_all_unacked();
+        let detached = original.all_unacked();
         assert!(detached[0].ingress_receipts.is_empty());
         assert_eq!(detached[1].ingress_receipts, vec![receipt.clone()]);
         let mut restored = UnackedQueue::new(4);
         restored.restore(&detached);
         restored.acknowledge(1);
-        let replay = restored.get_unacked_after(1);
+        let replay = restored.unacked_after(1);
         assert_eq!(replay.len(), 1);
         assert_eq!(replay[0].ingress_receipts, vec![receipt]);
     }

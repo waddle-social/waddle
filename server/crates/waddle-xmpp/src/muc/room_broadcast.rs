@@ -65,7 +65,7 @@ impl MucRoom {
         let mut outbound = Vec::with_capacity(self.occupants.len());
 
         for occupant in self.occupants.values() {
-            for recipient_jid in self.get_occupant_sessions(&occupant.nick) {
+            for recipient_jid in self.occupant_sessions(&occupant.nick) {
                 let mut broadcast_msg = message.clone();
                 broadcast_msg.type_ = MessageType::Groupchat;
                 broadcast_msg.from = Some(Jid::from(from_room_jid.clone()));
@@ -97,7 +97,7 @@ impl MucRoom {
     /// Find the occupant by their real JID.
     pub fn find_occupant_by_real_jid(&self, jid: &FullJid) -> Option<&Occupant> {
         self.occupants.values().find(|occupant| {
-            self.get_occupant_sessions(&occupant.nick)
+            self.occupant_sessions(&occupant.nick)
                 .iter()
                 .any(|session| session == jid)
         })
@@ -109,12 +109,12 @@ impl MucRoom {
     }
 
     /// Get all remote occupants in the room.
-    pub fn get_remote_occupants(&self) -> Vec<&Occupant> {
+    pub fn remote_occupants(&self) -> Vec<&Occupant> {
         self.occupants.values().filter(|o| o.is_remote).collect()
     }
 
     /// Get all occupants grouped by their home server domain.
-    pub fn get_occupants_by_domain(&self) -> HashMap<String, Vec<&Occupant>> {
+    pub fn occupants_by_domain(&self) -> HashMap<String, Vec<&Occupant>> {
         let mut by_domain: HashMap<String, Vec<&Occupant>> = HashMap::new();
 
         for occupant in self.occupants.values() {
@@ -131,7 +131,7 @@ impl MucRoom {
     }
 
     /// Get occupants from a specific domain.
-    pub fn get_occupants_for_domain(&self, domain: &str) -> Vec<&Occupant> {
+    pub fn occupants_for_domain(&self, domain: &str) -> Vec<&Occupant> {
         if domain == "local" {
             self.occupants
                 .values()
@@ -156,7 +156,7 @@ impl MucRoom {
     }
 
     /// Get all unique remote server domains that have occupants in this room.
-    pub fn get_remote_domains(&self) -> Vec<String> {
+    pub fn remote_domains(&self) -> Vec<String> {
         let mut domains: Vec<String> = self
             .occupants
             .values()

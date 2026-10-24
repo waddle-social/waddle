@@ -39,9 +39,9 @@ use xmpp_parsers::message::{Id, Lang, Message, MessageType};
 
 fn observer(room: &jid::BareJid) -> ConfiguredRoomObserver {
     ConfiguredRoomObserver {
-        plugin: PluginId::new("jev-result-fixture").expect("plugin"),
-        generation: ObservationGeneration::new(1).expect("generation"),
-        identity: Sha256Digest::new("a".repeat(64)).expect("identity"),
+        plugin: PluginId::try_new("jev-result-fixture").expect("plugin"),
+        generation: ObservationGeneration::try_new(1).expect("generation"),
+        identity: Sha256Digest::try_new("a".repeat(64)).expect("identity"),
         scope: RoomObservationScope::Rooms(vec![room.clone()]),
         max_concurrent: 1,
     }
@@ -78,13 +78,14 @@ fn source_message(room: &jid::BareJid, source_id: &str, origin_id: &str) -> Mess
 }
 
 fn score_payload() -> ExtensionPayload {
-    let ns = waddle_extensions::PayloadNamespace::new("urn:waddle:safety-scores:1").expect("ns");
+    let ns =
+        waddle_extensions::PayloadNamespace::try_new("urn:waddle:safety-scores:1").expect("ns");
     let attr = |local_name: &str, value: &str| XmlAttribute {
         namespace: None,
         local_name: local_name.to_string(),
         value: value.to_string(),
     };
-    let score = XmlElement::new(
+    let score = XmlElement::try_new(
         ns.clone(),
         "score",
         vec![
@@ -95,9 +96,9 @@ fn score_payload() -> ExtensionPayload {
         vec![],
     )
     .expect("score");
-    ExtensionPayload::new(
+    ExtensionPayload::try_new(
         ns.clone(),
-        XmlElement::new(
+        XmlElement::try_new(
             ns,
             "safety-scores",
             vec![attr("model-version", "test-model")],

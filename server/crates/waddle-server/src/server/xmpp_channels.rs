@@ -279,7 +279,7 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_write_persists_canonical_group_dm_type() {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()

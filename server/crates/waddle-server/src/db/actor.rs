@@ -218,7 +218,7 @@ impl kameo::message::Message<DbQuery> for DbActor {
         while let Some(row) = rows.next().await? {
             let mut values = Vec::with_capacity(col_count);
             for i in 0..col_count {
-                values.push(row.get_value(i)?);
+                values.push(row.value(i)?);
             }
             result.push(values);
         }
@@ -249,7 +249,7 @@ impl kameo::message::Message<DbQueryOne> for DbActor {
                 Some(row) => {
                     let mut values = Vec::with_capacity(col_count);
                     for i in 0..col_count {
-                        values.push(row.get_value(i)?);
+                        values.push(row.value(i)?);
                     }
                     Ok(Some(values))
                 }

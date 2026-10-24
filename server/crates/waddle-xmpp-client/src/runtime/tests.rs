@@ -15,12 +15,12 @@ use crate::{
 };
 
 fn config() -> ClientConfig {
-    ClientConfig::new(
+    ClientConfig::try_new(
         ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap()),
-        WebSocketConfig::new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap(),
-        OAuthBearerConfig::new(
+        WebSocketConfig::try_new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap(),
+        OAuthBearerConfig::try_new(
             BareJid::from_str("alice@example.com").unwrap(),
-            ClientResource::new("macbook").unwrap(),
+            ClientResource::try_new("macbook").unwrap(),
             AccessToken::new("token"),
         )
         .unwrap(),
@@ -30,7 +30,7 @@ fn config() -> ClientConfig {
 
 #[test]
 fn runtime_updates_state_when_connecting() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let events = runtime.queue_request(ClientRequest::Connect).unwrap();
     assert_eq!(runtime.snapshot().phase, SessionPhase::Connecting);
     assert_eq!(events.len(), 2);
@@ -38,7 +38,7 @@ fn runtime_updates_state_when_connecting() {
 
 #[test]
 fn runtime_immediately_requests_ack_for_first_unhandled_outbound_stanza() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;
     runtime.sm_state.enabled = true;
     let message = Element::builder("message", crate::NS_CLIENT)
@@ -70,7 +70,7 @@ fn runtime_immediately_requests_ack_for_first_unhandled_outbound_stanza() {
 
 #[test]
 fn runtime_pagehide_ack_request_uses_the_typed_sm_builder() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.sm_state.enabled = true;
 
     let events = runtime.request_stream_management_ack();
@@ -94,7 +94,7 @@ fn runtime_pagehide_ack_commits_only_after_the_socket_write() {
     let mut config = config();
     config.session.stream_management.resume_state =
         Some(resume_state_with_sent_messages(["unacked-pagehide"]));
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     runtime.sm_state.enabled = true;
     let now = Utc.with_ymd_and_hms(2026, 7, 28, 12, 0, 0).unwrap();
 
@@ -115,7 +115,7 @@ fn runtime_pagehide_ack_commits_only_after_the_socket_write() {
 
 #[test]
 fn a_suspended_host_restarts_the_acknowledgement_clock_instead_of_reconnecting() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;
     runtime.sm_state.enabled = true;
     let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -167,7 +167,7 @@ fn a_suspended_host_restarts_the_acknowledgement_clock_instead_of_reconnecting()
 fn a_throttled_host_still_times_out_a_dead_stream() {
     // A background tab whose timers run once a minute still handles frames
     // promptly: only the first gap without `<a/>` progress restarts the clock.
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;
     runtime.sm_state.enabled = true;
     let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -198,7 +198,7 @@ fn a_throttled_host_still_times_out_a_dead_stream() {
 
 #[test]
 fn ack_progress_grants_a_later_suspension_another_restart() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;
     runtime.sm_state.enabled = true;
     let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -232,7 +232,7 @@ fn ack_progress_grants_a_later_suspension_another_restart() {
 
 #[test]
 fn runtime_emits_typed_retry_timeout_and_reconnect_outcomes() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;
     runtime.sm_state.enabled = true;
     let now = Utc.timestamp_opt(1_700_000_000, 0).unwrap();
@@ -299,7 +299,7 @@ fn progress_timeout_retains_resume_tail_and_blocks_late_outbound_work() {
     config.session.stream_management.resume_state = Some(
         resume_state_with_sent_messages(["first", "second"]).with_max_resume_seconds(Some(300)),
     );
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -353,7 +353,7 @@ fn progress_timeout_retains_resume_tail_and_blocks_late_outbound_work() {
 
 #[test]
 fn runtime_rearms_the_retry_scheduler_after_a_no_progress_ack() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.sm_state.outbound_enabled = true;
     runtime.sm_state.enabled = true;
     runtime.sm_negotiation = SmNegotiationState::Enabled;
@@ -394,7 +394,7 @@ fn runtime_rearms_the_retry_scheduler_after_a_no_progress_ack() {
 
 #[test]
 fn runtime_emits_initial_open_when_transport_opens() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();
     let events = runtime
         .apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
@@ -414,7 +414,7 @@ fn runtime_emits_initial_open_when_transport_opens() {
 
 #[test]
 fn app_stanza_routes_jmi_message_to_typed_call_event() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='alice@waddle.test/desktop' to='bob@waddle.test'>
         <propose xmlns='urn:xmpp:jingle-message:0' id='call-1'>
@@ -435,7 +435,7 @@ fn app_stanza_routes_jmi_message_to_typed_call_event() {
 
 #[test]
 fn app_stanza_emits_standalone_pubsub_retract_and_summary_events() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element = "<message xmlns='jabber:client' type='headline' \
             from='community.waddle.test' to='alice@example.com'>\
         <event xmlns='http://jabber.org/protocol/pubsub#event'>\
@@ -479,7 +479,7 @@ fn app_stanza_emits_standalone_pubsub_retract_and_summary_events() {
 
 #[test]
 fn app_stanza_emits_own_status_preference_beside_the_pubsub_message() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element = "<message xmlns='jabber:client' type='headline' \
             from='alice@example.com' to='alice@example.com/phone'>\
         <event xmlns='http://jabber.org/protocol/pubsub#event'>\
@@ -509,7 +509,7 @@ fn app_stanza_emits_own_status_preference_beside_the_pubsub_message() {
 
 #[test]
 fn app_stanza_ignores_a_status_preference_from_another_account() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element = "<message xmlns='jabber:client' type='headline' \
             from='mallory@example.com' to='alice@example.com/phone'>\
         <event xmlns='http://jabber.org/protocol/pubsub#event'>\
@@ -532,7 +532,7 @@ fn app_stanza_ignores_a_status_preference_from_another_account() {
 
 #[test]
 fn app_stanza_emits_typed_avatar_change_without_altering_pubsub_message() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element = "<message xmlns='jabber:client' type='headline' \
             from='alice@example.com' to='bob@example.com'>\
         <event xmlns='http://jabber.org/protocol/pubsub#event'>\
@@ -567,7 +567,7 @@ fn app_stanza_emits_typed_avatar_change_without_altering_pubsub_message() {
 
 #[test]
 fn app_stanza_answers_client_caps_disco_info() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.snapshot.phase = SessionPhase::Established;
     runtime.snapshot.binding = Some(SessionBinding {
         jid: FullJid::from_str("alice@example.com/macbook").unwrap(),
@@ -613,7 +613,7 @@ fn app_stanza_answers_client_caps_disco_info() {
 
 #[test]
 fn app_stanza_routes_carbon_wrapped_jmi_to_typed_call_event() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook'>
         <sent xmlns='urn:xmpp:carbons:2'>
@@ -641,7 +641,7 @@ fn app_stanza_routes_carbon_wrapped_jmi_to_typed_call_event() {
 
 #[test]
 fn app_stanza_ignores_forged_carbon_wrapped_call_from_peer() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='bob@example.com' to='alice@example.com/macbook'>
         <sent xmlns='urn:xmpp:carbons:2'>
@@ -669,7 +669,7 @@ fn app_stanza_ignores_forged_carbon_wrapped_call_from_peer() {
 
 #[test]
 fn app_stanza_unwraps_received_carbon_into_inner_message() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook' type='chat'>
         <received xmlns='urn:xmpp:carbons:2'>
@@ -702,7 +702,7 @@ fn app_stanza_unwraps_received_carbon_into_inner_message() {
 
 #[test]
 fn app_stanza_unwraps_sent_carbon_into_inner_message() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook' type='chat'>
         <sent xmlns='urn:xmpp:carbons:2'>
@@ -736,7 +736,7 @@ fn app_stanza_unwraps_sent_carbon_into_inner_message() {
 /// inner element has no delay of its own (#1267 item 6).
 #[test]
 fn app_stanza_propagates_forwarded_delay_onto_unwrapped_carbon() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='alice@example.com' to='alice@example.com/macbook' type='chat'>
         <received xmlns='urn:xmpp:carbons:2'>
@@ -768,7 +768,7 @@ fn app_stanza_propagates_forwarded_delay_onto_unwrapped_carbon() {
 /// through to the messaging parser as a body-less phantom message.
 #[test]
 fn app_stanza_ignores_forged_carbon_wrapped_message_entirely() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='mallory@example.com' to='alice@example.com/macbook' type='chat'>
         <received xmlns='urn:xmpp:carbons:2'>
@@ -797,7 +797,7 @@ fn app_stanza_ignores_forged_carbon_wrapped_message_entirely() {
 /// sender.
 #[test]
 fn app_stanza_ignores_carbon_envelope_from_own_full_jid() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='alice@example.com/attacker' to='alice@example.com/macbook' type='chat'>
         <received xmlns='urn:xmpp:carbons:2'>
@@ -824,7 +824,7 @@ fn app_stanza_ignores_carbon_envelope_from_own_full_jid() {
 /// server-generated carbon.
 #[test]
 fn app_stanza_ignores_carbon_wrapped_call_from_own_full_jid() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='alice@example.com/attacker' to='alice@example.com/macbook'>
         <sent xmlns='urn:xmpp:carbons:2'>
@@ -852,7 +852,7 @@ fn app_stanza_ignores_carbon_wrapped_call_from_own_full_jid() {
 /// with a carbon direction.
 #[test]
 fn app_stanza_leaves_direct_messages_unstamped() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element =
         r#"<message xmlns='jabber:client' from='bob@example.com/desktop' to='alice@example.com/macbook' type='chat' id='d1'>
         <body>direct</body>
@@ -872,7 +872,7 @@ fn app_stanza_leaves_direct_messages_unstamped() {
 
 #[test]
 fn app_stanza_acknowledges_jingle_iq_set_and_surfaces_call_event() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let stanza: Element = r#"<iq xmlns='jabber:client' type='set' id='j1' from='alice@waddle.test/desktop' to='bob@waddle.test/phone'>
         <jingle xmlns='urn:xmpp:jingle:1' action='session-terminate' sid='call-1'>
           <reason><success/></reason>
@@ -904,7 +904,7 @@ fn app_stanza_acknowledges_jingle_iq_set_and_surfaces_call_event() {
 
 #[test]
 fn runtime_bootstraps_auth_bind_and_ready_state() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();
     runtime
         .apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
@@ -996,8 +996,8 @@ fn runtime_bootstraps_auth_bind_and_ready_state() {
 fn runtime_requests_sm_resume_before_resource_binding_when_resume_state_exists() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
-    let mut runtime = XmppRuntime::new(config).unwrap();
+        Some(SmResumeState::try_new(StreamId::new("old-sm-id"), 7, 12).unwrap());
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
 
     let events = runtime
@@ -1039,8 +1039,8 @@ fn runtime_requests_sm_resume_before_resource_binding_when_resume_state_exists()
 fn runtime_establishes_session_from_successful_sm_resume_without_binding() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
-    let mut runtime = XmppRuntime::new(config).unwrap();
+        Some(SmResumeState::try_new(StreamId::new("old-sm-id"), 7, 12).unwrap());
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1084,7 +1084,7 @@ fn runtime_resumed_unacked_tail_replays_before_requesting_ack_without_recounting
     let mut config = config();
     config.session.stream_management.resume_state =
         Some(resume_state_with_sent_messages(["unacked-1", "unacked-2"]));
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1173,8 +1173,8 @@ fn runtime_resumed_unacked_tail_replays_before_requesting_ack_without_recounting
 fn runtime_rejects_resumed_without_required_h() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
-    let mut runtime = XmppRuntime::new(config).unwrap();
+        Some(SmResumeState::try_new(StreamId::new("old-sm-id"), 7, 12).unwrap());
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1212,8 +1212,8 @@ fn runtime_rejects_resumed_without_required_h() {
 fn runtime_rejects_resumed_with_mismatched_previd() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
-    let mut runtime = XmppRuntime::new(config).unwrap();
+        Some(SmResumeState::try_new(StreamId::new("old-sm-id"), 7, 12).unwrap());
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1255,8 +1255,8 @@ fn runtime_rejects_resumed_with_mismatched_previd() {
 fn runtime_falls_back_to_resource_binding_when_sm_resume_fails() {
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
-    let mut runtime = XmppRuntime::new(config).unwrap();
+        Some(SmResumeState::try_new(StreamId::new("old-sm-id"), 7, 12).unwrap());
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1313,8 +1313,8 @@ fn runtime_fresh_sm_session_ack_counts_only_current_session_inbound_stanzas() {
     // the previous session's received-stanza count (7 here).
     let mut config = config();
     config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
-    let mut runtime = XmppRuntime::new(config).unwrap();
+        Some(SmResumeState::try_new(StreamId::new("old-sm-id"), 7, 12).unwrap());
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1410,8 +1410,8 @@ fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() 
     // resume rejected with handled-count-too-high.
     let mut first_config = config();
     first_config.session.stream_management.resume_state =
-        Some(SmResumeState::new(StreamId::new("old-sm-id"), 7, 12).unwrap());
-    let mut runtime = XmppRuntime::new(first_config).unwrap();
+        Some(SmResumeState::try_new(StreamId::new("old-sm-id"), 7, 12).unwrap());
+    let mut runtime = XmppRuntime::try_new(first_config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1481,7 +1481,7 @@ fn runtime_resume_after_fresh_sm_session_reports_only_current_session_inbound() 
     let resume_state = runtime.resume_state().expect("resume state");
     let mut next_config = config();
     next_config.session.stream_management.resume_state = Some(resume_state);
-    let mut next_runtime = XmppRuntime::new(next_config).unwrap();
+    let mut next_runtime = XmppRuntime::try_new(next_config).unwrap();
     drive_to_authenticated_stream(&mut next_runtime);
     let events = next_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1515,7 +1515,7 @@ fn runtime_rejects_duplicate_enabled_on_live_sm_session() {
     // re-establish: re-running the XEP-0198 §5 counter reset on a live
     // session would drive the client's next <a h/> backwards on the
     // wire (issue #1181 adversarial review).
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     let bind_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1584,7 +1584,7 @@ fn runtime_rejects_duplicate_enabled_on_live_sm_session() {
 
 #[test]
 fn runtime_rejects_unsolicited_enabled_before_resource_binding_without_mutating_sm() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     let events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
             Element::builder("enabled", crate::stream_management::NS_SM)
@@ -1608,7 +1608,7 @@ fn runtime_rejects_unsolicited_ack_and_request_controls_without_mutating_sm() {
             .attr(minidom::rxml::xml_ncname!("h").to_owned(), "0")
             .build(),
     ] {
-        let mut runtime = XmppRuntime::new(config()).unwrap();
+        let mut runtime = XmppRuntime::try_new(config()).unwrap();
         let events = runtime
             .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
                 control,
@@ -1631,7 +1631,7 @@ fn runtime_rejects_malformed_sm_ack_without_mutating_counters_or_ownership() {
             .attr(minidom::rxml::xml_ncname!("h").to_owned(), "not-a-u32")
             .build(),
     ] {
-        let mut runtime = XmppRuntime::new(config()).unwrap();
+        let mut runtime = XmppRuntime::try_new(config()).unwrap();
         send_bound_enable(&mut runtime);
         runtime
             .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1677,7 +1677,7 @@ fn runtime_rejects_malformed_failed_before_acknowledging_or_falling_back() {
         let expected_resume_state = resume_state.clone();
         let mut resume_config = config();
         resume_config.session.stream_management.resume_state = Some(resume_state);
-        let mut runtime = XmppRuntime::new(resume_config).unwrap();
+        let mut runtime = XmppRuntime::try_new(resume_config).unwrap();
 
         drive_to_authenticated_stream(&mut runtime);
         runtime
@@ -1708,7 +1708,7 @@ fn runtime_recovers_from_failed_resume_with_redirect_condition() {
     let resume_state = resume_state_with_sent_messages(["retry-after-redirect"]);
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    let mut runtime = XmppRuntime::try_new(resume_config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -1738,7 +1738,7 @@ fn runtime_recovers_from_failed_resume_with_redirect_condition() {
 
 #[test]
 fn runtime_accepts_enable_response_only_after_bound_enable_was_sent() {
-    let mut enabled_runtime = XmppRuntime::new(config()).unwrap();
+    let mut enabled_runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut enabled_runtime);
     let enabled_events = enabled_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1753,7 +1753,7 @@ fn runtime_accepts_enable_response_only_after_bound_enable_was_sent() {
     )));
     assert!(enabled_runtime.sm_state.enabled);
 
-    let mut failed_runtime = XmppRuntime::new(config()).unwrap();
+    let mut failed_runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut failed_runtime);
     let failed_events = failed_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1775,7 +1775,7 @@ fn runtime_accepts_enable_response_only_after_bound_enable_was_sent() {
 
 #[test]
 fn runtime_routes_application_stanzas_while_awaiting_enable_response() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut runtime);
 
     let stanza: Element = r#"<message xmlns='jabber:client' from='alice@example.com/desktop'>
@@ -1803,7 +1803,7 @@ fn runtime_resume_h_stays_consistent_across_repeated_resume_cycles() {
     // receive → detach → resume. Each <resume/> h must equal exactly the
     // stanzas received across the SAME SM session (successful resumes
     // continue the session; the counter carries forward, never inflates).
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     let bind_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1852,7 +1852,7 @@ fn runtime_resume_h_stays_consistent_across_repeated_resume_cycles() {
     let resume_state = runtime.resume_state().expect("first resume state");
     let mut second_config = config();
     second_config.session.stream_management.resume_state = Some(resume_state);
-    let mut second = XmppRuntime::new(second_config).unwrap();
+    let mut second = XmppRuntime::try_new(second_config).unwrap();
     drive_to_authenticated_stream(&mut second);
     let events = second
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1892,7 +1892,7 @@ fn runtime_resume_h_stays_consistent_across_repeated_resume_cycles() {
     let resume_state = second.resume_state().expect("second resume state");
     let mut third_config = config();
     third_config.session.stream_management.resume_state = Some(resume_state);
-    let mut third = XmppRuntime::new(third_config).unwrap();
+    let mut third = XmppRuntime::try_new(third_config).unwrap();
     drive_to_authenticated_stream(&mut third);
     let events = third
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1914,7 +1914,7 @@ fn runtime_resume_h_stays_consistent_across_repeated_resume_cycles() {
 
 #[test]
 fn runtime_requests_default_resume_window_when_enabling_stream_management() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     let bind_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1955,7 +1955,7 @@ fn runtime_requests_default_resume_window_when_enabling_stream_management() {
 
 #[test]
 fn runtime_releases_send_barrier_when_fresh_sm_enable_fails() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     let bind_events = runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -2016,7 +2016,7 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
     let resume_state = resume_state_with_sent_messages(["handled", "unhandled"]);
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    let mut runtime = XmppRuntime::try_new(resume_config).unwrap();
     drive_to_authenticated_stream(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -2071,7 +2071,7 @@ fn runtime_replays_unhandled_stanzas_after_resume_without_recounting_them() {
 
 #[test]
 fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
-    let mut first_runtime = XmppRuntime::new(config()).unwrap();
+    let mut first_runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut first_runtime);
     first_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -2098,7 +2098,7 @@ fn runtime_resume_state_carries_unhandled_stanzas_into_next_runtime() {
         .expect("resume state with unhandled queue");
     let mut config = config();
     config.session.stream_management.resume_state = Some(resume_state);
-    let mut next_runtime = XmppRuntime::new(config).unwrap();
+    let mut next_runtime = XmppRuntime::try_new(config).unwrap();
 
     drive_to_authenticated_stream(&mut next_runtime);
     next_runtime
@@ -2169,7 +2169,7 @@ fn runtime_retries_persisted_tail_after_post_auth_features_omit_sm() {
     .expect("persisted SM tail is valid");
     let mut config = config();
     config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     let no_sm_events = runtime
@@ -2299,7 +2299,7 @@ fn runtime_retries_only_unhandled_stanzas_after_failed_resume_fresh_enable() {
     let resume_state = resume_state_with_sent_messages(["handled-before-fail", "retry-after-fail"]);
     let mut config = config();
     config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -2409,7 +2409,7 @@ fn runtime_rejection_excludes_outbound_from_failed_resume_retry() {
         SmResumeState::from_unhandled_outbound_entries(StreamId::new("old-sm-id"), 0, 2, entries)
             .unwrap(),
     );
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
     let rejection: Element = "<message xmlns='jabber:client' type='error' id='rejected' from='chat@example.com'><error type='cancel'><service-unavailable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/></error></message>".parse().unwrap();
     runtime.handle_app_stanza(&rejection);
     drive_to_authenticated_stream(&mut runtime);
@@ -2473,7 +2473,7 @@ fn runtime_preserves_failed_resume_snapshot_until_fallback_retry_is_sent() {
     let resume_state = resume_state_with_sent_messages(["retry-after-drop"]);
     let mut config = config();
     config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -2533,7 +2533,7 @@ fn runtime_discards_resume_state_after_prebind_stream_error_close() {
     let resume_state = resume_state_with_sent_messages(["retry-after-stream-error"]);
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    let mut runtime = XmppRuntime::try_new(resume_config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     let feature_events = runtime
@@ -2575,7 +2575,7 @@ fn runtime_discards_resume_state_after_prebind_stream_error_close() {
         .unwrap();
     assert!(runtime.resume_state().is_none());
 
-    let mut next_runtime = XmppRuntime::new(config()).unwrap();
+    let mut next_runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut next_runtime);
     let next_events = next_runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -2600,7 +2600,7 @@ fn runtime_discards_resume_state_after_generic_prebind_stream_error() {
     let resume_state = resume_state_with_sent_messages(["retry-after-generic-stream-error"]);
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    let mut runtime = XmppRuntime::try_new(resume_config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -2638,7 +2638,7 @@ fn runtime_discards_resume_state_after_generic_prebind_stream_error() {
 
 #[test]
 fn runtime_emits_stream_error_condition_for_browser_telemetry() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);
 
     let events = runtime
@@ -2658,7 +2658,7 @@ fn runtime_emits_stream_error_condition_for_browser_telemetry() {
 
 #[test]
 fn runtime_emits_stream_error_detail_for_handled_count_too_high() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);
 
     let events = runtime
@@ -2681,7 +2681,7 @@ fn runtime_emits_stream_error_detail_for_handled_count_too_high() {
 
 #[test]
 fn runtime_rejects_stanza_only_conditions_in_stream_error_namespace() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     drive_to_authenticated_stream(&mut runtime);
 
     let events = runtime
@@ -2704,7 +2704,7 @@ fn runtime_preserves_no_sm_fallback_after_prebind_stream_error_for_reconnect() {
     let resume_state = resume_state_with_sent_messages(["retry-after-fallback-error"]);
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    let mut runtime = XmppRuntime::try_new(resume_config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -2736,7 +2736,7 @@ fn runtime_preserves_no_sm_fallback_after_prebind_stream_error_for_reconnect() {
 
     let mut reconnect_config = config();
     reconnect_config.session.stream_management.resume_state = Some(persisted_fallback);
-    let mut reconnect = XmppRuntime::new(reconnect_config).unwrap();
+    let mut reconnect = XmppRuntime::try_new(reconnect_config).unwrap();
     drive_to_authenticated_stream(&mut reconnect);
     let no_sm_events = reconnect
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -2794,7 +2794,7 @@ fn runtime_never_resumes_or_replays_iq_after_persisted_no_sm_fallback() {
     .expect("persisted SM tail is valid");
     let mut initial_config = config();
     initial_config.session.stream_management.resume_state = Some(resume_state);
-    let mut initial = XmppRuntime::new(initial_config).unwrap();
+    let mut initial = XmppRuntime::try_new(initial_config).unwrap();
 
     drive_to_authenticated_stream(&mut initial);
     let no_sm_events = initial
@@ -2828,7 +2828,7 @@ fn runtime_never_resumes_or_replays_iq_after_persisted_no_sm_fallback() {
 
     let mut reconnect_config = config();
     reconnect_config.session.stream_management.resume_state = Some(persisted_fallback);
-    let mut reconnect = XmppRuntime::new(reconnect_config).unwrap();
+    let mut reconnect = XmppRuntime::try_new(reconnect_config).unwrap();
     drive_to_authenticated_stream(&mut reconnect);
     let sm_events = reconnect
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -2894,7 +2894,7 @@ fn runtime_keeps_resume_state_when_transport_fails_during_resume_without_stream_
     let expected_resume_state = resume_state.clone();
     let mut resume_config = config();
     resume_config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(resume_config).unwrap();
+    let mut runtime = XmppRuntime::try_new(resume_config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -2921,7 +2921,7 @@ fn runtime_retries_unhandled_stanzas_when_fresh_sm_enable_fails() {
     let resume_state = resume_state_with_sent_messages(["handled-before-fail", "retry-after-fail"]);
     let mut config = config();
     config.session.stream_management.resume_state = Some(resume_state);
-    let mut runtime = XmppRuntime::new(config).unwrap();
+    let mut runtime = XmppRuntime::try_new(config).unwrap();
 
     drive_to_authenticated_stream(&mut runtime);
     runtime
@@ -2997,7 +2997,7 @@ fn runtime_retries_unhandled_stanzas_when_fresh_sm_enable_fails() {
 
 #[test]
 fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -3030,7 +3030,7 @@ fn runtime_emits_message_delivery_ack_from_core_sm_queue() {
 
 #[test]
 fn runtime_counts_outbound_stanzas_after_enable_is_sent() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut runtime);
 
     let message = Element::builder("message", crate::NS_CLIENT)
@@ -3048,7 +3048,7 @@ fn runtime_counts_outbound_stanzas_after_enable_is_sent() {
 
 #[test]
 fn runtime_rejects_sm_ack_above_sent_count() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -3089,7 +3089,7 @@ fn runtime_rejects_sm_ack_above_sent_count() {
 
 #[test]
 fn runtime_requires_oauthbearer_feature() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();
     runtime
         .apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
@@ -3116,7 +3116,7 @@ fn runtime_requires_oauthbearer_feature() {
 
 #[test]
 fn runtime_emits_typed_auth_failure() {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     runtime.queue_request(ClientRequest::Connect).unwrap();
     runtime
         .apply_transport_event(TransportEvent::StateChanged(TransportState::Open))
@@ -3281,7 +3281,7 @@ fn bind_result(stanza_id: &StanzaId) -> Element {
 }
 
 fn resume_state_with_sent_messages<const N: usize>(ids: [&str; N]) -> SmResumeState {
-    let mut runtime = XmppRuntime::new(config()).unwrap();
+    let mut runtime = XmppRuntime::try_new(config()).unwrap();
     send_bound_enable(&mut runtime);
     runtime
         .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(

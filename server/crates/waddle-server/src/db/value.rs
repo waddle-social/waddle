@@ -288,11 +288,11 @@ pub struct Row {
 
 impl Row {
     pub fn get<T: DbDecode>(&self, idx: usize) -> Result<T, DatabaseError> {
-        let value = self.get_value(idx)?;
+        let value = self.value(idx)?;
         T::decode(value)
     }
 
-    pub fn get_value(&self, idx: usize) -> Result<Value, DatabaseError> {
+    pub fn value(&self, idx: usize) -> Result<Value, DatabaseError> {
         self.values.get(idx).cloned().ok_or_else(|| {
             DatabaseError::QueryFailed(format!(
                 "column index {} out of bounds (row has {} columns)",

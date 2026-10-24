@@ -28,7 +28,7 @@ pub async fn effective_affiliation(
     entity: &BareJid,
     is_pep: bool,
 ) -> Result<Affiliation, XmppError> {
-    let stored = storage.get_affiliation(target, node, entity).await?;
+    let stored = storage.affiliation(target, node, entity).await?;
     if stored != Affiliation::None {
         return Ok(stored);
     }

@@ -20,7 +20,7 @@ impl TryFrom<wit_types::MessageSource> for MessageSource {
             stanza_id: wit_newtype_to_domain!(value.stanza_id, StanzaId)?,
             body_range: value
                 .body_range
-                .map(|range| BodyRange::new(range.start, range.end))
+                .map(|range| BodyRange::try_new(range.start, range.end))
                 .transpose()?,
         })
     }
@@ -282,7 +282,7 @@ impl TryFrom<wit_types::ArtifactReference> for ArtifactReference {
     type Error = anyhow::Error;
 
     fn try_from(value: wit_types::ArtifactReference) -> Result<Self> {
-        ArtifactReference::new(
+        ArtifactReference::try_new(
             value.uri.value,
             value.sha256.value,
             value
@@ -298,7 +298,7 @@ impl TryFrom<wit_types::ExtensionPayload> for ExtensionPayload {
     type Error = anyhow::Error;
 
     fn try_from(value: wit_types::ExtensionPayload) -> Result<Self> {
-        ExtensionPayload::new(
+        ExtensionPayload::try_new(
             wit_newtype_to_domain!(value.namespace, PayloadNamespace)?,
             xml_element_from_tokens(value.root, value.tokens)?,
         )
@@ -359,7 +359,7 @@ impl TryFrom<wit_types::XmlElement> for XmlElement {
     type Error = anyhow::Error;
 
     fn try_from(value: wit_types::XmlElement) -> Result<Self> {
-        XmlElement::new(
+        XmlElement::try_new(
             wit_newtype_to_domain!(value.namespace, PayloadNamespace)?,
             value.local_name,
             value

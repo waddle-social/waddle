@@ -63,9 +63,9 @@ impl WaddleClient {
         future_to_promise(async move {
             let opts: RegisterPushDeviceOptions = serde_wasm_bindgen::from_value(options)
                 .map_err(|err| push_registration_js_error("protocol-shape", err.to_string()))?;
-            let service_jid = waddle_xmpp_client::push::PushServiceJid::new(&opts.service_jid)
+            let service_jid = waddle_xmpp_client::push::PushServiceJid::try_new(&opts.service_jid)
                 .map_err(push_registration_client_js_error)?;
-            let app_id = waddle_xmpp_client::push::PushAppId::new(&opts.app_id)
+            let app_id = waddle_xmpp_client::push::PushAppId::try_new(&opts.app_id)
                 .map_err(push_registration_client_js_error)?;
             let environment = opts.environment;
             let credentials = opts
@@ -515,8 +515,16 @@ impl WaddleClient {
             // include forwarded last-message payloads.
             let iq = waddle_xmpp_client::inbox::build_inbox_query_iq_element(
                 request_id.as_str(),
-                opts.only_unread,
-                !opts.no_messages,
+                if opts.only_unread {
+                    waddle_xmpp_client::inbox::InboxReadFilter::UnreadOnly
+                } else {
+                    waddle_xmpp_client::inbox::InboxReadFilter::All
+                },
+                if opts.no_messages {
+                    waddle_xmpp_client::inbox::InboxMessageContent::Omit
+                } else {
+                    waddle_xmpp_client::inbox::InboxMessageContent::Include
+                },
             );
             let page = match send_inbox_query_command(inner, iq, request_id).await {
                 Ok(page) => page,

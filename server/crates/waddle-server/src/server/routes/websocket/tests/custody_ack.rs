@@ -103,7 +103,7 @@ async fn custody_ack_completes_only_the_valid_wrapped_window() {
     assert!(frames.is_empty());
     assert!(!conn.phase.is_closing());
     assert_eq!(conn.sm_state.last_acked, 0);
-    assert_eq!(conn.sm_state.get_stanzas_to_resend(0).len(), 1);
+    assert_eq!(conn.sm_state.stanzas_to_resend(0).len(), 1);
     for (index, key) in keys.iter().enumerate() {
         let proof = persistence
             .get_ingress_append(key)
@@ -140,7 +140,7 @@ async fn custody_ack_rejects_high_count_without_discharging_payloads() {
     assert!(!frames.is_empty());
     assert!(conn.phase.is_closing());
     assert_eq!(conn.sm_state.last_acked, u32::MAX - 1);
-    assert_eq!(conn.sm_state.get_stanzas_to_resend(u32::MAX - 1).len(), 3);
+    assert_eq!(conn.sm_state.stanzas_to_resend(u32::MAX - 1).len(), 3);
     let pending = persistence
         .list_pending_ingress_appends(10)
         .await
@@ -198,7 +198,7 @@ async fn custody_ack_storage_failure_preserves_replay_and_ack_window() {
     assert!(conn.phase.is_closing());
     assert_eq!(frames.len(), 2);
     assert_eq!(conn.sm_state.last_acked, u32::MAX - 1);
-    assert_eq!(conn.sm_state.get_stanzas_to_resend(u32::MAX - 1).len(), 3);
+    assert_eq!(conn.sm_state.stanzas_to_resend(u32::MAX - 1).len(), 3);
     assert_eq!(
         persistence
             .list_pending_ingress_appends(10)

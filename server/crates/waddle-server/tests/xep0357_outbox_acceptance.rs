@@ -60,7 +60,7 @@ impl Fixture {
     async fn new(outbox_db: IngressFixture, push_db: IngressFixture) -> Self {
         let owner: BareJid = "alice@example.com".parse().expect("owner");
         let service: BareJid = "push.example.com".parse().expect("service");
-        let outbox = NotificationOutboxStore::new(outbox_db.db.clone())
+        let outbox = NotificationOutboxStore::try_new(outbox_db.db.clone())
             .await
             .expect("outbox");
         let backing = Arc::new(InMemoryPubSubStorage::new());
@@ -72,9 +72,11 @@ impl Fixture {
         )
         .await
         .expect("push service");
-        waddle_server::push_registrations::DatabasePushRegistrationStore::new(push_db.db.clone())
-            .await
-            .expect("registration schema");
+        waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
+            push_db.db.clone(),
+        )
+        .await
+        .expect("registration schema");
         let node = push
             .ensure_node(&owner, "web")
             .await
@@ -333,7 +335,7 @@ async fn inactive_node_fails_once_and_disables_registration(fixture: Fixture) {
         NotificationOutboxPublishOutcome::Failed { .. }
     ));
     assert_eq!(fixture.outbox_db.count("notification_outbox WHERE status = 'failed' AND attempt_count = 0 AND queue_acceptance_may_exist = 0 AND claim_token IS NULL AND next_attempt_at_ms IS NULL AND last_error = 'registration_gone'").await, 1);
-    let registrations = waddle_server::push_registrations::DatabasePushRegistrationStore::new(
+    let registrations = waddle_server::push_registrations::DatabasePushRegistrationStore::try_new(
         fixture.push_db.db.clone(),
     )
     .await

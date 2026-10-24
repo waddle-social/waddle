@@ -82,6 +82,7 @@ pub enum ManualStatus {
 
 impl ManualStatus {
     /// The wire token for this status (`available` | `chat` | `away` | `dnd`).
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             ManualStatus::Available => STATUS_AVAILABLE,
@@ -119,6 +120,7 @@ pub enum StatusPreference {
 
 /// Errors raised while parsing a `<status-preference>` element.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum StatusPreferenceParseError {
     #[error(
         "expected <status-preference xmlns='{NS_WADDLE_STATUS_PREFERENCE}'> root, \
@@ -162,6 +164,7 @@ pub enum StatusPreferenceParseError {
 
 impl StatusPreference {
     /// The wire `mode` token (`automatic` | `manual`).
+    #[must_use]
     pub fn mode_token(&self) -> &'static str {
         match self {
             StatusPreference::Automatic => MODE_AUTOMATIC,
@@ -170,6 +173,7 @@ impl StatusPreference {
     }
 
     /// The wire `status` token, present only for a manual pick.
+    #[must_use]
     pub fn status_token(&self) -> Option<&'static str> {
         match self {
             StatusPreference::Automatic => None,
@@ -205,6 +209,7 @@ impl StatusPreference {
     }
 
     /// Serialize to a `<status-preference>` element for a PEP publish.
+    #[must_use]
     pub fn build_element(&self) -> Element {
         let mut builder = Element::builder(ELEMENT_STATUS_PREFERENCE, NS_WADDLE_STATUS_PREFERENCE)
             .attr(xml_ncname!("mode").to_owned(), self.mode_token());

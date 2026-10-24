@@ -81,7 +81,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
     let db_pool = match db_pool_override {
         Some(db_pool) => db_pool,
         None => Arc::new(
-            DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+            DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
                 .await
                 .expect("db pool"),
         ),
@@ -104,7 +104,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
 
     let runner = MigrationRunner::single();
     runner.run(db_pool.global()).await.expect("migrations");
-    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
+    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(
         db_pool.global().clone(),
     )
     .await
@@ -169,7 +169,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         Arc::clone(&dnd_projection),
     ));
     let notification_activity = Arc::new(
-        crate::notification_activity::NotificationActivityStore::new(
+        crate::notification_activity::NotificationActivityStore::try_new(
             app_state.db_pool.global().clone(),
         )
         .await
@@ -186,7 +186,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
         .expect("push service"),
     );
     let notification_outbox = Arc::new(
-        crate::notification_outbox::NotificationOutboxStore::new(
+        crate::notification_outbox::NotificationOutboxStore::try_new(
             app_state.db_pool.global().clone(),
         )
         .await
@@ -219,9 +219,11 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
             tokio::runtime::Handle::current(),
         );
     let room_effect_outbox = Arc::new(
-        crate::room_effect_outbox::RoomEffectOutboxStore::new(app_state.db_pool.global().clone())
-            .await
-            .expect("room effect outbox"),
+        crate::room_effect_outbox::RoomEffectOutboxStore::try_new(
+            app_state.db_pool.global().clone(),
+        )
+        .await
+        .expect("room effect outbox"),
     );
     let room_effect_arm_supervisor = crate::room_effect_outbox::RoomEffectArmSupervisor::new(
         Arc::clone(&room_effect_outbox),
@@ -308,7 +310,7 @@ pub(crate) async fn create_test_websocket_state_with_extension_manager(
                     ),
                     pubsub_storage,
                     push_store: Arc::new(
-                        crate::push_registrations::DatabasePushRegistrationStore::new(
+                        crate::push_registrations::DatabasePushRegistrationStore::try_new(
                             app_state.db_pool.global().clone(),
                         )
                         .await
@@ -450,7 +452,7 @@ pub async fn register_test_connection(
         .deps
         .protocol
         .connection_registry
-        .get_entry(jid)
+        .entry(jid)
         .expect("connection entry must exist immediately after register");
     let registered = crate::server::dual_registration::mirror_register(
         &state.deps.protocol.user_registry,

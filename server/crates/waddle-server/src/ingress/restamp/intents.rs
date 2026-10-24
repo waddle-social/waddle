@@ -57,7 +57,7 @@ impl Replacements {
                 if let Some(payload) = prepared {
                     let mut message = payload.message().clone();
                     self.message(&mut message);
-                    *payload = StoredMessagePayload::new(message)?;
+                    *payload = StoredMessagePayload::try_new(message)?;
                 }
             }
             IngressEffectIntent::RouteMucGroupchat { route_identity, .. }

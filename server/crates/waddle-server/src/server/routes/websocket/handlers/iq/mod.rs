@@ -274,7 +274,7 @@ pub async fn handle_iq_with_conn_state(
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     phase: &ConnectionPhase,
     conn_state: &mut IqConnState<'_>,
 ) -> ResponseBatch {
@@ -478,9 +478,7 @@ pub async fn handle_iq_with_conn_state(
                 extensions_domain: &extensions_domain,
                 push_domain: &push_domain,
             },
-            authenticated_session
-                .as_ref()
-                .map(ResolvedPrincipal::from_authenticated_session),
+            authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
             phase.bound_jid(),
         )
         .await

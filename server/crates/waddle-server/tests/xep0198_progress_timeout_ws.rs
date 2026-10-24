@@ -19,14 +19,14 @@ use xmpp_parsers::message::{Id, Message, MessageType};
 const ACCOUNTS: &[(&str, &str)] = &[("alice", "progress-timeout-password")];
 
 fn runtime(server: &TestServer) -> XmppRuntime {
-    XmppRuntime::new(
-        ClientConfig::new(
+    XmppRuntime::try_new(
+        ClientConfig::try_new(
             ConnectionConfig::new("localhost".parse().expect("server JID")),
-            WebSocketConfig::new(server.ws_url().parse().expect("WebSocket URL"))
+            WebSocketConfig::try_new(server.ws_url().parse().expect("WebSocket URL"))
                 .expect("transport config"),
-            OAuthBearerConfig::new(
+            OAuthBearerConfig::try_new(
                 "alice@localhost".parse().expect("account JID"),
-                ClientResource::new("progress-timeout").expect("resource"),
+                ClientResource::try_new("progress-timeout").expect("resource"),
                 AccessToken::new("unused-by-SCRAM-harness"),
             )
             .expect("auth config"),

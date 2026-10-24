@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn correlation_id_is_stable_for_the_same_room_name() {
-        let call = CallId::new("general@muc.example.com").expect("valid call id");
+        let call = CallId::try_new("general@muc.example.com").expect("valid call id");
         assert_eq!(
             CallCorrelationId::for_call(&call),
             CallCorrelationId::for_call(&call)
@@ -86,8 +86,8 @@ mod tests {
 
     #[test]
     fn correlation_id_differs_between_rooms() {
-        let a = CallId::new("general@muc.example.com").expect("valid call id");
-        let b = CallId::new("random@muc.example.com").expect("valid call id");
+        let a = CallId::try_new("general@muc.example.com").expect("valid call id");
+        let b = CallId::try_new("random@muc.example.com").expect("valid call id");
         assert_ne!(
             CallCorrelationId::for_call(&a),
             CallCorrelationId::for_call(&b)
@@ -96,7 +96,7 @@ mod tests {
 
     #[test]
     fn correlation_id_is_bounded_lowercase_hex() {
-        let call = CallId::new("alice@example.com::dm-1128").expect("valid call id");
+        let call = CallId::try_new("alice@example.com::dm-1128").expect("valid call id");
         let id = CallCorrelationId::for_call(&call);
         assert_eq!(id.as_str().len(), CORRELATION_ID_HEX_LEN);
         assert!(
@@ -109,7 +109,7 @@ mod tests {
 
     #[test]
     fn correlation_id_leaks_no_jid_substring() {
-        let call = CallId::new("alice@example.com::dm-1128").expect("valid call id");
+        let call = CallId::try_new("alice@example.com::dm-1128").expect("valid call id");
         let id = CallCorrelationId::for_call(&call);
         assert!(!id.as_str().contains("alice"), "{id}");
         assert!(!id.as_str().contains("example"), "{id}");
@@ -131,7 +131,7 @@ mod tests {
 
     #[test]
     fn room_name_and_call_id_derivations_agree() {
-        let call = CallId::new("general@muc.example.com").expect("valid call id");
+        let call = CallId::try_new("general@muc.example.com").expect("valid call id");
         assert_eq!(
             CallCorrelationId::for_call(&call),
             CallCorrelationId::for_room_name("general@muc.example.com")

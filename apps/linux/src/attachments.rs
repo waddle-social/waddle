@@ -9,10 +9,10 @@
 
 use std::net::IpAddr;
 
-use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use ring::aead::{self, Aad, LessSafeKey, Nonce, UnboundKey};
-use ring::digest::{digest, SHA256};
+use ring::digest::{SHA256, digest};
 use ring::rand::{SecureRandom, SystemRandom};
 use thiserror::Error;
 use url::{Host, Url};
@@ -146,11 +146,7 @@ pub fn disposition(media_type: &str) -> &'static str {
         .iter()
         .any(|prefix| media_type.starts_with(prefix))
         || media_type == "application/pdf";
-    if inline {
-        "inline"
-    } else {
-        "attachment"
-    }
+    if inline { "inline" } else { "attachment" }
 }
 
 /// The name the ciphertext is uploaded under, as the web client names it.
@@ -278,7 +274,7 @@ pub struct Transfers {
 impl Transfers {
     /// `server` is the account's own server; loopback HTTP is allowed only
     /// when it is itself on loopback.
-    pub fn new(server: &Url) -> Result<Self, reqwest::Error> {
+    pub fn try_new(server: &Url) -> Result<Self, reqwest::Error> {
         let allow_loopback = is_loopback(server);
         let builder = || {
             reqwest::Client::builder()
@@ -631,7 +627,7 @@ mod tests {
         });
         crate::install_crypto_provider();
         let server = Url::parse(&format!("http://{address}/")).expect("url");
-        let transfers = Transfers::new(&server).expect("client");
+        let transfers = Transfers::try_new(&server).expect("client");
         let result = transfers.fetch(&format!("http://{address}/file")).await;
         assert!(
             matches!(result, Err(TransferError::Status(status)) if status.as_u16() == 302),

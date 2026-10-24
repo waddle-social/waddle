@@ -152,7 +152,7 @@ impl WaddleClient {
             }
         };
 
-        let transport = match WebSocketConfig::new(url) {
+        let transport = match WebSocketConfig::try_new(url) {
             Ok(t) => t,
             Err(e) => {
                 self.emit_error(format!("Invalid WebSocket config: {e}"));
@@ -160,7 +160,7 @@ impl WaddleClient {
             }
         };
 
-        let resource = match ClientResource::new(&self.config.resource) {
+        let resource = match ClientResource::try_new(&self.config.resource) {
             Ok(r) => r,
             Err(e) => {
                 self.emit_error(format!("Invalid resource: {e}"));
@@ -169,7 +169,7 @@ impl WaddleClient {
         };
 
         let auth =
-            OAuthBearerConfig::new(jid, resource, AccessToken::new(&self.config.access_token));
+            OAuthBearerConfig::try_new(jid, resource, AccessToken::new(&self.config.access_token));
         let auth = match auth {
             Ok(a) => a,
             Err(e) => {
@@ -179,7 +179,7 @@ impl WaddleClient {
         };
 
         let mut client_config =
-            match ClientConfig::new(ConnectionConfig::new(domain), transport, auth) {
+            match ClientConfig::try_new(ConnectionConfig::new(domain), transport, auth) {
                 Ok(c) => c,
                 Err(e) => {
                     self.emit_error(format!("Invalid client config: {e}"));
@@ -188,7 +188,7 @@ impl WaddleClient {
             };
         apply_resumability(&mut client_config, self.config.resumable);
 
-        let xmpp_client = match XmppClient::new(client_config) {
+        let xmpp_client = match XmppClient::try_new(client_config) {
             Ok(c) => c,
             Err(e) => {
                 self.emit_error(format!("Failed to create XMPP client: {e}"));

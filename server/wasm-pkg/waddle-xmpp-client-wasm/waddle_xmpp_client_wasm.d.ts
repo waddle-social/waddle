@@ -217,8 +217,8 @@ export class WaddleClient {
      */
     fetch_vapid_public_key(service_jid: string): Promise<any>;
     fetch_vcard4(jid: string): Promise<any>;
-    get_resume_state(): any;
-    get_resume_state_handle(): WaddleResumeState | undefined;
+    resume_state(): any;
+    resume_state_handle(): WaddleResumeState | undefined;
     get_server_version(): Promise<any>;
     /**
      * `true` iff the authenticated user is the community owner — i.e.

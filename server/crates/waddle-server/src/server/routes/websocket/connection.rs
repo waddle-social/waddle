@@ -1715,7 +1715,7 @@ where
     if conn.sm_inbound_completion.has_unhandled_hole() {
         warn!(
             jid = ?conn.phase.bound_jid(),
-            inbound_h = conn.sm_state.get_inbound_count(),
+            inbound_h = conn.sm_state.inbound_count(),
             resumable = conn.sm_state.is_resumable(),
             "Ending transport after unhandled stanza dispatch timeout; preserving sender responsibility"
         );
@@ -2389,7 +2389,7 @@ mod tests {
     }
 
     fn replay_completion_origin() -> crate::room_effect_outbox::RoomEffectOriginInstanceId {
-        crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+        crate::room_effect_outbox::RoomEffectOriginInstanceId::try_new(
             "connection-replay-completion".to_owned(),
         )
         .expect("origin instance")
@@ -2952,7 +2952,7 @@ mod tests {
         .await
         .expect("abandoned sequence must not block cleanup");
 
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
     }
 
     #[tokio::test]
@@ -2994,7 +2994,7 @@ mod tests {
         .await
         .expect("abandoned consumed completion must not block cleanup");
 
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
         assert!(!conn.sm_inbound_completion.has_pending());
         assert!(sender.sent.is_empty());
     }
@@ -3021,7 +3021,7 @@ mod tests {
         drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
 
         assert_eq!(
-            conn.sm_state.get_inbound_count(),
+            conn.sm_state.inbound_count(),
             1,
             "the contiguous pre-hole stanza must be acknowledged before detach"
         );
@@ -3091,7 +3091,7 @@ mod tests {
         );
 
         assert_eq!(
-            conn.sm_state.get_stanzas_to_resend(0).len(),
+            conn.sm_state.stanzas_to_resend(0).len(),
             1,
             "the initiator reply is retained for SM replay"
         );
@@ -3871,7 +3871,7 @@ mod tests {
         tokio::time::advance(ORDERED_RELAY_HANDOFF_CLEANUP_DEADLINE).await;
         drain.await;
 
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
         assert!(!conn.sm_inbound_completion.has_pending());
     }
 
@@ -3898,7 +3898,7 @@ mod tests {
         drain_ordered_relay_handoffs_before_cleanup(&mut rx, &mut conn).await;
 
         assert_eq!(
-            conn.sm_state.get_inbound_count(),
+            conn.sm_state.inbound_count(),
             ORDERED_RELAY_HANDOFF_CLEANUP_MAX_COMPLETIONS as u32,
             "cleanup must cap ready backlog work before detaching"
         );
@@ -3919,7 +3919,7 @@ mod tests {
 
         assert_eq!(discard_deferred_inbound(&mut conn), 2);
         assert!(conn.deferred_inbound.is_empty());
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
     }
 
     async fn assert_deferred_force_detach_handling(
@@ -3973,8 +3973,8 @@ mod tests {
         .await;
 
         assert!(conn.deferred_inbound.is_empty());
-        assert_eq!(conn.sm_state.get_inbound_count(), expected_handled);
-        let responses = conn.sm_state.get_stanzas_to_resend(0);
+        assert_eq!(conn.sm_state.inbound_count(), expected_handled);
+        let responses = conn.sm_state.stanzas_to_resend(0);
         assert_eq!(responses.len(), expected_handled as usize);
         if let Some(response) = responses.first() {
             let response = Element::from_str(&response.stanza_xml).expect("replay IQ XML");
@@ -4063,8 +4063,8 @@ mod tests {
         .await;
 
         assert!(conn.deferred_inbound.is_empty());
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
-        assert!(conn.sm_state.get_stanzas_to_resend(0).is_empty());
+        assert_eq!(conn.sm_state.inbound_count(), 0);
+        assert!(conn.sm_state.stanzas_to_resend(0).is_empty());
     }
 
     #[test]

@@ -224,9 +224,9 @@ async fn restoring_live_roster_keeps_rolled_back_intermediate_ban_after_foreign_
         .await
         .expect("restore rolled-back batch");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
-    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(snapshot.room.occupant("alice").is_some());
     assert!(
-        snapshot.room.get_occupant("bob").is_none(),
+        snapshot.room.occupant("bob").is_none(),
         "the current durable ban still applies"
     );
     assert_eq!(snapshot.occupancy_revision, 7);
@@ -268,9 +268,9 @@ async fn restoring_live_roster_applies_exact_commit_after_later_affiliation_chan
         }),
         "the verdict names the original commit rather than the later owner's revision"
     );
-    assert!(snapshot.room.get_occupant("alice").is_none());
+    assert!(snapshot.room.occupant("alice").is_none());
     assert!(
-        snapshot.room.get_occupant("bob").is_none(),
+        snapshot.room.occupant("bob").is_none(),
         "restored membership does not undo an earlier session removal"
     );
     assert!(
@@ -299,7 +299,7 @@ async fn restoring_live_roster_requires_matching_attempt_receipt() {
         .await
         .expect("snapshot")
         .room
-        .get_occupant("alice")
+        .occupant("alice")
         .is_some());
 }
 
@@ -338,7 +338,7 @@ async fn restoring_live_roster_rejects_receipt_from_wrong_lifecycle_or_revision(
             .await
             .expect("snapshot")
             .room
-            .get_occupant("alice")
+            .occupant("alice")
             .is_some());
     }
 }
@@ -418,7 +418,7 @@ async fn restoring_live_roster_applies_roles_only_when_hydrated_authorization_ma
             .expect("restore exact role delta");
         let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
         assert_eq!(
-            snapshot.room.get_occupant("alice").expect("alice").role,
+            snapshot.room.occupant("alice").expect("alice").role,
             if affiliation == Affiliation::Member {
                 Role::Participant
             } else {
@@ -463,9 +463,9 @@ async fn restoring_live_roster_without_admin_projection_enforces_durable_ban() {
         .await
         .expect("restore subject-recovery roster");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
-    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(snapshot.room.occupant("alice").is_some());
     assert!(
-        snapshot.room.get_occupant("bob").is_none(),
+        snapshot.room.occupant("bob").is_none(),
         "a foreign owner's durable ban applies to every restore, not only admin recovery"
     );
     assert!(snapshot.admin_mutation_resolutions.is_empty());
@@ -486,13 +486,13 @@ async fn restoring_live_roster_without_admin_projection_keeps_revoked_members_fo
         .await
         .expect("restore members-only roster");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
-    assert!(snapshot.room.get_occupant("alice").is_some());
+    assert!(snapshot.room.occupant("alice").is_some());
     assert!(
-        snapshot.room.get_occupant("bob").is_none(),
+        snapshot.room.occupant("bob").is_none(),
         "a durable ban is enforced on every restore"
     );
     assert!(
-        snapshot.room.get_occupant("carol").is_some(),
+        snapshot.room.occupant("carol").is_some(),
         "a non-member stays until the path owing its removal presence runs"
     );
 }
@@ -599,10 +599,10 @@ async fn restoring_live_roster_with_unproven_projection_keeps_revoked_members() 
         .await
         .expect("restore rolled-back batch");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
-    assert!(snapshot.room.get_occupant("alice").is_some());
-    assert!(snapshot.room.get_occupant("bob").is_none(), "durable ban");
+    assert!(snapshot.room.occupant("alice").is_some());
+    assert!(snapshot.room.occupant("bob").is_none(), "durable ban");
     assert!(
-        snapshot.room.get_occupant("carol").is_some(),
+        snapshot.room.occupant("carol").is_some(),
         "a NotCommitted projection must not prune untouched members"
     );
 }
@@ -622,12 +622,12 @@ async fn restoring_live_roster_with_committed_projection_prunes_only_touched_jid
         .expect("restore proven batch");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert!(
-        snapshot.room.get_occupant("alice").is_none(),
+        snapshot.room.occupant("alice").is_none(),
         "intermediate ban"
     );
-    assert!(snapshot.room.get_occupant("bob").is_none(), "final ban");
+    assert!(snapshot.room.occupant("bob").is_none(), "final ban");
     assert!(
-        snapshot.room.get_occupant("carol").is_some(),
+        snapshot.room.occupant("carol").is_some(),
         "an untouched non-member is owed its own leave presence elsewhere"
     );
 }
@@ -700,11 +700,11 @@ async fn ambiguous_admin_batch_keeps_noop_removal_for_pending_leave() {
         .await
         .expect("successor snapshot");
     assert!(
-        restored.room.get_occupant("bob").is_none(),
+        restored.room.occupant("bob").is_none(),
         "the real membership removal is projected"
     );
     assert!(
-        restored.room.get_occupant("carol").is_some(),
+        restored.room.occupant("carol").is_some(),
         "the no-op removal owes no presence; retain its pending leave session"
     );
     assert_eq!(
@@ -731,7 +731,7 @@ async fn restoring_live_roster_prunes_foreign_membership_revocation() {
         .expect("restore subject roster");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert!(
-        snapshot.room.get_occupant("alice").is_none(),
+        snapshot.room.occupant("alice").is_none(),
         "foreign membership revocation must not restore occupancy"
     );
 }
@@ -785,10 +785,7 @@ async fn ambiguous_local_affiliation_removal_retains_departure_custody() {
         after.room.find_occupant_by_real_jid(&leaver).is_some(),
         "local leave still owes removal presence"
     );
-    assert_eq!(
-        after.room.get_affiliation(&leaver.to_bare()),
-        Affiliation::None
-    );
+    assert_eq!(after.room.affiliation(&leaver.to_bare()), Affiliation::None);
     assert!(
         after.pending_affiliation_departures.is_empty(),
         "projecting the durable affiliation consumes the ambiguity marker"
@@ -932,7 +929,7 @@ async fn live_roster_recovery_replays_lost_commit_after_later_membership_regrant
         .expect("retry exact committed removal");
     let snapshot = successor.ask(GetSnapshot).await.expect("snapshot");
     assert!(
-        snapshot.room.get_occupant("bob").is_none(),
+        snapshot.room.occupant("bob").is_none(),
         "later regrant cannot resurrect a departed session"
     );
     assert_ne!(

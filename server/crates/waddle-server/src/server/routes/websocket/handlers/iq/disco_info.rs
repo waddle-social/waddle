@@ -78,7 +78,7 @@ pub(super) async fn handle_disco_info_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
 ) -> Vec<String> {
     if ctx.payload_ns != "http://jabber.org/protocol/disco#info" {
         return Vec::new();
@@ -152,9 +152,7 @@ pub(super) async fn handle_disco_info_iq(
     if let Some(response) = spaces::handle_spaces_disco_info(
         &request,
         state,
-        authenticated_session
-            .as_ref()
-            .map(ResolvedPrincipal::from_authenticated_session),
+        authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
     )
     .await
     {
@@ -187,9 +185,7 @@ pub(super) async fn handle_disco_info_iq(
         server_info::handle_server_disco_info(
             &request,
             state,
-            authenticated_session
-                .as_ref()
-                .map(ResolvedPrincipal::from_authenticated_session),
+            authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
         )
         .await,
     )

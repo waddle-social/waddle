@@ -53,7 +53,16 @@ fn xep0421_advertised_on_every_room_configuration() {
         for members_only in [false, true] {
             for moderated in [false, true] {
                 for forum in [false, true] {
-                    let feats = muc_room_features(persistent, members_only, true, moderated, forum);
+                    let feats = muc_room_features(
+                        waddle_xmpp_core::disco::info::RoomPersistence::from_persistent_flag(
+                            persistent,
+                        ),
+                        waddle_xmpp_core::disco::info::RoomMembership::from_members_only_flag(
+                            members_only,
+                        ),
+                        waddle_xmpp_core::disco::info::RoomVisibility::Public,
+                        waddle_xmpp_core::types::Moderation::from_moderated_flag(moderated),
+                    );
                     assert!(
                         feats.iter().any(|f| f == &target),
                         "muc_room_features(persistent={persistent}, members_only={members_only}, moderated={moderated}, forum={forum}) \
@@ -236,11 +245,11 @@ fn room_b() -> jid::BareJid {
 }
 
 fn secret_a() -> OccupantIdSecret {
-    OccupantIdSecret::new(b"deployment-a-32-byte-occupant-key".to_vec())
+    OccupantIdSecret::try_new(b"deployment-a-32-byte-occupant-key".to_vec())
         .expect("≥32 bytes meets §3 floor")
 }
 fn secret_b() -> OccupantIdSecret {
-    OccupantIdSecret::new(b"deployment-b-32-byte-occupant-key".to_vec())
+    OccupantIdSecret::try_new(b"deployment-b-32-byte-occupant-key".to_vec())
         .expect("≥32 bytes meets §3 floor")
 }
 
@@ -356,7 +365,7 @@ fn xep0421_destroy_notification_carries_occupant_id() {
     let occupant: jid::FullJid = "user@example.com/res".parse().expect("occupant jid");
     let occupant_bare = occupant.to_bare();
     let secret =
-        OccupantIdSecret::new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
+        OccupantIdSecret::try_new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
 
     let presence = build_destroy_notification(
         &room,

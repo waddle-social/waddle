@@ -151,7 +151,7 @@ async fn healthy_room(
 fn room_registry() -> kameo::actor::ActorRef<RoomRegistryActor> {
     RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(vec![b'd'; 32]).expect("secret"),
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(vec![b'd'; 32]).expect("secret"),
     ))
 }
 

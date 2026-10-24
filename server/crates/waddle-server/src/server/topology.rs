@@ -412,7 +412,7 @@ mod tests {
     /// bookmarks backfill) must still complete.
     #[tokio::test]
     async fn bootstrap_completes_the_rest_of_the_seed_when_one_room_is_claimed_elsewhere() {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()

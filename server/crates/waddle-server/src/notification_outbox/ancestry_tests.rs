@@ -82,7 +82,7 @@ async fn fanout(
 }
 
 async fn notification_ancestry_fanout_coalescing_and_late_parent(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let first = candidate("archive-first");
@@ -186,11 +186,11 @@ async fn notification_provider_binding_and_revocation(
         APNS_TEST_TOPIC, FCM_TEST_APP_ID,
     };
     use crate::push_service::DatabasePushServiceStore;
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let registrations =
-        crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
             .await
             .expect("registrations");
     // Host registration retirement requires the exact service boundary.
@@ -241,7 +241,7 @@ async fn notification_provider_binding_and_revocation(
         &candidate,
         &[NotificationOutboxTarget::new(
             service.clone(),
-            PushServiceNodeName::new(victim.node()).expect("node"),
+            PushServiceNodeName::try_new(victim.node()).expect("node"),
         )],
     )
     .await;
@@ -400,11 +400,11 @@ async fn notification_lost_backing_marker_preserves_newer_wire(fixture: IngressF
         DatabasePushServiceStore, PushDevicePlatform, PushDeviceRegistration,
     };
     use waddle_xmpp::pubsub::{PubSubItem, PubSubStorage};
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let registrations =
-        crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
             .await
             .expect("registrations");
     // Backing uses a genuinely different database from queue/Foundation.
@@ -449,7 +449,7 @@ async fn notification_lost_backing_marker_preserves_newer_wire(fixture: IngressF
         &candidate,
         &[NotificationOutboxTarget::new(
             service.clone(),
-            PushServiceNodeName::new(node.node()).expect("node"),
+            PushServiceNodeName::try_new(node.node()).expect("node"),
         )],
     )
     .await;
@@ -535,13 +535,13 @@ async fn postgres_parked_parent_contention_does_not_block_fresh_outbox_work() {
     let Some(fixture) = IngressFixture::postgres("parked_outbox_fairness").await else {
         return;
     };
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let provider_db = Database::in_memory("parked-fairness-provider")
         .await
         .expect("provider db");
-    crate::push_registrations::DatabasePushRegistrationStore::new(provider_db.clone())
+    crate::push_registrations::DatabasePushRegistrationStore::try_new(provider_db.clone())
         .await
         .expect("registration schema");
     let push = with_fake_fcm(
@@ -578,7 +578,7 @@ async fn postgres_parked_parent_contention_does_not_block_fresh_outbox_work() {
         .expect("user registration");
     let target = NotificationOutboxTarget::new(
         service.clone(),
-        PushServiceNodeName::new(node.node()).expect("node"),
+        PushServiceNodeName::try_new(node.node()).expect("node"),
     );
     let parent = attach(&fixture, &parked_candidate).await;
     fanout(&outbox, &parked_candidate, std::slice::from_ref(&target)).await;
@@ -661,10 +661,10 @@ async fn explicit_revocation_retires_parked_boundary_without_provider_row(
 ) {
     use crate::push_service::test_support::{fcm_registration, FCM_TEST_APP_ID};
     use crate::push_service::DatabasePushServiceStore;
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
-    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+    crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registration schema");
     let service: BareJid = "push.example.com".parse().expect("service");
@@ -694,7 +694,7 @@ async fn explicit_revocation_retires_parked_boundary_without_provider_row(
         &notification,
         &[NotificationOutboxTarget::new(
             service.clone(),
-            PushServiceNodeName::new(node.node()).expect("node"),
+            PushServiceNodeName::try_new(node.node()).expect("node"),
         )],
     )
     .await;
@@ -856,7 +856,7 @@ async fn postgres_outbox_parent_contention_rolls_back_explicit_disable_and_allow
 async fn explicit_retirement_only_rewrites_failed_jobs_with_outstanding_custody(
     fixture: IngressFixture,
 ) {
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let target = target_named("known-failure-retirement");

@@ -73,7 +73,7 @@ async fn mam_failure_is_nonadvancing_with_healthy_retry(fixture: IngressFixture)
         room.clone().into(),
     ));
     archived.thread = Some(waddle_xmpp_core::ThreadInfo {
-        id: waddle_xmpp_core::mam::ThreadId::new("roadmap").expect("thread"),
+        id: waddle_xmpp_core::mam::ThreadId::try_new("roadmap").expect("thread"),
         parent: None,
     });
     mam.store_message(&room, &archived)

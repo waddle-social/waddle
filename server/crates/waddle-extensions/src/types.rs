@@ -31,6 +31,7 @@ const MAX_XML_SERIALIZED_BYTES: usize = 64 * 1024;
 
 /// Validation failures for extension identifiers, XML trees, and artifact references.
 #[derive(Debug, Clone, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum FrameworkTypeError {
     /// A durable observation generation was zero.
     #[error("observation generation must be positive")]
@@ -122,7 +123,7 @@ macro_rules! typed_non_empty_string {
             /// Returns `FrameworkTypeError::Empty` if the value is empty or
             /// contains only whitespace; accepted text is retained without
             /// trimming.
-            pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+            pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
                 let value = value.into();
                 if value.trim().is_empty() {
                     Err(FrameworkTypeError::Empty { field: $field })
@@ -132,11 +133,13 @@ macro_rules! typed_non_empty_string {
             }
 
             /// Borrow the stored text without allocating or changing whitespace.
+            #[must_use]
             pub fn as_str(&self) -> &str {
                 &self.0
             }
 
             /// Consume this wrapper and return its original owned text without copying.
+            #[must_use]
             pub fn into_string(self) -> String {
                 self.0
             }
@@ -171,9 +174,9 @@ pub use message::*;
 pub use payload::*;
 pub use primitives::*;
 pub use ui::*;
-
 /// Whether a namespace starts with a reserved `urn:xmpp:`, `jabber:`, or `http://jabber.org/`
 /// prefix.
+#[must_use]
 pub fn is_official_namespace(value: &str) -> bool {
     value.starts_with("urn:xmpp:")
         || value.starts_with("jabber:")

@@ -113,6 +113,7 @@ impl WasmWebSocket {
     }
 
     /// Borrow the browser WebSocket so the host can inspect its transport state.
+    #[must_use]
     pub fn web_socket(&self) -> &web_sys::WebSocket {
         &self.ws
     }

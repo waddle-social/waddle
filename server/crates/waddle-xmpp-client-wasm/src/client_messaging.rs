@@ -120,7 +120,7 @@ impl WaddleClient {
             let chat_id: Jid = chat_id
                 .parse()
                 .map_err(|err| js_error(format!("invalid MDS chat id: {err}")))?;
-            let stanza_id = StanzaId::new(stanza_id)
+            let stanza_id = StanzaId::try_new(stanza_id)
                 .map_err(|err| js_error(format!("invalid MDS stanza id: {err}")))?;
             let stanza_id_by: BareJid = stanza_id_by
                 .parse()
@@ -239,8 +239,9 @@ impl WaddleClient {
                     )))
                 }
             };
-            let sid = InCallSessionId::new(sid).map_err(|err| js_error(err.to_string()))?;
-            let emoji = InCallReactionEmoji::new(emoji).map_err(|err| js_error(err.to_string()))?;
+            let sid = InCallSessionId::try_new(sid).map_err(|err| js_error(err.to_string()))?;
+            let emoji =
+                InCallReactionEmoji::try_new(emoji).map_err(|err| js_error(err.to_string()))?;
             let stanza = build_in_call_reaction_message(&recipient, &sid, &emoji);
             send_stanza_command(inner, stanza).await?;
             Ok(JsValue::UNDEFINED)

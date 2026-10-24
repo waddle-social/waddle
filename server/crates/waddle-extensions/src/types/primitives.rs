@@ -148,16 +148,18 @@ impl ProviderFieldText {
     /// # Errors
     ///
     /// This constructor currently accepts all text and never returns an error.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         Ok(Self(value.into()))
     }
-
     /// Borrow the stored text without allocating or changing whitespace.
+
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -185,7 +187,7 @@ impl RoomJid {
     /// # Errors
     ///
     /// Returns `InvalidBareJid` if the text does not parse as a bare JID.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         let value = value.into();
         value
             .parse::<BareJid>()
@@ -194,11 +196,13 @@ impl RoomJid {
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -226,7 +230,7 @@ impl FullJidValue {
     /// # Errors
     ///
     /// Returns `InvalidFullJid` if the text does not parse as a full JID.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         let value = value.into();
         value
             .parse::<FullJid>()
@@ -235,11 +239,13 @@ impl FullJidValue {
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -269,7 +275,7 @@ impl PluginId {
     ///
     /// Returns `Empty` for empty input, or `InvalidPluginId` for characters or end
     /// positions outside the lowercase ASCII identifier grammar.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         let value = value.into();
         if value.is_empty() {
             return Err(FrameworkTypeError::Empty { field: "plugin id" });
@@ -293,11 +299,13 @@ impl PluginId {
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -327,7 +335,7 @@ impl PayloadNamespace {
     ///
     /// Returns `OfficialNamespace` for reserved XMPP prefixes, or
     /// `InvalidPayloadNamespace` unless the value starts with `urn:` or `https://`.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         let value = value.into();
         if is_official_namespace(&value) {
             return Err(FrameworkTypeError::OfficialNamespace(value));
@@ -340,21 +348,25 @@ impl PayloadNamespace {
     }
 
     /// Return the namespace used by Waddle's extension envelope and UI vocabulary.
+    #[must_use]
     pub fn framework() -> Self {
         Self(FRAMEWORK_NAMESPACE.to_string())
     }
 
     /// Whether this namespace is exactly the Waddle extension framework namespace.
+    #[must_use]
     pub fn is_framework(&self) -> bool {
         self.0 == FRAMEWORK_NAMESPACE
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -384,7 +396,7 @@ impl CommandNode {
     ///
     /// Returns `InvalidCommandNode` unless the value is the framework namespace or starts
     /// with that namespace followed by a colon.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         let value = value.into();
         let valid = value == FRAMEWORK_NAMESPACE
             || value
@@ -398,16 +410,19 @@ impl CommandNode {
     }
 
     /// Return the framework's generic launch-invocation ad-hoc command node.
+    #[must_use]
     pub fn invoke() -> Self {
         Self(INVOKE_COMMAND_NODE.to_string())
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -429,7 +444,7 @@ impl Sha256Digest {
     /// # Errors
     ///
     /// Returns `InvalidSha256Digest` unless the value is exactly 64 ASCII hexadecimal characters.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         let value = value.into();
         if value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
             Ok(Self(value.to_ascii_lowercase()))
@@ -439,6 +454,7 @@ impl Sha256Digest {
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -462,7 +478,7 @@ impl ArtifactUri {
     ///
     /// Returns `InvalidArtifactUri` unless the value starts with `http://` or `https://`
     /// and contains `/sha256/`.
-    pub fn new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, FrameworkTypeError> {
         let value = value.into();
         let immutable_http = (value.starts_with("https://") || value.starts_with("http://"))
             && value.contains("/sha256/");
@@ -474,6 +490,7 @@ impl ArtifactUri {
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -504,13 +521,13 @@ impl ArtifactReference {
     ///
     /// Returns the URI or digest validation error, or `ArtifactDigestMismatch` when the
     /// URI does not contain the normalized digest.
-    pub fn new(
+    pub fn try_new(
         uri: impl Into<String>,
         sha256: impl Into<String>,
         media_type: Option<MediaType>,
     ) -> Result<Self, FrameworkTypeError> {
-        let uri = ArtifactUri::new(uri)?;
-        let sha256 = Sha256Digest::new(sha256)?;
+        let uri = ArtifactUri::try_new(uri)?;
+        let sha256 = Sha256Digest::try_new(sha256)?;
         if !uri.as_str().to_ascii_lowercase().contains(sha256.as_str()) {
             return Err(FrameworkTypeError::ArtifactDigestMismatch {
                 uri: uri.as_str().to_string(),
@@ -559,7 +576,7 @@ impl BodyRange {
     /// # Errors
     ///
     /// Returns `InvalidBodyRange` when `end` is not strictly greater than `start`.
-    pub fn new(start: u32, end: u32) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(start: u32, end: u32) -> Result<Self, FrameworkTypeError> {
         if end > start {
             Ok(Self { start, end })
         } else {

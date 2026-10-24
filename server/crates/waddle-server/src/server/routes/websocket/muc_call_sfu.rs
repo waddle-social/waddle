@@ -40,7 +40,7 @@ pub(crate) fn derive_room_voice_from_snapshot(
         .values()
         .flat_map(|occupant| {
             let voice = occupant.role.voice(moderation);
-            room.get_occupant_sessions(&occupant.nick)
+            room.occupant_sessions(&occupant.nick)
                 .into_iter()
                 .map(move |session| (session, voice))
         })
@@ -89,7 +89,7 @@ pub(crate) fn unregister_participant_via_sfu_if_occupant_matches(
     unbound: waddle_sfu::UnboundOccupantPolicy,
     observed_sids: Option<&ObservedCallSids>,
 ) -> Option<SessionScopedTeardown> {
-    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+    let Ok(call_id) = CallId::try_new(room_jid.to_string()) else {
         return None;
     };
     let identity = Identity::from_jid(jid.clone());
@@ -111,7 +111,7 @@ pub(crate) fn unregister_participant_via_sfu_ungated(
     room_jid: &BareJid,
     jid: &FullJid,
 ) {
-    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+    let Ok(call_id) = CallId::try_new(room_jid.to_string()) else {
         // Room JID couldn't round-trip into a CallId, which means it
         // could never have been used to mint a join token either —
         // there's nothing to undo.
@@ -139,7 +139,7 @@ pub(crate) fn apply_voice_grants_via_sfu(
     jid: &FullJid,
     voice: Voice,
 ) {
-    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+    let Ok(call_id) = CallId::try_new(room_jid.to_string()) else {
         return;
     };
     let identity = Identity::from_jid(jid.clone());
@@ -431,7 +431,7 @@ pub(crate) fn note_participant_left_from_webhook(
     jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
 ) -> Option<TeardownDisposition> {
-    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+    let Ok(call_id) = CallId::try_new(room_jid.to_string()) else {
         return None;
     };
     note_participant_left_by_call_id(state, &call_id, jid, observed_sids)
@@ -449,7 +449,7 @@ pub(crate) fn note_participant_left_for_session(
     observed_sids: Option<&ObservedCallSids>,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> Option<waddle_sfu::SessionScopedTeardown> {
-    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+    let Ok(call_id) = CallId::try_new(room_jid.to_string()) else {
         return None;
     };
     let sfu = state.deps.protocol.sfu.as_ref()?;
@@ -470,7 +470,7 @@ pub(crate) fn note_participant_left_for_occupant(
     unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> Option<waddle_sfu::SessionScopedTeardown> {
-    let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+    let Ok(call_id) = CallId::try_new(room_jid.to_string()) else {
         return None;
     };
     let sfu = state.deps.protocol.sfu.as_ref()?;
@@ -495,7 +495,7 @@ pub(crate) fn observe_participant_sids_from_webhook(
     jid: &FullJid,
     observed_sids: Option<&ObservedCallSids>,
 ) -> Option<SidObservationDisposition> {
-    let call_id = CallId::new(room_jid.to_string()).ok()?;
+    let call_id = CallId::try_new(room_jid.to_string()).ok()?;
     let sfu = state.deps.protocol.sfu.as_ref()?;
     let identity = Identity::from_jid(jid.clone());
     Some(sfu.observe_call_participant_sids(

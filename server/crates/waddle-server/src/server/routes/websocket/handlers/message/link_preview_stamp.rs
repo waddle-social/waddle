@@ -1111,8 +1111,8 @@ mod tests {
     fn invalid_link_preview_request_is_stripped_without_metadata() {
         let _events_guard = recorded_events::lock();
         recorded_events::clear();
-        let token =
-            waddle_xmpp::xep::LinkPreviewToken::new("not-a-signed-preview-token").expect("token");
+        let token = waddle_xmpp::xep::LinkPreviewToken::try_new("not-a-signed-preview-token")
+            .expect("token");
         let mut message = Message::new(None::<jid::Jid>);
         message.to = Some("room@muc.example.com".parse().expect("jid"));
         message.bodies.insert(

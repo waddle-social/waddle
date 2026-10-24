@@ -36,7 +36,7 @@ impl WaddleClient {
     /// The camelCase object includes counters, resumption eligibility, the server's
     /// optional maximum interval, and timestamped unhandled outbound entries.
     /// Persist snapshots promptly, especially after the synchronous pagehide handoff.
-    pub fn get_resume_state(&self) -> JsValue {
+    pub fn resume_state(&self) -> JsValue {
         match self.inner.borrow().resume_state.as_ref() {
             Some(state) => {
                 to_js_value(&JsResumeState::from(state.clone())).unwrap_or(JsValue::NULL)
@@ -47,7 +47,7 @@ impl WaddleClient {
 
     /// Clone the current resume snapshot into an opaque handle, or return no handle when
     /// unavailable.
-    pub fn get_resume_state_handle(&self) -> Option<WaddleResumeState> {
+    pub fn resume_state_handle(&self) -> Option<WaddleResumeState> {
         self.inner
             .borrow()
             .resume_state

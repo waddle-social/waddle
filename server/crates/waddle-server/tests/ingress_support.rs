@@ -85,7 +85,7 @@ impl IngressFixture {
         waddle_server::inbox::DatabaseInboxStorage::open(Some(db.database_url()))
             .await
             .expect("inbox schema");
-        waddle_server::notification_activity::NotificationActivityStore::new(db.clone())
+        waddle_server::notification_activity::NotificationActivityStore::try_new(db.clone())
             .await
             .expect("activity schema");
         MigrationRunner::single()
@@ -231,7 +231,7 @@ impl IngressFixture {
     }
 
     pub async fn authority(&self) -> waddle_server::ingress::IngressAuthority {
-        waddle_server::ingress::IngressAuthority::new(
+        waddle_server::ingress::IngressAuthority::try_new(
             Default::default(),
             self.db.clone(),
             self.lineage.clone(),

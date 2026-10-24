@@ -69,7 +69,7 @@ impl AuthConfig {
         };
 
         // Validation is strict and fails startup.
-        let registry = crate::auth::ProviderRegistry::new(providers.clone())
+        let registry = crate::auth::ProviderRegistry::try_new(providers.clone())
             .map_err(|e| format!("invalid provider config: {}", e))?;
 
         if registry.is_empty() {
@@ -1358,7 +1358,7 @@ fn parse_occupant_id_secret(raw: Option<&str>) -> Result<OccupantIdSecret, Strin
              generate with: openssl rand -base64 48)"
         )
     })?;
-    OccupantIdSecret::new(value.as_bytes().to_vec()).map_err(|e| {
+    OccupantIdSecret::try_new(value.as_bytes().to_vec()).map_err(|e| {
         format!(
             "WADDLE_OCCUPANT_ID_SECRET invalid: {e} \
              (generate with: openssl rand -base64 48)"
@@ -1571,7 +1571,7 @@ const TEST_OCCUPANT_ID_SECRET: &str = "test-occupant-id-secret-32-bytes-long";
 
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) fn test_occupant_id_secret() -> OccupantIdSecret {
-    OccupantIdSecret::new(TEST_OCCUPANT_ID_SECRET.as_bytes().to_vec())
+    OccupantIdSecret::try_new(TEST_OCCUPANT_ID_SECRET.as_bytes().to_vec())
         .expect("test secret meets length floor")
 }
 
@@ -1584,7 +1584,7 @@ pub(crate) fn test_occupant_id_secret() -> OccupantIdSecret {
 /// Trusted origins for test configs: `http://localhost:3000` only.
 #[cfg(any(test, feature = "test-support"))]
 fn test_trusted_web_origins() -> crate::auth::redirect::TrustedWebOrigins {
-    crate::auth::redirect::TrustedWebOrigins::new("http://localhost:3000", None)
+    crate::auth::redirect::TrustedWebOrigins::try_new("http://localhost:3000", None)
         .expect("the test base URL is a valid origin")
 }
 
@@ -1638,7 +1638,7 @@ impl ServerConfig {
         let apns =
             crate::push_service::ApnsConfig::from_env().map_err(|error| error.to_string())?;
         let fcm = crate::push_service::FcmConfig::from_env().map_err(|error| error.to_string())?;
-        let trusted_web_origins = crate::auth::redirect::TrustedWebOrigins::new(
+        let trusted_web_origins = crate::auth::redirect::TrustedWebOrigins::try_new(
             &base_url,
             std::env::var("WADDLE_CORS_ORIGINS").ok().as_deref(),
         )

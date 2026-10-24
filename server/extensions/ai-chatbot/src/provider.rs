@@ -348,7 +348,7 @@ fn parse_provider_answer_from_document(
                 "provider response did not include answer text".to_string(),
             )
         })?;
-    let text = NonEmptyString::new(content).ok_or_else(|| {
+    let text = NonEmptyString::try_new(content).ok_or_else(|| {
         ProviderExecutionError::InvalidResponse("provider answer was empty".to_string())
     })?;
     Ok(ProviderAnswer { text })
@@ -362,7 +362,8 @@ pub(crate) fn assemble_provider_request(
     let mut messages = Vec::new();
     messages.push(ProviderMessage {
         role: ProviderRole::System,
-        content: NonEmptyString::new(BASELINE_SYSTEM_PROMPT).expect("baseline prompt is non-empty"),
+        content: NonEmptyString::try_new(BASELINE_SYSTEM_PROMPT)
+            .expect("baseline prompt is non-empty"),
     });
     if let Some(system_prompt) = &config.system_prompt {
         messages.push(ProviderMessage {

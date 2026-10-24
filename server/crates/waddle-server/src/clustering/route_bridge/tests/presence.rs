@@ -15,7 +15,7 @@ async fn register_local_resource(
     let _owner = services.connection_registry.register(jid.clone(), tx);
     let entry = services
         .connection_registry
-        .get_entry(jid)
+        .entry(jid)
         .expect("connection entry exists immediately after register");
     assert!(
         crate::server::dual_registration::mirror_register(

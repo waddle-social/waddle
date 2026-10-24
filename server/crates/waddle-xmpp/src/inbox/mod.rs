@@ -239,7 +239,7 @@ impl InboxView {
     }
 
     /// Look up an entry by full key (partner + optional thread).
-    pub fn get_by_key(&self, key: &InboxKey) -> Option<&InboxEntry> {
+    pub fn by_key(&self, key: &InboxKey) -> Option<&InboxEntry> {
         self.entries.get(key)
     }
 

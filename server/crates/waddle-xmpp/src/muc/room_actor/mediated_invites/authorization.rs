@@ -31,7 +31,7 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
         if self.room.find_nick_by_real_jid(&msg.inviter).is_none() {
             return Err(MediatedInviteGrantError::NotOccupant);
         }
-        let inviter_affiliation = self.room.get_affiliation(&msg.inviter.to_bare());
+        let inviter_affiliation = self.room.affiliation(&msg.inviter.to_bare());
         let lacks_required_affiliation = if self.room.config.group_dm {
             inviter_affiliation < Affiliation::Member
         } else if self.room.config.members_only {
@@ -48,7 +48,7 @@ impl kameo::message::Message<AuthorizeMediatedInvite> for RoomActor {
         {
             return Err(MediatedInviteGrantError::GrantPending);
         }
-        let previous_affiliation = self.room.get_affiliation(&msg.invitee);
+        let previous_affiliation = self.room.affiliation(&msg.invitee);
         if previous_affiliation == Affiliation::Outcast {
             return Err(MediatedInviteGrantError::InviteeBanned);
         }

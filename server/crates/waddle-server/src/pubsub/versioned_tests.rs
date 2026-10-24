@@ -27,12 +27,13 @@ fn item(body: &str, id: &str) -> PubSubItem {
 async fn exercise_ordering(storage: Arc<DatabasePubSubStorage>) {
     let service: BareJid = "push@example.com".parse().expect("service");
     let publisher: BareJid = "alice@example.com".parse().expect("publisher");
-    let node = PublicationNode::new(format!("ordering-{}", uuid::Uuid::new_v4())).expect("node");
+    let node =
+        PublicationNode::try_new(format!("ordering-{}", uuid::Uuid::new_v4())).expect("node");
     storage
         .get_or_create_node(&service, node.as_str())
         .await
         .expect("node");
-    let version = PublicationVersion::new(2, uuid::Uuid::new_v4()).expect("version");
+    let version = PublicationVersion::try_new(2, uuid::Uuid::new_v4()).expect("version");
     let latest = item("latest", "same");
     // Simulate an earlier worker paused outside the PubSub database, then a
     // newer wire publish commits before the older worker finally enters it.
@@ -49,7 +50,7 @@ async fn exercise_ordering(storage: Arc<DatabasePubSubStorage>) {
                 &older_publisher,
                 &older_node,
                 &item("old", "different"),
-                PublicationVersion::new(1, uuid::Uuid::new_v4()).expect("version"),
+                PublicationVersion::try_new(1, uuid::Uuid::new_v4()).expect("version"),
             )
             .await
     });
@@ -99,7 +100,7 @@ async fn exercise_ordering(storage: Arc<DatabasePubSubStorage>) {
                 &publisher,
                 &node,
                 &latest,
-                PublicationVersion::new(2, uuid::Uuid::new_v4()).expect("version")
+                PublicationVersion::try_new(2, uuid::Uuid::new_v4()).expect("version")
             )
             .await,
         Err(PublicationError::IntegrityConflict)
@@ -179,7 +180,7 @@ async fn exercise_ordering(storage: Arc<DatabasePubSubStorage>) {
                     &publisher,
                     &node,
                     &item(&revision.to_string(), &revision.to_string()),
-                    PublicationVersion::new(revision, uuid::Uuid::new_v4()).expect("version"),
+                    PublicationVersion::try_new(revision, uuid::Uuid::new_v4()).expect("version"),
                 )
                 .await
         }));
@@ -257,7 +258,7 @@ async fn versioned_push_pubsub_stamp_and_item_roll_back_together() {
 async fn exercise_rollback(storage: &DatabasePubSubStorage) {
     let service: BareJid = "push@example.com".parse().expect("service");
     let publisher: BareJid = "alice@example.com".parse().expect("publisher");
-    let node = PublicationNode::new("rollback").expect("node");
+    let node = PublicationNode::try_new("rollback").expect("node");
     storage
         .get_or_create_node(&service, node.as_str())
         .await
@@ -275,7 +276,7 @@ async fn exercise_rollback(storage: &DatabasePubSubStorage) {
             storage.execute("CREATE TRIGGER fail_push_item BEFORE INSERT ON pubsub_items FOR EACH ROW EXECUTE FUNCTION reject_push_item()", ()).await.expect("inject failure");
         }
     }
-    let version = PublicationVersion::new(1, uuid::Uuid::new_v4()).expect("version");
+    let version = PublicationVersion::try_new(1, uuid::Uuid::new_v4()).expect("version");
     let payload = item("approved", "same");
     assert!(storage
         .publish_push_item_versioned(&service, &publisher, &node, &payload, version)
@@ -317,7 +318,7 @@ async fn versioned_push_pubsub_additive_initialization_preserves_v8_items_and_su
     let storage = DatabasePubSubStorage::open(None).await.expect("storage");
     let service: BareJid = "push@example.com".parse().expect("service");
     let publisher: BareJid = "alice@example.com".parse().expect("publisher");
-    let node = PublicationNode::new("existing-v8").expect("node");
+    let node = PublicationNode::try_new("existing-v8").expect("node");
     storage
         .get_or_create_node(&service, node.as_str())
         .await
@@ -365,7 +366,7 @@ async fn versioned_push_pubsub_additive_initialization_preserves_v8_items_and_su
                 &publisher,
                 &node,
                 &payload,
-                PublicationVersion::new(1, uuid::Uuid::new_v4()).expect("version")
+                PublicationVersion::try_new(1, uuid::Uuid::new_v4()).expect("version")
             )
             .await
             .expect("new API"),
@@ -382,8 +383,8 @@ async fn versioned_push_pubsub_reopen_preserves_lost_reply_and_retraction_waterm
     let url = format!("sqlite://{}", path.display());
     let service: BareJid = "push@example.com".parse().expect("service");
     let publisher: BareJid = "alice@example.com".parse().expect("publisher");
-    let node = PublicationNode::new("reopen").expect("node");
-    let version = PublicationVersion::new(1, uuid::Uuid::new_v4()).expect("version");
+    let node = PublicationNode::try_new("reopen").expect("node");
+    let version = PublicationVersion::try_new(1, uuid::Uuid::new_v4()).expect("version");
     let payload = item("frozen", "same");
     {
         let storage = DatabasePubSubStorage::open(Some(&url))

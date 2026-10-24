@@ -218,7 +218,7 @@ impl ExtensionHostAdapter {
             Ok(archive_ids
                 .into_iter()
                 .find(|(archive, _)| archive == &room)
-                .and_then(|(_, id)| StanzaId::new(id.id).ok()))
+                .and_then(|(_, id)| StanzaId::try_new(id.id).ok()))
         }
         .await;
         drop(cleanup);

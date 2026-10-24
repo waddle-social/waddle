@@ -203,7 +203,7 @@ async fn spawn_unrestored_fenced_room() -> (
         "channel-1".to_string(),
         RoomConfig::default(),
     );
-    let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+    let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
         .expect("valid occupant-id secret");
     let actor = RoomActor::spawn(RoomActor::new(room, secret));
     let owner = NodeIdentity::new("test-node", "test-node-epoch");
@@ -484,7 +484,7 @@ async fn assert_invalid_restore_fence_fails_closed(invalid_fence: RoomClaimFence
         "channel-1".to_string(),
         RoomConfig::default(),
     );
-    let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+    let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
         .expect("valid occupant-id secret");
     let actor = RoomActor::spawn(RoomActor::new(room, secret));
     let store = Arc::new(OwnershipStore::expecting(
@@ -573,7 +573,7 @@ async fn second_restore_cannot_transplant_an_actor_to_a_successor_fence() {
         "channel-1".to_string(),
         RoomConfig::default(),
     );
-    let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+    let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
         .expect("valid occupant-id secret");
     let actor = RoomActor::spawn(RoomActor::new(room, secret));
     let original_fence = claim_fence(&room_jid, "original-incarnation", 11);
@@ -682,7 +682,7 @@ fn durable_existing_room() -> DurableRoomState {
 }
 
 async fn spawn_restore_registry(store: Arc<OwnershipStore>) -> ActorRef<RoomRegistryActor> {
-    let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+    let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
         .expect("valid occupant-id secret");
     let registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".to_string(),

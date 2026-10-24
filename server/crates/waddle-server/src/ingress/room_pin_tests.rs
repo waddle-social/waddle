@@ -76,7 +76,7 @@ async fn room_pin_seam(mut fixture: IngressFixture, retract: bool, fail_pin: boo
         .expect("register occupant");
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {
@@ -710,7 +710,7 @@ async fn room_pin_snapshot_failure(fixture: IngressFixture, unpin: bool) {
     registry.register(sender.clone(), tx);
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {
@@ -931,7 +931,7 @@ async fn secondary_room_snapshot_failure(fixture: IngressFixture, subject: bool,
     let registry = ConnectionRegistry::new();
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {
@@ -1199,7 +1199,7 @@ async fn room_pin_preview_lookup_failure(fixture: IngressFixture) {
     let registry = ConnectionRegistry::new();
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'p'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'p'; 32]).expect("secret"),
     ));
     let room: BareJid = "preview@muc.example.com".parse().expect("room");
     let actor = rooms

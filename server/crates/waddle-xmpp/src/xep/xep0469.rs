@@ -130,7 +130,7 @@ pub fn set_pin_state(conference_elem: &mut Element, state: PinState) {
 }
 
 /// Extract pin state from a bookmark conference element.
-pub fn get_pin_state(conference_elem: &Element) -> PinState {
+pub fn pin_state(conference_elem: &Element) -> PinState {
     if is_bookmark_pinned(conference_elem) {
         PinState::Pinned
     } else {
@@ -180,8 +180,8 @@ mod tests {
 
     #[test]
     fn test_get_pin_state() {
-        assert_eq!(get_pin_state(&make_conference(true)), PinState::Pinned);
-        assert_eq!(get_pin_state(&make_conference(false)), PinState::Unpinned);
+        assert_eq!(pin_state(&make_conference(true)), PinState::Pinned);
+        assert_eq!(pin_state(&make_conference(false)), PinState::Unpinned);
     }
 
     #[test]

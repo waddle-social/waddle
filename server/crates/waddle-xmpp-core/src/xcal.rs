@@ -79,6 +79,7 @@ pub enum Freq {
 
 impl Freq {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Daily => "DAILY",
@@ -89,6 +90,7 @@ impl Freq {
     }
 
     /// Parse a supported calendar token, returning `None` for unknown values.
+    #[must_use]
     pub fn from_str_value(s: &str) -> Option<Self> {
         match s {
             "DAILY" => Some(Self::Daily),
@@ -122,6 +124,7 @@ pub enum Weekday {
 
 impl Weekday {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Sunday => "SU",
@@ -135,6 +138,7 @@ impl Weekday {
     }
 
     /// Parse a supported calendar token, returning `None` for unknown values.
+    #[must_use]
     pub fn from_str_value(s: &str) -> Option<Self> {
         match s {
             "SU" => Some(Self::Sunday),
@@ -173,6 +177,7 @@ pub enum CalendarDateValue {
 
 impl CalendarDateValue {
     /// Return the category used to dispatch or serialize this value.
+    #[must_use]
     pub fn kind(self) -> CalendarDateValueKind {
         match self {
             Self::Date(_) => CalendarDateValueKind::Date,
@@ -181,6 +186,7 @@ impl CalendarDateValue {
     }
 
     /// Return the UTC instant when the value includes a time; dates alone return `None`.
+    #[must_use]
     pub fn as_datetime(self) -> Option<DateTime<Utc>> {
         match self {
             Self::DateTime(value) => Some(value),
@@ -231,6 +237,7 @@ pub struct Rrule {
 
 impl Rrule {
     /// Create a recurrence rule with interval one and no limiting date, count, or day filters.
+    #[must_use]
     pub fn new(freq: Freq) -> Self {
         Self {
             freq,
@@ -242,30 +249,35 @@ impl Rrule {
     }
 
     /// Set the interval and return the updated value.
+    #[must_use]
     pub fn with_interval(mut self, interval: u32) -> Self {
         self.interval = Some(interval);
         self
     }
 
     /// Set the by day and return the updated value.
+    #[must_use]
     pub fn with_by_day<I: IntoIterator<Item = Weekday>>(mut self, days: I) -> Self {
         self.by_day = days.into_iter().collect();
         self
     }
 
     /// Set the by month day and return the updated value.
+    #[must_use]
     pub fn with_by_month_day<I: IntoIterator<Item = i32>>(mut self, days: I) -> Self {
         self.by_month_day = days.into_iter().collect();
         self
     }
 
     /// Set the count and return the updated value.
+    #[must_use]
     pub fn with_count(mut self, count: u32) -> Self {
         self.end = Some(RruleEnd::Count(count));
         self
     }
 
     /// Set the until and return the updated value.
+    #[must_use]
     pub fn with_until(mut self, until: DateTime<Utc>) -> Self {
         self.end = Some(RruleEnd::Until(until));
         self
@@ -291,6 +303,7 @@ pub enum PartStat {
 
 impl PartStat {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NeedsAction => "NEEDS-ACTION",
@@ -301,6 +314,7 @@ impl PartStat {
     }
 
     /// Parse a supported calendar token, returning `None` for unknown values.
+    #[must_use]
     pub fn from_str_value(s: &str) -> Option<Self> {
         match s {
             "NEEDS-ACTION" => Some(Self::NeedsAction),
@@ -328,6 +342,7 @@ pub struct Attendee {
 
 impl Attendee {
     /// Create an attendee with the supplied URI and participation status, without a role or RSVP flag.
+    #[must_use]
     pub fn new(uri: impl Into<String>, partstat: PartStat) -> Self {
         Self {
             uri: uri.into(),
@@ -338,12 +353,14 @@ impl Attendee {
     }
 
     /// Set the role and return the updated value.
+    #[must_use]
     pub fn with_role(mut self, role: impl Into<String>) -> Self {
         self.role = Some(role.into());
         self
     }
 
     /// Set the rsvp and return the updated value.
+    #[must_use]
     pub fn with_rsvp(mut self, rsvp: bool) -> Self {
         self.rsvp = Some(rsvp);
         self
@@ -403,6 +420,7 @@ pub struct CalendarItem {
 
 impl CalendarItem {
     /// Create a recurrence series containing the master event and no overrides.
+    #[must_use]
     pub fn new(master: VEvent) -> Self {
         Self {
             master,
@@ -411,6 +429,7 @@ impl CalendarItem {
     }
 
     /// Append the supplied override and return the updated value.
+    #[must_use]
     pub fn add_override(mut self, override_event: VEvent) -> Self {
         self.overrides.push(override_event);
         self
@@ -419,6 +438,7 @@ impl CalendarItem {
 
 impl VEvent {
     /// Create an event with its UID and summary; date/time and recurrence properties remain unset.
+    #[must_use]
     pub fn new(uid: impl Into<String>, summary: impl Into<String>) -> Self {
         Self {
             uid: uid.into(),
@@ -437,102 +457,119 @@ impl VEvent {
     }
 
     /// Set the dtstamp and return the updated value.
+    #[must_use]
     pub fn with_dtstamp(mut self, dtstamp: DateTime<Utc>) -> Self {
         self.dtstamp = Some(dtstamp);
         self
     }
 
     /// Set the dtstart and return the updated value.
+    #[must_use]
     pub fn with_dtstart(mut self, dtstart: DateTime<Utc>) -> Self {
         self.dtstart = Some(CalendarDateValue::DateTime(dtstart));
         self
     }
 
     /// Set the dtend and return the updated value.
+    #[must_use]
     pub fn with_dtend(mut self, dtend: DateTime<Utc>) -> Self {
         self.dtend = Some(CalendarDateValue::DateTime(dtend));
         self
     }
 
     /// Set the dtstart date and return the updated value.
+    #[must_use]
     pub fn with_dtstart_date(mut self, dtstart: NaiveDate) -> Self {
         self.dtstart = Some(CalendarDateValue::Date(dtstart));
         self
     }
 
     /// Set the dtend date and return the updated value.
+    #[must_use]
     pub fn with_dtend_date(mut self, dtend: NaiveDate) -> Self {
         self.dtend = Some(CalendarDateValue::Date(dtend));
         self
     }
 
     /// Set the dtstart value and return the updated value.
+    #[must_use]
     pub fn with_dtstart_value(mut self, dtstart: CalendarDateValue) -> Self {
         self.dtstart = Some(dtstart);
         self
     }
 
     /// Set the dtend value and return the updated value.
+    #[must_use]
     pub fn with_dtend_value(mut self, dtend: CalendarDateValue) -> Self {
         self.dtend = Some(dtend);
         self
     }
 
     /// Set the description and return the updated value.
+    #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
         self
     }
 
     /// Set the location and return the updated value.
+    #[must_use]
     pub fn with_location(mut self, location: impl Into<String>) -> Self {
         self.location = Some(location.into());
         self
     }
 
     /// Set the organizer and return the updated value.
+    #[must_use]
     pub fn with_organizer(mut self, organizer: impl Into<String>) -> Self {
         self.organizer = Some(organizer.into());
         self
     }
 
     /// Set the rrule and return the updated value.
+    #[must_use]
     pub fn with_rrule(mut self, rrule: Rrule) -> Self {
         self.rrule = Some(rrule);
         self
     }
 
     /// Set the attendees and return the updated value.
+    #[must_use]
     pub fn with_attendees<I: IntoIterator<Item = Attendee>>(mut self, attendees: I) -> Self {
         self.attendees = attendees.into_iter().collect();
         self
     }
 
     /// Append the supplied attendee and return the updated value.
+    #[must_use]
     pub fn add_attendee(mut self, attendee: Attendee) -> Self {
         self.attendees.push(attendee);
         self
     }
 
     /// Set the recurrence id and return the updated value.
+    #[must_use]
     pub fn with_recurrence_id(mut self, recurrence_id: DateTime<Utc>) -> Self {
         self.recurrence_id = Some(CalendarDateValue::DateTime(recurrence_id));
         self
     }
 
     /// Set the recurrence id date and return the updated value.
+    #[must_use]
     pub fn with_recurrence_id_date(mut self, recurrence_id: NaiveDate) -> Self {
         self.recurrence_id = Some(CalendarDateValue::Date(recurrence_id));
         self
     }
 
     /// Set the recurrence id value and return the updated value.
+    #[must_use]
     pub fn with_recurrence_id_value(mut self, recurrence_id: CalendarDateValue) -> Self {
         self.recurrence_id = Some(recurrence_id);
         self
     }
 
     /// Set the exdates and return the updated value.
+    #[must_use]
     pub fn with_exdates<I: IntoIterator<Item = DateTime<Utc>>>(mut self, exdates: I) -> Self {
         self.exdates = exdates
             .into_iter()
@@ -542,12 +579,14 @@ impl VEvent {
     }
 
     /// Set the exdate dates and return the updated value.
+    #[must_use]
     pub fn with_exdate_dates<I: IntoIterator<Item = NaiveDate>>(mut self, exdates: I) -> Self {
         self.exdates = exdates.into_iter().map(CalendarDateValue::Date).collect();
         self
     }
 
     /// Set the exdate values and return the updated value.
+    #[must_use]
     pub fn with_exdate_values<I: IntoIterator<Item = CalendarDateValue>>(
         mut self,
         exdates: I,
@@ -557,18 +596,21 @@ impl VEvent {
     }
 
     /// Append the supplied exdate and return the updated value.
+    #[must_use]
     pub fn add_exdate(mut self, exdate: DateTime<Utc>) -> Self {
         self.exdates.push(CalendarDateValue::DateTime(exdate));
         self
     }
 
     /// Append the supplied exdate date and return the updated value.
+    #[must_use]
     pub fn add_exdate_date(mut self, exdate: NaiveDate) -> Self {
         self.exdates.push(CalendarDateValue::Date(exdate));
         self
     }
 
     /// Append the supplied exdate value and return the updated value.
+    #[must_use]
     pub fn add_exdate_value(mut self, exdate: CalendarDateValue) -> Self {
         self.exdates.push(exdate);
         self
@@ -578,6 +620,7 @@ impl VEvent {
     /// events this only reflects the DTSTART of the master series;
     /// upcoming-instance expansion is a separate concern from the
     /// wire shape.
+    #[must_use]
     pub fn is_upcoming(&self) -> bool {
         match self.dtstart {
             Some(CalendarDateValue::DateTime(dtstart)) => dtstart > Utc::now(),
@@ -640,6 +683,7 @@ fn build_rrule_element(rrule: &Rrule) -> Element {
 /// event. Wraps the VEVENT in a VCALENDAR with `<version>2.0</version>`
 /// per RFC 5545. Equivalent to `build_vcalendar_with_item` for a
 /// non-recurring item with no overrides.
+#[must_use]
 pub fn build_vcalendar_with_event(event: &VEvent) -> Element {
     build_vcalendar_with_item(&CalendarItem {
         master: event.clone(),
@@ -652,6 +696,7 @@ pub fn build_vcalendar_with_event(event: &VEvent) -> Element {
 /// Per ProtoXEP §"Calendar Items", components sharing a UID MUST
 /// live in the same pubsub item — this is the shape that lets a
 /// recurring event carry per-instance edits.
+#[must_use]
 pub fn build_vcalendar_with_item(item: &CalendarItem) -> Element {
     let mut vcalendar = Element::builder("vcalendar", NS_XCAL).build();
     append_text_child(&mut vcalendar, "version", "2.0");
@@ -725,6 +770,7 @@ fn build_attendee_element(attendee: &Attendee) -> Element {
 }
 
 /// `true` when an element is a `<vcalendar/>` in the xCal namespace.
+#[must_use]
 pub fn is_vcalendar_element(elem: &Element) -> bool {
     elem.ns() == NS_XCAL && elem.name() == "vcalendar"
 }
@@ -813,6 +859,7 @@ fn parse_rrule(elem: &Element) -> Option<Rrule> {
 /// overrides are surfaced via `parse_vcalendar_item`. SUMMARY is
 /// permitted to be empty so that override events (which only patch
 /// a subset of fields) round-trip cleanly.
+#[must_use]
 pub fn parse_vcalendar_event(item_id: &str, vcalendar: &Element) -> Option<VEvent> {
     let item = parse_vcalendar_item(item_id, vcalendar)?;
     Some(item.master)
@@ -823,6 +870,7 @@ pub fn parse_vcalendar_event(item_id: &str, vcalendar: &Element) -> Option<VEven
 /// VEVENTs, the one *without* a `<recurrence-id>` is the master and
 /// the rest are overrides; when there's only one VEVENT it's the
 /// master and `overrides` is empty.
+#[must_use]
 pub fn parse_vcalendar_item(item_id: &str, vcalendar: &Element) -> Option<CalendarItem> {
     if !is_vcalendar_element(vcalendar) {
         return None;
@@ -996,6 +1044,7 @@ fn parse_attendee(elem: &Element) -> Option<Attendee> {
 /// for non-XMPP URIs or malformed values. Used by the chat to map
 /// attendee URIs back to JIDs and by the server to authorise RSVP
 /// publishes (an attendee URI must match the publisher's bare JID).
+#[must_use]
 pub fn xmpp_uri_to_bare_jid(uri: &str) -> Option<String> {
     let rest = uri.strip_prefix("xmpp:")?;
     let stripped = rest.split(['?', '/']).next().unwrap_or(rest);

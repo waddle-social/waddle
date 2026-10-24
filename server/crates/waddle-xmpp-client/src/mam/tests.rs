@@ -534,7 +534,7 @@ fn room_search_history_targets_room_archive_with_fulltext() {
 #[test]
 fn room_thread_history_targets_room_archive_with_thread_filter() {
     let room: BareJid = "room@muc.example.com".parse().expect("room JID");
-    let thread = ThreadId::new("thread-42").expect("thread id");
+    let thread = ThreadId::try_new("thread-42").expect("thread id");
     let iq = build_room_thread_history_iq("iq-1", "query-1", 30, &room, &thread, None);
 
     assert_eq!(iq.attr("to"), Some("room@muc.example.com"));
@@ -553,8 +553,8 @@ fn room_thread_history_targets_room_archive_with_thread_filter() {
 #[test]
 fn room_thread_history_pages_older_from_cursor() {
     let room: BareJid = "room@muc.example.com".parse().expect("room JID");
-    let thread = ThreadId::new("thread-42").expect("thread id");
-    let cursor = ArchivedMessageId::new("mam-7").expect("cursor");
+    let thread = ThreadId::try_new("thread-42").expect("thread id");
+    let cursor = ArchivedMessageId::try_new("mam-7").expect("cursor");
     let iq = build_room_thread_history_iq("iq-1", "query-1", 30, &room, &thread, Some(&cursor));
 
     assert_eq!(rsm_before(&iq).as_deref(), Some("mam-7"));
@@ -642,8 +642,8 @@ mod stanza_id_filter_tests {
         assert_eq!(
             query.stanza_ids,
             vec![
-                MamFilterStanzaId::new("sid-A").unwrap(),
-                MamFilterStanzaId::new("sid-B").unwrap(),
+                MamFilterStanzaId::try_new("sid-A").unwrap(),
+                MamFilterStanzaId::try_new("sid-B").unwrap(),
             ],
             "stanza-id filter values must survive builder → serialize → parse round-trip"
         );
@@ -1079,7 +1079,7 @@ mod query {
     async fn fetch_room_history_by_thread_sends_thread_filter_to_room_archive() {
         let (handle, cmd_rx, _evt_tx) = make_handle();
         let room: jid::BareJid = "room@muc.example.com".parse().expect("room JID");
-        let thread = waddle_xmpp_core::mam::ThreadId::new("thread-42").expect("thread id");
+        let thread = waddle_xmpp_core::mam::ThreadId::try_new("thread-42").expect("thread id");
         let stanza_rx = spawn_fin_responder(cmd_rx);
 
         let page = timeout(

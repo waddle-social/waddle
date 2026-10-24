@@ -123,7 +123,7 @@ async fn failed_ordered_room_ask(base: Arc<WebSocketState>) {
         panic!("relay message");
     };
     assert_eq!(relayed.bodies, message.bodies);
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     assert_ack(&state, &mut conn, 1).await;
     assert_durable(&state, canonical.message_key, &room, &relayed).await;

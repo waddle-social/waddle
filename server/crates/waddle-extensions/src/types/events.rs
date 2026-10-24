@@ -68,8 +68,8 @@ impl TryFrom<DetectedLink> for LinkTarget {
 
     fn try_from(value: DetectedLink) -> Result<Self, Self::Error> {
         Ok(Self {
-            url: Url::new(value.url)?,
-            range: BodyRange::new(value.start_offset, value.end_offset)?,
+            url: Url::try_new(value.url)?,
+            range: BodyRange::try_new(value.start_offset, value.end_offset)?,
         })
     }
 }
@@ -122,6 +122,7 @@ pub enum CommandAction {
 
 impl CommandAction {
     /// Return the canonical wire token used by extension XML and WIT.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Execute => "execute",

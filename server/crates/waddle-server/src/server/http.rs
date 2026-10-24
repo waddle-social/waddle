@@ -614,7 +614,7 @@ async fn open_ingress_authority(
         None
     };
     Ok(Arc::new(
-        crate::ingress::IngressAuthority::new(
+        crate::ingress::IngressAuthority::try_new(
             config.ingress.clone(),
             state.db_pool.global().clone(),
             state.lineage_config.clone(),
@@ -746,7 +746,7 @@ async fn create_websocket_state(
             tokio::runtime::Handle::current(),
         );
     let room_effect_outbox = Arc::new(
-        crate::room_effect_outbox::RoomEffectOutboxStore::new(state.db_pool.global().clone())
+        crate::room_effect_outbox::RoomEffectOutboxStore::try_new(state.db_pool.global().clone())
             .await
             .map_err(|error| anyhow::anyhow!("failed to initialize room effect outbox: {error}"))?,
     );
@@ -1008,7 +1008,7 @@ async fn create_websocket_state(
     }
     ensure_push_service_global_database_is_durable()?;
     let push_store: Arc<dyn waddle_xmpp::push::PushSubscriptionStore> = Arc::new(
-        crate::push_registrations::DatabasePushRegistrationStore::new(
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(
             state.db_pool.global().clone(),
         )
         .await
@@ -1076,7 +1076,7 @@ async fn create_websocket_state(
                 .load_token_signer()
                 .await
                 .map_err(|error| anyhow::anyhow!("failed to load APNs provider key: {error}"))?;
-            let sender = waddle_xmpp::push::apns::HttpApnsSender::new()
+            let sender = waddle_xmpp::push::apns::HttpApnsSender::try_new()
                 .map_err(|error| anyhow::anyhow!("failed to build APNs sender: {error}"))?;
             info!(
                 apns_topic = apns_config.topic.as_str(),
@@ -1102,7 +1102,7 @@ async fn create_websocket_state(
             let tokens = fcm_config.load_token_source().await.map_err(|error| {
                 anyhow::anyhow!("failed to load FCM service-account key: {error}")
             })?;
-            let sender = waddle_xmpp::push::fcm::HttpFcmSender::new()
+            let sender = waddle_xmpp::push::fcm::HttpFcmSender::try_new()
                 .map_err(|error| anyhow::anyhow!("failed to build FCM sender: {error}"))?;
             info!(
                 fcm_project_id = fcm_config.project_id.as_str(),
@@ -1137,11 +1137,13 @@ async fn create_websocket_state(
     )
     .await;
     let notification_outbox = Arc::new(
-        crate::notification_outbox::NotificationOutboxStore::new(state.db_pool.global().clone())
-            .await
-            .map_err(|error| {
-                anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
-            })?,
+        crate::notification_outbox::NotificationOutboxStore::try_new(
+            state.db_pool.global().clone(),
+        )
+        .await
+        .map_err(|error| {
+            anyhow::anyhow!("failed to initialize notification candidate outbox: {error}")
+        })?,
     );
     // Push initialization precedes outbox schema/adoption. Rebind only exact
     // accepted target tuples once canonical ancestry is available.
@@ -1161,7 +1163,7 @@ async fn create_websocket_state(
         Arc::clone(&dnd_projection),
     ));
     let notification_activity = Arc::new(
-        crate::notification_activity::NotificationActivityStore::new(
+        crate::notification_activity::NotificationActivityStore::try_new(
             state.db_pool.global().clone(),
         )
         .await

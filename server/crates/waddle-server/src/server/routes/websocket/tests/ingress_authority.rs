@@ -66,7 +66,7 @@ async fn committed_message_advances_h_and_records_checkpoint() {
     let state = create_test_websocket_state().await;
     let mut conn = connection(&state, true).await;
     let frames = handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     assert!(frames.iter().any(|frame| frame.contains("bad-request")));
     assert_eq!(
@@ -92,7 +92,7 @@ async fn presence_after_committed_message_flushes_checkpoint_case(state: Arc<Web
         xmpp_parsers::presence::Presence::new(xmpp_parsers::presence::Type::Unavailable),
     ));
     handle_xmpp_frame(&presence, "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 2);
+    assert_eq!(conn.sm_state.inbound_count(), 2);
     assert!(conn.sm_inbound_completion.checkpoint_dirty());
     assert_eq!(
         state
@@ -171,7 +171,7 @@ async fn non_advancing_resumable_message_leaves_an_ordinary_hole() {
     );
     let frames = handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
     assert!(frames.is_empty());
-    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert_eq!(conn.sm_state.inbound_count(), 0);
     assert!(conn.sm_state.is_resumable());
     assert!(conn.sm_inbound_completion.has_unhandled_hole());
     assert!(!conn.sm_recovery_required);
@@ -217,9 +217,9 @@ fn deferred_iq_keeps_h_pending_until_its_handoff() {
         &mut conn.sm_inbound_completion,
         &mut conn.sm_state,
     );
-    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert_eq!(conn.sm_state.inbound_count(), 0);
     conn.sm_inbound_completion.complete(seq, &mut conn.sm_state);
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
 }
 
 #[tokio::test(start_paused = true)]
@@ -242,7 +242,7 @@ async fn phase_c_timeout_keeps_committed_handled_disposition() {
     )
     .await;
     assert!(batch.frames.is_empty());
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
 }
 
@@ -279,7 +279,7 @@ async fn message_waits_for_ingress_commit_before_responding_or_checkpointing() {
     );
     drop(blocked);
     let (conn, frames) = task.await.expect("dispatch task");
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!frames.is_empty());
 }
 
@@ -297,7 +297,7 @@ async fn accepted_message_commits_archive_and_inbox_on_the_authority_database() 
         .insert(Default::default(), "durably accepted".to_owned());
     let wire = super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
     handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     let archived = state
         .deps
@@ -334,7 +334,7 @@ async fn ack_flushes_two_committed_messages_after_deferred_iq_completes() {
     for _ in 0..2 {
         let frames = handle_xmpp_frame(&offered_message(), "example.com", &state, &mut conn).await;
         assert!(frames.iter().any(|frame| frame.contains("bad-request")));
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
     }
     let stream = SmSessionId::new("authority-connection");
     assert_eq!(
@@ -350,7 +350,7 @@ async fn ack_flushes_two_committed_messages_after_deferred_iq_completes() {
         0
     );
     conn.sm_inbound_completion.complete(iq, &mut conn.sm_state);
-    assert_eq!(conn.sm_state.get_inbound_count(), 3);
+    assert_eq!(conn.sm_state.inbound_count(), 3);
     let frames = handle_xmpp_frame(
         &waddle_xmpp::stream_management::SmRequest::to_xml(),
         "example.com",
@@ -406,7 +406,7 @@ async fn direct_message_spoofed_sender_stanza_id_is_replaced_and_foreign_stamp_i
     );
     let wire = super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
     handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     let archived = state
         .deps
@@ -450,7 +450,7 @@ async fn groupchat_spoofed_room_stanza_id_reaches_committed_semantic_response() 
     add_stanza_id(&mut message, &StanzaId::new("spoofed-room", room.into()));
     let wire = super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
     let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     assert!(
         frames.iter().any(|frame| {
@@ -670,14 +670,10 @@ async fn connection_reply_receipt_after_transport_write_with_remote(
     if transport_lost && nested_owner && resumable {
         // The original owner report and remote token registry are gone. Only
         // identities retained on the SM carrier can authorize completion.
-        let frames = conn
-            .sm_state
-            .get_stanzas_to_resend(0)
-            .into_iter()
-            .map(|entry| {
-                super::super::frame::ResponseFrame::from_serialized_xml(entry.stanza_xml)
-                    .with_ingress_receipts(entry.ingress_receipts)
-            });
+        let frames = conn.sm_state.stanzas_to_resend(0).into_iter().map(|entry| {
+            super::super::frame::ResponseFrame::from_serialized_xml(entry.stanza_xml)
+                .with_ingress_receipts(entry.ingress_receipts)
+        });
         let mut replay = super::super::frame::ResponseBatch::from_frames(frames);
         assert_eq!(replay.frames.len(), 1);
         assert_eq!(replay.frames[0].ingress_receipts().len(), 1);
@@ -757,7 +753,7 @@ async fn postgres_connection_reply_receipt_with_remote(
     url.query_pairs_mut()
         .append_pair("options", &format!("-c search_path={schema}"));
     let pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url.to_string()),
             PoolConfig,
         )

@@ -25,7 +25,7 @@ impl ExtensionManager {
             fields,
             form,
         } = request;
-        let Ok(command_node) = CommandNode::new(node.to_string()) else {
+        let Ok(command_node) = CommandNode::try_new(node.to_string()) else {
             return Vec::new();
         };
         let dispatch_node = command_node.clone();
@@ -46,7 +46,7 @@ impl ExtensionManager {
                 return match timeout(EXTENSION_COMMAND_TIMEOUT, actor.handle_event(event)).await {
                     Ok(effects) => self.sign_effects(effects),
                     Err(_) => vec![ExtensionEffect::HostWarning(
-                        DisplayText::new(format!("Extension command {command_node} timed out"))
+                        DisplayText::try_new(format!("Extension command {command_node} timed out"))
                             .expect("timeout warning is non-empty"),
                     )],
                 };
@@ -75,10 +75,10 @@ impl ExtensionManager {
             expires_at,
             launch_token,
         } = request;
-        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+        let Ok(plugin_id) = PluginId::try_new(plugin_name.to_string()) else {
             return Vec::new();
         };
-        let Ok(action_id) = crate::types::ActionId::new(action_id.to_string()) else {
+        let Ok(action_id) = crate::types::ActionId::try_new(action_id.to_string()) else {
             return Vec::new();
         };
         if !self.verify_launch_token(LaunchTokenVerification {
@@ -129,7 +129,7 @@ impl ExtensionManager {
         plugin_name: &str,
         event: ProviderWebhook,
     ) -> Vec<ExtensionEffect> {
-        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+        let Ok(plugin_id) = PluginId::try_new(plugin_name.to_string()) else {
             return Vec::new();
         };
         let waddle_id = event.waddle_id.clone();
@@ -144,7 +144,7 @@ impl ExtensionManager {
                 {
                     Ok(effects) => self.sign_effects(effects),
                     Err(_) => vec![ExtensionEffect::HostWarning(
-                        DisplayText::new(format!(
+                        DisplayText::try_new(format!(
                             "Extension provider webhook {plugin_name} timed out"
                         ))
                         .expect("timeout warning is non-empty"),
@@ -157,11 +157,12 @@ impl ExtensionManager {
 
     /// Whether the plugin/action IDs, signed context, submitted payload fields, token,
     /// and optional expiry validate against this manager's signing key.
+    #[must_use]
     pub fn validates_launch_invocation(&self, request: LaunchValidationRequest<'_>) -> bool {
-        let Ok(plugin_id) = PluginId::new(request.plugin_name.to_string()) else {
+        let Ok(plugin_id) = PluginId::try_new(request.plugin_name.to_string()) else {
             return false;
         };
-        let Ok(action_id) = crate::types::ActionId::new(request.action_id.to_string()) else {
+        let Ok(action_id) = crate::types::ActionId::try_new(request.action_id.to_string()) else {
             return false;
         };
         self.verify_launch_token(LaunchTokenVerification {

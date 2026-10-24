@@ -33,7 +33,7 @@ fn test_xmpp_config() -> XmppConfig {
 async fn create_test_state() -> Arc<AppState> {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
-    let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
+    let db_pool = DatabasePool::try_new(config, pool_config).await.unwrap();
 
     // Run migrations
     let runner = MigrationRunner::global();

@@ -593,7 +593,7 @@ async fn delivered_copy_remains_once_with_deferred_observer(f: IngressFixture) {
     // A detached session is what makes the frozen copy REBUILDABLE and
     // deliverable inside the same attempt.
     store_detached(&sm, &occupant).await;
-    let plugin_id = PluginId::new("muc-recovery-observer").expect("plugin id");
+    let plugin_id = PluginId::try_new("muc-recovery-observer").expect("plugin id");
     let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Warning);
     let mut state = state_for(&f, sm.clone()).await;
     Arc::get_mut(&mut state)
@@ -631,8 +631,8 @@ async fn delivered_copy_remains_once_with_deferred_observer(f: IngressFixture) {
             room: room.clone(),
             plugin: plugin_id.clone(),
             correction_target: None,
-            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+            generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
         });

@@ -86,9 +86,9 @@ impl ExtensionHostAdapter {
                 }
                 let response = interpret::ExtensionRoomMessage {
                     plugin: invocation.plugin_id.clone(),
-                    room: RoomJid::new(room.to_string())
+                    room: RoomJid::try_new(room.to_string())
                         .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?,
-                    body: DisplayText::new(request.body)
+                    body: DisplayText::try_new(request.body)
                         .map_err(|error| ExtensionHostAdapterError::Protocol(error.to_string()))?,
                     preferred_nick: Some(self.extension_bot_nick(&invocation.plugin_id)),
                     stanza_id: Some(request.stanza_id),

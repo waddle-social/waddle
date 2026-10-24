@@ -207,7 +207,7 @@ pub(super) async fn assert_pushed_entry(
     registry.register_with_carbons(resource.clone(), sender, false);
     users
         .ask(RegisterUserResource {
-            entry: registry.get_entry(&resource).expect("registered entry"),
+            entry: registry.entry(&resource).expect("registered entry"),
             jid: resource,
         })
         .await

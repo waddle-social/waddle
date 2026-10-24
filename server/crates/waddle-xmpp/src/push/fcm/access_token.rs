@@ -297,7 +297,7 @@ struct TokenResponse {
 }
 
 impl OAuthFcmTokenSource {
-    pub fn new(
+    pub fn try_new(
         key: FcmServiceAccountKey,
         clock: Arc<dyn FcmClock>,
     ) -> Result<Self, FcmTokenSourceBuildError> {
@@ -595,7 +595,7 @@ mod tests {
         let (private_pem, _) = rsa_key_pair();
         let key = FcmServiceAccountKey::from_json(&service_account_json(&private_pem, ""))
             .expect("service-account key");
-        let source = OAuthFcmTokenSource::new(key, Arc::new(SystemFcmClock))
+        let source = OAuthFcmTokenSource::try_new(key, Arc::new(SystemFcmClock))
             .expect("production token source");
         crate::push::types::assert_production_connect_timeout(source.client).await;
     }
@@ -711,7 +711,7 @@ mod tests {
             "https://evil.example/token",
         ))
         .expect("key");
-        let source = OAuthFcmTokenSource::new(key, Arc::new(SystemFcmClock)).expect("source");
+        let source = OAuthFcmTokenSource::try_new(key, Arc::new(SystemFcmClock)).expect("source");
         assert_eq!(source.token_url.as_str(), GOOGLE_OAUTH_TOKEN_URL);
     }
 

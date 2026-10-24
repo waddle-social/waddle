@@ -35,6 +35,7 @@ pub struct DiscoItem {
 
 impl DiscoItem {
     /// Create a discovery item from its address, optional display name, and optional node.
+    #[must_use]
     pub fn new(jid: &str, name: Option<&str>, node: Option<&str>) -> Self {
         Self {
             jid: jid.to_string(),
@@ -44,6 +45,7 @@ impl DiscoItem {
     }
 
     /// Create a discovery item for the conference service at the supplied domain.
+    #[must_use]
     pub fn muc_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
@@ -52,37 +54,44 @@ impl DiscoItem {
     /// disco#items on the server returns this so a strict client
     /// can subsequently disco#info the mixer and discover Muji
     /// support before sending a session-initiate.
+    #[must_use]
     pub fn calls_mixer(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
 
     /// Create a discovery item for a named conference room.
+    #[must_use]
     pub fn muc_room(jid: &str, name: &str) -> Self {
         Self::new(jid, Some(name), None)
     }
 
     /// Create a discovery item for the HTTP upload service.
+    #[must_use]
     pub fn upload_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
 
     /// Create a discovery item for the PubSub service.
+    #[must_use]
     pub fn pubsub_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
 
     /// Create a discovery item for the Waddle spaces service.
+    #[must_use]
     pub fn spaces_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
 
     /// Community pubsub service that hosts the XEP-0472 feed and
     /// XEP-0501 stories nodes (`community.<domain>`).
+    #[must_use]
     pub fn community_service(domain: &str, name: Option<&str>) -> Self {
         Self::new(domain, name, None)
     }
 
     /// Create a named discovery item for a space node on the spaces service.
+    #[must_use]
     pub fn spaces_node(jid: &str, node: &str, name: Option<&str>) -> Self {
         Self {
             jid: jid.to_string(),
@@ -92,17 +101,20 @@ impl DiscoItem {
     }
 
     /// Create a discovery item for a PubSub node at the supplied JID.
+    #[must_use]
     pub fn pubsub_node(jid: &str, node: &str) -> Self {
         Self::new(jid, None, Some(node))
     }
 
     /// Create a named discovery item for an ad-hoc command node.
+    #[must_use]
     pub fn command(jid: &str, node: &str, name: &str) -> Self {
         Self::new(jid, Some(name), Some(node))
     }
 }
 
 /// Check if an IQ is a disco#items query.
+#[must_use]
 pub fn is_disco_items_query(iq: &Iq) -> bool {
     match iq {
         Iq::Get { payload, .. } => payload.name() == "query" && payload.ns() == DISCO_ITEMS_NS,
@@ -142,6 +154,7 @@ pub fn parse_disco_items_query(iq: &Iq) -> Result<DiscoItemsQuery, CoreError> {
 }
 
 /// Build a disco#items response IQ.
+#[must_use]
 pub fn build_disco_items_response(original_iq: &Iq, items: &[DiscoItem], node: Option<&str>) -> Iq {
     let mut query_builder = Element::builder("query", DISCO_ITEMS_NS);
 

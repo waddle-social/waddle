@@ -303,7 +303,7 @@ async fn displayed_marker_replay(fixture: IngressFixture) {
     use waddle_xmpp::ingress::InboxProjectionMutation;
     for thread in [
         None,
-        Some(waddle_xmpp_core::mam::ThreadId::new("discussion").expect("thread")),
+        Some(waddle_xmpp_core::mam::ThreadId::try_new("discussion").expect("thread")),
     ] {
         let suffix = if thread.is_some() {
             "thread"

@@ -261,7 +261,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
         body: None,
         rich: Some(ArchivedRichMessage {
             payload: Some(ArchivedRichPayload::Tombstone(ArchivedTombstone {
-                retraction_id: RichMessageId::new("later-retraction"),
+                retraction_id: RichMessageId::try_new("later-retraction"),
                 stamp: chrono::Utc::now(),
                 moderation: None,
                 sender_scope: Some(alice.to_bare()),
@@ -292,7 +292,7 @@ async fn plan_pinned_retraction_freezes_system_archive_and_deliveries() {
             mutations: vec![waddle_xmpp::ingress::LinkPreviewMediaRefMutation {
                 upload_slot_id: uuid::Uuid::nil(),
                 archive: room.clone(),
-                message_id: RichMessageId::new(target.id.clone()).expect("message id"),
+                message_id: RichMessageId::try_new(target.id.clone()).expect("message id"),
                 current_archive_stanza_id: target.clone(),
                 state: waddle_xmpp::ingress::LinkPreviewMediaRefState::Current,
             }],

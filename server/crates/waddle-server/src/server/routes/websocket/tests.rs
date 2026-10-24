@@ -125,7 +125,7 @@ async fn handle_muc_join(
     sender_jid: &jid::FullJid,
     nick: &str,
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
-    authenticated_session: &Option<crate::auth::Session>,
+    authenticated_session: Option<&crate::auth::Session>,
 ) -> Vec<String> {
     handle_muc_join_with_occupancy_session(
         state,
@@ -151,7 +151,7 @@ async fn handle_muc_join_with_occupancy_session(
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     connection: (
         waddle_xmpp_core::OccupancySessionGeneration,
-        &Option<crate::auth::Session>,
+        Option<&crate::auth::Session>,
     ),
 ) -> Vec<String> {
     let (occupancy_session, authenticated_session) = connection;
@@ -246,7 +246,7 @@ pub(crate) async fn create_test_websocket_state_with_durable_ingress(
     fixture: &crate::ingress::test_support::IngressFixture,
 ) -> Arc<WebSocketState> {
     let db_pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             PoolConfig,
         )
@@ -816,7 +816,7 @@ fn fixture_call_sfu() -> Arc<dyn waddle_sfu::SfuService> {
             .expect("test api secret meets min length"),
         webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test webhook secret meets min length"),
-        ws_url: waddle_sfu::WebsocketUrl::new("wss://livekit.test/".parse().expect("ws url"))
+        ws_url: waddle_sfu::WebsocketUrl::try_new("wss://livekit.test/".parse().expect("ws url"))
             .expect("ws url valid"),
         turn_host: waddle_sfu::TurnHost::new("turn.test"),
         turn_tls_port: 443,
@@ -825,7 +825,7 @@ fn fixture_call_sfu() -> Arc<dyn waddle_sfu::SfuService> {
         token_ttl: chrono::Duration::seconds(3600),
         turn_ttl: chrono::Duration::seconds(3600),
     };
-    Arc::new(waddle_sfu::LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+    Arc::new(waddle_sfu::LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
 }
 
 /// Build a test [`WebSocketState`] whose dispatcher has the XEP-0166
@@ -862,7 +862,7 @@ pub(crate) async fn create_test_websocket_state_with_fixture_bot() -> Arc<WebSoc
 pub(crate) async fn create_test_websocket_state_with_fixture_bot_avatar(
     avatar: waddle_extensions::ArtifactReference,
 ) -> Arc<WebSocketState> {
-    let plugin = waddle_extensions::PluginId::new(FIXTURE_BOT_PLUGIN).expect("plugin id");
+    let plugin = waddle_extensions::PluginId::try_new(FIXTURE_BOT_PLUGIN).expect("plugin id");
     create_test_websocket_state_with_extension_manager(
         Arc::new(
             fixture_bot_extension_manager()

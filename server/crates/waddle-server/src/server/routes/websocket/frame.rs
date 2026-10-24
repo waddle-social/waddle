@@ -638,7 +638,7 @@ async fn handle_xmpp_frame_impl(
                             domain,
                             &muc_domain,
                             state,
-                            authenticated_session,
+                            authenticated_session.as_ref(),
                             phase,
                             &mut iq_conn_state,
                         )
@@ -653,7 +653,7 @@ async fn handle_xmpp_frame_impl(
                                 muc_domain: &muc_domain,
                                 state,
                                 phase,
-                                authenticated_session,
+                                authenticated_session: authenticated_session.as_ref(),
                                 occupancy_session,
                                 registry_owner: registry_owner.as_ref(),
                                 ordered_relay_origin: ordered_relay_origin.clone(),
@@ -703,7 +703,7 @@ async fn handle_xmpp_frame_impl(
             };
             settle_inbound_dispatch(
                 disposition,
-                ordered_relay_origin_was_deferred(&ordered_relay_origin),
+                ordered_relay_origin_was_deferred(ordered_relay_origin.as_ref()),
                 reserved_inbound_for_sm,
                 sm_inbound_completion,
                 sm_state,
@@ -843,17 +843,16 @@ async fn ordered_relay_origin_for_inbound_stanza(
 
 #[cfg(feature = "clustering")]
 fn ordered_relay_origin_was_deferred(
-    origin: &Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> bool {
     origin
-        .as_ref()
         .and_then(|origin| origin.handoff.as_ref())
         .is_some_and(|handoff| handoff.was_deferred())
 }
 
 #[cfg(not(feature = "clustering"))]
 fn ordered_relay_origin_was_deferred(
-    origin: &Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
+    origin: Option<&crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 ) -> bool {
     let _ = origin;
     false
@@ -877,7 +876,7 @@ pub(super) fn ordered_relay_origin_from_sm(
                 waddle_xmpp::pending_delivery::SmSessionId::new(stream_id.clone()),
             ),
             sender_entity,
-            inbound_sequence: sm_state.get_inbound_count(),
+            inbound_sequence: sm_state.inbound_count(),
             handoff: None,
         });
     }

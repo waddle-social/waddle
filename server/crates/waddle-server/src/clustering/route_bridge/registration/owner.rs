@@ -1193,7 +1193,7 @@ mod tests {
             .get()
             .expect("services")
             .connection_registry
-            .get_entry(&old.jid)
+            .entry(&old.jid)
             .is_none());
         assert_eq!(
             bridge
@@ -1363,7 +1363,7 @@ mod tests {
             );
         } else {
             assert!(
-                services.connection_registry.get_entry(&old.jid).is_none(),
+                services.connection_registry.entry(&old.jid).is_none(),
                 "revoked generation must not publish a route after its actor ask completes"
             );
         }

@@ -121,7 +121,7 @@ async fn slow_force_detach_does_not_delay_a_concurrent_relay_ping() {
     // exactly as long as the measurement needs.
     let (started_tx, started_rx) = tokio::sync::oneshot::channel();
     let (release_tx, release_rx) = tokio::sync::oneshot::channel::<()>();
-    let entry = registry.get_entry(&jid).expect("entry was just registered");
+    let entry = registry.entry(&jid).expect("entry was just registered");
     let mut force_detach_rx = entry
         .take_force_detach_rx()
         .expect("receiver is available exactly once");

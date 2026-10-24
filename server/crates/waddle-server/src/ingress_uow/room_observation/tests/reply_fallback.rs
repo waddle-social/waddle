@@ -18,7 +18,7 @@ fn with_reply(mut message: Message, quote_len: usize) -> Message {
 }
 
 fn digest(body: &str) -> Sha256Digest {
-    Sha256Digest::new(hex::encode(Sha256::digest(body.as_bytes()))).expect("digest")
+    Sha256Digest::try_new(hex::encode(Sha256::digest(body.as_bytes()))).expect("digest")
 }
 
 async fn reply_inputs_preserve_raw_identity_and_correction_fences(fixture: IngressFixture) {

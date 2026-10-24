@@ -243,7 +243,7 @@ pub(crate) async fn driver_loop(
     inner: Rc<RefCell<WaddleClientInner>>,
     command_lane: Rc<RefCell<WasmCommandLane>>,
 ) {
-    let mut task = match WasmDriverTask::new(
+    let mut task = match WasmDriverTask::try_new(
         config,
         ws,
         command_wake_rx,
@@ -263,7 +263,7 @@ pub(crate) async fn driver_loop(
 }
 
 impl WasmDriverTask {
-    fn new(
+    fn try_new(
         config: ClientConfig,
         ws: WasmWebSocket,
         command_wake_rx: mpsc::Receiver<()>,
@@ -273,7 +273,7 @@ impl WasmDriverTask {
     ) -> DriverResult<Self> {
         let (sm_clock_tx, sm_clock_rx) = mpsc::channel(1);
         let core = Rc::new(RefCell::new(WasmDriverCore {
-            runtime: XmppRuntime::new(config)?,
+            runtime: XmppRuntime::try_new(config)?,
             web_socket: ws.web_socket().clone(),
         }));
         inner.borrow_mut().driver_core = Some(core.clone());
@@ -517,7 +517,7 @@ impl WasmDriverTask {
                 } => match result {
                     Ok(()) => match stanza
                         .attr("id")
-                        .and_then(|id| waddle_xmpp_client::request::StanzaId::new(id).ok())
+                        .and_then(|id| waddle_xmpp_client::request::StanzaId::try_new(id).ok())
                     {
                         Some(id) => {
                             self.pending_iqs.insert(id, responder);
@@ -735,7 +735,7 @@ impl WasmDriverTask {
     ) -> bool {
         let id = stanza
             .attr("id")
-            .and_then(|id| waddle_xmpp_client::request::StanzaId::new(id).ok());
+            .and_then(|id| waddle_xmpp_client::request::StanzaId::try_new(id).ok());
         match self
             .send_transport_message(TransportMessage::Element(stanza))
             .await
@@ -1074,7 +1074,7 @@ impl WasmDriverTask {
                 None
             }
             ClientEvent::IqResult { id, element } => {
-                let iq_id = waddle_xmpp_client::request::StanzaId::new(id.as_str()).ok();
+                let iq_id = waddle_xmpp_client::request::StanzaId::try_new(id.as_str()).ok();
                 if let Some(responder) = iq_id.as_ref().and_then(|id| self.pending_iqs.remove(id)) {
                     let result = if element.attr("type") == Some("result") {
                         Ok(element)
@@ -1100,7 +1100,7 @@ impl WasmDriverTask {
                 None
             }
             ClientEvent::IqCancelled { stanza_id } => {
-                let iq_id = waddle_xmpp_client::request::StanzaId::new(stanza_id.as_str()).ok();
+                let iq_id = waddle_xmpp_client::request::StanzaId::try_new(stanza_id.as_str()).ok();
                 if let Some(responder) = iq_id.as_ref().and_then(|id| self.pending_iqs.remove(id)) {
                     let _ = responder.send(Err(ClientError::RequestCancelled));
                 } else if let Some(pending) = self.pending_mam_queries.remove(stanza_id.as_str()) {
@@ -1687,7 +1687,7 @@ mod tests {
             access_token: "token".to_string(),
             resource: "web".to_string(),
             resume_state: Some(
-                waddle_xmpp_client::SmResumeState::new(
+                waddle_xmpp_client::SmResumeState::try_new(
                     waddle_xmpp_client::StreamId::new("previous-stream"),
                     4,
                     9,
@@ -1697,7 +1697,7 @@ mod tests {
             ),
         };
         let runtime =
-            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+            XmppRuntime::try_new(build_client_config(&stored).expect("config")).expect("runtime");
 
         publish_resume_state_snapshot(&inner, &runtime, false);
 
@@ -1723,7 +1723,7 @@ mod tests {
             resume_state: None,
         };
         let mut runtime =
-            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+            XmppRuntime::try_new(build_client_config(&stored).expect("config")).expect("runtime");
         send_bound_stream_management_enable(&mut runtime);
         runtime
             .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1780,7 +1780,7 @@ mod tests {
         let inner = test_inner();
         let stored = inner.borrow().config.clone();
         let mut runtime =
-            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+            XmppRuntime::try_new(build_client_config(&stored).expect("config")).expect("runtime");
         send_bound_stream_management_enable(&mut runtime);
         runtime
             .apply_transport_event(TransportEvent::MessageReceived(TransportMessage::Element(
@@ -1817,7 +1817,7 @@ mod tests {
             .borrow()
             .resume_state
             .clone()
-            .expect("pagehide publish updates get_resume_state cache");
+            .expect("pagehide publish updates resume_state cache");
         let entries = snapshot
             .unhandled_outbound_entries()
             .map(|entry| {
@@ -1846,7 +1846,7 @@ mod tests {
         let inner = test_inner();
         let stored = inner.borrow().config.clone();
         let mut runtime =
-            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+            XmppRuntime::try_new(build_client_config(&stored).expect("config")).expect("runtime");
 
         runtime
             .apply_transport_event(TransportEvent::MessageSent(TransportMessage::Element(
@@ -1882,7 +1882,7 @@ mod tests {
     fn publish_resume_state_snapshot_clears_on_explicit_disconnect() {
         let inner = test_inner();
         inner.borrow_mut().resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new(
+            waddle_xmpp_client::SmResumeState::try_new(
                 waddle_xmpp_client::StreamId::new("previous-stream"),
                 4,
                 9,
@@ -1891,7 +1891,7 @@ mod tests {
         );
         let stored = inner.borrow().config.clone();
         let runtime =
-            XmppRuntime::new(build_client_config(&stored).expect("config")).expect("runtime");
+            XmppRuntime::try_new(build_client_config(&stored).expect("config")).expect("runtime");
 
         publish_resume_state_snapshot(&inner, &runtime, true);
 
@@ -1988,7 +1988,7 @@ mod tests {
     fn cancel_raw_iq_removes_sent_pending_responder() {
         let (responder, rx) = oneshot::channel();
         let sent_id =
-            waddle_xmpp_client::request::StanzaId::new("sent-1").expect("valid stanza id");
+            waddle_xmpp_client::request::StanzaId::try_new("sent-1").expect("valid stanza id");
         let mut pending_iqs = HashMap::from([(sent_id.clone(), responder)]);
         let mut deferred_commands = VecDeque::new();
 
@@ -2022,7 +2022,7 @@ mod tests {
         ]);
 
         let cancelled_id =
-            waddle_xmpp_client::request::StanzaId::new("deferred-1").expect("valid stanza id");
+            waddle_xmpp_client::request::StanzaId::try_new("deferred-1").expect("valid stanza id");
         cancel_raw_iq_state(&mut pending_iqs, &mut deferred_commands, &cancelled_id);
 
         assert_eq!(deferred_commands.len(), 1);

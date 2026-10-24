@@ -26,7 +26,7 @@ const MUTED_NAME: &str = "muted";
 pub struct InCallSessionId(SessionId);
 
 impl InCallSessionId {
-    pub fn new(value: impl Into<String>) -> Result<Self, InCallParseError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, InCallParseError> {
         let value = value.into();
         let value = value.trim();
         if value.is_empty() {
@@ -44,7 +44,7 @@ impl InCallSessionId {
 pub struct InCallReactionEmoji(String);
 
 impl InCallReactionEmoji {
-    pub fn new(value: impl Into<String>) -> Result<Self, InCallParseError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, InCallParseError> {
         let value = value.into();
         let value = value.trim();
         if value.is_empty() {
@@ -179,12 +179,12 @@ pub fn parse_in_call_signal(element: &Element) -> Result<InCallSignal, InCallPar
         return Err(InCallParseError::NotInCall);
     }
 
-    let sid = InCallSessionId::new(required_attr(element, "sid")?)?;
+    let sid = InCallSessionId::try_new(required_attr(element, "sid")?)?;
     let reaction = element
         .children()
         .find(|child| child.name() == "reaction" && child.ns() == NS_WADDLE_IN_CALL)
         .ok_or(InCallParseError::MissingChild("reaction"))?;
-    let emoji = InCallReactionEmoji::new(required_attr(reaction, "emoji")?)?;
+    let emoji = InCallReactionEmoji::try_new(required_attr(reaction, "emoji")?)?;
 
     Ok(InCallSignal::Reaction(InCallReactionSignal { sid, emoji }))
 }

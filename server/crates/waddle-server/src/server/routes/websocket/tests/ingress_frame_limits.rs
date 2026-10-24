@@ -140,7 +140,7 @@ async fn resource_limit_case(state: Arc<WebSocketState>, resumable: bool) {
         assert!(!conn.sm_inbound_completion.has_unhandled_hole());
         assert!(conn.phase.is_ready());
         if resumable {
-            assert_eq!(conn.sm_state.get_inbound_count(), case as u32 + 1);
+            assert_eq!(conn.sm_state.inbound_count(), case as u32 + 1);
             let id = SmSessionId::new(conn.sm_state.stream_id.as_deref().expect("stream"));
             assert_eq!(
                 state
@@ -179,7 +179,7 @@ async fn stream_lookup_failure_case(state: Arc<WebSocketState>) {
     let frames = handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
     assert!(frames.is_empty());
     assert!(conn.sm_inbound_completion.has_unhandled_hole());
-    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert_eq!(conn.sm_state.inbound_count(), 0);
     assert_eq!(
         metrics.counter_sum("ingress.decisions", &[("class", "storage")]),
         Some(1)
@@ -219,7 +219,7 @@ async fn stream_lookup_failure_case(state: Arc<WebSocketState>) {
     assert!(frames
         .iter()
         .any(|frame| frame.contains("resource-constraint")));
-    assert_eq!(healthy.sm_state.get_inbound_count(), 1);
+    assert_eq!(healthy.sm_state.inbound_count(), 1);
     assert_eq!(
         state
             .deps
@@ -250,7 +250,7 @@ async fn postgres_state() -> Option<(Arc<WebSocketState>, sqlx::PgPool, String)>
     url.query_pairs_mut()
         .append_pair("options", &format!("-c search_path={schema}"));
     let pool = Arc::new(
-        crate::db::DatabasePool::new(
+        crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url.to_string()),
             crate::db::PoolConfig,
         )

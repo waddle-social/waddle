@@ -35,7 +35,7 @@ pub(super) async fn node(f: &IngressFixture) -> ExtensionHostAdapter {
     crate::pubsub::DatabasePubSubStorage::open(Some(f.db.database_url()))
         .await
         .expect("notification policy schema");
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(f.db.driver(), f.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -58,14 +58,14 @@ pub(super) async fn node(f: &IngressFixture) -> ExtensionHostAdapter {
             f.db.clone(),
         ),
     );
-    NotificationOutboxStore::new(f.db.clone())
+    NotificationOutboxStore::try_new(f.db.clone())
         .await
         .expect("outbox schema");
     ExtensionHostAdapter::new(state)
 }
 
 pub(super) fn plugin() -> PluginId {
-    PluginId::new("direct-test").expect("plugin")
+    PluginId::try_new("direct-test").expect("plugin")
 }
 
 pub(super) fn invocation() -> ExtensionInvocation {
@@ -82,7 +82,7 @@ pub(super) fn invocation() -> ExtensionInvocation {
 pub(super) fn request(origin: &str) -> HostSendMessage {
     HostSendMessage {
         target: HostMessageTarget::Direct("juliet@example.com".parse().expect("target")),
-        stanza_id: StanzaId::new(origin).expect("origin"),
+        stanza_id: StanzaId::try_new(origin).expect("origin"),
         body: "extension direct body".into(),
         thread_id: None,
         reply_to: None,

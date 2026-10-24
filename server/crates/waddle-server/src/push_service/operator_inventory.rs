@@ -240,7 +240,7 @@ mod tests {
     #[tokio::test]
     async fn inventory_includes_parked_outbox_without_provider_acceptance() {
         let push = store().await;
-        let outbox = crate::notification_outbox::NotificationOutboxStore::new(push.db.clone())
+        let outbox = crate::notification_outbox::NotificationOutboxStore::try_new(push.db.clone())
             .await
             .expect("outbox schema");
         let node = PushOperatorNode::parse("outbox-only-node").expect("node");
@@ -290,7 +290,7 @@ mod tests {
         )
         .await
         .expect("configured provider");
-        crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+        crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("outbox");
         let node = push

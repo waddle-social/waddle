@@ -295,7 +295,7 @@ async fn in_memory_set_affiliation_none_deletes_row() {
     assert_eq!(prev, Affiliation::None);
     assert_eq!(
         storage
-            .get_affiliation(&owner, "node", &entity)
+            .affiliation(&owner, "node", &entity)
             .await
             .expect("get"),
         Affiliation::Outcast
@@ -308,7 +308,7 @@ async fn in_memory_set_affiliation_none_deletes_row() {
     assert_eq!(prev, Affiliation::Outcast);
     assert_eq!(
         storage
-            .get_affiliation(&owner, "node", &entity)
+            .affiliation(&owner, "node", &entity)
             .await
             .expect("get"),
         Affiliation::None
@@ -383,14 +383,14 @@ async fn versioned_push_memory_orders_replays_and_preserves_retraction_watermark
     let storage = InMemoryPubSubStorage::new();
     let service: BareJid = "push@example.com".parse().expect("service");
     let publisher: BareJid = "alice@example.com".parse().expect("publisher");
-    let node = PublicationNode::new("versioned-push").expect("node");
+    let node = PublicationNode::try_new("versioned-push").expect("node");
     storage
         .get_or_create_node(&service, node.as_str())
         .await
         .expect("node");
     let token = uuid::Uuid::new_v4();
-    let newer = PublicationVersion::new(2, token).expect("version");
-    let old = PublicationVersion::new(1, uuid::Uuid::new_v4()).expect("version");
+    let newer = PublicationVersion::try_new(2, token).expect("version");
+    let old = PublicationVersion::try_new(1, uuid::Uuid::new_v4()).expect("version");
     let item = push_notification("newer", "same");
     assert!(matches!(
         storage
@@ -448,7 +448,7 @@ async fn versioned_push_memory_orders_replays_and_preserves_retraction_watermark
                 &publisher,
                 &node,
                 &item,
-                PublicationVersion::new(2, uuid::Uuid::new_v4()).expect("version")
+                PublicationVersion::try_new(2, uuid::Uuid::new_v4()).expect("version")
             )
             .await,
         Err(PublicationError::IntegrityConflict)
@@ -501,7 +501,7 @@ async fn versioned_push_memory_republication_updates_latest_order_and_retention(
     let storage = InMemoryPubSubStorage::new();
     let service: BareJid = "push@example.com".parse().expect("service");
     let publisher: BareJid = "alice@example.com".parse().expect("publisher");
-    let node = PublicationNode::new("republication-order").expect("node");
+    let node = PublicationNode::try_new("republication-order").expect("node");
     storage
         .get_or_create_node(&service, node.as_str())
         .await
@@ -520,7 +520,7 @@ async fn versioned_push_memory_republication_updates_latest_order_and_retention(
                     &publisher,
                     &node,
                     &push_notification(body, id),
-                    PublicationVersion::new(revision, uuid::Uuid::new_v4()).expect("version")
+                    PublicationVersion::try_new(revision, uuid::Uuid::new_v4()).expect("version")
                 )
                 .await
                 .expect("publish"),
@@ -543,7 +543,7 @@ async fn versioned_push_memory_republication_updates_latest_order_and_retention(
             &publisher,
             &node,
             &push_notification("C", "C"),
-            PublicationVersion::new(4, uuid::Uuid::new_v4()).expect("version"),
+            PublicationVersion::try_new(4, uuid::Uuid::new_v4()).expect("version"),
         )
         .await
         .expect("publish C");

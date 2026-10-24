@@ -1807,7 +1807,7 @@ mod tests {
         if let Some(fixture) =
             crate::ingress::test_support::IngressFixture::postgres("push_repair_backoff").await
         {
-            let store = DatabasePushServiceStore::new(fixture.db.clone())
+            let store = DatabasePushServiceStore::try_new(fixture.db.clone())
                 .await
                 .expect("store");
             verify_atomic_repair_backoff(store).await;

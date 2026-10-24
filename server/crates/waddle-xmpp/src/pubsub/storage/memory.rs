@@ -613,7 +613,7 @@ impl PubSubStorage for InMemoryPubSubStorage {
         Ok(prev.unwrap_or(Affiliation::None))
     }
 
-    async fn get_affiliation(
+    async fn affiliation(
         &self,
         owner: &BareJid,
         node_name: &str,

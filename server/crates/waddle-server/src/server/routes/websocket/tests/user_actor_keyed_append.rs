@@ -42,7 +42,7 @@ async fn local_actor_detach_recovery(
                 .deps
                 .protocol
                 .connection_registry
-                .get_entry(&socket.recipient)
+                .entry(&socket.recipient)
                 .expect("registered socket"),
         )
         .await
@@ -170,9 +170,9 @@ async fn local_actor_detach_recovery(
     }
     let mut resumed = waddle_xmpp::stream_management::StreamManagementState::new();
     resumed.restore_from_session(&detached);
-    assert_eq!(resumed.get_stanzas_to_resend(0).len(), 1);
+    assert_eq!(resumed.stanzas_to_resend(0).len(), 1);
     resumed.acknowledge(1);
-    assert!(resumed.get_stanzas_to_resend(1).is_empty());
+    assert!(resumed.stanzas_to_resend(1).is_empty());
     assert!(
         socket
             .state

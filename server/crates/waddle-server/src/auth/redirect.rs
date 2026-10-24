@@ -59,7 +59,7 @@ impl TrustedWebOrigins {
     /// Build the set from `WADDLE_BASE_URL` and the comma-separated
     /// `WADDLE_CORS_ORIGINS` value (absent or blank means the server's own
     /// origin only).
-    pub fn new(base_url: &str, cors_origins: Option<&str>) -> Result<Self, RedirectError> {
+    pub fn try_new(base_url: &str, cors_origins: Option<&str>) -> Result<Self, RedirectError> {
         let base_url = Url::parse(base_url).map_err(|_| RedirectError::InvalidBaseUrl)?;
         if !is_http_scheme(&base_url) || base_url.cannot_be_a_base() {
             return Err(RedirectError::InvalidBaseUrl);
@@ -249,7 +249,7 @@ mod tests {
     use super::*;
 
     fn production() -> TrustedWebOrigins {
-        TrustedWebOrigins::new(
+        TrustedWebOrigins::try_new(
             "https://xmpp.waddle.social",
             Some("https://waddle.chat,http://localhost:4321"),
         )
@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn without_cors_origins_only_the_server_origin_is_trusted() {
-        let origins = TrustedWebOrigins::new("https://xmpp.waddle.social/", None).unwrap();
+        let origins = TrustedWebOrigins::try_new("https://xmpp.waddle.social/", None).unwrap();
         assert!(origins.resolve_return_url(Some("/")).is_ok());
         assert_eq!(
             origins.resolve_return_url(Some("https://waddle.chat/")),
@@ -334,15 +334,15 @@ mod tests {
     #[test]
     fn invalid_configuration_is_refused() {
         assert_eq!(
-            TrustedWebOrigins::new("not a url", None),
+            TrustedWebOrigins::try_new("not a url", None),
             Err(RedirectError::InvalidBaseUrl)
         );
         assert!(matches!(
-            TrustedWebOrigins::new("https://a.example", Some("https://b.example/path")),
+            TrustedWebOrigins::try_new("https://a.example", Some("https://b.example/path")),
             Err(RedirectError::InvalidTrustedOrigin { .. })
         ));
         assert!(matches!(
-            TrustedWebOrigins::new("https://a.example", Some("ftp://b.example")),
+            TrustedWebOrigins::try_new("https://a.example", Some("ftp://b.example")),
             Err(RedirectError::InvalidTrustedOrigin { .. })
         ));
     }

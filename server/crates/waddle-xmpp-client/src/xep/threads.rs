@@ -152,6 +152,7 @@ pub struct FetchThreadsQuery<'a> {
 }
 
 /// Build a `<iq type='get'>` requesting the user's threads.
+#[must_use]
 pub fn build_fetch_threads_iq(request_id: &str, opts: &FetchThreadsQuery<'_>) -> Element {
     let mut query_builder = Element::builder("query", NS_THREADS);
     if let Some(status) = opts.status.as_attr() {
@@ -205,6 +206,7 @@ pub fn build_fetch_threads_iq(request_id: &str, opts: &FetchThreadsQuery<'_>) ->
 
 /// Parse the `<iq type='result'>` response into a typed `ThreadsPage`.
 /// Returns `None` when the IQ does not carry a `<threads xmlns='urn:waddle:threads:0'/>`.
+#[must_use]
 pub fn parse_threads_response(iq: &Element) -> Option<ThreadsPage> {
     let threads = iq.get_child("threads", NS_THREADS)?;
     let total: u64 = threads

@@ -1227,7 +1227,7 @@ async fn xep_0424_lookup_archived_message_propagates_tombstone_state() {
         stanza_xml: None,
         rich: Some(ArchivedRichMessage {
             payload: Some(ArchivedRichPayload::Tombstone(ArchivedTombstone {
-                retraction_id: Some(RichMessageId::new("retract-1").expect("rich id")),
+                retraction_id: Some(RichMessageId::try_new("retract-1").expect("rich id")),
                 stamp: chrono::Utc::now(),
                 moderation: None,
                 sender_scope: None,

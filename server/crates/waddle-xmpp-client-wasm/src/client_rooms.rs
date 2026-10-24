@@ -248,7 +248,7 @@ impl WaddleClient {
                 .map_err(|err| js_error(format!("invalid JID: {err}")))?;
             let known_ids: Vec<_> = known_ids
                 .into_iter()
-                .filter_map(waddle_xmpp_client::AvatarItemId::new)
+                .filter_map(waddle_xmpp_client::AvatarItemId::try_new)
                 .collect();
             let fetch = request_avatar_with_iq_skipping(&bare, &known_ids, |stanza| {
                 let inner = inner.clone();

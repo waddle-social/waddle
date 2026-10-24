@@ -17,6 +17,7 @@ use super::types::{GroupDmCreated, GroupDmLeft, GroupDmRenamed};
 /// Typed shape errors for group-DM command responses. These indicate
 /// a server-side bug or schema drift, never a user mistake.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum GroupDmResponseError {
     #[error("group-dm response is not a XEP-0050 command result")]
     /// Group-dm response is not a XEP-0050 command result.

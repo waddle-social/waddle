@@ -22,7 +22,7 @@ use waddle_xmpp::{
 
 async fn outstanding_invite_discharges_delivery(fixture: IngressFixture) {
     let standalone = socket_tests::create_test_websocket_state().await;
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

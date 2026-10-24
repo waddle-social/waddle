@@ -56,6 +56,7 @@ pub enum HashAlgo {
 
 impl HashAlgo {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             HashAlgo::Sha256 => "sha-256",
@@ -63,6 +64,7 @@ impl HashAlgo {
     }
 
     /// Interpret a protocol attribute, preserving the documented default for unknown or missing values.
+    #[must_use]
     pub fn from_attr(value: &str) -> Option<Self> {
         match value {
             "sha-256" => Some(HashAlgo::Sha256),
@@ -93,6 +95,7 @@ pub struct StickerText {
 
 impl StickerText {
     /// Create sticker text with no language tag.
+    #[must_use]
     pub fn plain(text: impl Into<String>) -> Self {
         Self {
             lang: None,
@@ -141,7 +144,8 @@ pub struct PackId(String);
 
 impl PackId {
     /// Create `PackId` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         if value.trim().is_empty() {
             return None;
@@ -150,6 +154,7 @@ impl PackId {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -259,6 +264,7 @@ fn pack_hash_input(
 
 /// Compute the pack-level `<hash/>` value (full Base64 SHA-256 digest)
 /// over the pack's significant content.
+#[must_use]
 pub fn compute_pack_hash(
     name: &[StickerText],
     summary: &[StickerText],
@@ -273,6 +279,7 @@ pub fn compute_pack_hash(
 
 /// Derive the pack id: the first 144 bits of the pack hash, Base64 —
 /// equivalently the first 24 characters of the full hash's Base64.
+#[must_use]
 pub fn compute_pack_id(
     name: &[StickerText],
     summary: &[StickerText],
@@ -281,10 +288,10 @@ pub fn compute_pack_id(
     let full = compute_pack_hash(name, summary, stickers);
     PackId(full.value_b64.chars().take(24).collect())
 }
-
 // ── Pack element build / parse ───────────────────────────────────────────────
 
 /// Build one XEP-0300 `<hash xmlns='urn:xmpp:hashes:2'/>` element.
+#[must_use]
 pub fn build_hash_element(hash: &StickerHash) -> Element {
     Element::builder("hash", NS_HASHES)
         .attr(
@@ -389,6 +396,7 @@ fn build_pack_sticker_element(sticker: &PackSticker) -> Element {
 /// trailing pack-level `<hash/>` is always recomputed from the pack's
 /// significant content so a published pack can never carry a hash that
 /// disagrees with its own items.
+#[must_use]
 pub fn build_pack_element(doc: &StickerPackDoc) -> Element {
     let builder = Element::builder("pack", NS_STICKERS);
     let builder = append_localized(builder, "name", &doc.name);
@@ -491,6 +499,7 @@ fn parse_pack_sticker(item: &Element) -> Option<PackSticker> {
 /// given pubsub item id. Malformed stickers (no lang-less desc, no
 /// hash, no source) are dropped; a pack with zero remaining stickers
 /// is rejected outright (XEP-0449: "one or more" items).
+#[must_use]
 pub fn parse_pack_element(id: PackId, pack: &Element) -> Option<StickerPackDoc> {
     if !pack.is("pack", NS_STICKERS) {
         return None;
@@ -517,17 +526,19 @@ pub fn parse_pack_element(id: PackId, pack: &Element) -> Option<StickerPackDoc> 
 }
 
 /// Parse one pubsub `<item id='…'/>` (in `ns`) into a pack document.
+#[must_use]
 pub fn parse_pack_item(item: &Element, ns: &str) -> Option<StickerPackDoc> {
     if !item.is("item", ns) {
         return None;
     }
-    let id = PackId::new(item.attr("id")?)?;
+    let id = PackId::try_new(item.attr("id")?)?;
     let pack = item.get_child("pack", NS_STICKERS)?;
     parse_pack_element(id, pack)
 }
 
 /// Parse an `<iq type='result'/>` for a sticker-node items query into
 /// pack documents. `node` guards against a mismatched reply payload.
+#[must_use]
 pub fn parse_sticker_packs_result(iq: &Element, node: &str) -> Vec<StickerPackDoc> {
     let Some(items) = iq
         .get_child("pubsub", NS_PUBSUB)
@@ -562,6 +573,7 @@ fn build_items_iq(iq_id: &str, target: Option<&BareJid>, items: Element) -> Elem
 /// XEP-0060 §6.5.2 items GET for the `urn:xmpp:stickers:0` node.
 /// `target: None` routes to the user's own PEP service (XEP-0163);
 /// `Some(owner)` fetches another user's published packs.
+#[must_use]
 pub fn build_sticker_packs_items_iq(iq_id: &str, target: Option<&BareJid>) -> Element {
     let items = Element::builder("items", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), STICKERS_NODE)
@@ -573,6 +585,7 @@ pub fn build_sticker_packs_items_iq(iq_id: &str, target: Option<&BareJid>) -> El
 /// child). `node` allows packs hosted on a generic pubsub node other
 /// than the PEP `urn:xmpp:stickers:0` default (XEP-0449 §send-from-pack
 /// `jid`/`node` sticker attributes).
+#[must_use]
 pub fn build_sticker_pack_items_iq(
     iq_id: &str,
     target: &BareJid,
@@ -598,6 +611,7 @@ pub fn build_sticker_pack_items_iq(
 /// single-slot `current` idiom — and is recomputed here so the id can
 /// never disagree with the published payload. Returns the id actually
 /// used alongside the stanza.
+#[must_use]
 pub fn build_pack_publish_iq(iq_id: &str, doc: &StickerPackDoc) -> (PackId, Element) {
     let id = compute_pack_id(&doc.name, &doc.summary, &doc.stickers);
     let canonical = StickerPackDoc {
@@ -626,6 +640,7 @@ pub fn build_pack_publish_iq(iq_id: &str, doc: &StickerPackDoc) -> (PackId, Elem
 
 /// XEP-0060 §7.2 retract IQ removing one pack from the user's own PEP
 /// sticker node.
+#[must_use]
 pub fn build_pack_retract_iq(iq_id: &str, pack_id: &PackId) -> Element {
     let retract = Element::builder("retract", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), STICKERS_NODE)
@@ -674,6 +689,7 @@ pub struct StickerMarker {
 }
 
 /// Build the message-level `<sticker/>` marker element.
+#[must_use]
 pub fn build_sticker_marker_element(marker: &StickerMarker) -> Element {
     let mut builder = Element::builder("sticker", NS_STICKERS);
     if let Some(pack) = marker.pack.as_ref() {

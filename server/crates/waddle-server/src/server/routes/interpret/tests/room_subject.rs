@@ -322,7 +322,7 @@ pub(super) async fn spawn_subject_mutation_test_room() -> (
 
     let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".to_string(),
-        OccupantIdSecret::new(b"subject-fail-closed-test-secret-32b".to_vec())
+        OccupantIdSecret::try_new(b"subject-fail-closed-test-secret-32b".to_vec())
             .expect("test secret meets length floor"),
     ));
     let claim_store = Arc::new(InProcessClaimStore::new());
@@ -419,7 +419,7 @@ async fn xep_0045_persist_room_subject_writes_state_via_room_actor() {
     let registry = ConnectionRegistry::new();
     let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".to_string(),
-        OccupantIdSecret::new(b"persist-subject-arm-test-secret-32b".to_vec())
+        OccupantIdSecret::try_new(b"persist-subject-arm-test-secret-32b".to_vec())
             .expect("test secret meets length floor"),
     ));
     let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
@@ -514,7 +514,7 @@ async fn xep_0045_persist_room_subject_committed_records_subject_mutation_intent
     let registry = ConnectionRegistry::new();
     let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".to_string(),
-        OccupantIdSecret::new(b"persist-subject-capture-test-secret".to_vec())
+        OccupantIdSecret::try_new(b"persist-subject-capture-test-secret".to_vec())
             .expect("test secret meets length floor"),
     ));
     let room_jid: jid::BareJid = "channel@muc.example.com".parse().expect("bare jid");
@@ -1217,8 +1217,8 @@ async fn xep_0045_subject_commit_outcome_unknown_reconciles_and_allows_broadcast
         "the stale actor must be demoted before exact subject reconciliation"
     );
     let snapshot = current_actor.ask(GetSnapshot).await.expect("room snapshot");
-    assert!(snapshot.room.get_occupant("alice").is_some());
-    assert!(snapshot.room.get_occupant("bob").is_none());
+    assert!(snapshot.room.occupant("alice").is_some());
+    assert!(snapshot.room.occupant("bob").is_none());
     assert_eq!(snapshot.departures.receipts.len(), 1);
     assert_eq!(
         current_actor
@@ -1400,8 +1400,8 @@ async fn xep0045_subject_recovery_does_not_restore_foreign_revoked_member() {
         .expect("lookup")
         .expect("successor");
     let snapshot = successor.ask(GetSnapshot).await.expect("restored snapshot");
-    assert!(snapshot.room.get_occupant("alice").is_some());
-    assert!(snapshot.room.get_occupant("bob").is_none());
+    assert!(snapshot.room.occupant("alice").is_some());
+    assert!(snapshot.room.occupant("bob").is_none());
     let dispatch = successor
         .ask(GetRoomSnapshot {
             sender_jid: "bob@example.com/web".parse().expect("revoked session"),

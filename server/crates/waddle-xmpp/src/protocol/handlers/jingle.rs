@@ -728,7 +728,7 @@ impl JingleHandler {
                 "Muji session-initiate requires at least one content definition",
             );
         }
-        let call_id = match CallId::new(room_jid.to_string()) {
+        let call_id = match CallId::try_new(room_jid.to_string()) {
             Ok(c) => c,
             Err(_) => {
                 attempt.failed(CallSetupFailureReason::BadRequest);
@@ -747,7 +747,7 @@ impl JingleHandler {
         // touched. Accepting it unbound would leave exactly one
         // participant whose live call an old queued terminate could
         // still tear down.
-        let session = match SessionBinding::new(jingle.sid.0.clone()) {
+        let session = match SessionBinding::try_new(jingle.sid.0.clone()) {
             Ok(session) => session,
             Err(_) => {
                 attempt.failed(CallSetupFailureReason::BadRequest);
@@ -921,7 +921,7 @@ impl JingleHandler {
     ) -> Vec<OutboundEvent> {
         // Same CallId derivation as session-initiate so the
         // unregister matches the original registration.
-        if let Ok(call_id) = CallId::new(room_jid.to_string()) {
+        if let Ok(call_id) = CallId::try_new(room_jid.to_string()) {
             let sender_identity = Identity::from_jid(ctx.full_jid.clone());
             if !self.sfu.has_call_participant(&call_id, &sender_identity) {
                 return unknown_session_reply(iq);
@@ -936,7 +936,7 @@ impl JingleHandler {
             // does not track bindings) accepts any sid, as before.
             // `presented = None` (a sid too pathological to bind) can
             // never match a bound session.
-            let presented = SessionBinding::new(jingle.sid.0.clone()).ok();
+            let presented = SessionBinding::try_new(jingle.sid.0.clone()).ok();
             let bound = self
                 .sfu
                 .participant_session_binding(&call_id, &sender_identity);
@@ -1255,7 +1255,7 @@ fn resolve_muji_initiator(
 /// changing this format requires changing the client twin, and the
 /// cross-pinned digest tests on both sides fail until they agree.
 fn scoped_call_id(initiator_bare: &BareJid, sid: &str) -> Result<CallId, SfuError> {
-    CallId::new(format!("{}::{}", initiator_bare, sid))
+    CallId::try_new(format!("{}::{}", initiator_bare, sid))
 }
 
 enum RewriteError {
@@ -1591,7 +1591,7 @@ mod tests {
                 .expect("test secret meets min length"),
             webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
                 .expect("test secret meets min length"),
-            ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+            ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().unwrap()).unwrap(),
             turn_host: TurnHost::new("turn.test"),
             turn_tls_port: 443,
             turn_udp_port: 3478,
@@ -1599,7 +1599,7 @@ mod tests {
             token_ttl: Duration::seconds(3600),
             turn_ttl: Duration::seconds(3600),
         };
-        Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+        Arc::new(LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
     }
 
     fn fixture_sfu() -> Arc<dyn SfuService> {
@@ -2043,7 +2043,7 @@ mod tests {
         *payload = jingle.into();
         let eve: FullJid = "eve@waddle.test/laptop".parse().unwrap();
         let sfu = fixture_livekit_sfu();
-        let call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
+        let call = waddle_sfu::CallId::try_new("alice@waddle.test::c1").unwrap();
         let handler = JingleHandler::new(sfu.clone());
 
         let events = handler.handle(&iq, &ctx(&eve));
@@ -2058,7 +2058,7 @@ mod tests {
     #[test]
     fn stale_participant_cannot_accept_reused_sid_without_current_invitation() {
         let sfu = fixture_livekit_sfu();
-        let call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
+        let call = waddle_sfu::CallId::try_new("alice@waddle.test::c1").unwrap();
         let eve: FullJid = "eve@waddle.test/laptop".parse().unwrap();
         let eve_identity = Identity::from_jid(eve.clone());
         sfu.register_call_participant(&call, &eve_identity);
@@ -2202,7 +2202,7 @@ mod tests {
         let sfu = fixture_livekit_sfu();
         // Pre-register under the scoped id so the unregister path
         // has something to remove.
-        let call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
+        let call = waddle_sfu::CallId::try_new("alice@waddle.test::c1").unwrap();
         let alice = Identity::from_jid("alice@waddle.test/desktop".parse().unwrap());
         let bob = Identity::from_jid("bob@waddle.test/desktop".parse().unwrap());
         sfu.register_call_participant(&call, &alice);
@@ -2239,7 +2239,7 @@ mod tests {
         };
 
         let sfu = fixture_livekit_sfu();
-        let call = waddle_sfu::CallId::new("bob@waddle.test::c1").unwrap();
+        let call = waddle_sfu::CallId::try_new("bob@waddle.test::c1").unwrap();
         let alice = Identity::from_jid("alice@waddle.test/desktop".parse().unwrap());
         let bob = Identity::from_jid("bob@waddle.test/desktop".parse().unwrap());
         sfu.register_call_participant(&call, &alice);
@@ -2267,8 +2267,8 @@ mod tests {
         };
 
         let sfu = fixture_livekit_sfu();
-        let eve_call = waddle_sfu::CallId::new("eve@waddle.test::c1").unwrap();
-        let bob_call = waddle_sfu::CallId::new("alice@waddle.test::c1").unwrap();
+        let eve_call = waddle_sfu::CallId::try_new("eve@waddle.test::c1").unwrap();
+        let bob_call = waddle_sfu::CallId::try_new("alice@waddle.test::c1").unwrap();
         let eve = Identity::from_jid("eve@waddle.test/laptop".parse().unwrap());
         let mallory = Identity::from_jid("mallory@waddle.test/phone".parse().unwrap());
         let alice = Identity::from_jid("alice@waddle.test/desktop".parse().unwrap());

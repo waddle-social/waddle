@@ -44,6 +44,7 @@ pub enum ChannelType {
 
 impl ChannelType {
     /// Parse a stored channel type into a supported managed channel type.
+    #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value.trim() {
             "text" => Some(Self::Text),
@@ -55,6 +56,7 @@ impl ChannelType {
     }
 
     /// Convert this channel type to the canonical stored string.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -65,17 +67,20 @@ impl ChannelType {
     }
 
     /// Returns true when this channel should be exposed as a forum room.
+    #[must_use]
     pub fn is_forum(self) -> bool {
         matches!(self, Self::Forum)
     }
 }
 
 /// Build the canonical localpart for a managed channel room.
+#[must_use]
 pub fn managed_room_localpart(channel_id: &str) -> String {
     channel_id.to_string()
 }
 
 /// Parse the canonical localpart for a managed channel room.
+#[must_use]
 pub fn parse_managed_room_localpart(localpart: &str) -> Option<String> {
     if localpart.is_empty() {
         return None;
@@ -84,6 +89,7 @@ pub fn parse_managed_room_localpart(localpart: &str) -> Option<String> {
 }
 
 /// Parse a bare room JID into managed channel coordinates.
+#[must_use]
 pub fn parse_managed_room_jid(room_jid: &jid::BareJid) -> Option<String> {
     parse_managed_room_localpart(room_jid.node()?.as_str())
 }

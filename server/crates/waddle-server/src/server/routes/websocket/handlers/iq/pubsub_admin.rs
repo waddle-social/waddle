@@ -21,7 +21,7 @@ pub(super) async fn handle_pubsub_admin_request(
     target_jid: &BareJid,
     user_jid: &BareJid,
     spaces_domain: &str,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     request: PubSubRequest,
 ) -> Vec<String> {
     match request {
@@ -32,9 +32,7 @@ pub(super) async fn handle_pubsub_admin_request(
             if target_jid.to_string() == spaces_domain {
                 if server_permission_allowed(
                     state,
-                    authenticated_session
-                        .as_ref()
-                        .map(ResolvedPrincipal::from_authenticated_session),
+                    authenticated_session.map(ResolvedPrincipal::from_authenticated_session),
                     Permission::CreateSpace,
                 )
                 .await
@@ -72,12 +70,8 @@ pub(super) async fn handle_pubsub_admin_request(
                                     PubSubError::Forbidden,
                                 ))];
                             }
-                            if let Err(error) = write_space_owner_tuple(
-                                state,
-                                &node,
-                                authenticated_session.as_ref(),
-                            )
-                            .await
+                            if let Err(error) =
+                                write_space_owner_tuple(state, &node, authenticated_session).await
                             {
                                 warn!(node = %node, error = %error, "Failed to persist Space owner tuple");
                                 return vec![iq_to_xml(build_pubsub_error(

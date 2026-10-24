@@ -39,8 +39,8 @@ pub(super) fn parse(message: &Message) -> Result<CarbonEnvelope, AppendAuthority
     };
     if let Some(thread) = &inner.thread {
         if let Some(parent) = &thread.parent {
-            waddle_xmpp_core::mam::ThreadId::new(thread.id.clone()).ok_or_else(invalid)?;
-            waddle_xmpp_core::mam::ThreadId::new(parent.clone()).ok_or_else(invalid)?;
+            waddle_xmpp_core::mam::ThreadId::try_new(thread.id.clone()).ok_or_else(invalid)?;
+            waddle_xmpp_core::mam::ThreadId::try_new(parent.clone()).ok_or_else(invalid)?;
             if parent.trim() != parent {
                 return Err(invalid());
             }

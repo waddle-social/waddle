@@ -90,7 +90,7 @@ pub struct Activity {
 
 /// A specific activity is a well-known element name under the general
 /// category. We wrap it in a newtype so that callers must go through
-/// `SpecificActivity::new` which asserts it is XML-safe.
+/// `SpecificActivity::try_new` which asserts it is XML-safe.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpecificActivity(String);
 
@@ -99,7 +99,7 @@ impl SpecificActivity {
     ///
     /// Returns `None` for empty strings or names containing characters that
     /// are invalid in XML element names.
-    pub fn new(name: impl Into<String>) -> Option<SpecificActivity> {
+    pub fn try_new(name: impl Into<String>) -> Option<SpecificActivity> {
         let s = name.into();
         if s.is_empty() || !s.chars().all(|c| c.is_ascii_lowercase() || c == '_') {
             return None;
@@ -185,7 +185,7 @@ pub fn parse_activity_element(elem: &Element) -> Result<Option<Activity>, Activi
                     if sub.ns() != NS_ACTIVITY {
                         continue;
                     }
-                    if let Some(sa) = SpecificActivity::new(sub.name().to_string()) {
+                    if let Some(sa) = SpecificActivity::try_new(sub.name().to_string()) {
                         specific = Some(sa);
                     }
                 }
@@ -223,7 +223,7 @@ mod tests {
     #[test]
     fn test_round_trip_with_specific_and_text() {
         let a = Activity::new(GeneralActivity::Working)
-            .with_specific(SpecificActivity::new("coding").unwrap())
+            .with_specific(SpecificActivity::try_new("coding").unwrap())
             .with_text("Rewriting MIX");
         let elem = build_activity_element(&a);
         let parsed = parse_activity_element(&elem).unwrap().unwrap();
@@ -235,7 +235,7 @@ mod tests {
     #[test]
     fn test_in_call_overlay_on_the_phone_round_trips() {
         let a = Activity::new(GeneralActivity::Talking)
-            .with_specific(SpecificActivity::new("on_the_phone").unwrap());
+            .with_specific(SpecificActivity::try_new("on_the_phone").unwrap());
         let elem = build_activity_element(&a);
         // Exact shape: <activity><talking><on_the_phone/></talking></activity>.
         let talking = elem
@@ -248,7 +248,7 @@ mod tests {
     #[test]
     fn test_in_call_overlay_on_video_phone_round_trips() {
         let a = Activity::new(GeneralActivity::Talking)
-            .with_specific(SpecificActivity::new("on_video_phone").unwrap());
+            .with_specific(SpecificActivity::try_new("on_video_phone").unwrap());
         let elem = build_activity_element(&a);
         let talking = elem
             .get_child("talking", NS_ACTIVITY)
@@ -285,11 +285,11 @@ mod tests {
 
     #[test]
     fn test_specific_newtype_rejects_invalid() {
-        assert!(SpecificActivity::new("").is_none());
-        assert!(SpecificActivity::new("Has Space").is_none());
-        assert!(SpecificActivity::new("UPPER").is_none());
-        assert!(SpecificActivity::new("coding").is_some());
-        assert!(SpecificActivity::new("doing_a_thing").is_some());
+        assert!(SpecificActivity::try_new("").is_none());
+        assert!(SpecificActivity::try_new("Has Space").is_none());
+        assert!(SpecificActivity::try_new("UPPER").is_none());
+        assert!(SpecificActivity::try_new("coding").is_some());
+        assert!(SpecificActivity::try_new("doing_a_thing").is_some());
     }
 
     #[test]

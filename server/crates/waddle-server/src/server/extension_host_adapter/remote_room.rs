@@ -284,6 +284,6 @@ fn host_request(
 pub(crate) fn temporary_failure(message: &'static str) -> ext_host::HostToolError {
     ext_host::HostToolError {
         code: ext_host::HostToolErrorCode::TemporaryFailure,
-        message: DisplayText::new(message).expect("static text"),
+        message: DisplayText::try_new(message).expect("static text"),
     }
 }

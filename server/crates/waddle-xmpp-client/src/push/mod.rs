@@ -67,6 +67,7 @@ pub enum PushPlatform {
 
 impl PushPlatform {
     /// Return the canonical token used in protocol attributes or forms.
+    #[must_use]
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Web => "web",
@@ -106,7 +107,7 @@ impl PushServiceJid {
     /// # Errors
     ///
     /// Returns `MalformedResultForm` when the service JID or application identifier does not satisfy the registration contract.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
+    pub fn try_new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
             return Err(PushRegistrationError::MalformedResultForm {
@@ -130,6 +131,7 @@ impl PushServiceJid {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -147,7 +149,7 @@ impl PushAppId {
     /// # Errors
     ///
     /// Returns `MalformedResultForm` when the service JID or application identifier does not satisfy the registration contract.
-    pub fn new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
+    pub fn try_new(value: impl AsRef<str>) -> Result<Self, PushRegistrationError> {
         let value = value.as_ref().trim();
         if value.is_empty() {
             return Err(PushRegistrationError::MalformedResultForm {
@@ -158,6 +160,7 @@ impl PushAppId {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -167,6 +170,7 @@ impl PushAppId {
 /// when the Push Service response shape violates the expected
 /// protocol choreography.
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
+#[non_exhaustive]
 pub enum PushRegistrationError {
     #[error("missing <command/> response during {stage}")]
     /// Missing `<command/>` response during `stage`.
@@ -204,6 +208,7 @@ pub enum PushRegistrationError {
 
 impl PushEnvironment {
     /// Return the canonical token used in protocol attributes or forms.
+    #[must_use]
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Production => "prod",
@@ -247,6 +252,7 @@ pub enum PushDeviceCredentials {
 
 impl PushDeviceCredentials {
     /// Return the registration platform implied by this push endpoint.
+    #[must_use]
     pub fn platform(&self) -> PushPlatform {
         match self {
             Self::WebPush { .. } => PushPlatform::Web,
@@ -263,11 +269,13 @@ pub struct PushNodeId(String);
 
 impl PushNodeId {
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this value and return its owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -283,11 +291,13 @@ pub struct PushDeviceId(String);
 
 impl PushDeviceId {
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this value and return its owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }
@@ -354,6 +364,7 @@ impl CommandDriver for crate::client::ClientHandle {
 /// PR-comment fix: previously this fn took both as arguments and
 /// a mismatched pair would silently produce a form the server
 /// rejects at runtime.
+#[must_use]
 pub fn build_register_device_submit_form(
     app_id: &str,
     environment: PushEnvironment,
@@ -392,10 +403,10 @@ pub fn build_register_device_submit_form(
 
 /// FORM_TYPE for the `disable-device` XEP-0050 command submit form.
 pub const DISABLE_DEVICE_FORM_TYPE: &str = "urn:waddle:push-service:commands:disable-device:0";
-
 /// Build the XEP-0004 submit form for the `disable-device` command.
 /// Carries the XEP-0357 `node` id and the Push Service-assigned
 /// `device-id` so the service can locate the row.
+#[must_use]
 pub fn build_disable_device_submit_form(node: &str, device_id: &str) -> DataForm {
     DataForm::new(
         DataFormType::Submit,
@@ -411,6 +422,7 @@ pub fn build_disable_device_submit_form(node: &str, device_id: &str) -> DataForm
 /// result form. Returns `None` when either field is missing or empty —
 /// the chat MUST NOT persist a half-populated record because the
 /// follow-up `disable-device` opt-out would have no way to scope.
+#[must_use]
 pub fn parse_register_device_result(form: &DataForm) -> Option<RegisterDeviceResult> {
     // Form-shape gate (PR-comment fix): refuse to parse anything that
     // isn't a stage-4 `<x type='result' FORM_TYPE=REGISTER_DEVICE_FORM_TYPE>`.
@@ -833,7 +845,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_accepts_exact_match() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         assert!(
             verify_iq_from_matches(&iq_with_from(Some("push.example.com")), &service_jid).is_ok()
         );
@@ -842,7 +854,7 @@ mod tests {
     #[test]
     fn verify_iq_from_accepts_case_variation_on_domain() {
         // RFC 6122 §2.4: domainpart comparison is case-insensitive.
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         assert!(
             verify_iq_from_matches(&iq_with_from(Some("Push.Example.COM")), &service_jid).is_ok()
         );
@@ -850,7 +862,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_absent_from() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(&iq_with_from(None), &service_jid)
             .expect_err("missing `from` must reject");
         match err {
@@ -865,7 +877,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_unrelated_jid() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(&iq_with_from(Some("attacker.tld")), &service_jid)
             .expect_err("unrelated `from` must reject");
         assert!(matches!(err, ClientError::PushRegistration(_)));
@@ -874,7 +886,7 @@ mod tests {
     #[test]
     fn verify_iq_from_rejects_prefix_substring_collision() {
         // `push.example.com` MUST NOT match `push.example.com.attacker.tld`.
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(
             &iq_with_from(Some("push.example.com.attacker.tld")),
             &service_jid,
@@ -885,7 +897,7 @@ mod tests {
 
     #[test]
     fn verify_iq_from_rejects_empty_from() {
-        let service_jid = PushServiceJid::new("push.example.com").expect("valid service jid");
+        let service_jid = PushServiceJid::try_new("push.example.com").expect("valid service jid");
         let err = verify_iq_from_matches(&iq_with_from(Some("")), &service_jid)
             .expect_err("empty `from` must reject");
         assert!(matches!(err, ClientError::PushRegistration(_)));

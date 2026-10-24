@@ -162,7 +162,7 @@ impl WaddleWindow {
         imp.account_status.set_title("Connecting…");
         imp.content_stack.set_visible_child_name("empty");
 
-        let transfers = match attachments::Transfers::new(account.server.as_url()) {
+        let transfers = match attachments::Transfers::try_new(account.server.as_url()) {
             Ok(transfers) => transfers,
             Err(error) => {
                 tracing::warn!(%error, "could not set up HTTP for file sharing");

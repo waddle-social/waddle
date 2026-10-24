@@ -54,12 +54,13 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         room: &room,
         message: &message,
         is_recipient,
-        thread: &thread,
+        thread: thread.as_ref(),
         dispatch_timestamp,
         notification_recovery,
     })
     .await;
-    if let Some(mutation) = groupchat_inbox_mutation(&room, &thread, is_recipient, &outcome) {
+    if let Some(mutation) = groupchat_inbox_mutation(&room, thread.as_ref(), is_recipient, &outcome)
+    {
         deps.capture_intent(IngressEffectIntent::InboxProject {
             owner: owner.clone(),
             mutation,
@@ -87,7 +88,7 @@ pub(super) async fn project_groupchat_inbox_event(input: ProjectGroupchatInboxEv
         is_live_occupant,
         room_members_only,
         sender_can_broadcast_channel_mention,
-        thread: &thread,
+        thread: thread.as_ref(),
         outcome: &outcome,
         notification_recovery: notification_recovery_for_capture.as_ref(),
     })
@@ -132,7 +133,7 @@ struct GroupchatNotificationProjection<'a, 'deps> {
     /// XEP-0513 frozen permission snapshot; see
     /// [`ProjectGroupchatInboxEvent::sender_can_broadcast_channel_mention`].
     sender_can_broadcast_channel_mention: bool,
-    thread: &'a Option<GroupchatThreadProjection>,
+    thread: Option<&'a GroupchatThreadProjection>,
     outcome: &'a GroupchatInboxProjectionOutcome,
     notification_recovery: Option<&'a super::effects::room::PlannedGroupchatNotificationRecovery>,
 }
@@ -145,7 +146,7 @@ fn groupchat_notification_recovery_mutation(
         recipient: recovery.key.recipient.clone(),
         room: recovery.key.room.clone(),
         thread_id: recovery.key.thread_id.as_ref().map(|thread_id| {
-            waddle_xmpp_core::mam::ThreadId::new(thread_id.clone())
+            waddle_xmpp_core::mam::ThreadId::try_new(thread_id.clone())
                 .expect("stored groupchat recovery thread id must be valid")
         }),
         archive_stanza_id: recovery.key.archive_stanza_id.clone(),
@@ -190,19 +191,15 @@ enum GroupchatNotificationCandidateQueueOutcome {
 
 fn groupchat_inbox_mutation(
     room: &BareJid,
-    thread: &Option<GroupchatThreadProjection>,
+    thread: Option<&GroupchatThreadProjection>,
     is_recipient: bool,
     outcome: &GroupchatInboxProjectionOutcome,
 ) -> Option<waddle_xmpp::ingress::InboxProjectionMutation> {
-    match (
-        outcome.channel_committed,
-        outcome.thread_committed,
-        thread.as_ref(),
-    ) {
+    match (outcome.channel_committed, outcome.thread_committed, thread) {
         (true, true, Some(thread)) => Some(
             waddle_xmpp::ingress::InboxProjectionMutation::GroupchatChannelAndThread {
                 room: room.clone(),
-                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
+                thread_id: waddle_xmpp_core::mam::ThreadId::try_new(thread.thread_id.clone())?,
                 increment_unread: is_recipient,
             },
         ),
@@ -215,7 +212,7 @@ fn groupchat_inbox_mutation(
         (false, true, Some(thread)) => Some(
             waddle_xmpp::ingress::InboxProjectionMutation::GroupchatThread {
                 room: room.clone(),
-                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread.thread_id.clone())?,
+                thread_id: waddle_xmpp_core::mam::ThreadId::try_new(thread.thread_id.clone())?,
             },
         ),
         _ => None,
@@ -2129,7 +2126,7 @@ mod audience_tests {
             is_live_occupant: false,
             room_members_only: false,
             sender_can_broadcast_channel_mention: false,
-            thread: &None,
+            thread: None,
             outcome: &outcome,
             notification_recovery: None,
         })
@@ -2178,7 +2175,7 @@ mod audience_tests {
             is_live_occupant: true,
             room_members_only: false,
             sender_can_broadcast_channel_mention: false,
-            thread: &None,
+            thread: None,
             outcome: &outcome,
             notification_recovery: None,
         })

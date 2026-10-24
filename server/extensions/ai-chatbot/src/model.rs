@@ -37,11 +37,12 @@ impl ProviderConfig {
             .unwrap_or(DEFAULT_CONTEXT_LIMIT)
             .min(MAX_CONTEXT_LIMIT);
         Ok(Self {
-            endpoint: NonEmptyString::new(endpoint).ok_or(ProviderConfigError::MissingEndpoint)?,
-            model: NonEmptyString::new(model).ok_or(ProviderConfigError::MissingModel)?,
-            api_key: NonEmptyString::new(api_key).ok_or(ProviderConfigError::MissingApiKey)?,
+            endpoint: NonEmptyString::try_new(endpoint)
+                .ok_or(ProviderConfigError::MissingEndpoint)?,
+            model: NonEmptyString::try_new(model).ok_or(ProviderConfigError::MissingModel)?,
+            api_key: NonEmptyString::try_new(api_key).ok_or(ProviderConfigError::MissingApiKey)?,
             system_prompt: json_config_string(&document, "system_prompt")
-                .and_then(NonEmptyString::new),
+                .and_then(NonEmptyString::try_new),
             context_limit,
         })
     }
@@ -186,8 +187,8 @@ pub(crate) enum ProviderExecutionError {
 pub(crate) struct CleanPrompt(pub(crate) NonEmptyString);
 
 impl CleanPrompt {
-    pub(crate) fn new(value: String) -> Option<Self> {
-        NonEmptyString::new(value).map(Self)
+    pub(crate) fn try_new(value: String) -> Option<Self> {
+        NonEmptyString::try_new(value).map(Self)
     }
 }
 
@@ -195,7 +196,7 @@ impl CleanPrompt {
 pub(crate) struct NonEmptyString(String);
 
 impl NonEmptyString {
-    pub(crate) fn new(value: impl Into<String>) -> Option<Self> {
+    pub(crate) fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then(|| Self(value.trim().to_string()))
     }
@@ -209,7 +210,7 @@ fn bare_jid_from_full(value: &str) -> Option<types::BareJid> {
     let bare = value
         .split_once('/')
         .map_or(value, |(bare, _resource)| bare);
-    NonEmptyString::new(bare).map(|value| types::BareJid {
+    NonEmptyString::try_new(bare).map(|value| types::BareJid {
         value: value.as_str().to_string(),
     })
 }

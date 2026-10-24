@@ -205,13 +205,13 @@ async fn xep_0424_retraction_retry_preserves_existing_moderation_tombstone() {
     seed_groupchat_archive_row(&mam, &room, archive_pk, "original-wire-id").await;
 
     let moderation_tombstone = ArchivedTombstone {
-        retraction_id: RichMessageId::new("moderation-archive-id"),
+        retraction_id: RichMessageId::try_new("moderation-archive-id"),
         stamp: chrono::Utc::now(),
         moderation: Some(ArchivedModeration {
-            target_id: RichMessageId::new(archive_pk).expect("non-empty target id"),
+            target_id: RichMessageId::try_new(archive_pk).expect("non-empty target id"),
             moderated_by: "room-owner@example.com".parse().expect("moderator JID"),
             stamp: Some(chrono::Utc::now()),
-            reason: RichText::new("room policy violation"),
+            reason: RichText::try_new("room policy violation"),
         }),
         sender_scope: None,
     };

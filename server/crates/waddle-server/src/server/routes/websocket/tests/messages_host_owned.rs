@@ -8,7 +8,7 @@ use crate::ingress_uow::{
 use waddle_xmpp::ingress::{IngressEffectIntent, MessageKey};
 
 async fn user_groupchat_with_bot(f: IngressFixture, another_user: bool) {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(f.db.driver(), f.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -313,7 +313,7 @@ async fn extension_bot_muc_private_message_is_refused_from_the_occupant() {
             None,
             (
                 super::super::record_test_occupancy_session(&state, jid),
-                &Some(session),
+                Some(&session),
             ),
         )
         .await;

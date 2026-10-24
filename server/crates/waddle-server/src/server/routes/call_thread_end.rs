@@ -48,7 +48,7 @@ async fn persist_completion_retry_if_first_attempt(
     if !first_attempt {
         return;
     }
-    let Some(thread_id) = waddle_xmpp_core::mam::ThreadId::new(active.thread_id.clone()) else {
+    let Some(thread_id) = waddle_xmpp_core::mam::ThreadId::try_new(active.thread_id.clone()) else {
         return;
     };
     let anchor = waddle_xmpp_core::xep0359::OriginId::new(active.anchor_origin_id.clone());
@@ -77,7 +77,7 @@ pub(crate) async fn enqueue_call_thread_end_retry(
     started: chrono::DateTime<chrono::Utc>,
     ended: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
-    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+    let call_id = match waddle_sfu::CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
             warn!(
@@ -167,7 +167,7 @@ pub(crate) async fn maybe_broadcast_call_thread_ended_for(
             }
             return WebhookEffectOutcome::Completed;
         };
-        let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+        let call_id = match waddle_sfu::CallId::try_new(room_jid.to_string()) {
             Ok(call_id) => call_id,
             Err(error) => {
                 warn!(room = %room_jid, %error, "cannot derive call id while ending MUC call thread");

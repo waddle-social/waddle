@@ -106,7 +106,7 @@ async fn muc_decline_recovery(
     reinvited: bool,
 ) {
     let pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             PoolConfig,
         )

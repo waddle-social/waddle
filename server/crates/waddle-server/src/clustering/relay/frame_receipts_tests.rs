@@ -28,7 +28,7 @@ async fn cached_reply_receipt(fixture: IngressFixture, fail_storage: bool) {
     };
     tx.commit().await.expect("release attestation");
     let authority = Arc::new(
-        crate::ingress::IngressAuthority::new(
+        crate::ingress::IngressAuthority::try_new(
             IngressConfig::default(),
             fixture.db.clone(),
             config,
@@ -213,7 +213,7 @@ async fn owner_reflection_survives_replay(fixture: IngressFixture) {
     };
     tx.commit().await.expect("release attestation");
     let authority = Arc::new(
-        crate::ingress::IngressAuthority::new(
+        crate::ingress::IngressAuthority::try_new(
             IngressConfig::default(),
             fixture.db.clone(),
             config,

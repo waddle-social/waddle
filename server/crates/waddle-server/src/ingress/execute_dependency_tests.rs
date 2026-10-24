@@ -92,7 +92,7 @@ async fn membership_runs_before_dependents_and_preserved_grant_cannot_be_compens
     room.set_affiliation(invite.invitee.clone(), waddle_xmpp::Affiliation::Member);
     let actor = RoomActor::spawn(RoomActor::new(
         room,
-        OccupantIdSecret::new(vec![b'x'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'x'; 32]).expect("secret"),
     ));
     let grant = MucMembershipMutation {
         room: invite.room.clone(),
@@ -158,7 +158,7 @@ async fn membership_runs_before_dependents_and_preserved_grant_cannot_be_compens
     );
     let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
     assert_eq!(
-        snapshot.room.get_affiliation(&invite.invitee),
+        snapshot.room.affiliation(&invite.invitee),
         waddle_xmpp::Affiliation::Member,
         "ledger compensation must not revoke preserved membership"
     );

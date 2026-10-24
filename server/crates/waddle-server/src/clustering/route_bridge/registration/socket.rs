@@ -235,7 +235,7 @@ impl OrderedRelayDeliveryBridge {
         let user_owner = NodeId::new(target_snapshot.owner.node_id.clone());
         let state = RemoteResourceStateSnapshot::from_entry(
             &entry,
-            services.connection_registry.get_presence_state(jid),
+            services.connection_registry.presence_state(jid),
         );
         let relay_stop_token = self.stop_token.clone();
         let relay_mailbox_timeout = self.mailbox_timeout;
@@ -1023,7 +1023,7 @@ impl OrderedRelayDeliveryBridge {
         }
         let updates = Self::build_full_resync_updates(
             &entry,
-            services.connection_registry.get_presence_state(jid),
+            services.connection_registry.presence_state(jid),
         );
         for update in &updates {
             let mut handle =
@@ -1086,7 +1086,7 @@ impl OrderedRelayDeliveryBridge {
         // one more pass with the fresh state instead of declaring victory.
         let recheck = Self::build_full_resync_updates(
             &entry,
-            services.connection_registry.get_presence_state(jid),
+            services.connection_registry.presence_state(jid),
         );
         if recheck != updates {
             return false;
@@ -1292,7 +1292,7 @@ async fn complete_fresh_remote_retirement(
         let generation = request.occupancy_session?;
         // A missing relay registration alone cannot certify that a socket
         // which still owns this generation has stopped its handlers.
-        let entry = services.connection_registry.get_entry(&request.jid);
+        let entry = services.connection_registry.entry(&request.jid);
         if entry.as_ref().and_then(ConnectionEntry::occupancy_session) == Some(generation) {
             return None;
         }

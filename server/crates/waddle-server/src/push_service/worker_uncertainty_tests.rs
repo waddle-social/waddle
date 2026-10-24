@@ -20,7 +20,7 @@ struct State {
 
 async fn seed(fixture: &IngressFixture, label: &str) -> State {
     let service: BareJid = "push.example.com".parse().expect("service");
-    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+    crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registrations");
     let backing = Arc::new(

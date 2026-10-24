@@ -37,6 +37,7 @@ impl ExtensionManager {
 
     /// Whether the named loaded plugin may emit this enrichment envelope under its
     /// manifest and grants.
+    #[must_use]
     pub fn validate_envelope_for_plugin(
         &self,
         plugin: &PluginId,
@@ -52,12 +53,13 @@ impl ExtensionManager {
 
     /// Extract the first valid bare room JID from a matching declared node's `{room}`
     /// placeholder across loaded plugins.
+    #[must_use]
     pub fn room_for_pubsub_node(&self, node: &crate::types::PubSubNode) -> Option<RoomJid> {
         for actor in &self.actors {
             let manifest = actor.manifest();
             if let Some(room) = manifest.pubsub_nodes.iter().find_map(|pattern| {
                 pubsub_node_placeholder_value(pattern.as_str(), node.as_str(), "room")
-                    .and_then(|room| RoomJid::new(room).ok())
+                    .and_then(|room| RoomJid::try_new(room).ok())
             }) {
                 return Some(room);
             }
@@ -66,6 +68,7 @@ impl ExtensionManager {
     }
 
     /// Extract a valid bare room JID from the named plugin's matching PubSub node pattern.
+    #[must_use]
     pub fn room_for_plugin_pubsub_node(
         &self,
         plugin: &PluginId,
@@ -77,7 +80,7 @@ impl ExtensionManager {
             .and_then(|actor| {
                 actor.manifest().pubsub_nodes.iter().find_map(|pattern| {
                     pubsub_node_placeholder_value(pattern.as_str(), node.as_str(), "room")
-                        .and_then(|room| RoomJid::new(room).ok())
+                        .and_then(|room| RoomJid::try_new(room).ok())
                 })
             })
     }
@@ -102,7 +105,7 @@ impl ExtensionManager {
             Some(expires_at),
             &payload_digest,
         );
-        launch.token = crate::types::LaunchToken::new(token).ok();
+        launch.token = crate::types::LaunchToken::try_new(token).ok();
     }
 
     pub(super) fn verify_launch_token(&self, request: LaunchTokenVerification<'_>) -> bool {

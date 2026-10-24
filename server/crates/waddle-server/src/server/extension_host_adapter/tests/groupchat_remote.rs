@@ -244,7 +244,7 @@ impl Cluster {
 
     fn provider(&self, plugin: PluginId) -> InvocationContext {
         InvocationContext {
-            waddle_id: waddle_extensions::WaddleId::new("extension-space").expect("waddle"),
+            waddle_id: waddle_extensions::WaddleId::try_new("extension-space").expect("waddle"),
             plugin_id: plugin,
             requester: None,
             source_room: Some(self.owner.room.clone()),
@@ -265,7 +265,7 @@ impl Cluster {
     fn request(&self) -> SendMessageRequest {
         SendMessageRequest {
             target: MessageTarget::Muc(self.owner.room.clone()),
-            body: DisplayText::new("cross-node bot body").expect("body"),
+            body: DisplayText::try_new("cross-node bot body").expect("body"),
             thread_id: None,
             reply_to: None,
             markup: Vec::new(),
@@ -286,7 +286,7 @@ impl Cluster {
                 self.origin.adapter.send_host_message(
                     context,
                     request,
-                    StanzaId::new(offered).expect("offered id"),
+                    StanzaId::try_new(offered).expect("offered id"),
                 ),
             )
             .await
@@ -565,7 +565,7 @@ async fn denials_cross_nodes(f: IngressFixture) {
                 .send_host_message(
                     &provider,
                     request,
-                    StanzaId::new(offered).expect("offered id"),
+                    StanzaId::try_new(offered).expect("offered id"),
                 )
                 .await
         }))
@@ -782,7 +782,7 @@ async fn signed_on_owner(f: IngressFixture) {
         .deps
         .protocol
         .extension_manager = super::groupchat_signed::signed_manager().await;
-    let plugin = PluginId::new("message-hook-fixture").expect("fixture plugin");
+    let plugin = PluginId::try_new("message-hook-fixture").expect("fixture plugin");
     let mut tx = f.uow.begin().await.expect("grant tx");
     ExtensionGrantRepository::sync_configured(
         &mut tx,
@@ -799,7 +799,7 @@ async fn signed_on_owner(f: IngressFixture) {
         super::envelope_with_launch_room(Some(cluster.owner.room.to_string().as_str()));
     envelope.enrichments[0].plugin = plugin.clone();
     envelope.enrichments[0].payload_namespace =
-        waddle_extensions::types::PayloadNamespace::new("urn:test:message-hook")
+        waddle_extensions::types::PayloadNamespace::try_new("urn:test:message-hook")
             .expect("namespace");
     envelope.enrichments[0].launches[0].plugin = plugin.clone();
     let mut request = cluster.request();

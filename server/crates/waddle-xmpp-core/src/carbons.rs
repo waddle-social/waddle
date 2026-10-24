@@ -45,6 +45,7 @@ fn no_copy_suppresses_carbons(msg: &Message) -> bool {
 }
 
 /// Check if an IQ is a carbons enable request.
+#[must_use]
 pub fn is_carbons_enable(iq: &Iq) -> bool {
     match iq {
         Iq::Set { payload, .. } => payload.name() == "enable" && payload.ns() == CARBONS_NS,
@@ -53,6 +54,7 @@ pub fn is_carbons_enable(iq: &Iq) -> bool {
 }
 
 /// Check if an IQ is a carbons disable request.
+#[must_use]
 pub fn is_carbons_disable(iq: &Iq) -> bool {
     match iq {
         Iq::Set { payload, .. } => payload.name() == "disable" && payload.ns() == CARBONS_NS,
@@ -61,6 +63,7 @@ pub fn is_carbons_disable(iq: &Iq) -> bool {
 }
 
 /// Build a success response for carbons enable/disable.
+#[must_use]
 pub fn build_carbons_result(original_iq: &Iq) -> Iq {
     Iq::Result {
         from: original_iq.to().cloned(),
@@ -71,6 +74,7 @@ pub fn build_carbons_result(original_iq: &Iq) -> Iq {
 }
 
 /// Check whether a message is eligible for XEP-0280 carbon copying.
+#[must_use]
 pub fn should_copy_message(msg: &Message) -> bool {
     use xmpp_parsers::message::MessageType;
 

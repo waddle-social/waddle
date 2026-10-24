@@ -79,7 +79,7 @@ async fn async_main(inherited: Option<InheritedListeners>) -> Result<()> {
     }
 
     let pool_config = db::PoolConfig;
-    let db_pool = db::DatabasePool::new(db_config, pool_config)
+    let db_pool = db::DatabasePool::try_new(db_config, pool_config)
         .await
         .map_err(|e| anyhow::anyhow!("Failed to initialize database: {}", e))?;
 

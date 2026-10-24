@@ -33,6 +33,7 @@ pub enum ExtensionEffect {
 impl ExtensionEffect {
     /// Whether the effect is permitted by the manifest, treating all declared
     /// capabilities as granted.
+    #[must_use]
     pub fn validate_for_manifest(&self, manifest: &ExtensionManifest) -> bool {
         self.validate_for_manifest_and_grants(
             manifest,
@@ -43,6 +44,7 @@ impl ExtensionEffect {
     /// Whether the effect's capability, owning plugin, payload roots, command nodes, and
     /// PubSub node are permitted by both the manifest and operator grants. Warnings and
     /// no-ops are always permitted.
+    #[must_use]
     pub fn validate_for_manifest_and_grants(
         &self,
         manifest: &ExtensionManifest,
@@ -121,6 +123,7 @@ pub struct DetectedLink {
 }
 
 /// Whether a message already carries an extension envelope in the framework namespace.
+#[must_use]
 pub fn message_has_framework_envelope(msg: &Message) -> bool {
     msg.payloads
         .iter()

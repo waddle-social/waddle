@@ -134,7 +134,7 @@ async fn livekit_webhook_handler(
         .map(CallCorrelationId::as_str)
         .unwrap_or("unknown");
 
-    if let Some(event_id) = event.event_id().and_then(WebhookEventId::new) {
+    if let Some(event_id) = event.event_id().and_then(WebhookEventId::try_new) {
         match router_state.deliveries.observe(&event_id).await {
             Ok(WebhookDeliveryObservation::Done) => {
                 record_webhook_outcome(event_type, WebhookOutcome::Duplicate);
@@ -188,7 +188,7 @@ async fn livekit_webhook_handler(
             // straggling participant_left loss can't leave permanent
             // ghost Muji presence in the room.
             info!(room = %env.room.name, "LiveKit reported room finished; sweeping surviving participants");
-            match CallId::new(env.room.name.clone()) {
+            match CallId::try_new(env.room.name.clone()) {
                 Ok(call_id) => {
                     let survivors = sfu.participants_for_call(&call_id);
                     if survivors.is_empty() {
@@ -321,7 +321,7 @@ async fn livekit_webhook_handler(
                 );
                 record_webhook_outcome(event_type, WebhookOutcome::PermanentFailure);
             }
-            if let Some(event_id) = event.event_id().and_then(WebhookEventId::new) {
+            if let Some(event_id) = event.event_id().and_then(WebhookEventId::try_new) {
                 if let Err(error) = router_state.deliveries.complete(&event_id).await {
                     warn!(
                         event_id = %event_id,
@@ -412,7 +412,7 @@ async fn enqueue_muji_room_sweep(
     room_jid: &BareJid,
     room_sid: &RoomSid,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
-    let call_id = match CallId::new(room_jid.to_string()) {
+    let call_id = match CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
             warn!(
@@ -457,7 +457,7 @@ fn register_participant_from_join(
     let Some(sfu) = state.deps.protocol.sfu.as_ref() else {
         return SidObservationDisposition::Applied;
     };
-    let Ok(call_id) = CallId::new(env.room.name.clone()) else {
+    let Ok(call_id) = CallId::try_new(env.room.name.clone()) else {
         return SidObservationDisposition::Applied;
     };
     let Ok(full_jid) = env.participant.identity.parse::<FullJid>() else {
@@ -712,7 +712,7 @@ async fn process_participant_left_for_identity(
         return outcome;
     }
 
-    let call_id = match CallId::new(room_name.to_owned()) {
+    let call_id = match CallId::try_new(room_name.to_owned()) {
         Ok(call_id) => call_id,
         Err(error) => {
             warn!(
@@ -1055,7 +1055,7 @@ mod tests {
         assert_eq!(notes[0].1.as_jid(), &survivor_jid);
         assert_eq!(
             notes[0].2.room_sid,
-            Some(RoomSid::new("RM_finished").expect("room sid"))
+            Some(RoomSid::try_new("RM_finished").expect("room sid"))
         );
         assert_eq!(notes[0].2.participant_sid, None);
     }
@@ -1111,7 +1111,7 @@ mod tests {
         );
         assert_eq!(
             jobs[0].intent.room_sid,
-            Some(RoomSid::new("RM_enqueue").expect("room sid"))
+            Some(RoomSid::try_new("RM_enqueue").expect("room sid"))
         );
     }
 
@@ -1156,7 +1156,7 @@ mod tests {
         assert_eq!(notes[0].1.as_jid(), &survivor_jid);
         assert_eq!(
             notes[0].2.room_sid,
-            Some(RoomSid::new("RM_immediate").expect("room sid"))
+            Some(RoomSid::try_new("RM_immediate").expect("room sid"))
         );
         let queued = state
             .deps
@@ -1182,7 +1182,9 @@ mod tests {
             Arc::new(super::super::webhook_delivery::InMemoryWebhookDeliveryStore::default());
         assert_eq!(
             store
-                .observe(&WebhookEventId::new("EV_processing_redelivery").expect("test event id"))
+                .observe(
+                    &WebhookEventId::try_new("EV_processing_redelivery").expect("test event id")
+                )
                 .await
                 .expect("seed processing delivery"),
             WebhookDeliveryObservation::Processing
@@ -1217,14 +1219,16 @@ mod tests {
         assert_eq!(recorder.note_snapshot().len(), 1);
         assert_eq!(
             store
-                .status(&WebhookEventId::new("EV_processing_redelivery").expect("test event id"))
+                .status(
+                    &WebhookEventId::try_new("EV_processing_redelivery").expect("test event id")
+                )
                 .expect("delivery status"),
             Some(WebhookDeliveryObservation::Done)
         );
         assert_eq!(
             store
                 .attempt_count(
-                    &WebhookEventId::new("EV_processing_redelivery").expect("test event id")
+                    &WebhookEventId::try_new("EV_processing_redelivery").expect("test event id")
                 )
                 .expect("attempt count"),
             Some(2)
@@ -1275,7 +1279,8 @@ mod tests {
         assert_eq!(
             store
                 .status(
-                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                    &WebhookEventId::try_new("EV_retryable_participant_left")
+                        .expect("test event id")
                 )
                 .expect("processing status"),
             Some(WebhookDeliveryObservation::Processing)
@@ -1283,7 +1288,8 @@ mod tests {
         assert_eq!(
             store
                 .attempt_count(
-                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                    &WebhookEventId::try_new("EV_retryable_participant_left")
+                        .expect("test event id")
                 )
                 .expect("first attempt count"),
             Some(1)
@@ -1308,7 +1314,7 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
-                authenticated_session: &Some(session),
+                authenticated_session: Some(&session),
                 registry_owner: None,
             },
         )
@@ -1336,7 +1342,8 @@ mod tests {
         assert_eq!(
             store
                 .status(
-                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                    &WebhookEventId::try_new("EV_retryable_participant_left")
+                        .expect("test event id")
                 )
                 .expect("done status"),
             Some(WebhookDeliveryObservation::Done)
@@ -1344,7 +1351,8 @@ mod tests {
         assert_eq!(
             store
                 .attempt_count(
-                    &WebhookEventId::new("EV_retryable_participant_left").expect("test event id")
+                    &WebhookEventId::try_new("EV_retryable_participant_left")
+                        .expect("test event id")
                 )
                 .expect("retry attempt count"),
             Some(2)
@@ -1394,7 +1402,7 @@ mod tests {
         assert_eq!(recorder.note_snapshot().len(), 1);
         assert_eq!(
             store
-                .status(&WebhookEventId::new("EV_absent_room_actor").expect("test event id"))
+                .status(&WebhookEventId::try_new("EV_absent_room_actor").expect("test event id"))
                 .expect("delivery status"),
             Some(WebhookDeliveryObservation::Done)
         );
@@ -1404,7 +1412,7 @@ mod tests {
                 .protocol
                 .call_teardown_outbox
                 .has_pending_muji_presence_clear(
-                    &CallId::new("room@muc.example.com").expect("room call id"),
+                    &CallId::try_new("room@muc.example.com").expect("room call id"),
                     &"alice@example.com/web"
                         .parse::<FullJid>()
                         .expect("full jid"),
@@ -1451,13 +1459,15 @@ mod tests {
         assert!(recorder.note_snapshot().is_empty());
         assert_eq!(
             store
-                .status(&WebhookEventId::new("EV_permanent_bad_jid").expect("test event id"))
+                .status(&WebhookEventId::try_new("EV_permanent_bad_jid").expect("test event id"))
                 .expect("delivery status"),
             Some(WebhookDeliveryObservation::Done)
         );
         assert_eq!(
             store
-                .attempt_count(&WebhookEventId::new("EV_permanent_bad_jid").expect("test event id"))
+                .attempt_count(
+                    &WebhookEventId::try_new("EV_permanent_bad_jid").expect("test event id")
+                )
                 .expect("attempt count"),
             Some(1)
         );
@@ -1724,7 +1734,7 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
-                authenticated_session: &Some(session),
+                authenticated_session: Some(&session),
                 registry_owner: None,
             },
         )
@@ -1779,7 +1789,7 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
-                authenticated_session: &Some(session),
+                authenticated_session: Some(&session),
                 registry_owner: None,
             },
         )
@@ -1927,8 +1937,8 @@ mod tests {
         let departed = "bob@example.com/phone";
         let observed_sids = ObservedCallSids {
             observed_event_at: None,
-            room_sid: Some(RoomSid::new("RM_observed").expect("room sid")),
-            participant_sid: Some(ParticipantSid::new("PA_observed").expect("participant sid")),
+            room_sid: Some(RoomSid::try_new("RM_observed").expect("room sid")),
+            participant_sid: Some(ParticipantSid::try_new("PA_observed").expect("participant sid")),
         };
 
         process_participant_left_for_identity(
@@ -1959,11 +1969,11 @@ mod tests {
             id: Some("EV_joined_observed".to_owned()),
             room: RoomInfo {
                 name: "alice@example.com::dm-observed".to_owned(),
-                sid: Some(RoomSid::new("RM_joined").expect("room sid")),
+                sid: Some(RoomSid::try_new("RM_joined").expect("room sid")),
             },
             participant: ParticipantInfo {
                 identity: "bob@example.com/phone".to_owned(),
-                sid: Some(ParticipantSid::new("PA_joined").expect("participant sid")),
+                sid: Some(ParticipantSid::try_new("PA_joined").expect("participant sid")),
                 state: None,
             },
         };
@@ -2033,7 +2043,9 @@ mod tests {
         assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
         assert_eq!(
             store
-                .status(&WebhookEventId::new("EV_room_rotation_pending").expect("test event id"))
+                .status(
+                    &WebhookEventId::try_new("EV_room_rotation_pending").expect("test event id")
+                )
                 .expect("processing status"),
             Some(WebhookDeliveryObservation::Processing),
             "the pending join must remain eligible for LiveKit redelivery"
@@ -2058,11 +2070,11 @@ mod tests {
             id: Some("EV_joined_stale".to_owned()),
             room: RoomInfo {
                 name: "alice@example.com::dm-stale".to_owned(),
-                sid: Some(RoomSid::new("RM_old").expect("room sid")),
+                sid: Some(RoomSid::try_new("RM_old").expect("room sid")),
             },
             participant: ParticipantInfo {
                 identity: "bob@example.com/phone".to_owned(),
-                sid: Some(ParticipantSid::new("PA_old").expect("participant sid")),
+                sid: Some(ParticipantSid::try_new("PA_old").expect("participant sid")),
                 state: None,
             },
         };
@@ -2090,16 +2102,16 @@ mod tests {
         let room_jid: BareJid = "rotating-sid@muc.example.com".parse().expect("room jid");
         let room_name = room_jid.to_string();
         let alice: FullJid = "alice@example.com/web".parse().expect("full jid");
-        let call_id = CallId::new(room_name.clone()).expect("call id");
+        let call_id = CallId::try_new(room_name.clone()).expect("call id");
         let identity = Identity::from_jid(alice.clone());
-        let shared_room_sid = RoomSid::new("RM_rotate").expect("room sid");
+        let shared_room_sid = RoomSid::try_new("RM_rotate").expect("room sid");
         let old_sids = ObservedCallSids::new(
             Some(shared_room_sid.clone()),
-            Some(ParticipantSid::new("PA_old").expect("participant sid")),
+            Some(ParticipantSid::try_new("PA_old").expect("participant sid")),
         );
         let current_sids = ObservedCallSids::new(
             Some(shared_room_sid.clone()),
-            Some(ParticipantSid::new("PA_current").expect("participant sid")),
+            Some(ParticipantSid::try_new("PA_current").expect("participant sid")),
         );
 
         let alice_occupancy_session = waddle_xmpp_core::OccupancySessionGeneration::mint();
@@ -2112,7 +2124,7 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
-                authenticated_session: &Some(session),
+                authenticated_session: Some(&session),
                 registry_owner: None,
             },
         )
@@ -2270,15 +2282,15 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: alice_occupancy_session,
-                authenticated_session: &Some(session),
+                authenticated_session: Some(&session),
                 registry_owner: None,
             },
         )
         .await;
         let observed_sids = ObservedCallSids {
             observed_event_at: None,
-            room_sid: Some(RoomSid::new("RM_stale").expect("room sid")),
-            participant_sid: Some(ParticipantSid::new("PA_stale").expect("participant sid")),
+            room_sid: Some(RoomSid::try_new("RM_stale").expect("room sid")),
+            participant_sid: Some(ParticipantSid::try_new("PA_stale").expect("participant sid")),
         };
         let room_name = room_jid.to_string();
 
@@ -2330,7 +2342,7 @@ mod tests {
             .clone();
         let alice: FullJid = "alice@example.com/web".parse().expect("alice full jid");
         let bob: FullJid = "bob@example.com/phone".parse().expect("bob full jid");
-        let call_id = CallId::new("alice@example.com::dm-1128").expect("scoped call id");
+        let call_id = CallId::try_new("alice@example.com::dm-1128").expect("scoped call id");
         let alice_identity = Identity::from_jid(alice.clone());
         let bob_identity = Identity::from_jid(bob.clone());
         let bob_token = sfu
@@ -2369,7 +2381,7 @@ mod tests {
             "example.com",
             "muc.example.com",
             state.as_ref(),
-            &None,
+            None,
             &ConnectionPhase::ready(alice.clone(), false),
         )
         .await;

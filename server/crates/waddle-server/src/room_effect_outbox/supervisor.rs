@@ -372,7 +372,7 @@ mod tests {
     async fn store_with_db(name: &str) -> (Database, Arc<RoomEffectOutboxStore>) {
         let database = Database::in_memory(name).await.expect("database");
         let store = Arc::new(
-            RoomEffectOutboxStore::new(database.clone())
+            RoomEffectOutboxStore::try_new(database.clone())
                 .await
                 .expect("store"),
         );
@@ -392,7 +392,7 @@ mod tests {
     }
 
     fn origin() -> RoomEffectOriginInstanceId {
-        RoomEffectOriginInstanceId::new("origin-instance".to_owned()).expect("origin instance")
+        RoomEffectOriginInstanceId::try_new("origin-instance".to_owned()).expect("origin instance")
     }
 
     fn producing_node() -> RoomEffectProducingNode {

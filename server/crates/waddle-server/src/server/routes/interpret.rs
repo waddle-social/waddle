@@ -707,7 +707,7 @@ async fn interpret_with_depth(
                     }
                 }
                 if tombstone_outcome.tombstoned() && deps.effects.is_planning() {
-                    if let Some(message_id) = RichMessageId::new(target_message_id.clone()) {
+                    if let Some(message_id) = RichMessageId::try_new(target_message_id.clone()) {
                         preview_plan::clear(deps, &room, &message_id).await;
                     }
                 }

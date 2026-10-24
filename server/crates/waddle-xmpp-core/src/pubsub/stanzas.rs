@@ -49,6 +49,7 @@ pub struct PubSubItem {
 
 impl PubSubItem {
     /// Create an item with the supplied identifier and payload and no publisher attribution.
+    #[must_use]
     pub fn new(id: Option<String>, payload: Option<Element>) -> Self {
         Self {
             id,
@@ -58,12 +59,14 @@ impl PubSubItem {
     }
 
     /// Set the publisher and return the updated value.
+    #[must_use]
     pub fn with_publisher(mut self, publisher: Option<BareJid>) -> Self {
         self.publisher = publisher;
         self
     }
 
     /// Parse the supported protocol fields from an XML element.
+    #[must_use]
     pub fn from_element(elem: &Element) -> Self {
         let publisher = elem
             .attr("publisher")
@@ -76,6 +79,7 @@ impl PubSubItem {
     }
 
     /// Serialize this value as a typed XML element.
+    #[must_use]
     pub fn to_element(&self, ns: &str) -> Element {
         let mut builder = Element::builder("item", ns);
 
@@ -109,6 +113,7 @@ pub struct PubSubEvent {
 
 impl PubSubEvent {
     /// Create a publication event for the node and its supplied items.
+    #[must_use]
     pub fn new(node: impl Into<String>, items: Vec<PubSubItem>) -> Self {
         Self {
             node: node.into(),
@@ -230,6 +235,7 @@ pub enum PubSubUnsupportedFeature {
 
 impl PubSubUnsupportedFeature {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::ManageSubscriptions => "manage-subscriptions",
@@ -239,6 +245,7 @@ impl PubSubUnsupportedFeature {
 
 /// PubSub-specific error conditions.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PubSubError {
     /// The selected PubSub node does not exist.
     NodeNotFound,
@@ -275,6 +282,7 @@ pub enum PubSubError {
 }
 
 /// Check if an IQ is a PubSub request.
+#[must_use]
 pub fn is_pubsub_iq(iq: &Iq) -> bool {
     match iq {
         Iq::Get { payload, .. } | Iq::Set { payload, .. } => {
@@ -286,6 +294,7 @@ pub fn is_pubsub_iq(iq: &Iq) -> bool {
 }
 
 /// Check if a message is a PubSub event notification.
+#[must_use]
 pub fn is_pubsub_event(message: &Message) -> bool {
     message
         .payloads

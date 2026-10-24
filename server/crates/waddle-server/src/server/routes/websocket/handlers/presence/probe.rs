@@ -22,7 +22,7 @@ pub(super) async fn handle_presence_probe(
         .deps
         .protocol
         .connection_registry
-        .get_available_resources_for_user(&to);
+        .available_resources_for_user(&to);
     let mut detached_available = match state
         .deps
         .protocol
@@ -118,7 +118,7 @@ pub(super) async fn handle_presence_probe(
             .deps
             .protocol
             .connection_registry
-            .get_presence_state(&resource);
+            .presence_state(&resource);
         let mut probe_response = build_available_presence(
             &resource,
             &from,

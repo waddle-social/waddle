@@ -50,7 +50,7 @@ async fn ingress_append_authority(
             .expect("SM persistence"),
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -504,7 +504,7 @@ async fn ingress_append_authority(
 // obligation unchanged and never reads canonical state: the next receiver
 // authorizes it at its own append decision (#1790).
 async fn forwarded_obligation_survives_intermediate_hop(fixture: IngressFixture) {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -852,7 +852,7 @@ struct RegisteredRemoteOwner {
 
 impl RegisteredRemoteOwner {
     async fn new(fixture: IngressFixture) -> Self {
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             crate::db::PoolConfig,
         )

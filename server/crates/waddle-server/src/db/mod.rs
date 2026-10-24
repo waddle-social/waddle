@@ -173,6 +173,15 @@ impl DatabaseConfig {
     }
 }
 
+/// Storage lifetime of a SQLite pool supplied by another store.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SqlitePoolStorage {
+    /// Data exists only for the lifetime of the in-memory database.
+    InMemory,
+    /// Data is backed by a durable SQLite database.
+    Persistent,
+}
+
 /// Logical database handle.
 #[derive(Clone, kameo::Reply)]
 pub struct Database {
@@ -225,13 +234,17 @@ impl Database {
 
     /// Wrap a physical external SQLx pool so shared database helpers can run
     /// against that exact pool without opening a second connection set.
-    pub(crate) fn from_sqlite_pool(name: &str, pool: SqlitePool, in_memory: bool) -> Self {
+    pub(crate) fn from_sqlite_pool(
+        name: &str,
+        pool: SqlitePool,
+        storage: SqlitePoolStorage,
+    ) -> Self {
         Self {
             backend: DatabaseBackend::Sqlite(pool),
             control_plane_backend: None,
             name: name.to_string(),
             driver: DatabaseDriver::Sqlite,
-            database_url: if in_memory {
+            database_url: if storage == SqlitePoolStorage::InMemory {
                 "sqlite::memory:".to_string()
             } else {
                 "sqlite:external-pool".to_string()

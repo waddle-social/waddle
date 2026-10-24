@@ -140,7 +140,7 @@ async fn restoring_live_roster_preserves_pending_members_only_config_removals() 
 
     let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
     assert!(
-        snapshot.room.get_occupant("visitor").is_some(),
+        snapshot.room.occupant("visitor").is_some(),
         "config recovery must retain the occupant until it records owed status-322 effects"
     );
 }
@@ -180,7 +180,7 @@ async fn restoring_live_roster_preserves_explicit_roles_without_authorization_ch
         assert_eq!(
             snapshot
                 .room
-                .get_occupant("visitor")
+                .occupant("visitor")
                 .expect("visitor retained")
                 .role,
             role
@@ -1138,11 +1138,8 @@ async fn admin_cannot_modify_admin_affiliations() {
     ));
 
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
-    assert_eq!(snapshot.get_affiliation(&target_admin), Affiliation::Admin);
-    assert_eq!(
-        snapshot.get_affiliation(&target_member),
-        Affiliation::Member
-    );
+    assert_eq!(snapshot.affiliation(&target_admin), Affiliation::Admin);
+    assert_eq!(snapshot.affiliation(&target_member), Affiliation::Member);
 }
 
 #[tokio::test]
@@ -1215,9 +1212,9 @@ async fn affiliation_batch_validation_happens_before_members_only_ejection() {
         ))
     ));
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot").room;
-    assert_eq!(snapshot.get_affiliation(&alice_bare), Affiliation::Member);
+    assert_eq!(snapshot.affiliation(&alice_bare), Affiliation::Member);
     assert_eq!(snapshot.find_nick_by_real_jid(&alice), Some("alice"));
-    assert_eq!(snapshot.get_affiliation(&owner_bare), Affiliation::Owner);
+    assert_eq!(snapshot.affiliation(&owner_bare), Affiliation::Owner);
 }
 
 #[tokio::test]
@@ -1472,7 +1469,7 @@ async fn unmanaged_members_only_post_enforcement_snapshot_excludes_removed_confi
         .room
         .occupants
         .values()
-        .flat_map(|occupant| snapshot.room.get_occupant_sessions(&occupant.nick))
+        .flat_map(|occupant| snapshot.room.occupant_sessions(&occupant.nick))
         .collect();
     assert_eq!(
         config_recipients,
@@ -5007,7 +5004,7 @@ async fn retry_of_an_attempt_older_than_the_live_session_is_superseded() {
     );
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert!(
-        snapshot.room.get_occupant("alice").is_some(),
+        snapshot.room.occupant("alice").is_some(),
         "the live session joined after the stale attempt and must remain"
     );
 }
@@ -5056,7 +5053,7 @@ async fn old_receipt_is_not_replayed_after_the_rejoined_session_was_kicked() {
         .await
         .expect("kick alice");
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
-    assert!(snapshot.room.get_occupant("alice").is_none(), "kicked");
+    assert!(snapshot.room.occupant("alice").is_none(), "kicked");
     assert!(
         snapshot
             .departures
@@ -5251,7 +5248,7 @@ async fn receipt_replays_while_a_sibling_session_still_holds_the_nick() {
             .await
             .expect("snapshot")
             .room
-            .get_occupant("alice")
+            .occupant("alice")
             .is_some(),
         "mobile keeps the nick"
     );
@@ -5295,7 +5292,7 @@ async fn replayed_final_departure_is_superseded_when_the_same_account_retook_the
             .await
             .expect("snapshot")
             .room
-            .get_occupant("alice")
+            .occupant("alice")
             .is_some(),
         "web2 keeps the nick"
     );
@@ -5343,7 +5340,7 @@ async fn coalesced_retry_is_superseded_when_the_same_account_retook_the_freed_ni
         .await
         .expect("snapshot")
         .room
-        .get_occupant("alice")
+        .occupant("alice")
         .is_some());
 }
 
@@ -5842,7 +5839,7 @@ async fn replayed_receipt_is_superseded_when_the_nick_was_retaken() {
     assert_eq!(
         snapshot
             .room
-            .get_occupant("alice")
+            .occupant("alice")
             .map(|occupant| &occupant.real_jid),
         Some(&bob),
         "the retry must not evict the current nick holder"
@@ -6117,7 +6114,7 @@ async fn join_with_lost_claim_projects_nothing() {
     // Resolver cache writes intentionally precede the projection commit so a
     // revocation is visible to admission checks even while the store is down.
     assert_eq!(
-        snapshot.room.get_affiliation(&alice.to_bare()),
+        snapshot.room.affiliation(&alice.to_bare()),
         Affiliation::Member
     );
 }
@@ -6578,7 +6575,7 @@ fn departure_receipts_keep_only_the_newest_generation_per_jid() {
         super::DepartureReceiptOutcome::Left(Box::new(LeaveOutcome {
             provenance: crate::muc::room_actor::DepartureProvenance::Live,
             acknowledge: LeaveAttemptId::generate(),
-            nick: crate::muc::MucOccupantNick::new(nick.to_owned()).expect("valid test nick"),
+            nick: crate::muc::MucOccupantNick::try_new(nick.to_owned()).expect("valid test nick"),
             affiliation: Affiliation::Member,
             role: Role::Participant,
             leaving_room_jid: test_room()
@@ -7028,7 +7025,7 @@ async fn simulate_crash_after_projection_commit(
         .commit_projection(crate::muc::durable::RoomProjection::OccupancyJoin {
             occupant: test_full_jid("alice"),
             session: waddle_xmpp_core::OccupancySessionGeneration::mint(),
-            nick: crate::muc::durable::MucOccupantNick::new("alice".to_owned())
+            nick: crate::muc::durable::MucOccupantNick::try_new("alice".to_owned())
                 .expect("valid nick"),
         })
         .await
@@ -10063,7 +10060,7 @@ async fn resolver_write_does_not_downgrade_explicit_grant() {
     room.update_affiliation_from_resolver(alice.clone(), Affiliation::Member);
 
     assert_eq!(
-        room.get_affiliation(&alice),
+        room.affiliation(&alice),
         Affiliation::Admin,
         "resolver-derived Member must not downgrade the explicit Admin grant"
     );
@@ -10713,7 +10710,7 @@ async fn host_owned_join_is_transient_and_unaffiliated() {
     let snapshot = actor.ask(GetSnapshot).await.expect("snapshot");
     assert_eq!(snapshot.room.occupants["helper"].role, Role::Participant);
     assert!(
-        snapshot.room.get_all_affiliations().is_empty(),
+        snapshot.room.all_affiliations().is_empty(),
         "no affiliation entry is written"
     );
     assert_eq!(snapshot.admission_revision, revision);

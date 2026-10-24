@@ -45,7 +45,7 @@ fn bare(value: &str) -> BareJid {
 }
 
 fn filter_id(s: &str) -> MamFilterStanzaId {
-    MamFilterStanzaId::new(s).expect("valid test fixture id")
+    MamFilterStanzaId::try_new(s).expect("valid test fixture id")
 }
 
 /// Build an `ArchivedMessage` that mirrors the production data layout.

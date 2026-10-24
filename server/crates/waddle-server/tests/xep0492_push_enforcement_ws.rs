@@ -270,7 +270,7 @@ fn xep0492_public_group_default_delivers_personal_mention_for_mentioned_non_memb
     );
     let archive_stanza_id =
         waddle_xmpp_core::xep0359::StanzaId::new("archive-1", jid::Jid::from(room.clone()));
-    let secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+    let secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
         b"xep0492-mention-non-member-secret-32b".to_vec(),
     )
     .expect("occupant-id secret");

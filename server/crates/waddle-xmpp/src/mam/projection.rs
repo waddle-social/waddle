@@ -154,13 +154,13 @@ fn prototype_body(message: &Message) -> Option<String> {
 /// fails JID parsing we drop the malformed `to` field and keep the
 /// reply (logging a warning), rather than discarding the entire reply
 /// reference. A reply element with no `id` attribute (or an empty `id`,
-/// which `RichMessageId::new` rejects) is treated as no reply at all.
+/// which `RichMessageId::try_new` rejects) is treated as no reply at all.
 fn extract_reply_reference(message: &Message) -> Option<ArchivedReply> {
     let reply = message
         .payloads
         .iter()
         .find(|payload| payload.name() == "reply" && payload.ns() == NS_REPLY)?;
-    let id = RichMessageId::new(reply.attr("id")?)?;
+    let id = RichMessageId::try_new(reply.attr("id")?)?;
     let to = reply.attr("to").and_then(|raw| match raw.parse::<Jid>() {
         Ok(jid) => Some(jid),
         Err(error) => {
@@ -197,24 +197,25 @@ fn serialize_message_xml(message: &Message) -> Option<String> {
 fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
     let payload = extract_correction_from_message(message)
         .and_then(|correction| {
-            RichMessageId::new(correction.replaces_id)
+            RichMessageId::try_new(correction.replaces_id)
                 .map(|replaces_id| ArchivedRichPayload::Correction { replaces_id })
         })
         .or_else(|| {
             extract_retraction_from_message(message).and_then(|kind| match kind {
-                RetractionKind::Request(retraction) => RichMessageId::new(retraction.retracts_id)
-                    .map(|target_id| {
+                RetractionKind::Request(retraction) => {
+                    RichMessageId::try_new(retraction.retracts_id).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
                             stamp: None,
                             retraction_id: message
                                 .id
                                 .clone()
-                                .and_then(|id| RichMessageId::new(id.0)),
+                                .and_then(|id| RichMessageId::try_new(id.0)),
                         })
-                    }),
+                    })
+                }
                 RetractionKind::Tombstone(retracted) => message.id.clone().and_then(|id| {
-                    RichMessageId::new(id.0).map(|target_id| {
+                    RichMessageId::try_new(id.0).map(|target_id| {
                         ArchivedRichPayload::Retraction(ArchivedRetraction {
                             target_id,
                             stamp: retracted
@@ -222,7 +223,7 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                                 .as_deref()
                                 .and_then(|stamp| chrono::DateTime::parse_from_rfc3339(stamp).ok())
                                 .map(|stamp| stamp.with_timezone(&Utc)),
-                            retraction_id: RichMessageId::new(retracted.retraction_id),
+                            retraction_id: RichMessageId::try_new(retracted.retraction_id),
                         })
                     })
                 }),
@@ -230,13 +231,13 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
         })
         .or_else(|| {
             extract_reactions_from_message(message).and_then(|reactions| {
-                RichMessageId::new(reactions.message_id).map(|target_id| {
+                RichMessageId::try_new(reactions.message_id).map(|target_id| {
                     ArchivedRichPayload::Reactions(ArchivedReactionSet {
                         target_id,
                         emojis: reactions
                             .emojis
                             .into_iter()
-                            .filter_map(RichText::new)
+                            .filter_map(RichText::try_new)
                             .collect(),
                     })
                 })
@@ -244,19 +245,19 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
         });
 
     let reply = parse_reply_from_message(message).and_then(|reply| {
-        RichMessageId::new(reply.id.as_str()).map(|id| ArchivedReply { id, to: reply.to })
+        RichMessageId::try_new(reply.id.as_str()).map(|id| ArchivedReply { id, to: reply.to })
     });
 
     let references = extract_references_from_message(message)
         .into_iter()
         .filter_map(|reference| {
-            let ref_type = RichText::new(reference.ref_type.as_str())?;
+            let ref_type = RichText::try_new(reference.ref_type.as_str())?;
             Some(ArchivedReference {
                 ref_type,
                 begin: reference.begin.and_then(|value| value.try_into().ok()),
                 end: reference.end.and_then(|value| value.try_into().ok()),
-                uri: RichText::new(reference.uri),
-                anchor: reference.anchor.and_then(RichText::new),
+                uri: RichText::try_new(reference.uri),
+                anchor: reference.anchor.and_then(RichText::try_new),
             })
         })
         .collect::<Vec<_>>();
@@ -270,9 +271,9 @@ fn rich_archive_payload(message: &Message) -> Option<ArchivedRichMessage> {
                     begin: mention.begin,
                     end: mention.end,
                     jid: mention.jid,
-                    occupant_id: mention.occupant_id.and_then(RichText::new),
-                    mentions: mention.mentions.and_then(RichText::new),
-                    uri: mention.uri.and_then(RichText::new),
+                    occupant_id: mention.occupant_id.and_then(RichText::try_new),
+                    mentions: mention.mentions.and_then(RichText::try_new),
+                    uri: mention.uri.and_then(RichText::try_new),
                     active: mention.active,
                     noping: mention.noping,
                 })

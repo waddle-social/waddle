@@ -60,6 +60,7 @@ pub enum GroupDmHistoryAccess {
 
 impl GroupDmHistoryAccess {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::FromJoin => "from-join",

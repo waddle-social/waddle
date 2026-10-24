@@ -195,7 +195,7 @@ async fn policy_drift(fixture: IngressFixture, duplicate: bool) {
         else {
             panic!("candidate")
         };
-        NotificationOutboxStore::new(fixture.db.clone())
+        NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("outbox")
             .insert_candidate(candidate)

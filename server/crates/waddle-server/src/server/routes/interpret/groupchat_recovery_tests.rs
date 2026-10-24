@@ -10,7 +10,7 @@ use std::sync::Arc;
 use waddle_xmpp::ingress::{GroupchatNotificationRecoveryAction, NotificationActivityMutation};
 
 async fn state_for(fixture: &IngressFixture) -> Arc<WebSocketState> {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

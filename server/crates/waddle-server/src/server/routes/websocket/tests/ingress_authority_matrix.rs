@@ -56,7 +56,7 @@ async fn room_dispatch_plan_failures_case(state: Arc<WebSocketState>) {
                     .is("close", xmpp_parsers::ns::WEBSOCKET));
             })
             .await;
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
         for table in [
             "ingress_messages",
             "ingress_origin_aliases",

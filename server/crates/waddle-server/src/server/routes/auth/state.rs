@@ -58,7 +58,7 @@ impl AuthState {
         let session_manager =
             SessionManager::new(app_state.db_pool.global_actor().clone(), encryption_key);
         let identity_service = IdentityService::new(app_state.db_pool.global_actor().clone());
-        let providers = ProviderRegistry::new(server_config.auth.providers.clone())
+        let providers = ProviderRegistry::try_new(server_config.auth.providers.clone())
             .unwrap_or_else(|e| panic!("invalid provider config at startup: {}", e));
 
         let xmpp_domain =

@@ -8,7 +8,7 @@ use waddle_xmpp::xep::xep0191::InMemoryBlockingStorage;
 
 fn context() -> host::InvocationContext {
     host::InvocationContext {
-        waddle_id: WaddleId::new("host-boundary").expect("waddle"),
+        waddle_id: WaddleId::try_new("host-boundary").expect("waddle"),
         plugin_id: plugin(),
         requester: Some("romeo@example.com".parse().expect("requester")),
         source_room: None,
@@ -20,7 +20,7 @@ fn context() -> host::InvocationContext {
 fn host_request() -> host::SendMessageRequest {
     host::SendMessageRequest {
         target: host::MessageTarget::Direct("juliet@example.com".parse().expect("recipient")),
-        body: DisplayText::new("extension direct body").expect("body"),
+        body: DisplayText::try_new("extension direct body").expect("body"),
         thread_id: None,
         reply_to: None,
         markup: vec![],

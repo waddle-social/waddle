@@ -716,11 +716,7 @@ where
                     }
                     if let Err(outcome) = send_window_message(
                         sender,
-                        Message::Text(
-                            SmAck::new(conn.sm_state.get_inbound_count())
-                                .to_xml()
-                                .into(),
-                        ),
+                        Message::Text(SmAck::new(conn.sm_state.inbound_count()).to_xml().into()),
                         "Failed to answer client SM <r/> during send-window pause",
                         authority,
                     )
@@ -805,11 +801,7 @@ where
         .map_err(|_| SendWindowOutcome::TransportClosed)?;
         send_window_message(
             sender,
-            Message::Text(
-                SmAck::new(conn.sm_state.get_inbound_count())
-                    .to_xml()
-                    .into(),
-            ),
+            Message::Text(SmAck::new(conn.sm_state.inbound_count()).to_xml().into()),
             "Failed to answer deferred client SM <r/> during send-window pause",
             authority,
         )

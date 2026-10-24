@@ -29,7 +29,7 @@ use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 fn test_occupant_id_secret() -> OccupantIdSecret {
     // ≥32 bytes so the value also passes the production length floor;
     // the L4 wire-trace fixture mirrors what a real deployment would carry.
-    OccupantIdSecret::new(b"l4-wire-trace-occupant-id-secret-32b".to_vec())
+    OccupantIdSecret::try_new(b"l4-wire-trace-occupant-id-secret-32b".to_vec())
         .expect("test secret meets length floor")
 }
 

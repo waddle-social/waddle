@@ -17,25 +17,25 @@ fn observation() -> ExtensionEvent {
     ExtensionEvent::RoomMessageObserve(RoomMessageObserve {
         source: RoomMessageSource {
             room: "room@muc.example.com".parse().expect("room"),
-            stanza_id: StanzaId::new("room-stanza").expect("stanza"),
-            revision_stanza_id: StanzaId::new("room-stanza").expect("revision"),
-            origin_id: Some(OriginId::new("source-origin").expect("origin")),
+            stanza_id: StanzaId::try_new("room-stanza").expect("stanza"),
+            revision_stanza_id: StanzaId::try_new("room-stanza").expect("revision"),
+            origin_id: Some(OriginId::try_new("source-origin").expect("origin")),
             sender: "alice@example.com".parse().expect("sender"),
             revision: MessageRevision::new(0),
-            body_digest: Sha256Digest::new(
+            body_digest: Sha256Digest::try_new(
                 "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
             )
             .expect("digest"),
-            observed_at: Timestamp::new("2026-09-26T12:00:00Z").expect("timestamp"),
+            observed_at: Timestamp::try_new("2026-09-26T12:00:00Z").expect("timestamp"),
         },
-        body: DisplayText::new("hello").expect("body"),
+        body: DisplayText::try_new("hello").expect("body"),
     })
 }
 
 fn context() -> InvocationContext {
     InvocationContext {
-        waddle_id: WaddleId::new("local").expect("waddle"),
-        plugin_id: PluginId::new("jev-judgments").expect("plugin"),
+        waddle_id: WaddleId::try_new("local").expect("waddle"),
+        plugin_id: PluginId::try_new("jev-judgments").expect("plugin"),
         requester: None,
         source_room: Some("room@muc.example.com".parse().expect("room")),
         kind: InvocationKind::RoomMessageObserve,
@@ -50,7 +50,7 @@ async fn jev_fresh_instance_reads_its_config_before_http() {
         // supplies this path and executes this test against the actual artifact.
         return;
     };
-    let runtime = WasmRuntime::new().expect("runtime");
+    let runtime = WasmRuntime::try_new().expect("runtime");
     let extension = LoadedExtension::load(&runtime, Path::new(&path)).expect("guest component");
     let valid_config = r#"{"api_key":"fake-test-key"}"#;
     extension.call_init(valid_config).await.expect("guest init");

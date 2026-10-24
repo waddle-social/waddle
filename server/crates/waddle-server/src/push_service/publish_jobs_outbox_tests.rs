@@ -27,7 +27,7 @@ async fn live_outbox_keeps_collected_parent_acceptance(
     fixture: IngressFixture,
     scenario: ProofScenario,
 ) {
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("upstream schema");
     let push = DatabasePushServiceStore::new_with_secret_key(
@@ -36,7 +36,7 @@ async fn live_outbox_keeps_collected_parent_acceptance(
     )
     .await
     .expect("provider");
-    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+    crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registration schema");
     let node = push
@@ -395,8 +395,8 @@ async fn exact_canonical_terminal_proof(fixture: IngressFixture) {
         .ensure_node(&owner(), "proof-other")
         .await
         .expect("other node");
-    let node =
-        crate::notification_outbox::PushServiceNodeName::new(target.node()).expect("typed node");
+    let node = crate::notification_outbox::PushServiceNodeName::try_new(target.node())
+        .expect("typed node");
     let service: BareJid = "push.example.com".parse().expect("service");
     let delivery = uuid::Uuid::new_v4();
     let item = notification_item(&delivery.to_string());
@@ -416,7 +416,7 @@ async fn exact_canonical_terminal_proof(fixture: IngressFixture) {
         .expect("exact proof"),
         Some(CanonicalNotificationTerminalProof::RegistrationRevoked)
     );
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("local owner schema");
     let context = Element::builder(
@@ -579,7 +579,7 @@ async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture, missing
         .await
         .expect("missing table is not readiness"));
     empty.rollback().await.expect("end absent-table probe");
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("old outbox source");
     let prior = DatabasePushServiceStore::new_with_secret_key(
@@ -643,7 +643,7 @@ async fn push_boot_before_outbox_freeze_upgrade(fixture: IngressFixture, missing
         1,
         "defer preserves uncertain custody"
     );
-    let upgraded = NotificationOutboxStore::new(fixture.db.clone())
+    let upgraded = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("HTTP next upgrades outbox");
     push_first
@@ -719,7 +719,7 @@ async fn postgres_outbox_readiness_uses_resolved_table_not_decoy_schema() {
     let Some(fixture) = IngressFixture::postgres("outbox_schema_decoy").await else {
         return;
     };
-    let outbox = NotificationOutboxStore::new(fixture.db.clone())
+    let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("actual outbox");
     let mut tx = fixture

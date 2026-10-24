@@ -130,7 +130,7 @@ pub(super) fn pubsub_node_placeholder_value(
 }
 
 pub(super) fn launch_expiry_at(now: DateTime<Utc>) -> Option<crate::types::Timestamp> {
-    crate::types::Timestamp::new((now + chrono::Duration::hours(1)).to_rfc3339()).ok()
+    crate::types::Timestamp::try_new((now + chrono::Duration::hours(1)).to_rfc3339()).ok()
 }
 
 pub(super) fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {

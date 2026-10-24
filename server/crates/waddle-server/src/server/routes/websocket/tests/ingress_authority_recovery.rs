@@ -173,7 +173,7 @@ async fn recovery_after_ambiguity(state: Arc<WebSocketState>, landed: bool) {
             .await
     };
     assert!(frames.is_empty());
-    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert_eq!(conn.sm_state.inbound_count(), 0);
     assert_eq!(
         row_count(&state, "ingress_messages").await,
         i64::from(landed)
@@ -548,7 +548,7 @@ where
         .extend_pairs(retained)
         .append_pair("options", &format!("-c search_path={schema}"));
     let pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(crate::db::DatabaseDriver::Postgres, url.to_string()),
             PoolConfig,
         )

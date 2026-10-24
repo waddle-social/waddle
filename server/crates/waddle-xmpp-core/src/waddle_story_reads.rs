@@ -60,8 +60,8 @@ impl StoryId {
     ///
     /// # Errors
     ///
-    /// Returns `StoryReadsParseError::EmptyId` if the identifier is blank after trimming.
-    pub fn new(id: impl Into<String>) -> Result<Self, StoryReadsParseError> {
+    /// Returns `StoryReadsParseError::EmptyId` if the identifier is empty. Whitespace-only identifiers are accepted without trimming.
+    pub fn try_new(id: impl Into<String>) -> Result<Self, StoryReadsParseError> {
         let value = id.into();
         if value.is_empty() {
             return Err(StoryReadsParseError::EmptyId);
@@ -70,12 +70,14 @@ impl StoryId {
     }
 
     /// Borrow the underlying id as a `&str`.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume and return the inner `String`. Used at the wasm boundary
     /// where JS-side payloads carry the id as a plain string.
+    #[must_use]
     pub fn into_inner(self) -> String {
         self.0
     }
@@ -89,6 +91,7 @@ impl AsRef<str> for StoryId {
 
 /// Errors produced when parsing a `<reads>` element.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum StoryReadsParseError {
     /// The root element name was not `reads`.
     #[error("wrong element name: expected `reads`, got `{0}`")]
@@ -122,21 +125,25 @@ pub struct StoryReads {
 
 impl StoryReads {
     /// Construct an empty read-state.
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Number of stored entries.
+    #[must_use]
     pub fn len(&self) -> usize {
         self.entries.len()
     }
 
     /// `true` when no entries are stored.
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
 
     /// `true` when `id` is marked read.
+    #[must_use]
     pub fn contains(&self, id: &StoryId) -> bool {
         self.entries.contains_key(id)
     }
@@ -175,6 +182,7 @@ impl StoryReads {
 
     /// Build the `<reads/>` element. Entries are emitted in `StoryId`
     /// order so the wire shape is deterministic and tests are stable.
+    #[must_use]
     pub fn build_element(&self) -> Element {
         let mut root = Element::builder("reads", NS_WADDLE_STORY_READS).build();
         for (id, at) in &self.entries {
@@ -209,7 +217,7 @@ impl StoryReads {
                 .attr("id")
                 .ok_or(StoryReadsParseError::MissingId)?
                 .to_owned();
-            let id = StoryId::new(id_attr)?;
+            let id = StoryId::try_new(id_attr)?;
             let at_attr = child.attr("at").ok_or(StoryReadsParseError::MissingAt)?;
             let at = at_attr
                 .parse::<DateTime<Utc>>()
@@ -234,21 +242,21 @@ mod tests {
     #[test]
     fn story_id_rejects_empty() {
         assert!(matches!(
-            StoryId::new(""),
+            StoryId::try_new(""),
             Err(StoryReadsParseError::EmptyId)
         ));
     }
 
     #[test]
     fn story_id_accepts_non_empty() {
-        let id = StoryId::new("story-aaa").expect("non-empty");
+        let id = StoryId::try_new("story-aaa").expect("non-empty");
         assert_eq!(id.as_str(), "story-aaa");
     }
 
     #[test]
     fn mark_read_inserts_entry() {
         let mut reads = StoryReads::new();
-        let id = StoryId::new("story-a").expect("ok");
+        let id = StoryId::try_new("story-a").expect("ok");
         reads.mark_read(id.clone(), ts(2026, 5, 19, 10));
         assert!(reads.contains(&id));
         assert_eq!(reads.len(), 1);
@@ -257,7 +265,7 @@ mod tests {
     #[test]
     fn mark_read_updates_existing() {
         let mut reads = StoryReads::new();
-        let id = StoryId::new("story-a").expect("ok");
+        let id = StoryId::try_new("story-a").expect("ok");
         reads.mark_read(id.clone(), ts(2026, 5, 19, 9));
         reads.mark_read(id.clone(), ts(2026, 5, 19, 11));
         assert_eq!(reads.len(), 1);
@@ -268,9 +276,9 @@ mod tests {
     #[test]
     fn prune_before_drops_old_entries() {
         let mut reads = StoryReads::new();
-        reads.mark_read(StoryId::new("a").expect("ok"), ts(2026, 5, 17, 10));
-        reads.mark_read(StoryId::new("b").expect("ok"), ts(2026, 5, 18, 10));
-        reads.mark_read(StoryId::new("c").expect("ok"), ts(2026, 5, 19, 10));
+        reads.mark_read(StoryId::try_new("a").expect("ok"), ts(2026, 5, 17, 10));
+        reads.mark_read(StoryId::try_new("b").expect("ok"), ts(2026, 5, 18, 10));
+        reads.mark_read(StoryId::try_new("c").expect("ok"), ts(2026, 5, 19, 10));
         reads.prune_before(ts(2026, 5, 18, 0));
         let kept: Vec<&str> = reads.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(kept, vec!["b", "c"]);
@@ -279,9 +287,9 @@ mod tests {
     #[test]
     fn cap_to_drops_oldest_first() {
         let mut reads = StoryReads::new();
-        reads.mark_read(StoryId::new("a").expect("ok"), ts(2026, 5, 17, 10));
-        reads.mark_read(StoryId::new("b").expect("ok"), ts(2026, 5, 18, 10));
-        reads.mark_read(StoryId::new("c").expect("ok"), ts(2026, 5, 19, 10));
+        reads.mark_read(StoryId::try_new("a").expect("ok"), ts(2026, 5, 17, 10));
+        reads.mark_read(StoryId::try_new("b").expect("ok"), ts(2026, 5, 18, 10));
+        reads.mark_read(StoryId::try_new("c").expect("ok"), ts(2026, 5, 19, 10));
         reads.cap_to(2);
         let kept: Vec<&str> = reads.iter().map(|(id, _)| id.as_str()).collect();
         assert_eq!(kept, vec!["b", "c"]);
@@ -290,7 +298,7 @@ mod tests {
     #[test]
     fn cap_to_is_noop_when_under_cap() {
         let mut reads = StoryReads::new();
-        reads.mark_read(StoryId::new("a").expect("ok"), ts(2026, 5, 17, 10));
+        reads.mark_read(StoryId::try_new("a").expect("ok"), ts(2026, 5, 17, 10));
         reads.cap_to(10);
         assert_eq!(reads.len(), 1);
     }
@@ -298,8 +306,14 @@ mod tests {
     #[test]
     fn parse_round_trip() {
         let mut reads = StoryReads::new();
-        reads.mark_read(StoryId::new("story-a").expect("ok"), ts(2026, 5, 19, 10));
-        reads.mark_read(StoryId::new("story-b").expect("ok"), ts(2026, 5, 19, 11));
+        reads.mark_read(
+            StoryId::try_new("story-a").expect("ok"),
+            ts(2026, 5, 19, 10),
+        );
+        reads.mark_read(
+            StoryId::try_new("story-b").expect("ok"),
+            ts(2026, 5, 19, 11),
+        );
         let elem = reads.build_element();
         let parsed = StoryReads::parse(&elem).expect("parseable");
         assert_eq!(parsed, reads);
@@ -397,9 +411,15 @@ mod tests {
     #[test]
     fn build_element_is_deterministic_by_id() {
         let mut reads = StoryReads::new();
-        reads.mark_read(StoryId::new("story-c").expect("ok"), ts(2026, 5, 19, 9));
-        reads.mark_read(StoryId::new("story-a").expect("ok"), ts(2026, 5, 19, 10));
-        reads.mark_read(StoryId::new("story-b").expect("ok"), ts(2026, 5, 19, 11));
+        reads.mark_read(StoryId::try_new("story-c").expect("ok"), ts(2026, 5, 19, 9));
+        reads.mark_read(
+            StoryId::try_new("story-a").expect("ok"),
+            ts(2026, 5, 19, 10),
+        );
+        reads.mark_read(
+            StoryId::try_new("story-b").expect("ok"),
+            ts(2026, 5, 19, 11),
+        );
         let elem = reads.build_element();
         let ids: Vec<&str> = elem
             .children()

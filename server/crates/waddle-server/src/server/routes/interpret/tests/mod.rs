@@ -74,7 +74,7 @@ async fn register_into_both_tiers(
 ) {
     connection_registry.register_with_carbons(jid.clone(), sender, false);
     let entry = connection_registry
-        .get_entry(jid)
+        .entry(jid)
         .expect("entry just registered into the DashMap");
     let registered =
         crate::server::dual_registration::mirror_register(user_registry, jid.clone(), entry).await;

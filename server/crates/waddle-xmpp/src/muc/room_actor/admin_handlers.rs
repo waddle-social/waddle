@@ -26,7 +26,7 @@ const STATUS_MEMBERS_ONLY_CONFIG_REMOVAL: &str = "322";
 fn all_room_sessions(room: &MucRoom) -> Vec<FullJid> {
     room.occupants
         .values()
-        .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+        .flat_map(|occupant| room.occupant_sessions(&occupant.nick))
         .collect()
 }
 
@@ -104,7 +104,8 @@ fn durable_admin_update(
         recipient: input.recipient.clone(),
         is_self: input.is_self,
         occupant: input.occupant_jid.clone(),
-        nick: MucOccupantNick::new(occupant.nick.clone()).expect("nick was previously accepted"),
+        nick: MucOccupantNick::try_new(occupant.nick.clone())
+            .expect("nick was previously accepted"),
         occupant_bare_jid: occupant.real_jid.to_bare(),
         disclosed_real_jid: visible_real_jid_for_recipient(
             room,
@@ -117,7 +118,7 @@ fn durable_admin_update(
         actor: input.actor.cloned(),
         reason: input
             .reason
-            .and_then(|value| DestroyReason::new(value.to_owned())),
+            .and_then(|value| DestroyReason::try_new(value.to_owned())),
     }
 }
 
@@ -180,7 +181,7 @@ pub(super) fn restored_roster_removal_effects(
     let mut self_updates = Vec::new();
     let mut remaining_updates = Vec::new();
     for occupant in room.occupants.values() {
-        let sessions = room.get_occupant_sessions(&occupant.nick);
+        let sessions = room.occupant_sessions(&occupant.nick);
         if !sessions
             .iter()
             .any(|session| removed_sessions.contains(session))
@@ -188,7 +189,7 @@ pub(super) fn restored_roster_removal_effects(
             continue;
         }
         let mut occupant = occupant.clone();
-        occupant.affiliation = room.get_affiliation(&occupant.real_jid.to_bare());
+        occupant.affiliation = room.affiliation(&occupant.real_jid.to_bare());
         let occupant_jid = room
             .room_jid
             .with_resource_str(&occupant.nick)
@@ -244,7 +245,7 @@ fn removal_presence_updates(
         .with_resource_str(&occupant.nick)
         .expect("nick was previously accepted as resource");
     let occupant_bare = occupant.real_jid.to_bare();
-    let removed_sessions = room.get_occupant_sessions(&occupant.nick);
+    let removed_sessions = room.occupant_sessions(&occupant.nick);
     all_room_sessions(room)
         .into_iter()
         .map(|recipient| {
@@ -296,9 +297,9 @@ fn apply_affiliation_change_with_effects(
     reason: Option<&str>,
 ) -> Result<AppliedAdminMutation, AdminApplyError> {
     if new_affiliation != Affiliation::Owner {
-        let target_current_affiliation = room.get_affiliation(&target_jid);
+        let target_current_affiliation = room.affiliation(&target_jid);
         if target_current_affiliation == Affiliation::Owner {
-            let owners = room.get_jids_by_affiliation(Affiliation::Owner);
+            let owners = room.jids_by_affiliation(Affiliation::Owner);
             if owners.len() == 1 && owners.contains(&target_jid) {
                 return Err(AdminApplyError::CannotRemoveLastOwner);
             }
@@ -334,7 +335,7 @@ fn apply_affiliation_change_with_effects(
                 .with_resource_str(&occupant.nick)
                 .expect("nick was previously accepted as resource");
             let occupant_bare = occupant.real_jid.to_bare();
-            let removed_sessions = room.get_occupant_sessions(&occupant.nick);
+            let removed_sessions = room.occupant_sessions(&occupant.nick);
             for recipient in all_room_sessions(room) {
                 let occupant_identity = OccupantIdentity {
                     bare_jid: &occupant_bare,
@@ -411,7 +412,7 @@ fn apply_affiliation_change_with_effects(
         // that exemption was a hole.
         let removed_by_moderation: Vec<FullJid> = affected_occupants
             .iter()
-            .flat_map(|occupant| room.get_occupant_sessions(&occupant.nick))
+            .flat_map(|occupant| room.occupant_sessions(&occupant.nick))
             .collect();
         for occupant in affected_occupants {
             room.remove_occupant(&occupant.nick);
@@ -435,7 +436,7 @@ fn apply_affiliation_change_with_effects(
             .with_resource_str(&occupant.nick)
             .expect("nick was previously accepted as resource");
         let occupant_bare = occupant.real_jid.to_bare();
-        let affected_sessions = room.get_occupant_sessions(&occupant.nick);
+        let affected_sessions = room.occupant_sessions(&occupant.nick);
         for recipient in all_room_sessions(room) {
             let occupant_identity = OccupantIdentity {
                 bare_jid: &occupant_bare,
@@ -513,7 +514,7 @@ fn session_voices(room: &MucRoom, target_jid: &BareJid) -> Vec<(FullJid, Voice)>
         .into_iter()
         .flat_map(|occupant| {
             let voice = occupant.role.voice(moderation);
-            room.get_occupant_sessions(&occupant.nick)
+            room.occupant_sessions(&occupant.nick)
                 .into_iter()
                 .map(move |session| (session, voice))
         })
@@ -579,7 +580,7 @@ pub fn enforce_members_only_from_room(
             .into_iter()
             .map(|built| (built.recipient, built.presence)),
         );
-        removed_by_moderation.extend(room.get_occupant_sessions(&occupant.nick));
+        removed_by_moderation.extend(room.occupant_sessions(&occupant.nick));
     }
     for occupant in removed_occupants {
         room.remove_occupant(&occupant.nick);
@@ -679,7 +680,7 @@ impl kameo::message::Message<GetAdminContext> for RoomActor {
         msg: GetAdminContext,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        let sender_affiliation = self.room.get_affiliation(&msg.sender_jid.to_bare());
+        let sender_affiliation = self.room.affiliation(&msg.sender_jid.to_bare());
         let sender_occupant = self.room.find_occupant_by_real_jid(&msg.sender_jid);
         let sender_role = sender_occupant.map(|o| o.role).unwrap_or(Role::None);
         Ok(AdminContext {
@@ -762,7 +763,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 };
                 let target_occupant = self
                     .room
-                    .get_occupant(target_nick)
+                    .occupant(target_nick)
                     .ok_or_else(|| AdminApplyError::OccupantNotFound(target_nick.clone()))?;
                 authorize_role_change(
                     msg.sender_affiliation,
@@ -781,7 +782,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                 };
                 let target_occupant = self
                     .room
-                    .get_occupant(&target_nick)
+                    .occupant(&target_nick)
                     .cloned()
                     .ok_or_else(|| AdminApplyError::OccupantNotFound(target_nick.clone()))?;
                 authorize_role_change(
@@ -797,7 +798,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                     .with_resource_str(&target_nick)
                     .expect("nick was previously accepted as resource");
                 let target_bare = target_occupant.real_jid.to_bare();
-                let target_sessions = self.room.get_occupant_sessions(&target_nick);
+                let target_sessions = self.room.occupant_sessions(&target_nick);
                 if new_role == Role::None {
                     for recipient in all_room_sessions(&self.room) {
                         let target_identity = OccupantIdentity {
@@ -873,13 +874,13 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
 
         let current_affiliations: BTreeMap<BareJid, Affiliation> = self
             .room
-            .get_all_affiliations()
+            .all_affiliations()
             .into_iter()
             .map(|entry| (entry.jid, entry.affiliation))
             .collect();
         let mut final_affiliations = current_affiliations.clone();
         let mut touched_jids = Vec::new();
-        let current_owner_count = self.room.get_jids_by_affiliation(Affiliation::Owner).len();
+        let current_owner_count = self.room.jids_by_affiliation(Affiliation::Owner).len();
         // Pre-validation simulates the mutation loop step by step
         // against an evolving affiliation map. It must reject
         // every set the loop below would reject — the loop
@@ -986,7 +987,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
             };
             invalidated_jids.push(target_jid.clone());
             requested_affiliations.push((target_jid.clone(), new_affiliation));
-            let target_current_affiliation = staged_room.get_affiliation(&target_jid);
+            let target_current_affiliation = staged_room.affiliation(&target_jid);
             let AppliedAdminMutation {
                 applied,
                 durable_updates: applied_durable_updates,
@@ -1038,12 +1039,12 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                 .iter()
                                 .filter(|(nick, occupant)| {
                                     self.room
-                                        .get_occupant(nick)
+                                        .occupant(nick)
                                         .is_some_and(|previous| previous.role != occupant.role)
                                 })
                                 .flat_map(|(nick, occupant)| {
                                     staged_room
-                                        .get_occupant_sessions(nick)
+                                        .occupant_sessions(nick)
                                         .into_iter()
                                         .map(|session| (session, occupant.role))
                                 })
@@ -1061,7 +1062,7 @@ impl kameo::message::Message<ApplyAdminItems> for RoomActor {
                                             .iter()
                                             .any(|(changed, _)| changed == *jid)
                                     })
-                                    .map(|jid| (jid.clone(), staged_room.get_affiliation(jid)))
+                                    .map(|jid| (jid.clone(), staged_room.affiliation(jid)))
                                     .collect(),
                                 removed_sessions: removed_by_moderation.clone(),
                                 changed_roles,
@@ -1128,7 +1129,7 @@ impl kameo::message::Message<ApplyAffiliationChange> for RoomActor {
         if self.invite_rollback_pending(&msg.jid) {
             return Err(AdminApplyError::InviteRollbackPending);
         }
-        let previous_affiliation = self.room.get_affiliation(&msg.jid);
+        let previous_affiliation = self.room.affiliation(&msg.jid);
         let mut staged_room = self.room.clone();
         let AppliedAdminMutation {
             mut applied,
@@ -1276,7 +1277,7 @@ impl kameo::message::Message<EnforceMembersOnlyAffiliations> for RoomActor {
             .flat_map(|occupant| {
                 let voice = occupant.role.voice(moderation);
                 staged_room
-                    .get_occupant_sessions(&occupant.nick)
+                    .occupant_sessions(&occupant.nick)
                     .into_iter()
                     .map(move |session| (session, voice))
             })
@@ -1370,7 +1371,7 @@ impl kameo::message::Message<IsOwner> for RoomActor {
     type Reply = bool;
 
     async fn handle(&mut self, msg: IsOwner, _ctx: &mut Context<Self, Self::Reply>) -> Self::Reply {
-        self.room.get_affiliation(&msg.jid) == Affiliation::Owner
+        self.room.affiliation(&msg.jid) == Affiliation::Owner
     }
 }
 
@@ -1398,7 +1399,7 @@ mod voice_change_tests {
     }
 
     fn secret() -> OccupantIdSecret {
-        OccupantIdSecret::new(b"occupant-id-secret-at-least-32-bytes".to_vec())
+        OccupantIdSecret::try_new(b"occupant-id-secret-at-least-32-bytes".to_vec())
             .expect("test secret meets min length")
     }
 

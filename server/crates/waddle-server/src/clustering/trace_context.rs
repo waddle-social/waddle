@@ -65,7 +65,7 @@ const MAX_TRACESTATE_LEN: usize = 512;
 pub struct TraceParentHeader(String);
 
 impl TraceParentHeader {
-    fn new(value: String) -> Option<Self> {
+    fn try_new(value: String) -> Option<Self> {
         (!value.is_empty() && value.len() <= MAX_TRACEPARENT_LEN).then_some(Self(value))
     }
 }
@@ -76,7 +76,7 @@ impl TraceParentHeader {
 pub struct TraceStateHeader(String);
 
 impl TraceStateHeader {
-    fn new(value: String) -> Option<Self> {
+    fn try_new(value: String) -> Option<Self> {
         (!value.is_empty() && value.len() <= MAX_TRACESTATE_LEN).then_some(Self(value))
     }
 }
@@ -241,8 +241,8 @@ impl RelayTraceContext {
         let mut carrier = RelayTraceCarrier::default();
         propagator().inject_context(cx, &mut carrier);
         Self {
-            traceparent: carrier.traceparent.and_then(TraceParentHeader::new),
-            tracestate: carrier.tracestate.and_then(TraceStateHeader::new),
+            traceparent: carrier.traceparent.and_then(TraceParentHeader::try_new),
+            tracestate: carrier.tracestate.and_then(TraceStateHeader::try_new),
         }
     }
 
@@ -377,7 +377,7 @@ mod tests {
     #[test]
     fn an_unsampled_traceparent_from_the_wire_falls_back_to_no_parent() {
         let stale_peer = RelayTraceContext {
-            traceparent: TraceParentHeader::new(
+            traceparent: TraceParentHeader::try_new(
                 "00-123456789abcdef011223344556677ff-00ff00ff00ff00ff-00".to_string(),
             ),
             tracestate: None,
@@ -429,7 +429,7 @@ mod tests {
     #[test]
     fn an_unparsable_traceparent_falls_back_to_no_parent() {
         let garbage = RelayTraceContext {
-            traceparent: TraceParentHeader::new("not-a-traceparent".to_string()),
+            traceparent: TraceParentHeader::try_new("not-a-traceparent".to_string()),
             tracestate: None,
         };
         assert!(garbage.remote_parent().is_none());
@@ -437,9 +437,9 @@ mod tests {
 
     #[test]
     fn an_oversized_traceparent_is_refused_before_the_propagator() {
-        assert!(TraceParentHeader::new("x".repeat(MAX_TRACEPARENT_LEN + 1)).is_none());
-        assert!(TraceStateHeader::new("x".repeat(MAX_TRACESTATE_LEN + 1)).is_none());
-        assert!(TraceParentHeader::new(String::new()).is_none());
+        assert!(TraceParentHeader::try_new("x".repeat(MAX_TRACEPARENT_LEN + 1)).is_none());
+        assert!(TraceStateHeader::try_new("x".repeat(MAX_TRACESTATE_LEN + 1)).is_none());
+        assert!(TraceParentHeader::try_new(String::new()).is_none());
     }
 
     /// The length bound must hold through serde too — a derived

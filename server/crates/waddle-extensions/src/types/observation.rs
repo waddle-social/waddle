@@ -12,13 +12,15 @@ impl ObservationGeneration {
     /// # Errors
     ///
     /// Returns `InvalidObservationGeneration` if the generation is zero.
-    pub fn new(value: u64) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(value: u64) -> Result<Self, FrameworkTypeError> {
         if value == 0 {
             return Err(FrameworkTypeError::InvalidObservationGeneration);
         }
         Ok(Self(value))
     }
     /// Return the host-assigned configuration generation.
+
+    #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }
@@ -31,10 +33,13 @@ pub struct MessageRevision(u64);
 
 impl MessageRevision {
     /// Wrap a host-assigned message revision number; zero is accepted.
+    #[must_use]
     pub fn new(value: u64) -> Self {
         Self(value)
     }
     /// Return the host-assigned message revision number.
+
+    #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }
@@ -52,6 +57,7 @@ pub enum RoomObservationScope {
 
 impl RoomObservationScope {
     /// Whether the room is explicitly selected or the scope includes all hosted rooms.
+    #[must_use]
     pub fn includes(&self, room: &BareJid) -> bool {
         match self {
             Self::Rooms(rooms) => rooms.contains(room),

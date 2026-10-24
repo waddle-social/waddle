@@ -13,7 +13,7 @@ use crate::db::Database;
 
 async fn store_with_db(name: &str) -> (Database, RoomEffectOutboxStore) {
     let database = Database::in_memory(name).await.expect("database");
-    let store = RoomEffectOutboxStore::new(database.clone())
+    let store = RoomEffectOutboxStore::try_new(database.clone())
         .await
         .expect("store");
     (database, store)
@@ -32,7 +32,7 @@ fn initial_revision() -> RoomRevision {
 }
 
 fn origin() -> RoomEffectOriginInstanceId {
-    RoomEffectOriginInstanceId::new("origin-instance".to_owned()).expect("origin instance")
+    RoomEffectOriginInstanceId::try_new("origin-instance".to_owned()).expect("origin instance")
 }
 
 fn producing_node() -> RoomEffectProducingNode {
@@ -44,7 +44,7 @@ fn full_jid(value: &str) -> FullJid {
 }
 
 fn nick(value: &str) -> MucOccupantNick {
-    MucOccupantNick::new(value.to_owned()).expect("occupant nick")
+    MucOccupantNick::try_new(value.to_owned()).expect("occupant nick")
 }
 
 fn config_effects() -> RoomMutationEffects {
@@ -72,7 +72,7 @@ fn admin_effects() -> RoomMutationEffects {
             affiliation: waddle_xmpp::Affiliation::Member,
             kind: AdminPresenceKind::Kicked,
             actor: Some(BareJid::from_str("mod@example.test").expect("actor JID")),
-            reason: Some(DestroyReason::new("cleanup".to_owned()).expect("reason")),
+            reason: Some(DestroyReason::try_new("cleanup".to_owned()).expect("reason")),
         }],
         vec![OccupantPresenceUpdate {
             recipient: full_jid("bob@example.test/device"),

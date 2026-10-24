@@ -354,7 +354,7 @@ async fn remote_socket_rechecks_archive_predecessor(case: RemotePredecessorCase)
     use waddle_xmpp::ingress::{EffectMessageIdentity, IngressEffectIntent};
 
     let fixture = IngressFixture::sqlite().await;
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -1091,7 +1091,7 @@ async fn drained_remote_direct_frame_retry_releases_room_effect_as_infrastructur
         vec![MucConfigStatusCode::NonPrivacyConfigurationChange],
         vec![target.clone()],
     );
-    let origin = RoomEffectOriginInstanceId::new("test-origin".to_owned()).expect("origin");
+    let origin = RoomEffectOriginInstanceId::try_new("test-origin".to_owned()).expect("origin");
     let producing_node =
         RoomEffectProducingNode::from_node_identity(NodeIdentity::new("node-a", "epoch-a"));
     let mut tx = store.database().begin().await.expect("transaction");
@@ -2160,7 +2160,7 @@ async fn stale_force_detach_persistently_busy_actor_records_janitor_retry() {
         socket_node: NodeId::new("replacement-socket-node".to_string()),
         state: RemoteResourceStateSnapshot::from_entry(
             &fresh_entry,
-            services.connection_registry.get_presence_state(&target),
+            services.connection_registry.presence_state(&target),
         ),
         trace: RelayTraceContext::default(),
     };
@@ -2629,7 +2629,7 @@ async fn canonical_remote_delivery_services(
     Arc<crate::server::routes::websocket::WebSocketState>,
     Arc<OrderedRelayDeliveryServices>,
 ) {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

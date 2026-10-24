@@ -184,7 +184,7 @@ async fn subject_broadcast_after_actor_commit(
     }
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b's'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b's'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {

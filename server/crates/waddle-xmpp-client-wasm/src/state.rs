@@ -58,7 +58,7 @@ impl WaddleConfig {
         outbound_h: u32,
     ) -> Result<(), JsValue> {
         self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new(
+            waddle_xmpp_client::SmResumeState::try_new(
                 waddle_xmpp_client::StreamId::new(previd),
                 inbound_h,
                 outbound_h,
@@ -83,7 +83,7 @@ impl WaddleConfig {
         max_resume_seconds: u32,
     ) -> Result<(), JsValue> {
         self.resume_state = Some(
-            waddle_xmpp_client::SmResumeState::new(
+            waddle_xmpp_client::SmResumeState::try_new(
                 waddle_xmpp_client::StreamId::new(previd),
                 inbound_h,
                 outbound_h,
@@ -585,7 +585,7 @@ mod command_lane_tests {
     fn command(id: &str) -> WasmCommand {
         let (responder, _receiver) = oneshot::channel();
         WasmCommand::CancelIq {
-            id: waddle_xmpp_client::request::StanzaId::new(id).expect("test stanza id"),
+            id: waddle_xmpp_client::request::StanzaId::try_new(id).expect("test stanza id"),
             responder,
         }
     }

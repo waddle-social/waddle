@@ -221,7 +221,7 @@ async fn reversed_live_execution(fixture: IngressFixture) {
     let users = UserRegistryActor::spawn(UserRegistryActor::new());
     users
         .ask(RegisterUserResource {
-            entry: connections.get_entry(&target).expect("live resource"),
+            entry: connections.entry(&target).expect("live resource"),
             jid: target.clone(),
         })
         .await
@@ -517,7 +517,7 @@ async fn pending_stream_progress(fixture: IngressFixture) {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
     registry.register(target.clone(), sender);
     let entry = registry
-        .get_entry(&target)
+        .entry(&target)
         .expect("registered recipient resource");
     let stream = SmSessionId::new("ordered-pending-stream");
     entry.set_sm_stream_id(Some(stream.clone()));

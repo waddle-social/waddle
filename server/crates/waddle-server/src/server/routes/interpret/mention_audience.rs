@@ -447,10 +447,10 @@ mod tests {
     fn xep0372_archived_mentions_round_trip_into_personal_targets() {
         let rich = ArchivedRichMessage {
             references: vec![waddle_xmpp::mam::ArchivedReference {
-                ref_type: waddle_xmpp::mam::RichText::new("mention").expect("type"),
+                ref_type: waddle_xmpp::mam::RichText::try_new("mention").expect("type"),
                 begin: Some(0),
                 end: Some(5),
-                uri: waddle_xmpp::mam::RichText::new("xmpp:carol@example.com"),
+                uri: waddle_xmpp::mam::RichText::try_new("xmpp:carol@example.com"),
                 anchor: None,
             }],
             mentions: vec![waddle_xmpp::mam::ArchivedMention {

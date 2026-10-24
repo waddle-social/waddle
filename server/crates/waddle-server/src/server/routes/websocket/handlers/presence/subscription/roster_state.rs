@@ -179,7 +179,7 @@ async fn send_roster_push_to_resources(
         .deps
         .protocol
         .connection_registry
-        .get_roster_interested_resources_for_user(user_jid);
+        .roster_interested_resources_for_user(user_jid);
     let mut delivered_resources = Vec::new();
     for resource in &live_resources {
         let push = build_roster_push(
@@ -259,7 +259,7 @@ async fn send_roster_push_to_resources(
         .deps
         .protocol
         .connection_registry
-        .get_roster_interested_resources_for_user(user_jid)
+        .roster_interested_resources_for_user(user_jid)
         .into_iter()
         .filter(|resource| !delivered_resources.contains(resource))
     {

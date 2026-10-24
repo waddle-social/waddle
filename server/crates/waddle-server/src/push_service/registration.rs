@@ -261,7 +261,7 @@ mod tests {
             .await
             .expect("device");
         let registration_store =
-            crate::push_registrations::DatabasePushRegistrationStore::new(store.database())
+            crate::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
                 .await
                 .expect("registration store");
         registration_store
@@ -346,7 +346,7 @@ mod tests {
             .await
             .expect("device");
         let registration_store =
-            crate::push_registrations::DatabasePushRegistrationStore::new(store.database())
+            crate::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
                 .await
                 .expect("registration store");
         registration_store

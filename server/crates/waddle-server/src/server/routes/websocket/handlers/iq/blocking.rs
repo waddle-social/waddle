@@ -373,7 +373,7 @@ pub(crate) async fn send_blocking_pushes(
         .deps
         .protocol
         .connection_registry
-        .get_blocklist_interested_resources_for_user(user_bare)
+        .blocklist_interested_resources_for_user(user_bare)
     {
         if recorded_detached.contains(&resource_jid) {
             continue;

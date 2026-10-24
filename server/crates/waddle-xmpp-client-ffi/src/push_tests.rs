@@ -95,15 +95,16 @@ fn xep0357_vapid_lookup_refuses_a_key_from_another_entity() {
 }
 
 fn client_config() -> ClientConfig {
-    let auth = OAuthBearerConfig::new(
+    let auth = OAuthBearerConfig::try_new(
         BareJid::new("alice@waddle.test").expect("valid jid"),
-        ClientResource::new("test").expect("valid resource"),
+        ClientResource::try_new("test").expect("valid resource"),
         AccessToken::new("token"),
     )
     .expect("valid auth");
-    let transport = WebSocketConfig::new(Url::parse("wss://xmpp.waddle.test").expect("valid url"))
-        .expect("valid transport");
-    ClientConfig::new(
+    let transport =
+        WebSocketConfig::try_new(Url::parse("wss://xmpp.waddle.test").expect("valid url"))
+            .expect("valid transport");
+    ClientConfig::try_new(
         ConnectionConfig::new(BareJid::new("waddle.test").expect("valid domain")),
         transport,
         auth,

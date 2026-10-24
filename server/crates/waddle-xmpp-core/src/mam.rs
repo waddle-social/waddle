@@ -50,9 +50,9 @@ pub const DATA_FORMS_NS: &str = "jabber:x:data";
 
 /// Stanza ID namespace (XEP-0359).
 pub const STANZA_ID_NS: &str = "urn:xmpp:sid:0";
-
 /// `true` when a message is a query-scoped MAM response envelope, not
 /// an offline-deliverable user message.
+#[must_use]
 pub fn is_mam_query_response_message(message: &xmpp_parsers::message::Message) -> bool {
     if message.type_ != xmpp_parsers::message::MessageType::Normal
         || !message.bodies.is_empty()

@@ -33,6 +33,7 @@ pub struct ObserverTestPlugin {
 impl ObserverTestPlugin {
     /// Create a shared deterministic observer fixture with no recorded invocations and no
     /// revocation.
+    #[must_use]
     pub fn new(id: PluginId, behavior: ObserverTestBehavior) -> Arc<Self> {
         Arc::new(Self {
             id,
@@ -47,6 +48,7 @@ impl ObserverTestPlugin {
     /// # Panics
     ///
     /// Panics if an earlier panic poisoned the recorded-invocation mutex.
+    #[must_use]
     pub fn invocations(&self) -> Vec<MessageHook> {
         self.invocations
             .lock()
@@ -71,7 +73,7 @@ impl ObserverTestPlugin {
         match &self.behavior {
             ObserverTestBehavior::Success => None,
             ObserverTestBehavior::Warning => Some(vec![ExtensionEffect::HostWarning(
-                DisplayText::new("observer fixture failed").expect("warning"),
+                DisplayText::try_new("observer fixture failed").expect("warning"),
             )]),
             ObserverTestBehavior::Blocked(release) => {
                 release.notified().await;

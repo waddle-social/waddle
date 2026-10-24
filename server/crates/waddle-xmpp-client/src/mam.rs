@@ -107,7 +107,8 @@ pub struct ArchivedMessageId(String);
 
 impl ArchivedMessageId {
     /// Wrap an archive identifier used for history pagination.
-    pub fn new(id: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(id: impl Into<String>) -> Option<Self> {
         let id = id.into();
         if id.is_empty() {
             None
@@ -117,6 +118,7 @@ impl ArchivedMessageId {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -322,6 +324,7 @@ pub struct MamIqBuilder<'a> {
 
 impl<'a> MamIqBuilder<'a> {
     /// New builder with required fields. All other fields default to `None`.
+    #[must_use]
     pub fn new(iq_id: &'a str, query_id: &'a str, max: u32) -> Self {
         Self {
             iq_id,
@@ -340,60 +343,70 @@ impl<'a> MamIqBuilder<'a> {
     }
 
     /// Set the RSM cursor selecting results before the supplied archive identifier.
+    #[must_use]
     pub fn before(mut self, value: &'a str) -> Self {
         self.before = Some(value);
         self
     }
 
     /// Set the RSM cursor selecting results after the supplied archive identifier.
+    #[must_use]
     pub fn after(mut self, value: &'a str) -> Self {
         self.after = Some(value);
         self
     }
 
     /// Set the jid and return the updated value.
+    #[must_use]
     pub fn with_jid(mut self, value: &'a str) -> Self {
         self.with_jid = Some(value);
         self
     }
 
     /// Set the archive service or room receiving the MAM query.
+    #[must_use]
     pub fn to_jid(mut self, value: &'a str) -> Self {
         self.to_jid = Some(value);
         self
     }
 
     /// Restrict the MAM query to the supplied conversation thread.
+    #[must_use]
     pub fn thread_id(mut self, value: &'a str) -> Self {
         self.thread_id = Some(value);
         self
     }
 
     /// Set the full-text search expression for the archive query.
+    #[must_use]
     pub fn fulltext(mut self, value: &'a str) -> Self {
         self.fulltext = Some(value);
         self
     }
 
     /// Set the inclusive lower timestamp bound for the archive query.
+    #[must_use]
     pub fn start(mut self, value: &'a str) -> Self {
         self.start = Some(value);
         self
     }
 
     /// Set the inclusive upper timestamp bound for the archive query.
+    #[must_use]
     pub fn end(mut self, value: &'a str) -> Self {
         self.end = Some(value);
         self
     }
 
     /// Restrict the archive query to the supplied stanza identifiers.
+    #[must_use]
     pub fn stanza_ids(mut self, value: &'a [&'a str]) -> Self {
         self.stanza_ids = Some(value);
         self
     }
 
     /// Build the `<iq>` element.
+    #[must_use]
     pub fn build(self) -> Element {
         let mut rsm = Element::builder("set", RSM_NS).append(
             Element::builder("max", RSM_NS)
@@ -475,6 +488,7 @@ impl<'a> MamIqBuilder<'a> {
 ///
 /// * `with_jid` — set as the `<with>` data form field (DM queries).
 /// * `to_jid`   — set as the `to` attribute on the IQ (room queries).
+#[must_use]
 pub fn build_mam_iq(
     iq_id: &str,
     query_id: &str,
@@ -497,6 +511,7 @@ pub fn build_mam_iq(
 /// (`to=room`) with the Waddle MAM thread field. A missing cursor becomes an
 /// empty `<before/>`, which XEP-0059 §2.5 reads as "the last page", so the
 /// newest replies come back first; omitting it would return the oldest page.
+#[must_use]
 pub fn build_room_thread_history_iq(
     iq_id: &str,
     query_id: &str,
@@ -516,6 +531,7 @@ pub fn build_room_thread_history_iq(
 /// (`to=room`) with the `{urn:xmpp:fulltext:0}fulltext` extended form field
 /// and an empty `<before/>` so the server pages backward from the newest
 /// match (XEP-0059 §2.5 / XEP-0313 §4.3).
+#[must_use]
 pub fn build_room_search_history_iq(
     iq_id: &str,
     query_id: &str,
@@ -534,6 +550,7 @@ pub fn build_room_search_history_iq(
 /// (`to=account`), constrained to the peer via the standard `with` field
 /// plus the `{urn:xmpp:fulltext:0}fulltext` extended form field. An empty
 /// `<before/>` requests the newest matching page first.
+#[must_use]
 pub fn build_dm_search_history_iq(
     iq_id: &str,
     query_id: &str,
@@ -587,6 +604,7 @@ pub struct MamResultCollector {
 
 impl MamResultCollector {
     /// Create a collector for one query identifier with no accumulated messages.
+    #[must_use]
     pub fn new(query_id: &str) -> Self {
         Self {
             query_id: query_id.to_string(),
@@ -596,6 +614,7 @@ impl MamResultCollector {
     }
 
     /// Borrow the query identifier used to correlate MAM result messages.
+    #[must_use]
     pub fn query_id(&self) -> &str {
         &self.query_id
     }
@@ -611,6 +630,7 @@ impl MamResultCollector {
     }
 
     /// Consume the collector and return the accumulated archived messages in receipt order.
+    #[must_use]
     pub fn into_messages(self) -> Vec<ArchivedMessage> {
         self.messages
     }
@@ -685,6 +705,7 @@ async fn run_mam_query(
 }
 
 /// Extract RSM and completeness from the IQ result element wrapping `<fin/>`.
+#[must_use]
 pub fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
     // The result may be the raw <fin/> (if send_iq returns it directly) or
     // an <iq type='result'> wrapping a <fin/> child.
@@ -705,6 +726,7 @@ pub fn parse_fin_from_iq_result(iq_result: &Element) -> (RsmPageInfo, bool) {
 /// Parse a MAM result `<message>` wrapper into an [`ArchivedMessage`].
 ///
 /// Returns `None` if the element is not a MAM result message.
+#[must_use]
 pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
     if element.name() != "message" || element.attr("type") == Some("error") {
         return None;
@@ -737,7 +759,7 @@ pub fn parse_mam_result(element: &Element) -> Option<ArchivedMessage> {
     let from = inner.attr("from").map(str::to_string);
     let to = inner.attr("to").map(str::to_string);
     let message_type = inner.attr("type").unwrap_or("normal").to_string();
-    let id = inner.attr("id").and_then(ArchivedMessageId::new);
+    let id = inner.attr("id").and_then(ArchivedMessageId::try_new);
 
     let body = inner
         .get_child("body", CLIENT_NS)
@@ -810,6 +832,7 @@ fn parse_archived_stanza_id(element: &Element) -> Option<StableStanzaId> {
 /// Parse a MAM `<fin/>` element into [`RsmPageInfo`] and a completeness flag.
 ///
 /// Returns `None` if the element is not a MAM `<fin/>`.
+#[must_use]
 pub fn parse_mam_fin(element: &Element) -> Option<(RsmPageInfo, bool)> {
     if element.name() != "fin" || element.ns() != MAM_NS {
         return None;

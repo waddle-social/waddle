@@ -14,6 +14,7 @@ pub struct RequestId(u64);
 
 impl RequestId {
     /// Return the underlying numeric request identifier.
+    #[must_use]
     pub fn get(self) -> u64 {
         self.0
     }
@@ -46,7 +47,7 @@ impl StanzaId {
     /// # Errors
     ///
     /// Returns `ClientError::EmptyStanzaId` when the identifier is blank after trimming.
-    pub fn new(stanza_id: impl Into<String>) -> ClientResult<Self> {
+    pub fn try_new(stanza_id: impl Into<String>) -> ClientResult<Self> {
         let stanza_id = stanza_id.into();
         if stanza_id.trim().is_empty() {
             return Err(ClientError::EmptyStanzaId);
@@ -56,6 +57,7 @@ impl StanzaId {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -112,6 +114,7 @@ pub enum ClientRequest {
 
 impl ClientRequest {
     /// Return the category used to dispatch or serialize this value.
+    #[must_use]
     pub fn kind(&self) -> RequestKind {
         match self {
             Self::Connect => RequestKind::Connect,
@@ -124,6 +127,7 @@ impl ClientRequest {
     }
 
     /// Borrow the request's stanza correlation identifier, if it has one.
+    #[must_use]
     pub fn stanza_id(&self) -> Option<&StanzaId> {
         match self {
             Self::SendIq { stanza_id, .. } => Some(stanza_id),
@@ -164,16 +168,19 @@ pub struct PendingRequest {
 
 impl PendingRequest {
     /// Return the category used to dispatch or serialize this value.
+    #[must_use]
     pub fn kind(&self) -> RequestKind {
         self.request.kind()
     }
 
     /// Borrow the request's stanza correlation identifier, if it has one.
+    #[must_use]
     pub fn stanza_id(&self) -> Option<&StanzaId> {
         self.request.stanza_id()
     }
 
     /// Return owned request and stanza identifiers for completion callbacks.
+    #[must_use]
     pub fn correlation(&self) -> RequestCorrelation {
         RequestCorrelation {
             request_id: self.id,
@@ -230,6 +237,7 @@ impl RequestTracker {
     }
 
     /// Return the number of requests still awaiting completion.
+    #[must_use]
     pub fn pending_len(&self) -> usize {
         self.pending.len()
     }
@@ -267,6 +275,7 @@ impl RequestTracker {
     }
 
     /// Return the current session state or an owned snapshot of pending requests.
+    #[must_use]
     pub fn snapshot(&self) -> Vec<PendingRequest> {
         self.pending.values().cloned().collect()
     }
@@ -287,7 +296,7 @@ mod tests {
     #[test]
     fn tracker_resolves_requests_by_stanza_id() {
         let mut tracker = RequestTracker::default();
-        let stanza_id = StanzaId::new("iq-1").unwrap();
+        let stanza_id = StanzaId::try_new("iq-1").unwrap();
         let pending = tracker
             .register(ClientRequest::SendElement {
                 stanza_id: Some(stanza_id.clone()),
@@ -303,7 +312,7 @@ mod tests {
     #[test]
     fn tracker_rejects_duplicate_stanza_ids() {
         let mut tracker = RequestTracker::default();
-        let stanza_id = StanzaId::new("iq-1").unwrap();
+        let stanza_id = StanzaId::try_new("iq-1").unwrap();
 
         tracker
             .register(ClientRequest::SendElement {

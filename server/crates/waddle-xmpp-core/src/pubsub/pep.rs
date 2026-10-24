@@ -78,8 +78,8 @@ pub const PEP_NODE_WADDLE_DND: &str = "urn:waddle:dnd:0";
 /// roster-contact PEP fan-out. The authoritative consumer is the
 /// server-side projection at the T1 push gate.
 pub const PEP_NODE_WADDLE_DM_BOOKMARKS: &str = "urn:waddle:dm-bookmarks:0";
-
 /// Check if an IQ is a PEP request for the current user.
+#[must_use]
 pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
         return false;
@@ -92,6 +92,7 @@ pub fn is_pep_request(iq: &Iq, user_jid: &BareJid) -> bool {
 }
 
 /// Check if a PubSub IQ is addressed to another user's PEP service.
+#[must_use]
 pub fn is_pep_request_to(iq: &Iq, target_jid: &BareJid) -> bool {
     if !is_pubsub_iq(iq) {
         return false;
@@ -108,6 +109,7 @@ pub struct PepHandler;
 
 impl PepHandler {
     /// Check if a node name is one of the built-in well-known PEP nodes.
+    #[must_use]
     pub fn is_well_known_node(node: &str) -> bool {
         node == PEP_NODE_BOOKMARKS
             || node == PEP_NODE_AVATAR_DATA
@@ -127,6 +129,7 @@ impl PepHandler {
     }
 
     /// Get the default access model for a well-known PEP node.
+    #[must_use]
     pub fn default_access_model_for_node(node: &str) -> AccessModel {
         if node == PEP_NODE_BOOKMARKS
             || node == PEP_NODE_MDS_DISPLAYED
@@ -157,6 +160,7 @@ impl PepHandler {
 }
 
 /// Build the PEP service disco identity.
+#[must_use]
 pub fn build_pep_identity() -> Identity {
     Identity::new("pubsub", "pep", Some("Personal Eventing Protocol"))
 }
@@ -172,6 +176,7 @@ pub fn build_pep_identity() -> Identity {
 /// `SendLastPublishedItem::Never` (see [`super::node::NodeConfig::waddle_dnd_defaults`])
 /// so there is no roster-contact fanout to opt into. The user's own
 /// resources fetch DND state via XEP-0060 `<items/>` get on resume.
+#[must_use]
 pub fn pep_features() -> Vec<Feature> {
     vec![
         Feature::pubsub(),

@@ -94,7 +94,7 @@ pub(super) async fn postgres_state(
 )> {
     let fixture = crate::ingress::test_support::IngressFixture::postgres(label).await?;
     let ingress = Arc::new(fixture.authority().await);
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -105,10 +105,12 @@ pub(super) async fn postgres_state(
 }
 
 pub(super) async fn sqlite_state() -> Arc<WebSocketState> {
-    let pool =
-        crate::db::DatabasePool::new(crate::db::DatabaseConfig::default(), crate::db::PoolConfig)
-            .await
-            .expect("SQLite pool");
+    let pool = crate::db::DatabasePool::try_new(
+        crate::db::DatabaseConfig::default(),
+        crate::db::PoolConfig,
+    )
+    .await
+    .expect("SQLite pool");
     database_state(Arc::new(pool), None).await
 }
 

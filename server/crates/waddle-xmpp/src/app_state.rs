@@ -455,7 +455,7 @@ pub trait AppState: Send + Sync + 'static {
     /// Get detailed information about the canonical space.
     ///
     /// Used by the XEP-0503 spaces service to return space metadata.
-    fn get_space_details(
+    fn space_details(
         &self,
     ) -> impl std::future::Future<Output = Result<Option<SpaceDetails>, XmppError>> + Send;
 }

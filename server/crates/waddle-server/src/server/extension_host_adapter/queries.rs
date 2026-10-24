@@ -154,8 +154,8 @@ impl ExtensionHostAdapter {
 
         let registry = &self.state.deps.protocol.connection_registry;
         let mut out = Vec::new();
-        for (jid, priority) in registry.get_available_resources_for_user(target) {
-            let state = registry.get_presence_state(&jid);
+        for (jid, priority) in registry.available_resources_for_user(target) {
+            let state = registry.presence_state(&jid);
             out.push(HostPresence {
                 jid,
                 show: state

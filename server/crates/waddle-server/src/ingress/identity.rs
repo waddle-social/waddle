@@ -215,12 +215,14 @@ pub(crate) mod stanza_lang_serde {
     use serde::{Deserialize, Deserializer, Serialize, Serializer};
     use xmpp_parsers::message::Lang;
 
-    pub fn serialize<S: Serializer>(
-        language: &Option<Lang>,
+    /// Serialize serde's zero-or-one borrowed language without requiring an option wrapper.
+    pub fn serialize<'a, S: Serializer>(
+        language: impl IntoIterator<Item = &'a Lang>,
         serializer: S,
     ) -> Result<S::Ok, S::Error> {
         language
-            .as_ref()
+            .into_iter()
+            .next()
             .map(|language| language.0.as_str())
             .serialize(serializer)
     }

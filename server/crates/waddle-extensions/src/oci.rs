@@ -33,6 +33,7 @@ const COMPONENT_WASM_VERSION: [u8; 4] = [0x0d, 0x00, 0x01, 0x00];
 impl OciExtensionPuller {
     /// Create an artifact resolver using the supplied cache directory; no files or
     /// network connections are created yet.
+    #[must_use]
     pub fn new(cache_dir: impl Into<PathBuf>) -> Self {
         Self {
             cache_dir: cache_dir.into(),
@@ -167,6 +168,7 @@ impl OciExtensionPuller {
     }
 
     /// Borrow the filesystem directory used for downloaded extension components.
+    #[must_use]
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
     }

@@ -78,7 +78,7 @@ pub struct NotificationOutboxStore {
 }
 
 impl NotificationOutboxStore {
-    pub async fn new(db: Database) -> Result<Self, NotificationOutboxError> {
+    pub async fn try_new(db: Database) -> Result<Self, NotificationOutboxError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)

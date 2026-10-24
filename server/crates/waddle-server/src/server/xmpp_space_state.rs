@@ -122,7 +122,7 @@ pub(crate) async fn get_channel_room_info(
     }
 }
 
-pub(crate) fn get_space_details(domain: &str) -> SpaceDetails {
+pub(crate) fn space_details(domain: &str) -> SpaceDetails {
     SpaceDetails {
         id: "space".to_string(),
         name: domain.to_string(),

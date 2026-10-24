@@ -153,6 +153,7 @@ fn muji_content_media(content: &Element) -> impl Iterator<Item = &str> {
 /// before handing a typed `Option<Show>` to [`build_presence_stanza`]. An
 /// unknown token yields `None` (plain Available) so an invalid value never
 /// reaches the wire.
+#[must_use]
 pub fn parse_show(token: &str) -> Option<Show> {
     match token {
         "away" => Some(Show::Away),
@@ -176,6 +177,7 @@ pub fn parse_show(token: &str) -> Option<Show> {
 /// `Option<DateTime<Utc>>`, not raw tokens. Shared by the native
 /// [`super::MessagingExt::send_presence`] and the wasm `send_presence` binding;
 /// the caller serialises to an [`Element`] at the I/O boundary (`send_stanza`).
+#[must_use]
 pub fn build_presence_stanza(
     status: Option<&str>,
     show: Option<Show>,

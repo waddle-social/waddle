@@ -43,7 +43,6 @@ pub const NS_WADDLE_DM_BOOKMARKS: &str = "urn:waddle:dm-bookmarks:0";
 /// to, so the requested config matches what the server creates on first
 /// publish (anti-DoS parity with the XEP-0402 bookmarks node).
 pub const DM_BOOKMARK_MAX_ITEMS: u32 = 1024;
-
 /// DM-carrier retract predicate (issue #720, sparse / override-only).
 ///
 /// Returns `true` iff a merged `<notify/>` carries NOTHING beyond the
@@ -62,6 +61,7 @@ pub const DM_BOOKMARK_MAX_ITEMS: u32 = 1024;
 /// A `<notify/>` with no fallback child at all (only identity-scoped
 /// siblings) is therefore NOT default — the siblings are foreign state
 /// we must keep on the wire.
+#[must_use]
 pub fn dm_notify_is_default(notify: &Element, default_mode: NotifyMode) -> bool {
     // Rich opt-in is honored on ANY setting (matching the readers), so
     // an opt-in anywhere means the DM carries an override.
@@ -121,6 +121,7 @@ pub fn dm_notify_is_default(notify: &Element, default_mode: NotifyMode) -> bool 
 /// autojoin / nick / password. The `<notify/>` is cloned in verbatim;
 /// its namespace and children stay byte-identical to official XEP-0492
 /// (Waddle hosts it, it does not fork it). Pure.
+#[must_use]
 pub fn build_dm_bookmark_element(notify: &Element) -> Element {
     Element::builder("dm-bookmark", NS_WADDLE_DM_BOOKMARKS)
         .append(notify.clone())
@@ -130,6 +131,7 @@ pub fn build_dm_bookmark_element(notify: &Element) -> Element {
 /// Read the XEP-0492 `<notify/>` child of a `<dm-bookmark>` payload
 /// (issue #720), if present. Returns `None` for a malformed payload
 /// missing the `<notify/>`. Borrows.
+#[must_use]
 pub fn read_dm_bookmark_notify(payload: &Element) -> Option<&Element> {
     payload.get_child("notify", NS_NOTIFICATION_SETTINGS)
 }
@@ -140,6 +142,7 @@ pub fn read_dm_bookmark_notify(payload: &Element) -> Option<&Element> {
 /// `to=` is omitted so the server routes the request to the account's
 /// own PEP service (XEP-0163 §3.5), mirroring
 /// [`crate::xep::xep0402::build_fetch_bookmarks_iq`].
+#[must_use]
 pub fn build_fetch_dm_bookmarks_iq(request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -172,6 +175,7 @@ pub fn build_fetch_dm_bookmarks_iq(request_id: &str) -> Element {
 /// `max_items=max`, the DM node bounds retention so server-side eviction
 /// stays enabled (anti-DoS parity with the bookmarks node). `to=` is
 /// omitted (XEP-0163 §3.5).
+#[must_use]
 pub fn build_publish_dm_bookmark_iq(jid: &BareJid, notify: &Element, request_id: &str) -> Element {
     let publish_options = Element::builder("publish-options", NS_PUBSUB)
         .append(
@@ -236,6 +240,7 @@ pub fn build_publish_dm_bookmark_iq(jid: &BareJid, notify: &Element, request_id:
 /// item == the default. `notify='true'` asks the server to broadcast a
 /// retract event to subscribers (mirroring XEP-0060 §7.2). `to=` is
 /// omitted (XEP-0163 §3.5).
+#[must_use]
 pub fn build_retract_dm_bookmark_iq(jid: &BareJid, request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "set")

@@ -1611,7 +1611,7 @@ fn build_outbound_message_with_sticker_marker_and_file_desc_hash() {
         }],
         sticker: Some(StickerMarker {
             pack: Some(PackRef {
-                id: PackId::new("EpRv28DHHzFrE4zd+xaNpVb4").expect("pack id"),
+                id: PackId::try_new("EpRv28DHHzFrE4zd+xaNpVb4").expect("pack id"),
                 jid: None,
                 node: None,
             }),
@@ -1694,7 +1694,7 @@ fn parse_message_reads_file_desc_and_hashes_into_shared_file() {
 #[test]
 fn build_outbound_message_with_link_preview_token_request() {
     let options = SendMessageOptions {
-        link_preview_token: Some(LinkPreviewToken::new("preview-token-1").expect("token")),
+        link_preview_token: Some(LinkPreviewToken::try_new("preview-token-1").expect("token")),
         ..Default::default()
     };
 
@@ -2164,7 +2164,7 @@ fn build_then_parse_roundtrip_preserves_encrypted_metadata() {
 
 #[test]
 fn build_outbound_message_uses_caller_stanza_id() {
-    let stanza_id = StanzaId::new("client-visible-1").unwrap();
+    let stanza_id = StanzaId::try_new("client-visible-1").unwrap();
     let options = SendMessageOptions {
         stanza_id: Some(stanza_id.clone()),
         ..Default::default()
@@ -2180,7 +2180,7 @@ fn build_outbound_message_uses_caller_stanza_id() {
 #[test]
 fn build_outbound_chat_messages_stamp_origin_id_matching_stanza_id() {
     for message_type in ["chat", "groupchat"] {
-        let stanza_id = StanzaId::new(format!("{message_type}-client-id")).unwrap();
+        let stanza_id = StanzaId::try_new(format!("{message_type}-client-id")).unwrap();
         let options = SendMessageOptions {
             stanza_id: Some(stanza_id.clone()),
             ..Default::default()
@@ -2543,8 +2543,8 @@ fn build_reaction_message_includes_thread_when_present() {
 fn build_in_call_reaction_message_has_transient_carrier_shape() {
     let recipient =
         InCallReactionRecipient::Direct("bob@example.com/phone".parse().expect("full jid"));
-    let sid = InCallSessionId::new("call-1").expect("valid sid");
-    let emoji = InCallReactionEmoji::new("👍").expect("valid emoji");
+    let sid = InCallSessionId::try_new("call-1").expect("valid sid");
+    let emoji = InCallReactionEmoji::try_new("👍").expect("valid emoji");
     let stanza = build_in_call_reaction_message(&recipient, &sid, &emoji);
     assert_eq!(stanza.attr("to"), Some("bob@example.com/phone"));
     assert_eq!(stanza.attr("type"), Some("chat"));
@@ -2567,16 +2567,16 @@ fn build_in_call_reaction_message_has_transient_carrier_shape() {
 
 #[test]
 fn in_call_reaction_values_reject_empty_wire_fields() {
-    assert!(InCallSessionId::new("").is_err());
-    assert!(InCallSessionId::new("   ").is_err());
-    assert!(InCallReactionEmoji::new("").is_err());
-    assert!(InCallReactionEmoji::new("   ").is_err());
+    assert!(InCallSessionId::try_new("").is_err());
+    assert!(InCallSessionId::try_new("   ").is_err());
+    assert!(InCallReactionEmoji::try_new("").is_err());
+    assert!(InCallReactionEmoji::try_new("   ").is_err());
 }
 
 #[test]
 fn in_call_reaction_values_trim_before_serialization() {
-    let sid = InCallSessionId::new(" call-1 ").expect("valid sid");
-    let emoji = InCallReactionEmoji::new(" 👍 ").expect("valid emoji");
+    let sid = InCallSessionId::try_new(" call-1 ").expect("valid sid");
+    let emoji = InCallReactionEmoji::try_new(" 👍 ").expect("valid emoji");
     assert_eq!(sid.as_str(), "call-1");
     assert_eq!(emoji.as_str(), "👍");
 }

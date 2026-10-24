@@ -55,7 +55,10 @@ impl ExtensionPayload {
     ///
     /// Returns a framework error when the advertised namespace differs from the root, any
     /// XML tree validation fails, or the aggregate content-size budget exceeds 64 KiB.
-    pub fn new(namespace: PayloadNamespace, root: XmlElement) -> Result<Self, FrameworkTypeError> {
+    pub fn try_new(
+        namespace: PayloadNamespace,
+        root: XmlElement,
+    ) -> Result<Self, FrameworkTypeError> {
         if root.namespace != namespace {
             return Err(FrameworkTypeError::InvalidPayloadNamespace(
                 root.namespace.as_str().to_string(),
@@ -78,6 +81,7 @@ impl ExtensionPayload {
     /// contain invalid XML local names. In debug builds, namespaced attributes
     /// also panic. Values accepted by the validated constructors satisfy these
     /// serialization preconditions.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         self.root.to_minidom()
     }
@@ -95,13 +99,14 @@ impl ExtensionPayload {
     /// aggregate payload-size budget.
     pub fn from_minidom(element: &Element) -> Result<Self, FrameworkTypeError> {
         let root = XmlElement::from_minidom(element)?;
-        Self::new(root.namespace.clone(), root)
+        Self::try_new(root.namespace.clone(), root)
     }
 
     /// Returns true when this payload is the framework-defined
     /// `<extension-item>` PubSub envelope. The host accepts these from any
     /// extension that has been granted `PubSubPublish`, without requiring the
     /// manifest to declare the framework namespace.
+    #[must_use]
     pub fn is_framework_item(&self) -> bool {
         self.namespace.is_framework()
             && self.root.namespace.is_framework()
@@ -120,7 +125,7 @@ impl XmlElement {
     ///
     /// Returns a framework error for unsupported local names, namespaced or duplicate
     /// attributes, or excessive depth, attribute/child counts, or text-node bytes.
-    pub fn new(
+    pub fn try_new(
         namespace: PayloadNamespace,
         local_name: impl Into<String>,
         attributes: Vec<XmlAttribute>,
@@ -232,7 +237,7 @@ impl XmlElement {
     }
 
     /// Parse a `minidom::Element` into a typed tree, preserving child namespaces
-    /// and validating names and tree limits through `XmlElement::new`.
+    /// and validating names and tree limits through `XmlElement::try_new`.
     /// Attribute namespace information is discarded by this conversion.
     ///
     /// # Errors
@@ -240,7 +245,7 @@ impl XmlElement {
     /// Returns a framework error for invalid or official element namespaces, unsupported
     /// local names, duplicate attributes after namespace removal, or tree limits.
     pub fn from_minidom(element: &Element) -> Result<Self, FrameworkTypeError> {
-        let namespace = PayloadNamespace::new(element.ns())?;
+        let namespace = PayloadNamespace::try_new(element.ns())?;
         let attributes = element
             .attrs()
             .iter()
@@ -263,6 +268,6 @@ impl XmlElement {
                 }
             }
         }
-        Self::new(namespace, element.name().to_string(), attributes, children)
+        Self::try_new(namespace, element.name().to_string(), attributes, children)
     }
 }

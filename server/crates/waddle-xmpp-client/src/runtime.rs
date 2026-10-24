@@ -95,7 +95,7 @@ impl XmppRuntime {
     /// # Errors
     ///
     /// Returns the configuration validation error for an invalid WebSocket endpoint, origin, or blank resource.
-    pub fn new(config: ClientConfig) -> ClientResult<Self> {
+    pub fn try_new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
         let persisted_resume_state = config.session.stream_management.resume_state.clone();
         let sm_state = persisted_resume_state
@@ -125,16 +125,19 @@ impl XmppRuntime {
     }
 
     /// Borrow the validated configuration used by this client or runtime.
+    #[must_use]
     pub fn config(&self) -> &ClientConfig {
         &self.config
     }
 
     /// Borrow the current session snapshot.
+    #[must_use]
     pub fn snapshot(&self) -> &SessionSnapshot {
         &self.snapshot
     }
 
     /// Return the resumable stream state, including an outstanding fallback replay tail.
+    #[must_use]
     pub fn resume_state(&self) -> Option<SmResumeState> {
         if self.fallback_resume_state.is_some()
             && (!self.pending_fallback_retries.is_empty()
@@ -147,11 +150,13 @@ impl XmppRuntime {
     }
 
     /// Return a snapshot of pending requests in request-identifier order.
+    #[must_use]
     pub fn pending_requests(&self) -> Vec<PendingRequest> {
         self.requests.snapshot()
     }
 
     /// Return whether the runtime is prepared or has an active session lifecycle.
+    #[must_use]
     pub fn status(&self) -> RuntimeStatus {
         match self.snapshot.phase {
             SessionPhase::Disconnected => RuntimeStatus::Prepared,
@@ -160,6 +165,7 @@ impl XmppRuntime {
     }
 
     /// Whether the session is established and any advertised stream-management negotiation has completed.
+    #[must_use]
     pub fn can_send_app_stanza(&self) -> bool {
         if !matches!(self.snapshot.phase, SessionPhase::Established) {
             return false;
@@ -175,6 +181,7 @@ impl XmppRuntime {
 
     /// Whether a host timer must continue polling the Rust-owned XEP-0198
     /// acknowledgement policy.
+    #[must_use]
     pub fn acknowledgement_clock_pending(&self) -> bool {
         self.sm_state.acknowledgement_clock_pending()
     }
@@ -336,6 +343,7 @@ impl XmppRuntime {
     /// Request a peer acknowledgement through the runtime-owned XEP-0198
     /// builder. Browser callers use this during `pagehide`; the host never
     /// constructs XML or redefines whether the current stream can carry SM.
+    #[must_use]
     pub fn request_stream_management_ack(&self) -> Vec<ClientEvent> {
         if !self.sm_state.enabled {
             return Vec::new();
@@ -355,6 +363,7 @@ impl XmppRuntime {
     /// Decide whether pagehide should write an acknowledgement request. This
     /// is deliberately separate from the post-write state transition: a
     /// browser can freeze or reject `WebSocket.send` immediately afterwards.
+    #[must_use]
     pub fn prepare_pagehide_ack(&self) -> PagehideAckRequest {
         if !self.sm_state.enabled
             || self.sm_state.acknowledgement_request_outstanding()
@@ -788,7 +797,7 @@ impl XmppRuntime {
             .next_bootstrap_stanza
             .checked_add(1)
             .ok_or(ClientError::RequestIdExhausted)?;
-        StanzaId::new(format!("bind-{}", self.next_bootstrap_stanza))
+        StanzaId::try_new(format!("bind-{}", self.next_bootstrap_stanza))
     }
 
     fn push_state_change(&self, previous: SessionSnapshot, events: &mut Vec<ClientEvent>) {

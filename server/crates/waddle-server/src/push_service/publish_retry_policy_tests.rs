@@ -4,7 +4,7 @@ use crate::push_service::test_support::{notification_item, owner, scalar_i64, st
 async fn expired_batch_backoff_uses_each_rows_durable_count(
     fixture: crate::ingress::test_support::IngressFixture,
 ) {
-    let store = DatabasePushServiceStore::new(fixture.db.clone())
+    let store = DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("store");
     let node = store
@@ -94,7 +94,7 @@ async fn node_retirement_preserves_terminal_history_and_does_not_count_noops() {
     .await
     .expect("configured push service");
     let registrations =
-        crate::push_registrations::DatabasePushRegistrationStore::new(store.db.clone())
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(store.db.clone())
             .await
             .expect("registrations");
     let node = store

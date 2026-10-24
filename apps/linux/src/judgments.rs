@@ -36,7 +36,7 @@ pub fn fastening(
         .map(|score| {
             Some(SafetyScore {
                 category: category(score.category),
-                probability: Probability::new(score.probability)?,
+                probability: Probability::try_new(score.probability)?,
                 taxonomy_version: score.taxonomy_version,
             })
         })

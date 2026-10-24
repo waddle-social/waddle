@@ -63,7 +63,7 @@ fn parent_only_with_empty_id_is_rejected() {
 }
 
 fn tid(value: &str) -> ThreadId {
-    ThreadId::new(value).expect("non-empty")
+    ThreadId::try_new(value).expect("non-empty")
 }
 
 #[test]

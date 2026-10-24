@@ -192,6 +192,7 @@ pub async fn set_dm_notification_mode<D: CommandDriver>(
 }
 
 /// Read direct-message bookmark items from a PubSub result, ignoring malformed or unrelated payloads.
+#[must_use]
 pub fn parse_dm_bookmark_payloads(iq: &Element) -> Vec<(BareJid, Element)> {
     let Some(items) = iq
         .get_child("pubsub", crate::pep::NS_PUBSUB)

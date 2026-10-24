@@ -24,7 +24,7 @@ use waddle_xmpp_core::xep0359::StanzaId;
 
 async fn preview_reference_policy_drift(fixture: IngressFixture) {
     let pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             PoolConfig,
         )

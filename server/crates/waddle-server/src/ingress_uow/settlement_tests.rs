@@ -303,7 +303,7 @@ fn deferred_policy_requires_completed_evidence_with_identical_frozen_fields() {
             1 => mismatch.room = "other@muc.example.com".parse().expect("room"),
             2 => {
                 mismatch.thread_id =
-                    Some(waddle_xmpp_core::mam::ThreadId::new("thread").expect("thread"))
+                    Some(waddle_xmpp_core::mam::ThreadId::try_new("thread").expect("thread"))
             }
             3 => mismatch.archive_stanza_id.id = "other".into(),
             4 => mismatch.sender = "other@example.com/phone".parse().expect("sender"),

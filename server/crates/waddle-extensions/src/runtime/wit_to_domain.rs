@@ -150,7 +150,7 @@ impl TryFrom<wit_types::PayloadRoot> for PayloadRoot {
     type Error = anyhow::Error;
 
     fn try_from(value: wit_types::PayloadRoot) -> Result<Self> {
-        PayloadRoot::new(
+        PayloadRoot::try_new(
             wit_newtype_to_domain!(value.namespace, PayloadNamespace)?,
             value.local_name,
         )
@@ -285,8 +285,8 @@ impl TryFrom<wit_types::InvocationUsage> for crate::types::InvocationUsage {
     type Error = anyhow::Error;
     fn try_from(value: wit_types::InvocationUsage) -> Result<Self> {
         Ok(Self {
-            provider: crate::types::ProviderId::new(value.provider.value)?,
-            model: crate::types::ModelId::new(value.model.value)?,
+            provider: crate::types::ProviderId::try_new(value.provider.value)?,
+            model: crate::types::ModelId::try_new(value.model.value)?,
             cost_micro_usd: value.cost_micro_usd,
         })
     }

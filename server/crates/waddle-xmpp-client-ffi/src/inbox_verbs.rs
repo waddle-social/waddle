@@ -53,7 +53,22 @@ impl WaddleClient {
         };
         // The ext's send_iq has no request-level timeout; bound the
         // whole streamed round-trip like every other fetch verb.
-        match tokio::time::timeout(IQ_TIMEOUT, handle.fetch_inbox(only_unread, !no_messages)).await
+        match tokio::time::timeout(
+            IQ_TIMEOUT,
+            handle.fetch_inbox(
+                if only_unread {
+                    waddle_xmpp_client::inbox::InboxReadFilter::UnreadOnly
+                } else {
+                    waddle_xmpp_client::inbox::InboxReadFilter::All
+                },
+                if no_messages {
+                    waddle_xmpp_client::inbox::InboxMessageContent::Omit
+                } else {
+                    waddle_xmpp_client::inbox::InboxMessageContent::Include
+                },
+            ),
+        )
+        .await
         {
             Ok(Ok(page)) => Ok(inbox_page_to_ffi(page)),
             Ok(Err(e)) => Err(client_error_to_waddle(&e)),

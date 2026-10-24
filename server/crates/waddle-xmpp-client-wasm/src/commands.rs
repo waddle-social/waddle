@@ -116,7 +116,7 @@ async fn send_iq_roundtrip(
 ) -> Result<Result<Element, ClientError>, JsValue> {
     let iq_id = stanza
         .attr("id")
-        .and_then(|value| waddle_xmpp_client::request::StanzaId::new(value).ok());
+        .and_then(|value| waddle_xmpp_client::request::StanzaId::try_new(value).ok());
     let (responder, rx) = oneshot::channel();
     let queue_inner = inner.clone();
     let round_trip = async move {
@@ -216,8 +216,8 @@ pub(crate) async fn cancel_iq_command(
     inner: Rc<RefCell<WaddleClientInner>>,
     id: String,
 ) -> Result<(), JsValue> {
-    let id =
-        waddle_xmpp_client::request::StanzaId::new(id).map_err(|err| js_error(err.to_string()))?;
+    let id = waddle_xmpp_client::request::StanzaId::try_new(id)
+        .map_err(|err| js_error(err.to_string()))?;
     let (responder, rx) = oneshot::channel();
     enqueue_command(&inner, WasmCommand::CancelIq { id, responder }).await?;
     rx.await

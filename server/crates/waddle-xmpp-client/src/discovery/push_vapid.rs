@@ -76,6 +76,7 @@ pub struct PushVapidAdvertisement {
 /// deployment. Other variants flag a malformed advertisement; callers
 /// should refuse to subscribe rather than degrade silently.
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PushVapidDiscoParseError {
     #[error("Push Service disco#info does not advertise a `{PUSH_VAPID_FORM_TYPE}` form")]
     /// Push Service disco#info does not advertise a ``PUSH_VAPID_FORM_TYPE`` form.
@@ -156,6 +157,7 @@ pub fn parse_push_vapid_from_disco_info(
 /// Outcomes for [`parse_push_vapid_reply`]: the reply-level checks in
 /// front of [`parse_push_vapid_from_disco_info`].
 #[derive(Debug, Error, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum PushVapidReplyError {
     /// The reply is not stamped by the queried service (RFC 6120
     /// §8.1.2.1 requires components to stamp `from`). A key from anyone

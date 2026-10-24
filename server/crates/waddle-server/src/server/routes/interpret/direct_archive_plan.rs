@@ -48,7 +48,7 @@ fn snapshot(deps: &Deps<'_>, key: DmCallThreadKey) -> Option<PlannedDmCallState>
                 initiator: entry.initiator.clone(),
                 media: entry.media,
                 started: entry.started,
-                thread: waddle_xmpp_core::mam::ThreadId::new(entry.thread_id.clone())?,
+                thread: waddle_xmpp_core::mam::ThreadId::try_new(entry.thread_id.clone())?,
             })
         });
     let projected = if active.is_some() {
@@ -127,7 +127,7 @@ pub(super) fn prepare(
             initiator: offer.initiator.clone(),
             media: offer.media,
             started: chrono::Utc::now(),
-            thread: waddle_xmpp_core::mam::ThreadId::new(state.key.sid.0.clone())?,
+            thread: waddle_xmpp_core::mam::ThreadId::try_new(state.key.sid.0.clone())?,
         });
         record(deps, state.clone());
     }
@@ -317,7 +317,7 @@ mod tests {
                     initiator: alice.clone(),
                     media: waddle_xmpp::xep::CallThreadMedia::audio_video(),
                     started: chrono::Utc::now(),
-                    thread: waddle_xmpp_core::mam::ThreadId::new("call-1").expect("thread"),
+                    thread: waddle_xmpp_core::mam::ThreadId::try_new("call-1").expect("thread"),
                 }),
                 projected: [alice.clone(), bob.clone()].into_iter().collect(),
             },
@@ -372,7 +372,7 @@ mod tests {
                 initiator: alice.clone(),
                 media: waddle_xmpp::xep::CallThreadMedia::audio_only(),
                 started,
-                thread: waddle_xmpp_core::mam::ThreadId::new(sid).expect("thread"),
+                thread: waddle_xmpp_core::mam::ThreadId::try_new(sid).expect("thread"),
             }),
             projected: [alice, bob].into_iter().collect(),
         }

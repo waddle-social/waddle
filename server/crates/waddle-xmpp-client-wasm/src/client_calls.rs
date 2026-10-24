@@ -408,7 +408,7 @@ impl WaddleClient {
     ) -> Promise {
         let inner = self.inner.clone();
         future_to_promise(async move {
-            let iq_id = waddle_xmpp_client::request::StanzaId::new(iq_id)
+            let iq_id = waddle_xmpp_client::request::StanzaId::try_new(iq_id)
                 .map_err(|err| js_error(err.to_string()))?;
             let mixer = calls_mixer_jid(stored_full_jid(&inner)?.domain().as_str());
 

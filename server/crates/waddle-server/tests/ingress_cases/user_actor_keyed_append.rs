@@ -31,7 +31,7 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
     users
         .ask(RegisterUserResource {
             jid: target.clone(),
-            entry: connections.get_entry(&target).expect("registered resource"),
+            entry: connections.entry(&target).expect("registered resource"),
         })
         .await
         .expect("authoritative local UserActor registration");
@@ -147,9 +147,9 @@ pub async fn local_queue_retains_append_identity(fixture: IngressFixture, kind: 
     let snapshot = detached_progress_support::queued(&sm, &target).await;
     let mut resumed = StreamManagementState::new();
     resumed.restore_from_session(&snapshot);
-    assert_eq!(resumed.get_stanzas_to_resend(0).len(), 1);
+    assert_eq!(resumed.stanzas_to_resend(0).len(), 1);
     resumed.acknowledge(1);
-    assert!(resumed.get_stanzas_to_resend(1).is_empty());
+    assert!(resumed.stanzas_to_resend(1).is_empty());
     users.kill();
     drop(sm);
     fixture.close().await;

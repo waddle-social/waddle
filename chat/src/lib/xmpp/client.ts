@@ -383,8 +383,8 @@ type XmppClientInstance = Partial<WasmClient> & CompatEmitter & {
   set_on_avatar_changed?: (cb: (event: WasmAvatarChanged) => void) => void;
   set_on_stream_management?: (cb: (event: StreamManagementTelemetry) => void) => void;
   send_in_call_reaction?: (to: string, type: "chat" | "groupchat", sid: string, emoji: string) => Promise<void>;
-  get_resume_state?: () => XmppResumeState | null;
-  get_resume_state_handle?: () => XmppResumeStateHandle | undefined;
+  resume_state?: () => XmppResumeState | null;
+  resume_state_handle?: () => XmppResumeStateHandle | undefined;
   request_stream_management_ack?: () => Promise<void>;
   try_request_stream_management_ack_for_pagehide?: () => PagehideSmAckEnqueueOutcome;
   publish_mds_displayed?: (chatId: string, stanzaId: string, stanzaIdBy: string) => Promise<void>;
@@ -1093,7 +1093,7 @@ export class BrowserXmppClient {
   persistResumeStateForPageHide(): void {
     if (this.disposed) return;
     this.resume.persistForPageHide(
-      this.xmpp?.get_resume_state?.() ?? null,
+      this.xmpp?.resume_state?.() ?? null,
       this.resource,
       () => this.persistRetainedJoinedRooms(),
     );

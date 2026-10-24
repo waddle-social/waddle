@@ -155,9 +155,10 @@ impl DatabasePushServiceStore {
             drop(conn);
             let token = uuid::Uuid::parse_str(job_id)
                 .map_err(|_| XmppError::internal("invalid publication token"))?;
-            let version = PublicationVersion::new(job.publication_order, token)
+            let version = PublicationVersion::try_new(job.publication_order, token)
                 .map_err(|error| error.into_xmpp_error())?;
-            let node = PublicationNode::new(job.node()).map_err(|error| error.into_xmpp_error())?;
+            let node =
+                PublicationNode::try_new(job.node()).map_err(|error| error.into_xmpp_error())?;
             let item = PubSubItem::new(Some(job.item_id().to_string()), Some(payload));
             match boundary
                 .storage

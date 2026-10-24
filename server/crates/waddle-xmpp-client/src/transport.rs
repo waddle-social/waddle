@@ -76,8 +76,8 @@ pub struct StreamOpen {
 impl StreamOpen {
     /// Protocol token `1.0`.
     pub const VERSION: &'static str = "1.0";
-
     /// Construct this bootstrap value from the validated client configuration.
+    #[must_use]
     pub fn from_config(config: &ClientConfig) -> Self {
         Self {
             to: Some(config.connection.server.clone()),
@@ -89,6 +89,7 @@ impl StreamOpen {
     }
 
     /// Create a server-originated stream-open frame with the supplied sender JID.
+    #[must_use]
     pub fn from_server(from: BareJid) -> Self {
         Self {
             to: None,
@@ -130,6 +131,7 @@ pub enum TransportEvent {
 
 impl TransportEvent {
     /// Map this transport event to its resulting transport state, if any.
+    #[must_use]
     pub fn transport_state(&self) -> TransportState {
         match self {
             Self::StateChanged(state) => *state,

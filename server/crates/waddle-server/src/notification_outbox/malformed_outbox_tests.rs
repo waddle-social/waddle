@@ -80,7 +80,7 @@ async fn pending_parent(fixture: &IngressFixture, job: &NotificationOutboxJob, i
 }
 
 async fn malformed_prefix_preserves_unknown_custody_and_unblocks_neighbor(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     for index in 0..3 {
@@ -222,7 +222,7 @@ async fn malformed_prefix_preserves_unknown_custody_and_unblocks_neighbor(fixtur
 }
 
 async fn orphaned_failed_unknown_row_keeps_its_evidence(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     enqueue_jobs_for_test(
@@ -322,7 +322,7 @@ async fn malformed_snapshot_cannot_overwrite_concurrent_repair_or_claim(
     fixture: IngressFixture,
     repair: bool,
 ) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     enqueue_jobs_for_test(

@@ -113,7 +113,7 @@ async fn recovered_bans_and_revocations_own_unavailable_presence_and_sfu_removal
                 channel_id: "channel".to_owned(),
                 config,
                 subject: None,
-                affiliations: authoritative.get_all_affiliations(),
+                affiliations: authoritative.all_affiliations(),
             },
             effects: Mutex::new(Vec::new()),
         });
@@ -124,7 +124,7 @@ async fn recovered_bans_and_revocations_own_unavailable_presence_and_sfu_removal
                 "channel".to_owned(),
                 RoomConfig::default(),
             ),
-            OccupantIdSecret::new(vec![3; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("secret"),
+            OccupantIdSecret::try_new(vec![3; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("secret"),
         ));
         actor
             .ask(RestoreDurableRoomState {

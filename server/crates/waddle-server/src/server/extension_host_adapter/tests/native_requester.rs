@@ -8,7 +8,7 @@ use waddle_extensions::{host_tools as host, DisplayText, WaddleId};
 
 fn context(source_room: Option<jid::BareJid>) -> host::InvocationContext {
     host::InvocationContext {
-        waddle_id: WaddleId::new("native-requester").expect("waddle"),
+        waddle_id: WaddleId::try_new("native-requester").expect("waddle"),
         plugin_id: direct_ingress::plugin(),
         requester: Some("romeo@example.com".parse().expect("requester")),
         source_room,
@@ -20,7 +20,7 @@ fn context(source_room: Option<jid::BareJid>) -> host::InvocationContext {
 fn request(target: host::MessageTarget) -> host::SendMessageRequest {
     host::SendMessageRequest {
         target,
-        body: DisplayText::new("native requester body").expect("body"),
+        body: DisplayText::try_new("native requester body").expect("body"),
         thread_id: None,
         reply_to: None,
         markup: vec![],

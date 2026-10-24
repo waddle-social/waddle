@@ -145,7 +145,7 @@ fn command_prompt(command: &types::CommandInvocation) -> Option<CleanPrompt> {
         .iter()
         .find(|field| field.name.value == "prompt")
         .and_then(|field| field.values.first())
-        .and_then(|value| CleanPrompt::new(clean_prompt(&value.value)))
+        .and_then(|value| CleanPrompt::try_new(clean_prompt(&value.value)))
 }
 
 fn command_response_target(

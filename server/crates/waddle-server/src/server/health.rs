@@ -515,7 +515,7 @@ mod readiness_generation_tests {
             format!("sqlite:file:{name}?mode=memory&cache=shared"),
         );
         Arc::new(
-            DatabasePool::new(config, PoolConfig)
+            DatabasePool::try_new(config, PoolConfig)
                 .await
                 .expect("sqlite pool"),
         )
@@ -592,7 +592,7 @@ mod readiness_generation_tests {
         let muc_domain =
             DomainPart::from_str("muc.localhost").expect("test MUC domain parses as DomainPart");
         let occupant_id_secret =
-            OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+            OccupantIdSecret::try_new(b"test-occupant-id-secret-32-bytes-long".to_vec())
                 .expect("test occupant-id secret meets length floor");
         let room_registry = waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::spawn(
             waddle_xmpp::muc::room_registry_actor::RoomRegistryActor::new(

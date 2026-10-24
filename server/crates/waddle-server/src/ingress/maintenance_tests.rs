@@ -686,7 +686,7 @@ async fn recovery_phase_completes_a_lost_detached_route(fixture: IngressFixture)
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
     let resource: jid::FullJid = "juliet@example.com/phone".parse().expect("resource");
     store_detached(&sm, &resource).await;
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

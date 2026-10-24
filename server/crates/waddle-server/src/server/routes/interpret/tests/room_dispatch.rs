@@ -358,15 +358,15 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         },
     ];
     let response = ExtensionRoomMessage {
-        plugin: waddle_extensions::PluginId::new("test-bot").expect("plugin"),
-        body: DisplayText::new("bot answer").expect("body"),
-        room: RoomJid::new(room_jid.to_string()).expect("room"),
+        plugin: waddle_extensions::PluginId::try_new("test-bot").expect("plugin"),
+        body: DisplayText::try_new("bot answer").expect("body"),
+        room: RoomJid::try_new(room_jid.to_string()).expect("room"),
         preferred_nick: None,
         stanza_id: None,
-        thread_id: Some(ThreadId::new("root-msg").expect("thread")),
+        thread_id: Some(ThreadId::try_new("root-msg").expect("thread")),
         reply_to: Some(ReplyTarget {
-            id: StanzaId::new("root-msg").expect("reply id"),
-            to: Some(FullJidValue::new(alice.to_string()).expect("reply to")),
+            id: StanzaId::try_new("root-msg").expect("reply id"),
+            to: Some(FullJidValue::try_new(alice.to_string()).expect("reply to")),
         }),
         markup: vec![MessageMarkupSpan {
             kind: MessageMarkupKind::Blockquote,
@@ -376,7 +376,7 @@ async fn extension_room_message_dispatches_threaded_muc_message() {
         extensions: None,
     };
 
-    let test_secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+    let test_secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
         b"test-occupant-id-secret-32-bytes-long".to_vec(),
     )
     .expect("test secret meets length floor");
@@ -673,7 +673,7 @@ pub(crate) async fn room_observer_test_manager(
         .map(|capability| ExtensionModuleConfig {
             room_observation: (capability == ExtensionCapability::MessageObserve).then_some(
                 waddle_extensions::RoomObservationConfig {
-                    generation: waddle_extensions::ObservationGeneration::new(1)
+                    generation: waddle_extensions::ObservationGeneration::try_new(1)
                         .expect("generation"),
                     scope: waddle_extensions::RoomObservationScope::AllHostedRooms,
                     max_concurrent: 1,
@@ -831,7 +831,7 @@ async fn assert_room_observer_message_planning(
             sender: sender.clone(),
             plugin: plugin.clone(),
             correction_target: None,
-            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+            generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
             identity: state
                 .deps
                 .protocol

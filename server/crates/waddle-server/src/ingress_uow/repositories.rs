@@ -147,7 +147,7 @@ impl InboxRepository {
             .as_ref()
             .filter(|thread| !thread.is_empty())
             .map(|thread| {
-                waddle_xmpp_core::mam::ThreadId::new(thread.clone())
+                waddle_xmpp_core::mam::ThreadId::try_new(thread.clone())
                     .ok_or(crate::inbox::InboxTxError::InvalidProjectionThread)
             })
             .transpose()?;

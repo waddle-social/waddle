@@ -7,6 +7,7 @@ pub struct ArchiveOrdinal(i64);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 /// Invalid stored archive ordering values, which must be strictly positive.
+#[non_exhaustive]
 pub enum ArchiveOrdinalError {
     #[error("archive ordinal must not be zero")]
     /// Archive ordinal must not be zero.
@@ -34,11 +35,13 @@ impl ArchiveOrdinal {
     }
 
     /// Return the strictly positive integer used by archive storage.
+    #[must_use]
     pub fn to_storage(self) -> i64 {
         self.0
     }
 
     /// Return the next archive ordinal, or `None` if the integer range is exhausted.
+    #[must_use]
     pub fn next(self) -> Option<Self> {
         self.0.checked_add(1).map(Self)
     }

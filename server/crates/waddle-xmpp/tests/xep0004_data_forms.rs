@@ -60,9 +60,9 @@ fn xep0004_parses_wire_submit_form() {
     let form = DataForm::from_element(&elem).expect("valid submit form");
 
     assert_eq!(form.form_type, FormType::Submit);
-    assert_eq!(form.get_form_type_value(), Some("jabber:bot"));
-    assert_eq!(form.get_value("botname"), Some("The Jabber Bot"));
-    assert_eq!(form.get_bool("public"), Some(true));
+    assert_eq!(form.form_type_value(), Some("jabber:bot"));
+    assert_eq!(form.value("botname"), Some("The Jabber Bot"));
+    assert_eq!(form.bool("public"), Some(true));
 }
 
 #[test]
@@ -141,7 +141,7 @@ fn xep0004_find_data_form_locates_nested_form() {
     let found = find_data_form(&parent)
         .expect("form child present")
         .expect("form parses");
-    assert_eq!(found.get_form_type_value(), Some("urn:example:info"));
+    assert_eq!(found.form_type_value(), Some("urn:example:info"));
 
     let empty = Element::builder("query", "http://jabber.org/protocol/disco#info").build();
     assert!(find_data_form(&empty).is_none());
@@ -157,7 +157,7 @@ fn xep0004_boolean_wire_values_accept_one_and_true() {
         );
         let elem: Element = xml.parse().expect("valid xml");
         let form = DataForm::from_element(&elem).expect("valid form");
-        assert_eq!(form.get_bool("flag"), Some(expected), "wire value {wire}");
+        assert_eq!(form.bool("flag"), Some(expected), "wire value {wire}");
     }
 }
 
@@ -172,7 +172,7 @@ fn xep0004_multi_value_field_preserves_order_and_count() {
 
     let parsed = DataForm::from_element(&reparse(&form.to_element())).expect("round trip");
     assert_eq!(
-        parsed.get_values("features").expect("values"),
+        parsed.values("features").expect("values"),
         &[
             "first".to_string(),
             "second".to_string(),

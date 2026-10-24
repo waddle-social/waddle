@@ -45,7 +45,7 @@ async fn values(
     let mut rows = conn.query(sql, params).await.expect("query");
     let row = rows.next().await.expect("row result").expect("row");
     (0..columns)
-        .map(|column| row.get_value(column).expect("column"))
+        .map(|column| row.value(column).expect("column"))
         .collect()
 }
 
@@ -67,7 +67,7 @@ async fn snapshot(
 
 async fn seed_host(fixture: &IngressFixture, node: &str, service: &BareJid) -> HostState {
     let registrations =
-        crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+        crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
             .await
             .expect("registration schema");
     registrations
@@ -156,7 +156,7 @@ async fn seed_disabled_pruning_tail(fixture: &IngressFixture) {
 }
 
 async fn pruning_preserves_legacy_enabled_local_registration(fixture: IngressFixture) {
-    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let service = "push.example.com".parse().expect("service");
@@ -198,7 +198,7 @@ async fn postgres_pruning_preserves_legacy_enabled_local_registration() {
 }
 
 async fn pruning_preserves_provider_and_foreign_custody(fixture: IngressFixture) {
-    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let service = "push.example.com".parse().expect("service");
@@ -283,10 +283,10 @@ async fn postgres_pruning_preserves_provider_and_foreign_custody() {
 }
 
 async fn configured_enable_retire_then_prune(fixture: IngressFixture) {
-    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
-    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+    crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registration schema");
     let service = "push.example.com".parse().expect("service");
@@ -358,7 +358,7 @@ async fn postgres_configured_enable_retire_then_prune() {
 
 async fn configured_local_registration_diagnostics(fixture: IngressFixture) {
     let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
-    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let service = "push.example.com".parse().expect("service");
@@ -434,7 +434,7 @@ async fn configured_local_registration_diagnostics(fixture: IngressFixture) {
 
     // A standalone instance cannot infer a host-service boundary, even with
     // registrations present in its database; it must not overwrite the sample.
-    let standalone = DatabasePushServiceStore::new(fixture.db.clone())
+    let standalone = DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("standalone");
     let unconfigured = standalone
@@ -503,7 +503,7 @@ async fn postgres_configured_local_registration_diagnostics() {
 }
 
 async fn explicit_disable_recovers_missing_or_unowned_legacy_target(fixture: IngressFixture) {
-    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let service = "push.example.com".parse().expect("service");
@@ -589,7 +589,7 @@ async fn postgres_explicit_disable_recovers_missing_or_unowned_legacy_target() {
 }
 
 async fn retirement_preserves_other_service_custody(fixture: IngressFixture) {
-    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let service: BareJid = "push.example.com".parse().expect("service");
@@ -707,7 +707,7 @@ async fn retirement_preserves_other_service_custody(fixture: IngressFixture) {
     );
 
     // A standalone store has no authority to infer any host-service boundary.
-    let standalone = DatabasePushServiceStore::new(fixture.db.clone())
+    let standalone = DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("standalone store");
     let standalone_node = standalone
@@ -776,7 +776,7 @@ async fn provider_snapshot(fixture: &IngressFixture, id: &str) -> Vec<Value> {
 
 async fn registration_disable_discovers_orphaned_provider_custody(fixture: IngressFixture) {
     let telemetry = waddle_xmpp::telemetry::test_support::acquire().await;
-    crate::notification_outbox::NotificationOutboxStore::new(fixture.db.clone())
+    crate::notification_outbox::NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let service: BareJid = "push.example.com".parse().expect("service");

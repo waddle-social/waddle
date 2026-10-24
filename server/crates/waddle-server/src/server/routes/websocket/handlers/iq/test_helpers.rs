@@ -8,7 +8,7 @@ pub async fn handle_iq(
     domain: &str,
     muc_domain: &str,
     state: &WebSocketState,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     phase: &ConnectionPhase,
 ) -> Vec<String> {
     let mut carbons_enabled = phase.bound_jid().is_some_and(|jid| {

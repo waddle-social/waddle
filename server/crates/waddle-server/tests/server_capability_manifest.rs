@@ -181,7 +181,12 @@ fn advertised_feature_claims_exist_in_runtime_feature_vectors() {
         .chain(spaces_service_features())
         .chain(community_service_features())
         .chain(muc_service_features())
-        .chain(muc_room_features(true, true, true, true, true))
+        .chain(muc_room_features(
+            waddle_xmpp_core::disco::info::RoomPersistence::Persistent,
+            waddle_xmpp_core::disco::info::RoomMembership::MembersOnly,
+            waddle_xmpp_core::disco::info::RoomVisibility::Public,
+            waddle_xmpp_core::types::Moderation::Moderated,
+        ))
         .chain(call_features())
     {
         advertised.insert(feature.0);

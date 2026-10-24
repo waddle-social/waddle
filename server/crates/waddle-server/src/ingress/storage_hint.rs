@@ -78,7 +78,7 @@ pub(super) fn validate_capture(
             };
             let mut validation = intent.clone();
             if let IngressEffectIntent::RouteDirect { prepared, .. } = &mut validation {
-                *prepared = Some(StoredMessagePayload::new(message.clone()).map_err(|_| {
+                *prepared = Some(StoredMessagePayload::try_new(message.clone()).map_err(|_| {
                     crate::ingress_uow::IngressUowError::Plan(
                         super::effects::PlanFailure::InvalidPreparedMessage,
                     )

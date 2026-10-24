@@ -118,7 +118,7 @@ pub(super) fn decode_outbox_job(
         push_service_jid: push_service_raw
             .parse()
             .map_err(|_| NotificationOutboxError::InvalidPushServiceBareJid(push_service_raw))?,
-        node: PushServiceNodeName::new(row.get::<String>(3)?)?,
+        node: PushServiceNodeName::try_new(row.get::<String>(3)?)?,
         conversation_jid,
         sender_jid,
         sender_jids,

@@ -16,7 +16,6 @@ use super::{
     MESSAGE_RETRACT_NS, MUC_USER_NS, OCCUPANT_ID_NS, REACTIONS_NS, REFERENCE_NS, REPLY_NS, RSM_NS,
     STANZA_ID_NS,
 };
-
 /// Build MAM result messages for each archived message.
 ///
 /// `archive_jid` is the queried archive's address (room bare JID for
@@ -32,6 +31,7 @@ use super::{
 /// previous string-typed parameter forced an internal `parse()` whose
 /// only failure mode was the `parse_message_jid` "unknown@invalid"
 /// fallback (a hot-path data-loss bug).
+#[must_use]
 pub fn build_result_messages(
     query_id: &str,
     archive_jid: &Jid,
@@ -45,6 +45,7 @@ pub fn build_result_messages(
 }
 
 /// Build the MAM fin (completion) IQ response.
+#[must_use]
 pub fn build_fin_iq(original_iq: &Iq, result: &MamResult) -> Iq {
     let fin = Element::builder("fin", MAM_NS)
         .attr(
@@ -105,6 +106,7 @@ fn build_result_message(
 /// typed reconstruction for legacy or partial rows. Exposed as `pub`
 /// so neighbouring crates can share the single source of truth for
 /// "what does the forwarded inner message look like".
+#[must_use]
 pub fn archived_inner_message(archived: &ArchivedMessage) -> Element {
     if let Some(stanza_xml) = archived.stanza_xml.as_deref() {
         match stanza_xml.parse::<Element>() {
@@ -141,6 +143,7 @@ pub fn archived_inner_message(archived: &ArchivedMessage) -> Element {
 /// helper provides exactly that: a total mapping from the typed
 /// enum back to the same wire literal `MessageType::from_str`
 /// would parse.
+#[must_use]
 pub fn message_type_wire_str(message_type: &MessageType) -> &'static str {
     match message_type {
         MessageType::Chat => "chat",
@@ -156,6 +159,7 @@ pub fn message_type_wire_str(message_type: &MessageType) -> &'static str {
 /// role jid='real-jid'/></x>`. Used by the archive write path (baked
 /// into `stanza_xml`) and by the typed fallback reconstruction below,
 /// so both replay paths agree on the wire shape.
+#[must_use]
 pub fn build_archived_muc_sender_x(sender: &ArchivedMucSender) -> Element {
     Element::builder("x", MUC_USER_NS)
         .append(
@@ -179,6 +183,7 @@ pub fn build_archived_muc_sender_x(sender: &ArchivedMucSender) -> Element {
 
 /// Build a XEP-0421 `<occupant-id xmlns='urn:xmpp:occupant-id:0'
 /// id='…'/>` element from the archived projection value.
+#[must_use]
 pub fn build_archived_occupant_id_element(id: &ArchivedOccupantId) -> Element {
     Element::builder("occupant-id", OCCUPANT_ID_NS)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id.as_str())

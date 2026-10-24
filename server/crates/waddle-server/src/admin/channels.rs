@@ -881,7 +881,7 @@ async fn handle_kick(
 // ---------------------------------------------------------------------------
 
 fn parse_optional_text(form: &DataForm, var: &str) -> Option<String> {
-    form.get_value(var)
+    form.value(var)
         .map(str::to_string)
         .filter(|s| !s.is_empty())
 }
@@ -897,7 +897,7 @@ fn parse_required_bare_jid(form: &DataForm, var: &str) -> Result<BareJid, String
 }
 
 fn parse_optional_bool(form: &DataForm, var: &str) -> Result<Option<bool>, String> {
-    let Some(raw) = form.get_value(var) else {
+    let Some(raw) = form.value(var) else {
         return Ok(None);
     };
     let raw = raw.trim();
@@ -925,7 +925,7 @@ fn parse_optional_channel_type(form: &DataForm, var: &str) -> Result<Option<Chan
 }
 
 fn parse_page_size(form: &DataForm) -> Result<u32, String> {
-    match form.get_value("page_size") {
+    match form.value("page_size") {
         Some(raw) if !raw.is_empty() => {
             let parsed: u32 = raw
                 .parse()
@@ -968,7 +968,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
             after_cursor: None,
         });
     }
-    let space_jid = match form.get_value("space_jid") {
+    let space_jid = match form.value("space_jid") {
         Some(raw) if !raw.is_empty() => Some(
             raw.parse::<BareJid>()
                 .map_err(|e| format!("space_jid invalid: {e}"))?,
@@ -976,7 +976,7 @@ pub fn parse_list_args(form: Option<&DataForm>) -> Result<ChannelsListArgs, Stri
         _ => None,
     };
     let prefix = form
-        .get_value("prefix")
+        .value("prefix")
         .map(|s| s.trim().to_lowercase())
         .filter(|s| !s.is_empty());
     let space_node = parse_optional_text(form, "space_node").map(SpaceNode::from);
@@ -996,7 +996,7 @@ pub fn parse_create_args(form: Option<&DataForm>) -> Result<ChannelsCreateArgs, 
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
     let topic = parse_optional_text(form, "topic");
-    let space_jid = match form.get_value("space_jid") {
+    let space_jid = match form.value("space_jid") {
         Some(raw) if !raw.is_empty() => Some(
             raw.parse::<BareJid>()
                 .map_err(|e| format!("space_jid invalid: {e}"))?,
@@ -1025,7 +1025,7 @@ pub fn parse_group_dm_create_args(form: Option<&DataForm>) -> Result<GroupDmCrea
     let name = parse_required_text(form, "name")?;
     validate_name(&name)?;
     let member_values = form
-        .get_values("member_jids")
+        .values("member_jids")
         .ok_or_else(|| "member_jids is required".to_string())?;
     let mut member_jids = Vec::with_capacity(member_values.len());
     for value in member_values
@@ -1121,7 +1121,7 @@ pub fn parse_affiliations_args(
 ) -> Result<ChannelsAffiliationsArgs, String> {
     let form = form.ok_or_else(|| "channels:affiliations requires an args form".to_string())?;
     let channel_jid = parse_required_bare_jid(form, "channel_jid")?;
-    let filter = match form.get_value("filter") {
+    let filter = match form.value("filter") {
         Some(raw) if !raw.is_empty() => Some(WireAffiliation::parse(raw)?),
         _ => None,
     };
@@ -1292,7 +1292,7 @@ async fn run_list(
         if let Some(snapshot) = local_channel_snapshot(state, &entry.channel_jid).await {
             entry.occupant_count =
                 u32::try_from(snapshot.room.occupant_count()).unwrap_or(u32::MAX);
-            for affiliation in snapshot.room.get_all_affiliations() {
+            for affiliation in snapshot.room.all_affiliations() {
                 match affiliation.affiliation {
                     Affiliation::Owner => entry.affiliation_owner_count += 1,
                     Affiliation::Admin => entry.affiliation_admin_count += 1,
@@ -2777,7 +2777,7 @@ fn find_occupant_for_full_jid<'a>(
         occupant.real_jid == *full_jid
             || snapshot
                 .room
-                .get_occupant_sessions(&occupant.nick)
+                .occupant_sessions(&occupant.nick)
                 .iter()
                 .any(|session| session == full_jid)
     })
@@ -2847,7 +2847,7 @@ fn broadcast_group_dm_config_change(
     snapshot: &waddle_xmpp::muc::room_actor::RoomSnapshot,
 ) {
     for occupant in snapshot.room.occupants.values() {
-        for recipient_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+        for recipient_jid in snapshot.room.occupant_sessions(&occupant.nick) {
             let message = build_group_dm_config_change_message(room_jid, &recipient_jid);
             let _ = connections.try_send_to(&recipient_jid, Stanza::Message(message));
         }
@@ -2976,7 +2976,7 @@ async fn broadcast_admin_config_change(
         return;
     };
     for occupant in snapshot.room.occupants.values() {
-        for recipient_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+        for recipient_jid in snapshot.room.occupant_sessions(&occupant.nick) {
             let message = waddle_xmpp::muc::build_config_change_message(
                 room_jid,
                 &recipient_jid,
@@ -5605,7 +5605,7 @@ mod tests {
     }
 
     fn admin_effect_origin() -> RoomEffectOriginInstanceId {
-        RoomEffectOriginInstanceId::new("admin-channel-test-origin".to_owned())
+        RoomEffectOriginInstanceId::try_new("admin-channel-test-origin".to_owned())
             .expect("origin instance")
     }
 
@@ -5868,8 +5868,8 @@ mod tests {
             members_only: true,
         };
         let form = build_channel_form(&channel);
-        assert_eq!(form.get_value("is_public"), Some("1"));
-        assert_eq!(form.get_value("members_only"), Some("1"));
+        assert_eq!(form.value("is_public"), Some("1"));
+        assert_eq!(form.value("members_only"), Some("1"));
     }
 
     #[test]
@@ -6111,7 +6111,7 @@ mod sfu_eviction_tests {
     use waddle_xmpp::muc::RoomConfig;
 
     async fn fresh_state() -> AppState {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()
@@ -6547,7 +6547,7 @@ mod group_dm_durable_reconciliation_tests {
                 if !exact {
                     return Err(RoomCommitError::NotOwner);
                 }
-                let effect_origin = crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                let effect_origin = crate::room_effect_outbox::RoomEffectOriginInstanceId::try_new(
                     "admin-channel-test-origin".to_owned(),
                 )
                 .expect("test origin instance");
@@ -6685,7 +6685,7 @@ mod group_dm_durable_reconciliation_tests {
     async fn fresh_state_with_room_registry(
         mode: DurableMode,
     ) -> (AppState, Arc<TestGroupDmDurableStore>) {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()
@@ -7224,7 +7224,7 @@ mod group_dm_durable_reconciliation_tests {
                 .deps
                 .protocol
                 .connection_registry
-                .get_entry(&alice_web)
+                .entry(&alice_web)
                 .is_some(),
             "the deferred administrative resource stays live while retained for janitor retry"
         );

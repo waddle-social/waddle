@@ -144,7 +144,7 @@ pub(in super::super::super) async fn deliver_reserved_muc_join(
             presence_show,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session,
-                authenticated_session: &Some(synthetic_session),
+                authenticated_session: Some(&synthetic_session),
                 registry_owner: None,
             },
         ),

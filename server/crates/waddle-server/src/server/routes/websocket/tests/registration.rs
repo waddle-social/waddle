@@ -44,7 +44,7 @@ async fn revoked_authority_cannot_publish_a_bound_connection() {
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .is_none(),
         "revoked registration publishes no local routing entry"
     );
@@ -250,7 +250,7 @@ async fn busy_registration_sends_resource_constraint_and_rolls_back() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .is_none());
     let captured = captured.lock().expect("frames");
     let frames: Vec<Element> = captured
@@ -298,7 +298,11 @@ async fn paused_local_mirror_releases_the_only_main_pool_connection() {
         .append_pair("options", &format!("-c search_path={schema}"));
     let mut config = DatabaseConfig::new(DatabaseDriver::Postgres, url.to_string());
     config.pool_size = 1;
-    let pool = Arc::new(DatabasePool::new(config, PoolConfig).await.expect("pool"));
+    let pool = Arc::new(
+        DatabasePool::try_new(config, PoolConfig)
+            .await
+            .expect("pool"),
+    );
     let state = super::create_test_websocket_state_with_db_pool(pool.clone()).await;
     let entered = Arc::new(tokio::sync::Notify::new());
     let release = Arc::new(tokio::sync::Notify::new());
@@ -548,7 +552,7 @@ async fn fresh_bind_waits_after_incumbent_route_is_removed() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .is_none());
 
     finish_test_socket_cleanup(&state, &mut incumbent, &mut rx).await;
@@ -926,7 +930,7 @@ async fn register_bound_connection_after_frame_registers_ready_connection_once()
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("registered connection");
     assert!(entry.is_carbons_enabled());
     assert!(entry
@@ -939,7 +943,7 @@ async fn register_bound_connection_after_frame_registers_ready_connection_once()
         .deps
         .protocol
         .connection_registry
-        .get_presence_state(&jid)
+        .presence_state(&jid)
         .expect("presence state restored");
     assert_eq!(presence.show.as_deref(), Some("chat"));
     assert_eq!(presence.status.as_deref(), Some("ready"));
@@ -1170,7 +1174,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("fresh bind");
     assert!(
         !entry.is_presence_available(),
@@ -1191,7 +1195,7 @@ async fn assert_pre_authority_bind_cutover(resume_first: bool, revoke_at_publica
         .deps
         .protocol
         .connection_registry
-        .get_presence_state(&jid)
+        .presence_state(&jid)
         .is_none());
     assert!(!conn.pending_subscribes_flushed);
     assert!(
@@ -1273,7 +1277,7 @@ async fn assert_fresh_bind_resume_control_tracks_new_stream(
         .deps
         .protocol
         .connection_registry
-        .get_entry(jid)
+        .entry(jid)
         .expect("fresh bound entry");
     let control = entry.resume_control().expect("fresh entry control");
     assert!(Arc::ptr_eq(&control, &conn.live_resume_control));
@@ -1412,7 +1416,7 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
     );
     assert!(conn.pending_resume_stream_id.is_none());
     assert!(conn.pending_resume_h.is_none());
-    let replay = conn.sm_state.get_stanzas_to_resend(9);
+    let replay = conn.sm_state.stanzas_to_resend(9);
     assert_eq!(replay.len(), 1);
     assert_eq!(
         replay[0].stanza_xml,
@@ -1431,7 +1435,7 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("registered resumed connection");
     assert_eq!(conn.occupancy_session, original_generation);
     assert_eq!(
@@ -1453,7 +1457,7 @@ async fn register_bound_connection_after_frame_completes_pending_resume_claim() 
         .deps
         .protocol
         .connection_registry
-        .get_presence_state(&jid)
+        .presence_state(&jid)
         .expect("resumed presence state restored");
     assert_eq!(presence.show.as_deref(), Some("chat"));
     assert_eq!(presence.status.as_deref(), Some("back"));
@@ -1560,7 +1564,7 @@ async fn authority_revoked_after_resume_finalization_restores_detached_session_o
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .is_none(),
         "cleanup removes the live routing entry"
     );
@@ -1865,7 +1869,7 @@ async fn stale_owner_publication_does_not_stamp_replacement_entry() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("A's entry");
     assert_eq!(
         entry.sm_stream_id(),
@@ -1885,7 +1889,7 @@ async fn stale_owner_publication_does_not_stamp_replacement_entry() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("replacement entry");
     repl_entry.set_sm_stream_id(Some(waddle_xmpp::pending_delivery::SmSessionId::new(
         "replacement-stream",
@@ -1915,7 +1919,7 @@ async fn stale_owner_publication_does_not_stamp_replacement_entry() {
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("replacement entry");
     assert_eq!(
         entry.sm_stream_id(),
@@ -1933,7 +1937,7 @@ async fn stale_owner_publication_does_not_stamp_replacement_entry() {
         .deps
         .protocol
         .connection_registry
-        .get_presence_state(&jid)
+        .presence_state(&jid)
         .expect("replacement presence state");
     assert_eq!(
         (
@@ -2144,7 +2148,7 @@ async fn cleanup_connection_shutdown_mirrors_unregister_into_actor_tree() {
             .deps
             .protocol
             .connection_registry
-            .get_entry(&jid)
+            .entry(&jid)
             .is_none(),
         "authoritative registry unregistered the resource"
     );

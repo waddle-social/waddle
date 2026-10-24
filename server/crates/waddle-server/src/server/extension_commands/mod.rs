@@ -39,7 +39,8 @@ pub(crate) async fn register_extension_commands(
                 else {
                     return extension_warning_result("Extension launch is missing plugin");
                 };
-                let Ok(pubsub_plugin_id) = waddle_extensions::PluginId::new(plugin.clone()) else {
+                let Ok(pubsub_plugin_id) = waddle_extensions::PluginId::try_new(plugin.clone())
+                else {
                     return extension_warning_result("Extension launch plugin is invalid");
                 };
                 let Some(launch) = extension_field_value(&fields, "launch-id")
@@ -60,21 +61,21 @@ pub(crate) async fn register_extension_commands(
                 let waddle_id = extension_field_value(&fields, "waddle-id")
                     .or_else(|| extension_field_value(&fields, "waddle#waddle_id"))
                     .unwrap_or_else(|| ctx.from.to_string());
-                let Ok(launch_id) = LaunchId::new(launch) else {
+                let Ok(launch_id) = LaunchId::try_new(launch) else {
                     return extension_warning_result("Extension launch id is invalid");
                 };
-                let Ok(waddle_id) = WaddleId::new(waddle_id) else {
+                let Ok(waddle_id) = WaddleId::try_new(waddle_id) else {
                     return extension_warning_result("Extension launch waddle id is invalid");
                 };
                 let room = extension_field_value(&fields, "room")
                     .or_else(|| extension_field_value(&fields, "waddle#room_jid"))
-                    .and_then(|value| ExtensionRoomJid::new(value).ok());
+                    .and_then(|value| ExtensionRoomJid::try_new(value).ok());
                 let source_stanza_id = extension_field_value(&fields, "source-stanza-id")
                     .or_else(|| extension_field_value(&fields, "waddle#message_stanza_id"))
-                    .and_then(|value| StanzaId::new(value).ok());
+                    .and_then(|value| StanzaId::try_new(value).ok());
                 let expires_at = extension_field_value(&fields, "expires-at")
                     .or_else(|| extension_field_value(&fields, "waddle#expires_at"))
-                    .and_then(|value| waddle_extensions::Timestamp::new(value).ok());
+                    .and_then(|value| waddle_extensions::Timestamp::try_new(value).ok());
                 let context = LaunchContext {
                     waddle_id,
                     room,
@@ -102,7 +103,7 @@ pub(crate) async fn register_extension_commands(
                         action_id: &action_id,
                         launch_id,
                         context,
-                        requester: FullJidValue::new(ctx.from.to_string())
+                        requester: FullJidValue::try_new(ctx.from.to_string())
                             .expect("requester JID string is non-empty"),
                         session_id: extension_session_id(command_session_id.clone()),
                         action: ctx.command.action.map(extension_command_action),
@@ -146,7 +147,7 @@ pub(crate) async fn register_extension_commands(
                 let registered_node = registered_node.clone();
                 let command_plugin_id = command_plugin_id.clone();
                 async move {
-                    let waddle_id = match WaddleId::new(ctx.from.to_string()) {
+                    let waddle_id = match WaddleId::try_new(ctx.from.to_string()) {
                         Ok(value) => value,
                         Err(error) => {
                             return waddle_xmpp::commands::CommandResult::Completed {
@@ -162,14 +163,14 @@ pub(crate) async fn register_extension_commands(
                     let fields = extension_command_fields(submitted_form);
                     let room = extension_field_value(&fields, "room")
                         .or_else(|| extension_field_value(&fields, "waddle#room_jid"))
-                        .and_then(|value| ExtensionRoomJid::new(value).ok());
+                        .and_then(|value| ExtensionRoomJid::try_new(value).ok());
                     let command_session_id = ctx.command.session_id.clone();
                     let effects = manager
                         .invoke_command(waddle_extensions::manager::CommandInvocationRequest {
                             node: &registered_node,
                             waddle_id,
                             room,
-                            requester: match waddle_extensions::FullJidValue::new(
+                            requester: match waddle_extensions::FullJidValue::try_new(
                                 ctx.from.to_string(),
                             ) {
                                 Ok(value) => value,

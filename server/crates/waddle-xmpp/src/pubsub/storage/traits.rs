@@ -244,7 +244,7 @@ pub trait PubSubStorage: Send + Sync + 'static {
     /// Read the explicit affiliation row for `(owner, node, entity)`.
     /// Returns `Affiliation::None` if no row exists. Owner-derivation for
     /// PEP nodes happens in `pubsub_authz`, *not* here.
-    async fn get_affiliation(
+    async fn affiliation(
         &self,
         owner: &BareJid,
         node_name: &str,

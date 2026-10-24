@@ -119,9 +119,10 @@ fn xep0245_adds_no_protocol_element_of_its_own() {
 #[test]
 fn xep0245_markup_offsets_index_the_full_body_including_the_prefix() {
     // Bold over "waves" (scalar offsets 4..9 of "/me waves hello").
-    let options = SendMessageOptions {
-        markup_spans: vec![bold_span(4, 9)],
-        ..SendMessageOptions::default()
+    let options = {
+        let mut outbound_options = SendMessageOptions::default();
+        outbound_options.markup_spans = vec![bold_span(4, 9)];
+        outbound_options
     };
     let (_, message) = build_outbound_message(ROOM, "groupchat", ACTION_BODY, &options)
         .expect("styled action message builds");
@@ -157,10 +158,12 @@ fn xep0245_correction_of_an_action_keeps_the_prefix() {
 
 #[test]
 fn xep0245_inbound_action_body_and_markup_survive_parsing_unmodified() {
-    let options = SendMessageOptions {
-        stanza_id: Some(StanzaId::new("action-1").expect("non-empty stanza id")),
-        markup_spans: vec![bold_span(4, 9)],
-        ..SendMessageOptions::default()
+    let options = {
+        let mut outbound_options = SendMessageOptions::default();
+        outbound_options.stanza_id =
+            Some(StanzaId::try_new("action-1").expect("non-empty stanza id"));
+        outbound_options.markup_spans = vec![bold_span(4, 9)];
+        outbound_options
     };
     let (_, message) = build_outbound_message(ROOM, "groupchat", ACTION_BODY, &options)
         .expect("action message builds");

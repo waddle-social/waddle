@@ -57,6 +57,7 @@ pub struct UserPresence {
 
 impl UserPresence {
     /// Create online presence with default priority and the current update timestamp.
+    #[must_use]
     pub fn online(jid: FullJid) -> Self {
         Self {
             jid: jid.to_string(),
@@ -68,6 +69,7 @@ impl UserPresence {
     }
 
     /// Whether this presence state permits message delivery.
+    #[must_use]
     pub fn is_available(&self) -> bool {
         !matches!(self.show, Show::Dnd | Show::Xa)
     }

@@ -2517,7 +2517,7 @@ async fn deposed_owner_with_live_socket_room_actor_scenario() {
         RoomClaimFenceContext::new(entity.clone(), identity.clone(), expected_epoch);
 
     let occupant_id_secret =
-        OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+        OccupantIdSecret::try_new(b"test-occupant-id-secret-32-bytes-long".to_vec())
             .expect("valid test occupant-id secret");
     let room_registry = RoomRegistry::spawn(
         "muc.example.com".to_string(),

@@ -14,7 +14,7 @@ use super::EffectIntentCodecError;
 pub struct StoredMessagePayload(Message);
 
 impl StoredMessagePayload {
-    pub fn new(message: Message) -> Result<Self, EffectIntentCodecError> {
+    pub fn try_new(message: Message) -> Result<Self, EffectIntentCodecError> {
         crate::parser::message_to_string(&message)
             .map_err(|_| EffectIntentCodecError::MalformedPayload)?;
         Ok(Self(message))
@@ -59,7 +59,7 @@ impl<'de> Deserialize<'de> for StoredMessagePayload {
         let encoded = String::deserialize(deserializer)?;
         let message =
             crate::parser::message_from_string(&encoded).map_err(serde::de::Error::custom)?;
-        Self::new(message).map_err(serde::de::Error::custom)
+        Self::try_new(message).map_err(serde::de::Error::custom)
     }
 }
 
@@ -91,7 +91,7 @@ mod tests {
             .build();
         let source = crate::parser::element_to_string(&element).expect("encode message");
         let message = crate::parser::message_from_string(&source).expect("decode message");
-        let payload = StoredMessagePayload::new(message).expect("freeze message");
+        let payload = StoredMessagePayload::try_new(message).expect("freeze message");
         let encoded = serde_json::to_vec(&payload).expect("encode payload");
         let restored: StoredMessagePayload =
             serde_json::from_slice(&encoded).expect("decode payload");

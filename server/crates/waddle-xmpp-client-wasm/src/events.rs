@@ -238,7 +238,7 @@ mod tests {
     fn avatar_changed_callback_payload_uses_bare_jid_and_optional_id() {
         let payload = avatar_changed_to_js(waddle_xmpp_client::AvatarChanged {
             jid: "bob@waddle.test".parse().expect("valid bare JID"),
-            avatar_id: waddle_xmpp_client::AvatarItemId::new(
+            avatar_id: waddle_xmpp_client::AvatarItemId::try_new(
                 "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d",
             ),
         });

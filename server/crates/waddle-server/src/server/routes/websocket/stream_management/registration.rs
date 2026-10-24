@@ -129,7 +129,7 @@ async fn complete_pending_resume_claim(
             Some(h) => {
                 detached.inbound_count = waddle_xmpp::stream_management::sequence::max_in_window(
                     detached.inbound_count,
-                    conn.sm_state.get_inbound_count(),
+                    conn.sm_state.inbound_count(),
                 );
                 conn.sm_state.restore_from_session(&detached);
                 // The resume `h` acknowledges the mod-2^32 window
@@ -164,7 +164,7 @@ async fn complete_pending_resume_claim(
                 }
                 resume_outcome = Some(super::observe::SmResumeOutcome::Resumed);
                 SmRegistrationFinalization::ReplaceWithResumed {
-                    resumed: SmResumed::new(stream_id.clone(), conn.sm_state.get_inbound_count()),
+                    resumed: SmResumed::new(stream_id.clone(), conn.sm_state.inbound_count()),
                     replay_after_h: h,
                 }
             }
@@ -223,7 +223,7 @@ async fn complete_pending_resume_claim(
             // releases the claim after canonical source confirmation.
             let handled = waddle_xmpp::stream_management::sequence::max_in_window(
                 detached.inbound_count,
-                conn.sm_state.get_inbound_count(),
+                conn.sm_state.inbound_count(),
             );
             cleanup_invalidated_detached_session(state, detached, Some(owner)).await;
             close_registered_resume_attempt(state, conn, jid, owner).await;
@@ -271,7 +271,7 @@ pub(in crate::server::routes::websocket) async fn reject_unregistered_resume(
     conn: &mut WsConnState,
     jid: &FullJid,
 ) -> SmRegistrationFinalization {
-    let handled = conn.sm_state.get_inbound_count();
+    let handled = conn.sm_state.inbound_count();
     if let Some(claim) = conn.pending_resume_claim.take() {
         claim.release().await;
     }

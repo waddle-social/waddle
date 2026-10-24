@@ -45,19 +45,19 @@ mod tests {
 
     #[test]
     fn callback_payload_contains_only_rejection_metadata() {
-        let config = ClientConfig::new(
+        let config = ClientConfig::try_new(
             waddle_xmpp_client::ConnectionConfig::new("example.com".parse().unwrap()),
-            waddle_xmpp_client::WebSocketConfig::new("wss://example.com/ws".parse().unwrap())
+            waddle_xmpp_client::WebSocketConfig::try_new("wss://example.com/ws".parse().unwrap())
                 .unwrap(),
-            waddle_xmpp_client::OAuthBearerConfig::new(
+            waddle_xmpp_client::OAuthBearerConfig::try_new(
                 "alice@example.com".parse().unwrap(),
-                waddle_xmpp_client::ClientResource::new("web").unwrap(),
+                waddle_xmpp_client::ClientResource::try_new("web").unwrap(),
                 waddle_xmpp_client::AccessToken::new("test"),
             )
             .unwrap(),
         )
         .unwrap();
-        let mut runtime = XmppRuntime::new(config).unwrap();
+        let mut runtime = XmppRuntime::try_new(config).unwrap();
         let stanza = "<message xmlns='jabber:client' type='error' id='m1' from='chat@example.com' to='alice@example.com/web'><body>echo</body><error type='cancel'><service-unavailable xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'/><text xmlns='urn:ietf:params:xml:ns:xmpp-stanzas'>No such account</text></error></message>".parse().unwrap();
         let events = runtime.handle_app_stanza(&stanza);
         let [ClientEvent::MessageRejected(rejection)] = events.as_slice() else {

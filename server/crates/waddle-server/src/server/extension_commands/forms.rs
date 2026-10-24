@@ -11,7 +11,7 @@ pub(crate) fn extension_command_fields(
         form.fields
             .iter()
             .filter_map(|field| {
-                let name = UiActionId::new(field.var.clone()?).ok()?;
+                let name = UiActionId::try_new(field.var.clone()?).ok()?;
                 let values = field
                     .values
                     .iter()
@@ -32,11 +32,13 @@ pub(crate) fn extension_data_form(
         title: form
             .title
             .clone()
-            .and_then(|title| waddle_extensions::DisplayText::new(title).ok()),
+            .and_then(|title| waddle_extensions::DisplayText::try_new(title).ok()),
         instructions: form
             .instructions
             .iter()
-            .filter_map(|instruction| waddle_extensions::DisplayText::new(instruction.clone()).ok())
+            .filter_map(|instruction| {
+                waddle_extensions::DisplayText::try_new(instruction.clone()).ok()
+            })
             .collect(),
         fields: form
             .fields
@@ -61,12 +63,12 @@ fn extension_data_form_field(
     field: &waddle_xmpp::xep::xep0004::Field,
 ) -> Option<ExtensionDataFormField> {
     Some(ExtensionDataFormField {
-        name: UiActionId::new(field.var.clone()?).ok()?,
+        name: UiActionId::try_new(field.var.clone()?).ok()?,
         field_type: extension_form_field_type(field.field_type),
         label: field
             .label
             .clone()
-            .and_then(|label| waddle_extensions::DisplayText::new(label).ok()),
+            .and_then(|label| waddle_extensions::DisplayText::try_new(label).ok()),
         required: field.required,
         values: field
             .values
@@ -80,7 +82,7 @@ fn extension_data_form_field(
                 label: option
                     .label
                     .clone()
-                    .and_then(|label| waddle_extensions::DisplayText::new(label).ok()),
+                    .and_then(|label| waddle_extensions::DisplayText::try_new(label).ok()),
                 value: DataFormValue::new(option.value.clone()),
             })
             .collect(),
@@ -105,7 +107,7 @@ fn extension_form_field_type(
 }
 
 pub(crate) fn extension_session_id(session_id: Option<String>) -> Option<CommandSessionId> {
-    session_id.and_then(|session_id| CommandSessionId::new(session_id).ok())
+    session_id.and_then(|session_id| CommandSessionId::try_new(session_id).ok())
 }
 
 pub(crate) fn extension_command_action(

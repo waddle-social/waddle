@@ -65,7 +65,7 @@ fn make_submission(fixture: &IngressFixture, system: bool) -> IngressSubmission 
             room_generation: EntityGeneration::INITIAL,
             route_identity: identity,
             system_message: Some(
-                StoredMessagePayload::new(source.clone()).expect("system payload"),
+                StoredMessagePayload::try_new(source.clone()).expect("system payload"),
             ),
         }
     } else {
@@ -244,7 +244,7 @@ fn set_source(submission: &mut IngressSubmission, source: Message) {
     for intent in &mut submission.plan.intents {
         if let IngressEffectIntent::RouteMucSystemBroadcast { system_message, .. } = intent {
             *system_message =
-                Some(StoredMessagePayload::new(source.clone()).expect("system source"));
+                Some(StoredMessagePayload::try_new(source.clone()).expect("system source"));
         }
     }
     copies(submission, &source);
@@ -530,7 +530,7 @@ pub async fn departed_occupant_maintenance(fixture: IngressFixture) {
     detached::attach(&sm, &b).await;
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'g'; 32]).expect("occupant-id secret"),
+        OccupantIdSecret::try_new(vec![b'g'; 32]).expect("occupant-id secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {
@@ -620,7 +620,7 @@ pub async fn seated_ghost_occupant_is_never_evicted(fixture: IngressFixture) {
     detached::attach(&sm, &a).await;
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        OccupantIdSecret::new(vec![b'h'; 32]).expect("occupant-id secret"),
+        OccupantIdSecret::try_new(vec![b'h'; 32]).expect("occupant-id secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {

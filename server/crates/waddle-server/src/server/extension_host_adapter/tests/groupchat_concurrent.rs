@@ -16,7 +16,7 @@ use waddle_xmpp::{muc::room_actor::GetSnapshot, Stanza};
 
 async fn two_bots(f: IngressFixture) {
     let fixture = GroupchatFixture::new(&f).await;
-    let other = PluginId::new("other-bot").expect("plugin");
+    let other = PluginId::try_new("other-bot").expect("plugin");
     let mut tx = f.uow.begin().await.expect("transaction");
     ExtensionGrantRepository::sync_configured(
         &mut tx,

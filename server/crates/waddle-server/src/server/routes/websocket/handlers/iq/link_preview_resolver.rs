@@ -1945,7 +1945,7 @@ mod tests {
         storage: Arc<dyn crate::storage::BlobStorage>,
         base_url: &str,
     ) -> (LinkPreviewMediaCache, DatabasePool) {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()

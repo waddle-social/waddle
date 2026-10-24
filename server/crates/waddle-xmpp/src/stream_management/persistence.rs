@@ -874,6 +874,15 @@ pub trait SmPersistenceStorage: Send + Sync {
     }
 }
 
+/// Whether acknowledgement leaves its source resumable or retires it for promotion.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SmAcknowledgementMode {
+    /// Preserve the session's existing resume lifetime.
+    PreserveResumability,
+    /// Disable further resumption while preserving the unacknowledged suffix.
+    RetireForPromotion,
+}
+
 /// In-memory implementation suitable for tests and as the structural
 /// fake that future libSQL/Postgres impls drop in for.
 #[derive(Debug, Default)]
@@ -907,7 +916,7 @@ impl InMemoryState {
         &mut self,
         stream_id: &SmSessionId,
         acknowledged_h: u32,
-        retire: bool,
+        mode: SmAcknowledgementMode,
     ) -> Result<(), SmPersistenceError> {
         let guard = self;
         let session = guard.sessions.get(stream_id).ok_or_else(|| {
@@ -952,7 +961,7 @@ impl InMemoryState {
                     to_inclusive: acknowledged_h,
                 });
         }
-        if retire {
+        if mode == SmAcknowledgementMode::RetireForPromotion {
             let session = guard.sessions.get_mut(stream_id).ok_or_else(|| {
                 SmPersistenceError::Other("SM acknowledgement source is missing".to_owned())
             })?;
@@ -982,7 +991,11 @@ impl SmPersistenceStorage for InMemorySmPersistence {
             .inner
             .lock()
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?;
-        guard.acknowledge(stream_id, acknowledged_h, true)?;
+        guard.acknowledge(
+            stream_id,
+            acknowledged_h,
+            SmAcknowledgementMode::RetireForPromotion,
+        )?;
         Ok(())
     }
 
@@ -996,7 +1009,11 @@ impl SmPersistenceStorage for InMemorySmPersistence {
         self.inner
             .lock()
             .map_err(|error| SmPersistenceError::Other(error.to_string()))?
-            .acknowledge(stream_id, acknowledged_h, false)
+            .acknowledge(
+                stream_id,
+                acknowledged_h,
+                SmAcknowledgementMode::PreserveResumability,
+            )
     }
 
     async fn pending_acknowledgements(

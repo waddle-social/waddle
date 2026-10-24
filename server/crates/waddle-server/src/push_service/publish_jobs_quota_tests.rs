@@ -179,7 +179,7 @@ async fn parked_uncertainty_backpressures_only_the_saturated_node(fixture: Ingre
         .expect("push store"),
         sender.clone(),
     );
-    crate::push_registrations::DatabasePushRegistrationStore::new(fixture.db.clone())
+    crate::push_registrations::DatabasePushRegistrationStore::try_new(fixture.db.clone())
         .await
         .expect("registration schema");
     let saturated = push

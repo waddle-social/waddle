@@ -24,6 +24,7 @@ pub enum BodyFallback {
 }
 
 /// Whether this message declares its entire body as fallback text for the supplied feature namespace.
+#[must_use]
 pub fn has_whole_body_fallback_for(message: &Element, feature_ns: &str) -> bool {
     message.children().any(|child| {
         child.name() == "fallback"
@@ -44,6 +45,7 @@ fn fallback_marks_whole_body(fallback: &Element) -> bool {
 }
 
 /// Collect valid body fallback declarations for the requested feature, ignoring malformed declarations.
+#[must_use]
 pub fn body_fallbacks_for(message: &Element, feature_ns: &str) -> Vec<BodyFallback> {
     message
         .children()
@@ -87,6 +89,7 @@ fn parse_body_fallback(fallback: &Element) -> Option<BodyFallback> {
 }
 
 /// Remove the specified Unicode-character ranges from the body, clamping ranges to its length.
+#[must_use]
 pub fn strip_fallback_ranges(body: &str, ranges: &[FallbackRange]) -> String {
     if ranges.is_empty() {
         return body.to_string();

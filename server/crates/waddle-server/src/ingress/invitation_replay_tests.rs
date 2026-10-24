@@ -119,7 +119,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
             .await
             .expect("snapshot")
             .room
-            .get_affiliation(&recipient),
+            .affiliation(&recipient),
         waddle_xmpp::Affiliation::None
     );
     assert!(rx.try_recv().is_err());
@@ -191,7 +191,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
             .await
             .expect("snapshot")
             .room
-            .get_affiliation(&recipient),
+            .affiliation(&recipient),
         waddle_xmpp::Affiliation::Member
     );
     let delivered = rx.try_recv().expect("committed invitation delivered");
@@ -247,7 +247,7 @@ async fn invitation_plan_commit_execute(fixture: IngressFixture) {
             .await
             .expect("snapshot")
             .room
-            .get_affiliation(&recipient),
+            .affiliation(&recipient),
         waddle_xmpp::Affiliation::Admin
     );
     assert_eq!(
@@ -298,7 +298,7 @@ async fn forged_room_stamp(
     member_joins_before_retry: bool,
 ) {
     let standalone = create_test_websocket_state().await;
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

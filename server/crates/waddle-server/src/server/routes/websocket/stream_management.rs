@@ -441,7 +441,7 @@ pub(super) async fn handle_sm_stanza(
                 return vec![];
             }
             vec![ResponseFrame::from_serialized_xml(
-                SmAck::new(ctx.sm_state.get_inbound_count()).to_xml(),
+                SmAck::new(ctx.sm_state.inbound_count()).to_xml(),
             )]
         }
         SmStanza::Ack(ack) => apply_sm_ack(state, ctx.sm_state, ctx.phase, ack.h).await,
@@ -1415,7 +1415,7 @@ async fn handle_sm_resume_terminal(
     );
     SmResumeTerminal::resumed(
         waddle_xmpp::pending_delivery::SmSessionId::new(resume.previd),
-        sm_state.get_inbound_count(),
+        sm_state.inbound_count(),
         detached.jid,
         replay,
     )
@@ -1449,10 +1449,10 @@ pub(super) async fn flush_ingress_checkpoint(
         .ingress
         .flush_checkpoint(
             stream,
-            waddle_xmpp::ingress::WireHandledCount::from_storage(sm_state.get_inbound_count()),
+            waddle_xmpp::ingress::WireHandledCount::from_storage(sm_state.inbound_count()),
         )
         .await?;
-    tracker.checkpoint_flushed(sm_state.get_inbound_count());
+    tracker.checkpoint_flushed(sm_state.inbound_count());
     Ok(())
 }
 
@@ -1509,9 +1509,9 @@ mod ingress_checkpoint_tests {
             conn.sm_inbound_completion
                 .complete(message, &mut conn.sm_state);
         }
-        assert_eq!(conn.sm_state.get_inbound_count(), 0);
+        assert_eq!(conn.sm_state.inbound_count(), 0);
         conn.sm_inbound_completion.complete(iq, &mut conn.sm_state);
-        assert_eq!(conn.sm_state.get_inbound_count(), 3);
+        assert_eq!(conn.sm_state.inbound_count(), 3);
         assert!(conn.sm_inbound_completion.checkpoint_dirty());
         let request = waddle_xmpp::stream_management::SmRequest::to_xml();
         let frames =

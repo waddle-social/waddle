@@ -41,7 +41,7 @@ pub struct DatabasePushRegistrationStore {
 }
 
 impl DatabasePushRegistrationStore {
-    pub async fn new(db: Database) -> Result<Self, PushError> {
+    pub async fn try_new(db: Database) -> Result<Self, PushError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)
@@ -511,7 +511,7 @@ mod tests {
     }
 
     async fn memory_store() -> DatabasePushRegistrationStore {
-        DatabasePushRegistrationStore::new(
+        DatabasePushRegistrationStore::try_new(
             Database::in_memory("push-registrations")
                 .await
                 .expect("database"),
@@ -640,7 +640,9 @@ mod tests {
             let db = Database::open_local("push-restart", &path)
                 .await
                 .expect("database");
-            let store = DatabasePushRegistrationStore::new(db).await.expect("store");
+            let store = DatabasePushRegistrationStore::try_new(db)
+                .await
+                .expect("store");
             store
                 .register(registration(
                     "alice@example.com",
@@ -655,7 +657,7 @@ mod tests {
         let reopened_db = Database::open_local("push-restart-reopened", &path)
             .await
             .expect("reopened database");
-        let reopened = DatabasePushRegistrationStore::new(reopened_db)
+        let reopened = DatabasePushRegistrationStore::try_new(reopened_db)
             .await
             .expect("reopened store");
         let registrations = reopened

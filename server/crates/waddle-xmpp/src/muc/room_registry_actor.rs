@@ -551,11 +551,11 @@ impl RoomRegistryActor {
                 .values()
                 .map(|occupant| {
                     (
-                        MucOccupantNick::new(occupant.nick.clone())
+                        MucOccupantNick::try_new(occupant.nick.clone())
                             .expect("nick was previously accepted"),
                         completion
                             .room
-                            .get_occupant_sessions(&occupant.nick)
+                            .occupant_sessions(&occupant.nick)
                             .into_iter()
                             .collect(),
                     )
@@ -586,13 +586,13 @@ impl RoomRegistryActor {
                 .request
                 .reason
                 .clone()
-                .and_then(DestroyReason::new),
+                .and_then(DestroyReason::try_new),
             completion.request.alternate_venue.clone(),
             completion
                 .request
                 .password
                 .clone()
-                .and_then(DestroyPassword::new),
+                .and_then(DestroyPassword::try_new),
             recipients,
         )
     }

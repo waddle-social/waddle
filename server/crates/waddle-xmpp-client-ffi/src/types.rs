@@ -13,7 +13,7 @@ uniffi::custom_type!(Jid, String, {
 uniffi::custom_type!(StanzaId, String, {
     remote,
     lower: |id| id.to_string(),
-    try_lift: |value| Ok(StanzaId::new(value)?),
+    try_lift: |value| Ok(StanzaId::try_new(value)?),
 });
 
 #[derive(uniffi::Record, Clone)]

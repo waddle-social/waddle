@@ -5,7 +5,7 @@ const HELLO_ID: &str = "aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d";
 const WORLD_ID: &str = "7c211433f02071597741e6ff5a8ea34789abbf43";
 
 fn item_id(value: &str) -> AvatarItemId {
-    AvatarItemId::new(value).expect("valid SHA-1 item id")
+    AvatarItemId::try_new(value).expect("valid SHA-1 item id")
 }
 
 fn make_metadata_iq(id: &str, mime: &str) -> Element {
@@ -185,8 +185,8 @@ fn parse_metadata_skips_malformed_and_url_info_for_in_band() {
 
 #[test]
 fn avatar_item_id_validates_sha1_hex_without_changing_wire_case() {
-    assert!(AvatarItemId::new("not-a-hash").is_none());
-    assert!(AvatarItemId::new("z".repeat(40)).is_none());
+    assert!(AvatarItemId::try_new("not-a-hash").is_none());
+    assert!(AvatarItemId::try_new("z".repeat(40)).is_none());
     let upper = HELLO_ID.to_ascii_uppercase();
     assert_eq!(item_id(&upper).as_str(), upper);
 }

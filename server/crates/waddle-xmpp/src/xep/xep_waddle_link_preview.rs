@@ -31,7 +31,7 @@ pub struct LinkPreviewToken(String);
 
 impl LinkPreviewToken {
     /// Wrap an already encoded token.
-    pub fn new(token: impl Into<String>) -> Option<Self> {
+    pub fn try_new(token: impl Into<String>) -> Option<Self> {
         let token = token.into();
         (!token.trim().is_empty() && token.len() <= MAX_LINK_PREVIEW_TOKEN_BYTES)
             .then_some(Self(token))
@@ -194,7 +194,7 @@ pub fn parse_link_preview_request_element(
         return Err(WaddleLinkPreviewError::WrongRoot);
     }
     elem.attr("token")
-        .and_then(LinkPreviewToken::new)
+        .and_then(LinkPreviewToken::try_new)
         .ok_or(WaddleLinkPreviewError::MissingToken)
 }
 
@@ -386,7 +386,7 @@ mod tests {
 
     #[test]
     fn request_element_round_trips_token() {
-        let token = LinkPreviewToken::new("token-1").expect("token");
+        let token = LinkPreviewToken::try_new("token-1").expect("token");
         let elem = build_link_preview_request_element(&token);
 
         assert_eq!(
@@ -551,7 +551,7 @@ mod tests {
 
     #[test]
     fn oversized_tokens_are_rejected_before_decode_work() {
-        assert!(LinkPreviewToken::new("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1)).is_none());
+        assert!(LinkPreviewToken::try_new("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1)).is_none());
 
         let token = LinkPreviewToken("x".repeat(MAX_LINK_PREVIEW_TOKEN_BYTES + 1));
 

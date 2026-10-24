@@ -136,7 +136,7 @@ async fn first_party_enable_rolls_back_when_registration_insert_fails() {
         )
         .await
         .expect("device");
-    let registration_store = DatabasePushRegistrationStore::new(store.database())
+    let registration_store = DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store");
     let owner_lock_updated_before = scalar_i64(
@@ -214,7 +214,7 @@ async fn first_party_enable_preserves_xep0357_publish_options_in_registration_an
         .await
         .expect("device");
     let publish_options = publish_options_with_field("secret", "server-secret");
-    let registration_store = DatabasePushRegistrationStore::new(store.database())
+    let registration_store = DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store");
     store
@@ -272,7 +272,7 @@ async fn xep0357_pubsub_iq_publish_requires_live_first_party_registration() {
         )
         .await
         .expect("device");
-    DatabasePushRegistrationStore::new(store.database())
+    DatabasePushRegistrationStore::try_new(store.database())
         .await
         .expect("registration store");
     let publish_options = publish_options_with_field("secret", "server-secret");

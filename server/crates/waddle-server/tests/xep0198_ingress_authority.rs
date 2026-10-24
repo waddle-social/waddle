@@ -379,7 +379,7 @@ async fn maintenance_recovery_appends_lost_detached_delivery_once(fixture: Ingre
     let sm = detached_progress_support::registry(&fixture).await;
     let [resource, sentinel_resource, _] = detached_progress_support::resources();
     detached_progress_support::attach(&sm, &resource).await;
-    // This fixture calls IngressAuthority::new with the enrolled database lineage.
+    // This fixture calls IngressAuthority::try_new with the enrolled database lineage.
     let authority = fixture.authority().await;
     let environment: Arc<dyn RecoveryEnvironment> = Arc::new(DetachedRecoveryEnvironment {
         connections: waddle_xmpp::registry::ConnectionRegistry::new(),
@@ -433,7 +433,7 @@ async fn maintenance_recovery_appends_lost_detached_delivery_once(fixture: Ingre
     let mut stream = StreamManagementState::new();
     stream.restore_from_session(&resumed);
     assert!(stream.can_resume_from(0));
-    let replay = stream.get_stanzas_to_resend(0);
+    let replay = stream.stanzas_to_resend(0);
     assert_eq!(replay.len(), 1);
     let actual: minidom::Element = replay[0].stanza_xml.parse().expect("replay XML");
     let expected: minidom::Element = submission.plan.sanitized_message.clone().into();
@@ -471,9 +471,9 @@ async fn maintenance_recovery_appends_lost_detached_delivery_once(fixture: Ingre
         1
     );
     assert_eq!(fixture.count("sm_ingress_appends").await, 2);
-    assert_eq!(stream.get_stanzas_to_resend(0).len(), 1);
+    assert_eq!(stream.stanzas_to_resend(0).len(), 1);
     stream.acknowledge(1);
-    assert!(stream.get_stanzas_to_resend(1).is_empty());
+    assert!(stream.stanzas_to_resend(1).is_empty());
     assert_eq!(stream.queue_len(), 0);
     assert!(authority.drain_and_join(Duration::from_secs(15)).await);
     drop(environment);

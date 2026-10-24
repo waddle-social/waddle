@@ -559,12 +559,12 @@ impl MucRoom {
     }
 
     /// Get an occupant by nickname.
-    pub fn get_occupant(&self, nick: &str) -> Option<&Occupant> {
+    pub fn occupant(&self, nick: &str) -> Option<&Occupant> {
         self.occupants.get(nick)
     }
 
     /// Get all active sessions for a nickname.
-    pub fn get_occupant_sessions(&self, nick: &str) -> Vec<FullJid> {
+    pub fn occupant_sessions(&self, nick: &str) -> Vec<FullJid> {
         self.occupant_sessions
             .get(nick)
             .cloned()

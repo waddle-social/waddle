@@ -338,7 +338,7 @@ pub(crate) fn recovery_intent(
             recipient: recovery.key.recipient.clone(),
             room: recovery.key.room.clone(),
             thread_id: recovery.key.thread_id.as_ref().map(|thread| {
-                waddle_xmpp_core::mam::ThreadId::new(thread.clone())
+                waddle_xmpp_core::mam::ThreadId::try_new(thread.clone())
                     .expect("validated recovery thread")
             }),
             archive_stanza_id: recovery.key.archive_stanza_id.clone(),

@@ -76,7 +76,7 @@ pub async fn handle_presence(
     muc_domain: &str,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    _authenticated_session: &Option<Session>,
+    _authenticated_session: Option<&Session>,
     registry_owner: Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
 ) -> Vec<String> {
     // Present the generation the connection's join recorded (see
@@ -108,7 +108,7 @@ pub async fn handle_presence_with_occupancy_session(
     muc_domain: &str,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
     connection: (
         waddle_xmpp_core::OccupancySessionGeneration,
         Option<&std::sync::Arc<std::sync::atomic::AtomicBool>>,
@@ -143,7 +143,7 @@ pub struct PresenceHandlerContext<'a> {
     pub muc_domain: &'a str,
     pub state: &'a WebSocketState,
     pub phase: &'a ConnectionPhase,
-    pub authenticated_session: &'a Option<Session>,
+    pub authenticated_session: Option<&'a Session>,
     pub occupancy_session: &'a waddle_xmpp_core::OccupancySessionGeneration,
     pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,

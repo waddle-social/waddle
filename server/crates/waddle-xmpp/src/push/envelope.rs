@@ -233,7 +233,7 @@ pub fn push_topic_for(class: PushClass, conversation: &str) -> PushTopic {
     let digest = hasher.finalize();
     let encoded = URL_SAFE_NO_PAD.encode(&digest[..24]);
     debug_assert_eq!(encoded.len(), 32);
-    PushTopic::new(encoded).unwrap_or_else(|err: PushTopicParseError| {
+    PushTopic::try_new(encoded).unwrap_or_else(|err: PushTopicParseError| {
         // Cannot happen: base64url alphabet is a strict subset of the
         // RFC 8030 §5.4 topic-char alphabet, and 24 bytes → exactly 32
         // chars stays at the 32-char ceiling. Surface as an assert so a
@@ -327,7 +327,7 @@ mod tests {
         assert_eq!(topic.as_str().len(), 32);
         // Constructor enforces RFC 8030 §5.4 alphabet — the round-trip
         // proves it.
-        let again = PushTopic::new(topic.as_str().to_string()).expect("alphabet-valid");
+        let again = PushTopic::try_new(topic.as_str().to_string()).expect("alphabet-valid");
         assert_eq!(again.as_str(), topic.as_str());
     }
 

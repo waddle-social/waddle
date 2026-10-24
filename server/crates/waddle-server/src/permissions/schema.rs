@@ -78,7 +78,7 @@ impl ObjectTypeSchema {
     }
 
     /// Get the computation for a permission
-    pub fn get_permission(&self, permission: &str) -> Option<&ComputedPermission> {
+    pub fn permission(&self, permission: &str) -> Option<&ComputedPermission> {
         self.permissions.get(permission)
     }
 }
@@ -111,7 +111,7 @@ impl PermissionSchema {
 
     /// Get the schema for an object type
     #[cfg(test)]
-    pub fn get_schema(&self, object_type: ObjectType) -> Option<&ObjectTypeSchema> {
+    pub fn schema(&self, object_type: ObjectType) -> Option<&ObjectTypeSchema> {
         self.schemas.get(&object_type)
     }
 
@@ -125,14 +125,14 @@ impl PermissionSchema {
     }
 
     /// Get the permission computation for an object type
-    pub fn get_permission(
+    pub fn permission(
         &self,
         object_type: ObjectType,
         permission: &str,
     ) -> Option<&ComputedPermission> {
         self.schemas
             .get(&object_type)
-            .and_then(|s| s.get_permission(permission))
+            .and_then(|s| s.permission(permission))
     }
 }
 

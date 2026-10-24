@@ -81,7 +81,7 @@ async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool)
     waddle_xmpp_core::xep0359::add_origin_id(&mut message, "live-disconnect-retry");
     let wire = super::super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
     handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     let outbound = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("live delivery")
@@ -225,7 +225,7 @@ async fn live_recipient_disconnect_retry(state: Arc<WebSocketState>, bare: bool)
     assert!(frames
         .iter()
         .all(|frame| !frame.contains("internal-server-error")));
-    assert_eq!(conn.sm_state.get_inbound_count(), 2);
+    assert_eq!(conn.sm_state.inbound_count(), 2);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     assert!(rx.try_recv().is_err(), "no duplicate recipient delivery");
     let archived = state
@@ -316,7 +316,7 @@ async fn live_full_jid_recipient_stamp_sender_repair(state: Arc<WebSocketState>)
     );
     let wire = super::super::super::transport_xml::stanza_to_xml(&Stanza::Message(message));
     handle_xmpp_frame(&wire, "example.com", &state, &mut conn).await;
-    assert_eq!(conn.sm_state.get_inbound_count(), 1);
+    assert_eq!(conn.sm_state.inbound_count(), 1);
     let outbound = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
         .await
         .expect("live delivery")
@@ -394,7 +394,7 @@ async fn live_full_jid_recipient_stamp_sender_repair(state: Arc<WebSocketState>)
     assert!(frames
         .iter()
         .all(|frame| !frame.contains("internal-server-error")));
-    assert_eq!(conn.sm_state.get_inbound_count(), 2);
+    assert_eq!(conn.sm_state.inbound_count(), 2);
     assert!(!conn.sm_inbound_completion.has_unhandled_hole());
     assert!(
         rx.try_recv().is_err(),

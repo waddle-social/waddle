@@ -13,7 +13,7 @@ use crate::db::DatabaseError;
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RoomEffectOriginInstanceId(String);
 impl RoomEffectOriginInstanceId {
-    pub fn new(value: String) -> Option<Self> {
+    pub fn try_new(value: String) -> Option<Self> {
         (!value.is_empty()).then_some(Self(value))
     }
     pub fn as_str(&self) -> &str {

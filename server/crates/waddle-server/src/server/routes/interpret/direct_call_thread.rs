@@ -25,7 +25,7 @@ pub(super) async fn project_direct_call_thread_anchor(
         return;
     };
 
-    let Some(thread_id) = ThreadId::new(thread_id) else {
+    let Some(thread_id) = ThreadId::try_new(thread_id) else {
         warn!(owner = %owner, peer = %peer, "ProjectDirectCallThreadAnchor: invalid thread id");
         return;
     };
@@ -70,7 +70,7 @@ pub(super) async fn mark_direct_call_thread_ended(
         return;
     };
 
-    let Some(thread_id) = ThreadId::new(thread_id) else {
+    let Some(thread_id) = ThreadId::try_new(thread_id) else {
         warn!("MarkDirectCallThreadEnded: invalid thread id");
         return;
     };

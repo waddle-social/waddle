@@ -85,7 +85,7 @@ pub(super) async fn reconcile_voice_grants(
         }
     };
     for room_jid in rooms {
-        let Ok(call_id) = CallId::new(room_jid.to_string()) else {
+        let Ok(call_id) = CallId::try_new(room_jid.to_string()) else {
             continue;
         };
         let Ok(Some(actor)) =

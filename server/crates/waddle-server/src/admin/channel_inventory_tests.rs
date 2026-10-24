@@ -5,7 +5,7 @@ use waddle_xmpp::muc::durable::{ChannelId, WaddleId};
 use waddle_xmpp::muc::room_actor::{Join, OccupancySessionGeneration};
 
 async fn fresh_state() -> AppState {
-    let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+    let pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
         .await
         .expect("database pool");
     MigrationRunner::global()

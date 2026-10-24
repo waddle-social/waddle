@@ -45,8 +45,8 @@ fn nested_thread_groupchat_row(
     thread_id: &str,
     parent_thread_id: Option<&str>,
 ) -> ArchivedMessage {
-    let id = ThreadId::new(thread_id).expect("non-empty thread id");
-    let thread = match parent_thread_id.and_then(ThreadId::new) {
+    let id = ThreadId::try_new(thread_id).expect("non-empty thread id");
+    let thread = match parent_thread_id.and_then(ThreadId::try_new) {
         Some(parent) => Some(ThreadInfo::child(id, parent)),
         None => Some(ThreadInfo::root(id)),
     };
@@ -176,7 +176,7 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
                 .build(),
         )
         .append(build_thread_element(
-            &ThreadInfo::root(ThreadId::new("stale-thread").expect("non-empty")),
+            &ThreadInfo::root(ThreadId::try_new("stale-thread").expect("non-empty")),
             "jabber:client",
         ))
         .append(
@@ -203,11 +203,11 @@ fn xep_0201_groupchat_stanza_xml_replay_preserves_thread_metadata() {
             jid_lit(ROOM),
         )),
         thread: Some(ThreadInfo::child(
-            ThreadId::new("root-thread").expect("thread id"),
-            ThreadId::new("parent-thread").expect("parent id"),
+            ThreadId::try_new("root-thread").expect("thread id"),
+            ThreadId::try_new("parent-thread").expect("parent id"),
         )),
         reply: Some(waddle_xmpp_core::mam::ArchivedReply {
-            id: waddle_xmpp_core::mam::RichMessageId::new("root-thread")
+            id: waddle_xmpp_core::mam::RichMessageId::try_new("root-thread")
                 .expect("non-empty reply id"),
             to: None,
         }),
@@ -317,8 +317,8 @@ fn xep_0201_parent_only_input_is_rejected_at_parser() {
 fn xep_0201_build_thread_element_round_trips_through_parse_thread_info() {
     // Sanity: builder + parser are inverses on the wire shape.
     let info = ThreadInfo::child(
-        ThreadId::new("child-2").expect("non-empty"),
-        ThreadId::new("root-1").expect("non-empty"),
+        ThreadId::try_new("child-2").expect("non-empty"),
+        ThreadId::try_new("root-1").expect("non-empty"),
     );
     let elem = build_thread_element(&info, "jabber:client");
     let wrapped = Element::builder("message", "jabber:client")
@@ -373,8 +373,8 @@ async fn xep_0201_collapsed_thread_field_round_trips_nested_through_storage() {
         .await
         .expect("open sqlite in-memory");
     let original = ThreadInfo::child(
-        ThreadId::new("c-collapse").expect("non-empty"),
-        ThreadId::new("r-collapse").expect("non-empty"),
+        ThreadId::try_new("c-collapse").expect("non-empty"),
+        ThreadId::try_new("r-collapse").expect("non-empty"),
     );
     let mut row = nested_thread_groupchat_row(
         "archive-collapse",
@@ -409,7 +409,7 @@ async fn xep_0201_collapsed_thread_field_round_trips_root_only_through_storage()
     let storage = SqlxMamStorage::open_in_memory()
         .await
         .expect("open sqlite in-memory");
-    let original = ThreadInfo::root(ThreadId::new("root-only").expect("non-empty"));
+    let original = ThreadInfo::root(ThreadId::try_new("root-only").expect("non-empty"));
     let mut row =
         nested_thread_groupchat_row("archive-root-only", "alice", "root only", "root-only", None);
     row.thread = Some(original.clone());
@@ -523,7 +523,7 @@ mod ingress_digest_boundary {
 
 /// The digest boundary mirrors `thread_info_from_message_in_stanza_ns`'s
 /// exact normalization split: PAYLOAD-form thread id text is trimmed
-/// (xep0201.rs consumer trims before `ThreadId::new`), while the typed
+/// (xep0201.rs consumer trims before `ThreadId::try_new`), while the typed
 /// field preserves bytes (covered above).
 #[test]
 fn payload_form_thread_id_padding_is_digest_neutral_like_the_consumer() {

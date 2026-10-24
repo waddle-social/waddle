@@ -204,7 +204,7 @@ fn recovery_envelope_preserves_push_body_and_hints() {
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
     let sender = room.with_resource_str("romeo").expect("occupant").into();
     let archive = waddle_xmpp_core::xep0359::StanzaId::new("frozen", room.clone().into());
-    let secret = OccupantIdSecret::new(vec![7; 32]).expect("secret");
+    let secret = OccupantIdSecret::try_new(vec![7; 32]).expect("secret");
     let mut envelope = xmpp_parsers::message::Message::new(None);
     envelope.bodies.insert(
         xmpp_parsers::message::Lang::new(),

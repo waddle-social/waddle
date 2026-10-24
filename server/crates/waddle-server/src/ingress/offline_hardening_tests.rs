@@ -29,7 +29,7 @@ use crate::server::routes::interpret::{effects::PlanSink, interpret};
 use waddle_xmpp::protocol::OutboundEvent;
 
 async fn pending_storage(fixture: &IngressFixture) -> Arc<dyn PendingDeliveryStorage> {
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     Arc::new(
@@ -108,7 +108,7 @@ async fn deferred_policy(fixture: IngressFixture) {
         .await
         .expect("projection schema");
     let storage = pending_storage(&fixture).await;
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

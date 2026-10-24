@@ -33,11 +33,11 @@ pub const CLIENT_STANZA_NS: &str = "jabber:client";
 
 /// Server-to-server stanza namespace for message payloads.
 pub const SERVER_STANZA_NS: &str = "jabber:server";
-
 /// Return true for the RFC 6121 `<thread/>` child belonging to `stanza_ns`.
 ///
 /// Same-local-name extension payloads in another namespace are not message
 /// thread metadata and must be preserved.
+#[must_use]
 pub fn is_thread_element_for_stanza(element: &Element, stanza_ns: &str) -> bool {
     element.name() == THREAD_ELEMENT && element.ns() == stanza_ns
 }
@@ -63,11 +63,13 @@ pub struct ThreadInfo {
 
 impl ThreadInfo {
     /// Build a root thread with no parent.
+    #[must_use]
     pub fn root(id: ThreadId) -> Self {
         Self { id, parent: None }
     }
 
     /// Build a nested thread with a parent id.
+    #[must_use]
     pub fn child(id: ThreadId, parent: ThreadId) -> Self {
         Self {
             id,
@@ -88,13 +90,14 @@ fn find_thread_element(msg_xml: &Element) -> Option<&Element> {
 /// The `xmpp_parsers::message::Message::thread` field is a plain `String` and
 /// drops the `parent` attribute — callers that need `parent` must use this
 /// element-level helper.
+#[must_use]
 pub fn parse_thread_info(msg_xml: &Element) -> Option<ThreadInfo> {
     let thread_elem = find_thread_element(msg_xml)?;
-    let id = ThreadId::new(thread_elem.text().trim().to_owned())?;
+    let id = ThreadId::try_new(thread_elem.text().trim().to_owned())?;
     let parent = thread_elem
         .attr("parent")
         .map(str::trim)
-        .and_then(ThreadId::new);
+        .and_then(ThreadId::try_new);
     Some(ThreadInfo { id, parent })
 }
 
@@ -113,6 +116,7 @@ pub fn parse_thread_info(msg_xml: &Element) -> Option<ThreadInfo> {
 /// field (parent unrecoverable) when no payload thread exists. Callers that
 /// need parent on archive write should ensure `reattach_thread_parent` runs
 /// upstream of this call.
+#[must_use]
 pub fn thread_info_from_message_in_stanza_ns(
     msg: &Message,
     stanza_ns: impl AsRef<str>,
@@ -123,20 +127,21 @@ pub fn thread_info_from_message_in_stanza_ns(
         .iter()
         .find(|elem| is_message_thread_payload_for_stanza(elem, stanza_ns))
     {
-        let id = ThreadId::new(thread_elem.text().trim().to_owned())?;
+        let id = ThreadId::try_new(thread_elem.text().trim().to_owned())?;
         let parent = thread_elem
             .attr("parent")
             .map(str::trim)
-            .and_then(ThreadId::new);
+            .and_then(ThreadId::try_new);
         return Some(ThreadInfo { id, parent });
     }
     msg.thread
         .as_ref()
-        .and_then(|thread| ThreadId::new(thread.id.clone()))
+        .and_then(|thread| ThreadId::try_new(thread.id.clone()))
         .map(ThreadInfo::root)
 }
 
 /// Read XEP-0201 thread info from a client-stanza parsed `Message`.
+#[must_use]
 pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
     thread_info_from_message_in_stanza_ns(msg, CLIENT_STANZA_NS)
 }
@@ -147,6 +152,7 @@ pub fn thread_info_from_message(msg: &Message) -> Option<ThreadInfo> {
 /// RFC 6121 scopes `<thread/>` to the enclosing message's namespace. Pass the
 /// parent message's namespace (typically `jabber:client` or `jabber:server`)
 /// so the serializer does not emit a spurious `xmlns=""`.
+#[must_use]
 pub fn build_thread_element(info: &ThreadInfo, ns: impl AsRef<str>) -> Element {
     let mut builder = Element::builder(THREAD_ELEMENT, ns.as_ref());
     if let Some(parent) = info.parent.as_ref().map(ThreadId::as_str) {
@@ -176,11 +182,13 @@ pub fn install_thread_element(msg_xml: &mut Element, info: &ThreadInfo) {
 /// payload element — the latter is used to preserve compatibility with
 /// callers that constructed messages by appending an element rather than
 /// setting the typed field.
+#[must_use]
 pub fn thread_id_from_message(msg: &Message) -> Option<String> {
     thread_id_from_message_in_stanza_ns(msg, CLIENT_STANZA_NS)
 }
 
 /// Read RFC 6121 `<thread/>` identifier from a message in `stanza_ns`.
+#[must_use]
 pub fn thread_id_from_message_in_stanza_ns(
     msg: &Message,
     stanza_ns: impl AsRef<str>,

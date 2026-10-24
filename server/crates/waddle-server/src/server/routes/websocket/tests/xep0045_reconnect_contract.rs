@@ -41,7 +41,7 @@ impl ReplacementFixture {
             &alice,
             "alice",
             None,
-            (old.occupancy_session, &old.authenticated_session),
+            (old.occupancy_session, old.authenticated_session.as_ref()),
         )
         .await;
         assert!(responses.iter().any(|frame| frame.contains("<subject")));
@@ -49,7 +49,7 @@ impl ReplacementFixture {
         let (observer_tx, observer_rx) = mpsc::channel(16);
         register_test_connection(&state, &bob, observer_tx).await;
         let responses =
-            handle_muc_join(&state, "example.com", &room, &bob, "bob", None, &None).await;
+            handle_muc_join(&state, "example.com", &room, &bob, "bob", None, None).await;
         assert!(responses.iter().any(|frame| frame.contains("<subject")));
 
         // The replacement has bound the same full JID but joined no rooms.
@@ -105,7 +105,7 @@ impl ReplacementFixture {
             handlers::presence::MucJoinConnectionContext {
                 registry_owner: self.replacement.registry_owner.as_ref(),
                 occupancy_session: self.replacement.occupancy_session,
-                authenticated_session: &self.replacement.authenticated_session,
+                authenticated_session: self.replacement.authenticated_session.as_ref(),
             },
         )
         .await;

@@ -1066,9 +1066,9 @@ impl LiveKitSfu {
     /// active so the teardown hot path can fire `RemoveParticipant` +
     /// `DeleteRoom` admin calls without making the [`SfuService`]
     /// surface async.
-    pub fn new(config: SfuConfig) -> Result<Self, SfuError> {
+    pub fn try_new(config: SfuConfig) -> Result<Self, SfuError> {
         let admin_base = admin_base_url_from_ws(&config.ws_url)?;
-        let admin = ReqwestLiveKitAdmin::new(
+        let admin = ReqwestLiveKitAdmin::try_new(
             admin_base,
             config.api_key.clone(),
             config.api_secret.clone(),

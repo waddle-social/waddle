@@ -6,7 +6,7 @@ pub(super) fn waddle_id_for_room_jid(room_jid: &BareJid) -> WaddleId {
     } else {
         "default".to_string()
     };
-    WaddleId::new(value).expect("static room Waddle scope is non-empty")
+    WaddleId::try_new(value).expect("static room Waddle scope is non-empty")
 }
 
 /// Resolve a typed [`MessageRef`] against the explicitly selected MAM

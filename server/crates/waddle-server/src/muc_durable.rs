@@ -361,15 +361,16 @@ impl PostgresMucRoomStore {
         node_identity: SharedNodeIdentity,
     ) -> Result<Self, XmppError> {
         Self::ensure_schema(&db).await.map_err(db_err)?;
-        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(db.clone())
+        crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(db.clone())
             .await
             .map_err(db_err)?;
-        let room_effect_outbox = crate::room_effect_outbox::RoomEffectOutboxStore::new(db.clone())
-            .await
-            .map_err(|error| {
-                crate::telemetry::mark_span_error("MUC durable storage operation failed");
-                XmppError::internal(format!("room effect outbox bootstrap error: {error}"))
-            })?;
+        let room_effect_outbox =
+            crate::room_effect_outbox::RoomEffectOutboxStore::try_new(db.clone())
+                .await
+                .map_err(|error| {
+                    crate::telemetry::mark_span_error("MUC durable storage operation failed");
+                    XmppError::internal(format!("room effect outbox bootstrap error: {error}"))
+                })?;
         let store = Self {
             db,
             room_effect_outbox,
@@ -2623,7 +2624,7 @@ mod tests {
     fn occupancy_join_projection() -> RoomDurableMutation {
         RoomDurableMutation::Projection(RoomProjection::OccupancyJoin {
             occupant: "alice@example.com/desktop".parse().expect("valid full JID"),
-            nick: MucOccupantNick::new("alice".to_string()).expect("valid nick"),
+            nick: MucOccupantNick::try_new("alice".to_string()).expect("valid nick"),
             session: projection_test_generation(),
         })
     }
@@ -2695,7 +2696,7 @@ mod tests {
     #[test]
     fn projection_fingerprints_are_stable_and_distinct() {
         let occupant: jid::FullJid = "alice@example.com/desktop".parse().expect("valid full JID");
-        let nick = MucOccupantNick::new("alice".to_string()).expect("valid nick");
+        let nick = MucOccupantNick::try_new("alice".to_string()).expect("valid nick");
         let stanza_id = waddle_xmpp_core::xep0359::StanzaId::new(
             "archive-1",
             "muc.example.com".parse().expect("valid assigning JID"),
@@ -2814,7 +2815,7 @@ mod tests {
         lifecycle: RoomLifecycleId,
         revision: RoomRevision,
     ) -> waddle_xmpp::muc::RoomEffectReservation {
-        let outbox = crate::room_effect_outbox::RoomEffectOutboxStore::new(db.clone())
+        let outbox = crate::room_effect_outbox::RoomEffectOutboxStore::try_new(db.clone())
             .await
             .expect("open room effect outbox");
         let mut tx = outbox.database().begin().await.expect("begin outbox tx");
@@ -2831,7 +2832,7 @@ mod tests {
                         None,
                         Vec::new(),
                     ),
-                    origin: &crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                    origin: &crate::room_effect_outbox::RoomEffectOriginInstanceId::try_new(
                         "muc-durable-test-origin".to_string(),
                     )
                     .expect("valid room effect origin"),
@@ -3080,9 +3081,10 @@ mod tests {
         )
         .await
         .expect("open in-memory database");
-        let room_effect_outbox = crate::room_effect_outbox::RoomEffectOutboxStore::new(db.clone())
-            .await
-            .expect("open room effect outbox");
+        let room_effect_outbox =
+            crate::room_effect_outbox::RoomEffectOutboxStore::try_new(db.clone())
+                .await
+                .expect("open room effect outbox");
         let store = PostgresMucRoomStore {
             db,
             room_effect_outbox,
@@ -5892,7 +5894,7 @@ mod tests {
                 "channel-projection-test".to_string(),
                 RoomConfig::default(),
             ),
-            OccupantIdSecret::new(b"muc-durable-legacy-join-test-secret".to_vec())
+            OccupantIdSecret::try_new(b"muc-durable-legacy-join-test-secret".to_vec())
                 .expect("valid test secret"),
         ));
         actor
@@ -7211,7 +7213,7 @@ mod tests {
         let revision = RoomRevision::initial();
         insert_tombstoned_lifecycle(&db, &room_jid, lifecycle, revision).await;
         let reservation = enqueue_terminal_effect(&db, &room_jid, lifecycle, revision).await;
-        let outbox = crate::room_effect_outbox::RoomEffectOutboxStore::new(db.clone())
+        let outbox = crate::room_effect_outbox::RoomEffectOutboxStore::try_new(db.clone())
             .await
             .expect("open room effect outbox");
         let row = outbox
@@ -7697,7 +7699,7 @@ mod tests {
                 "channel-fresh".to_string(),
                 RoomConfig::default(),
             ),
-            OccupantIdSecret::new(b"muc-durable-first-subject-test-secret".to_vec())
+            OccupantIdSecret::try_new(b"muc-durable-first-subject-test-secret".to_vec())
                 .expect("valid test secret"),
         ));
 

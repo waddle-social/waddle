@@ -149,7 +149,7 @@ fn test_thread_reply_count_increments() {
     );
 
     let key = InboxKey::thread(jid(room), "t1");
-    let e = inbox.get_by_key(&key).unwrap();
+    let e = inbox.by_key(&key).unwrap();
     assert_eq!(e.reply_count, 1);
     assert_eq!(e.unread, 2);
     // Title preserved from first message
@@ -175,12 +175,10 @@ fn test_mark_read_by_key_for_thread() {
     assert_eq!(updated.unread, 0);
     assert_eq!(updated.thread_id.as_deref(), Some("t1"));
 
-    let t1 = inbox.get_by_key(&key).unwrap();
+    let t1 = inbox.by_key(&key).unwrap();
     assert_eq!(t1.unread, 0);
 
-    let t2 = inbox
-        .get_by_key(&InboxKey::thread(jid(room), "t2"))
-        .unwrap();
+    let t2 = inbox.by_key(&InboxKey::thread(jid(room), "t2")).unwrap();
     assert_eq!(t2.unread, 1);
 }
 

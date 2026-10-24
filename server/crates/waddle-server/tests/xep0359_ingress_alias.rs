@@ -360,7 +360,7 @@ async fn alias_connection(
     users
         .ask(waddle_xmpp::registry::RegisterUserResource {
             jid: resource.clone(),
-            entry: registry.get_entry(resource).expect("registered connection"),
+            entry: registry.entry(resource).expect("registered connection"),
         })
         .await
         .expect("registered user resource");
@@ -381,7 +381,7 @@ async fn rejoin_and_nickname_reuse(fixture: IngressFixture) {
     };
     let room: BareJid = "room@muc.example.com".parse().expect("room");
     let pool = Arc::new(
-        DatabasePool::new(
+        DatabasePool::try_new(
             DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             PoolConfig,
         )

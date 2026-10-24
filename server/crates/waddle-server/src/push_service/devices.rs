@@ -1085,13 +1085,13 @@ mod tests {
                 .await
         }
 
-        async fn get_affiliation(
+        async fn affiliation(
             &self,
             owner: &BareJid,
             node_name: &str,
             entity: &BareJid,
         ) -> Result<Affiliation, XmppError> {
-            self.inner.get_affiliation(owner, node_name, entity).await
+            self.inner.affiliation(owner, node_name, entity).await
         }
 
         async fn list_node_affiliations(
@@ -1162,7 +1162,7 @@ mod tests {
         }
 
         let registration_store =
-            crate::push_registrations::DatabasePushRegistrationStore::new(store.database())
+            crate::push_registrations::DatabasePushRegistrationStore::try_new(store.database())
                 .await
                 .expect("registration store");
         registration_store

@@ -89,7 +89,7 @@ pub(super) async fn storage(
     fixture: &IngressFixture,
     quota: QuotaPolicy,
 ) -> Arc<dyn PendingDeliveryStorage> {
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     Arc::new(

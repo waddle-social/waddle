@@ -3,7 +3,7 @@ use crate::ingress::test_support::IngressFixture;
 use crate::notification_outbox::test_support::{candidate, enqueue_jobs_for_test, target};
 
 async fn claimed(fixture: &IngressFixture) -> (NotificationOutboxStore, NotificationOutboxJob) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("store");
     enqueue_jobs_for_test(&store, &candidate("acceptance-fence"), &[target()]).await;
@@ -219,7 +219,7 @@ async fn postgres_cancellation_after_boundary_keeps_uncertain_custody() {
 }
 
 async fn legacy_unknown_work_cannot_coalesce_new_obligations(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("store");
     enqueue_jobs_for_test(&store, &candidate("first-archive"), &[target()]).await;

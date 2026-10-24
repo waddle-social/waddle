@@ -592,7 +592,7 @@ pub(crate) async fn execute_group_dm_membership(
             "Internal server error.",
         )]);
     };
-    if snapshot.room.get_affiliation(&invitee) >= waddle_xmpp::Affiliation::Member {
+    if snapshot.room.affiliation(&invitee) >= waddle_xmpp::Affiliation::Member {
         return EffectOutcome::Membership(
             crate::server::routes::interpret::effects::MembershipOutcome::Preserved,
         );
@@ -667,7 +667,7 @@ pub(crate) async fn execute_group_dm_membership(
                     .reply_timeout(std::time::Duration::from_secs(5))
                     .await
                     .is_ok_and(|snapshot| {
-                        snapshot.room.get_affiliation(&invitee) >= waddle_xmpp::Affiliation::Member
+                        snapshot.room.affiliation(&invitee) >= waddle_xmpp::Affiliation::Member
                     });
                 if !committed {
                     rollback_group_dm_invite_grant(
@@ -760,7 +760,7 @@ pub(crate) async fn execute_group_dm_membership(
 
     EffectOutcome::Membership(
         crate::server::routes::interpret::effects::MembershipOutcome::Granted {
-            previous_affiliation: snapshot.room.get_affiliation(&invitee),
+            previous_affiliation: snapshot.room.affiliation(&invitee),
         },
     )
 }
@@ -794,7 +794,7 @@ pub(crate) async fn rollback_group_dm_membership(
     else {
         return;
     };
-    if snapshot.room.get_affiliation(&grant.grant.invitee) != waddle_xmpp::Affiliation::Member {
+    if snapshot.room.affiliation(&grant.grant.invitee) != waddle_xmpp::Affiliation::Member {
         return;
     }
     rollback_group_dm_invite_grant(
@@ -1004,7 +1004,7 @@ mod tests {
                 channel_id.to_string(),
                 RoomConfig::default(),
             ),
-            waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+            waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
                 b"test-occupant-id-secret-32-bytes-long".to_vec(),
             )
             .expect("test secret meets length floor"),
@@ -1252,7 +1252,7 @@ mod tests {
                     .await
                     .expect("snapshot")
                     .room
-                    .get_affiliation(&invitee),
+                    .affiliation(&invitee),
                 waddle_xmpp::Affiliation::Member
             );
             assert!(crate::server::routes::websocket::muc_invites::list_invites(
@@ -1307,7 +1307,7 @@ mod tests {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             waddle_xmpp::Affiliation::Admin
         );
     }
@@ -1401,7 +1401,7 @@ mod tests {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             waddle_xmpp::Affiliation::None
         );
         assert!(crate::server::routes::websocket::muc_invites::list_invites(
@@ -1471,7 +1471,7 @@ mod tests {
         let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
         assert!(snapshot.room.find_nick_by_real_jid(&sender).is_some());
         assert_eq!(
-            snapshot.room.get_affiliation(&sender.to_bare()),
+            snapshot.room.affiliation(&sender.to_bare()),
             waddle_xmpp::Affiliation::Admin
         );
         let mut machine =

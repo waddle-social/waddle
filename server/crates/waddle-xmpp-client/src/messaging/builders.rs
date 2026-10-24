@@ -42,6 +42,7 @@ pub fn build_chat_state_message(
 }
 
 /// Build an XEP-0333 displayed marker with storage-suppression hints and optional thread.
+#[must_use]
 pub fn build_displayed_message(
     to: &str,
     message_id: &str,
@@ -74,6 +75,7 @@ pub fn build_displayed_message(
 }
 
 /// Build an XEP-0444 complete reaction update with a generated stanza/origin identifier and storage hint.
+#[must_use]
 pub fn build_reaction_message(
     to: &str,
     message_type: &str,
@@ -111,6 +113,7 @@ pub fn build_reaction_message(
 }
 
 /// Build a call-session reaction addressed as chat or groupchat according to the typed recipient.
+#[must_use]
 pub fn build_in_call_reaction_message(
     recipient: &InCallReactionRecipient,
     sid: &InCallSessionId,
@@ -148,21 +151,25 @@ pub fn build_in_call_reaction_message(
 /// Build a `<message><pinned target='…'/></message>` request for #414.
 /// `to` is the room bare JID; `target_stanza_id` is the XEP-0359
 /// stanza-id (`by=room`) of the message being pinned.
+#[must_use]
 pub fn build_pinned_message(to: &str, target_stanza_id: &str) -> Element {
     build_pin_message(to, PinMessageType::Groupchat, "pinned", target_stanza_id)
 }
 
 /// Build a 1:1 `<message type='chat'><pinned target='…'/></message>` request.
+#[must_use]
 pub fn build_pinned_chat_message(to: &str, target_stanza_id: &str) -> Element {
     build_pin_message(to, PinMessageType::Chat, "pinned", target_stanza_id)
 }
 
 /// Build a `<message><unpinned target='…'/></message>` request for #414.
+#[must_use]
 pub fn build_unpinned_message(to: &str, target_stanza_id: &str) -> Element {
     build_pin_message(to, PinMessageType::Groupchat, "unpinned", target_stanza_id)
 }
 
 /// Build a 1:1 `<message type='chat'><unpinned target='…'/></message>` request.
+#[must_use]
 pub fn build_unpinned_chat_message(to: &str, target_stanza_id: &str) -> Element {
     build_pin_message(to, PinMessageType::Chat, "unpinned", target_stanza_id)
 }
@@ -212,6 +219,7 @@ fn build_pin_message(
 }
 
 /// Build an XEP-0424 retraction with a generated stanza/origin identifier and optional thread.
+#[must_use]
 pub fn build_retraction_message(
     to: &str,
     message_type: &str,
@@ -293,6 +301,7 @@ pub fn build_muc_join_presence(room: &jid::BareJid, nick: &str) -> ClientResult<
 }
 
 /// Whether `stanza` is an XEP-0045 join presence (an `<x/>` MUC payload).
+#[must_use]
 pub fn is_muc_join_presence(stanza: &Element) -> bool {
     xmpp_parsers::presence::Presence::try_from(stanza.clone()).is_ok_and(|presence| {
         presence
@@ -303,6 +312,7 @@ pub fn is_muc_join_presence(stanza: &Element) -> bool {
 }
 
 /// Build an XEP-0425 moderation IQ-set targeting the selected message, with an optional reason.
+#[must_use]
 pub fn build_moderation_message(
     to: &str,
     _message_type: &str,
@@ -367,7 +377,7 @@ pub fn build_outbound_message(
 ) -> ClientResult<(StanzaId, Element)> {
     let stanza_id = match options.stanza_id.clone() {
         Some(stanza_id) => stanza_id,
-        None => StanzaId::new(Uuid::new_v4().to_string())?,
+        None => StanzaId::try_new(Uuid::new_v4().to_string())?,
     };
     let mut builder = Element::builder("message", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("to").to_owned(), to)

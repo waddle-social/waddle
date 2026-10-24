@@ -76,7 +76,7 @@ pub trait AffiliationResolver: Send + Sync {
             return Affiliation::None;
         }
 
-        config.get_affiliation_for_jid(jid)
+        config.affiliation_for_jid(jid)
     }
 
     /// Check if a federated user can join a room.
@@ -103,7 +103,7 @@ pub trait AffiliationResolver: Send + Sync {
             return false;
         }
 
-        let affiliation = config.get_affiliation_for_jid(jid);
+        let affiliation = config.affiliation_for_jid(jid);
 
         if members_only {
             affiliation >= Affiliation::Member

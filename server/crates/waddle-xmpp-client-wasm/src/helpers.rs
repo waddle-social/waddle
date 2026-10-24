@@ -12,18 +12,19 @@ pub(crate) fn build_client_config(config: &StoredConfig) -> Result<ClientConfig,
         .to_string()
         .parse()
         .map_err(|err| js_error(format!("invalid domain: {err}")))?;
-    let transport = WebSocketConfig::new(
+    let transport = WebSocketConfig::try_new(
         config
             .server_url
             .parse()
             .map_err(|err| js_error(format!("invalid server URL: {err}")))?,
     )
     .map_err(|err| js_error(err.to_string()))?;
-    let resource =
-        ClientResource::new(config.resource.clone()).map_err(|err| js_error(err.to_string()))?;
-    let auth = OAuthBearerConfig::new(jid, resource, AccessToken::new(config.access_token.clone()))
+    let resource = ClientResource::try_new(config.resource.clone())
         .map_err(|err| js_error(err.to_string()))?;
-    let mut client_config = ClientConfig::new(ConnectionConfig::new(domain), transport, auth)
+    let auth =
+        OAuthBearerConfig::try_new(jid, resource, AccessToken::new(config.access_token.clone()))
+            .map_err(|err| js_error(err.to_string()))?;
+    let mut client_config = ClientConfig::try_new(ConnectionConfig::new(domain), transport, auth)
         .map_err(|err| js_error(err.to_string()))?;
     client_config.session.stream_management.resume_state = config.resume_state.clone();
     Ok(client_config)
@@ -99,7 +100,7 @@ pub(crate) fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> 
         return None;
     }
 
-    element.attr("id").and_then(|id| StanzaId::new(id).ok())
+    element.attr("id").and_then(|id| StanzaId::try_new(id).ok())
 }
 
 pub(crate) fn to_js_value<T: Serialize + ?Sized>(value: &T) -> Result<JsValue, JsValue> {

@@ -29,7 +29,7 @@ impl WasmRuntime {
     /// # Errors
     ///
     /// Returns an error if the Wasmtime engine or HTTP client cannot be initialized.
-    pub fn new() -> Result<Self> {
+    pub fn try_new() -> Result<Self> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         config.consume_fuel(true);
@@ -38,11 +38,12 @@ impl WasmRuntime {
             .context("failed to create wasmtime engine")?;
         Ok(Self {
             engine,
-            http: super::http::HttpRuntime::new()?,
+            http: super::http::HttpRuntime::try_new()?,
         })
     }
 
     /// Borrow the shared Wasmtime engine configured for components and fuel metering.
+    #[must_use]
     pub fn engine(&self) -> &Engine {
         &self.engine
     }
@@ -401,7 +402,7 @@ mod limit_tests {
 
     #[tokio::test]
     async fn spinning_wasm_exhausts_fuel_without_blocking_the_executor() {
-        let runtime = WasmRuntime::new().expect("runtime");
+        let runtime = WasmRuntime::try_new().expect("runtime");
         let module = wasmtime::Module::new(
             runtime.engine(),
             r#"(module (func (export "run") (loop br 0)))"#,
@@ -431,7 +432,7 @@ mod limit_tests {
 
     #[tokio::test]
     async fn wasm_memory_growth_is_rejected_at_the_store_limit() {
-        let runtime = WasmRuntime::new().expect("runtime");
+        let runtime = WasmRuntime::try_new().expect("runtime");
         let module = wasmtime::Module::new(
             runtime.engine(),
             r#"(module

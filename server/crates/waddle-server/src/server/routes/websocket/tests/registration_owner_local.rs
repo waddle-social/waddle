@@ -166,7 +166,7 @@ where
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("successor mirror");
     assert!(!successor.is_locally_hosted());
     assert_eq!(
@@ -357,7 +357,7 @@ async fn assert_remote_replaces_owner_local(remove_route: bool, timeout_first: b
         .deps
         .protocol
         .connection_registry
-        .get_entry(&jid)
+        .entry(&jid)
         .expect("remote mirror");
     assert!(!entry.is_locally_hosted());
     assert_eq!(

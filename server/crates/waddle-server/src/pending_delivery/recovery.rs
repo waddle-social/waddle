@@ -166,7 +166,7 @@ impl PendingRecovery {
         let registry = &state.deps.protocol.connection_registry;
         let mut targets: BTreeMap<BareJid, RecoveryTarget> = BTreeMap::new();
         for resource in registry.list_connections() {
-            let Some(entry) = registry.get_entry(&resource) else {
+            let Some(entry) = registry.entry(&resource) else {
                 continue;
             };
             if !entry.is_locally_hosted()
@@ -286,7 +286,7 @@ mod tests {
                 .expect("durable row after initial empty presence");
             // Rediscovery must not rely on resetting the first-presence CAS.
             assert!(registry
-                .get_entry(&resource)
+                .entry(&resource)
                 .expect("entry")
                 .claim_offline_flush());
             receivers.push(receiver);

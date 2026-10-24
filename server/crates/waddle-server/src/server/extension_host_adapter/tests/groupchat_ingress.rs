@@ -345,7 +345,7 @@ async fn sends_share_a_lingering_occupancy(f: IngressFixture) {
         ]
     );
     let room = fixture.actor.ask(GetSnapshot).await.expect("snapshot").room;
-    assert_eq!(room.get_affiliation(&bot.to_bare()), Affiliation::None);
+    assert_eq!(room.affiliation(&bot.to_bare()), Affiliation::None);
     let chain = fixture
         .actor
         .ask(waddle_xmpp::muc::room_actor::GetRoomSnapshot {
@@ -427,7 +427,7 @@ async fn group_dm_refuses_the_bot(f: IngressFixture) {
         "the bot never joined the group DM"
     );
     assert_eq!(
-        room.get_affiliation(&bot.to_bare()),
+        room.affiliation(&bot.to_bare()),
         Affiliation::None,
         "the refusal leaves no Member affiliation behind"
     );

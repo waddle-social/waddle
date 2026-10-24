@@ -33,6 +33,7 @@ use url::Url;
 
 /// Parse an XMPP element into a [`MessagingEvent`], or return `None` if the
 /// element is not a `<message>` or `<presence>`.
+#[must_use]
 pub fn parse(element: &Element) -> Option<MessagingEvent> {
     match element.name() {
         "message" => {

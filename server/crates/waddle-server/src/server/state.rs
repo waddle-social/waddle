@@ -116,7 +116,7 @@ impl AppState {
         let muc_domain = DomainPart::from_str("muc.localhost")
             .expect("test MUC domain 'muc.localhost' parses as DomainPart");
         let occupant_id_secret =
-            OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+            OccupantIdSecret::try_new(b"test-occupant-id-secret-32-bytes-long".to_vec())
                 .expect("test occupant-id secret meets length floor");
         let server_hats = waddle_xmpp::xep::xep0317::ServerHats::default();
         let room_registry = RoomRegistryActor::spawn(
@@ -363,7 +363,7 @@ mod tests {
 
     #[tokio::test]
     async fn new_with_deps_populates_admin_v2_dependencies() {
-        let db_pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let db_pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()

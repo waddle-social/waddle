@@ -745,7 +745,7 @@ pub(super) async fn apply_muc_owner_config(
                     room_with_reconciled_config.set_affiliation(jid.clone(), *affiliation);
                 }
             } else {
-                for affiliation in recovered_snapshot.room.get_all_affiliations() {
+                for affiliation in recovered_snapshot.room.all_affiliations() {
                     room_with_reconciled_config
                         .set_affiliation(affiliation.jid, affiliation.affiliation);
                 }
@@ -1049,7 +1049,7 @@ async fn drain_or_broadcast_config_change(
     }
 
     for occupant in room.occupants.values() {
-        for recipient_jid in room.get_occupant_sessions(&occupant.nick) {
+        for recipient_jid in room.occupant_sessions(&occupant.nick) {
             let message = waddle_xmpp::muc::build_config_change_message(
                 room_jid,
                 &recipient_jid,
@@ -1203,7 +1203,7 @@ mod tests {
     }
 
     fn origin() -> RoomEffectOriginInstanceId {
-        RoomEffectOriginInstanceId::new("config-guard-origin".to_owned()).expect("origin")
+        RoomEffectOriginInstanceId::try_new("config-guard-origin".to_owned()).expect("origin")
     }
 
     fn producing_node() -> RoomEffectProducingNode {
@@ -2688,7 +2688,7 @@ mod tests {
                 if snapshot_room(state.as_ref(), &room)
                     .await
                     .room
-                    .get_occupant("alice")
+                    .occupant("alice")
                     .is_none()
                 {
                     return;
@@ -2702,7 +2702,7 @@ mod tests {
         assert_eq!(
             sfu.snapshot(),
             vec![(
-                waddle_sfu::CallId::new(room.to_string()).expect("valid call id"),
+                waddle_sfu::CallId::try_new(room.to_string()).expect("valid call id"),
                 waddle_sfu::Identity::from_jid(alice),
             )],
             "detached unmanaged enforcement must still revoke the removed occupant from the SFU"
@@ -2812,7 +2812,7 @@ mod tests {
             "rollback must restore the original room config"
         );
         assert!(
-            snapshot.room.get_occupant("alice").is_some(),
+            snapshot.room.occupant("alice").is_some(),
             "rollback must leave the restored occupant seated"
         );
         assert!(

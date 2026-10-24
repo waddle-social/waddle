@@ -132,7 +132,7 @@ async fn store(
                     .thread_id
                     .clone()
                     .map(|thread| {
-                        waddle_xmpp_core::mam::ThreadId::new(thread)
+                        waddle_xmpp_core::mam::ThreadId::try_new(thread)
                             .ok_or(IngressUowError::EffectIntentConflict)
                     })
                     .transpose()?,

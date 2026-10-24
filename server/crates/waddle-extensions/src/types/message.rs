@@ -13,6 +13,7 @@ pub struct ExtensionEnvelope {
 
 impl ExtensionEnvelope {
     /// Create a version-1 extension envelope containing the supplied enrichments.
+    #[must_use]
     pub fn new(enrichments: Vec<MessageEnrichment>) -> Self {
         Self {
             version: 1,
@@ -21,6 +22,7 @@ impl ExtensionEnvelope {
     }
 
     /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("extensions", FRAMEWORK_NAMESPACE).attr(
             minidom::rxml::xml_ncname!("version").to_owned(),
@@ -59,6 +61,7 @@ pub struct MessageEnrichment {
 impl MessageEnrichment {
     /// Whether every payload's advertised namespace and root namespace match this
     /// enrichment's declared namespace.
+    #[must_use]
     pub fn payloads_match_declared_namespace(&self) -> bool {
         self.payloads.iter().all(|payload| {
             payload.namespace == self.payload_namespace
@@ -67,6 +70,7 @@ impl MessageEnrichment {
     }
 
     /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("enrichment", FRAMEWORK_NAMESPACE)
             .attr(
@@ -126,6 +130,7 @@ pub struct MessageSource {
 
 impl MessageSource {
     /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("source", FRAMEWORK_NAMESPACE).attr(
             minidom::rxml::xml_ncname!("stanza-id").to_owned(),
@@ -203,6 +208,7 @@ pub struct LaunchDescriptor {
 
 impl LaunchDescriptor {
     /// Serialize this extension model into the framework's typed XML element tree.
+    #[must_use]
     pub fn to_minidom(&self) -> Element {
         let mut builder = Element::builder("launch", FRAMEWORK_NAMESPACE)
             .attr(

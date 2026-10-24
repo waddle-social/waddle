@@ -95,7 +95,7 @@ pub(super) async fn handle_last_activity_iq(
             .deps
             .protocol
             .connection_registry
-            .get_available_resources_for_user(&target_bare)
+            .available_resources_for_user(&target_bare)
             .is_empty()
         {
             return vec![iq_to_xml(build_last_activity_response(iq, 0, None))];
@@ -105,7 +105,7 @@ pub(super) async fn handle_last_activity_iq(
             .deps
             .protocol
             .connection_registry
-            .get_last_activity(&target_bare)
+            .last_activity(&target_bare)
         {
             let seconds = chrono::Utc::now()
                 .signed_duration_since(last_activity.timestamp)

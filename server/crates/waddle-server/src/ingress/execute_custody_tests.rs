@@ -41,7 +41,7 @@ async fn retirement_authority(fixture: &IngressFixture) -> crate::ingress::Ingre
             action: None,
         };
         tx.commit().await.expect("close lineage read");
-        return crate::ingress::IngressAuthority::new(
+        return crate::ingress::IngressAuthority::try_new(
             Default::default(),
             fixture.db.clone(),
             config,

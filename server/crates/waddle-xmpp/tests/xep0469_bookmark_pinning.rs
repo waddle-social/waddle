@@ -15,7 +15,7 @@
 use minidom::Element;
 use waddle_xmpp::xep::xep0402::{build_bookmark_element, parse_bookmark, Bookmark, NS_BOOKMARKS2};
 use waddle_xmpp::xep::xep0469::{
-    build_pinned_element, get_pin_state, is_bookmark_pinned, is_pinned_element, pin_bookmark,
+    build_pinned_element, is_bookmark_pinned, is_pinned_element, pin_bookmark, pin_state,
     set_pin_state, sort_bookmarks_pinned_first, unpin_bookmark, PinState, NS_BOOKMARKS_PINNING,
 };
 
@@ -71,7 +71,7 @@ fn xep0469_spec_example_shape_is_recognized_as_pinned() {
         .parse()
         .expect("valid xml");
     assert!(is_bookmark_pinned(&conf));
-    assert_eq!(get_pin_state(&conf), PinState::Pinned);
+    assert_eq!(pin_state(&conf), PinState::Pinned);
 }
 
 #[test]
@@ -84,7 +84,7 @@ fn xep0469_pinned_element_in_wrong_namespace_is_ignored() {
         .parse()
         .expect("valid xml");
     assert!(!is_bookmark_pinned(&conf));
-    assert_eq!(get_pin_state(&conf), PinState::Unpinned);
+    assert_eq!(pin_state(&conf), PinState::Unpinned);
 }
 
 #[test]
@@ -175,9 +175,9 @@ fn xep0469_unpin_without_extensions_is_a_no_op() {
 fn xep0469_set_pin_state_round_trip() {
     let mut conf = conference();
     set_pin_state(&mut conf, PinState::Pinned);
-    assert_eq!(get_pin_state(&conf), PinState::Pinned);
+    assert_eq!(pin_state(&conf), PinState::Pinned);
     set_pin_state(&mut conf, PinState::Unpinned);
-    assert_eq!(get_pin_state(&conf), PinState::Unpinned);
+    assert_eq!(pin_state(&conf), PinState::Unpinned);
 }
 
 // ── XEP-0402 integration ─────────────────────────────────────────────
@@ -213,7 +213,7 @@ fn xep0469_rebuilt_bookmark_with_pinned_extension_stays_pinned() {
 
     let payload = build_bookmark_element(&bookmark);
     assert!(is_bookmark_pinned(&payload));
-    assert_eq!(get_pin_state(&payload), PinState::Pinned);
+    assert_eq!(pin_state(&payload), PinState::Pinned);
 }
 
 // ── Sorting ──────────────────────────────────────────────────────────

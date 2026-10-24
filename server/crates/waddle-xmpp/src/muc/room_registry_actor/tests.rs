@@ -4966,7 +4966,7 @@ mod ownership_claims_tests {
                     generation: leave_attempt.order(),
                     nick_generation: None,
                     outcome: crate::muc::room_actor::DepartureReceiptOutcome::Suppressed {
-                        nick: crate::muc::MucOccupantNick::new("ghost".to_string())
+                        nick: crate::muc::MucOccupantNick::try_new("ghost".to_string())
                             .expect("valid nick"),
                         affiliation: crate::Affiliation::Member,
                     },
@@ -5403,7 +5403,7 @@ mod ownership_claims_tests {
                 .await
                 .expect("successor snapshot")
                 .room
-                .get_occupant("alice")
+                .occupant("alice")
                 .is_some(),
             "the transplanted roster survives the handoff"
         );

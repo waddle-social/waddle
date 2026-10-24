@@ -512,7 +512,7 @@ fn recovery_envelope_preserves_occupant_mention_and_noping() {
     let room: jid::BareJid = "room@conference.example.com".parse().expect("room");
     let sender = room.with_resource_str("romeo").expect("occupant").into();
     let archive = waddle_xmpp_core::xep0359::StanzaId::new("frozen", room.clone().into());
-    let secret = OccupantIdSecret::new(vec![7; 32]).expect("secret");
+    let secret = OccupantIdSecret::try_new(vec![7; 32]).expect("secret");
     let occupant = generate_occupant_id(&owner, &room, &secret);
     for noping in [false, true] {
         let mut mention = ExplicitMention::occupant_id(occupant.as_str());

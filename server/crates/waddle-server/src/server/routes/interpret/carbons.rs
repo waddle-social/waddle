@@ -65,8 +65,7 @@ pub(super) async fn send_carbons(
         // Registry-only embedders have no actor tree. Production planners
         // always supply it; retain their explicit carbon-policy source.
         if deps.user_registry.is_none() {
-            carbon_recipients
-                .extend(registry.get_other_carbon_resources_for_user(&owner, &exclude));
+            carbon_recipients.extend(registry.other_carbon_resources_for_user(&owner, &exclude));
         }
         carbon_recipients.sort();
         carbon_recipients.dedup();
@@ -269,11 +268,11 @@ pub(crate) async fn send_carbons_to_registry_with_capture(
     // body-less) are enforced by `CarbonsMessageHandler`
     // before emitting this event; the interpreter does
     // not re-check them — but it DOES per-target filter
-    // through `get_other_carbon_resources_for_user` so a
+    // through `other_carbon_resources_for_user` so a
     // resource that disabled carbons after the message
     // entered the pipeline still gets skipped.
     let owner_str = owner.to_string();
-    let mut live_targets = registry.get_other_carbon_resources_for_user(&owner, &exclude);
+    let mut live_targets = registry.other_carbon_resources_for_user(&owner, &exclude);
     live_targets.sort();
     // Detached-but-resumable resources (XEP-0198 stream
     // management) — without this fan-out arm, briefly

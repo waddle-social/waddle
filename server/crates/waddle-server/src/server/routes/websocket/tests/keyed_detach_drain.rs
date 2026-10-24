@@ -31,7 +31,7 @@ async fn detaching_socket(fixture: IngressFixture) -> DetachingSocket {
             .expect("SM persistence"),
     );
     let sm = Arc::new(InMemorySmSessionRegistry::new().with_persistence(persistence));
-    let pool = DatabasePool::new(
+    let pool = DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

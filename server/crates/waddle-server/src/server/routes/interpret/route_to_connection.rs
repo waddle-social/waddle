@@ -350,7 +350,7 @@ async fn route_planned_direct_message(
                         && source.to == message.to
                         && source.type_ == message.type_
                 }) {
-                    match waddle_xmpp::ingress::StoredMessagePayload::new(message.clone()) {
+                    match waddle_xmpp::ingress::StoredMessagePayload::try_new(message.clone()) {
                         Ok(prepared) => {
                             // Validate the same bounded copy, but retain no payload
                             // when the sender explicitly forbids later handoff.
@@ -1456,7 +1456,7 @@ pub(crate) async fn deliver_ordered_local_copy(
     // authoritative even after that socket disappears or is replaced.
     let entry = deps
         .connection_registry
-        .get_entry(target)
+        .entry(target)
         .filter(|entry| entry.is_locally_hosted());
     let status = match (&deps.ingress_delivery_uow, authority) {
         (Some(uow), _) => {

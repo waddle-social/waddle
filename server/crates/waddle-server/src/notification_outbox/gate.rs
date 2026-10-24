@@ -1067,7 +1067,7 @@ mod tests {
             job_id: NotificationOutboxJobId::from("groupchat-blocked-job".to_string()),
             recipient_bare_jid: recipient,
             push_service_jid: bare("push.example.com"),
-            node: PushServiceNodeName::new("web-node").expect("node"),
+            node: PushServiceNodeName::try_new("web-node").expect("node"),
             conversation_jid: room,
             sender_jid: sender.clone(),
             sender_jids: vec![sender],

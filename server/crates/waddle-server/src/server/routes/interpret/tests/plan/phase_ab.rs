@@ -354,7 +354,7 @@ async fn phases_a_b_with_poisoned_stores(scenario: Scenario) {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&"guest@example.com".parse().expect("guest")),
+                .affiliation(&"guest@example.com".parse().expect("guest")),
             waddle_xmpp::Affiliation::None
         ),
     }

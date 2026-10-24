@@ -307,7 +307,7 @@ pub(super) async fn handle_muc_mediated_invite(
         )]);
     }
     let inviter_bare = bound_jid.to_bare();
-    let inviter_affiliation = snapshot.room.get_affiliation(&inviter_bare);
+    let inviter_affiliation = snapshot.room.affiliation(&inviter_bare);
     // XEP-0045 §7.8.2 note: "Invitation privileges in members-only
     // rooms SHOULD be restricted to room admins; if a member without
     // privileges to edit the member list attempts to invite another
@@ -400,7 +400,7 @@ pub(super) async fn handle_muc_mediated_invite(
         return Some(vec![]);
     }
 
-    let previous_invitee_affiliation = snapshot.room.get_affiliation(&invitee);
+    let previous_invitee_affiliation = snapshot.room.affiliation(&invitee);
     let mut mutation = MucMembershipMutation {
         room: room_jid.clone(),
         invitee: invitee.clone(),
@@ -586,7 +586,7 @@ pub(crate) async fn execute_muc_membership(
     else {
         return EffectOutcome::Unavailable;
     };
-    let previous_invitee_affiliation = snapshot.room.get_affiliation(&invitee);
+    let previous_invitee_affiliation = snapshot.room.affiliation(&invitee);
     let granted_membership = snapshot.room.config.members_only
         && previous_invitee_affiliation < waddle_xmpp::Affiliation::Member;
     if granted_membership {
@@ -625,7 +625,7 @@ pub(crate) async fn execute_muc_membership(
                                 .ask(GetSnapshot)
                                 .reply_timeout(std::time::Duration::from_secs(5))
                                 .await
-                                .map(|snapshot| snapshot.room.get_affiliation(&invitee))
+                                .map(|snapshot| snapshot.room.affiliation(&invitee))
                             {
                                 if let Err(error) =
                                     super::super::iq::persist_managed_channel_affiliation(
@@ -713,7 +713,7 @@ pub(crate) async fn rollback_muc_membership(grant: &MucMembershipMutation, deps:
     else {
         return;
     };
-    if snapshot.room.get_affiliation(&grant.invitee) != waddle_xmpp::Affiliation::Member {
+    if snapshot.room.affiliation(&grant.invitee) != waddle_xmpp::Affiliation::Member {
         return;
     }
     rollback_invite_grant(
@@ -999,7 +999,7 @@ mod tests {
                 channel_id.to_string(),
                 RoomConfig::default(),
             ),
-            OccupantIdSecret::new(vec![b't'; 32]).expect("occupant-id secret"),
+            OccupantIdSecret::try_new(vec![b't'; 32]).expect("occupant-id secret"),
         ))
     }
 
@@ -1295,7 +1295,7 @@ mod tests {
                 .await
                 .expect("initial snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             waddle_xmpp::Affiliation::None
         );
         let mut message = Message::new(Some(jid::Jid::from(room)));
@@ -1334,7 +1334,7 @@ mod tests {
                 .await
                 .expect("final snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             concurrent_affiliation,
             "failed invitation must restore the execution-time affiliation"
         );
@@ -1385,7 +1385,7 @@ mod tests {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&invitee),
+                .affiliation(&invitee),
             waddle_xmpp::Affiliation::Admin
         );
     }
@@ -1509,7 +1509,7 @@ mod tests {
                 .await
                 .expect("snapshot")
                 .room
-                .get_affiliation(&recipient),
+                .affiliation(&recipient),
             waddle_xmpp::Affiliation::None
         );
     }

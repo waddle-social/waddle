@@ -21,7 +21,7 @@ fn bare_jid(value: &str) -> BareJid {
 }
 
 fn stanza_id(value: &str) -> StanzaId {
-    StanzaId::new(value).expect("test stanza id is non-empty")
+    StanzaId::try_new(value).expect("test stanza id is non-empty")
 }
 
 fn item(namespace: &str, chat_id: &Jid, stanza_id: &StanzaId, by: &BareJid) -> Element {

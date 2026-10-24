@@ -423,7 +423,7 @@ async fn system_sources_keep_separate_payloads(fixture: IngressFixture) {
             message.from = Some(room.clone().into());
             message.bodies.insert(Default::default(), body.into());
             waddle_xmpp_core::xep0359::add_stanza_id(&mut message, &stamp);
-            StoredMessagePayload::new(message).expect("system payload")
+            StoredMessagePayload::try_new(message).expect("system payload")
         });
         submission
             .plan
@@ -511,7 +511,7 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
     use waddle_xmpp::ingress::{EffectMessageIdentity, EntityGeneration};
     let room: jid::BareJid = "observer@muc.example.com".parse().expect("room");
     let occupant: jid::FullJid = "juliet@example.com/absent".parse().expect("occupant");
-    let plugin = waddle_extensions::PluginId::new("message-hook-fixture").expect("plugin");
+    let plugin = waddle_extensions::PluginId::try_new("message-hook-fixture").expect("plugin");
     let stamp = waddle_xmpp_core::xep0359::StanzaId::new("observer-id", room.clone().into());
     let mut submission = fixture.submission(Some("observer-no-live-copy"), "observed content");
     let request = submission.plan.sanitized_message.clone();
@@ -537,8 +537,8 @@ async fn observer_source_without_deliverable_copy(fixture: IngressFixture, late_
             requester: submission.sender.to_bare(),
             sender: submission.sender.clone(),
             plugin: plugin.clone(),
-            generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-            identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+            generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
+            identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64)).expect("identity"),
             correction_target: None,
         },
     ];

@@ -168,10 +168,10 @@ mod tests {
     async fn push_queue_observation_tracks_retained_capacity_and_unsettled_lineage(
         fixture: IngressFixture,
     ) {
-        let provider = DatabasePushServiceStore::new(fixture.db.clone())
+        let provider = DatabasePushServiceStore::try_new(fixture.db.clone())
             .await
             .expect("provider");
-        let outbox = NotificationOutboxStore::new(fixture.db.clone())
+        let outbox = NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("outbox");
         let owner = owner();

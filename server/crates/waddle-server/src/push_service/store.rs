@@ -93,7 +93,7 @@ pub(super) async fn lock_node_tx(
 
 impl DatabasePushServiceStore {
     #[cfg(test)]
-    pub async fn new(db: Database) -> Result<Self, XmppError> {
+    pub async fn try_new(db: Database) -> Result<Self, XmppError> {
         Self::new_with_secret_key(db, b"waddle-push-service-test-secret-key").await
     }
 
@@ -621,7 +621,7 @@ mod tests {
             let db = Database::open_local("push-service-reopen", &path)
                 .await
                 .expect("database");
-            let store = DatabasePushServiceStore::new(db).await.expect("store");
+            let store = DatabasePushServiceStore::try_new(db).await.expect("store");
             let node = store.ensure_node(&owner, "web").await.expect("node");
             node_id = node.node().to_string();
             store
@@ -651,7 +651,7 @@ mod tests {
         let reopened_db = Database::open_local("push-service-reopen-again", &path)
             .await
             .expect("reopened database");
-        let reopened = DatabasePushServiceStore::new(reopened_db)
+        let reopened = DatabasePushServiceStore::try_new(reopened_db)
             .await
             .expect("reopened store");
         let node = reopened
@@ -682,7 +682,7 @@ mod tests {
     }
     #[tokio::test]
     async fn fcm_device_seals_its_auth_secret_and_disable_scrubs_every_secret() {
-        let store = DatabasePushServiceStore::new(
+        let store = DatabasePushServiceStore::try_new(
             Database::in_memory("push-service-fcm-secrets")
                 .await
                 .expect("database"),
@@ -747,7 +747,7 @@ mod tests {
 
     #[tokio::test]
     async fn provider_disable_scrubs_every_secret_like_an_owner_disable() {
-        let store = DatabasePushServiceStore::new(
+        let store = DatabasePushServiceStore::try_new(
             Database::in_memory("push-service-fcm-provider-disable")
                 .await
                 .expect("database"),

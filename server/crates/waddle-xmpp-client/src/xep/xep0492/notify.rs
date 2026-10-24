@@ -31,7 +31,6 @@ pub const NS_NOTIFICATION_SETTINGS: &str = "urn:xmpp:notification-settings:1";
 /// helpers here MUST stay byte-compatible with the server-side
 /// `parse_rich_payload_opt_in`.
 pub const NS_PUSH_RICH_PAYLOAD: &str = "urn:waddle:push:rich:0";
-
 /// Read the Waddle rich-payload opt-in from a XEP-0492 `<notify/>`.
 ///
 /// Returns `true` when any setting child (fallback or identity-scoped)
@@ -40,6 +39,7 @@ pub const NS_PUSH_RICH_PAYLOAD: &str = "urn:waddle:push:rich:0";
 /// server-side `parse_rich_payload_opt_in` so the write side here and
 /// the read side there agree on one wire shape (#719). Absence of the
 /// element is opt-out — the minimal XEP-0357 summary payload.
+#[must_use]
 pub fn read_rich_payload_opt_in(notify: &Element) -> bool {
     notify
         .children()
@@ -76,6 +76,7 @@ pub struct NotifySettingsSurface {
 /// sibling carries the rich-payload marker — matching how both
 /// [`read_fallback_mode`] and the server's `parse_rich_payload_opt_in`
 /// resolve across siblings. Round-2 PR #804 review (Codex P2). Pure.
+#[must_use]
 pub fn surface_bookmark_notify(extensions: &[Element]) -> NotifySettingsSurface {
     let notifies = || {
         extensions
@@ -91,6 +92,7 @@ pub fn surface_bookmark_notify(extensions: &[Element]) -> NotifySettingsSurface 
 /// Surface the XEP-0492 notification state from a single hosted
 /// `<notify/>` — the DM-bookmark carrier shape (issue #720), which
 /// hosts exactly one `<notify/>` per contact. Pure.
+#[must_use]
 pub fn surface_dm_notify(notify: &Element) -> NotifySettingsSurface {
     NotifySettingsSurface {
         fallback_mode: read_fallback_mode(notify),
@@ -116,6 +118,7 @@ pub enum NotifyMode {
 
 impl NotifyMode {
     /// Wire element name for this setting.
+    #[must_use]
     pub fn as_wire_name(self) -> &'static str {
         match self {
             Self::Always => "always",
@@ -125,6 +128,7 @@ impl NotifyMode {
     }
 
     /// Parse a wire element name back into a typed mode.
+    #[must_use]
     pub fn from_wire_name(name: &str) -> Option<Self> {
         match name {
             "always" => Some(Self::Always),
@@ -162,6 +166,7 @@ pub enum ConversationKind {
 impl ConversationKind {
     /// Resolve the XEP-0492 §3 default when no fallback child is
     /// present.
+    #[must_use]
     pub fn default_notify_mode(self) -> NotifyMode {
         match self {
             Self::DirectChat | Self::PrivateGroup => NotifyMode::Always,
@@ -176,6 +181,7 @@ impl ConversationKind {
 /// Returns `None` when no fallback child is present (a `<notify/>`
 /// carrying only identity-scoped siblings written by another client).
 /// Caller resolves `None` against [`ConversationKind::default_notify_mode`].
+#[must_use]
 pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
     notify.children().find_map(|child| {
         if child.ns() != NS_NOTIFICATION_SETTINGS
@@ -238,6 +244,7 @@ pub fn read_fallback_mode(notify: &Element) -> Option<NotifyMode> {
 ///
 /// The function is pure — it takes a borrowed `extensions` element
 /// and returns an owned new element.
+#[must_use]
 pub fn merge_notify_into_extensions(
     extensions: Option<&Element>,
     mode: NotifyMode,
@@ -304,6 +311,7 @@ fn gather_notify_settings(notify: &Element, out: &mut Vec<Element>) {
 /// and folded; the Waddle `<rich-payload/>` opt-in (#719) is toggled
 /// by `rich_payload_opt_in`. Pure — borrows the input, returns an
 /// owned `<notify/>`.
+#[must_use]
 pub fn merge_notify(
     existing_notify: Option<&Element>,
     mode: NotifyMode,

@@ -129,7 +129,7 @@ impl InProcessVapidSigner {
     /// dropped (`p256::SecretKey` zeroizes on drop), leaving only the
     /// `EncodingKey` (PKCS#8 PEM bytes) as the residual sign-capable
     /// material in heap.
-    pub fn new(kid: Kid, secret_key: p256::SecretKey) -> Result<Self, VapidSignError> {
+    pub fn try_new(kid: Kid, secret_key: p256::SecretKey) -> Result<Self, VapidSignError> {
         use p256::pkcs8::EncodePrivateKey;
         let public_key = secret_key.public_key();
         let pem = secret_key
@@ -217,7 +217,7 @@ impl VapidSigner for InProcessVapidSigner {
         let header = Header::new(Algorithm::ES256);
         let token = jsonwebtoken::encode(&header, &claims, &self.encoding_key)
             .map_err(VapidSignError::Signing)?;
-        let jwt = VapidJwt::new(&token)?;
+        let jwt = VapidJwt::try_new(&token)?;
 
         let mut cache = self.lock_cache();
         cache.put(
@@ -267,7 +267,7 @@ mod tests {
 
     fn fresh_signer() -> InProcessVapidSigner {
         let secret = p256::SecretKey::random(&mut OsRng);
-        InProcessVapidSigner::new(Kid::new(), secret).expect("signer init")
+        InProcessVapidSigner::try_new(Kid::new(), secret).expect("signer init")
     }
 
     fn parse_origin(url: &str) -> url::Origin {

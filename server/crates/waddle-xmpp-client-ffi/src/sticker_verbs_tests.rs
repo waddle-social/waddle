@@ -84,7 +84,7 @@ fn bare(value: &str) -> BareJid {
 }
 
 fn pack_id(value: &str) -> PackId {
-    PackId::new(value).expect("test pack id")
+    PackId::try_new(value).expect("test pack id")
 }
 
 fn marsey_ffi_pack(id: &str) -> WaddleStickerPack {

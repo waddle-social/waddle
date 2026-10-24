@@ -14,7 +14,7 @@ macro_rules! domain_newtype_to_wit {
 
 macro_rules! wit_newtype_to_domain {
     ($value:expr, $domain:ty) => {
-        <$domain>::new($value.value).map_err(anyhow::Error::from)
+        <$domain>::try_new($value.value).map_err(anyhow::Error::from)
     };
 }
 

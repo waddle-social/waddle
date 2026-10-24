@@ -524,7 +524,7 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
             .ask(RegisterUserResource {
                 jid: recipient.clone(),
                 entry: registry
-                    .get_entry(recipient)
+                    .entry(recipient)
                     .expect("registered carbon resource"),
             })
             .await
@@ -620,7 +620,7 @@ async fn frozen_carbon_destinations_retry(fixture: ingress_support::IngressFixtu
         .ask(RegisterUserResource {
             jid: middle.clone(),
             entry: registry
-                .get_entry(&middle)
+                .entry(&middle)
                 .expect("reconnected carbon resource"),
         })
         .await

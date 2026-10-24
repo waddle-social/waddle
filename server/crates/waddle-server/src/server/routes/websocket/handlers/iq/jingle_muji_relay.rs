@@ -343,7 +343,7 @@ mod tests {
             .sfu
             .as_ref()
             .expect("calls fixture wires an SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("valid call id");
+        let call = waddle_sfu::CallId::try_new(room.to_string()).expect("valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice);
         assert_eq!(
             sfu.participant_occupant_session(&call, &identity),
@@ -377,7 +377,7 @@ mod tests {
             .sfu
             .as_ref()
             .expect("calls fixture wires an SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("valid call id");
+        let call = waddle_sfu::CallId::try_new(room.to_string()).expect("valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice);
         assert_eq!(sfu.participant_occupant_session(&call, &identity), None);
     }
@@ -419,7 +419,8 @@ mod tests {
             .sfu
             .as_ref()
             .expect("the calls fixture wires an SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("room JID is a valid call id");
+        let call =
+            waddle_sfu::CallId::try_new(room.to_string()).expect("room JID is a valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         handle_relayed_muji_initiate(
             &state,
@@ -490,7 +491,7 @@ mod tests {
             "the stale generation must receive unknown-session: {stale_frames:?}",
         );
         let sfu = state.deps.protocol.sfu.as_ref().expect("calls fixture SFU");
-        let call = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let call = waddle_sfu::CallId::try_new(room.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         assert!(sfu.has_call_participant(&call, &identity));
         assert!(
@@ -544,13 +545,13 @@ mod tests {
         // A registration with NO room actor for its room — exactly the
         // state a departing occupant is left in when the last MUC leave
         // tore the actor down before their Jingle terminate arrived.
-        let call = waddle_sfu::CallId::new("vanished@muc.example.com").expect("valid call id");
+        let call = waddle_sfu::CallId::try_new("vanished@muc.example.com").expect("valid call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         let generation = occupancy_session();
         sfu.register_call_participant_with_session(
             &call,
             &identity,
-            &waddle_sfu::SessionBinding::new("relay-sid").expect("session binding"),
+            &waddle_sfu::SessionBinding::try_new("relay-sid").expect("session binding"),
             generation,
         );
         assert!(sfu.has_call_participant(&call, &identity));

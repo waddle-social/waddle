@@ -50,6 +50,7 @@ fn room_jid_field(room_jid: &str) -> ExtensionSubmitField {
 
 /// XEP-0050 §2.4 execute request that starts a command. When invoked
 /// from a room the submit form carries the [`ROOM_JID_FIELD`].
+#[must_use]
 pub fn build_extension_invoke_iq(service_jid: &str, node: &str, room_jid: Option<&str>) -> Element {
     let fields: Vec<ExtensionSubmitField> = room_jid.map(room_jid_field).into_iter().collect();
     build_xep0050_command_request_with_form_element(
@@ -66,6 +67,7 @@ pub fn build_extension_invoke_iq(service_jid: &str, node: &str, room_jid: Option
 /// action submits the palette's fields, with the [`ROOM_JID_FIELD`]
 /// appended when the invocation came from a room and the palette did
 /// not already carry it.
+#[must_use]
 pub fn build_extension_submit_iq(
     service_jid: &str,
     node: &str,

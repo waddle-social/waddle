@@ -13,16 +13,19 @@ pub struct SubId(String);
 
 impl SubId {
     /// Generate a fresh subid backed by a v4 UUID.
+    #[must_use]
     pub fn generate() -> Self {
         Self(uuid::Uuid::new_v4().to_string())
     }
 
     /// Wrap an existing identifier (used by storage when reading rows back).
+    #[must_use]
     pub fn from_raw(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }

@@ -85,7 +85,7 @@ async fn local_carbons_receipts(
         users
             .ask(RegisterUserResource {
                 jid: resource.clone(),
-                entry: registry.get_entry(resource).expect("registered resource"),
+                entry: registry.entry(resource).expect("registered resource"),
             })
             .await
             .expect("register actor resource");
@@ -157,9 +157,7 @@ async fn local_carbons_receipts(
         users
             .ask(RegisterUserResource {
                 jid: resources[1].clone(),
-                entry: registry
-                    .get_entry(&resources[1])
-                    .expect("reconnected resource"),
+                entry: registry.entry(&resources[1]).expect("reconnected resource"),
             })
             .await
             .expect("register reconnected actor resource");
@@ -175,7 +173,7 @@ async fn local_carbons_receipts(
         users
             .ask(RegisterUserResource {
                 jid: late.clone(),
-                entry: registry.get_entry(&late).expect("late resource"),
+                entry: registry.entry(&late).expect("late resource"),
             })
             .await
             .expect("register late actor resource");
@@ -311,7 +309,7 @@ async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
         .ask(RegisterUserResource {
             jid: target.clone(),
             entry: registry
-                .get_entry(&target)
+                .entry(&target)
                 .expect("registered carbon recipient"),
         })
         .await
@@ -328,7 +326,7 @@ async fn opted_out_carbon_receipt(fixture: IngressFixture, rebind: bool) {
             .ask(RegisterUserResource {
                 jid: target.clone(),
                 entry: registry
-                    .get_entry(&target)
+                    .entry(&target)
                     .expect("registered replacement recipient"),
             })
             .await

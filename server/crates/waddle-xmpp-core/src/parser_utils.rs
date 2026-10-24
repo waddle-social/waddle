@@ -15,7 +15,7 @@ use xmpp_parsers::message::Message;
 /// - `element`: The message Element to potentially modify
 /// - `thread_id`: The thread ID from the parsed Message
 pub fn ensure_thread_element(element: &mut Element, thread_id: Option<&str>) {
-    let Some(id) = thread_id.and_then(|raw| crate::mam::ThreadId::new(raw.trim().to_owned()))
+    let Some(id) = thread_id.and_then(|raw| crate::mam::ThreadId::try_new(raw.trim().to_owned()))
     else {
         // skip empty thread
         return;
@@ -41,6 +41,7 @@ pub fn ensure_thread_element(element: &mut Element, thread_id: Option<&str>) {
 ///
 /// ## Returns
 /// The parent attribute value if present and non-empty, None otherwise.
+#[must_use]
 pub fn extract_thread_parent(element: &Element) -> Option<String> {
     let stanza_ns = element.ns();
     element
@@ -71,7 +72,7 @@ pub fn reattach_thread_parent(msg: &mut Message, thread_parent: String, stanza_n
     let Some(thread) = msg.thread.take() else {
         return;
     };
-    let Some(id) = crate::mam::ThreadId::new(thread.id) else {
+    let Some(id) = crate::mam::ThreadId::try_new(thread.id) else {
         // Empty thread body would render as a malformed
         // `<thread parent='X'></thread>` (XEP-0201 implicitly forbids
         // an empty thread body when `parent` is present). Drop the
@@ -80,7 +81,7 @@ pub fn reattach_thread_parent(msg: &mut Message, thread_parent: String, stanza_n
         // propagate it.
         return;
     };
-    let parent = crate::mam::ThreadId::new(thread_parent);
+    let parent = crate::mam::ThreadId::try_new(thread_parent);
     let info = crate::xep0201::ThreadInfo { id, parent };
     msg.payloads
         .push(crate::xep0201::build_thread_element(&info, stanza_ns));

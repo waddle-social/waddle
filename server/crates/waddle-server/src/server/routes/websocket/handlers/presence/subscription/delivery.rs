@@ -345,7 +345,7 @@ async fn available_live_and_detached_resources_for_user(
         .deps
         .protocol
         .connection_registry
-        .get_available_resources_for_user(user)
+        .available_resources_for_user(user)
         .into_iter()
         .map(|(jid, _)| jid)
         .collect();
@@ -378,7 +378,7 @@ async fn presence_state_for_available_resource(
         .deps
         .protocol
         .connection_registry
-        .get_presence_state(resource)
+        .presence_state(resource)
     {
         return Some(PresenceStateSnapshot {
             show: state.show.as_deref().and_then(show_from_name),
@@ -433,7 +433,7 @@ async fn send_stanza_to_available_user_resources_and_detached_available(
         .deps
         .protocol
         .connection_registry
-        .get_available_resources_for_user(user)
+        .available_resources_for_user(user)
         .into_iter()
         .map(|(jid, _)| jid)
         .collect();
@@ -463,7 +463,7 @@ async fn send_stanza_to_available_user_resources_and_detached_available(
         .deps
         .protocol
         .connection_registry
-        .get_available_resources_for_user(user)
+        .available_resources_for_user(user)
         .into_iter()
         .map(|(jid, _)| jid)
         .filter(|resource| !delivered_resources.contains(resource))
@@ -707,7 +707,7 @@ pub(super) fn subscription_presence_recipients(
             .deps
             .protocol
             .connection_registry
-            .get_available_resources_for_user(&request.to)
+            .available_resources_for_user(&request.to)
             .into_iter()
             .map(|(jid, _)| jid)
             .collect(),
@@ -717,6 +717,6 @@ pub(super) fn subscription_presence_recipients(
             .deps
             .protocol
             .connection_registry
-            .get_roster_interested_resources_for_user(&request.to),
+            .roster_interested_resources_for_user(&request.to),
     }
 }

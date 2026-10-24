@@ -232,7 +232,7 @@ pub(super) async fn broadcast_room_system_message_with_identity(
     // without a destination, then each live/rebuilt occupant copy sets its own.
     let mut frozen_message = (*message).clone();
     frozen_message.to = None;
-    let system_message = match waddle_xmpp::ingress::StoredMessagePayload::new(frozen_message) {
+    let system_message = match waddle_xmpp::ingress::StoredMessagePayload::try_new(frozen_message) {
         Ok(payload) => payload,
         Err(error) => {
             warn!(room = %room, ?error, "could not freeze room system message");

@@ -54,7 +54,7 @@ pub(crate) async fn execute_with_received_at(
                         let delivered =
                             immediate
                                 .connection_registry
-                                .get_entry(&jid)
+                                .entry(&jid)
                                 .is_some_and(|entry| {
                                     immediate.connection_registry.try_send_outbound_if_owner(
                                         &jid,

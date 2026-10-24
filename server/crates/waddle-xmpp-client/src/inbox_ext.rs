@@ -12,8 +12,8 @@ use crate::discovery::{build_waddle_inbox_mark_read_iq, WaddleInboxMarkRead};
 use crate::error::{ClientError, ClientResult};
 use crate::event::ClientEvent;
 use crate::inbox::{
-    build_inbox_query_iq_element, parse_inbox_fin, InboxPage, InboxStreamEntry,
-    InboxStreamEntrySource,
+    build_inbox_query_iq_element, parse_inbox_fin, InboxMessageContent, InboxPage, InboxReadFilter,
+    InboxStreamEntry, InboxStreamEntrySource,
 };
 
 /// XEP-0430 inbox verbs on the async [`ClientHandle`].
@@ -21,8 +21,8 @@ pub trait InboxExt {
     /// Run one streamed `<inbox xmlns='urn:xmpp:inbox:1'/>` query and
     /// resolve on the closing `<fin/>`.
     ///
-    /// `unread_only` maps to the XEP-0430 `unread-only` attribute and
-    /// `messages` to `messages` (whether the server embeds each
+    /// `read_filter` maps to the XEP-0430 `unread-only` attribute and
+    /// `message_content` to `messages` (whether the server embeds each
     /// conversation's last archived stanza as a MAM `<result/>`).
     ///
     /// Callers MUST NOT run two inbox queries concurrently on the
@@ -37,8 +37,8 @@ pub trait InboxExt {
     /// Returns an error if the account is not bound or the IQ request fails with a timeout, disconnection, stanza error, or transport failure.
     fn fetch_inbox(
         &self,
-        unread_only: bool,
-        messages: bool,
+        read_filter: InboxReadFilter,
+        message_content: InboxMessageContent,
     ) -> impl std::future::Future<Output = ClientResult<InboxPage>> + Send + '_;
 
     /// Mark one conversation (optionally one thread) read via the
@@ -92,14 +92,18 @@ fn collect_buffered_entries(
 }
 
 impl InboxExt for ClientHandle {
-    async fn fetch_inbox(&self, unread_only: bool, messages: bool) -> ClientResult<InboxPage> {
+    async fn fetch_inbox(
+        &self,
+        read_filter: InboxReadFilter,
+        message_content: InboxMessageContent,
+    ) -> ClientResult<InboxPage> {
         use tokio::sync::broadcast::error::RecvError;
 
         let query_id = uuid::Uuid::new_v4().to_string();
         // Subscribe BEFORE the IQ leaves so no streamed entry can slip
         // past between send and subscription.
         let mut events = self.events();
-        let iq = build_inbox_query_iq_element(&query_id, unread_only, messages);
+        let iq = build_inbox_query_iq_element(&query_id, read_filter, message_content);
         let fin_fut = self.send_iq(iq);
         tokio::pin!(fin_fut);
 
@@ -270,7 +274,10 @@ mod tests {
             let _ = responder.send(Ok(fin_result_element(&id)));
         });
 
-        let page = handle.fetch_inbox(true, false).await.expect("inbox page");
+        let page = handle
+            .fetch_inbox(InboxReadFilter::UnreadOnly, InboxMessageContent::Omit)
+            .await
+            .expect("inbox page");
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].partner, "alice@example.com");
         assert_eq!(page.entries[0].unread, 3);
@@ -313,7 +320,10 @@ mod tests {
             let _ = responder.send(Ok(fin_result_element(&id)));
         });
 
-        let page = handle.fetch_inbox(false, true).await.expect("inbox page");
+        let page = handle
+            .fetch_inbox(InboxReadFilter::All, InboxMessageContent::Include)
+            .await
+            .expect("inbox page");
         assert_eq!(page.entries.len(), 1);
         assert_eq!(page.entries[0].partner, "bob@example.com");
         assert_eq!(page.entries[0].query_id, None);
@@ -341,7 +351,10 @@ mod tests {
             let _ = responder.send(Ok(fin_result_element(&id)));
         });
 
-        let page = handle.fetch_inbox(false, false).await.expect("inbox page");
+        let page = handle
+            .fetch_inbox(InboxReadFilter::All, InboxMessageContent::Omit)
+            .await
+            .expect("inbox page");
         assert!(page.entries.is_empty(), "pushes must never enter a page");
     }
 
@@ -384,7 +397,10 @@ mod tests {
             let _ = responder.send(Ok(fin_result_element(&id)));
         });
 
-        let page = handle.fetch_inbox(false, false).await.expect("inbox page");
+        let page = handle
+            .fetch_inbox(InboxReadFilter::All, InboxMessageContent::Omit)
+            .await
+            .expect("inbox page");
         let partners: Vec<&str> = page
             .entries
             .iter()
@@ -413,7 +429,7 @@ mod tests {
         });
 
         let err = handle
-            .fetch_inbox(false, false)
+            .fetch_inbox(InboxReadFilter::All, InboxMessageContent::Omit)
             .await
             .expect_err("error must surface");
         assert!(matches!(err, ClientError::Disconnected));

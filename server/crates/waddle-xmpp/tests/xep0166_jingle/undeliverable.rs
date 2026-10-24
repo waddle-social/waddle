@@ -51,7 +51,7 @@ fn undeliverable_initiate_rollback_targets_only_the_minted_issuance() {
     );
     let forwarded = routed_iq(&handler.handle(&invite, &ctx(&alice)));
 
-    let call = waddle_sfu::CallId::new("alice@waddle.test::bounce-1").expect("call id");
+    let call = waddle_sfu::CallId::try_new("alice@waddle.test::bounce-1").expect("call id");
     let bob_identity = Identity::from_jid("bob@waddle.test/phone".parse().expect("bob jid"));
     // An independent, successful issuance for the same pair.
     let independent = sfu

@@ -12,7 +12,7 @@ fn sfu_fixture_for_route_test() -> Arc<dyn waddle_sfu::SfuService> {
             .expect("test secret meets min length"),
         webhook_secret: waddle_sfu::ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length"),
-        ws_url: waddle_sfu::WebsocketUrl::new("wss://livekit.test/".parse().expect("url"))
+        ws_url: waddle_sfu::WebsocketUrl::try_new("wss://livekit.test/".parse().expect("url"))
             .expect("ws url"),
         turn_host: waddle_sfu::TurnHost::new("turn.test"),
         turn_tls_port: 443,
@@ -21,7 +21,7 @@ fn sfu_fixture_for_route_test() -> Arc<dyn waddle_sfu::SfuService> {
         token_ttl: chrono::Duration::seconds(3600),
         turn_ttl: chrono::Duration::seconds(3600),
     };
-    Arc::new(waddle_sfu::LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+    Arc::new(waddle_sfu::LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
 }
 
 fn jingle_payload_for_route_test(action: &str, sid: &str) -> Element {
@@ -118,7 +118,7 @@ async fn route_to_connection_offline_session_initiate_bounce_carries_no_credenti
     // issuance for the same pair (an independent, successful
     // negotiation) must survive the bounce untouched.
     let call_id =
-        waddle_sfu::CallId::new("alice@example.com::offline-sid".to_string()).expect("call id");
+        waddle_sfu::CallId::try_new("alice@example.com::offline-sid".to_string()).expect("call id");
     let bob_identity = waddle_sfu::Identity::from_jid(bob.clone());
     let earlier_token = sfu
         .issue_join_token(

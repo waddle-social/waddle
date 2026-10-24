@@ -95,7 +95,7 @@ async fn departed_recovery(f: IngressFixture, case: DepartedCase) {
     let registry = (case == DepartedCase::UnhostedRoom).then(|| {
         RoomRegistryActor::spawn(RoomRegistryActor::new(
             "muc.example.com".into(),
-            OccupantIdSecret::new(vec![b'd'; 32]).expect("occupant-id secret"),
+            OccupantIdSecret::try_new(vec![b'd'; 32]).expect("occupant-id secret"),
         ))
     });
     let env: Arc<dyn RecoveryEnvironment> = Arc::new(RoomOverrideEnvironment {

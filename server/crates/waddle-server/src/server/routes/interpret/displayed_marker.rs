@@ -264,7 +264,7 @@ mod tests {
     ) -> MamArchivedMessage {
         let archive_jid = jid::Jid::from(room.clone());
         let thread_info = thread.and_then(|raw| {
-            ThreadId::new(raw.to_string()).map(|id| ThreadInfo { id, parent: None })
+            ThreadId::try_new(raw.to_string()).map(|id| ThreadInfo { id, parent: None })
         });
         let stanza_id = Some(Xep0359StanzaId::new(
             wire_id.to_string(),

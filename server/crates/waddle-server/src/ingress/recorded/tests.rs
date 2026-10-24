@@ -362,7 +362,7 @@ fn recorded_recovery_payload_respects_thread_and_execution_phase() {
                 mutation: GroupchatNotificationRecoveryMutation {
                     recipient: owner.clone(),
                     room: room.clone(),
-                    thread_id: ThreadId::new(thread),
+                    thread_id: ThreadId::try_new(thread),
                     archive_stanza_id: recovery.key.archive_stanza_id.clone(),
                     sender: recovery.sender_jid.clone(),
                     is_live_occupant: true,

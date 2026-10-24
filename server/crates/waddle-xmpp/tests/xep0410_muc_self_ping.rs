@@ -289,7 +289,7 @@ fn spawn_room() -> ActorRef<RoomActor> {
         RoomConfig::default(),
     );
     let secret =
-        OccupantIdSecret::new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
+        OccupantIdSecret::try_new(vec![9u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret");
     RoomActor::spawn(RoomActor::new(room, secret))
 }
 

@@ -22,6 +22,7 @@ pub enum CallThreadKind {
 
 impl CallThreadKind {
     /// Canonical wire/storage token for the kind: `"dm"` or `"muc"`.
+    #[must_use]
     pub fn as_token(self) -> &'static str {
         match self {
             CallThreadKind::Dm => "dm",
@@ -54,6 +55,7 @@ pub struct CallThreadMedia {
 
 impl CallThreadMedia {
     /// Create media capabilities with audio enabled and video disabled.
+    #[must_use]
     pub const fn audio_only() -> Self {
         Self {
             audio: true,
@@ -62,6 +64,7 @@ impl CallThreadMedia {
     }
 
     /// Create media capabilities with audio and video enabled.
+    #[must_use]
     pub const fn audio_video() -> Self {
         Self {
             audio: true,
@@ -79,6 +82,7 @@ impl CallThreadMedia {
     }
 
     /// Ordered media tokens (`audio` before `video`) for the wasm boundary.
+    #[must_use]
     pub fn token_list(self) -> Vec<String> {
         let mut tokens = Vec::with_capacity(2);
         if self.audio {
@@ -136,6 +140,7 @@ impl CallThreadDuration {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -143,6 +148,7 @@ impl CallThreadDuration {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 /// Validation failures for call-thread roots, required attributes, media, identities, and timestamps.
+#[non_exhaustive]
 pub enum CallThreadParseError {
     /// The payload is not a supported call-thread anchor.
     NotCallThread,
@@ -167,6 +173,7 @@ pub enum CallThreadParseError {
 /// # Panics
 ///
 /// Panics if both `anchor.media.audio` and `anchor.media.video` are false.
+#[must_use]
 pub fn build_call_thread_anchor(anchor: &CallThreadAnchor) -> Element {
     let kind = match anchor.kind {
         CallThreadKind::Dm => "dm",
@@ -227,6 +234,7 @@ pub fn parse_call_thread_anchor(
 }
 
 /// Find a call-thread anchor among the message children; absent or malformed anchors return None.
+#[must_use]
 pub fn parse_call_thread_anchor_child(message: &Element) -> Option<CallThreadAnchor> {
     message
         .get_child("call-thread", NS_WADDLE_CALL_THREAD)
@@ -234,6 +242,7 @@ pub fn parse_call_thread_anchor_child(message: &Element) -> Option<CallThreadAnc
 }
 
 /// Find and decode a call-ended annotation among the message children.
+#[must_use]
 pub fn parse_call_thread_ended_child(message: &Element) -> Option<CallThreadEnded> {
     let apply_to = message.get_child("apply-to", "urn:xmpp:fasten:0")?;
     let anchor_id = required_attr(apply_to, "id").ok()?.to_string();

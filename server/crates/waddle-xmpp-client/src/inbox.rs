@@ -17,6 +17,26 @@ pub const NS_INBOX: &str = "urn:xmpp:inbox:1";
 pub const NS_WADDLE_INBOX: &str = "urn:waddle:inbox:0";
 const NS_MAM: &str = "urn:xmpp:mam:2";
 
+/// Conversations included in an inbox query.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InboxReadFilter {
+    /// Include both read and unread conversations.
+    #[default]
+    All,
+    /// Include only conversations with unread messages.
+    UnreadOnly,
+}
+
+/// Whether an inbox query embeds each conversation's latest archived message.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum InboxMessageContent {
+    /// Request entries and counts without archived message payloads.
+    Omit,
+    /// Include the latest archived message for each entry.
+    #[default]
+    Include,
+}
+
 /// Source surface for one streamed XEP-0430 inbox `<entry/>`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InboxStreamEntrySource {
@@ -97,6 +117,7 @@ pub struct InboxPage {
 /// `<entry xmlns='urn:xmpp:inbox:1'/>` query response nor a Waddle
 /// `<push xmlns='urn:waddle:inbox:0'/>` wrapper — those flow through
 /// the other typed handlers (MAM/PEP/messaging) unchanged.
+#[must_use]
 pub fn parse_inbox_stream_message(message: &Element) -> Option<InboxStreamEntry> {
     if message.name() != "message" {
         return None;
@@ -184,6 +205,7 @@ pub fn parse_inbox_stream_message(message: &Element) -> Option<InboxStreamEntry>
 }
 
 /// Parse the closing `<iq type='result'><fin/></iq>`.
+#[must_use]
 pub fn parse_inbox_fin(iq: &Element) -> Option<InboxFin> {
     if iq.name() != "iq" {
         return None;
@@ -222,15 +244,28 @@ pub fn parse_inbox_fin(iq: &Element) -> Option<InboxFin> {
 /// request. The default attribute values match XEP-0430 defaults
 /// (`unread-only='false'`, `messages='true'`) and the helper writes
 /// them explicitly so the wire form is unambiguous on the receiver.
-pub fn build_inbox_query_iq_element(id: &str, unread_only: bool, messages: bool) -> Element {
+#[must_use]
+pub fn build_inbox_query_iq_element(
+    id: &str,
+    read_filter: InboxReadFilter,
+    message_content: InboxMessageContent,
+) -> Element {
     let inbox = Element::builder("inbox", NS_INBOX)
         .attr(
             minidom::rxml::xml_ncname!("unread-only").to_owned(),
-            if unread_only { "true" } else { "false" },
+            if read_filter == InboxReadFilter::UnreadOnly {
+                "true"
+            } else {
+                "false"
+            },
         )
         .attr(
             minidom::rxml::xml_ncname!("messages").to_owned(),
-            if messages { "true" } else { "false" },
+            if message_content == InboxMessageContent::Include {
+                "true"
+            } else {
+                "false"
+            },
         )
         .build();
     Element::builder("iq", "jabber:client")

@@ -23,6 +23,7 @@ use super::types::{
 /// Typed shape errors for admin command responses. These indicate a
 /// server-side bug or schema drift, never a user mistake.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum AdminResponseError {
     #[error("admin response missing <command/>")]
     /// Admin response missing `<command/>`.

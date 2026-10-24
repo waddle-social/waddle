@@ -9,6 +9,7 @@ use crate::types::{
 impl ExtensionManager {
     /// Clone the loaded observers' frozen configuration identities, scopes, generations,
     /// and concurrency limits.
+    #[must_use]
     pub fn configured_room_observers(&self) -> Vec<ConfiguredRoomObserver> {
         self.actors
             .iter()
@@ -17,6 +18,7 @@ impl ExtensionManager {
     }
 
     /// The caller supplies an authoritative hosted room, never an untrusted tenant label.
+    #[must_use]
     pub fn room_observation_subscriptions(
         &self,
         room: &BareJid,
@@ -173,11 +175,11 @@ mod tests {
     }
 
     fn result_effect() -> ExtensionEffect {
-        let namespace = PayloadNamespace::new("urn:test:room-result").expect("namespace");
+        let namespace = PayloadNamespace::try_new("urn:test:room-result").expect("namespace");
         ExtensionEffect::PublishRoomResult(
-            ExtensionPayload::new(
+            ExtensionPayload::try_new(
                 namespace.clone(),
-                XmlElement::new(namespace, "result", vec![], vec![]).expect("element"),
+                XmlElement::try_new(namespace, "result", vec![], vec![]).expect("element"),
             )
             .expect("payload"),
         )
@@ -196,7 +198,7 @@ mod tests {
         assert_eq!(
             validated_observation_result(
                 response(vec![ExtensionEffect::HostWarning(
-                    DisplayText::new("guest error").expect("text")
+                    DisplayText::try_new("guest error").expect("text")
                 )]),
                 |_| true
             ),

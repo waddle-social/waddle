@@ -45,7 +45,7 @@ pub struct NotificationActivityStore {
 }
 
 impl NotificationActivityStore {
-    pub async fn new(db: Database) -> Result<Self, NotificationActivityError> {
+    pub async fn try_new(db: Database) -> Result<Self, NotificationActivityError> {
         let store = Self { db };
         store.initialize().await?;
         Ok(store)

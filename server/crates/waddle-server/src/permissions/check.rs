@@ -202,7 +202,7 @@ impl PermissionChecker {
         }
 
         // 3. Check computed permissions from schema
-        if let Some(computation) = self.schema.get_permission(object.object_type, permission) {
+        if let Some(computation) = self.schema.permission(object.object_type, permission) {
             let result = self
                 .check_computed(subject, computation, object, depth, visited)
                 .await?;

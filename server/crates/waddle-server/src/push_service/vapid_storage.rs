@@ -73,23 +73,22 @@ impl VapidStorage {
         db: Database,
         root_key: &[u8],
     ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
-        let storage =
-            Self::new(db.clone(), root_key)
-                .await
-                .map_err(|source| VapidLoadError::DbWrite {
-                    stage: VapidDbWriteStage::Initialize,
-                    source: Box::new(source),
-                })?;
+        let storage = Self::try_new(db.clone(), root_key)
+            .await
+            .map_err(|source| VapidLoadError::DbWrite {
+                stage: VapidDbWriteStage::Initialize,
+                source: Box::new(source),
+            })?;
         if let Some((kid, secret_key)) = storage.load_latest().await? {
             return Ok(Arc::new(
-                InProcessVapidSigner::new(kid, secret_key)
+                InProcessVapidSigner::try_new(kid, secret_key)
                     .map_err(|source| VapidLoadError::SignerInit { source })?,
             ));
         }
         let kid = Kid::new();
         let secret_key = p256::SecretKey::random(&mut OsRng);
         Ok(Arc::new(
-            InProcessVapidSigner::new(kid, secret_key)
+            InProcessVapidSigner::try_new(kid, secret_key)
                 .map_err(|source| VapidLoadError::SignerInit { source })?,
         ))
     }
@@ -98,13 +97,12 @@ impl VapidStorage {
         db: Database,
         root_key: &[u8],
     ) -> Result<Arc<dyn VapidSigner>, VapidLoadError> {
-        let storage =
-            Self::new(db.clone(), root_key)
-                .await
-                .map_err(|source| VapidLoadError::DbWrite {
-                    stage: VapidDbWriteStage::Initialize,
-                    source: Box::new(source),
-                })?;
+        let storage = Self::try_new(db.clone(), root_key)
+            .await
+            .map_err(|source| VapidLoadError::DbWrite {
+                stage: VapidDbWriteStage::Initialize,
+                source: Box::new(source),
+            })?;
 
         // 1. Env-var bootstrap path.
         //
@@ -122,7 +120,7 @@ impl VapidStorage {
                 .as_bytes()
                 .to_vec();
             // (a) signer-init (consumes secret_key — fallible).
-            let signer = InProcessVapidSigner::new(kid, secret_key)
+            let signer = InProcessVapidSigner::try_new(kid, secret_key)
                 .map_err(|source| VapidLoadError::SignerInit { source })?;
             // (b) persist (fallible).
             storage
@@ -134,7 +132,7 @@ impl VapidStorage {
         // 2. Read latest non-retired row.
         if let Some((kid, secret_key)) = storage.load_latest().await? {
             return Ok(Arc::new(
-                InProcessVapidSigner::new(kid, secret_key)
+                InProcessVapidSigner::try_new(kid, secret_key)
                     .map_err(|source| VapidLoadError::SignerInit { source })?,
             ));
         }
@@ -148,7 +146,7 @@ impl VapidStorage {
             .to_encoded_point(false)
             .as_bytes()
             .to_vec();
-        let signer = InProcessVapidSigner::new(kid, secret_key)
+        let signer = InProcessVapidSigner::try_new(kid, secret_key)
             .map_err(|source| VapidLoadError::SignerInit { source })?;
         storage
             .persist_keypair(&kid, &scalar_bytes[..], &public_bytes)
@@ -156,7 +154,7 @@ impl VapidStorage {
         Ok(Arc::new(signer))
     }
 
-    async fn new(db: Database, root_key: &[u8]) -> Result<Self, XmppError> {
+    async fn try_new(db: Database, root_key: &[u8]) -> Result<Self, XmppError> {
         let storage = Self {
             db,
             cipher: VapidKeyCipher::new(root_key),

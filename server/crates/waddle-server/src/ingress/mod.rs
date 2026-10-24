@@ -198,7 +198,7 @@ impl IngressAuthority {
         self.recovery.bind(environment);
     }
 
-    pub async fn new(
+    pub async fn try_new(
         config: IngressConfig,
         database: Database,
         lineage: LineageConfig,
@@ -1199,7 +1199,7 @@ mod lifecycle_tests {
         crate::db::lineage::enroll(&database, &lineage)
             .await
             .expect("enroll lineage");
-        let authority = IngressAuthority::new(
+        let authority = IngressAuthority::try_new(
             IngressConfig::default(),
             database.clone(),
             lineage,

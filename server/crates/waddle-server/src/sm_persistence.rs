@@ -210,7 +210,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             stream_id,
             acknowledged_h,
             self.db.driver(),
-            true,
+            waddle_xmpp::stream_management::persistence::SmAcknowledgementMode::RetireForPromotion,
         )
         .await?;
         tx.commit()
@@ -237,7 +237,7 @@ impl SmPersistenceStorage for DatabaseSmPersistence {
             stream_id,
             acknowledged_h,
             self.db.driver(),
-            false,
+            waddle_xmpp::stream_management::persistence::SmAcknowledgementMode::PreserveResumability,
         )
         .await?;
         tx.commit()

@@ -114,7 +114,7 @@ pub(super) async fn execute_sealed_inbox_push(
     }
     let thread = match entry.thread_id.as_deref() {
         Some(thread) => Some(
-            waddle_xmpp_core::mam::ThreadId::new(thread)
+            waddle_xmpp_core::mam::ThreadId::try_new(thread)
                 .ok_or(IngressUowError::EffectIntentConflict)?,
         ),
         None => None,

@@ -36,6 +36,7 @@ pub enum AuthMechanism {
 
 impl AuthMechanism {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::OAuthBearer => "OAUTHBEARER",
@@ -212,6 +213,7 @@ impl StreamFeatures {
     }
 
     /// Whether the peer advertised the requested authentication mechanism.
+    #[must_use]
     pub fn supports(&self, mechanism: AuthMechanism) -> bool {
         self.mechanisms.contains(&mechanism)
     }
@@ -226,6 +228,7 @@ pub enum AuthenticationRequest {
 
 impl AuthenticationRequest {
     /// Construct this bootstrap value from the validated client configuration.
+    #[must_use]
     pub fn from_config(config: &OAuthBearerConfig) -> Self {
         Self::OAuthBearer(OAuthBearerRequest {
             account: config.account.clone(),
@@ -234,6 +237,7 @@ impl AuthenticationRequest {
     }
 
     /// Serialize this value as a typed XML element.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         match self {
             Self::OAuthBearer(request) => request.to_element(),
@@ -241,6 +245,7 @@ impl AuthenticationRequest {
     }
 
     /// Wrap this bootstrap XML in a transport message for transmission.
+    #[must_use]
     pub fn to_transport_message(&self) -> TransportMessage {
         TransportMessage::Element(self.to_element())
     }
@@ -257,6 +262,7 @@ pub struct OAuthBearerRequest {
 
 impl OAuthBearerRequest {
     /// Serialize this value as a typed XML element.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         Element::builder("auth", NS_SASL)
             .attr(
@@ -326,6 +332,7 @@ pub struct ResourceBindingRequest {
 
 impl ResourceBindingRequest {
     /// Create a bind IQ request with the supplied stanza identifier and resource.
+    #[must_use]
     pub fn new(stanza_id: StanzaId, resource: ClientResource) -> Self {
         Self {
             stanza_id,
@@ -334,6 +341,7 @@ impl ResourceBindingRequest {
     }
 
     /// Serialize this value as a typed XML element.
+    #[must_use]
     pub fn to_element(&self) -> Element {
         Element::builder("iq", NS_CLIENT)
             .attr(
@@ -354,6 +362,7 @@ impl ResourceBindingRequest {
     }
 
     /// Wrap this bootstrap XML in a transport message for transmission.
+    #[must_use]
     pub fn to_transport_message(&self) -> TransportMessage {
         TransportMessage::Element(self.to_element())
     }
@@ -386,7 +395,7 @@ impl ResourceBindingResult {
         let stanza_id = element
             .attr("id")
             .ok_or(ClientError::InvalidBindResponse)
-            .and_then(StanzaId::new)?;
+            .and_then(StanzaId::try_new)?;
 
         let bind = element
             .children()
@@ -404,6 +413,7 @@ impl ResourceBindingResult {
     }
 
     /// Consume the resource-binding result and attach the stream identity and resumption policy.
+    #[must_use]
     pub fn into_session_binding(
         self,
         stream_id: Option<StreamId>,
@@ -436,6 +446,7 @@ impl BootstrapElement {
     /// # Errors
     ///
     /// Returns a typed client error inside `Some` for recognized bootstrap elements with invalid content; unrelated elements return `None`.
+    #[must_use]
     pub fn parse(element: &Element) -> Option<ClientResult<Self>> {
         let ns = element.ns();
         match element.name() {

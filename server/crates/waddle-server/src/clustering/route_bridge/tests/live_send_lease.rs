@@ -21,7 +21,7 @@ struct SocketFixture {
 
 impl SocketFixture {
     async fn new(fixture: &IngressFixture) -> Self {
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             crate::db::PoolConfig,
         )

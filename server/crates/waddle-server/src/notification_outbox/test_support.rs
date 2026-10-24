@@ -66,12 +66,12 @@ pub(super) fn target() -> NotificationOutboxTarget {
 pub(super) fn target_named(node: &str) -> NotificationOutboxTarget {
     NotificationOutboxTarget::new(
         bare("push.example.com"),
-        PushServiceNodeName::new(node).expect("node"),
+        PushServiceNodeName::try_new(node).expect("node"),
     )
 }
 
 pub(super) async fn store() -> NotificationOutboxStore {
-    NotificationOutboxStore::new(Database::in_memory("notification-outbox").await.unwrap())
+    NotificationOutboxStore::try_new(Database::in_memory("notification-outbox").await.unwrap())
         .await
         .expect("store")
 }
@@ -329,7 +329,7 @@ pub(super) fn active_channel_mention_candidate_for(
 }
 
 pub(super) async fn activity_store() -> crate::notification_activity::NotificationActivityStore {
-    crate::notification_activity::NotificationActivityStore::new(
+    crate::notification_activity::NotificationActivityStore::try_new(
         Database::in_memory("notification-activity-eval")
             .await
             .expect("activity db"),

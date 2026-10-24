@@ -308,7 +308,7 @@ pub(super) fn sticker_pack_from_ffi(
 fn sticker_marker_from_ffi(
     sticker: crate::WaddleStickerRef,
 ) -> Result<stickers::StickerMarker, String> {
-    let id = stickers::PackId::new(sticker.pack_id)
+    let id = stickers::PackId::try_new(sticker.pack_id)
         .ok_or_else(|| "sticker pack id must not be empty".to_string())?;
     let jid = sticker
         .pack_jid
@@ -1108,48 +1108,48 @@ pub(super) fn send_options_from_ffi(opts: WaddleSendOptions) -> Result<SendMessa
 
     let stanza_id = opts
         .stanza_id
-        .map(StanzaId::new)
+        .map(StanzaId::try_new)
         .transpose()
         .map_err(|e| e.to_string())?;
 
-    Ok(SendMessageOptions {
-        stanza_id,
-        reply,
-        fallback,
-        thread,
-        shared_files,
-        subject: opts.subject,
-        markup_spans: opts
-            .markup_spans
-            .into_iter()
-            .map(|span| MarkupSpanData {
-                span_type: markup_span_type_wire_name(span.span_type).to_string(),
-                start: span.start,
-                end: span.end,
-                uri: span.uri,
-            })
-            .collect(),
-        references: opts
-            .references
-            .into_iter()
-            .map(|reference| ReferenceData {
-                ref_type: reference_type_wire_name(reference.ref_type),
-                uri: reference.uri,
-                begin: reference.begin,
-                end: reference.end,
-                anchor: reference.anchor,
-            })
-            .collect(),
-        request_displayed_marker: opts.request_displayed_marker,
-        muc_pm: opts.muc_pm,
-        link_preview_token: opts
-            .link_preview_token
-            .map(messaging::LinkPreviewToken::new)
-            .transpose()
-            .map_err(|err| err.to_string())?,
-        sticker: opts.sticker.map(sticker_marker_from_ffi).transpose()?,
-        mention_directory: opts.mention_directory.map(mention_directory_from_ffi),
-    })
+    let mut outbound_options = SendMessageOptions::default();
+    outbound_options.stanza_id = stanza_id;
+    outbound_options.reply = reply;
+    outbound_options.fallback = fallback;
+    outbound_options.thread = thread;
+    outbound_options.shared_files = shared_files;
+    outbound_options.subject = opts.subject;
+    outbound_options.markup_spans = opts
+        .markup_spans
+        .into_iter()
+        .map(|span| MarkupSpanData {
+            span_type: markup_span_type_wire_name(span.span_type).to_string(),
+            start: span.start,
+            end: span.end,
+            uri: span.uri,
+        })
+        .collect();
+    outbound_options.references = opts
+        .references
+        .into_iter()
+        .map(|reference| ReferenceData {
+            ref_type: reference_type_wire_name(reference.ref_type),
+            uri: reference.uri,
+            begin: reference.begin,
+            end: reference.end,
+            anchor: reference.anchor,
+        })
+        .collect();
+    outbound_options.request_displayed_marker = opts.request_displayed_marker;
+    outbound_options.muc_pm = opts.muc_pm;
+    outbound_options.link_preview_token = opts
+        .link_preview_token
+        .map(messaging::LinkPreviewToken::try_new)
+        .transpose()
+        .map_err(|err| err.to_string())?;
+    outbound_options.sticker = opts.sticker.map(sticker_marker_from_ffi).transpose()?;
+    outbound_options.mention_directory = opts.mention_directory.map(mention_directory_from_ffi);
+    Ok(outbound_options)
 }
 
 #[cfg(test)]
@@ -2598,14 +2598,14 @@ mod tests {
 
         dispatch_event(
             ClientEvent::MessageDelivery(MessageDeliveryEvent::Acked {
-                stanza_id: StanzaId::new("acked-1").expect("stanza id"),
+                stanza_id: StanzaId::try_new("acked-1").expect("stanza id"),
             }),
             account,
             &listener,
         );
         dispatch_event(
             ClientEvent::MessageDelivery(MessageDeliveryEvent::Failed {
-                stanza_id: StanzaId::new("failed-1").expect("stanza id"),
+                stanza_id: StanzaId::try_new("failed-1").expect("stanza id"),
             }),
             account,
             &listener,
@@ -2658,7 +2658,7 @@ mod tests {
         dispatch_event(
             ClientEvent::AvatarChanged(AvatarChanged {
                 jid: "bob@waddle.test".parse().expect("valid bare JID"),
-                avatar_id: AvatarItemId::new("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"),
+                avatar_id: AvatarItemId::try_new("aaf4c61ddcc5e8a2dabede0f3b482cd9aea9434d"),
             }),
             "alice@waddle.test",
             &listener,
@@ -2682,7 +2682,7 @@ mod tests {
         use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
         let listener = CapturingListener::default();
-        let id = StanzaId::new("rejected-1").expect("valid id");
+        let id = StanzaId::try_new("rejected-1").expect("valid id");
         let from: Jid = "room@muc.waddle.test/bob".parse().expect("valid sender");
         let to: Jid = "alice@waddle.test/phone".parse().expect("valid recipient");
         dispatch_event(

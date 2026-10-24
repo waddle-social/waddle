@@ -52,7 +52,7 @@ fn ordinary_message() -> String {
 }
 
 async fn assert_no_committed_rows(state: &WebSocketState, conn: &WsConnState) {
-    assert_eq!(conn.sm_state.get_inbound_count(), 0);
+    assert_eq!(conn.sm_state.inbound_count(), 0);
     assert!(conn.sm_inbound_completion.has_unhandled_hole());
     assert!(conn.sm_state.is_resumable());
     assert!(!conn.sm_recovery_required);
@@ -105,7 +105,7 @@ async fn demotion_case(base: Arc<WebSocketState>) {
         db.execute("INSERT INTO clustering_claims (entity, entity_type, node_id, node_epoch, claim_epoch) VALUES (?, ?, ?, ?, ?)", crate::db_params![format!("sm_session:{}", stream.as_str()), "sm_session", fence.owner().node_id.clone(), fence.owner().node_epoch.clone(), fence.epoch().0]).await.expect("claim matching enabled stream");
     }
     let ingress = Arc::new(
-        crate::ingress::IngressAuthority::new(
+        crate::ingress::IngressAuthority::try_new(
             crate::config::IngressConfig::default(),
             database.clone(),
             crate::ingress::test_lineage_config(),

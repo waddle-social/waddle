@@ -30,7 +30,7 @@ pub async fn extension_submission(
     origin: &str,
     body: &str,
 ) -> IngressSubmission {
-    let plugin = PluginId::new("offline-recovery-plugin").expect("plugin");
+    let plugin = PluginId::try_new("offline-recovery-plugin").expect("plugin");
     let mut tx = fixture.uow.begin().await.expect("grant transaction");
     ExtensionGrantRepository::sync_configured(
         &mut tx,

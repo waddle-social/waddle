@@ -420,7 +420,8 @@ mod tests {
     }
 
     fn occupant_id_secret() -> OccupantIdSecret {
-        OccupantIdSecret::new(b"secret-secret-secret-secret-12345".to_vec()).expect("valid secret")
+        OccupantIdSecret::try_new(b"secret-secret-secret-secret-12345".to_vec())
+            .expect("valid secret")
     }
 
     #[test]

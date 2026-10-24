@@ -7,6 +7,7 @@ impl ExtensionManager {
     ///
     /// Membership is frozen into ingress obligations by callers. Keep these
     /// predicates exactly aligned with [`Self::process_message_observer`].
+    #[must_use]
     pub fn message_observer_plugins(&self, message: &Message) -> Vec<PluginId> {
         if message_hook_body(message).is_none() {
             return Vec::new();
@@ -51,19 +52,19 @@ impl ExtensionManager {
             .to
             .as_ref()
             .or(msg.from.as_ref())
-            .and_then(|jid| RoomJid::new(jid.to_bare().to_string()).ok());
+            .and_then(|jid| RoomJid::try_new(jid.to_bare().to_string()).ok());
         let source_stanza_id = room
             .as_ref()
             .and_then(|room| room_stanza_id_from_payloads(msg, room.as_str()))
             .or_else(|| {
                 msg.id
                     .as_ref()
-                    .and_then(|id| StanzaId::new(id.0.clone()).ok())
+                    .and_then(|id| StanzaId::try_new(id.0.clone()).ok())
             });
         let sender = msg
             .from
             .as_ref()
-            .and_then(|jid| FullJidValue::new(jid.to_string()).ok());
+            .and_then(|jid| FullJidValue::try_new(jid.to_string()).ok());
         let event = ExtensionEvent::MessageHook(MessageHook {
             context: MessageContext {
                 waddle_id: waddle_id.clone(),
@@ -102,7 +103,7 @@ impl ExtensionManager {
     /// Panics only if the fixed nonblank `local` community identifier violates the
     /// identifier constructor invariant.
     pub async fn enrich_message(&self, msg: &mut Message) -> usize {
-        self.enrich_message_for_waddle(msg, WaddleId::new("local").expect("static waddle id"))
+        self.enrich_message_for_waddle(msg, WaddleId::try_new("local").expect("static waddle id"))
             .await
     }
 
@@ -187,7 +188,7 @@ impl ExtensionManager {
                 .to
                 .as_ref()
                 .or(msg.from.as_ref())
-                .and_then(|jid| RoomJid::new(jid.to_bare().to_string()).ok());
+                .and_then(|jid| RoomJid::try_new(jid.to_bare().to_string()).ok());
             let hook_room = room.clone();
             let source_stanza_id = room
                 .as_ref()
@@ -195,12 +196,12 @@ impl ExtensionManager {
                 .or_else(|| {
                     msg.id
                         .as_ref()
-                        .and_then(|id| StanzaId::new(id.0.clone()).ok())
+                        .and_then(|id| StanzaId::try_new(id.0.clone()).ok())
                 });
             let sender = msg
                 .from
                 .as_ref()
-                .and_then(|jid| FullJidValue::new(jid.to_string()).ok());
+                .and_then(|jid| FullJidValue::try_new(jid.to_string()).ok());
             let event = ExtensionEvent::MessageHook(MessageHook {
                 context: MessageContext {
                     waddle_id: waddle_id.clone(),
@@ -317,7 +318,7 @@ fn message_hook_body(message: &Message) -> Option<DisplayText> {
         .bodies
         .get("")
         .or_else(|| message.bodies.values().next())
-        .and_then(|body| DisplayText::new(body.clone()).ok())
+        .and_then(|body| DisplayText::try_new(body.clone()).ok())
 }
 
 enum HookTimeout {
@@ -342,7 +343,7 @@ async fn bounded_message_hook(
             );
             if matches!(policy, HookTimeout::Observer) {
                 vec![ExtensionEffect::HostWarning(
-                    DisplayText::new("Extension message observer timed out")
+                    DisplayText::try_new("Extension message observer timed out")
                         .expect("static observer timeout warning"),
                 )]
             } else {
@@ -359,7 +360,7 @@ mod observer_tests {
     #[tokio::test]
     async fn observer_invocation_success_returns_confirmed_effects() {
         let effects = bounded_message_hook(
-            &PluginId::new("observer-test").expect("plugin"),
+            &PluginId::try_new("observer-test").expect("plugin"),
             HookTimeout::Observer,
             Duration::from_secs(1),
             std::future::ready(vec![ExtensionEffect::Noop]),
@@ -370,9 +371,9 @@ mod observer_tests {
 
     #[tokio::test]
     async fn observer_invocation_failure_preserves_host_warning() {
-        let warning = DisplayText::new("observer host mutation failed").expect("warning");
+        let warning = DisplayText::try_new("observer host mutation failed").expect("warning");
         let effects = bounded_message_hook(
-            &PluginId::new("observer-test").expect("plugin"),
+            &PluginId::try_new("observer-test").expect("plugin"),
             HookTimeout::Observer,
             Duration::from_secs(1),
             std::future::ready(vec![ExtensionEffect::HostWarning(warning.clone())]),
@@ -386,7 +387,7 @@ mod observer_tests {
     #[tokio::test]
     async fn observer_invocation_timeout_remains_unconfirmed() {
         let effects = bounded_message_hook(
-            &PluginId::new("observer-test").expect("plugin"),
+            &PluginId::try_new("observer-test").expect("plugin"),
             HookTimeout::Observer,
             Duration::ZERO,
             std::future::pending(),
@@ -401,7 +402,7 @@ mod observer_tests {
     #[tokio::test]
     async fn enrichment_invocation_timeout_still_fails_open() {
         let effects = bounded_message_hook(
-            &PluginId::new("enrichment-test").expect("plugin"),
+            &PluginId::try_new("enrichment-test").expect("plugin"),
             HookTimeout::FailOpen,
             Duration::ZERO,
             std::future::pending(),

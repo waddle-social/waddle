@@ -155,7 +155,7 @@ async fn room_command_available(
         if !snapshot.room.config.group_dm {
             return false;
         }
-        if snapshot.room.get_affiliation(&requester_bare) >= Affiliation::Member {
+        if snapshot.room.affiliation(&requester_bare) >= Affiliation::Member {
             return true;
         }
         let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {

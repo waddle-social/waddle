@@ -478,7 +478,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
         {
             // An occupancy an earlier send left lingering, or an interrupted
             // one left behind, is this send's to reuse and leave.
-            occupancy.held = waddle_xmpp::muc::MucOccupantNick::new(present.nick.clone())
+            occupancy.held = waddle_xmpp::muc::MucOccupantNick::try_new(present.nick.clone())
                 .map(|nick| (nick, session));
             break (room_actor, None);
         }
@@ -496,7 +496,7 @@ pub(crate) async fn plan_extension_bot_groupchat(
             &initial_occupants,
             preferred_nick.as_deref().unwrap_or("waddle"),
         );
-        let joined_nick = waddle_xmpp::muc::MucOccupantNick::new(bot_nick.clone())
+        let joined_nick = waddle_xmpp::muc::MucOccupantNick::try_new(bot_nick.clone())
             .ok_or(ExtensionBotDispatchError::BotJoinFailed)?;
         // Held before the ask: a send cancelled while it runs still leaves.
         occupancy.held = Some((joined_nick, session));
@@ -735,7 +735,7 @@ async fn route_join_presences(
             .deps
             .protocol
             .connection_registry
-            .get_entry(&occupant)
+            .entry(&occupant)
             .is_some_and(|entry| entry.is_locally_hosted());
         if local && deliver_room_presence_locally(state, room, &occupant, &presence) {
             continue;

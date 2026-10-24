@@ -905,7 +905,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             stream_id,
             acknowledged_h,
             crate::db::DatabaseDriver::Postgres,
-            true,
+            waddle_xmpp::stream_management::persistence::SmAcknowledgementMode::RetireForPromotion,
         )
         .await?;
         tx.commit()
@@ -940,7 +940,7 @@ impl SmPersistenceStorage for PostgresFencedSmPersistence {
             stream_id,
             acknowledged_h,
             crate::db::DatabaseDriver::Postgres,
-            false,
+            waddle_xmpp::stream_management::persistence::SmAcknowledgementMode::PreserveResumability,
         )
         .await?;
         tx.commit()

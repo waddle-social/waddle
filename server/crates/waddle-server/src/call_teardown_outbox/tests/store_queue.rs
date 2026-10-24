@@ -2,7 +2,7 @@ use super::*;
 
 async fn store_with_db(name: &str) -> (Database, CallTeardownOutboxStore) {
     let database = Database::in_memory(name).await.unwrap();
-    let store = CallTeardownOutboxStore::new(database.clone())
+    let store = CallTeardownOutboxStore::try_new(database.clone())
         .await
         .unwrap();
     (database, store)
@@ -203,10 +203,10 @@ async fn differing_fence_evidence_inserts_a_second_queued_row() {
         generation: Some(CallGeneration::try_from(2).unwrap()),
         occupant: None,
         unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
-        room_sid: Some(RoomSid::new("RM_other").unwrap()),
+        room_sid: Some(RoomSid::try_new("RM_other").unwrap()),
         target: TeardownTarget::Participant {
             identity: FullJid::from_str("alice@example.test/device").unwrap(),
-            participant_sid: Some(ParticipantSid::new("PA_other").unwrap()),
+            participant_sid: Some(ParticipantSid::try_new("PA_other").unwrap()),
         },
         ..participant_intent()
     };
@@ -375,13 +375,13 @@ async fn row_decode_maps_unknown_last_error_to_the_typed_unknown_variant() {
 #[tokio::test]
 async fn a_new_store_over_the_same_pool_drains_enqueued_work() {
     let database = Database::in_memory("call-teardown-restart").await.unwrap();
-    let first = CallTeardownOutboxStore::new(database.clone())
+    let first = CallTeardownOutboxStore::try_new(database.clone())
         .await
         .unwrap();
     let intent_id = first.enqueue(participant_intent()).await.unwrap();
     drop(first);
 
-    let restarted = CallTeardownOutboxStore::new(database).await.unwrap();
+    let restarted = CallTeardownOutboxStore::try_new(database).await.unwrap();
     let claimed = restarted.claim_due(1).await.unwrap().pop().unwrap();
     assert_eq!(claimed.intent_id, intent_id);
     assert!(restarted.mark_done(&claimed).await.unwrap());
@@ -391,16 +391,16 @@ async fn a_new_store_over_the_same_pool_drains_enqueued_work() {
 async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
     let store = store("call-teardown-muji").await;
     let intent = CallTeardownIntent {
-        call_id: CallId::new("room@conference.example.test").unwrap(),
+        call_id: CallId::try_new("room@conference.example.test").unwrap(),
         target: TeardownTarget::MujiPresenceClear {
             room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
             departed: FullJid::from_str("alice@example.test/device").unwrap(),
-            participant_sid: Some(ParticipantSid::new("PA_muji").unwrap()),
+            participant_sid: Some(ParticipantSid::try_new("PA_muji").unwrap()),
         },
         generation: None,
         occupant: None,
         unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
-        room_sid: Some(RoomSid::new("RM_muji").unwrap()),
+        room_sid: Some(RoomSid::try_new("RM_muji").unwrap()),
         session: None,
     };
 
@@ -414,14 +414,14 @@ async fn muji_presence_clear_round_trips_with_typed_participant_sid() {
 async fn muji_room_sweep_round_trips_with_webhook_room_sid() {
     let store = store("call-teardown-muji-room-sweep").await;
     let intent = CallTeardownIntent {
-        call_id: CallId::new("room@conference.example.test").unwrap(),
+        call_id: CallId::try_new("room@conference.example.test").unwrap(),
         target: TeardownTarget::MujiRoomSweep {
             room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
         },
         generation: None,
         occupant: None,
         unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
-        room_sid: Some(RoomSid::new("RM_sweep").unwrap()),
+        room_sid: Some(RoomSid::try_new("RM_sweep").unwrap()),
         session: None,
     };
 
@@ -434,16 +434,16 @@ async fn muji_room_sweep_round_trips_with_webhook_room_sid() {
 async fn muji_presence_clear_dedupe_is_exact_match_on_participant_sid() {
     let store = store("call-teardown-muji-dedupe").await;
     let first = CallTeardownIntent {
-        call_id: CallId::new("room@conference.example.test").unwrap(),
+        call_id: CallId::try_new("room@conference.example.test").unwrap(),
         target: TeardownTarget::MujiPresenceClear {
             room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
             departed: FullJid::from_str("alice@example.test/device").unwrap(),
-            participant_sid: Some(ParticipantSid::new("PA_same").unwrap()),
+            participant_sid: Some(ParticipantSid::try_new("PA_same").unwrap()),
         },
         generation: None,
         occupant: None,
         unbound_occupant: waddle_sfu::UnboundOccupantPolicy::Keep,
-        room_sid: Some(RoomSid::new("RM_same").unwrap()),
+        room_sid: Some(RoomSid::try_new("RM_same").unwrap()),
         session: None,
     };
     let second = first.clone();
@@ -451,7 +451,7 @@ async fn muji_presence_clear_dedupe_is_exact_match_on_participant_sid() {
         target: TeardownTarget::MujiPresenceClear {
             room_jid: BareJid::from_str("room@conference.example.test").unwrap(),
             departed: FullJid::from_str("alice@example.test/device").unwrap(),
-            participant_sid: Some(ParticipantSid::new("PA_other").unwrap()),
+            participant_sid: Some(ParticipantSid::try_new("PA_other").unwrap()),
         },
         ..first.clone()
     };
@@ -541,7 +541,7 @@ async fn ownership_release_defers_old_row_so_later_work_can_be_claimed() {
     let store = store("call-teardown-ownership-deferral").await;
     let foreign_id = store
         .enqueue(CallTeardownIntent {
-            call_id: CallId::new("room@muc.example.test").expect("room call id"),
+            call_id: CallId::try_new("room@muc.example.test").expect("room call id"),
             target: TeardownTarget::Room,
             generation: None,
             occupant: None,
@@ -578,7 +578,7 @@ async fn participant_waits_for_pending_muji_presence_clear() {
     let store = store("call-teardown-muji-dependency").await;
     let room = BareJid::from_str("room@conference.example.test").expect("room");
     let departed = FullJid::from_str("alice@example.test/device").expect("full JID");
-    let call_id = CallId::new(room.to_string()).expect("call id");
+    let call_id = CallId::try_new(room.to_string()).expect("call id");
     store
         .enqueue(CallTeardownIntent {
             call_id: call_id.clone(),
@@ -634,8 +634,8 @@ async fn differing_session_binding_inserts_a_second_queued_row() {
     // them by their recorded session, so collapsing them onto the old
     // row would either skip a legitimate teardown or run a stale one.
     let store = store("call-teardown-dedupe-session").await;
-    let old_session = waddle_sfu::SessionBinding::new("muji-old").unwrap();
-    let new_session = waddle_sfu::SessionBinding::new("muji-new").unwrap();
+    let old_session = waddle_sfu::SessionBinding::try_new("muji-old").unwrap();
+    let new_session = waddle_sfu::SessionBinding::try_new("muji-new").unwrap();
     let first = CallTeardownIntent {
         session: Some(old_session),
         ..participant_intent()

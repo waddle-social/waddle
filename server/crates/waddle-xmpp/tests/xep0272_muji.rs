@@ -269,7 +269,7 @@ fn muji_call_id_is_the_room_jid() {
     // `(initiator_bare, sid)` to prevent collisions across
     // independent calls.
     let room: jid::BareJid = "general@muc.example.com".parse().unwrap();
-    let call_id = CallId::new(room.to_string()).expect("room JID forms a valid CallId");
+    let call_id = CallId::try_new(room.to_string()).expect("room JID forms a valid CallId");
     assert_eq!(call_id.as_str(), "general@muc.example.com");
 }
 
@@ -314,7 +314,7 @@ fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
             .expect("test secret meets min length"),
         webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length"),
-        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+        ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().unwrap()).unwrap(),
         turn_host: TurnHost::new("turn.test"),
         turn_tls_port: 443,
         turn_udp_port: 3478,
@@ -322,7 +322,7 @@ fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
         token_ttl: Duration::seconds(3600),
         turn_ttl: Duration::seconds(3600),
     };
-    Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+    Arc::new(LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
 }
 
 const TEST_DOMAIN: &str = "waddle.test";
@@ -628,11 +628,11 @@ fn muji_session_terminate_to_local_mixer_passes_federation_guard() {
     );
     let jid = test_full_jid();
     let sfu = fixture_sfu();
-    let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
+    let call_id = CallId::try_new("room@muc.waddle.test").expect("valid room call id");
     sfu.register_call_participant_with_session(
         &call_id,
         &waddle_sfu::Identity::from_jid(jid.clone()),
-        &waddle_sfu::SessionBinding::new("muji-1").expect("session binding"),
+        &waddle_sfu::SessionBinding::try_new("muji-1").expect("session binding"),
         test_occupant_session(),
     );
     let handler = JingleHandler::new(sfu);
@@ -664,7 +664,7 @@ fn muji_session_terminate_to_local_mixer_passes_federation_guard() {
 /// Recording admin client: captures every admin invocation so the
 /// test can assert the XMPP teardown path correctly mirrors itself
 /// onto LiveKit's REST surface. The production
-/// [`waddle_sfu::LiveKitSfu::new`] uses a reqwest-backed client;
+/// [`waddle_sfu::LiveKitSfu::try_new`] uses a reqwest-backed client;
 /// tests swap that out via [`waddle_sfu::LiveKitSfu::with_admin`].
 #[derive(Default)]
 struct RecordingAdmin {
@@ -764,7 +764,7 @@ fn fixture_sfu_with_admin(admin: Arc<RecordingAdmin>) -> Arc<dyn SfuService> {
             .expect("test secret meets min length"),
         webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length"),
-        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+        ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().unwrap()).unwrap(),
         turn_host: TurnHost::new("turn.test"),
         turn_tls_port: 443,
         turn_udp_port: 3478,
@@ -803,12 +803,12 @@ async fn muji_session_terminate_evicts_participant_via_livekit_admin() {
     // sequence under test is "join, then terminate", which is what
     // the chat client does via session-initiate + session-terminate.
     let room_jid_str = "room@muc.waddle.test";
-    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let call_id = CallId::try_new(room_jid_str).expect("valid call id");
     let initiator = test_full_jid();
     sfu.register_call_participant_with_session(
         &call_id,
         &waddle_sfu::Identity::from_jid(initiator.clone()),
-        &waddle_sfu::SessionBinding::new("muji-1").expect("session binding"),
+        &waddle_sfu::SessionBinding::try_new("muji-1").expect("session binding"),
         test_occupant_session(),
     );
 
@@ -855,14 +855,14 @@ async fn muji_session_terminate_skips_delete_room_when_call_still_has_participan
     let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
 
     let room_jid_str = "room@muc.waddle.test";
-    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let call_id = CallId::try_new(room_jid_str).expect("valid call id");
     let alice = test_full_jid();
     let bob: jid::FullJid = "bob@waddle.test/desktop".parse().unwrap();
     sfu.register_call_participant(&call_id, &waddle_sfu::Identity::from_jid(alice.clone()));
     sfu.register_call_participant_with_session(
         &call_id,
         &waddle_sfu::Identity::from_jid(bob.clone()),
-        &waddle_sfu::SessionBinding::new("muji-2").expect("session binding"),
+        &waddle_sfu::SessionBinding::try_new("muji-2").expect("session binding"),
         test_occupant_session(),
     );
 
@@ -892,7 +892,7 @@ async fn muji_unknown_participant_terminate_returns_unknown_session_without_admi
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
     let room_jid_str = "room@muc.waddle.test";
-    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let call_id = CallId::try_new(room_jid_str).expect("valid call id");
     let alice = test_full_jid();
     let bob: jid::FullJid = "bob@waddle.test/desktop".parse().unwrap();
 
@@ -1036,18 +1036,18 @@ fn muji_initiate_with_context_generation_binds_the_sfu_registration() {
         "muji-occupant-session-bound",
     );
     let jid = test_full_jid();
-    let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
+    let call_id = CallId::try_new("room@muc.waddle.test").expect("valid room call id");
     let identity = Identity::from_jid(jid.clone());
     let occupant_session = OccupancySessionGeneration::mint();
     let sfu = Arc::new(
-        LiveKitSfu::new({
+        LiveKitSfu::try_new({
             SfuConfig {
                 api_key: ApiKey::new("APIxxxxxxxx"),
                 api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
                     .expect("test secret meets min length"),
                 webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
                     .expect("test secret meets min length"),
-                ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+                ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().unwrap()).unwrap(),
                 turn_host: TurnHost::new("turn.test"),
                 turn_tls_port: 443,
                 turn_udp_port: 3478,
@@ -1145,17 +1145,17 @@ fn muji_initiate_without_context_generation_is_refused_and_does_not_register() {
         "muji-occupant-session-missing",
     );
     let jid = test_full_jid();
-    let call_id = CallId::new("room@muc.waddle.test").expect("valid room call id");
+    let call_id = CallId::try_new("room@muc.waddle.test").expect("valid room call id");
     let identity = Identity::from_jid(jid.clone());
     let sfu = Arc::new(
-        LiveKitSfu::new({
+        LiveKitSfu::try_new({
             SfuConfig {
                 api_key: ApiKey::new("APIxxxxxxxx"),
                 api_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
                     .expect("test secret meets min length"),
                 webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
                     .expect("test secret meets min length"),
-                ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+                ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().unwrap()).unwrap(),
                 turn_host: TurnHost::new("turn.test"),
                 turn_tls_port: 443,
                 turn_udp_port: 3478,
@@ -1221,7 +1221,7 @@ fn muji_session_initiate_is_rate_limited_per_bare_jid() {
         );
         let mut context = ctx(&jid);
         context.participant_registration = sfu.participant_registration_expectation(
-            &CallId::new("room@muc.waddle.test").expect("call"),
+            &CallId::try_new("room@muc.waddle.test").expect("call"),
             &Identity::from_jid(jid.clone()),
         );
         let events = handler.handle(&iq, &context);
@@ -1251,7 +1251,7 @@ async fn muji_session_terminate_with_stale_sid_does_not_tear_down_current_sessio
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
     let room_jid_str = "room@muc.waddle.test";
-    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let call_id = CallId::try_new(room_jid_str).expect("valid call id");
     let jid = test_full_jid();
 
     // Join with the CURRENT session's sid via the real initiate path
@@ -1309,7 +1309,7 @@ async fn muji_session_terminate_with_matching_sid_tears_down_as_today() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
     let room_jid_str = "room@muc.waddle.test";
-    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let call_id = CallId::try_new(room_jid_str).expect("valid call id");
     let jid = test_full_jid();
 
     let initiate = muji_session_initiate_iq(
@@ -1350,7 +1350,7 @@ async fn same_sid_terminate_is_fenced_by_the_occupant_generation() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = fixture_sfu_with_admin(Arc::clone(&admin));
     let room_jid_str = "room@muc.waddle.test";
-    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let call_id = CallId::try_new(room_jid_str).expect("valid call id");
     let jid = test_full_jid();
     let displaced = OccupancySessionGeneration::mint();
     let replacement = OccupancySessionGeneration::mint();
@@ -1418,9 +1418,9 @@ fn empty_muji_session_initiate_preserves_registration_and_issues_no_token() {
         let jid = test_full_jid();
         let identity = Identity::from_jid(jid.clone());
         let room = "room@muc.waddle.test";
-        let call = CallId::new(room).expect("room call");
+        let call = CallId::try_new(room).expect("room call");
         let incumbent = OccupancySessionGeneration::mint();
-        let incumbent_sid = waddle_sfu::SessionBinding::new("incumbent").expect("session");
+        let incumbent_sid = waddle_sfu::SessionBinding::try_new("incumbent").expect("session");
         let incumbent_token = has_incumbent.then(|| {
             sfu.issue_join_token_with_session(
                 &call,
@@ -1482,7 +1482,7 @@ fn muji_session_initiate_with_unbindable_sid_is_rejected_before_registering() {
     // Reject the initiate outright instead: no token, no registration.
     let sfu = fixture_sfu();
     let room_jid_str = "room@muc.waddle.test";
-    let call_id = CallId::new(room_jid_str).expect("valid call id");
+    let call_id = CallId::try_new(room_jid_str).expect("valid call id");
     let jid = test_full_jid();
     let oversized_sid = "s".repeat(300);
 
@@ -1514,7 +1514,7 @@ fn muji_session_initiate_with_unbindable_sid_is_rejected_before_registering() {
 fn stale_authorization_cannot_overwrite_the_replacement_muji_registration() {
     let sfu = fixture_sfu();
     let room = "room@muc.waddle.test";
-    let call = CallId::new(room).expect("room call");
+    let call = CallId::try_new(room).expect("room call");
     let jid = test_full_jid();
     let identity = waddle_sfu::Identity::from_jid(jid.clone());
     let first = OccupancySessionGeneration::mint();
@@ -1523,7 +1523,7 @@ fn stale_authorization_cannot_overwrite_the_replacement_muji_registration() {
     old_context.occupant_session = Some(first);
     old_context.participant_registration =
         sfu.participant_registration_expectation(&call, &identity);
-    let replacement_sid = waddle_sfu::SessionBinding::new("replacement").expect("session");
+    let replacement_sid = waddle_sfu::SessionBinding::try_new("replacement").expect("session");
     let replacement_token = sfu
         .issue_join_token_with_session(
             &call,
@@ -1565,7 +1565,7 @@ fn stale_authorization_cannot_overwrite_the_replacement_muji_registration() {
 fn muji_initiate_without_registration_expectation_fails_closed() {
     let sfu = fixture_sfu();
     let jid = test_full_jid();
-    let call = CallId::new("room@muc.waddle.test").expect("call");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call");
     let identity = Identity::from_jid(jid.clone());
     let mut context = ctx(&jid);
     context.participant_registration = None;

@@ -19,8 +19,8 @@ pub const NS_AVATAR_METADATA_NOTIFY: &str = "urn:xmpp:avatar:metadata+notify";
 const IDENTITY_CATEGORY: &str = "client";
 const IDENTITY_TYPE: &str = "pc";
 const IDENTITY_NAME: &str = "Waddle";
-
 /// Return the protocol feature namespaces included in the client's capability advertisement.
+#[must_use]
 pub fn client_caps_features() -> Vec<&'static str> {
     vec![
         DISCO_INFO_NS,
@@ -69,6 +69,7 @@ pub fn client_caps_features() -> Vec<&'static str> {
 }
 
 /// Compute the XEP-0115 verification string for the client's identities and features.
+#[must_use]
 pub fn client_caps_verification_string() -> String {
     let mut s = String::new();
     s.push_str(IDENTITY_CATEGORY);
@@ -89,11 +90,13 @@ pub fn client_caps_verification_string() -> String {
 }
 
 /// Return the capability node combined with its verification hash.
+#[must_use]
 pub fn client_caps_node_ver() -> String {
     format!("{}#{}", CAPS_NODE, client_caps_verification_string())
 }
 
 /// Build the XEP-0115 c element advertising the client node and SHA-1 verification hash.
+#[must_use]
 pub fn build_client_caps_element() -> Element {
     Element::builder("c", NS_CAPS)
         .attr(minidom::rxml::xml_ncname!("hash").to_owned(), "sha-1")
@@ -106,6 +109,7 @@ pub fn build_client_caps_element() -> Element {
 }
 
 /// Build the disco#info IQ-result matching the client capability node and feature hash.
+#[must_use]
 pub fn build_client_caps_disco_info_response(
     request: &Element,
     from: Option<&jid::FullJid>,

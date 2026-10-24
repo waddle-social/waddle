@@ -340,7 +340,7 @@ impl PendingAdminProjection {
         let occupants: Vec<_> = room
             .occupants
             .keys()
-            .map(|nick| (nick.clone(), room.get_occupant_sessions(nick)))
+            .map(|nick| (nick.clone(), room.occupant_sessions(nick)))
             .collect();
         for (nick, sessions) in occupants {
             for session in sessions {
@@ -348,7 +348,7 @@ impl PendingAdminProjection {
                     room.remove_occupant_session(&nick, &session);
                 } else if self.moderated == room.config.moderated
                     && self.expected_affiliations.iter().any(|(jid, affiliation)| {
-                        *jid == session.to_bare() && room.get_affiliation(jid) == *affiliation
+                        *jid == session.to_bare() && room.affiliation(jid) == *affiliation
                     })
                 {
                     if let Some((_, role)) = self
@@ -503,7 +503,7 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             .unwrap_or_default();
         let mut removed_sessions = Vec::new();
         for (nick, jid) in &restored_occupants {
-            let banned = restored.get_affiliation(jid) == Affiliation::Outcast;
+            let banned = restored.affiliation(jid) == Affiliation::Outcast;
             let pruned_by_proven_admin_batch =
                 admin_pruned_jids.contains(jid) && !restored.can_user_join(jid);
             // Only fenced restored state proves a foreign revocation. Local
@@ -516,7 +516,7 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             if banned || pruned_by_proven_admin_batch || revoked_by_another_mutation {
                 removed_sessions.extend(
                     restored
-                        .get_occupant_sessions(nick)
+                        .occupant_sessions(nick)
                         .into_iter()
                         .filter(|session| !already_removed.contains(session)),
                 );
@@ -534,12 +534,12 @@ impl kameo::message::Message<RestoreLiveRoster> for RoomActor {
             )
             .await?;
         for (nick, jid) in restored_occupants {
-            for session in restored.get_occupant_sessions(&nick) {
+            for session in restored.occupant_sessions(&nick) {
                 if proven_removals.contains(&session) {
                     restored.remove_occupant_session(&nick, &session);
                 }
             }
-            let affiliation = restored.get_affiliation(&jid);
+            let affiliation = restored.affiliation(&jid);
             let role = restored.derive_role_from_affiliation(affiliation);
             if let Some(occupant) = restored.occupants.get_mut(&nick) {
                 if moderation_changed || occupant.affiliation != affiliation {
@@ -1231,7 +1231,7 @@ impl RoomActor {
             max_occupants: self.room.config.max_occupants,
             affiliations: self
                 .room
-                .get_all_affiliations()
+                .all_affiliations()
                 .into_iter()
                 .map(|entry| (entry.jid, entry.affiliation))
                 .collect(),
@@ -1569,7 +1569,7 @@ impl RoomActor {
                 .room
                 .occupants
                 .values()
-                .map(|occupant| self.room.get_occupant_sessions(&occupant.nick).len())
+                .map(|occupant| self.room.occupant_sessions(&occupant.nick).len())
                 .sum(),
             pins: self.room.pinned_entries().len(),
         }
@@ -1955,7 +1955,7 @@ impl RoomActor {
             .filter(|occupant| {
                 !use_post_enforcement_audience || occupant.affiliation >= Affiliation::Member
             })
-            .flat_map(|occupant| self.room.get_occupant_sessions(&occupant.nick))
+            .flat_map(|occupant| self.room.occupant_sessions(&occupant.nick))
             .collect()
     }
 
@@ -1989,13 +1989,12 @@ impl RoomActor {
                 let next_voice = occupant.role.voice(next_moderation);
                 (current_voice != next_voice)
                     .then(|| {
-                        self.room
-                            .get_occupant_sessions(&occupant.nick)
-                            .into_iter()
-                            .map(move |session| OccupantVoiceChange {
+                        self.room.occupant_sessions(&occupant.nick).into_iter().map(
+                            move |session| OccupantVoiceChange {
                                 session,
                                 voice: next_voice,
-                            })
+                            },
+                        )
                     })
                     .into_iter()
                     .flatten()
@@ -2385,10 +2384,10 @@ impl kameo::message::Message<Join> for RoomActor {
         if self.room.is_full() && !affiliation_overflows_full_room(msg.affiliation) {
             return Err(RoomActorError::RoomFull);
         }
-        if self.room.get_occupant(&msg.nick).is_some() {
+        if self.room.occupant(&msg.nick).is_some() {
             return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         }
-        let Some(durable_nick) = super::durable::MucOccupantNick::new(msg.nick.clone()) else {
+        let Some(durable_nick) = super::durable::MucOccupantNick::try_new(msg.nick.clone()) else {
             return Err(RoomActorError::NickAlreadyInUse(msg.nick));
         };
         let session = msg.session;
@@ -2520,7 +2519,7 @@ impl kameo::message::Message<OccupantVoices> for RoomActor {
             .flat_map(|occupant| {
                 let voice = occupant.role.voice(moderation);
                 self.room
-                    .get_occupant_sessions(&occupant.nick)
+                    .occupant_sessions(&occupant.nick)
                     .into_iter()
                     .map(move |session| (session, voice))
             })
@@ -2542,7 +2541,7 @@ impl kameo::message::Message<GetOccupantByNick> for RoomActor {
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
         self.room
-            .get_occupant(&msg.nick)
+            .occupant(&msg.nick)
             .map(OccupantInfo::from_occupant)
     }
 }
@@ -2739,14 +2738,14 @@ impl kameo::message::Message<UpdateGroupDmConfigByMember> for RoomActor {
             return Err(UpdateGroupDmConfigByMemberError::NotGroupDm);
         }
         let sender_bare = msg.sender_jid.to_bare();
-        if self.room.get_affiliation(&sender_bare) < Affiliation::Member {
+        if self.room.affiliation(&sender_bare) < Affiliation::Member {
             return Err(UpdateGroupDmConfigByMemberError::NotMember);
         }
         let sender_is_occupant = self.room.occupants.values().any(|occupant| {
             occupant.real_jid == msg.sender_jid
                 || self
                     .room
-                    .get_occupant_sessions(&occupant.nick)
+                    .occupant_sessions(&occupant.nick)
                     .iter()
                     .any(|session| session == &msg.sender_jid)
         });
@@ -2953,7 +2952,7 @@ impl kameo::message::Message<ChangeAffiliation> for RoomActor {
         if self.invite_rollback_pending(&msg.jid) {
             return Err(AffiliationMutationError::InviteRollbackPending);
         }
-        let changed = self.room.get_affiliation(&msg.jid) != msg.affiliation;
+        let changed = self.room.affiliation(&msg.jid) != msg.affiliation;
         if changed {
             if let Err(error) = self
                 .commit_durable(
@@ -3007,7 +3006,7 @@ impl kameo::message::Message<GetAffiliation> for RoomActor {
         msg: GetAffiliation,
         _ctx: &mut Context<Self, Self::Reply>,
     ) -> Self::Reply {
-        Ok(self.room.get_affiliation(&msg.jid))
+        Ok(self.room.affiliation(&msg.jid))
     }
 }
 
@@ -3043,7 +3042,7 @@ impl kameo::message::Message<ListAffiliations> for RoomActor {
     ) -> Self::Reply {
         let mut entries: Vec<AffiliationEntry> = self
             .room
-            .get_all_affiliations()
+            .all_affiliations()
             .into_iter()
             .filter(|entry| match msg.filter {
                 Some(tier) => entry.affiliation == tier,

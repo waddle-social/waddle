@@ -440,7 +440,7 @@ impl ConnectionEntry {
 
     /// Take this connection's force-detach receiver, wiring it into the
     /// owning connection's own select loop. Returns `Some` exactly once per
-    /// connection — every clone of this entry (e.g. via [`super::ConnectionRegistry::get_entry`])
+    /// connection — every clone of this entry (e.g. via [`super::ConnectionRegistry::entry`])
     /// shares the same underlying take-once slot, so only the connection
     /// task that actually registered this entry (immediately after
     /// registration — see `server::routes::websocket::registration`) ever

@@ -123,6 +123,7 @@ pub enum Moderation {
 
 impl Moderation {
     /// Lift a [`crate::types::Moderation`] out of a room-config flag.
+    #[must_use]
     pub fn from_moderated_flag(moderated: bool) -> Self {
         if moderated {
             Self::Moderated
@@ -146,6 +147,7 @@ pub enum Voice {
 
 impl Voice {
     /// Whether this occupant may broadcast messages to all room occupants.
+    #[must_use]
     pub fn is_voiced(self) -> bool {
         matches!(self, Self::Voiced)
     }
@@ -160,6 +162,7 @@ impl Role {
     /// visitors in unmoderated rooms — which Waddle does, so an
     /// unmoderated room's visitor keeps voice. `Role::None` is not an
     /// occupant at all and never has voice.
+    #[must_use]
     pub fn voice(self, moderation: Moderation) -> Voice {
         match self {
             Role::None => Voice::Muted,

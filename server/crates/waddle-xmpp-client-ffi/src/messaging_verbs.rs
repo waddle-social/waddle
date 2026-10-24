@@ -363,7 +363,7 @@ impl WaddleClient {
         let Some(chat) = self.parse_jid(&chat_jid, "publish_mds_displayed") else {
             return false;
         };
-        let stanza_id = match StanzaId::new(stanza_id) {
+        let stanza_id = match StanzaId::try_new(stanza_id) {
             Ok(id) => id,
             Err(e) => {
                 self.emit_error(format!(

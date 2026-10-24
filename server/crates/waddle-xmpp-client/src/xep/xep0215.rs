@@ -45,6 +45,7 @@ impl ExternalServiceType {
 
     /// Wire-form `type` value. Single source of truth for the discriminator
     /// that crosses the WASM boundary and drives the chat-side ICE mapping.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Stun => "stun",
@@ -73,6 +74,7 @@ impl ExternalServiceTransport {
     }
 
     /// Wire-form `transport` value.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Udp => "udp",
@@ -110,10 +112,10 @@ pub struct ExternalService {
 
 /// `jabber:client` namespace for the IQ envelope.
 const NS_CLIENT: &str = "jabber:client";
-
 /// Build the `<iq type='get'><services xmlns='urn:xmpp:extdisco:2'/></iq>` a
 /// client sends to its own server to learn the advertised external services
 /// (XEP-0215 §3.2). An empty `<services/>` requests every service type.
+#[must_use]
 pub fn build_extdisco_services_iq(to: &str, request_id: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -126,6 +128,7 @@ pub fn build_extdisco_services_iq(to: &str, request_id: &str) -> Element {
 /// Parse the `<service/>` entries from a `services` IQ-result payload into typed
 /// values. Entries whose `type` is unknown or which lack the mandatory
 /// `host`/`port` attributes are skipped.
+#[must_use]
 pub fn parse_external_services(iq: &Element) -> Vec<ExternalService> {
     let Some(services) = iq.get_child("services", NS_EXT_DISCO) else {
         return Vec::new();

@@ -58,91 +58,87 @@ pub(crate) fn send_options_from_js(options: JsValue) -> Result<SendMessageOption
 
     let stanza_id = options
         .stanza_id
-        .map(StanzaId::new)
+        .map(StanzaId::try_new)
         .transpose()
         .map_err(|err| js_error(err.to_string()))?;
 
-    Ok(SendMessageOptions {
-        stanza_id,
-        subject: options.subject,
-        // The wasm chat surface has no sticker picker yet; the field
-        // exists so the shared builder compiles against one options
-        // shape across FFI surfaces.
-        sticker: None,
-        reply,
-        fallback: options.fallback.map(|range| FallbackRange {
-            start: range.start,
-            end: range.end,
-        }),
-        thread: options.thread.map(|thread| ThreadRef {
-            id: thread.id,
-            parent: thread.parent,
-        }),
-        link_preview_token: options
-            .link_preview_token
-            .map(LinkPreviewToken::new)
-            .transpose()
-            .map_err(|err| js_error(err.to_string()))?,
-        request_displayed_marker: options.request_displayed_marker,
-        muc_pm: options.muc_pm,
-        markup_spans: options
-            .markup_spans
-            .into_iter()
-            .map(|span| MarkupSpanData {
-                span_type: span.span_type,
-                start: span.start,
-                end: span.end,
-                uri: span.uri,
+    let mut outbound_options = SendMessageOptions::default();
+    outbound_options.stanza_id = stanza_id;
+    outbound_options.subject = options.subject;
+    outbound_options.reply = reply;
+    outbound_options.fallback = options.fallback.map(|range| FallbackRange {
+        start: range.start,
+        end: range.end,
+    });
+    outbound_options.thread = options.thread.map(|thread| ThreadRef {
+        id: thread.id,
+        parent: thread.parent,
+    });
+    outbound_options.link_preview_token = options
+        .link_preview_token
+        .map(LinkPreviewToken::try_new)
+        .transpose()
+        .map_err(|err| js_error(err.to_string()))?;
+    outbound_options.request_displayed_marker = options.request_displayed_marker;
+    outbound_options.muc_pm = options.muc_pm;
+    outbound_options.markup_spans = options
+        .markup_spans
+        .into_iter()
+        .map(|span| MarkupSpanData {
+            span_type: span.span_type,
+            start: span.start,
+            end: span.end,
+            uri: span.uri,
+        })
+        .collect();
+    outbound_options.references = options
+        .references
+        .into_iter()
+        .map(|reference| ReferenceData {
+            ref_type: reference.ref_type,
+            uri: reference.uri,
+            begin: reference.begin,
+            end: reference.end,
+            anchor: reference.anchor,
+        })
+        .collect();
+    outbound_options.mention_directory = options.mention_directory.map(mention_directory_from_js);
+    outbound_options.shared_files = options
+        .shared_files
+        .into_iter()
+        .map(|file| {
+            let disposition = SharedFileDisposition::from_text_or_infer(
+                Some(file.disposition.as_str()),
+                file.media_type.as_deref(),
+            );
+            // Surface invalid encryption metadata as an explicit
+            // error rather than silently sending a ciphertext URL
+            // without the matching XEP-0448 envelope — that produces
+            // hard-to-debug broken attachments for recipients.
+            let encrypted = file
+                .encrypted
+                .map(encrypted_file_from_js)
+                .transpose()
+                .map_err(|err| js_error(err.to_string()))?;
+            // Plaintext file-level hashes (XEP-0448 requires ≥1 for
+            // encrypted sends). Unknown algorithms are refused at
+            // this boundary rather than smuggled through as strings.
+            let hashes = file_hashes_from_js(file.hashes).map_err(js_error)?;
+            Ok(messaging::SharedFile {
+                url: file.url,
+                name: file.name,
+                media_type: file.media_type,
+                size: file.size,
+                width: file.width,
+                height: file.height,
+                desc: None,
+                hashes,
+                disposition,
+                encrypted,
             })
-            .collect(),
-        references: options
-            .references
-            .into_iter()
-            .map(|reference| ReferenceData {
-                ref_type: reference.ref_type,
-                uri: reference.uri,
-                begin: reference.begin,
-                end: reference.end,
-                anchor: reference.anchor,
-            })
-            .collect(),
-        mention_directory: options.mention_directory.map(mention_directory_from_js),
-        shared_files: options
-            .shared_files
-            .into_iter()
-            .map(|file| {
-                let disposition = SharedFileDisposition::from_text_or_infer(
-                    Some(file.disposition.as_str()),
-                    file.media_type.as_deref(),
-                );
-                // Surface invalid encryption metadata as an explicit
-                // error rather than silently sending a ciphertext URL
-                // without the matching XEP-0448 envelope — that produces
-                // hard-to-debug broken attachments for recipients.
-                let encrypted = file
-                    .encrypted
-                    .map(encrypted_file_from_js)
-                    .transpose()
-                    .map_err(|err| js_error(err.to_string()))?;
-                // Plaintext file-level hashes (XEP-0448 requires ≥1 for
-                // encrypted sends). Unknown algorithms are refused at
-                // this boundary rather than smuggled through as strings.
-                let hashes = file_hashes_from_js(file.hashes).map_err(js_error)?;
-                Ok(messaging::SharedFile {
-                    url: file.url,
-                    name: file.name,
-                    media_type: file.media_type,
-                    size: file.size,
-                    width: file.width,
-                    height: file.height,
-                    desc: None,
-                    hashes,
-                    disposition,
-                    encrypted,
-                })
-            })
-            .collect::<Result<Vec<_>, JsValue>>()?,
-    })
+        })
+        .collect::<Result<Vec<_>, JsValue>>()?;
+    Ok(outbound_options)
 }
 
 #[cfg(test)]

@@ -33,7 +33,7 @@ fn prepared_route_restamps_only_derived_ids_and_preserves_real_drift() {
         recipient: recipient.clone(),
         fanout: vec!["bob@example.test/phone".parse().expect("target")],
         route_identity: EffectMessageIdentity::capture_ordinal(7),
-        prepared: Some(StoredMessagePayload::new(message).expect("valid payload")),
+        prepared: Some(StoredMessagePayload::try_new(message).expect("valid payload")),
     };
     let saved = intent(original.clone());
     for drift in ["none", "body", "target", "foreign", "fanout", "ambiguous"] {

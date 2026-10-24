@@ -96,6 +96,7 @@ pub struct PubsubAttachmentSummaryUpdate {
 impl PubsubEvent {
     /// The §7.2.2.1 retractions in this event, or `None` when nothing
     /// was retracted.
+    #[must_use]
     pub fn retracted_items(&self) -> Option<PubsubRetractedItems> {
         let item_ids: Vec<String> = self
             .items
@@ -115,6 +116,7 @@ impl PubsubEvent {
 
     /// The XEP-0470 attachment-summary payloads in this event, one
     /// update per summarised item.
+    #[must_use]
     pub fn attachment_summaries(&self) -> Vec<PubsubAttachmentSummaryUpdate> {
         self.items
             .iter()
@@ -134,6 +136,7 @@ impl PubsubEvent {
 }
 
 /// Collect PubSub publication events from the message, interpreting known summaries and preserving opaque payloads.
+#[must_use]
 pub fn parse_pubsub_events(message: &Element) -> Vec<PubsubEvent> {
     if message.name() != "message" {
         return Vec::new();

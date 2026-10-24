@@ -65,7 +65,7 @@ fn join_connection_still_owns_slot(
 #[cfg(any(test, feature = "clustering"))]
 pub struct MucJoinConnectionContext<'a> {
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
-    pub authenticated_session: &'a Option<Session>,
+    pub authenticated_session: Option<&'a Session>,
     /// The connection's registry ownership token, re-validated right
     /// before the join is committed (locally or relayed): a connection that
     /// lost its slot during the join's awaits must not install itself over
@@ -80,7 +80,7 @@ pub struct MucJoinRequest<'a> {
     pub nick: &'a str,
     pub presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     pub occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
-    pub authenticated_session: &'a Option<Session>,
+    pub authenticated_session: Option<&'a Session>,
     pub registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
     pub ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }
@@ -93,7 +93,7 @@ struct MucJoinWork<'a> {
     presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
     occupancy_session: waddle_xmpp_core::OccupancySessionGeneration,
     registry_owner: Option<&'a std::sync::Arc<std::sync::atomic::AtomicBool>>,
-    authenticated_session: &'a Option<Session>,
+    authenticated_session: Option<&'a Session>,
     ordered_relay_origin: Option<crate::server::routes::interpret::OrderedRelayRouteOrigin>,
 }
 
@@ -1215,7 +1215,7 @@ async fn handle_muc_join_unlocked(state: &WebSocketState, request: MucJoinWork<'
                     && !room_preparation_pending
                     && !server_permission_allowed(
                         state,
-                        authenticated_session.as_ref().map(
+                        authenticated_session.map(
                             crate::server::routes::websocket::ResolvedPrincipal::from_authenticated_session,
                         ),
                         Permission::CreateMuc,
@@ -2532,7 +2532,7 @@ mod resolver_sync_retry_tests {
         if let Some((jid, affiliation)) = seed {
             room.update_affiliation_from_resolver(jid, affiliation);
         }
-        let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+        let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
             .expect("occupant-id secret");
         let actor = RoomActor::spawn(RoomActor::new(room, secret));
         actor
@@ -2642,7 +2642,7 @@ mod resolver_sync_retry_tests {
     async fn resolver_sync_reaps_actor_after_ownership_loss() {
         let room_jid: BareJid = "resolver-sync@muc.example.com".parse().expect("room JID");
         let member: BareJid = "deposed@example.com".parse().expect("member JID");
-        let secret = OccupantIdSecret::new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
+        let secret = OccupantIdSecret::try_new(vec![7; OCCUPANT_ID_SECRET_MIN_BYTES])
             .expect("occupant-id secret");
         let registry = RoomRegistry::spawn(
             "muc.example.com".to_string(),
@@ -3427,7 +3427,7 @@ mod occupancy_projection_handler_tests {
         sender_jid: &FullJid,
         nick: &str,
         presence_show: Option<crate::notification_activity::NotificationPresenceShow>,
-        authenticated_session: &Option<Session>,
+        authenticated_session: Option<&Session>,
     ) -> Vec<String> {
         super::handle_muc_join(
             state,
@@ -3682,7 +3682,7 @@ mod occupancy_projection_handler_tests {
             &owner,
             "owner",
             None,
-            &Some(owner_session),
+            Some(&owner_session),
         )
         .await;
         assert!(
@@ -3698,7 +3698,7 @@ mod occupancy_projection_handler_tests {
             &bob,
             "bob",
             None,
-            &None,
+            None,
         )
         .await;
         assert!(
@@ -3716,7 +3716,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &None,
+            None,
         )
         .await;
 
@@ -3765,7 +3765,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            Some(&alice_session),
         )
         .await;
         assert!(
@@ -3781,7 +3781,7 @@ mod occupancy_projection_handler_tests {
             &bob,
             "bob",
             None,
-            &None,
+            None,
         )
         .await;
         assert!(
@@ -3849,7 +3849,7 @@ mod occupancy_projection_handler_tests {
             &bob,
             "bob",
             None,
-            &None,
+            None,
         )
         .await;
         assert!(
@@ -3906,7 +3906,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            Some(&alice_session),
         )
         .await;
         assert!(alice_join
@@ -3931,7 +3931,7 @@ mod occupancy_projection_handler_tests {
             &bob,
             "bob",
             None,
-            &None,
+            None,
         )
         .await;
         assert!(bob_join
@@ -4003,7 +4003,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            Some(&alice_session),
         )
         .await;
         assert!(alice_join
@@ -4075,7 +4075,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            Some(&alice_session),
         )
         .await;
         assert!(alice_join
@@ -4131,7 +4131,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            Some(&alice_session),
         )
         .await;
         assert!(alice_join
@@ -4139,9 +4139,9 @@ mod occupancy_projection_handler_tests {
             .any(|frame| frame.contains("status code='110'")));
         waddle_sfu::SfuService::register_call_participant_with_session(
             recorder.as_ref(),
-            &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+            &waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id"),
             &waddle_sfu::Identity::from_jid(alice.clone()),
-            &waddle_sfu::SessionBinding::new("leave-timeout-session").expect("session binding"),
+            &waddle_sfu::SessionBinding::try_new("leave-timeout-session").expect("session binding"),
             current_occupancy_session(state.as_ref(), &alice),
         );
         let bob_join = handle_muc_join(
@@ -4151,7 +4151,7 @@ mod occupancy_projection_handler_tests {
             &bob,
             "bob",
             None,
-            &None,
+            None,
         )
         .await;
         assert!(bob_join
@@ -4246,7 +4246,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session.clone()),
+            Some(&alice_session.clone()),
         )
         .await;
         assert!(alice_join
@@ -4259,7 +4259,7 @@ mod occupancy_projection_handler_tests {
             &bob,
             "bob",
             None,
-            &None,
+            None,
         )
         .await;
         assert!(bob_join
@@ -4291,7 +4291,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            Some(&alice_session),
         )
         .await;
         assert!(
@@ -4354,7 +4354,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session.clone()),
+            Some(&alice_session.clone()),
         )
         .await;
         assert!(alice_join
@@ -4367,7 +4367,7 @@ mod occupancy_projection_handler_tests {
             &bob,
             "bob",
             None,
-            &None,
+            None,
         )
         .await;
         assert!(bob_join
@@ -4403,7 +4403,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(alice_session),
+            Some(&alice_session),
         )
         .await;
         assert!(
@@ -4414,9 +4414,10 @@ mod occupancy_projection_handler_tests {
         );
         waddle_sfu::SfuService::register_call_participant_with_session(
             recorder.as_ref(),
-            &waddle_sfu::CallId::new(room_jid.to_string()).expect("call id"),
+            &waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id"),
             &waddle_sfu::Identity::from_jid(alice.clone()),
-            &waddle_sfu::SessionBinding::new("replacement-leave-session").expect("session binding"),
+            &waddle_sfu::SessionBinding::try_new("replacement-leave-session")
+                .expect("session binding"),
             current_occupancy_session(state.as_ref(), &alice),
         );
         while alice_rx.try_recv().is_ok() {}
@@ -4517,7 +4518,7 @@ mod occupancy_projection_handler_tests {
             &alice,
             "alice",
             None,
-            &Some(owner_session),
+            Some(&owner_session),
         )
         .await;
         assert!(joined

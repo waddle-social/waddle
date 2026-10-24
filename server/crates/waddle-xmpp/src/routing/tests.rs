@@ -42,10 +42,10 @@ async fn test_get_destination_local() {
     let router = StanzaRouter::new(config, registry, user_registry);
 
     let jid = create_test_jid("user@waddle.social");
-    assert_eq!(router.get_destination(&jid), RoutingDestination::Local);
+    assert_eq!(router.destination(&jid), RoutingDestination::Local);
 
     let jid = create_test_jid("user@waddle.social/resource");
-    assert_eq!(router.get_destination(&jid), RoutingDestination::Local);
+    assert_eq!(router.destination(&jid), RoutingDestination::Local);
 }
 
 #[tokio::test]
@@ -56,10 +56,10 @@ async fn test_get_destination_muc() {
     let router = StanzaRouter::new(config, registry, user_registry);
 
     let jid = create_test_jid("room@muc.waddle.social");
-    assert_eq!(router.get_destination(&jid), RoutingDestination::LocalMuc);
+    assert_eq!(router.destination(&jid), RoutingDestination::LocalMuc);
 
     let jid = create_test_jid("room@muc.waddle.social/nick");
-    assert_eq!(router.get_destination(&jid), RoutingDestination::LocalMuc);
+    assert_eq!(router.destination(&jid), RoutingDestination::LocalMuc);
 }
 
 #[tokio::test]
@@ -70,10 +70,7 @@ async fn test_get_destination_spaces() {
     let router = StanzaRouter::new(config, registry, user_registry);
 
     let jid = create_test_jid("spaces.waddle.social");
-    assert_eq!(
-        router.get_destination(&jid),
-        RoutingDestination::LocalSpaces
-    );
+    assert_eq!(router.destination(&jid), RoutingDestination::LocalSpaces);
 }
 
 #[tokio::test]
@@ -85,7 +82,7 @@ async fn test_get_destination_remote() {
 
     let jid = create_test_jid("user@example.com");
     assert_eq!(
-        router.get_destination(&jid),
+        router.destination(&jid),
         RoutingDestination::Remote {
             domain: "example.com".to_string()
         }
@@ -93,7 +90,7 @@ async fn test_get_destination_remote() {
 
     let jid = create_test_jid("user@other.social/resource");
     assert_eq!(
-        router.get_destination(&jid),
+        router.destination(&jid),
         RoutingDestination::Remote {
             domain: "other.social".to_string()
         }

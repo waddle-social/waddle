@@ -39,7 +39,7 @@ fn body(outbound: waddle_xmpp::registry::OutboundStanza) -> String {
 async fn shared_state(
     fixture: &IngressFixture,
 ) -> std::sync::Arc<crate::server::routes::websocket::WebSocketState> {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

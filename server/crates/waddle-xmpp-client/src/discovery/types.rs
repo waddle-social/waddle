@@ -42,11 +42,13 @@ pub struct DiscoInfoResult {
 
 impl DiscoInfoResult {
     /// Whether discovery advertised the exact supplied feature namespace.
+    #[must_use]
     pub fn has_feature(&self, feature: &str) -> bool {
         self.features.iter().any(|f| f == feature)
     }
 
     /// Whether the matching discovery form field contains the supplied value.
+    #[must_use]
     pub fn has_form_value(&self, form_type: &str, field_var: &str, value: &str) -> bool {
         self.forms
             .iter()
@@ -59,6 +61,7 @@ impl DiscoInfoResult {
     }
 
     /// Borrow the first value of the requested field from the matching discovery data form.
+    #[must_use]
     pub fn form_value(&self, form_type: &str, field_var: &str) -> Option<&str> {
         self.forms
             .iter()
@@ -126,7 +129,8 @@ pub struct SpaceNode(String);
 
 impl SpaceNode {
     /// Create `SpaceNode` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         if value.trim().is_empty() {
             None
@@ -136,6 +140,7 @@ impl SpaceNode {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -167,6 +172,7 @@ pub enum DiscoveredChannelType {
 
 impl DiscoveredChannelType {
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Text => "text",
@@ -176,6 +182,7 @@ impl DiscoveredChannelType {
     }
 
     /// Recognize a supported channel type from trimmed discovery metadata.
+    #[must_use]
     pub fn from_metadata(value: &str) -> Option<Self> {
         match value.trim() {
             "text" => Some(Self::Text),

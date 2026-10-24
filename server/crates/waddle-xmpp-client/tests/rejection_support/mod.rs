@@ -4,23 +4,24 @@ use waddle_xmpp_client::{
     WebSocketConfig, XmppRuntime,
 };
 use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
-
+#[must_use]
 pub fn runtime(resume: Option<SmResumeState>) -> XmppRuntime {
-    let mut config = ClientConfig::new(
+    let mut config = ClientConfig::try_new(
         ConnectionConfig::new("example.com".parse().unwrap()),
-        WebSocketConfig::new("wss://example.com/ws".parse().unwrap()).unwrap(),
-        OAuthBearerConfig::new(
+        WebSocketConfig::try_new("wss://example.com/ws".parse().unwrap()).unwrap(),
+        OAuthBearerConfig::try_new(
             "alice@example.com".parse().unwrap(),
-            ClientResource::new("web").unwrap(),
+            ClientResource::try_new("web").unwrap(),
             AccessToken::new("test"),
         )
         .unwrap(),
     )
     .unwrap();
     config.session.stream_management.resume_state = resume;
-    XmppRuntime::new(config).unwrap()
+    XmppRuntime::try_new(config).unwrap()
 }
 
+#[must_use]
 pub fn rejection(from: &str) -> Element {
     Element::builder("message", "jabber:client")
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "error")

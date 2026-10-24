@@ -275,10 +275,10 @@ fn observer() -> IngressEffectIntent {
         room: bare("room@conference.example.com"),
         requester: bare("romeo@example.com"),
         sender: full("romeo@example.com/phone"),
-        plugin: waddle_extensions::PluginId::new("fixture").expect("plugin"),
+        plugin: waddle_extensions::PluginId::try_new("fixture").expect("plugin"),
         correction_target: None,
-        generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-        identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+        generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
+        identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64)).expect("identity"),
     }
 }
 #[test]

@@ -104,7 +104,7 @@ async fn snapshot(storage: &DatabaseSmPersistence, stream: &SmSessionId) -> Vec<
     ] {
         let mut rows = storage.query(sql, crate::db_params![stream.to_string()]).await.expect("schema query");
         while let Some(row) = rows.next().await.expect("row fetch") {
-            values.push((0..count).map(|index| row.get_value(index).expect("column decode")).collect());
+            values.push((0..count).map(|index| row.value(index).expect("column decode")).collect());
         }
     }
     values

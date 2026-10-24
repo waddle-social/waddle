@@ -40,7 +40,7 @@ impl ExtensionManager {
         }
         config.validate().map_err(anyhow::Error::msg)?;
 
-        let runtime = WasmRuntime::new()?;
+        let runtime = WasmRuntime::try_new()?;
         let puller = OciExtensionPuller::new(&config.cache_dir);
         let mut actors = Vec::new();
         let mut feature_namespaces = Vec::new();
@@ -155,6 +155,7 @@ impl ExtensionManager {
     }
 
     /// Install a nonempty launch-signing key; an empty key leaves the existing key unchanged.
+    #[must_use]
     pub fn with_launch_signing_key(mut self, key: impl AsRef<[u8]>) -> Self {
         let key = key.as_ref();
         if !key.is_empty() {
@@ -186,17 +187,20 @@ impl ExtensionManager {
     }
 
     /// Borrow the distinct extension payload namespaces selected for feature advertisement.
+    #[must_use]
     pub fn feature_namespaces(&self) -> &[String] {
         &self.feature_namespaces
     }
 
     /// Clone the extension payload namespaces selected for feature advertisement.
+    #[must_use]
     pub fn extension_features(&self) -> Vec<String> {
         self.feature_namespaces.clone()
     }
 
     /// Return command node/name pairs for command-granted plugins, excluding the generic
     /// framework invoke node.
+    #[must_use]
     pub fn command_nodes(&self) -> Vec<(String, String)> {
         self.actors
             .iter()
@@ -215,6 +219,7 @@ impl ExtensionManager {
 
     /// Return plugin identities and command descriptors for command-granted plugins,
     /// excluding the generic invoke node.
+    #[must_use]
     pub fn command_descriptors(
         &self,
     ) -> Vec<(crate::types::PluginId, crate::types::CommandDescriptor)> {
@@ -235,13 +240,15 @@ impl ExtensionManager {
     }
 
     /// Borrow the extension routes retained for discovery and UI rendering.
+    #[must_use]
     pub fn route_descriptors(&self) -> &[crate::types::ExtensionRouteDescriptor] {
         &self.route_descriptors
     }
 
     /// Whether a valid plugin ID identifies a currently loaded extension.
+    #[must_use]
     pub fn has_plugin(&self, plugin_name: &str) -> bool {
-        let Ok(plugin_id) = PluginId::new(plugin_name.to_string()) else {
+        let Ok(plugin_id) = PluginId::try_new(plugin_name.to_string()) else {
             return false;
         };
         self.actors
@@ -253,11 +260,12 @@ impl ExtensionManager {
     /// loaded. Used by host tools that need to know an extension's
     /// declared payload namespace at runtime (e.g. to gate PubSub reads
     /// to the extension's own namespace).
+    #[must_use]
     pub fn manifest_for_plugin(
         &self,
         plugin_name: &str,
     ) -> Option<crate::types::ExtensionManifest> {
-        let plugin_id = PluginId::new(plugin_name.to_string()).ok()?;
+        let plugin_id = PluginId::try_new(plugin_name.to_string()).ok()?;
         self.actors
             .iter()
             .find(|actor| actor.manifest().id == plugin_id)
@@ -274,6 +282,7 @@ impl ExtensionManager {
     ///
     /// Panics if the plugin is not loaded or its actor has already been shared through
     /// another `Arc`.
+    #[must_use]
     pub fn with_profile_avatar(
         mut self,
         plugin: &PluginId,
@@ -335,7 +344,7 @@ fn configured_room_observer(
     Ok(Some(crate::types::ConfiguredRoomObserver {
         plugin: manifest.id.clone(),
         generation: observation.generation,
-        identity: crate::types::Sha256Digest::new(hex::encode(Sha256::digest(identity_input)))?,
+        identity: crate::types::Sha256Digest::try_new(hex::encode(Sha256::digest(identity_input)))?,
         scope: observation.scope.clone(),
         max_concurrent: observation.max_concurrent,
     }))

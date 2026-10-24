@@ -94,8 +94,8 @@ describe("DM call activity hydration", () => {
     const client = new BrowserXmppClient(session(), persistence);
     const resource = client.fullJid.split("/")[1];
     const xmpp = {
-      get_resume_state_handle: () => ({ free: () => undefined }),
-      get_resume_state: () => ({ previd: "prev", inboundH: 1, outboundH: 2 }),
+      resume_state_handle: () => ({ free: () => undefined }),
+      resume_state: () => ({ previd: "prev", inboundH: 1, outboundH: 2 }),
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;
@@ -139,8 +139,8 @@ describe("DM call activity hydration", () => {
     const client = new BrowserXmppClient(session(), persistence);
     const resource = client.fullJid.split("/")[1];
     const xmpp = {
-      get_resume_state_handle: () => ({ free: () => undefined }),
-      get_resume_state: () => ({ previd: "prev-live", inboundH: 7, outboundH: 9 }),
+      resume_state_handle: () => ({ free: () => undefined }),
+      resume_state: () => ({ previd: "prev-live", inboundH: 7, outboundH: 9 }),
     };
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).xmpp = xmpp;
     (client as unknown as { xmpp: typeof xmpp; connected: boolean }).connected = true;

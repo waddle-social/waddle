@@ -11,6 +11,7 @@ pub struct ConnectionConfig {
 
 impl ConnectionConfig {
     /// Select the bare server JID used when opening XMPP streams.
+    #[must_use]
     pub fn new(server: BareJid) -> Self {
         Self { server }
     }

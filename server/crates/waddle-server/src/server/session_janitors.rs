@@ -431,7 +431,7 @@ pub(crate) async fn run_local_muc_departure_sweep(state: &WebSocketState) {
                                             .deps
                                             .protocol
                                             .connection_registry
-                                            .get_entry(&jid)
+                                            .entry(&jid)
                                             .is_some(),
                                         &GroupDmLeaveEffect::from(outcome.as_ref()),
                                     );
@@ -4142,7 +4142,7 @@ async fn stopped_registry_after_steal_exactly_releases_the_won_claim() {
 
     let registry = waddle_xmpp::muc::RoomRegistry::spawn(
         "muc.example.com".to_string(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
@@ -4200,7 +4200,7 @@ async fn terminal_shutdown_transfers_a_post_cas_room_handoff_into_registry_drain
 
     let registry = waddle_xmpp::muc::RoomRegistry::spawn(
         "muc.example.com".to_string(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
@@ -4269,7 +4269,7 @@ async fn cancelled_after_known_steal_still_registers_the_exact_room_fence() {
 
     let registry = waddle_xmpp::muc::RoomRegistry::spawn(
         "muc.example.com".to_string(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
@@ -4376,7 +4376,7 @@ async fn registry_death_after_mailbox_acceptance_self_fences_the_node() {
 
     let registry = waddle_xmpp::muc::RoomRegistry::spawn(
         "muc.example.com".to_string(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
@@ -4459,7 +4459,7 @@ async fn registry_death_after_mailbox_acceptance_self_fences_the_node() {
 async fn idle_room_registry_death_self_fences_the_node() {
     let registry = waddle_xmpp::muc::RoomRegistry::spawn(
         "muc.example.com".to_string(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
@@ -5152,7 +5152,7 @@ async fn worker_restart_self_fences_when_an_uncertain_sm_claim_is_unobserved() {
 
     let room_registry = waddle_xmpp::muc::RoomRegistry::spawn(
         "muc.example.com".to_string(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
             b"test-occupant-id-secret-32-bytes-long".to_vec(),
         )
         .expect("secret"),
@@ -11005,12 +11005,12 @@ mod local_muc_departure_tests {
             })
             .await
             .expect("first join");
-        let call_id = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(jid.clone());
         recorder.register_call_participant_with_session(
             &call_id,
             &identity,
-            &waddle_sfu::SessionBinding::new("superseded-explicit-g1").expect("sid"),
+            &waddle_sfu::SessionBinding::try_new("superseded-explicit-g1").expect("sid"),
             first_generation,
         );
 
@@ -11130,13 +11130,14 @@ mod local_muc_departure_tests {
                 }
             ));
 
-            let call = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+            let call = waddle_sfu::CallId::try_new(room.to_string()).expect("call id");
             let identity = waddle_sfu::Identity::from_jid(jid.clone());
             match matching_media {
                 Some(matching) => recorder.register_call_participant_with_session(
                     &call,
                     &identity,
-                    &waddle_sfu::SessionBinding::new("retained-media").expect("session binding"),
+                    &waddle_sfu::SessionBinding::try_new("retained-media")
+                        .expect("session binding"),
                     if matching {
                         generation
                     } else {
@@ -11202,7 +11203,7 @@ mod local_muc_departure_tests {
             })
             .await
             .expect("first join");
-        let call_id = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(jid.clone());
 
         let attempt = waddle_xmpp::muc::room_actor::LeaveAttemptId::generate();
@@ -11240,7 +11241,7 @@ mod local_muc_departure_tests {
         recorder.register_call_participant_with_session(
             &call_id,
             &identity,
-            &waddle_sfu::SessionBinding::new("superseded-explicit-g1").expect("sid"),
+            &waddle_sfu::SessionBinding::try_new("superseded-explicit-g1").expect("sid"),
             generation,
         );
         state.deps.protocol.pending_local_muc_departures.record(
@@ -11310,7 +11311,7 @@ mod local_muc_departure_tests {
             })
             .await
             .expect("join");
-        let call_id = waddle_sfu::CallId::new(room.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(jid.clone());
         recorder.register_call_participant(&call_id, &identity);
         state.deps.protocol.pending_local_muc_departures.record(

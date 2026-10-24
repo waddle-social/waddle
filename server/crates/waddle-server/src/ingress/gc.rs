@@ -424,7 +424,7 @@ mod tests {
             ),
             action: None,
         };
-        let authority = crate::ingress::IngressAuthority::new(
+        let authority = crate::ingress::IngressAuthority::try_new(
             crate::ingress::IngressConfig::default(),
             database.clone(),
             wrong_lineage,

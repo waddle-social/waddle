@@ -22,7 +22,7 @@ async fn correction_authority_is_the_validated_archive_row_with_nickname_continu
     }
     let actor = RoomActor::spawn(RoomActor::new(
         MucRoom::new(room.clone(), "w".into(), "c".into(), RoomConfig::default()),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(vec![1; 32]).expect("secret"),
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(vec![1; 32]).expect("secret"),
     ));
     let registry = ConnectionRegistry::new();
     let mut deps = Deps::registry_only(&registry);

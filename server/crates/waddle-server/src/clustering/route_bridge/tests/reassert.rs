@@ -57,7 +57,7 @@ async fn reassert_media_grants_local_without_owned_claim_refuses_to_execute() {
         crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
             registry_owner: None,
             occupancy_session: alice_occupancy_session,
-            authenticated_session: &Some(session),
+            authenticated_session: Some(&session),
         },
     )
     .await;
@@ -203,7 +203,7 @@ async fn reassert_media_grants_local_with_stale_lease_refuses_to_execute() {
         crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
             registry_owner: None,
             occupancy_session: alice_occupancy_session,
-            authenticated_session: &Some(session),
+            authenticated_session: Some(&session),
         },
     )
     .await;
@@ -387,7 +387,7 @@ async fn reassert_media_grants_local_with_owned_claim_pushes_grants() {
         crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
             registry_owner: None,
             occupancy_session: alice_occupancy_session,
-            authenticated_session: &Some(session),
+            authenticated_session: Some(&session),
         },
     )
     .await;

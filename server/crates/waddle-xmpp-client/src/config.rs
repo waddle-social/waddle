@@ -29,7 +29,7 @@ impl ClientConfig {
     /// # Errors
     ///
     /// Returns a validation error if the endpoint is not `ws`/`wss`, lacks a host, the origin is not `http`/`https`, or the client resource is blank.
-    pub fn new(
+    pub fn try_new(
         connection: ConnectionConfig,
         transport: WebSocketConfig,
         auth: OAuthBearerConfig,
@@ -93,7 +93,7 @@ impl WebSocketConfig {
     /// # Errors
     ///
     /// Returns an error if the endpoint is not `ws`/`wss`, lacks a host, or the optional origin is not `http`/`https`.
-    pub fn new(endpoint: Url) -> ClientResult<Self> {
+    pub fn try_new(endpoint: Url) -> ClientResult<Self> {
         let config = Self {
             endpoint,
             origin: None,
@@ -154,7 +154,7 @@ impl OAuthBearerConfig {
     /// # Errors
     ///
     /// Returns the resource validation error if the requested resource is blank.
-    pub fn new(
+    pub fn try_new(
         account: BareJid,
         resource: ClientResource,
         access_token: AccessToken,
@@ -188,13 +188,14 @@ impl ClientResource {
     /// # Errors
     ///
     /// Returns `ClientError::EmptyResource` if the requested resource is blank after trimming.
-    pub fn new(resource: impl Into<String>) -> ClientResult<Self> {
+    pub fn try_new(resource: impl Into<String>) -> ClientResult<Self> {
         let resource = Self(resource.into());
         resource.validate()?;
         Ok(resource)
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -225,11 +226,13 @@ pub struct AccessToken(String);
 
 impl AccessToken {
     /// Wrap bearer token material without exposing it in Debug output.
+    #[must_use]
     pub fn new(token: impl Into<String>) -> Self {
         Self(token.into())
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -283,7 +286,7 @@ mod tests {
     #[test]
     fn websocket_config_rejects_non_websocket_schemes() {
         let endpoint = Url::parse("https://chat.example.com/ws").unwrap();
-        let error = WebSocketConfig::new(endpoint).unwrap_err();
+        let error = WebSocketConfig::try_new(endpoint).unwrap_err();
         assert!(matches!(
             error,
             ClientError::InvalidTransportScheme { scheme } if scheme == "https"
@@ -294,15 +297,15 @@ mod tests {
     fn client_config_validates_successfully() {
         let connection = ConnectionConfig::new(BareJid::from_str("waddle.example").unwrap());
         let transport =
-            WebSocketConfig::new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap();
-        let auth = OAuthBearerConfig::new(
+            WebSocketConfig::try_new(Url::parse("wss://chat.example.com/ws").unwrap()).unwrap();
+        let auth = OAuthBearerConfig::try_new(
             BareJid::from_str("alice@example.com").unwrap(),
-            ClientResource::new("phone").unwrap(),
+            ClientResource::try_new("phone").unwrap(),
             AccessToken::new("token"),
         )
         .unwrap();
 
-        let config = ClientConfig::new(connection, transport, auth).unwrap();
+        let config = ClientConfig::try_new(connection, transport, auth).unwrap();
         assert!(matches!(config.auth, AuthenticationConfig::OAuthBearer(_)));
     }
 }

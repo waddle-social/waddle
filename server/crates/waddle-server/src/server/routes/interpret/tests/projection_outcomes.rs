@@ -87,7 +87,7 @@ async fn assert_committed_projection_push(database_url: &str, conversation: Conv
         room: &room,
         message: &message,
         is_recipient: true,
-        thread: &thread,
+        thread: thread.as_ref(),
         dispatch_timestamp: 10,
         notification_recovery: None,
     })

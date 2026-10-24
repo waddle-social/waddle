@@ -411,7 +411,7 @@ pub(super) async fn muc_owner_authorized(
         .await
         .map_err(|error| XmppError::internal(format!("snapshot failed: {error:?}")))?;
     if matches!(
-        snapshot.room.get_affiliation(&sender_jid.to_bare()),
+        snapshot.room.affiliation(&sender_jid.to_bare()),
         Affiliation::Owner
     ) {
         return Ok(true);

@@ -294,6 +294,7 @@ impl From<CoreError> for XmppError {
             CoreError::NotImplemented => Self::feature_not_implemented(Some(
                 "waddle-xmpp-core scaffold is not implemented yet".to_string(),
             )),
+            other => Self::internal_server_error(Some(other.to_string())),
         }
     }
 }

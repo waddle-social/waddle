@@ -220,7 +220,7 @@ pub(crate) fn provider_tool_mam_query(
             let jid = target
                 .get("jid")
                 .and_then(serde_json::Value::as_str)
-                .and_then(NonEmptyString::new);
+                .and_then(NonEmptyString::try_new);
             if let Some(current_target) = request.tool_target.as_ref() {
                 match (kind, jid) {
                     ("room", Some(jid)) if jid.as_str() == current_target.room.value.as_str() => {
@@ -313,7 +313,7 @@ pub(crate) fn provider_tool_mam_query(
 fn optional_non_empty_arg(args: &serde_json::Value, key: &str) -> Option<NonEmptyString> {
     args.get(key)
         .and_then(serde_json::Value::as_str)
-        .and_then(NonEmptyString::new)
+        .and_then(NonEmptyString::try_new)
 }
 
 pub(crate) fn format_archived_messages(

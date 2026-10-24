@@ -26,12 +26,12 @@ impl TryFrom<String> for MucOccupantNick {
     type Error = InvalidMucOccupantNick;
 
     fn try_from(value: String) -> Result<Self, Self::Error> {
-        Self::new(value).ok_or(InvalidMucOccupantNick)
+        Self::try_new(value).ok_or(InvalidMucOccupantNick)
     }
 }
 
 impl MucOccupantNick {
-    pub fn new(value: String) -> Option<Self> {
+    pub fn try_new(value: String) -> Option<Self> {
         if value.is_empty() {
             return None;
         }
@@ -75,7 +75,7 @@ fn durable_nick_validator_room_jid() -> &'static BareJid {
 pub struct DestroyReason(String);
 
 impl DestroyReason {
-    pub fn new(value: String) -> Option<Self> {
+    pub fn try_new(value: String) -> Option<Self> {
         (!value.is_empty()).then_some(Self(value))
     }
     pub fn as_str(&self) -> &str {
@@ -88,7 +88,7 @@ impl DestroyReason {
 pub struct DestroyPassword(String);
 
 impl DestroyPassword {
-    pub fn new(value: String) -> Option<Self> {
+    pub fn try_new(value: String) -> Option<Self> {
         (!value.is_empty()).then_some(Self(value))
     }
     pub fn as_str(&self) -> &str {
@@ -433,18 +433,18 @@ mod tests {
 
     #[test]
     fn muc_occupant_nick_accepts_any_admitted_resourcepart() {
-        let nick = MucOccupantNick::new(" ".to_owned()).expect("single-space nick");
+        let nick = MucOccupantNick::try_new(" ".to_owned()).expect("single-space nick");
         assert_eq!(nick.as_str(), " ");
     }
 
     #[test]
     fn muc_occupant_nick_rejects_invalid_resourceparts() {
         assert!(
-            MucOccupantNick::new(String::new()).is_none(),
+            MucOccupantNick::try_new(String::new()).is_none(),
             "empty nick must still be rejected"
         );
         assert!(
-            MucOccupantNick::new("\u{0000}".to_owned()).is_none(),
+            MucOccupantNick::try_new("\u{0000}".to_owned()).is_none(),
             "control characters must not be admitted as resourceparts"
         );
     }
@@ -478,7 +478,7 @@ mod tests {
                 recipient: alice.clone(),
                 is_self: true,
                 occupant: FullJid::from_str("room@example.test/alice").unwrap(),
-                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                nick: MucOccupantNick::try_new("alice".to_owned()).unwrap(),
                 occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
                 disclosed_real_jid: Some(alice.clone()),
                 affiliation: Affiliation::Member,
@@ -490,7 +490,7 @@ mod tests {
                 recipient: bob.clone(),
                 is_self: false,
                 occupant: FullJid::from_str("room@example.test/alice").unwrap(),
-                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                nick: MucOccupantNick::try_new("alice".to_owned()).unwrap(),
                 occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
                 disclosed_real_jid: Some(alice.clone()),
                 affiliation: Affiliation::Member,
@@ -509,7 +509,7 @@ mod tests {
                 recipient: alice.clone(),
                 is_self: true,
                 occupant: FullJid::from_str("room@example.test/alice").unwrap(),
-                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                nick: MucOccupantNick::try_new("alice".to_owned()).unwrap(),
                 occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
                 disclosed_real_jid: Some(alice),
                 affiliation: Affiliation::Member,
@@ -521,7 +521,7 @@ mod tests {
                 recipient: bob.clone(),
                 is_self: false,
                 occupant: FullJid::from_str("room@example.test/alice").unwrap(),
-                nick: MucOccupantNick::new("alice".to_owned()).unwrap(),
+                nick: MucOccupantNick::try_new("alice".to_owned()).unwrap(),
                 occupant_bare_jid: BareJid::from_str("alice@example.test").unwrap(),
                 disclosed_real_jid: None,
                 affiliation: Affiliation::None,

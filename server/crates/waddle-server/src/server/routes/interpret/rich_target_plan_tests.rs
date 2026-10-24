@@ -131,7 +131,7 @@ async fn groupchat_rich_target_failure(fixture: IngressFixture, stop_actor: bool
     let nick: jid::Jid = room.with_resource_str("romeo").expect("nickname").into();
     let rooms = RoomRegistryActor::spawn(RoomRegistryActor::new(
         "muc.example.com".into(),
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(vec![b'r'; 32]).expect("secret"),
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(vec![b'r'; 32]).expect("secret"),
     ));
     let actor = rooms
         .ask(CreateRoom {

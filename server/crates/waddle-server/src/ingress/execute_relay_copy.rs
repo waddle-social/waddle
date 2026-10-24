@@ -26,7 +26,7 @@ pub(super) async fn attempt_before_readiness(
     if deps.delivery_execution_context != DeliveryExecutionContext::Live
         || deps
             .connection_registry
-            .get_entry(resource)
+            .entry(resource)
             .is_some_and(|entry| entry.is_locally_hosted())
     {
         return Ok(None);
@@ -137,7 +137,7 @@ pub(super) async fn append_sealed_legacy(
     // A target that is local now keeps its frozen child and occupancy guards.
     if deps
         .connection_registry
-        .get_entry(resource)
+        .entry(resource)
         .is_some_and(|entry| entry.is_locally_hosted())
     {
         return None;

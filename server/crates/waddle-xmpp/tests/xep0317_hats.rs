@@ -50,7 +50,7 @@ fn bare(jid: &FullJid) -> BareJid {
 }
 
 fn secret() -> OccupantIdSecret {
-    OccupantIdSecret::new([0u8; 32].to_vec()).expect("32-byte secret")
+    OccupantIdSecret::try_new([0u8; 32].to_vec()).expect("32-byte secret")
 }
 
 fn identity<'a>(

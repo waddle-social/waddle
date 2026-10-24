@@ -49,7 +49,7 @@ async fn state_for(
     fixture: &IngressFixture,
     sm: Arc<InMemorySmSessionRegistry>,
 ) -> Arc<WebSocketState> {
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )
@@ -392,7 +392,7 @@ async fn live_route(f: IngressFixture, full: bool, detached_no_store: bool, head
                     .deps
                     .protocol
                     .connection_registry
-                    .get_entry(&resource)
+                    .entry(&resource)
                     .expect("live entry")
             )
             .await
@@ -577,7 +577,7 @@ mod family_tests {
         }
     }
     pub(super) async fn family_state(fixture: &IngressFixture) -> Arc<WebSocketState> {
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             crate::db::PoolConfig,
         )
@@ -603,7 +603,7 @@ mod family_tests {
             .await
             .expect("pending storage"),
         );
-        NotificationOutboxStore::new(fixture.db.clone())
+        NotificationOutboxStore::try_new(fixture.db.clone())
             .await
             .expect("notification schema");
         state
@@ -734,7 +734,7 @@ mod family_tests {
             observer_test_support::{ObserverTestBehavior, ObserverTestPlugin},
             ExtensionManager, PluginId,
         };
-        let plugin_id = PluginId::new("recovery-observer").expect("plugin id");
+        let plugin_id = PluginId::try_new("recovery-observer").expect("plugin id");
         let behavior = if warning {
             ObserverTestBehavior::Warning
         } else {
@@ -743,7 +743,7 @@ mod family_tests {
         let plugin = ObserverTestPlugin::new(plugin_id.clone(), behavior);
         // A second frozen observer and a synthetic MUC copy exercise recovery
         // when one obligation can settle while observers remain pending.
-        let sibling_id = PluginId::new("recovery-observer-sibling").expect("sibling id");
+        let sibling_id = PluginId::try_new("recovery-observer-sibling").expect("sibling id");
         let sibling = ObserverTestPlugin::new(sibling_id.clone(), ObserverTestBehavior::Success);
         let mut plugins = vec![plugin.clone()];
         if warning {
@@ -768,8 +768,10 @@ mod family_tests {
                 room: room.clone(),
                 plugin: plugin_id.clone(),
                 correction_target: None,
-                generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-                identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+                generation: waddle_extensions::ObservationGeneration::try_new(1)
+                    .expect("generation"),
+                identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64))
+                    .expect("identity"),
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
             });
@@ -781,9 +783,9 @@ mod family_tests {
                     room: room.clone(),
                     plugin: sibling_id.clone(),
                     correction_target: None,
-                    generation: waddle_extensions::ObservationGeneration::new(1)
+                    generation: waddle_extensions::ObservationGeneration::try_new(1)
                         .expect("generation"),
-                    identity: waddle_extensions::Sha256Digest::new("0".repeat(64))
+                    identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64))
                         .expect("identity"),
                     requester: submission.sender.to_bare(),
                     sender: submission.sender.clone(),
@@ -939,7 +941,7 @@ mod family_tests {
         crate::pubsub::DatabasePubSubStorage::open(Some(fixture.db.database_url()))
             .await
             .expect("projection schema");
-        let plugin_id = PluginId::new("recovery-warning-observer").expect("plugin id");
+        let plugin_id = PluginId::try_new("recovery-warning-observer").expect("plugin id");
         let plugin = ObserverTestPlugin::new(plugin_id.clone(), ObserverTestBehavior::Warning);
         let manager = ExtensionManager::with_observer_test_plugins(vec![plugin.clone()]).await;
         let mut state = family_state(&fixture).await;
@@ -969,8 +971,10 @@ mod family_tests {
                 room: room.clone(),
                 plugin: plugin_id.clone(),
                 correction_target: None,
-                generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-                identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+                generation: waddle_extensions::ObservationGeneration::try_new(1)
+                    .expect("generation"),
+                identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64))
+                    .expect("identity"),
                 requester: submission.sender.to_bare(),
                 sender: submission.sender.clone(),
             });
@@ -1300,7 +1304,7 @@ mod pin_tests {
         }
     }
     async fn state_for(f: &IngressFixture) -> Arc<WebSocketState> {
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(f.db.driver(), f.db.database_url()),
             crate::db::PoolConfig,
         )

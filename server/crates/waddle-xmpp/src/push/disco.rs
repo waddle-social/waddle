@@ -129,11 +129,11 @@ pub fn parse_push_vapid_disco_form(
     let form =
         DataForm::from_element(form_element).map_err(|_| PushVapidDiscoFormError::NotADataForm)?;
     if form
-        .get_form_type_value()
+        .form_type_value()
         .is_none_or(|value| value != PUSH_VAPID_FORM_TYPE)
     {
         return Err(PushVapidDiscoFormError::WrongFormType {
-            got: form.get_form_type_value().map(str::to_owned),
+            got: form.form_type_value().map(str::to_owned),
         });
     }
 
@@ -204,7 +204,7 @@ mod tests {
         let advertisement = sample_advertisement();
         let element = push_vapid_disco_form(&advertisement);
         let form = DataForm::from_element(&element).expect("parses as data form");
-        assert_eq!(form.get_form_type_value(), Some(PUSH_VAPID_FORM_TYPE));
+        assert_eq!(form.form_type_value(), Some(PUSH_VAPID_FORM_TYPE));
         assert_eq!(form.form_type, FormType::Result);
     }
 

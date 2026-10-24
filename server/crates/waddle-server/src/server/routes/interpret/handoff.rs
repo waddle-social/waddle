@@ -70,7 +70,7 @@ pub struct SmInboundCompletionTracker {
 
 impl SmInboundCompletionTracker {
     pub fn reserve(&mut self, sm_state: &StreamManagementState) -> OrderedRelayInboundSequence {
-        let current = sm_state.get_inbound_count();
+        let current = sm_state.inbound_count();
         self.contiguous = current;
         self.last_flushed.get_or_insert(current);
         let next = self
@@ -115,14 +115,14 @@ impl SmInboundCompletionTracker {
         }
         self.completed.insert(sequence.0);
         loop {
-            let next = sm_state.get_inbound_count().wrapping_add(1);
+            let next = sm_state.inbound_count().wrapping_add(1);
             if self.first_unhandled == Some(next) || !self.completed.remove(&next) {
                 break;
             }
             sm_state.increment_inbound();
             self.contiguous = next;
         }
-        self.checkpoint_dirty = self.last_flushed != Some(sm_state.get_inbound_count());
+        self.checkpoint_dirty = self.last_flushed != Some(sm_state.inbound_count());
     }
 
     pub fn checkpoint_dirty(&self) -> bool {
@@ -176,12 +176,12 @@ mod tests {
             tracker.mark_committed(message, checkpoint);
             tracker.complete(message, &mut sm);
         }
-        assert_eq!(sm.get_inbound_count(), 0);
+        assert_eq!(sm.inbound_count(), 0);
         assert!(!tracker.checkpoint_dirty());
         tracker.complete(iq, &mut sm);
-        assert_eq!(sm.get_inbound_count(), 3);
+        assert_eq!(sm.inbound_count(), 3);
         assert!(tracker.checkpoint_dirty());
-        tracker.checkpoint_flushed(sm.get_inbound_count());
+        tracker.checkpoint_flushed(sm.inbound_count());
         assert!(!tracker.checkpoint_dirty());
     }
     #[test]
@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(tracker.checkpoint_for(seq), 1);
         tracker.mark_committed(seq, 1);
         tracker.complete(seq, &mut sm);
-        assert_eq!(sm.get_inbound_count(), 1);
+        assert_eq!(sm.inbound_count(), 1);
         assert!(!tracker.checkpoint_dirty());
     }
     #[test]
@@ -206,9 +206,9 @@ mod tests {
         assert!(!tracker.checkpoint_dirty());
         let presence = tracker.reserve(&sm);
         tracker.complete(presence, &mut sm);
-        assert_eq!(sm.get_inbound_count(), 0);
+        assert_eq!(sm.inbound_count(), 0);
         assert!(tracker.checkpoint_dirty());
-        tracker.checkpoint_flushed(sm.get_inbound_count());
+        tracker.checkpoint_flushed(sm.inbound_count());
         assert!(!tracker.checkpoint_dirty());
     }
     #[test]
@@ -222,7 +222,7 @@ mod tests {
         tracker.complete(later, &mut sm);
         tracker.complete(first, &mut sm);
         tracker.complete(hole, &mut sm);
-        assert_eq!(sm.get_inbound_count(), 1);
+        assert_eq!(sm.inbound_count(), 1);
         assert!(tracker.has_unhandled_hole());
         assert!(!tracker.has_pending());
         tracker.reset();

@@ -278,7 +278,7 @@ fn space_from_disco_item_requires_spaces_metadata() {
 
 #[test]
 fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
-    let space_id = SpaceNode::new("general").expect("space node");
+    let space_id = SpaceNode::try_new("general").expect("space node");
     let iq = Element::builder("iq", CLIENT_NS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
@@ -353,7 +353,7 @@ fn pubsub_items_parse_bookmark_channels_and_ignore_non_conference_payloads() {
 #[test]
 fn space_channel_autojoin_defaults_to_false_when_attr_absent() {
     // XEP-0402 §2.2 default (web parity: `bookmark.autojoin ?? false`).
-    let space_id = SpaceNode::new("general").expect("space node");
+    let space_id = SpaceNode::try_new("general").expect("space node");
     let iq = Element::builder("iq", CLIENT_NS)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "result")
         .append(
@@ -1012,7 +1012,7 @@ mod bookmark_merge {
     }
 
     fn standalone() -> SpaceNode {
-        SpaceNode::new(STANDALONE_SPACE_ID).expect("standalone id")
+        SpaceNode::try_new(STANDALONE_SPACE_ID).expect("standalone id")
     }
 
     fn bookmarks_response(items: Vec<BookmarkItem>) -> Element {

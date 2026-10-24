@@ -178,7 +178,7 @@ async fn drain_outbound_dispatches_direct_frame_into_unacked_unchanged() {
     )
     .await;
 
-    let queue = conn.sm_state.get_stanzas_to_resend(0);
+    let queue = conn.sm_state.stanzas_to_resend(0);
     assert_eq!(queue.len(), 1, "DirectFrame recorded once");
     assert_eq!(
         queue[0].stanza_xml, expected_xml,
@@ -242,7 +242,7 @@ async fn drain_outbound_dispatches_peer_stanza_through_recipient_pass() {
     )
     .await;
 
-    let queue = conn.sm_state.get_stanzas_to_resend(0);
+    let queue = conn.sm_state.stanzas_to_resend(0);
     assert!(
         !queue.is_empty(),
         "PeerStanza drain MUST record at least the recipient-pass wire frame"

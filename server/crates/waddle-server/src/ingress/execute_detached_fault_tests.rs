@@ -91,7 +91,7 @@ async fn detached_delivery_fault(
                         .deps
                         .protocol
                         .connection_registry
-                        .get_entry(resource)
+                        .entry(resource)
                         .expect("live entry"),
                 )
                 .await
@@ -146,7 +146,7 @@ async fn detached_delivery_fault(
                 .deps
                 .protocol
                 .connection_registry
-                .get_entry(resource)
+                .entry(resource)
                 .is_some());
             let stanza = Stanza::Message(submission.plan.sanitized_message.clone());
             match kind {

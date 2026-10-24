@@ -11,7 +11,7 @@ async fn socket_state(
     fixture: &IngressFixture,
 ) -> Arc<crate::server::routes::websocket::WebSocketState> {
     let standalone = socket_tests::create_test_websocket_state().await;
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

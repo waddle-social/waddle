@@ -51,14 +51,14 @@ async fn superseded_connection_presence_does_not_touch_replacement_registry_stat
     .await;
 
     // B's presence entry and state survive untouched.
-    let entry = registry.get_entry(&jid).expect("replacement entry");
+    let entry = registry.entry(&jid).expect("replacement entry");
     assert_eq!(
         entry.presence_priority(),
         3,
         "a superseded connection must not overwrite the replacement's priority"
     );
     let presence_state = registry
-        .get_presence_state(&jid)
+        .presence_state(&jid)
         .expect("replacement presence state");
     assert_eq!(presence_state.show.as_deref(), Some("dnd"));
     assert_eq!(presence_state.status.as_deref(), Some("busy"));
@@ -85,7 +85,7 @@ fn muc_join_presence_carries_authority_in_xep_0045_payload_only() {
     // This builder is the on-the-wire shape for a fresh-join
     // presence, so the assertion here pins both directions: the
     // XEP-0045 payload IS emitted, and the XEP-0317 payload is NOT.
-    let secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::new(
+    let secret = waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(
         b"join-presence-handler-test-secret".to_vec(),
     )
     .expect("test secret meets length floor");

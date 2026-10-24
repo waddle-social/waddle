@@ -16,9 +16,9 @@ async fn callback_retries_after_cancel_and_lease_expiry(fixture: IngressFixture)
         .expect("schema");
     let room: BareJid = "room@conference.example.org".parse().expect("room");
     let observer = ConfiguredRoomObserver {
-        plugin: PluginId::new("observer-fixture").expect("plugin"),
-        generation: ObservationGeneration::new(1).expect("generation"),
-        identity: Sha256Digest::new("a".repeat(64)).expect("identity"),
+        plugin: PluginId::try_new("observer-fixture").expect("plugin"),
+        generation: ObservationGeneration::try_new(1).expect("generation"),
+        identity: Sha256Digest::try_new("a".repeat(64)).expect("identity"),
         scope: RoomObservationScope::Rooms(vec![room.clone()]),
         max_concurrent: 1,
     };

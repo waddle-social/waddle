@@ -33,6 +33,7 @@ pub struct FallbackRange {
 
 /// Build a `<reply xmlns='urn:xmpp:reply:0' to='…' id='…'/>` element from a
 /// typed marker.
+#[must_use]
 pub fn build_reply_element(marker: &ReplyMarker) -> Element {
     Element::builder("reply", NS_REPLY)
         .attr(
@@ -48,6 +49,7 @@ pub fn build_reply_element(marker: &ReplyMarker) -> Element {
 
 /// Build a `<fallback>` element scoped to XEP-0461 carrying a single
 /// `<body start='…' end='…'/>` range.
+#[must_use]
 pub fn build_fallback_element(range: &FallbackRange) -> Element {
     Element::builder("fallback", NS_FALLBACK)
         .attr(minidom::rxml::xml_ncname!("for").to_owned(), NS_REPLY)
@@ -69,6 +71,7 @@ pub fn build_fallback_element(range: &FallbackRange) -> Element {
 /// Parse `<reply xmlns='urn:xmpp:reply:0' to='…' id='…'/>` out of a message
 /// element. Returns `None` if no reply child is present or if required
 /// attributes are missing or malformed.
+#[must_use]
 pub fn parse_reply(message: &Element) -> Option<ReplyMarker> {
     let reply_el = message.get_child("reply", NS_REPLY)?;
     let id = reply_el.attr("id")?.to_string();
@@ -86,6 +89,7 @@ pub fn parse_reply(message: &Element) -> Option<ReplyMarker> {
 ///
 /// Only fallback elements scoped to the XEP-0461 reply namespace are
 /// recognised.
+#[must_use]
 pub fn parse_fallback(message: &Element) -> Option<FallbackRange> {
     if let Some(fb) = message.children().find(|c| {
         c.name() == "fallback" && c.ns() == NS_FALLBACK && c.attr("for") == Some(NS_REPLY)

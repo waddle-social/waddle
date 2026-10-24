@@ -57,6 +57,7 @@ pub enum SharedFileDisposition {
 
 impl SharedFileDisposition {
     /// Honor an explicit inline/attachment value, otherwise infer inline display for supported media and PDF types.
+    #[must_use]
     pub fn from_text_or_infer(value: Option<&str>, media_type: Option<&str>) -> Self {
         match value {
             Some("inline") => Self::Inline,
@@ -66,6 +67,7 @@ impl SharedFileDisposition {
     }
 
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Inline => "inline",
@@ -154,7 +156,7 @@ impl InCallSessionId {
     /// # Errors
     ///
     /// Returns `CoreError::BadRequest` if the call-session identifier is blank after trimming.
-    pub fn new(value: impl Into<String>) -> ClientResult<Self> {
+    pub fn try_new(value: impl Into<String>) -> ClientResult<Self> {
         let value = value.into();
         let value = value.trim();
         if value.is_empty() {
@@ -167,6 +169,7 @@ impl InCallSessionId {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -182,7 +185,7 @@ impl InCallReactionEmoji {
     /// # Errors
     ///
     /// Returns `CoreError::BadRequest` if the reaction text is blank after trimming.
-    pub fn new(value: impl Into<String>) -> ClientResult<Self> {
+    pub fn try_new(value: impl Into<String>) -> ClientResult<Self> {
         let value = value.into();
         let value = value.trim();
         if value.is_empty() {
@@ -195,6 +198,7 @@ impl InCallReactionEmoji {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -227,6 +231,7 @@ pub enum InCallReactionRecipient {
 
 impl InCallReactionRecipient {
     /// Format the recipient's JID for an outgoing call-reaction stanza.
+    #[must_use]
     pub fn to_jid_string(&self) -> String {
         match self {
             Self::Direct(jid) => jid.to_string(),
@@ -235,6 +240,7 @@ impl InCallReactionRecipient {
     }
 
     /// Return the chat or groupchat message type required by the call recipient.
+    #[must_use]
     pub fn message_type(&self) -> &'static str {
         match self {
             Self::Direct(_) => "chat",
@@ -620,6 +626,7 @@ pub enum ExtensionCapabilityData {
 
 impl ExtensionCapabilityData {
     /// Interpret a protocol attribute, preserving the documented default for unknown or missing values.
+    #[must_use]
     pub fn from_attr(value: &str) -> Option<Self> {
         match value {
             "message.enrich" => Some(Self::MessageEnrich),
@@ -642,6 +649,7 @@ impl ExtensionCapabilityData {
     }
 
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::MessageEnrich => "message.enrich",
@@ -669,12 +677,14 @@ pub struct ExtensionTextId(String);
 
 impl ExtensionTextId {
     /// Create `ExtensionTextId` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -686,12 +696,14 @@ pub struct ExtensionDisplayText(String);
 
 impl ExtensionDisplayText {
     /// Create `ExtensionDisplayText` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -703,7 +715,8 @@ pub struct ExtensionTimestamp(String);
 
 impl ExtensionTimestamp {
     /// Retain an RFC 3339 timestamp token, returning None if parsing fails.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         chrono::DateTime::parse_from_rfc3339(value.as_str())
             .ok()
@@ -711,6 +724,7 @@ impl ExtensionTimestamp {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -722,7 +736,8 @@ pub struct ExtensionCommandNode(String);
 
 impl ExtensionCommandNode {
     /// Accept the framework namespace or a colon-separated child command node; other nodes return None.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         let valid = value == crate::messaging::namespaces::NS_WADDLE_EXTENSION
             || value
@@ -732,6 +747,7 @@ impl ExtensionCommandNode {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -743,13 +759,15 @@ pub struct ExtensionRoomJid(String);
 
 impl ExtensionRoomJid {
     /// Retain a valid bare room JID, returning None when parsing fails.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         value.parse::<jid::BareJid>().ok()?;
         Some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -761,7 +779,8 @@ pub struct ExtensionPluginId(String);
 
 impl ExtensionPluginId {
     /// Accept nonempty lowercase ASCII letters, digits, and hyphens; other input returns None.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         let valid = !value.is_empty()
             && value
@@ -771,6 +790,7 @@ impl ExtensionPluginId {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -782,12 +802,14 @@ pub struct ExtensionNamespace(String);
 
 impl ExtensionNamespace {
     /// Create `ExtensionNamespace` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -799,12 +821,14 @@ pub struct ExtensionXmlName(String);
 
 impl ExtensionXmlName {
     /// Create `ExtensionXmlName` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -836,6 +860,7 @@ pub enum MucAffiliation {
 
 impl MucAffiliation {
     /// Interpret a protocol attribute, preserving the documented default for unknown or missing values.
+    #[must_use]
     pub fn from_attr(value: &str) -> Option<Self> {
         match value {
             "owner" => Some(Self::Owner),
@@ -848,6 +873,7 @@ impl MucAffiliation {
     }
 
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Owner => "owner",
@@ -874,6 +900,7 @@ pub enum MucRole {
 
 impl MucRole {
     /// Interpret a protocol attribute, preserving the documented default for unknown or missing values.
+    #[must_use]
     pub fn from_attr(value: &str) -> Option<Self> {
         match value {
             "moderator" => Some(Self::Moderator),
@@ -885,6 +912,7 @@ impl MucRole {
     }
 
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Moderator => "moderator",
@@ -914,6 +942,7 @@ pub enum MucStatus {
 
 impl MucStatus {
     /// Recognize a standardized MUC status code while preserving unknown codes.
+    #[must_use]
     pub fn from_code(code: u16) -> Self {
         match code {
             100 => Self::NonAnonymous,
@@ -923,6 +952,7 @@ impl MucStatus {
     }
 
     /// Return the numeric MUC status code.
+    #[must_use]
     pub fn code(self) -> u16 {
         match self {
             Self::NonAnonymous => 100,
@@ -1030,6 +1060,7 @@ pub enum MessagingEvent {
 /// typed XEP payloads. Protocol values flow through typed XEP structs —
 /// never raw `String` blobs — per the typed-payloads hard rule.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct SendMessageOptions {
     /// Caller-supplied stanza id for optimistic UI / delivery correlation.
     /// Generated by the client when omitted.
@@ -1082,7 +1113,7 @@ impl LinkPreviewToken {
     /// # Errors
     ///
     /// Returns `InvalidLinkPreviewToken` unless the token contains exactly 64 ASCII hexadecimal characters.
-    pub fn new(value: impl Into<String>) -> Result<Self, InvalidLinkPreviewToken> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, InvalidLinkPreviewToken> {
         let value = value.into();
         if value.trim().is_empty() {
             return Err(InvalidLinkPreviewToken);
@@ -1091,6 +1122,7 @@ impl LinkPreviewToken {
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }

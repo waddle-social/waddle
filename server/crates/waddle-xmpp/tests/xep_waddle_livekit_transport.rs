@@ -31,9 +31,9 @@ use waddle_xmpp::xep::xep_waddle_livekit_transport::{
 };
 
 fn issued_fixture() -> IssuedTransport {
-    let url = WebsocketUrl::new("wss://livekit.waddle.test".parse().expect("valid url"))
+    let url = WebsocketUrl::try_new("wss://livekit.waddle.test".parse().expect("valid url"))
         .expect("valid ws url");
-    let room = CallId::new("alice@waddle.test::c1").expect("valid call id");
+    let room = CallId::try_new("alice@waddle.test::c1").expect("valid call id");
     let jid: jid::FullJid = "bob@waddle.test/desktop".parse().expect("valid jid");
     let identity = Identity::from_jid(jid);
     let token = Jwt::from_wire("eyJhbGciOi.payload.sig".to_string());
@@ -251,7 +251,7 @@ fn waddle_livekit_transport_rejects_missing_token_child() {
 
 #[test]
 fn waddle_livekit_transport_rejects_invalid_url_scheme() {
-    // The `WebsocketUrl::new` constructor restricts schemes to
+    // The `WebsocketUrl::try_new` constructor restricts schemes to
     // `ws://` and `wss://`. An `http://` URL is rejected at the
     // typed-construction boundary.
     let elem = Element::builder("transport", NS_WADDLE_LIVEKIT_TRANSPORT)
@@ -319,9 +319,9 @@ fn waddle_livekit_transport_from_join_token_produces_issued_form() {
     // `JoinToken` returned by the SFU service. The conversion
     // copies the typed fields verbatim — no string round-trip.
     let join = waddle_sfu::JoinToken {
-        url: WebsocketUrl::new("wss://livekit.waddle.test".parse().expect("valid url"))
+        url: WebsocketUrl::try_new("wss://livekit.waddle.test".parse().expect("valid url"))
             .expect("valid ws url"),
-        room: CallId::new("alice@waddle.test::c1").expect("valid call id"),
+        room: CallId::try_new("alice@waddle.test::c1").expect("valid call id"),
         identity: Identity::from_jid("bob@waddle.test/desktop".parse().expect("valid jid")),
         jwt: Jwt::from_wire("a.b.c".to_string()),
         jti: Jti::new(),

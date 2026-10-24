@@ -872,10 +872,10 @@ async fn postgres_schema_has_required_room_effect_columns() {
     )
     .await
     .expect("postgres database");
-    RoomEffectOutboxStore::new(db.clone())
+    RoomEffectOutboxStore::try_new(db.clone())
         .await
         .expect("schema");
-    RoomEffectOutboxStore::new(db.clone())
+    RoomEffectOutboxStore::try_new(db.clone())
         .await
         .expect("restart schema");
     let connection = db.guard().await.expect("connection");
@@ -925,7 +925,7 @@ async fn fifo_order_survives_store_restart() {
     let second = enqueue_and_arm(&store, lifecycle, second_revision, admin_effects()).await;
 
     drop(store);
-    let restarted = RoomEffectOutboxStore::new(db.clone())
+    let restarted = RoomEffectOutboxStore::try_new(db.clone())
         .await
         .expect("restart store");
 

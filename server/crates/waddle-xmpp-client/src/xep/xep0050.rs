@@ -36,6 +36,7 @@ pub enum AdHocAction {
 
 impl AdHocAction {
     /// Return the canonical token used in protocol attributes or forms.
+    #[must_use]
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Execute => "execute",
@@ -60,6 +61,7 @@ pub enum AdHocStatus {
 
 impl AdHocStatus {
     /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "executing" => Some(Self::Executing),
@@ -86,6 +88,7 @@ pub struct CommandResponse {
 /// Build an IQ that initiates a XEP-0050 ad-hoc command with no
 /// session id. Use this for the FIRST stage of the multi-step dance,
 /// typically with [`AdHocAction::Execute`].
+#[must_use]
 pub fn build_xep0050_command_request(
     service_jid: &str,
     node: &str,
@@ -108,6 +111,7 @@ pub fn build_xep0050_command_request(
 /// Like [`build_xep0050_command_request`], but with a caller-supplied
 /// IQ id. Use this when the caller owns response correlation (the FFI
 /// verbs stamp UUID ids).
+#[must_use]
 pub fn build_xep0050_command_request_with_id(
     service_jid: &str,
     node: &str,
@@ -129,6 +133,7 @@ pub fn build_xep0050_command_request_with_id(
 /// by the service in the first response. Caller is responsible for
 /// propagating the session id verbatim from
 /// [`CommandResponse::session_id`].
+#[must_use]
 pub fn build_xep0050_command_request_with_session(
     service_jid: &str,
     node: &str,
@@ -153,6 +158,7 @@ pub fn build_xep0050_command_request_with_session(
 /// chat client, which submits bare `var`/`value` fields), which
 /// [`xmpp_parsers::data_forms::DataForm`] builders cannot express
 /// per-field-type faithfully.
+#[must_use]
 pub fn build_xep0050_command_request_with_form_element(
     service_jid: &str,
     node: &str,
@@ -199,6 +205,7 @@ fn build_command_iq(
 /// when the IQ does not carry a `<command/>` child or the `status`
 /// attribute is missing/unknown — both are server-side bugs the
 /// caller surfaces as a typed protocol error.
+#[must_use]
 pub fn parse_command_response(iq: &Element) -> Option<CommandResponse> {
     let command = iq.get_child("command", NS_COMMANDS)?;
     let status = AdHocStatus::parse(command.attr("status")?)?;

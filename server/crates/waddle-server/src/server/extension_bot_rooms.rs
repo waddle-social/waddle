@@ -38,7 +38,7 @@ pub(crate) async fn list(db: &Database, room: &BareJid) -> Result<Vec<PluginId>,
     let mut plugins = Vec::new();
     while let Some(row) = rows.next().await? {
         let plugin: String = row.get(0)?;
-        plugins.push(PluginId::new(plugin).map_err(|_| {
+        plugins.push(PluginId::try_new(plugin).map_err(|_| {
             DatabaseError::QueryFailed("invalid persisted extension plugin id".to_owned())
         })?);
     }
@@ -71,8 +71,8 @@ mod tests {
             .expect("migrations");
         let room: BareJid = "lobby@muc.example.com".parse().expect("room");
         let other: BareJid = "other@muc.example.com".parse().expect("room");
-        let polls = PluginId::new("polls").expect("plugin");
-        let echo = PluginId::new("echo").expect("plugin");
+        let polls = PluginId::try_new("polls").expect("plugin");
+        let echo = PluginId::try_new("echo").expect("plugin");
         for (room, plugin) in [
             (&room, &polls),
             (&room, &polls),

@@ -882,11 +882,7 @@ async fn cleanup_connection_shutdown_inner(
             forget_terminal_ingress_stream_and_release_claim(state, &conn.sm_state).await;
             return ConnectionShutdownOutcome::NotPersisted;
         };
-        let presence_state = state
-            .deps
-            .protocol
-            .connection_registry
-            .get_presence_state(&jid);
+        let presence_state = state.deps.protocol.connection_registry.presence_state(&jid);
         let Some(entry) = state
             .deps
             .protocol
@@ -1468,7 +1464,7 @@ async fn cleanup_connection_shutdown_inner(
                         .deps
                         .protocol
                         .connection_registry
-                        .get_entry(&jid)
+                        .entry(&jid)
                         .is_some();
                     if !replacement_bound_during_recovery {
                         state.deps.protocol.caps_resolver.drop_resource(&jid);
@@ -1885,7 +1881,7 @@ fn preferred_live_pending_flush_target(
     recipient: &BareJid,
 ) -> Option<LivePendingFlushTarget> {
     let mut resources = registry
-        .get_available_resources_for_user(recipient)
+        .available_resources_for_user(recipient)
         .into_iter()
         // Match the XEP-0160/RFC 6121 gate in the normal initial-presence
         // flush: a negative-priority resource is available for presence, but
@@ -1898,7 +1894,7 @@ fn preferred_live_pending_flush_target(
             .then_with(|| left_jid.to_string().cmp(&right_jid.to_string()))
     });
     resources.into_iter().find_map(|(resource, _)| {
-        registry.get_entry(&resource).and_then(|entry| {
+        registry.entry(&resource).and_then(|entry| {
             // The availability snapshot above and this entry lookup are
             // two reads: the resource can go unavailable/negative or a
             // silent same-FullJID replacement can register in between.
@@ -1996,10 +1992,10 @@ pub(crate) async fn redrive_terminal_pending_rows_to_live_resource_with_cancel(
             // may be promoted to that otherwise available resource.
             let registry = &state.deps.protocol.connection_registry;
             let remote_available = registry
-                .get_available_resources_for_user(recipient)
+                .available_resources_for_user(recipient)
                 .into_iter()
                 .any(|(resource, _)| {
-                    registry.get_entry(&resource).is_some_and(|entry| {
+                    registry.entry(&resource).is_some_and(|entry| {
                         !entry.is_locally_hosted()
                             && entry.is_presence_available()
                             && entry.presence_priority() >= 0
@@ -2717,12 +2713,7 @@ async fn refuse_detach_without_principal(
         // binding and rejoining rooms. At this point the old route is already
         // gone, so any live registry entry is necessarily that replacement and
         // owns the FullJID-keyed resources below.
-        let replacement_took_over = state
-            .deps
-            .protocol
-            .connection_registry
-            .get_entry(jid)
-            .is_some();
+        let replacement_took_over = state.deps.protocol.connection_registry.entry(jid).is_some();
         // The MUC sweep is generation-scoped (#1703) and therefore runs even
         // when a replacement retook the FullJID: rooms the replacement
         // re-joined answer `Superseded`, rooms it did not re-join are only
@@ -2809,7 +2800,7 @@ pub(crate) async fn broadcast_unavailable_if_no_replacement(
         .deps
         .protocol
         .connection_registry
-        .get_entry(jid)
+        .entry(jid)
         .is_some_and(|entry| entry.is_presence_available())
     {
         debug!(
@@ -3883,7 +3874,7 @@ pub(super) async fn cleanup_invalidated_detached_session(
             .deps
             .protocol
             .connection_registry
-            .get_entry(&detached.jid)
+            .entry(&detached.jid)
             .is_some_and(|entry| {
                 entry
                     .sm_stream_id()
@@ -5863,7 +5854,7 @@ mod local_departure_cleanup_tests {
         let alice = full_jid("alice@example.com/web");
         let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", generation).await;
-        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         recorder.register_call_participant(&call_id, &identity);
 
@@ -5913,7 +5904,7 @@ mod local_departure_cleanup_tests {
         let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
         join_member_with_generation(&room_actor, &alice, "alice", second_generation).await;
-        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         recorder.register_call_participant(&call_id, &identity);
 
@@ -5967,12 +5958,12 @@ mod local_departure_cleanup_tests {
         let second_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
 
-        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         recorder.register_call_participant_with_session(
             &call_id,
             &identity,
-            &waddle_sfu::SessionBinding::new("muji-g1").expect("sid"),
+            &waddle_sfu::SessionBinding::try_new("muji-g1").expect("sid"),
             first_generation,
         );
 
@@ -5980,7 +5971,7 @@ mod local_departure_cleanup_tests {
         recorder.register_call_participant_with_session(
             &call_id,
             &identity,
-            &waddle_sfu::SessionBinding::new("muji-g2").expect("sid"),
+            &waddle_sfu::SessionBinding::try_new("muji-g2").expect("sid"),
             second_generation,
         );
 
@@ -6036,12 +6027,12 @@ mod local_departure_cleanup_tests {
         let generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", generation).await;
 
-        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         recorder.register_call_participant_with_session(
             &call_id,
             &identity,
-            &waddle_sfu::SessionBinding::new("muji-live").expect("sid"),
+            &waddle_sfu::SessionBinding::try_new("muji-live").expect("sid"),
             generation,
         );
 
@@ -6098,12 +6089,12 @@ mod local_departure_cleanup_tests {
         let first_generation = waddle_xmpp::muc::room_actor::OccupancySessionGeneration::mint();
         join_member_with_generation(&room_actor, &alice, "alice", first_generation).await;
 
-        let call_id = waddle_sfu::CallId::new(room_jid.to_string()).expect("call id");
+        let call_id = waddle_sfu::CallId::try_new(room_jid.to_string()).expect("call id");
         let identity = waddle_sfu::Identity::from_jid(alice.clone());
         recorder.register_call_participant_with_session(
             &call_id,
             &identity,
-            &waddle_sfu::SessionBinding::new("muji-g1").expect("sid"),
+            &waddle_sfu::SessionBinding::try_new("muji-g1").expect("sid"),
             first_generation,
         );
         store.set_leave_mode(LeaveProjectionMode::NotOwner);

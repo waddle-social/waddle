@@ -35,7 +35,7 @@ impl MessageRejection {
             return None;
         }
         Some(Self {
-            stanza_id: StanzaId::new(element.attr("id")?).ok()?,
+            stanza_id: StanzaId::try_new(element.attr("id")?).ok()?,
             from: match element.attr("from") {
                 Some(from) => from.parse().ok()?,
                 // RFC 6120 §8.1.2.1: only a direct stream stanza can inherit

@@ -5,7 +5,7 @@ pub use waddle_xmpp_core::disco::info::{
     community_service_features, is_disco_info_query, muc_room_features, muc_service_features,
     parse_disco_info_response, pubsub_service_features, push_service_features,
     spaces_service_features, upload_service_features, DiscoInfoQuery, DiscoInfoResponse, Feature,
-    Identity, DISCO_INFO_NS,
+    Identity, RoomMembership, RoomPersistence, RoomVisibility, DISCO_INFO_NS,
 };
 use xmpp_parsers::iq::Iq;
 

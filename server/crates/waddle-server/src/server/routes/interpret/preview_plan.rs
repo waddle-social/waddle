@@ -285,7 +285,7 @@ mod tests {
         use std::sync::Arc;
 
         let pool = Arc::new(
-            DatabasePool::new(
+            DatabasePool::try_new(
                 DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
                 PoolConfig,
             )
@@ -299,7 +299,7 @@ mod tests {
         )
         .await;
         let archive = fixture.principal.bare_jid().clone();
-        let message_id = RichMessageId::new("original".to_owned()).expect("message id");
+        let message_id = RichMessageId::try_new("original".to_owned()).expect("message id");
         let slot = Uuid::new_v4();
         fixture.execute(
             "INSERT INTO upload_slots (id, requester_jid, filename, size_bytes, content_type, expires_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -437,7 +437,7 @@ mod tests {
             Deps::registry_only(&registry).with_ingress_effect_capture(Some(capture.clone()));
         deps.effects = &sink;
         let archive: BareJid = "alice@example.com".parse().expect("archive");
-        let message_id = RichMessageId::new("wire-1".to_owned()).expect("message id");
+        let message_id = RichMessageId::try_new("wire-1".to_owned()).expect("message id");
         let current = LinkPreviewMediaRefMutation {
             upload_slot_id: Uuid::nil(),
             archive: archive.clone(),

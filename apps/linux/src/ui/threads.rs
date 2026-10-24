@@ -294,7 +294,7 @@ mod tests {
                         model_version: "jev-v1".into(),
                         scores: vec![SafetyScore {
                             category: SafetyCategory::IsQuestion,
-                            probability: Probability::new(0.95).unwrap(),
+                            probability: Probability::try_new(0.95).unwrap(),
                             taxonomy_version: "question-v1".into(),
                         }],
                     },

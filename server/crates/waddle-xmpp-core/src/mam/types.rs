@@ -21,12 +21,14 @@ pub struct RichMessageId(
 
 impl RichMessageId {
     /// Create `RichMessageId` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -41,12 +43,14 @@ pub struct RichText(
 
 impl RichText {
     /// Create `RichText` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -200,12 +204,14 @@ pub struct ArchivedOccupantId(String);
 
 impl ArchivedOccupantId {
     /// Create `ArchivedOccupantId` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -269,6 +275,7 @@ impl ArchivedRichMessage {
     /// logical message even though its resource (and possibly its
     /// affiliation/role) changed. Comparing the identity fields would
     /// break dedup and duplicate the row in the archive.
+    #[must_use]
     pub fn content_only(&self) -> Self {
         Self {
             occupant_id: None,
@@ -279,6 +286,7 @@ impl ArchivedRichMessage {
 
     /// True when this payload is an XEP-0424 / XEP-0425 tombstone — the
     /// terminal state an archive row never leaves.
+    #[must_use]
     pub fn is_tombstoned(&self) -> bool {
         matches!(
             self.payload.as_ref(),
@@ -289,6 +297,7 @@ impl ArchivedRichMessage {
     /// True when this payload carries no client-authored content
     /// (`payload` / `reply` / `references` / `mentions` / `subjects`) and no
     /// server-derived MUC identity (`occupant_id` / `muc_sender`).
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.payload.is_none()
             && self.reply.is_none()
@@ -305,6 +314,7 @@ impl ArchivedRichMessage {
     /// the server-stamped occupant-id / real-JID" compare equal to a
     /// row that carried no `rich_payload` at all — the two are the same
     /// logical message for dedup purposes.
+    #[must_use]
     pub fn dedup_content(&self) -> Option<Self> {
         let content = self.content_only();
         (!content.is_empty()).then_some(content)
@@ -317,12 +327,14 @@ pub struct ThreadId(String);
 
 impl ThreadId {
     /// Create `ThreadId` from non-blank text, returning `None` for empty or whitespace-only input.
-    pub fn new(value: impl Into<String>) -> Option<Self> {
+    #[must_use]
+    pub fn try_new(value: impl Into<String>) -> Option<Self> {
         let value = value.into();
         (!value.trim().is_empty()).then_some(Self(value))
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         self.0.as_str()
     }
@@ -483,6 +495,7 @@ impl ArchivedMessage {
     /// not pull in this fixture constructor.
     #[cfg(any(test, feature = "test-utils"))]
     #[doc(hidden)]
+    #[must_use]
     pub fn for_test(from: Jid, to: Jid) -> Self {
         Self {
             id: String::new(),

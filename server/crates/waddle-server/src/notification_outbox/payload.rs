@@ -131,7 +131,7 @@ pub fn target_from_subscription(
     })?;
     Ok(Some(NotificationOutboxTarget::new(
         push_service_jid,
-        PushServiceNodeName::new(node.clone())?,
+        PushServiceNodeName::try_new(node.clone())?,
     )))
 }
 

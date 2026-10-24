@@ -262,7 +262,7 @@ mod tests {
     }
 
     fn jwt() -> VapidJwt {
-        VapidJwt::new("eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2EifQ.sig").expect("jwt")
+        VapidJwt::try_new("eyJhbGciOiJFUzI1NiJ9.eyJhdWQiOiJodHRwczovL2EifQ.sig").expect("jwt")
     }
 
     fn payload() -> EncryptedPayload {

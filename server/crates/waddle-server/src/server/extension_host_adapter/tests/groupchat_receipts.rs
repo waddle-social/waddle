@@ -32,11 +32,11 @@ pub(super) async fn intents(f: &IngressFixture) -> Vec<IngressEffectIntent> {
 async fn wire_and_receipts(f: IngressFixture) {
     let mut fixture = GroupchatFixture::new(&f).await;
     let mut request = fixture.request("groupchat-wire");
-    request.thread_id = Some(waddle_extensions::ThreadId::new("root-message").expect("thread"));
+    request.thread_id = Some(waddle_extensions::ThreadId::try_new("root-message").expect("thread"));
     request.reply_to = Some(waddle_extensions::ReplyTarget {
-        id: waddle_extensions::StanzaId::new("root-message").expect("reply"),
+        id: waddle_extensions::StanzaId::try_new("root-message").expect("reply"),
         to: Some(
-            waddle_extensions::FullJidValue::new(format!("{}/romeo", fixture.room))
+            waddle_extensions::FullJidValue::try_new(format!("{}/romeo", fixture.room))
                 .expect("occupant reply"),
         ),
     });

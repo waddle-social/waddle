@@ -853,7 +853,7 @@ mod tests {
                 && url.ends_with(".png")
                 && url.contains("/link-preview-")
         }));
-        let token = waddle_xmpp::xep::LinkPreviewToken::new(
+        let token = waddle_xmpp::xep::LinkPreviewToken::try_new(
             preview.attr("token").expect("token").to_string(),
         )
         .expect("token");
@@ -948,7 +948,7 @@ mod tests {
             "direct video preview has no cached image"
         );
 
-        let token = waddle_xmpp::xep::LinkPreviewToken::new(
+        let token = waddle_xmpp::xep::LinkPreviewToken::try_new(
             preview.attr("token").expect("token").to_string(),
         )
         .expect("token");

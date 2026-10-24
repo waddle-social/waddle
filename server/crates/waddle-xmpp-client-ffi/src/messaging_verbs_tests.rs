@@ -72,7 +72,7 @@ fn bare(value: &str) -> BareJid {
 }
 
 fn stanza_id(value: &str) -> waddle_xmpp_client::request::StanzaId {
-    waddle_xmpp_client::request::StanzaId::new(value).expect("test stanza id")
+    waddle_xmpp_client::request::StanzaId::try_new(value).expect("test stanza id")
 }
 
 /// The origin-id every chat/groupchat verb stanza must carry

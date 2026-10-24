@@ -217,7 +217,7 @@ fn prepare_dm_call_thread_archive_message(
         return None;
     }
     let thread_id = key.sid.0.clone();
-    waddle_xmpp_core::mam::ThreadId::new(thread_id.clone())?;
+    waddle_xmpp_core::mam::ThreadId::try_new(thread_id.clone())?;
     let active = crate::server::routes::websocket::ActiveCallThread {
         anchor_origin_id: String::new(),
         initiator: offer.initiator,
@@ -237,7 +237,7 @@ fn add_dm_call_thread_archive_payloads(
     message: &mut Message,
     active: &crate::server::routes::websocket::ActiveCallThread,
 ) {
-    let Some(thread_id) = waddle_xmpp_core::mam::ThreadId::new(active.thread_id.clone()) else {
+    let Some(thread_id) = waddle_xmpp_core::mam::ThreadId::try_new(active.thread_id.clone()) else {
         return;
     };
     if !message.payloads.iter().any(|payload| {
@@ -587,9 +587,8 @@ async fn update_direct_link_preview_refs(
             )
             .await
             {
-                Ok(target) => {
-                    target.or_else(|| waddle_xmpp::mam::RichMessageId::new(correction.replaces_id))
-                }
+                Ok(target) => target
+                    .or_else(|| waddle_xmpp::mam::RichMessageId::try_new(correction.replaces_id)),
                 Err(error) => {
                     warn!(%archive_jid, %error, "correction preview target lookup failed");
                     deps.effects
@@ -606,7 +605,7 @@ async fn update_direct_link_preview_refs(
         .or_else(|| message.id.as_ref().map(|id| id.0.as_str()));
     let Some(message_id) = message_id else { return };
     if deps.effects.is_planning() {
-        if let Some(message_id) = waddle_xmpp::mam::RichMessageId::new(message_id.to_owned()) {
+        if let Some(message_id) = waddle_xmpp::mam::RichMessageId::try_new(message_id.to_owned()) {
             let archive_id = StanzaId::new(archive_id, jid::Jid::from(archive_jid.clone()));
             super::preview_plan::update(deps, archive_jid, &message_id, &archive_id, message).await;
         }
@@ -647,7 +646,7 @@ pub(super) async fn resolve_direct_correction_target_message_id(
         .await?;
     Ok(row.and_then(|row| {
         row.stanza_id
-            .and_then(|id| waddle_xmpp::mam::RichMessageId::new(id.id))
+            .and_then(|id| waddle_xmpp::mam::RichMessageId::try_new(id.id))
     }))
 }
 
@@ -687,7 +686,7 @@ async fn apply_direct_retraction_tombstone(
                 }
                 if deps.effects.is_planning() {
                     if let Some(message_id) =
-                        waddle_xmpp::mam::RichMessageId::new(retraction.retracts_id.clone())
+                        waddle_xmpp::mam::RichMessageId::try_new(retraction.retracts_id.clone())
                     {
                         super::preview_plan::clear(deps, archive_jid, &message_id).await;
                     }

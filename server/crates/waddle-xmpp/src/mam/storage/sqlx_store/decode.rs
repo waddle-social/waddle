@@ -113,12 +113,12 @@ fn decode_thread_columns(
             "orphan parent_thread_id without thread_id".to_string(),
         )),
         (Some(raw_id), parent_raw) => {
-            let id = ThreadId::new(raw_id).ok_or_else(|| {
+            let id = ThreadId::try_new(raw_id).ok_or_else(|| {
                 MamStorageError::Serialization("invalid (empty) thread_id".to_string())
             })?;
             let parent = match parent_raw {
                 None => None,
-                Some(raw_parent) => Some(ThreadId::new(raw_parent).ok_or_else(|| {
+                Some(raw_parent) => Some(ThreadId::try_new(raw_parent).ok_or_else(|| {
                     MamStorageError::Serialization("invalid (empty) parent_thread_id".to_string())
                 })?),
             };
@@ -150,7 +150,7 @@ fn decode_reply_columns(
             "orphan reply_to_jid without reply_to_id".to_string(),
         )),
         (Some(id_raw), to_raw) => {
-            let id = RichMessageId::new(id_raw)
+            let id = RichMessageId::try_new(id_raw)
                 .ok_or_else(|| MamStorageError::Serialization("empty reply_to_id".to_string()))?;
             let to = to_raw
                 .map(|raw| raw.parse::<jid::Jid>())

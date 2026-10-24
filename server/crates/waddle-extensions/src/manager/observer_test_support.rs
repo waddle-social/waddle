@@ -11,7 +11,7 @@ impl ExtensionManager {
     /// Panics if `CARGO_MANIFEST_DIR` is absent, the fixture engine or component cannot
     /// load, or fixture initialization fails.
     pub async fn with_observer_test_plugins(plugins: Vec<Arc<ObserverTestPlugin>>) -> Self {
-        let runtime = WasmRuntime::new().expect("fixture runtime");
+        let runtime = WasmRuntime::try_new().expect("fixture runtime");
         // This helper also runs inside sibling crates' test binaries.
         let path = Path::new(
             &std::env::var_os("CARGO_MANIFEST_DIR").expect("test runner sets CARGO_MANIFEST_DIR"),
@@ -53,8 +53,8 @@ mod tests {
 
     #[tokio::test]
     async fn observer_manager_selects_and_invokes_each_plugin_independently() {
-        let success_id = PluginId::new("observer-success").expect("plugin");
-        let warning_id = PluginId::new("observer-warning").expect("plugin");
+        let success_id = PluginId::try_new("observer-success").expect("plugin");
+        let warning_id = PluginId::try_new("observer-warning").expect("plugin");
         let success = ObserverTestPlugin::new(success_id.clone(), ObserverTestBehavior::Success);
         let warning = ObserverTestPlugin::new(warning_id.clone(), ObserverTestBehavior::Warning);
         let manager =
@@ -65,7 +65,7 @@ mod tests {
             manager.message_observer_plugins(&message),
             [success_id.clone(), warning_id.clone()]
         );
-        let waddle = WaddleId::new("space").expect("waddle");
+        let waddle = WaddleId::try_new("space").expect("waddle");
         let result = manager
             .process_message_observer(&success_id, &message, waddle.clone(), None)
             .await
@@ -86,7 +86,7 @@ mod tests {
 
     #[tokio::test]
     async fn observer_manager_rechecks_grants_and_message_eligibility() {
-        let id = PluginId::new("observer-revoked").expect("plugin");
+        let id = PluginId::try_new("observer-revoked").expect("plugin");
         let plugin = ObserverTestPlugin::new(id.clone(), ObserverTestBehavior::Success);
         let manager = ExtensionManager::with_observer_test_plugins(vec![plugin.clone()]).await;
         let mut message = message();
@@ -94,12 +94,12 @@ mod tests {
             manager.message_observer_plugins(&message),
             std::slice::from_ref(&id)
         );
-        let missing = PluginId::new("observer-missing").expect("plugin");
+        let missing = PluginId::try_new("observer-missing").expect("plugin");
         assert!(manager
             .process_message_observer(
                 &missing,
                 &message,
-                WaddleId::new("space").expect("waddle"),
+                WaddleId::try_new("space").expect("waddle"),
                 None
             )
             .await
@@ -107,7 +107,12 @@ mod tests {
         message.bodies.clear();
         assert!(manager.message_observer_plugins(&message).is_empty());
         assert!(manager
-            .process_message_observer(&id, &message, WaddleId::new("space").expect("waddle"), None)
+            .process_message_observer(
+                &id,
+                &message,
+                WaddleId::try_new("space").expect("waddle"),
+                None
+            )
             .await
             .is_none());
         message.bodies.insert(
@@ -117,7 +122,12 @@ mod tests {
         plugin.revoke();
         assert!(manager.message_observer_plugins(&message).is_empty());
         assert!(manager
-            .process_message_observer(&id, &message, WaddleId::new("space").expect("waddle"), None)
+            .process_message_observer(
+                &id,
+                &message,
+                WaddleId::try_new("space").expect("waddle"),
+                None
+            )
             .await
             .is_none());
         assert!(plugin.invocations().is_empty());

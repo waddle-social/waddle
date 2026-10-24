@@ -416,6 +416,7 @@ pub struct PubSubGetItemsResponse {
 
 /// Stable categories used to distinguish denied, invalid, unavailable, and retryable host calls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
 pub enum HostToolErrorCode {
     /// Invocation authority or capability grants do not permit this operation.
     Denied,
@@ -441,6 +442,7 @@ pub struct HostToolError {
 
 impl HostToolError {
     /// Create a permission-denied host-tool failure with the supplied diagnostic.
+    #[must_use]
     pub fn denied(message: DisplayText) -> Self {
         Self {
             code: HostToolErrorCode::Denied,
@@ -449,6 +451,7 @@ impl HostToolError {
     }
 
     /// Create a malformed-request host-tool failure with the supplied diagnostic.
+    #[must_use]
     pub fn invalid_request(message: DisplayText) -> Self {
         Self {
             code: HostToolErrorCode::InvalidRequest,
@@ -633,7 +636,7 @@ impl ExtensionHostTools for DenyingExtensionHostTools {
 fn unavailable() -> HostToolError {
     HostToolError {
         code: HostToolErrorCode::Unsupported,
-        message: DisplayText::new("extension host tools are not configured")
+        message: DisplayText::try_new("extension host tools are not configured")
             .expect("static host-tool error is non-empty"),
     }
 }

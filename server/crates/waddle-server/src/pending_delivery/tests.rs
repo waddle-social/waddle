@@ -4080,7 +4080,7 @@ async fn postgres_fenced_promotion_prunes_only_committed_unacked_sequence() {
     let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
     live_registry.register(alternate.clone(), sender);
     let entry = live_registry
-        .get_entry(&alternate)
+        .entry(&alternate)
         .expect("live alternate resource");
     users
         .ask(waddle_xmpp::registry::RegisterUserResource {
@@ -5299,7 +5299,7 @@ async fn reset_offline_flush_reopens_the_once_per_session_cas() {
     let resource = full("alice@example.com/web");
     let (tx, _rx) = tokio::sync::mpsc::channel(8);
     registry.register(resource.clone(), tx);
-    let entry = registry.get_entry(&resource).expect("registered entry");
+    let entry = registry.entry(&resource).expect("registered entry");
 
     assert!(entry.claim_offline_flush(), "first claim wins");
     assert!(!entry.claim_offline_flush(), "CAS: second claim loses");
@@ -5343,7 +5343,7 @@ async fn transient_deferral_plus_cas_reset_delivers_on_next_presence_flush() {
     let resource = full("alice@example.com/web");
     let (tx, mut rx) = tokio::sync::mpsc::channel(8);
     registry.register(resource.clone(), tx);
-    let entry = registry.get_entry(&resource).expect("registered entry");
+    let entry = registry.entry(&resource).expect("registered entry");
     let sm_session = SmSessionId::new("sm-stream-cas-reset");
 
     assert!(

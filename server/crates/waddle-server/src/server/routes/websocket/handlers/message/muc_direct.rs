@@ -151,7 +151,7 @@ async fn handle_muc_private_message(
             "Private messages are not allowed for your role in this room.",
         )]);
     }
-    let Some(target_occupant) = snapshot.room.get_occupant(&target_nick) else {
+    let Some(target_occupant) = snapshot.room.occupant(&target_nick) else {
         return Some(vec![message_error_frame(
             incoming,
             bound_jid,
@@ -179,7 +179,7 @@ async fn handle_muc_private_message(
         )]);
     }
     let recipient_bare = target_occupant.real_jid.to_bare();
-    let recipient_sessions = snapshot.room.get_occupant_sessions(&target_nick);
+    let recipient_sessions = snapshot.room.occupant_sessions(&target_nick);
 
     let from_room_jid = match room_jid.clone().with_resource_str(&sender_nick) {
         Ok(jid) => jid,
@@ -874,7 +874,7 @@ mod tests {
     use waddle_xmpp::{Affiliation, Role};
 
     fn secret() -> OccupantIdSecret {
-        OccupantIdSecret::new(vec![3u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
+        OccupantIdSecret::try_new(vec![3u8; OCCUPANT_ID_SECRET_MIN_BYTES]).expect("valid secret")
     }
 
     fn pm() -> Message {

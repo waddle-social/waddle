@@ -17,6 +17,7 @@ pub enum PreviewImageMediaType {
 
 impl PreviewImageMediaType {
     /// Borrow the canonical MIME text used on the wire.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Png => "image/png",
@@ -83,6 +84,7 @@ pub enum DirectVideoMediaType {
 
 impl DirectVideoMediaType {
     /// Borrow the canonical MIME text used on the wire.
+    #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Mp4 => "video/mp4",
@@ -137,6 +139,7 @@ impl std::error::Error for InvalidDirectVideoMediaType {}
 /// This intentionally stays string-based so crates that already parse into
 /// their local URL type can do so at the boundary without adding URL parsing
 /// dependencies to `waddle-xmpp-core`.
+#[must_use]
 pub fn first_eligible_https_url_text(body: &str) -> Option<&str> {
     body.char_indices().find_map(|(idx, _)| {
         if !body[idx..]

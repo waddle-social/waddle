@@ -672,7 +672,7 @@ async fn invite_quota_recovers_generated_notification(
     room.set_affiliation(invite.invitee.clone(), affiliation);
     let actor = RoomActor::spawn(RoomActor::new(
         room,
-        OccupantIdSecret::new(vec![b'x'; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![b'x'; 32]).expect("secret"),
     ));
     let grant = MucMembershipMutation {
         room: invite.room.clone(),
@@ -794,7 +794,7 @@ async fn invite_quota_recovers_generated_notification(
     );
     let snapshot = actor.ask(GetSnapshot).await.expect("room snapshot");
     assert_eq!(
-        snapshot.room.get_affiliation(&invite.invitee),
+        snapshot.room.affiliation(&invite.invitee),
         Affiliation::Member,
         "canonical quota exhaustion preserves both existing and newly granted membership"
     );
@@ -903,7 +903,7 @@ async fn invite_quota_recovers_generated_notification(
             .await
             .expect("membership preserved")
             .room
-            .get_affiliation(&invite.invitee),
+            .affiliation(&invite.invitee),
         Affiliation::Member
     );
     actor.kill();

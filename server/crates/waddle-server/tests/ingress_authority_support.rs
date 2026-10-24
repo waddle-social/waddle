@@ -98,7 +98,7 @@ impl IngressFixture {
             .parse()
             .expect("fixture target bare JID");
         let claim_epoch = ClaimEpoch(17);
-        let handle = IngressAuthority::new(
+        let handle = IngressAuthority::try_new(
             IngressConfig {
                 pool_size: 4,
                 retry_attempts: 5,

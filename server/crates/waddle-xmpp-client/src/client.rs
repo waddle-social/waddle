@@ -32,6 +32,7 @@ pub struct ClientHandle {
 
 impl ClientHandle {
     /// Subscribe to the live event stream.
+    #[must_use]
     pub fn events(&self) -> broadcast::Receiver<ClientEvent> {
         self.events.subscribe()
     }
@@ -40,6 +41,7 @@ impl ClientHandle {
     ///
     /// Terminates the process if a panicking writer poisoned the shared state;
     /// an uncertain snapshot must not authorize continued session operations.
+    #[must_use]
     pub fn snapshot(&self) -> SessionSnapshot {
         self.state
             .read()
@@ -48,6 +50,7 @@ impl ClientHandle {
     }
 
     /// Current high-level client state.
+    #[must_use]
     pub fn state(&self) -> ClientState {
         self.snapshot().client_state()
     }
@@ -122,12 +125,13 @@ impl XmppClient {
     /// # Errors
     ///
     /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
-    pub fn new(config: ClientConfig) -> ClientResult<Self> {
+    pub fn try_new(config: ClientConfig) -> ClientResult<Self> {
         config.validate()?;
         Ok(Self { config })
     }
 
     /// Borrow the validated configuration used by this client or runtime.
+    #[must_use]
     pub fn config(&self) -> &ClientConfig {
         &self.config
     }
@@ -138,7 +142,7 @@ impl XmppClient {
     ///
     /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
     pub fn runtime(&self) -> ClientResult<XmppRuntime> {
-        XmppRuntime::new(self.config.clone())
+        XmppRuntime::try_new(self.config.clone())
     }
 
     /// Create the native asynchronous client driver using the default WebSocket transport.
@@ -162,7 +166,7 @@ impl XmppClient {
     where
         TFactory: WebSocketTransportFactory,
     {
-        ClientDriver::new(self.config.clone(), transport_factory)
+        ClientDriver::try_new(self.config.clone(), transport_factory)
     }
 }
 
@@ -184,14 +188,15 @@ where
     /// # Errors
     ///
     /// Returns the configuration validation error for an invalid endpoint, origin, or resource.
-    pub fn new(config: ClientConfig, transport_factory: TFactory) -> ClientResult<Self> {
+    pub fn try_new(config: ClientConfig, transport_factory: TFactory) -> ClientResult<Self> {
         Ok(Self {
-            runtime: XmppRuntime::new(config)?,
+            runtime: XmppRuntime::try_new(config)?,
             transport_factory,
         })
     }
 
     /// Borrow the immutable configuration used to create this client or runtime.
+    #[must_use]
     pub fn config(&self) -> &ClientConfig {
         self.runtime.config()
     }
@@ -694,7 +699,7 @@ fn message_delivery_stanza_id(element: &Element) -> Option<StanzaId> {
         return None;
     }
 
-    element.attr("id").and_then(|id| StanzaId::new(id).ok())
+    element.attr("id").and_then(|id| StanzaId::try_new(id).ok())
 }
 
 fn is_fatal_transport_error(error: &ClientError) -> bool {

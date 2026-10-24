@@ -111,7 +111,7 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
                 let affiliation = occupant.affiliation;
                 let room = &self.room;
                 self.room
-                    .get_occupant_sessions(&occupant.nick)
+                    .occupant_sessions(&occupant.nick)
                     .into_iter()
                     .map(move |full_jid| {
                         let watermark = room
@@ -144,7 +144,7 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
         // inbox fan-out without waiting for a respawn.
         let mut durable_recipient_bare_jids = self
             .room
-            .get_all_affiliations()
+            .all_affiliations()
             .into_iter()
             .filter(|entry| entry.affiliation >= Affiliation::Member)
             .map(|entry| entry.jid)
@@ -152,7 +152,7 @@ impl kameo::message::Message<GetRoomSnapshot> for RoomActor {
         durable_recipient_bare_jids.extend(
             self.durable_member_recipients
                 .iter()
-                .filter(|jid| self.room.get_affiliation(jid) != Affiliation::Outcast)
+                .filter(|jid| self.room.affiliation(jid) != Affiliation::Outcast)
                 .cloned(),
         );
         durable_recipient_bare_jids.sort();
@@ -217,7 +217,7 @@ impl kameo::message::Message<BuildGroupchatBroadcast> for RoomActor {
             .values()
             .flat_map(|o| {
                 self.room
-                    .get_occupant_sessions(&o.nick)
+                    .occupant_sessions(&o.nick)
                     .into_iter()
                     .filter(|jid| *jid != sender_jid_for_filter)
             })

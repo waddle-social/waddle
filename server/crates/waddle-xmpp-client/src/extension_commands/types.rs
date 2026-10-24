@@ -13,6 +13,7 @@ pub enum ExtensionCommandScope {
 
 impl ExtensionCommandScope {
     /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "global" => Some(Self::Global),
@@ -22,6 +23,7 @@ impl ExtensionCommandScope {
     }
 
     /// Return the canonical token used in protocol attributes or forms.
+    #[must_use]
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Global => "global",
@@ -106,6 +108,7 @@ pub enum ExtensionFieldType {
 
 impl ExtensionFieldType {
     /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    #[must_use]
     pub fn parse(value: Option<&str>) -> Self {
         match value {
             Some("boolean") => Self::Boolean,
@@ -122,6 +125,7 @@ impl ExtensionFieldType {
     }
 
     /// Return the canonical token used in protocol attributes or forms.
+    #[must_use]
     pub fn as_wire_str(self) -> &'static str {
         match self {
             Self::Boolean => "boolean",
@@ -196,6 +200,7 @@ pub enum ExtensionNoteType {
 
 impl ExtensionNoteType {
     /// Parse a supported wire value, rejecting unrecognized or malformed input.
+    #[must_use]
     pub fn parse(value: Option<&str>) -> Self {
         match value {
             Some("warn") | Some("warning") => Self::Warn,

@@ -52,7 +52,7 @@ fn decode_work(
         ),
         subscription: subscription.clone(),
         source: serde_json::from_str(&source_json)?,
-        body: DisplayText::new(body).map_err(|_| ObservationError::Codec)?,
+        body: DisplayText::try_new(body).map_err(|_| ObservationError::Codec)?,
         attempt: u32::try_from(attempt).map_err(|_| ObservationError::Codec)?,
     })
 }

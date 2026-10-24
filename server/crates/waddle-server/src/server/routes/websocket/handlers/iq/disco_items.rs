@@ -36,7 +36,7 @@ async fn classify_room_command_target(
             }
         };
         return if snapshot.config.group_dm {
-            if snapshot.get_affiliation(&requester_bare) >= Affiliation::Member {
+            if snapshot.affiliation(&requester_bare) >= Affiliation::Member {
                 RoomCommandTarget::GroupDm
             } else {
                 let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {

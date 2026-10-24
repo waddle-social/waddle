@@ -25,6 +25,7 @@ pub enum Affiliation {
 impl Affiliation {
     /// Whether this affiliation is allowed to publish to a node by default.
     /// Note: still subject to `PublishModel` overrides at the node level.
+    #[must_use]
     pub fn can_publish_default(self) -> bool {
         matches!(
             self,
@@ -33,11 +34,13 @@ impl Affiliation {
     }
 
     /// Whether this affiliation bars all interactions with the node.
+    #[must_use]
     pub fn is_outcast(self) -> bool {
         matches!(self, Affiliation::Outcast)
     }
 
     /// Whether the row should be persisted. We do not persist `None` rows.
+    #[must_use]
     pub fn is_persisted(self) -> bool {
         !matches!(self, Affiliation::None)
     }

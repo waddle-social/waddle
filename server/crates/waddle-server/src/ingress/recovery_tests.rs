@@ -153,7 +153,7 @@ pub(crate) fn recovery_plan(fixture: &IngressFixture) -> IngressSubmission {
 }
 
 async fn rollback(fixture: IngressFixture) {
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox schema");
     let inbox = DatabaseInboxStorage::from_database(fixture.db.clone())

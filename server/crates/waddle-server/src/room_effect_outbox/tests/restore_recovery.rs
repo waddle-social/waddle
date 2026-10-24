@@ -299,7 +299,7 @@ async fn assert_foreign_removal_delivery(affiliation: Affiliation, status: &str)
         RoomClaimFenceContext::new(old_fence.entity.clone(), foreign_owner, foreign_epoch);
     let foreign_actor = RoomActor::spawn(RoomActor::new(
         MucRoom::new(room.clone(), "w".to_owned(), "c".to_owned(), config),
-        OccupantIdSecret::new(vec![7; 32]).expect("secret"),
+        OccupantIdSecret::try_new(vec![7; 32]).expect("secret"),
     ));
     foreign_actor
         .ask(RestoreDurableRoomState {

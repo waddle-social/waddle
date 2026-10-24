@@ -383,7 +383,7 @@ impl DataForm {
     }
 
     /// Get the `FORM_TYPE` value, if present.
-    pub fn get_form_type_value(&self) -> Option<&str> {
+    pub fn form_type_value(&self) -> Option<&str> {
         self.fields
             .iter()
             .find(|f| f.var.as_deref() == Some("FORM_TYPE"))
@@ -403,17 +403,17 @@ impl DataForm {
     }
 
     /// Get a field's first value by var name.
-    pub fn get_value(&self, var: &str) -> Option<&str> {
+    pub fn value(&self, var: &str) -> Option<&str> {
         self.field(var).and_then(|f| f.value())
     }
 
     /// Get a field's values by var name.
-    pub fn get_values(&self, var: &str) -> Option<&[String]> {
+    pub fn values(&self, var: &str) -> Option<&[String]> {
         self.field(var).map(|f| f.values.as_slice())
     }
 
     /// Get a field's value as a boolean.
-    pub fn get_bool(&self, var: &str) -> Option<bool> {
+    pub fn bool(&self, var: &str) -> Option<bool> {
         self.field(var).and_then(|f| f.value_as_bool())
     }
 }

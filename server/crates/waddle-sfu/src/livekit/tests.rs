@@ -20,7 +20,7 @@ fn fixture_config() -> SfuConfig {
             .expect("test secret meets min length"),
         webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length"),
-        ws_url: WebsocketUrl::new(Url::parse("wss://livekit.waddle.social").unwrap()).unwrap(),
+        ws_url: WebsocketUrl::try_new(Url::parse("wss://livekit.waddle.social").unwrap()).unwrap(),
         turn_host: TurnHost::new("turn.waddle.social"),
         turn_tls_port: 443,
         turn_udp_port: 3478,
@@ -45,11 +45,11 @@ fn applied_state(disposition: TeardownDisposition) -> CallState {
 }
 
 fn fixture_room_sid(value: &str) -> RoomSid {
-    RoomSid::new(value).expect("valid room sid")
+    RoomSid::try_new(value).expect("valid room sid")
 }
 
 fn fixture_participant_sid(value: &str) -> ParticipantSid {
-    ParticipantSid::new(value).expect("valid participant sid")
+    ParticipantSid::try_new(value).expect("valid participant sid")
 }
 
 fn observed_sids(room_sid: Option<&str>, participant_sid: Option<&str>) -> ObservedCallSids {
@@ -65,8 +65,8 @@ fn fixture_occupancy_session() -> OccupancySessionGeneration {
 
 #[test]
 fn observed_join_registers_after_restart_and_defers_conflicting_room_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("restart@muc.waddle.social").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("restart@muc.waddle.social").expect("call id");
     let alice = fixture_identity("alice");
     let current = observed_sids(Some("RM_current"), Some("PA_current"));
 
@@ -135,8 +135,8 @@ fn stored_participant_sid(
 
 #[test]
 fn participant_registered_at_keeps_the_first_current_registration_timestamp() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("c-first-registered-at").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("c-first-registered-at").expect("call id");
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_current"), Some("PA_current"));
     let key = (call.clone(), alice.clone());
@@ -186,8 +186,8 @@ fn participant_registered_at_keeps_the_first_current_registration_timestamp() {
 
 #[test]
 fn participant_sid_advance_on_join_restamps_the_current_registration() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("c-participant-sid-advance").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("c-participant-sid-advance").expect("call id");
     let alice = fixture_identity("alice");
     let original = observed_sids(Some("RM_current"), Some("PA_original"));
     let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
@@ -237,8 +237,8 @@ fn participant_sid_advance_on_join_restamps_the_current_registration() {
 
 #[test]
 fn delayed_old_leave_with_a_superseded_participant_sid_is_stale() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("c-old-leave-stale").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("c-old-leave-stale").expect("call id");
     let alice = fixture_identity("alice");
     let original = observed_sids(Some("RM_current"), Some("PA_original"));
     let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
@@ -267,8 +267,8 @@ fn delayed_old_leave_with_a_superseded_participant_sid_is_stale() {
 
 #[test]
 fn leave_from_a_different_room_incarnation_remains_stale() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("c-old-room-leave-stale").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("c-old-room-leave-stale").expect("call id");
     let alice = fixture_identity("alice");
     let current = observed_sids(Some("RM_current"), Some("PA_current"));
     let old_room = observed_sids(Some("RM_old"), Some("PA_old"));
@@ -295,8 +295,8 @@ fn leave_from_a_different_room_incarnation_remains_stale() {
 
 #[test]
 fn current_leave_with_the_latest_participant_sid_tears_down() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("c-current-leave").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("c-current-leave").expect("call id");
     let alice = fixture_identity("alice");
     let original = observed_sids(Some("RM_current"), Some("PA_original"));
     let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
@@ -324,8 +324,8 @@ fn current_leave_with_the_latest_participant_sid_tears_down() {
 
 #[test]
 fn registry_tracks_participants_per_call() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("r1").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("r1").unwrap();
     let a = fixture_identity("alice");
     let b = fixture_identity("bob");
 
@@ -347,8 +347,8 @@ fn registry_tracks_participants_per_call() {
 
 #[test]
 fn issue_join_token_returns_room_scoped_jwt() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c1").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c1").unwrap();
     let identity = fixture_identity("alice");
 
     let token = sfu
@@ -360,8 +360,8 @@ fn issue_join_token_returns_room_scoped_jwt() {
 
 #[test]
 fn participant_last_minted_at_tracks_the_current_registration() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("c-last-minted-at").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("c-last-minted-at").expect("call id");
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_observed"), Some("PA_observed"));
 
@@ -400,7 +400,7 @@ fn participant_last_minted_at_tracks_the_current_registration() {
 
 #[test]
 fn issue_turn_credentials_yields_time_limited_pair() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
     let identity = fixture_identity("alice");
     let cred = sfu.issue_turn_credentials(&identity).expect("cred issued");
     assert!(cred.expires_at > chrono::Utc::now());
@@ -412,8 +412,8 @@ fn issue_turn_credentials_yields_time_limited_pair() {
 
 #[test]
 fn unregister_revokes_every_jti_issued_to_the_participant() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-revoke").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-revoke").unwrap();
     let alice = fixture_identity("alice");
 
     let t1 = sfu
@@ -436,8 +436,8 @@ fn unregister_revokes_every_jti_issued_to_the_participant() {
 
 #[test]
 fn revocation_is_scoped_per_participant() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-scope").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-scope").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -459,8 +459,8 @@ fn revocation_is_scoped_per_participant() {
 
 #[test]
 fn revoke_issued_token_ignores_a_jti_the_server_never_minted() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-unknown-jti").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-unknown-jti").unwrap();
     let alice = fixture_identity("alice");
 
     let minted = sfu
@@ -481,8 +481,8 @@ fn revoke_issued_token_ignores_a_jti_the_server_never_minted() {
 
 #[test]
 fn revoke_issued_token_drops_the_emptied_issued_bucket() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-empty-bucket").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-empty-bucket").unwrap();
     let alice = fixture_identity("alice");
 
     let minted = sfu
@@ -526,7 +526,7 @@ fn revoke_issued_token_reports_a_guarded_eject_intent() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("c-bounce-eject").expect("call id");
+    let call = CallId::try_new("c-bounce-eject").expect("call id");
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_revoked"), Some("PA_revoked"));
     sfu.register_call_participant(&call, &alice);
@@ -578,7 +578,7 @@ fn targeted_revocation_requeues_eject_when_the_holder_joins_late() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("c-bounce-late-join").expect("call id");
+    let call = CallId::try_new("c-bounce-late-join").expect("call id");
     let alice = fixture_identity("alice");
     let minted = sfu
         .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
@@ -624,7 +624,7 @@ fn targeted_revocation_keeps_other_live_issuances_authorized() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("c-targeted-authorized").expect("call id");
+    let call = CallId::try_new("c-targeted-authorized").expect("call id");
     let alice = fixture_identity("alice");
     let first = sfu
         .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
@@ -648,8 +648,8 @@ fn targeted_revocation_keeps_other_live_issuances_authorized() {
 
 #[test]
 fn issued_jti_vec_is_capped_per_participant() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-cap").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-cap").unwrap();
     let alice = fixture_identity("alice");
 
     // Mint well past the cap; every fresh token should slot in,
@@ -672,7 +672,7 @@ fn issued_jti_vec_is_capped_per_participant() {
 #[test]
 fn revoked_entries_are_swept_once_past_expiry() {
     use chrono::Duration as ChronoDuration;
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
 
     // Seed the revoked map directly with a past-exp entry so
     // the test does not depend on real-time tickdown of the
@@ -695,7 +695,7 @@ fn revoked_entries_are_swept_once_past_expiry() {
     sfu.revoked
         .insert(Jti::new(), Utc::now() - ChronoDuration::seconds(1));
     let alice = fixture_identity("alice");
-    let call = CallId::new("c-sweep").unwrap();
+    let call = CallId::try_new("c-sweep").unwrap();
     sfu.register_call_participant(&call, &alice);
     let _ = sfu.unregister_call_participant(&call, &alice, None);
     assert_eq!(
@@ -707,8 +707,8 @@ fn revoked_entries_are_swept_once_past_expiry() {
 
 #[test]
 fn register_is_idempotent() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c1").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c1").unwrap();
     let identity = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &identity);
@@ -718,8 +718,8 @@ fn register_is_idempotent() {
 
 #[test]
 fn generation_increments_only_when_a_call_is_recreated() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("alice@waddle.social::reused-client-sid").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("alice@waddle.social::reused-client-sid").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -766,8 +766,8 @@ fn generation_increments_only_when_a_call_is_recreated() {
 
 #[test]
 fn sid_learning_stores_the_first_sid_and_defers_join_conflicts() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-sid-learning").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-sid-learning").unwrap();
     let alice = fixture_identity("alice");
     let first = observed_sids(Some("RM_first"), Some("PA_first"));
     let conflicting = observed_sids(Some("RM_other"), Some("PA_other"));
@@ -815,7 +815,7 @@ fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("c-observe-pending-eject").expect("call id");
+    let call = CallId::try_new("c-observe-pending-eject").expect("call id");
     let alice = fixture_identity("alice");
     let minted = sfu
         .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
@@ -856,8 +856,8 @@ fn observe_path_requeues_pending_revocation_eject_without_deadlocking() {
 
 #[test]
 fn join_side_participant_sid_advance_can_learn_the_first_room_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-atomic-sid-learning").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-atomic-sid-learning").unwrap();
     let alice = fixture_identity("alice");
     let participant_only = observed_sids(None, Some("PA_current"));
     let rejoined = observed_sids(Some("RM_current"), Some("PA_rejoined"));
@@ -890,8 +890,8 @@ fn join_side_participant_sid_advance_can_learn_the_first_room_sid() {
 
 #[test]
 fn unknown_identity_teardown_does_not_teach_room_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("c-unknown-identity-sid").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("c-unknown-identity-sid").unwrap();
     let alice = fixture_identity("alice");
     let ghost = fixture_identity("mallory");
     let stale = observed_sids(Some("RM_stale"), Some("PA_stale"));
@@ -1280,7 +1280,7 @@ fn teardown_without_runtime_reports_typed_intents() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("r-no-runtime").expect("call id");
+    let call = CallId::try_new("r-no-runtime").expect("call id");
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -1308,7 +1308,7 @@ async fn failed_admin_effects_are_independently_reported() {
             sink_values.lock().expect("sink lock").push(intent);
             Box::pin(async {})
         }));
-    let call = CallId::new("r-admin-fail").expect("call id");
+    let call = CallId::try_new("r-admin-fail").expect("call id");
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -1341,7 +1341,7 @@ async fn saturated_teardown_gate_reports_without_spawning_admin_work() {
             Box::pin(async {})
         }));
     sfu.admin_permits = Arc::new(Semaphore::new(0));
-    let call = CallId::new("r-saturated").expect("call id");
+    let call = CallId::try_new("r-saturated").expect("call id");
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -1372,7 +1372,7 @@ async fn teardown_burst_reserves_before_spawn_and_defers_excess_work() {
         }));
     let excess = 32;
     for index in 0..(ADMIN_CONCURRENCY + excess) {
-        let call = CallId::new(format!("r-burst-{index}")).expect("call id");
+        let call = CallId::try_new(format!("r-burst-{index}")).expect("call id");
         let alice = fixture_identity("alice");
         sfu.register_call_participant(&call, &alice);
         let _ = sfu.unregister_call_participant(&call, &alice, None);
@@ -1414,7 +1414,7 @@ async fn saturated_teardown_reports_use_one_supervised_persistence_task() {
 
     let calls = 32;
     for index in 0..calls {
-        let call = CallId::new(format!("r-persist-burst-{index}")).expect("call id");
+        let call = CallId::try_new(format!("r-persist-burst-{index}")).expect("call id");
         let alice = fixture_identity("alice");
         sfu.register_call_participant(&call, &alice);
         let _ = sfu.unregister_call_participant(&call, &alice, None);
@@ -1441,7 +1441,7 @@ async fn saturated_teardown_reports_use_one_supervised_persistence_task() {
 async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-sid-guard").expect("call id");
+    let call = CallId::try_new("r-sid-guard").expect("call id");
     let alice = fixture_identity("alice");
     let current = observed_sids(Some("RM_current"), Some("PA_current"));
     assert_eq!(
@@ -1475,7 +1475,7 @@ async fn teardown_executor_sid_guard_skips_a_new_room_incarnation() {
 async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-sid-unresolved").expect("call id");
+    let call = CallId::try_new("r-sid-unresolved").expect("call id");
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
     let persisted = CallTeardownIntentLite {
@@ -1505,7 +1505,7 @@ async fn teardown_executor_defers_when_live_entry_has_not_learned_persisted_sids
 async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_completes() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-restart-fence").expect("call id");
+    let call = CallId::try_new("r-restart-fence").expect("call id");
     let alice = fixture_identity("alice");
     let intent = CallTeardownIntentLite {
         call_id: call.clone(),
@@ -1555,7 +1555,7 @@ async fn teardown_executor_requeues_fenced_missing_calls_until_a_reconcile_pass_
 async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fence() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-live-fence").expect("call id");
+    let call = CallId::try_new("r-live-fence").expect("call id");
     let alice = fixture_identity("alice");
     sfu.reconcile_pass_completed.store(true, Ordering::Release);
     // LiveKit hosts a NEWER incarnation: same identity, different sid.
@@ -1591,7 +1591,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
     // Identity no longer connected at all: the removal already happened;
     // success without touching the room.
     let absent = CallTeardownIntentLite {
-        call_id: CallId::new("r-live-fence-gone").expect("call id"),
+        call_id: CallId::try_new("r-live-fence-gone").expect("call id"),
         target: TeardownTargetLite::Participant {
             identity: alice,
             participant_sid: Some(fixture_participant_sid("PA_old")),
@@ -1616,7 +1616,7 @@ async fn teardown_executor_declines_missing_call_when_live_sid_disproves_the_fen
 async fn teardown_executor_defers_missing_call_when_live_participant_sid_is_unknown() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-live-fence-unknown").expect("call id");
+    let call = CallId::try_new("r-live-fence-unknown").expect("call id");
     let alice = fixture_identity("alice");
     sfu.reconcile_pass_completed.store(true, Ordering::Release);
     admin.set_live_with_sids(&call, vec![(alice.clone(), None)]);
@@ -1660,7 +1660,7 @@ async fn inline_teardown_reports_participant_and_room_intents_before_admin_work_
             sink_values.lock().expect("sink lock").push(intent);
             Box::pin(async {})
         }));
-    let call = CallId::new("r-inline-report-first").expect("call id");
+    let call = CallId::try_new("r-inline-report-first").expect("call id");
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -1706,7 +1706,7 @@ async fn inline_teardown_reports_participant_and_room_intents_before_admin_work_
 async fn update_capabilities_pushes_permission_for_registered_participant() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-grants").unwrap();
+    let call = CallId::try_new("r-grants").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -1744,7 +1744,7 @@ async fn update_capabilities_pushes_permission_for_registered_participant() {
 async fn downgrade_pushes_even_when_the_local_registry_lost_the_participant() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-grants-ghost").unwrap();
+    let call = CallId::try_new("r-grants-ghost").unwrap();
     let alice = fixture_identity("alice");
     assert!(
         !sfu.has_call_participant(&call, &alice),
@@ -1771,7 +1771,7 @@ async fn downgrade_pushes_even_when_the_local_registry_lost_the_participant() {
 async fn downgrade_to_listen_only_revokes_outstanding_tokens_but_keeps_participant() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-demote").unwrap();
+    let call = CallId::try_new("r-demote").unwrap();
     let alice = fixture_identity("alice");
     let token = sfu
         .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
@@ -1801,7 +1801,7 @@ async fn downgrade_to_listen_only_revokes_outstanding_tokens_but_keeps_participa
 async fn upgrade_to_voice_does_not_revoke_tokens() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-promote").unwrap();
+    let call = CallId::try_new("r-promote").unwrap();
     let alice = fixture_identity("alice");
     let token = sfu
         .issue_join_token(
@@ -1843,7 +1843,7 @@ async fn a_superseded_grant_push_never_lands_after_a_newer_one() {
     // test must catch.
     admin.queue_update_delays([StdDuration::from_millis(300), StdDuration::from_millis(10)]);
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-order").unwrap();
+    let call = CallId::try_new("r-order").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -1895,7 +1895,7 @@ async fn a_superseded_grant_push_never_lands_after_a_newer_one() {
 async fn sequential_grant_pushes_each_reach_livekit() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-sequential").unwrap();
+    let call = CallId::try_new("r-sequential").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -1931,7 +1931,7 @@ async fn sequential_grant_pushes_each_reach_livekit() {
 async fn live_participants_reports_livekit_truth_not_the_local_registry() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-authoritative").unwrap();
+    let call = CallId::try_new("r-authoritative").unwrap();
     let alice = fixture_identity("alice");
     // LiveKit holds alice; this process's registry does not (the
     // cross-node case).
@@ -1961,7 +1961,7 @@ async fn live_participants_reports_unknown_when_livekit_cannot_be_reached() {
     let admin = Arc::new(RecordingAdmin::default());
     admin.fail_list();
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-list-fails").unwrap();
+    let call = CallId::try_new("r-list-fails").unwrap();
 
     assert!(
         crate::SfuReconciler::live_participants(&sfu, &call)
@@ -1975,7 +1975,7 @@ async fn live_participants_reports_unknown_when_livekit_cannot_be_reached() {
 async fn unregister_schedules_remove_participant_on_the_admin_client() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-evict").unwrap();
+    let call = CallId::try_new("r-evict").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -2009,7 +2009,7 @@ async fn unregister_schedules_remove_participant_on_the_admin_client() {
 async fn unregister_last_participant_also_schedules_delete_room() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-empty").unwrap();
+    let call = CallId::try_new("r-empty").unwrap();
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -2041,7 +2041,7 @@ async fn unregister_of_unknown_identity_does_not_schedule_admin_work() {
     // may still be live" convergence instead.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-ghost").unwrap();
+    let call = CallId::try_new("r-ghost").unwrap();
     let ghost = fixture_identity("mallory");
 
     let state = applied_state(sfu.unregister_call_participant(&call, &ghost, None));
@@ -2069,7 +2069,7 @@ fn unregister_requeues_eject_when_a_revoked_holder_rejoins_late() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("r-late-rejoin").expect("call id");
+    let call = CallId::try_new("r-late-rejoin").expect("call id");
     let alice = fixture_identity("alice");
     let first_join = observed_sids(Some("RM_first"), Some("PA_first"));
     assert_eq!(
@@ -2125,7 +2125,7 @@ async fn note_participant_left_clears_local_state_without_admin_call() {
     // production impl honours it.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-webhook").unwrap();
+    let call = CallId::try_new("r-webhook").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -2148,7 +2148,7 @@ async fn note_participant_left_clears_local_state_without_admin_call() {
 async fn stale_sid_webhook_is_dropped_after_same_call_id_is_reused() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-stale-room").unwrap();
+    let call = CallId::try_new("r-stale-room").unwrap();
     let alice = fixture_identity("alice");
     let call_a = observed_sids(Some("RM_A"), Some("PA_A"));
     let call_b = observed_sids(Some("RM_B"), Some("PA_B"));
@@ -2199,7 +2199,7 @@ async fn stale_sid_webhook_is_dropped_after_same_call_id_is_reused() {
 async fn matching_sid_webhook_still_tears_down() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-match").unwrap();
+    let call = CallId::try_new("r-match").unwrap();
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_match"), Some("PA_match"));
 
@@ -2224,7 +2224,7 @@ async fn matching_sid_webhook_still_tears_down() {
 async fn teardown_without_sids_stays_backward_compatible() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-no-sids").unwrap();
+    let call = CallId::try_new("r-no-sids").unwrap();
     let alice = fixture_identity("alice");
     let learned = observed_sids(Some("RM_backcompat"), Some("PA_backcompat"));
 
@@ -2249,7 +2249,7 @@ async fn teardown_without_sids_stays_backward_compatible() {
 async fn stale_generation_skips_scheduled_remove_participant() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-stale-generation").unwrap();
+    let call = CallId::try_new("r-stale-generation").unwrap();
     let alice = fixture_identity("alice");
     let call_a = observed_sids(Some("RM_old"), Some("PA_old"));
     let call_b = observed_sids(Some("RM_new"), Some("PA_new"));
@@ -2292,7 +2292,7 @@ async fn stale_generation_skips_scheduled_remove_participant() {
 async fn no_call_teardown_uses_last_generation_to_protect_a_rejoin() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-no-call-stale-generation").unwrap();
+    let call = CallId::try_new("r-no-call-stale-generation").unwrap();
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -2326,7 +2326,7 @@ async fn last_participant_delete_room_skipped_when_someone_rejoins() {
     // unregister returns, before yielding to the spawn.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-rejoin").unwrap();
+    let call = CallId::try_new("r-rejoin").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -2363,7 +2363,7 @@ async fn delete_room_skipped_when_livekit_reports_another_replicas_participant()
     // LiveKit itself before DeleteRoom.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-cross-replica").unwrap();
+    let call = CallId::try_new("r-cross-replica").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -2398,7 +2398,7 @@ async fn delete_room_fires_when_livekit_reports_only_the_departing_participant()
     // empty_timeout.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-departing-echo").unwrap();
+    let call = CallId::try_new("r-departing-echo").unwrap();
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -2422,7 +2422,7 @@ async fn delete_room_skipped_when_only_a_foreign_participant_remains() {
     // occupancy. Deleting the room around it would kill the recording.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-egress").unwrap();
+    let call = CallId::try_new("r-egress").unwrap();
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -2453,7 +2453,7 @@ async fn delete_room_skipped_when_a_participant_registers_during_the_occupancy_p
         fixture_config(),
         Arc::clone(&admin) as Arc<_>,
     ));
-    let call = CallId::new("r-probe-race").unwrap();
+    let call = CallId::try_new("r-probe-race").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -2493,7 +2493,7 @@ async fn delete_room_skipped_when_livekit_occupancy_cannot_be_confirmed() {
     // skipped and the room lapses via LiveKit's own empty_timeout.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-list-error").unwrap();
+    let call = CallId::try_new("r-list-error").unwrap();
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -2528,7 +2528,7 @@ async fn reconcile_sweeps_ghost_absent_from_livekit() {
     // already gone from LiveKit.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("general@muc.waddle.social").unwrap();
+    let call = CallId::try_new("general@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
     sfu.register_call_participant(&call, &alice);
@@ -2567,7 +2567,7 @@ async fn reconcile_respects_registration_grace_window() {
     // window — sweeping here would tear down a call coming up.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room@muc.waddle.social").unwrap();
+    let call = CallId::try_new("room@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
     // LiveKit reports nobody (room not yet created / mid-connect).
@@ -2588,7 +2588,7 @@ async fn reconcile_respects_registration_grace_window() {
 async fn reconcile_keeps_genuinely_connected_participants() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room2@muc.waddle.social").unwrap();
+    let call = CallId::try_new("room2@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
     admin.set_live(&call, vec![alice.clone()]);
@@ -2609,7 +2609,7 @@ async fn reconcile_skips_calls_it_cannot_confirm() {
     let admin = Arc::new(RecordingAdmin::default());
     admin.fail_list();
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room3@muc.waddle.social").unwrap();
+    let call = CallId::try_new("room3@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -2629,8 +2629,8 @@ async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
     // rejoin before the next pass. Nothing may be swept.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call_a = CallId::new("standup@muc.waddle.social").unwrap();
-    let call_b = CallId::new("alice@waddle.social::dm-1").unwrap();
+    let call_a = CallId::try_new("standup@muc.waddle.social").unwrap();
+    let call_b = CallId::try_new("alice@waddle.social::dm-1").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
     sfu.register_call_participant(&call_a, &alice);
@@ -2669,7 +2669,7 @@ async fn reconcile_livekit_restart_does_not_mass_terminate_live_calls() {
 async fn reconcile_room_sid_rotation_reincarnates_call_and_accepts_new_sid_observation() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("sid-rotation@muc.waddle.social").unwrap();
+    let call = CallId::try_new("sid-rotation@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     let old_observed = observed_sids(Some("RM_old"), Some("PA_old"));
     let new_observed = observed_sids(Some("RM_new"), Some("PA_new"));
@@ -2732,7 +2732,7 @@ async fn reconcile_room_sid_rotation_reincarnates_call_and_accepts_new_sid_obser
 async fn reconcile_listing_learns_a_missing_room_sid_without_rotating_generation() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("sid-learn@muc.waddle.social").unwrap();
+    let call = CallId::try_new("sid-learn@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     let learned_room_sid = fixture_room_sid("RM_learned");
     let stale = observed_sids(Some("RM_old"), Some("PA_old"));
@@ -2771,7 +2771,7 @@ async fn reconcile_failed_pass_resets_absence_streak() {
     // are not "consecutive".
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room@muc.waddle.social").unwrap();
+    let call = CallId::try_new("room@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
     admin.set_live(&call, vec![]);
@@ -2810,7 +2810,7 @@ async fn reconcile_streak_resets_on_reregistration() {
     // attempt.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room@muc.waddle.social").unwrap();
+    let call = CallId::try_new("room@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
     admin.set_live(&call, vec![]);
@@ -2837,12 +2837,12 @@ async fn reconcile_streak_resets_on_reregistration() {
 async fn reconcile_discovers_listed_livekit_rooms_and_sweeps_disconnected_after_grace() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("recovered@muc.waddle.social").unwrap();
+    let call = CallId::try_new("recovered@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
 
     admin.set_rooms(vec![crate::admin::ListedRoom {
         name: crate::admin::ListedRoomName::classify(call.as_str().to_owned()),
-        sid: Some(RoomSid::new("RM_recovered").expect("room sid")),
+        sid: Some(RoomSid::try_new("RM_recovered").expect("room sid")),
         num_participants: None,
     }]);
     admin.set_live(&call, vec![alice.clone()]);
@@ -2855,7 +2855,7 @@ async fn reconcile_discovers_listed_livekit_rooms_and_sweeps_disconnected_after_
     assert!(sfu.has_call_participant(&call, &alice));
     assert_eq!(
         stored_room_sid(&sfu, &call),
-        Some(RoomSid::new("RM_recovered").expect("room sid"))
+        Some(RoomSid::try_new("RM_recovered").expect("room sid"))
     );
 
     admin.set_live(&call, vec![]);
@@ -2880,7 +2880,7 @@ async fn reconcile_list_rooms_error_does_not_skip_registry_pass() {
         num_participants: None,
     }]);
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("recovery@muc.waddle.social").unwrap();
+    let call = CallId::try_new("recovery@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
     sfu.register_call_participant(&call, &alice);
 
@@ -2903,7 +2903,7 @@ async fn reconcile_limits_concurrent_room_occupancy_probes() {
 
     let room_count = RECONCILE_CONCURRENCY + 4;
     for i in 0..room_count {
-        let call = CallId::new(format!("bulk-{i}.muc.waddle.social")).unwrap();
+        let call = CallId::try_new(format!("bulk-{i}.muc.waddle.social")).unwrap();
         sfu.register_call_participant(&call, &fixture_identity("alice"));
         admin.set_live(&call, vec![]);
     }
@@ -2941,7 +2941,7 @@ fn restored_participant_skips_the_first_empty_bucket_eject_after_adoption() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("r-adopted-empty-bucket").expect("call id");
+    let call = CallId::try_new("r-adopted-empty-bucket").expect("call id");
     let alice = fixture_identity("alice");
 
     assert!(sfu.adopt_discovered_call(
@@ -2987,13 +2987,14 @@ fn concurrent_join_during_teardown_is_never_clobbered() {
     // must always be present in the registry, whatever the
     // interleaving. Run many racing iterations to exercise the
     // window.
-    let sfu =
-        Arc::new(LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test (no runtime)"));
+    let sfu = Arc::new(
+        LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test (no runtime)"),
+    );
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
     for i in 0..200 {
-        let call = CallId::new(format!("race-{i}")).unwrap();
+        let call = CallId::try_new(format!("race-{i}")).unwrap();
         sfu.register_call_participant(&call, &alice);
 
         let leaver = {
@@ -3021,7 +3022,7 @@ async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
     // so no DeleteRoom is scheduled against the fresh joiner.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-joiner-race").unwrap();
+    let call = CallId::try_new("r-joiner-race").unwrap();
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
 
@@ -3057,8 +3058,8 @@ async fn delete_room_not_fired_when_joiner_lands_before_conditional_remove() {
 
 #[test]
 fn final_direct_call_departure_retains_a_generation_tombstone() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("alice@waddle.social::dm-reap").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("alice@waddle.social::dm-reap").unwrap();
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -3083,8 +3084,8 @@ fn final_direct_call_departure_retains_a_generation_tombstone() {
 
 #[test]
 fn final_muc_departure_retains_generation_tracker() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("LiveKitSfu init in test");
-    let call = CallId::new("room@muc.waddle.social").unwrap();
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("LiveKitSfu init in test");
+    let call = CallId::try_new("room@muc.waddle.social").unwrap();
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -3111,7 +3112,7 @@ fn final_muc_departure_retains_generation_tracker() {
 async fn reconcile_prunes_generation_tombstones_older_than_25_hours() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("alice@waddle.social::aged-tombstone").expect("call id");
+    let call = CallId::try_new("alice@waddle.social::aged-tombstone").expect("call id");
     let alice = fixture_identity("alice");
 
     sfu.register_call_participant(&call, &alice);
@@ -3163,7 +3164,7 @@ async fn degraded_reconcile_pass_keeps_the_startup_fence_closed() {
 async fn partially_restored_call_merges_remaining_live_identities() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("merge-room@muc.waddle.social").expect("call id");
+    let call = CallId::try_new("merge-room@muc.waddle.social").expect("call id");
     let alice = Identity::from_jid("alice@waddle.social/web".parse().expect("jid"));
     let bob = Identity::from_jid("bob@waddle.social/web".parse().expect("jid"));
     let alice_sid = fixture_participant_sid("PA_alice_reconciled");
@@ -3173,7 +3174,7 @@ async fn partially_restored_call_merges_remaining_live_identities() {
     sfu.register_call_participant(&call, &alice);
     admin.set_rooms(vec![crate::admin::ListedRoom {
         name: crate::admin::ListedRoomName::classify(call.to_string()),
-        sid: Some(RoomSid::new("RM_merge").expect("room sid")),
+        sid: Some(RoomSid::try_new("RM_merge").expect("room sid")),
         num_participants: Some(2),
     }]);
     admin.set_live_with_sids(
@@ -3208,8 +3209,8 @@ async fn partially_restored_call_merges_remaining_live_identities() {
 
 #[test]
 fn reconciliation_listing_never_regresses_an_already_known_participant_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("merge-sid-race@muc.waddle.social").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("merge-sid-race@muc.waddle.social").expect("call id");
     let alice = fixture_identity("alice");
     let current = observed_sids(Some("RM_current"), Some("PA_new"));
     let stale_listed_sid = fixture_participant_sid("PA_old");
@@ -3241,7 +3242,7 @@ fn reconciliation_listing_never_regresses_an_already_known_participant_sid() {
 async fn adopted_participant_sid_makes_fenced_removal_decidable() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("adopt-sid@muc.waddle.social").expect("call id");
+    let call = CallId::try_new("adopt-sid@muc.waddle.social").expect("call id");
     let alice = Identity::from_jid("alice@waddle.social/web".parse().expect("jid"));
     let room_sid = fixture_room_sid("RM_adopt_sid");
     let participant_sid = fixture_participant_sid("PA_adopt_sid");
@@ -3292,8 +3293,8 @@ async fn adopted_participant_sid_makes_fenced_removal_decidable() {
 /// the old leave mismatches and the live twin's leave applies.
 #[test]
 fn equal_event_time_join_contests_lineage_and_defers_matching_leave() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("contested@muc.waddle.social").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("contested@muc.waddle.social").expect("call id");
     let alice = fixture_identity("alice");
     let event_second = Utc::now();
     let mut first = observed_sids(Some("RM_contested"), Some("PA_first"));
@@ -3372,8 +3373,8 @@ fn equal_event_time_join_contests_lineage_and_defers_matching_leave() {
 /// same-second twin survived.
 #[test]
 fn contested_lineage_resolves_only_via_a_probe_started_after_the_contest() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("contested-confirm@muc.waddle.social").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("contested-confirm@muc.waddle.social").expect("call id");
     let alice = fixture_identity("alice");
     let event_second = Utc::now();
     let mut first = observed_sids(Some("RM_confirm"), Some("PA_first"));
@@ -3449,7 +3450,7 @@ fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
             Box::pin(async {})
         },
     ));
-    let call = CallId::new("c-reconcile-rearm-eject").expect("call id");
+    let call = CallId::try_new("c-reconcile-rearm-eject").expect("call id");
     let alice = fixture_identity("alice");
     let minted = sfu
         .issue_join_token(&call, &alice, MediaCapabilities::direct_call_peer())
@@ -3486,10 +3487,10 @@ fn reconcile_rearms_pending_revocation_eject_for_already_tracked_identity() {
 
 #[test]
 fn session_binding_dies_with_the_registration() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let sid = SessionBinding::new("muji-sid-1").expect("binding");
+    let sid = SessionBinding::try_new("muji-sid-1").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &sid, occupant);
@@ -3505,8 +3506,8 @@ fn webhook_restored_registration_has_no_session_binding() {
     // A registration restored from a `participant_joined` webhook
     // never saw the Jingle signaling leg, so it carries no binding —
     // terminate handling must treat that as "accept any sid".
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_x"), Some("PA_x"));
 
@@ -3519,13 +3520,13 @@ fn webhook_restored_registration_has_no_session_binding() {
 
 #[test]
 fn session_binding_rejects_empty_and_oversized_values() {
-    assert!(SessionBinding::new("").is_err());
+    assert!(SessionBinding::try_new("").is_err());
     assert!(
-        SessionBinding::new("   ").is_err(),
+        SessionBinding::try_new("   ").is_err(),
         "whitespace-only sid is semantically blank and must be rejected"
     );
-    assert!(SessionBinding::new("a".repeat(257)).is_err());
-    assert!(SessionBinding::new("a".repeat(256)).is_ok());
+    assert!(SessionBinding::try_new("a".repeat(257)).is_err());
+    assert!(SessionBinding::try_new("a".repeat(256)).is_ok());
 }
 
 #[test]
@@ -3535,10 +3536,10 @@ fn plain_re_registration_clears_the_previous_session_binding() {
     // identifier for. It must NOT keep the previous session's binding:
     // a stale terminate carrying the OLD sid would then match and tear
     // down the new session — the exact #1608 shape, made permanent.
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let old = SessionBinding::new("muji-sid-old").expect("binding");
+    let old = SessionBinding::try_new("muji-sid-old").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &old, occupant);
@@ -3549,11 +3550,11 @@ fn plain_re_registration_clears_the_previous_session_binding() {
 
 #[test]
 fn register_with_session_binds_atomically_and_rebinds_on_rejoin() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let old = SessionBinding::new("muji-sid-old").expect("binding");
-    let new = SessionBinding::new("muji-sid-new").expect("binding");
+    let old = SessionBinding::try_new("muji-sid-old").expect("binding");
+    let new = SessionBinding::try_new("muji-sid-new").expect("binding");
     let first_occupant = fixture_occupancy_session();
     let second_occupant = fixture_occupancy_session();
 
@@ -3570,11 +3571,11 @@ fn register_with_session_binds_atomically_and_rebinds_on_rejoin() {
 
 #[test]
 fn session_scoped_unregister_refuses_a_mismatching_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let live = SessionBinding::new("muji-live").expect("binding");
-    let stale = SessionBinding::new("muji-stale").expect("binding");
+    let live = SessionBinding::try_new("muji-live").expect("binding");
+    let stale = SessionBinding::try_new("muji-stale").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &live, occupant);
@@ -3590,10 +3591,10 @@ fn session_scoped_unregister_refuses_a_mismatching_sid() {
 
 #[test]
 fn session_scoped_unregister_applies_on_a_matching_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let live = SessionBinding::new("muji-live").expect("binding");
+    let live = SessionBinding::try_new("muji-live").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &live, occupant);
@@ -3608,10 +3609,10 @@ fn session_scoped_unregister_applies_on_a_matching_sid() {
 fn session_scoped_unregister_accepts_any_sid_for_an_unbound_registration() {
     // Webhook-restored registrations never saw the signaling leg and
     // carry no binding — they keep the pre-#1608 accept-any teardown.
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let presented = SessionBinding::new("any-sid").expect("binding");
+    let presented = SessionBinding::try_new("any-sid").expect("binding");
 
     sfu.register_call_participant(&call, &alice);
     match sfu.unregister_call_participant_if_session_matches(&call, &alice, Some(&presented), None)
@@ -3627,10 +3628,10 @@ fn session_scoped_unregister_refuses_an_unparseable_sid_against_a_bound_registra
     // `None` models a presented sid that could not become a binding
     // (blank / over-cap): it can never match a bound session, and must
     // not tear one down.
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let live = SessionBinding::new("muji-live").expect("binding");
+    let live = SessionBinding::try_new("muji-live").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &live, occupant);
@@ -3646,11 +3647,11 @@ async fn executor_refuses_a_session_bearing_intent_after_a_rebind() {
     // #1608 (PR #1626 review round 3): the drain-loop fence and the
     // executor run at different times; a rebind in between must be
     // caught by the executor's own late re-check, not just the fence.
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let rebound = SessionBinding::new("muji-rebound").expect("binding");
-    let stale = SessionBinding::new("muji-stale").expect("binding");
+    let rebound = SessionBinding::try_new("muji-rebound").expect("binding");
+    let stale = SessionBinding::try_new("muji-stale").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &rebound, occupant);
@@ -3682,9 +3683,9 @@ async fn executor_refuses_a_session_bearing_intent_after_a_rebind() {
 async fn executor_applies_a_session_bearing_intent_that_matches_the_binding() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let current = SessionBinding::new("muji-current").expect("binding");
+    let current = SessionBinding::try_new("muji-current").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &current, occupant);
@@ -3736,11 +3737,11 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
     // below because there is no await between them.
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
-    let session_a = SessionBinding::new("muji-session-a").expect("binding");
-    let session_b = SessionBinding::new("muji-session-b").expect("binding");
+    let session_a = SessionBinding::try_new("muji-session-a").expect("binding");
+    let session_b = SessionBinding::try_new("muji-session-b").expect("binding");
     let occupant_a = fixture_occupancy_session();
     let occupant_b = fixture_occupancy_session();
     let occupant_bob = fixture_occupancy_session();
@@ -3773,7 +3774,7 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
     // empty assertion above cannot pass vacuously (i.e. it proves the
     // eject spawn actually ran and was refused, rather than never
     // having been scheduled at all).
-    let session_bob = SessionBinding::new("muji-session-bob").expect("binding");
+    let session_bob = SessionBinding::try_new("muji-session-bob").expect("binding");
     sfu.register_call_participant_with_session(&call, &bob, &session_bob, occupant_bob);
     match sfu.unregister_call_participant_if_session_matches(&call, &bob, Some(&session_bob), None)
     {
@@ -3792,11 +3793,11 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_identity_rejoin()
 
 #[test]
 fn session_scoped_note_left_refuses_a_rebound_registration() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let rebound = SessionBinding::new("muji-rebound").expect("binding");
-    let stale = SessionBinding::new("muji-stale").expect("binding");
+    let rebound = SessionBinding::try_new("muji-rebound").expect("binding");
+    let stale = SessionBinding::try_new("muji-stale").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &rebound, occupant);
@@ -3815,10 +3816,10 @@ fn session_scoped_note_left_refuses_a_rebound_registration() {
 
 #[test]
 fn occupant_scoped_unregister_applies_on_a_matching_generation() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let sid = SessionBinding::new("muji-live").expect("binding");
+    let sid = SessionBinding::try_new("muji-live").expect("binding");
     let occupant = fixture_occupancy_session();
 
     sfu.register_call_participant_with_session(&call, &alice, &sid, occupant);
@@ -3838,10 +3839,10 @@ fn occupant_scoped_unregister_applies_on_a_matching_generation() {
 
 #[test]
 fn occupant_scoped_unregister_refuses_a_mismatching_generation_without_mutation() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let sid = SessionBinding::new("muji-live").expect("binding");
+    let sid = SessionBinding::try_new("muji-live").expect("binding");
     let live = fixture_occupancy_session();
     let stale = fixture_occupancy_session();
 
@@ -3863,8 +3864,8 @@ fn occupant_scoped_unregister_refuses_a_mismatching_generation_without_mutation(
 
 #[test]
 fn occupant_scoped_unregister_refuses_an_unbound_registration() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let presented = fixture_occupancy_session();
 
@@ -3888,10 +3889,10 @@ fn occupant_scoped_unregister_refuses_an_unbound_registration() {
 async fn inline_teardown_refuses_the_remote_eject_after_a_same_sid_rejoin_with_new_generation() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
-    let sid = SessionBinding::new("muji-session-shared").expect("binding");
+    let sid = SessionBinding::try_new("muji-session-shared").expect("binding");
     let generation_one = fixture_occupancy_session();
     let generation_two = fixture_occupancy_session();
     let bob_generation = fixture_occupancy_session();
@@ -3931,8 +3932,8 @@ async fn inline_teardown_refuses_the_remote_eject_after_a_same_sid_rejoin_with_n
 
 #[test]
 fn occupant_scoped_unregister_tears_down_an_unbound_registration_when_the_departure_is_confirmed() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
 
     // Restored after a restart: no occupant generation on the registration.
@@ -3955,10 +3956,10 @@ fn occupant_scoped_unregister_tears_down_an_unbound_registration_when_the_depart
 
 #[test]
 fn occupant_scoped_note_left_refuses_a_same_sid_registration_of_a_newer_generation() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
-    let sid = SessionBinding::new("muji-session-shared").expect("binding");
+    let sid = SessionBinding::try_new("muji-session-shared").expect("binding");
     let generation_one = fixture_occupancy_session();
     let generation_two = fixture_occupancy_session();
 
@@ -3994,12 +3995,12 @@ fn occupant_scoped_note_left_refuses_a_same_sid_registration_of_a_newer_generati
 
 #[test]
 fn occupant_scoped_note_left_refuses_the_same_generations_newer_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let generation = fixture_occupancy_session();
-    let old_sid = SessionBinding::new("muji-session-old").expect("binding");
-    let new_sid = SessionBinding::new("muji-session-new").expect("binding");
+    let old_sid = SessionBinding::try_new("muji-session-old").expect("binding");
+    let new_sid = SessionBinding::try_new("muji-session-new").expect("binding");
 
     // The SAME connection re-initiated under a new sid while its terminate
     // for the old sid was in flight (#1608 rule kept under the occupant gate).
@@ -4032,12 +4033,12 @@ fn occupant_scoped_note_left_refuses_the_same_generations_newer_sid() {
 
 #[test]
 fn occupant_scoped_unregister_refuses_the_same_generations_newer_sid_when_presented() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("room@muc.waddle.test").expect("call id");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("room@muc.waddle.test").expect("call id");
     let alice = fixture_identity("alice");
     let generation = fixture_occupancy_session();
-    let old_sid = SessionBinding::new("muji-session-old").expect("binding");
-    let new_sid = SessionBinding::new("muji-session-new").expect("binding");
+    let old_sid = SessionBinding::try_new("muji-session-old").expect("binding");
+    let new_sid = SessionBinding::try_new("muji-session-new").expect("binding");
 
     sfu.register_call_participant_with_session(&call, &alice, &new_sid, generation);
     // A terminate for the OLD sid from the same connection must not unregister
@@ -4077,7 +4078,7 @@ fn occupant_scoped_unregister_refuses_the_same_generations_newer_sid_when_presen
 async fn teardown_executor_defers_occupant_fenced_missing_calls_until_reconcile() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-occupant-fence").expect("call id");
+    let call = CallId::try_new("r-occupant-fence").expect("call id");
     let alice = fixture_identity("alice");
     let intent = CallTeardownIntentLite {
         call_id: call.clone(),
@@ -4113,7 +4114,7 @@ async fn teardown_executor_defers_occupant_fenced_intents_for_untracked_identiti
 {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
-    let call = CallId::new("r-occupant-partial").expect("call id");
+    let call = CallId::try_new("r-occupant-partial").expect("call id");
     let alice = fixture_identity("alice");
     let bob = fixture_identity("bob");
     // Bob was restored by a webhook; alice's live replacement is known only to LiveKit.
@@ -4160,7 +4161,7 @@ async fn teardown_executor_honours_the_persisted_unbound_policy() {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), Arc::clone(&admin) as Arc<_>);
     sfu.reconcile_pass_completed.store(true, Ordering::Release);
-    let call = CallId::new("r-unbound-policy").expect("call id");
+    let call = CallId::try_new("r-unbound-policy").expect("call id");
     let alice = fixture_identity("alice");
     // Restored after a restart: no generation.
     sfu.register_call_participant(&call, &alice);
@@ -4199,13 +4200,13 @@ async fn teardown_executor_honours_the_persisted_unbound_policy() {
 
 #[test]
 fn stale_authorized_initiate_cannot_publish_over_a_replacement() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("generation-race").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("generation-race").expect("call");
     let alice = fixture_identity("alice");
     let first = fixture_occupancy_session();
     let second = fixture_occupancy_session();
-    let old_sid = SessionBinding::new("old-sid").expect("old session");
-    let new_sid = SessionBinding::new("new-sid").expect("replacement session");
+    let old_sid = SessionBinding::try_new("old-sid").expect("old session");
+    let new_sid = SessionBinding::try_new("new-sid").expect("replacement session");
     // g1 captures its comparison value, then pauses at room authorization.
     let expected = captured_registration(&sfu, &call, &alice);
     // g2 replaces the room occupancy and finishes its authorized initiate.
@@ -4273,7 +4274,7 @@ enum RegistrationAfterPublication {
 async fn assert_initiate_rollback_fences_its_publication(after: RegistrationAfterPublication) {
     let admin = Arc::new(RecordingAdmin::default());
     let sfu = LiveKitSfu::with_admin(fixture_config(), admin.clone() as Arc<_>);
-    let call = CallId::new("publication-rollback").expect("call");
+    let call = CallId::try_new("publication-rollback").expect("call");
     let alice = fixture_identity("alice");
     sfu.register_call_participant_observed(
         &call,
@@ -4282,7 +4283,7 @@ async fn assert_initiate_rollback_fences_its_publication(after: RegistrationAfte
     );
     let expected = captured_registration(&sfu, &call, &alice);
     let occupant = fixture_occupancy_session();
-    let session = SessionBinding::new("same-generation-and-session").expect("session");
+    let session = SessionBinding::try_new("same-generation-and-session").expect("session");
     let token = sfu
         .issue_join_token_with_session(
             &call,
@@ -4377,13 +4378,13 @@ async fn initiate_rollback_revokes_its_unchanged_publication() {
 
 #[test]
 fn failed_initiate_publication_cannot_roll_back_the_winning_publication() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
-    let call = CallId::new("failed-publication-rollback").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("failed-publication-rollback").expect("call");
     let alice = fixture_identity("alice");
     let failed = captured_registration(&sfu, &call, &alice);
     let winner = captured_registration(&sfu, &call, &alice);
     let occupant = fixture_occupancy_session();
-    let session = SessionBinding::new("same-session").expect("session");
+    let session = SessionBinding::try_new("same-session").expect("session");
     let token = sfu
         .issue_join_token_with_session(
             &call,
@@ -4442,7 +4443,7 @@ fn assert_stale_registration_preserves_participant(
             call,
             identity,
             MediaCapabilities::direct_call_peer(),
-            &SessionBinding::new("stale-initiate").expect("session"),
+            &SessionBinding::try_new("stale-initiate").expect("session"),
             fixture_occupancy_session(),
             expected,
         )
@@ -4461,8 +4462,8 @@ fn assert_stale_registration_preserves_participant(
 
 #[test]
 fn captured_absence_rejects_a_webhook_restored_participant() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
-    let call = CallId::new("absent-to-restored").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("absent-to-restored").expect("call");
     let alice = fixture_identity("alice");
     let expected = captured_registration(&sfu, &call, &alice);
     sfu.register_call_participant_observed(
@@ -4475,8 +4476,8 @@ fn captured_absence_rejects_a_webhook_restored_participant() {
 
 #[test]
 fn captured_unbound_participant_rejects_removed_and_restored_incarnation() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
-    let call = CallId::new("unbound-restored-again").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("unbound-restored-again").expect("call");
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_live"), Some("PA_same"));
     sfu.register_call_participant_observed(&call, &alice, &observed);
@@ -4489,8 +4490,8 @@ fn captured_unbound_participant_rejects_removed_and_restored_incarnation() {
 
 #[test]
 fn captured_unbound_participant_rejects_a_new_webhook_sid() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
-    let call = CallId::new("unbound-sid-advanced").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("unbound-sid-advanced").expect("call");
     let alice = fixture_identity("alice");
     sfu.register_call_participant_observed(
         &call,
@@ -4508,21 +4509,21 @@ fn captured_unbound_participant_rejects_a_new_webhook_sid() {
 
 #[test]
 fn captured_binding_rejects_same_occupant_with_a_new_signaling_session() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
-    let call = CallId::new("same-occupant-new-session").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("same-occupant-new-session").expect("call");
     let alice = fixture_identity("alice");
     let occupant = fixture_occupancy_session();
     sfu.register_call_participant_with_session(
         &call,
         &alice,
-        &SessionBinding::new("old").expect("session"),
+        &SessionBinding::try_new("old").expect("session"),
         occupant,
     );
     let expected = captured_registration(&sfu, &call, &alice);
     sfu.register_call_participant_with_session(
         &call,
         &alice,
-        &SessionBinding::new("new").expect("session"),
+        &SessionBinding::try_new("new").expect("session"),
         occupant,
     );
     assert_stale_registration_preserves_participant(&sfu, &call, &alice, expected);
@@ -4530,15 +4531,15 @@ fn captured_binding_rejects_same_occupant_with_a_new_signaling_session() {
 
 #[test]
 fn captured_unbound_participant_accepts_unchanged_duplicate_observation() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("SFU");
-    let call = CallId::new("unchanged-unbound").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("SFU");
+    let call = CallId::try_new("unchanged-unbound").expect("call");
     let alice = fixture_identity("alice");
     let observed = observed_sids(Some("RM_live"), Some("PA_live"));
     sfu.register_call_participant_observed(&call, &alice, &observed);
     let expected = captured_registration(&sfu, &call, &alice);
     sfu.register_call_participant_observed(&call, &alice, &observed);
     let occupant = fixture_occupancy_session();
-    let session = SessionBinding::new("authorized").expect("session");
+    let session = SessionBinding::try_new("authorized").expect("session");
     assert!(sfu
         .issue_join_token_with_session(
             &call,
@@ -4566,13 +4567,13 @@ fn captured_unbound_participant_accepts_unchanged_duplicate_observation() {
 
 #[test]
 fn authorized_replacement_can_conditionally_replace_the_previous_binding() {
-    let sfu = LiveKitSfu::new(fixture_config()).expect("test SFU");
-    let call = CallId::new("generation-replacement").expect("call");
+    let sfu = LiveKitSfu::try_new(fixture_config()).expect("test SFU");
+    let call = CallId::try_new("generation-replacement").expect("call");
     let alice = fixture_identity("alice");
     let first = fixture_occupancy_session();
     let second = fixture_occupancy_session();
-    let old_sid = SessionBinding::new("old-sid").expect("old session");
-    let new_sid = SessionBinding::new("new-sid").expect("replacement session");
+    let old_sid = SessionBinding::try_new("old-sid").expect("old session");
+    let new_sid = SessionBinding::try_new("new-sid").expect("replacement session");
     sfu.register_call_participant_with_session(&call, &alice, &old_sid, first);
     let expected = captured_registration(&sfu, &call, &alice);
     assert!(sfu

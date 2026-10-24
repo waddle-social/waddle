@@ -766,7 +766,7 @@ async fn assert_inbox_wire(
     registry.register_with_carbons(resource.clone(), sender, false);
     users
         .ask(RegisterUserResource {
-            entry: registry.get_entry(&resource).expect("entry"),
+            entry: registry.entry(&resource).expect("entry"),
             jid: resource,
         })
         .await

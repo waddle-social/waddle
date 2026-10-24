@@ -42,7 +42,7 @@ impl kameo::message::Message<PrepareMediatedInviteGrantRollback> for RoomActor {
             return Ok(MediatedInviteRollbackPreparation::Prepared);
         }
         if !self.invite_grant_is_active(&msg.grant)
-            || self.room.get_affiliation(&msg.grant.invitee) != Affiliation::Member
+            || self.room.affiliation(&msg.grant.invitee) != Affiliation::Member
         {
             return Ok(MediatedInviteRollbackPreparation::Superseded);
         }
@@ -85,7 +85,7 @@ impl kameo::message::Message<CommitMediatedInviteGrantRollback> for RoomActor {
                 return Ok(MediatedInviteRollbackCommit::Superseded);
             }
         }
-        if self.room.get_affiliation(&msg.grant.invitee) != Affiliation::Member {
+        if self.room.affiliation(&msg.grant.invitee) != Affiliation::Member {
             return Ok(MediatedInviteRollbackCommit::Superseded);
         }
         match self.gate_mutation().await {

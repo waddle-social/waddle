@@ -16,7 +16,7 @@ fn bare(value: &str) -> BareJid {
 }
 
 async fn store() -> NotificationActivityStore {
-    NotificationActivityStore::new(
+    NotificationActivityStore::try_new(
         Database::in_memory("notification-activity-test")
             .await
             .expect("in-memory db"),

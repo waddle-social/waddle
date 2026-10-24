@@ -249,16 +249,19 @@ pub struct DataFormValue(String);
 
 impl DataFormValue {
     /// Wrap form text verbatim; empty values are retained.
+    #[must_use]
     pub fn new(value: impl Into<String>) -> Self {
         Self(value.into())
     }
 
     /// Borrow the stored text without allocating or changing whitespace.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
 
     /// Consume this wrapper and return its original owned text without copying.
+    #[must_use]
     pub fn into_string(self) -> String {
         self.0
     }

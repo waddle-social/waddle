@@ -51,7 +51,7 @@ async fn immediate_offline_delivery(database_url: Option<&str>) {
         .deps
         .protocol
         .notification_outbox = Arc::new(
-        NotificationOutboxStore::new(database.clone())
+        NotificationOutboxStore::try_new(database.clone())
             .await
             .expect("notification outbox on tested dialect"),
     );

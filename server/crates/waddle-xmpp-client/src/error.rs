@@ -23,6 +23,7 @@ pub const STANZA_CONDITION_SESSION_EXPIRED: &str = "session-expired";
 
 #[derive(Debug, Error)]
 /// Transport, authentication, session-state, request, and protocol failures exposed by the client.
+#[non_exhaustive]
 pub enum ClientError {
     #[error(transparent)]
     /// Validation failure raised by the shared XMPP core.
@@ -241,6 +242,7 @@ impl StanzaErrorType {
     /// The RFC 6120 §8.3.2 wire value, the inverse of the parse in
     /// [`parse_stanza_error`]. Kept on the type so boundary adapters
     /// (wasm rejections, telemetry) can't drift from the parser.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Auth => "auth",
@@ -258,6 +260,7 @@ impl StanzaErrorType {
 /// Looks for a child `<error/>` element, extracts `type`, the RFC 6120 condition
 /// child (in the `urn:ietf:params:xml:ns:xmpp-stanzas` namespace), and optional
 /// `<text/>` content.  Returns a best-effort `StanzaError` even if parts are missing.
+#[must_use]
 pub fn parse_stanza_error(element: &Element) -> StanzaError {
     const NS_STANZAS: &str = "urn:ietf:params:xml:ns:xmpp-stanzas";
     const NS_CLIENT_ALT: &str = "jabber:client";

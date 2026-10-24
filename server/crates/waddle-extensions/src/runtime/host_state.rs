@@ -93,7 +93,7 @@ impl HostState {
             .push(DeliveryKey { capability, source })
             .map_err(|_| {
                 HostToolError::denied(
-                    DisplayText::new("delivery resource unavailable").expect("static denial"),
+                    DisplayText::try_new("delivery resource unavailable").expect("static denial"),
                 )
             })?;
         self.delivery = Some(resource);
@@ -110,7 +110,7 @@ impl HostState {
         if let Some(resource) = self.delivery.as_ref() {
             let key = self.table.get(resource).map_err(|_| {
                 HostToolError::denied(
-                    DisplayText::new("delivery resource unavailable").expect("static denial"),
+                    DisplayText::try_new("delivery resource unavailable").expect("static denial"),
                 )
             })?;
             key.capability.validate(&self.context, &key.source).await?;
@@ -121,7 +121,7 @@ impl HostState {
     pub(super) fn for_init() -> Self {
         Self::for_init_with(
             crate::config::RuntimeLimits::default(),
-            super::http::HttpRuntime::new().expect("static HTTP client configuration"),
+            super::http::HttpRuntime::try_new().expect("static HTTP client configuration"),
         )
     }
 
@@ -132,8 +132,8 @@ impl HostState {
         Self::new(
             Arc::new(DenyingExtensionHostTools),
             InvocationContext {
-                waddle_id: WaddleId::new("init").expect("static waddle id is valid"),
-                plugin_id: PluginId::new("initializing-extension")
+                waddle_id: WaddleId::try_new("init").expect("static waddle id is valid"),
+                plugin_id: PluginId::try_new("initializing-extension")
                     .expect("static plugin id is valid"),
                 requester: None,
                 source_room: None,
@@ -156,7 +156,7 @@ impl HostState {
             && capability == ExtensionCapability::HostMessageSend
         {
             return Err(HostToolError::denied(
-                DisplayText::new(
+                DisplayText::try_new(
                     "room observations return effects; message sending is unavailable",
                 )
                 .expect("static denial"),
@@ -166,7 +166,7 @@ impl HostState {
             Ok(())
         } else {
             Err(HostToolError::denied(
-                DisplayText::new(format!(
+                DisplayText::try_new(format!(
                     "missing extension capability {}",
                     capability.as_str()
                 ))
@@ -183,7 +183,7 @@ impl HostState {
             Ok(())
         } else {
             Err(HostToolError::denied(
-                DisplayText::new(format!(
+                DisplayText::try_new(format!(
                     "{tool_name} is only available during ad-hoc command execution"
                 ))
                 .expect("private host-tool denial message is non-empty"),
@@ -405,7 +405,8 @@ impl RuntimeHost for HostState {
                 .await
             }
             Ok(()) => Err(HostToolError::denied(
-                DisplayText::new("extension HTTP request limit exceeded").expect("static denial"),
+                DisplayText::try_new("extension HTTP request limit exceeded")
+                    .expect("static denial"),
             )),
             Err(error) => Err(error),
         };

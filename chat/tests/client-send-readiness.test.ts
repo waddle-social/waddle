@@ -1422,8 +1422,8 @@ describe("client send readiness", () => {
       join_room: mock(() => new Promise<void>((_resolve, reject) => {
         rejectOldJoin = reject;
       })),
-      get_resume_state: () => null,
-      get_resume_state_handle: () => null,
+      resume_state: () => null,
+      resume_state_handle: () => null,
     };
     (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
     (client as unknown as { connected: boolean }).connected = true;
@@ -1477,8 +1477,8 @@ describe("client send readiness", () => {
       join_room: mock(() => new Promise<void>((resolve) => {
         resolveOldJoin = resolve;
       })),
-      get_resume_state: () => null,
-      get_resume_state_handle: () => null,
+      resume_state: () => null,
+      resume_state_handle: () => null,
     };
     (client as unknown as { xmpp: typeof oldXmpp; connected: boolean }).xmpp = oldXmpp;
     (client as unknown as { connected: boolean }).connected = true;
@@ -2159,7 +2159,7 @@ describe("client send readiness", () => {
   test("native failed-resume fallback retains the durable live unacked DM row until ack", async () => {
     const xmpp = {
       send_chat_message: mock(async (_peer: string, _body: string, opts: { stanza_id?: string }) => opts.stanza_id),
-      get_resume_state: () => ({
+      resume_state: () => ({
         previd: "live-sm-id",
         inboundH: 4,
         outboundH: 9,

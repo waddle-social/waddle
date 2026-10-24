@@ -38,7 +38,7 @@ async fn live_retry(fixture: IngressFixture) {
     let users = UserRegistryActor::spawn(UserRegistryActor::new());
     users
         .ask(RegisterUserResource {
-            entry: connections.get_entry(&b).expect("live resource entry"),
+            entry: connections.entry(&b).expect("live resource entry"),
             jid: b.clone(),
         })
         .await
@@ -340,7 +340,7 @@ async fn live_effects_complete_independently(fixture: IngressFixture) {
         connections.register_with_carbons(jid.clone(), sender, false);
         users
             .ask(RegisterUserResource {
-                entry: connections.get_entry(jid).expect("live resource entry"),
+                entry: connections.entry(jid).expect("live resource entry"),
                 jid: jid.clone(),
             })
             .await

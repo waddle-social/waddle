@@ -22,6 +22,7 @@ pub enum SubscriptionType {
 
 impl SubscriptionType {
     /// Recognize a presence subscription operation, returning `None` for unrelated presence types.
+    #[must_use]
     pub fn from_presence_type(ptype: &PresenceType) -> Option<Self> {
         match ptype {
             PresenceType::Subscribe => Some(SubscriptionType::Subscribe),
@@ -33,6 +34,7 @@ impl SubscriptionType {
     }
 
     /// Convert this subscription operation to the corresponding XMPP presence type.
+    #[must_use]
     pub fn to_presence_type(&self) -> PresenceType {
         match self {
             SubscriptionType::Subscribe => PresenceType::Subscribe,
@@ -43,6 +45,7 @@ impl SubscriptionType {
     }
 
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &'static str {
         match self {
             SubscriptionType::Subscribe => "subscribe",
@@ -72,6 +75,7 @@ pub struct PresenceSubscriptionRequest {
 
 impl PresenceSubscriptionRequest {
     /// Create a subscription request with sender and recipient JIDs and no optional payloads.
+    #[must_use]
     pub fn new(subscription_type: SubscriptionType, from: BareJid, to: BareJid) -> Self {
         Self {
             subscription_type,
@@ -84,12 +88,14 @@ impl PresenceSubscriptionRequest {
     }
 
     /// Set the status and return the updated value.
+    #[must_use]
     pub fn with_status(mut self, status: impl Into<String>) -> Self {
         self.status = Some(status.into());
         self
     }
 
     /// Set the id and return the updated value.
+    #[must_use]
     pub fn with_id(mut self, id: impl Into<String>) -> Self {
         self.id = Some(id.into());
         self
@@ -185,6 +191,7 @@ pub fn parse_subscription_presence(
 }
 
 /// Build a subscription presence stanza.
+#[must_use]
 pub fn build_subscription_presence(
     subscription_type: SubscriptionType,
     from: &BareJid,
@@ -206,6 +213,7 @@ pub fn build_subscription_presence(
 }
 
 /// Build an unavailable presence stanza for broadcasting to subscribers.
+#[must_use]
 pub fn build_unavailable_presence(from: &BareJid, to: &BareJid) -> Presence {
     let mut pres = Presence::new(PresenceType::Unavailable);
     pres.from = Some(Jid::from(from.clone()));
@@ -214,6 +222,7 @@ pub fn build_unavailable_presence(from: &BareJid, to: &BareJid) -> Presence {
 }
 
 /// Build an available presence stanza for broadcasting to subscribers.
+#[must_use]
 pub fn build_available_presence(
     from: &FullJid,
     to: &BareJid,
@@ -256,6 +265,7 @@ pub struct PendingSubscription {
 
 impl PendingSubscription {
     /// Record a pending inbound subscription with the current receipt time and no status text.
+    #[must_use]
     pub fn new(from: BareJid) -> Self {
         Self {
             from,
@@ -265,6 +275,7 @@ impl PendingSubscription {
     }
 
     /// Capture a pending subscription request and its receipt timestamp.
+    #[must_use]
     pub fn from_request(request: &PresenceSubscriptionRequest) -> Self {
         Self {
             from: request.from.clone(),

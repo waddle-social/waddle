@@ -274,6 +274,7 @@ pub enum StreamErrorCondition {
 
 impl StreamErrorCondition {
     /// Recognize an RFC 6120 stream-error condition by its local name.
+    #[must_use]
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "bad-format" => Some(Self::BadFormat),
@@ -306,6 +307,7 @@ impl StreamErrorCondition {
     }
 
     /// Borrow the stored text or canonical protocol token without allocating.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::BadFormat => "bad-format",

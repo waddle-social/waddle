@@ -322,12 +322,12 @@ mod tests {
                 assert_eq!(env.room.name, "general@muc.test");
                 assert_eq!(
                     env.room.sid,
-                    Some(RoomSid::new("RM_xxx").expect("valid typed room sid"))
+                    Some(RoomSid::try_new("RM_xxx").expect("valid typed room sid"))
                 );
                 assert_eq!(env.participant.identity, "alice@waddle.test/desktop");
                 assert_eq!(
                     env.participant.sid,
-                    Some(ParticipantSid::new("PA_xxx").expect("valid typed participant sid"))
+                    Some(ParticipantSid::try_new("PA_xxx").expect("valid typed participant sid"))
                 );
             }
             other => panic!("expected ParticipantLeft, got {other:?}"),

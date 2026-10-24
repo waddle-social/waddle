@@ -16,10 +16,10 @@ use super::types::{
     ExtensionFieldType, ExtensionFormFieldDescriptor, ExtensionFormOption, ExtensionNoteType,
 };
 use super::{EXTENSION_COMMAND_FORM_TYPE, INVOKE_COMMAND_NODE, NS_WADDLE_EXTENSION_1};
-
 // ── Service discovery ────────────────────────────────────────────────
 
 /// Conventional extension service JID: `extensions.<domain>`.
+#[must_use]
 pub fn fallback_extension_service_jid(domain: &str) -> String {
     format!("extensions.{domain}")
 }
@@ -27,6 +27,7 @@ pub fn fallback_extension_service_jid(domain: &str) -> String {
 /// Probe order for the extension service: every component the domain
 /// advertised, then the conventional `extensions.<domain>` JID, then
 /// the domain itself — deduplicated, first qualified candidate wins.
+#[must_use]
 pub fn extension_service_candidates(domain: &str, discovered_jids: &[String]) -> Vec<String> {
     let mut candidates: Vec<String> = Vec::new();
     let fallback = fallback_extension_service_jid(domain);
@@ -45,16 +46,17 @@ pub fn extension_service_candidates(domain: &str, discovered_jids: &[String]) ->
 /// A component qualifies as the extension service only when it
 /// advertises BOTH the Waddle extension feature and XEP-0050 command
 /// support.
+#[must_use]
 pub fn is_extension_service(info: &DiscoInfoResult) -> bool {
     info.has_feature(NS_WADDLE_EXTENSION_1) && info.has_feature(NS_COMMANDS)
 }
-
 // ── Command-list discovery ───────────────────────────────────────────
 
 /// Filter the service's XEP-0050 command list: keep items with a
 /// node, drop the internal [`INVOKE_COMMAND_NODE`], fall back to the
 /// service JID when the item omits its own, and to the node when the
 /// item has no display name.
+#[must_use]
 pub fn extension_command_refs(
     items: Vec<DiscoItem>,
     service_jid: &str,
@@ -85,6 +87,7 @@ pub fn extension_command_refs(
 /// Both FORM_TYPEs are accepted: [`NS_WADDLE_EXTENSION_1`] (the
 /// service-level form) and [`EXTENSION_COMMAND_FORM_TYPE`] (the
 /// per-command form the server emits today).
+#[must_use]
 pub fn parse_extension_command_metadata(info: &DiscoInfoResult) -> ExtensionCommandMetadata {
     let mut metadata = ExtensionCommandMetadata::default();
     for form in info.forms.iter().filter(|form| {
@@ -122,6 +125,7 @@ pub fn parse_extension_command_metadata(info: &DiscoInfoResult) -> ExtensionComm
 /// Combine a command-list item with its (possibly absent) metadata.
 /// A command whose `disco#info` failed defaults to global scope with
 /// no composer affordances — the wasm client's fallback.
+#[must_use]
 pub fn extension_command_descriptor(
     item: ExtensionCommandItemRef,
     metadata: ExtensionCommandMetadata,
@@ -142,6 +146,7 @@ pub fn extension_command_descriptor(
 /// Typed shape errors for extension command responses. These indicate
 /// a server-side bug or schema drift, never a user mistake.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum ExtensionResponseError {
     #[error("extension command response missing <command/>")]
     /// Extension command response missing `<command/>`.

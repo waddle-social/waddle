@@ -55,11 +55,13 @@ pub struct StanzaId {
 
 impl StanzaId {
     /// Create a new stanza ID.
+    #[must_use]
     pub fn new(id: impl Into<String>, by: jid::Jid) -> Self {
         Self { id: id.into(), by }
     }
 
     /// Borrow the opaque id portion as a string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.id
     }
@@ -79,11 +81,13 @@ pub struct OriginId {
 
 impl OriginId {
     /// Create a new origin ID.
+    #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self { id: id.into() }
     }
 
     /// Borrow the opaque id portion as a string slice.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.id
     }
@@ -132,29 +136,31 @@ impl StanzaIdCarrier for Message {
         extract_origin_id(self)
     }
 }
-
 // ── Detection ────────────────────────────────────────────────────────
 
 /// Check if an element is a `<stanza-id/>`.
+#[must_use]
 pub fn is_stanza_id_element(elem: &Element) -> bool {
     elem.ns() == NS_SID && elem.name() == "stanza-id"
 }
 
 /// Check if an element is an `<origin-id/>`.
+#[must_use]
 pub fn is_origin_id_element(elem: &Element) -> bool {
     elem.ns() == NS_SID && elem.name() == "origin-id"
 }
 
 /// Check if a message has any `<stanza-id/>`.
+#[must_use]
 pub fn has_stanza_id(msg: &Message) -> bool {
     msg.payloads.iter().any(is_stanza_id_element)
 }
 
 /// Check if a message has an `<origin-id/>`.
+#[must_use]
 pub fn has_origin_id(msg: &Message) -> bool {
     msg.payloads.iter().any(is_origin_id_element)
 }
-
 // ── Extraction ───────────────────────────────────────────────────────
 
 /// Extract all stanza IDs from a message.
@@ -162,6 +168,7 @@ pub fn has_origin_id(msg: &Message) -> bool {
 /// Stanza-id elements whose `by` attribute is missing, empty, or fails to
 /// parse as a JID are silently skipped, consistent with the typed-payloads
 /// rule (untyped input is dropped at the boundary).
+#[must_use]
 pub fn extract_stanza_ids(msg: &Message) -> Vec<StanzaId> {
     msg.payloads
         .iter()
@@ -176,6 +183,7 @@ pub fn extract_stanza_ids(msg: &Message) -> Vec<StanzaId> {
 }
 
 /// Extract the stanza ID assigned by a specific entity.
+#[must_use]
 pub fn extract_stanza_id_by(msg: &Message, by: &jid::Jid) -> Option<String> {
     extract_stanza_ids(msg)
         .into_iter()
@@ -184,6 +192,7 @@ pub fn extract_stanza_id_by(msg: &Message, by: &jid::Jid) -> Option<String> {
 }
 
 /// Extract the origin ID from a message.
+#[must_use]
 pub fn extract_origin_id(msg: &Message) -> Option<OriginId> {
     msg.payloads
         .iter()
@@ -194,13 +203,14 @@ pub fn extract_origin_id(msg: &Message) -> Option<OriginId> {
 }
 
 /// Extract the origin ID string from a message.
+#[must_use]
 pub fn extract_origin_id_str(msg: &Message) -> Option<String> {
     extract_origin_id(msg).map(|o| o.id)
 }
-
 // ── Building ─────────────────────────────────────────────────────────
 
 /// Build a `<stanza-id xmlns='urn:xmpp:sid:0' id='...' by='...'/>` element.
+#[must_use]
 pub fn build_stanza_id_element(id: &str, by: &jid::Jid) -> Element {
     Element::builder("stanza-id", NS_SID)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)
@@ -209,6 +219,7 @@ pub fn build_stanza_id_element(id: &str, by: &jid::Jid) -> Element {
 }
 
 /// Build an `<origin-id xmlns='urn:xmpp:sid:0' id='...'/>` element.
+#[must_use]
 pub fn build_origin_id_element(id: &str) -> Element {
     Element::builder("origin-id", NS_SID)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), id)

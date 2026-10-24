@@ -424,7 +424,7 @@ impl PubSubStorage for DatabasePubSubStorage {
         entity: &BareJid,
         affiliation: Affiliation,
     ) -> Result<Affiliation, XmppError> {
-        let prev = self.get_affiliation(owner, node_name, entity).await?;
+        let prev = self.affiliation(owner, node_name, entity).await?;
         if affiliation == Affiliation::None {
             self.execute(
                 "DELETE FROM pubsub_affiliations WHERE owner_jid = ? AND node_name = ? AND entity_jid = ?",
@@ -453,7 +453,7 @@ impl PubSubStorage for DatabasePubSubStorage {
         Ok(prev)
     }
 
-    async fn get_affiliation(
+    async fn affiliation(
         &self,
         owner: &BareJid,
         node_name: &str,

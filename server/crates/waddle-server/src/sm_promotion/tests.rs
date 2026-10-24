@@ -56,9 +56,7 @@ async fn dual_register(
     sender: tokio::sync::mpsc::Sender<OutboundStanza>,
 ) {
     registry.register(jid.clone(), sender);
-    let entry = registry
-        .get_entry(&jid)
-        .expect("just registered on DashMap");
+    let entry = registry.entry(&jid).expect("just registered on DashMap");
     user_registry
         .ask(RegisterUserResource { jid, entry })
         .await

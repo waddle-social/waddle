@@ -22,7 +22,7 @@ pub(crate) fn room_effect_origin_instance_id() -> RoomEffectOriginInstanceId {
         std::sync::OnceLock::new();
     INSTANCE_ID
         .get_or_init(|| {
-            RoomEffectOriginInstanceId::new(uuid::Uuid::new_v4().to_string())
+            RoomEffectOriginInstanceId::try_new(uuid::Uuid::new_v4().to_string())
                 .expect("UUID room-effect origin instance id is non-empty")
         })
         .clone()

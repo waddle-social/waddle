@@ -167,7 +167,7 @@ impl SmSessionLocalClaims {
                 let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
                 let (jid, entry) = loop {
                     let attached = connections.sm_stream_owner(&session_id).and_then(|jid| {
-                        let entry = connections.get_entry(&jid)?;
+                        let entry = connections.entry(&jid)?;
                         (entry.sm_stream_id().as_ref() == Some(&session_id)).then_some((jid, entry))
                     });
                     if let Some(found) = attached {
@@ -773,11 +773,7 @@ impl UserLocalClaims {
         };
         let entries = resources
             .into_iter()
-            .filter_map(|jid| {
-                connection_registry
-                    .get_entry(&jid)
-                    .map(|entry| (jid, entry))
-            })
+            .filter_map(|jid| connection_registry.entry(&jid).map(|entry| (jid, entry)))
             .collect();
         self.force_detach_entries(bare_jid, entries).await;
     }
@@ -1911,7 +1907,7 @@ mod tests {
     // -----------------------------------------------------------------
 
     fn test_occupant_id_secret() -> waddle_xmpp::xep::xep0421::OccupantIdSecret {
-        waddle_xmpp::xep::xep0421::OccupantIdSecret::new(vec![7u8; 32]).expect("valid secret")
+        waddle_xmpp::xep::xep0421::OccupantIdSecret::try_new(vec![7u8; 32]).expect("valid secret")
     }
 
     #[tokio::test]

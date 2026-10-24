@@ -26,7 +26,7 @@ async fn two_resource_inbox_push(fixture: IngressFixture) {
         registry.register_with_carbons(resource.clone(), sender, false);
         users
             .ask(RegisterUserResource {
-                entry: registry.get_entry(resource).expect("registered resource"),
+                entry: registry.entry(resource).expect("registered resource"),
                 jid: resource.clone(),
             })
             .await

@@ -11,13 +11,13 @@ use super::{
     PubSubError, PubSubEvent, PubSubItem, NS_PUBSUB, NS_PUBSUB_ERRORS, NS_PUBSUB_EVENT,
     NS_PUBSUB_OWNER,
 };
-
 /// Build a PubSub event notification message.
 ///
 /// The message type is `headline` per XEP-0060 §12.18 (default
 /// `pubsub#notification_type`) and XEP-0163 §4.3 (PEP MUST be headline).
 /// Headline messages are not stored offline (RFC 6121 §8.5.2.1.4), which
 /// matches PubSub's catch-up-via-`<items/>` recovery model.
+#[must_use]
 pub fn build_pubsub_event(from: &Jid, to: &Jid, event: &PubSubEvent) -> Message {
     let mut items_elem = Element::builder("items", NS_PUBSUB_EVENT)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), &event.node);
@@ -37,6 +37,7 @@ pub fn build_pubsub_event(from: &Jid, to: &Jid, event: &PubSubEvent) -> Message 
 }
 
 /// Build a PubSub item retraction event notification.
+#[must_use]
 pub fn build_pubsub_retract_event(from: &Jid, to: &Jid, node: &str, item_id: &str) -> Message {
     let retract_elem = Element::builder("retract", NS_PUBSUB_EVENT)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
@@ -56,6 +57,7 @@ pub fn build_pubsub_retract_event(from: &Jid, to: &Jid, node: &str, item_id: &st
 }
 
 /// Build a PubSub items result IQ.
+#[must_use]
 pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubItem]) -> Iq {
     let mut items_elem = Element::builder("items", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("node").to_owned(), node);
@@ -77,6 +79,7 @@ pub fn build_pubsub_items_result(original_iq: &Iq, node: &str, items: &[PubSubIt
 }
 
 /// Build a PubSub publish result IQ.
+#[must_use]
 pub fn build_pubsub_publish_result(original_iq: &Iq, node: &str, item_id: &str) -> Iq {
     let item_elem = Element::builder("item", NS_PUBSUB)
         .attr(minidom::rxml::xml_ncname!("id").to_owned(), item_id)
@@ -100,6 +103,7 @@ pub fn build_pubsub_publish_result(original_iq: &Iq, node: &str, item_id: &str) 
 }
 
 /// Build a PubSub error IQ response.
+#[must_use]
 pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
     use xmpp_parsers::stanza_error::{DefinedCondition, ErrorType, StanzaError};
 
@@ -157,6 +161,7 @@ pub fn build_pubsub_error(original_iq: &Iq, error: PubSubError) -> Iq {
 }
 
 /// Build an empty result IQ for successful requests without a payload.
+#[must_use]
 pub fn build_pubsub_success(original_iq: &Iq) -> Iq {
     Iq::Result {
         from: original_iq.to().cloned(),
@@ -167,6 +172,7 @@ pub fn build_pubsub_success(original_iq: &Iq) -> Iq {
 }
 
 /// Build a `<subscribe/>` result IQ that carries `subscription` (XEP-0060 §6.1.6).
+#[must_use]
 pub fn build_pubsub_subscribe_result(
     original_iq: &Iq,
     node: &str,
@@ -200,6 +206,7 @@ pub fn build_pubsub_subscribe_result(
 }
 
 /// Build an `<affiliations/>` result IQ for `<affiliations node='...'/>` get.
+#[must_use]
 pub fn build_pubsub_affiliations_result(
     original_iq: &Iq,
     node: &str,
@@ -233,6 +240,7 @@ pub fn build_pubsub_affiliations_result(
 }
 
 /// Build a `<subscriptions/>` owner result for XEP-0060 §8.8.
+#[must_use]
 pub fn build_pubsub_owner_subscriptions_result(
     original_iq: &Iq,
     node: &str,
@@ -276,6 +284,7 @@ pub fn build_pubsub_owner_subscriptions_result(
 
 /// Build the result for a `<configure/>` get carrying current node config
 /// as a `<x type='form'/>` data form (XEP-0060 §6.4).
+#[must_use]
 pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: &NodeConfig) -> Iq {
     fn field(var: &str, value: &str) -> Element {
         Element::builder("field", "jabber:x:data")
@@ -287,6 +296,7 @@ pub fn build_pubsub_configure_form_result(original_iq: &Iq, node: &str, config: 
             )
             .build()
     }
+
     /// Build a `type='hidden'` field per XEP-0004 §3.2.
     fn hidden_field(var: &str, value: &str) -> Element {
         Element::builder("field", "jabber:x:data")

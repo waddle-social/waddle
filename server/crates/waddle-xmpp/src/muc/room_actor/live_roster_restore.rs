@@ -26,7 +26,7 @@ impl RoomActor {
         let source_sessions: BTreeSet<_> = room
             .occupants
             .keys()
-            .flat_map(|nick| room.get_occupant_sessions(nick))
+            .flat_map(|nick| room.occupant_sessions(nick))
             .collect();
         if source_sessions.is_empty() {
             return Ok(Vec::new());

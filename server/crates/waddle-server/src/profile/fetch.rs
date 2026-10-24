@@ -1174,13 +1174,13 @@ mod tests {
         };
         let url: Url = format!("{}/avatar.png", server.uri()).parse().unwrap();
 
-        let pinned = Sha256Digest::new(hex::encode(Sha256::digest(&png))).unwrap();
+        let pinned = Sha256Digest::try_new(hex::encode(Sha256::digest(&png))).unwrap();
         let fetched = fetch_artifact_avatar_bytes(&url, &pinned, &policy)
             .await
             .expect("pinned bytes");
         assert_eq!(fetched.bytes, png);
 
-        let other = Sha256Digest::new(hex::encode(Sha256::digest(b"other"))).unwrap();
+        let other = Sha256Digest::try_new(hex::encode(Sha256::digest(b"other"))).unwrap();
         let result = fetch_artifact_avatar_bytes(&url, &other, &policy).await;
         assert!(
             matches!(result, Err(FetchError::DigestMismatch)),

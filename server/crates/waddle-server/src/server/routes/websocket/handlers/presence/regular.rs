@@ -447,7 +447,7 @@ async fn broadcast_presence_to_subscribers(
             .deps
             .protocol
             .connection_registry
-            .get_available_resources_for_user(&subscriber_bare)
+            .available_resources_for_user(&subscriber_bare)
             .into_iter()
             .map(|(jid, _)| jid)
         {

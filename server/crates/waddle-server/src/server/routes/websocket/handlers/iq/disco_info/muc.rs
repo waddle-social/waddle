@@ -89,7 +89,7 @@ async fn classify_room_command_target(
             }
         };
         return if snapshot.config.group_dm {
-            if snapshot.get_affiliation(&requester_bare) >= Affiliation::Member {
+            if snapshot.affiliation(&requester_bare) >= Affiliation::Member {
                 RoomCommandTarget::GroupDm
             } else {
                 let Some(channel_id) = waddle_xmpp::parse_managed_room_jid(room_jid) else {
@@ -480,11 +480,18 @@ pub(super) async fn handle_muc_disco_info<'a>(
         };
         let identities = vec![Identity::muc_room(room_name)];
         let mut features = muc_room_features(
-            snapshot.config.persistent,
-            snapshot.config.members_only,
-            snapshot.config.public_room,
-            snapshot.config.moderated || channel_type == "announcement",
-            snapshot.config.forum || channel_type == "forum",
+            waddle_xmpp_core::disco::info::RoomPersistence::from_persistent_flag(
+                snapshot.config.persistent,
+            ),
+            waddle_xmpp_core::disco::info::RoomMembership::from_members_only_flag(
+                snapshot.config.members_only,
+            ),
+            waddle_xmpp_core::disco::info::RoomVisibility::from_public_room_flag(
+                snapshot.config.public_room,
+            ),
+            waddle_xmpp_core::types::Moderation::from_moderated_flag(
+                snapshot.config.moderated || channel_type == "announcement",
+            ),
         );
         if snapshot.config.group_dm {
             features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));
@@ -534,11 +541,16 @@ pub(super) async fn handle_muc_disco_info<'a>(
         };
         let identities = vec![Identity::muc_room(room_name)];
         let mut features = muc_room_features(
-            true,
-            channel.members_only,
-            channel.public_room,
-            channel.channel_type == "announcement",
-            channel.channel_type == "forum",
+            waddle_xmpp_core::disco::info::RoomPersistence::Persistent,
+            waddle_xmpp_core::disco::info::RoomMembership::from_members_only_flag(
+                channel.members_only,
+            ),
+            waddle_xmpp_core::disco::info::RoomVisibility::from_public_room_flag(
+                channel.public_room,
+            ),
+            waddle_xmpp_core::types::Moderation::from_moderated_flag(
+                channel.channel_type == "announcement",
+            ),
         );
         if channel.channel_type == waddle_xmpp::admin::CHANNEL_TYPE_GROUP_DM {
             features.push(Feature::new(waddle_xmpp::admin::NS_GROUP_DM_FEATURE));

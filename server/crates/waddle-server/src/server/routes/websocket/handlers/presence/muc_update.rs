@@ -510,7 +510,7 @@ fn build_call_thread_anchor_message(
     active_muji: Option<&Muji>,
     initiator_nick: &str,
 ) -> Option<CallThreadAnchorMessage> {
-    let thread_id = ThreadId::new(uuid::Uuid::new_v4().to_string())?;
+    let thread_id = ThreadId::try_new(uuid::Uuid::new_v4().to_string())?;
     let sid = SessionId(uuid::Uuid::new_v4().to_string());
     let media = media_from_muji(active_muji);
     let body = format!("{initiator_nick} started a call");

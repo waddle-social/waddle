@@ -57,6 +57,7 @@ pub enum ExtensionCapability {
 
 impl ExtensionCapability {
     /// Return the canonical wire token used by extension XML and WIT.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::RoomResultPublish => "room.result.publish",
@@ -106,11 +107,13 @@ pub struct ExtensionManifest {
 
 impl ExtensionManifest {
     /// Whether this capability occurs in the manifest's requested capabilities.
+    #[must_use]
     pub fn declares_capability(&self, capability: ExtensionCapability) -> bool {
         self.capabilities.contains(&capability)
     }
 
     /// Whether the manifest declares this payload's surface, namespace, and XML root local name.
+    #[must_use]
     pub fn declares_payload(&self, surface: PayloadSurface, payload: &ExtensionPayload) -> bool {
         self.payloads.iter().any(|rule| {
             rule.surface == surface
@@ -121,12 +124,14 @@ impl ExtensionManifest {
     }
 
     /// Whether the manifest declares the exact ad-hoc command node.
+    #[must_use]
     pub fn declares_command(&self, node: &CommandNode) -> bool {
         self.commands.iter().any(|command| command.node == *node)
     }
 
     /// Whether a declared node pattern matches this node; `{placeholder}` segments match
     /// one nonempty colon-separated segment.
+    #[must_use]
     pub fn declares_pubsub_node(&self, node: &PubSubNode) -> bool {
         self.pubsub_nodes
             .iter()
@@ -134,6 +139,7 @@ impl ExtensionManifest {
     }
 
     /// Borrow the extension routes retained for discovery and UI rendering.
+    #[must_use]
     pub fn route_descriptors(&self) -> &[ExtensionRouteDescriptor] {
         &self.routes
     }
@@ -206,6 +212,7 @@ pub enum CommandScope {
 
 impl CommandScope {
     /// Return the canonical wire token used by extension XML and WIT.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Global => "global",
@@ -224,6 +231,7 @@ pub enum ExtensionRouteScope {
 
 impl ExtensionRouteScope {
     /// Return the canonical wire token used by extension XML and WIT.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Channel => "channel",
@@ -243,6 +251,7 @@ pub enum ExtensionRouteSurface {
 
 impl ExtensionRouteSurface {
     /// Return the canonical wire token used by extension XML and WIT.
+    #[must_use]
     pub fn as_str(self) -> &'static str {
         match self {
             Self::Gallery => "gallery",
@@ -300,7 +309,7 @@ impl PayloadRoot {
     /// Returns `InvalidXmlName` unless the local name starts with an ASCII letter or
     /// underscore, continues with ASCII letters/digits/underscore/hyphen/period, contains
     /// no colon, and does not start with lowercase `xml`.
-    pub fn new(
+    pub fn try_new(
         namespace: PayloadNamespace,
         local_name: impl Into<String>,
     ) -> Result<Self, FrameworkTypeError> {

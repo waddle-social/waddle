@@ -20,6 +20,7 @@ pub enum Stanza {
 
 impl Stanza {
     /// Get the stanza type name for tracing.
+    #[must_use]
     pub fn name(&self) -> &'static str {
         match self {
             Stanza::Message(_) => "message",
@@ -29,6 +30,7 @@ impl Stanza {
     }
 
     /// Convert the stanza to a minidom Element.
+    #[must_use]
     pub fn to_element(&self) -> minidom::Element {
         match self {
             Stanza::Message(message) => {

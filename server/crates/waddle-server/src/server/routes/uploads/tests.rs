@@ -15,7 +15,7 @@ use waddle_xmpp::xep::xep0421::OccupantIdSecret;
 async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
     let config = DatabaseConfig::default();
     let pool_config = PoolConfig;
-    let db_pool = DatabasePool::new(config, pool_config).await.unwrap();
+    let db_pool = DatabasePool::try_new(config, pool_config).await.unwrap();
 
     // Run migrations
     let runner = MigrationRunner::global();
@@ -34,7 +34,7 @@ async fn create_test_upload_state() -> (Arc<UploadState>, std::path::PathBuf) {
     )));
     let muc_domain = jid::DomainPart::from_str("muc.example.com").expect("muc domain parses");
     let occupant_id_secret =
-        OccupantIdSecret::new(b"test-occupant-id-secret-32-bytes-long".to_vec())
+        OccupantIdSecret::try_new(b"test-occupant-id-secret-32-bytes-long".to_vec())
             .expect("test occupant-id secret meets length floor");
     let room_registry = RoomRegistryActor::spawn(RoomRegistryActor::new(
         muc_domain.to_string(),

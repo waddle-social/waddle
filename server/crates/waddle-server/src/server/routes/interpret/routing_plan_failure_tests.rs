@@ -191,7 +191,7 @@ async fn nonexistent_rejection(fixture: IngressFixture) {
     use crate::ingress::execute::{execute_effects, terminalize_if_complete};
     use std::time::Duration;
     let registry = ConnectionRegistry::new();
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

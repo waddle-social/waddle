@@ -67,7 +67,6 @@ pub const NS_MUJI: &str = "urn:xmpp:jingle:muji:0";
 /// `urn:xmpp:jingle:apps:rtp:1` — XEP-0167 RTP description namespace,
 /// used inside Muji content declarations.
 pub const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
-
 /// Build a `<muji xmlns='urn:xmpp:jingle:muji:0'>` element from typed
 /// inputs. When `audio` or `video` is true, a corresponding
 /// `<content creator='initiator' name='audio|video'>
@@ -82,6 +81,7 @@ pub const NS_JINGLE_RTP: &str = "urn:xmpp:jingle:apps:rtp:1";
 ///
 /// CLAUDE.md XML hard rule: callers never hand-roll the element via
 /// raw `Element::builder` strings.
+#[must_use]
 pub fn build_muji_element(preparing: bool, audio: bool, video: bool) -> minidom::Element {
     let mut builder = minidom::Element::builder("muji", NS_MUJI);
     if preparing {
@@ -144,6 +144,7 @@ fn build_muji_content(media: &str) -> minidom::Element {
 ///
 /// CLAUDE.md XML hard rule: built from a typed `DateTime<Utc>`, never
 /// string-concatenated at the call site.
+#[must_use]
 pub fn build_idle_element(since: chrono::DateTime<chrono::Utc>) -> minidom::Element {
     minidom::Element::builder("idle", NS_IDLE)
         .attr(
@@ -162,6 +163,7 @@ pub fn build_idle_element(since: chrono::DateTime<chrono::Utc>) -> minidom::Elem
 ///
 /// CLAUDE.md XML hard rule: callers append this typed element rather than
 /// hand-rolling the `<in-call>` shape at the wasm boundary.
+#[must_use]
 pub fn build_in_call_presence_state_element(hand_raised: bool, muted: bool) -> minidom::Element {
     let mut builder = minidom::Element::builder("in-call", NS_WADDLE_IN_CALL);
     if hand_raised {

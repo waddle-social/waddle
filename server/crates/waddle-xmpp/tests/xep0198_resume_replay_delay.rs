@@ -153,7 +153,7 @@ fn first_send_is_recorded_unstamped_and_gains_delay_only_at_replay() {
         SmEvictionPath::DirectOutbound,
     );
 
-    let replay = state.get_stanzas_to_resend(0);
+    let replay = state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 1);
     assert_eq!(
         replay[0].stanza_xml, wire,
@@ -193,7 +193,7 @@ fn resend_set_carries_each_stanzas_original_receipt_time() {
         SmEvictionPath::DirectOutbound,
     );
 
-    let replay = state.get_stanzas_to_resend(0);
+    let replay = state.stanzas_to_resend(0);
     assert_eq!(replay.len(), 2);
     assert_eq!(replay[0].original_receipt_at, first_receipt);
     assert_eq!(replay[0].stanza_xml, first_xml);

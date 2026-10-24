@@ -724,7 +724,7 @@ async fn remote_carbon_owner_receiver_authorizes_keyed_custody(
         obligation.sender_bare = sender.to_bare();
         message.from = Some(sender.into());
     }
-    let pool = crate::db::DatabasePool::new(
+    let pool = crate::db::DatabasePool::try_new(
         crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
         crate::db::PoolConfig,
     )

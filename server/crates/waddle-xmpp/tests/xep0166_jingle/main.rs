@@ -91,7 +91,7 @@ fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
             .expect("test secret meets min length"),
         webhook_secret: ApiSecret::from_text("super-secret-secret-32-bytes-min")
             .expect("test secret meets min length"),
-        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().unwrap()).unwrap(),
+        ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().unwrap()).unwrap(),
         turn_host: TurnHost::new("turn.test"),
         turn_tls_port: 443,
         turn_udp_port: 3478,
@@ -99,7 +99,7 @@ fn fixture_livekit_sfu() -> Arc<LiveKitSfu> {
         token_ttl: Duration::seconds(3600),
         turn_ttl: Duration::seconds(3600),
     };
-    Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+    Arc::new(LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
 }
 
 fn ctx<'a>(jid: &'a FullJid) -> StanzaContext<'a> {
@@ -706,7 +706,7 @@ fn xep_0166_dm_session_accept_rejects_stale_participant_on_reused_sid() {
     // responder full JID.
     let sfu = fixture_livekit_sfu();
     let call_id =
-        waddle_sfu::CallId::new("alice@waddle.test::dm-reused").expect("valid scoped call id");
+        waddle_sfu::CallId::try_new("alice@waddle.test::dm-reused").expect("valid scoped call id");
     let eve: FullJid = "eve@waddle.test/laptop".parse().expect("valid JID");
     let eve_identity = Identity::from_jid(eve.clone());
     sfu.register_call_participant(&call_id, &eve_identity);
@@ -754,8 +754,8 @@ fn xep_0166_dm_superseded_invite_revokes_previous_responder() {
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
     let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
     let charlie: FullJid = "charlie@waddle.test/tablet".parse().expect("valid JID");
-    let call_id =
-        waddle_sfu::CallId::new("alice@waddle.test::dm-superseded").expect("valid scoped call id");
+    let call_id = waddle_sfu::CallId::try_new("alice@waddle.test::dm-superseded")
+        .expect("valid scoped call id");
     let bob_identity = Identity::from_jid(bob.clone());
     let charlie_identity = Identity::from_jid(charlie.clone());
 
@@ -862,7 +862,7 @@ fn xep_0166_dm_accepted_call_reuse_revokes_previous_responder() {
     let handler = JingleHandler::new(sfu.clone());
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
     let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
-    let call_id = waddle_sfu::CallId::new("alice@waddle.test::dm-accepted-reused")
+    let call_id = waddle_sfu::CallId::try_new("alice@waddle.test::dm-accepted-reused")
         .expect("valid scoped call id");
     let bob_identity = Identity::from_jid(bob.clone());
 
@@ -973,9 +973,10 @@ fn xep_0166_dm_session_terminate_requires_shared_call_membership() {
     // authorize a terminate to an unrelated peer. The sender and
     // addressed peer must share one scoped call id.
     let sfu = fixture_livekit_sfu();
-    let eve_call = waddle_sfu::CallId::new("eve@waddle.test::dm-collision").expect("valid call id");
+    let eve_call =
+        waddle_sfu::CallId::try_new("eve@waddle.test::dm-collision").expect("valid call id");
     let alice_call =
-        waddle_sfu::CallId::new("alice@waddle.test::dm-collision").expect("valid call id");
+        waddle_sfu::CallId::try_new("alice@waddle.test::dm-collision").expect("valid call id");
     let eve: FullJid = "eve@waddle.test/laptop".parse().expect("valid JID");
     let mallory: FullJid = "mallory@waddle.test/phone".parse().expect("valid JID");
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
@@ -1193,7 +1194,8 @@ fn xep_0166_survivor_terminate_after_peer_swept_acks_and_cleans_up() {
     let handler = JingleHandler::new(sfu.clone());
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
     let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
-    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-survivor").expect("valid call id");
+    let call =
+        waddle_sfu::CallId::try_new("alice@waddle.test::dm-survivor").expect("valid call id");
     let alice_identity = Identity::from_jid(alice.clone());
     let bob_identity = Identity::from_jid(bob.clone());
 
@@ -1298,7 +1300,7 @@ fn xep_0166_terminate_glare_second_terminate_is_not_forbidden() {
     let handler = JingleHandler::new(sfu.clone());
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
     let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
-    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-glare").expect("valid call id");
+    let call = waddle_sfu::CallId::try_new("alice@waddle.test::dm-glare").expect("valid call id");
 
     let invite = dm_jingle_iq(
         Action::SessionInitiate,
@@ -1355,7 +1357,7 @@ fn xep_0166_duplicate_terminate_is_idempotent() {
     let sfu = fixture_livekit_sfu();
     let handler = JingleHandler::new(sfu.clone());
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
-    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-dup").expect("valid call id");
+    let call = waddle_sfu::CallId::try_new("alice@waddle.test::dm-dup").expect("valid call id");
 
     let invite = dm_jingle_iq(
         Action::SessionInitiate,
@@ -1405,8 +1407,8 @@ fn xep_0166_session_terminate_rate_limit_returns_policy_violation_without_touchi
 
     for idx in 0..DEFAULT_MAX_TERMINATES {
         let sid = format!("dm-rate-ok-{idx}");
-        let call =
-            waddle_sfu::CallId::new(format!("alice@waddle.test::{sid}")).expect("valid call id");
+        let call = waddle_sfu::CallId::try_new(format!("alice@waddle.test::{sid}"))
+            .expect("valid call id");
         sfu.register_call_participant(&call, &alice_identity);
         sfu.register_call_participant(&call, &bob_identity);
 
@@ -1429,7 +1431,7 @@ fn xep_0166_session_terminate_rate_limit_returns_policy_violation_without_touchi
     }
 
     let blocked_sid = "dm-rate-blocked";
-    let blocked_call = waddle_sfu::CallId::new(format!("alice@waddle.test::{blocked_sid}"))
+    let blocked_call = waddle_sfu::CallId::try_new(format!("alice@waddle.test::{blocked_sid}"))
         .expect("valid call id");
     sfu.register_call_participant(&blocked_call, &alice_identity);
     sfu.register_call_participant(&blocked_call, &bob_identity);
@@ -1524,7 +1526,7 @@ fn xep_0166_multi_content_stanza_mints_one_shared_token() {
     let handler = JingleHandler::new(sfu.clone());
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
     let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
-    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-two-content").expect("call id");
+    let call = waddle_sfu::CallId::try_new("alice@waddle.test::dm-two-content").expect("call id");
     let bob_identity = Identity::from_jid(bob);
 
     let invite = two_content_initiate(
@@ -1557,7 +1559,7 @@ fn xep_0166_multi_content_renegotiations_do_not_burn_jti_budget() {
     let handler = JingleHandler::new(sfu.clone());
     let alice: FullJid = "alice@waddle.test/desktop".parse().expect("valid JID");
     let bob: FullJid = "bob@waddle.test/phone".parse().expect("valid JID");
-    let call = waddle_sfu::CallId::new("alice@waddle.test::dm-renegotiate").expect("call id");
+    let call = waddle_sfu::CallId::try_new("alice@waddle.test::dm-renegotiate").expect("call id");
     let bob_identity = Identity::from_jid(bob);
 
     for round in 1..=3usize {

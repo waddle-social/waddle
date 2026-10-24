@@ -93,7 +93,7 @@ async fn stable_legacy_id(
 }
 
 async fn pending_candidate_receipt_gap(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let candidate = candidate("legacy-candidate-gap");
@@ -149,10 +149,10 @@ async fn pending_candidate_receipt_gap(fixture: IngressFixture) {
 }
 
 async fn pending_provider_and_restart_reconcile(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
-    let provider = crate::push_service::DatabasePushServiceStore::new(fixture.db.clone())
+    let provider = crate::push_service::DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("provider schema");
     let candidate = candidate("legacy-published-gap");
@@ -167,7 +167,7 @@ async fn pending_provider_and_restart_reconcile(fixture: IngressFixture) {
         .expect("provider node");
     let target = NotificationOutboxTarget::new(
         "push.example.com".parse().expect("service"),
-        PushServiceNodeName::new(node.node()).expect("node"),
+        PushServiceNodeName::try_new(node.node()).expect("node"),
     );
     let mut tx = fixture
         .db
@@ -364,7 +364,7 @@ async fn postgres_legacy_provider_pending_and_repeat_startup_are_honest() {
 }
 
 async fn malformed_legacy_candidate_boot_isolated_and_retained(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("initial outbox");
     let bad_sender = candidate("malformed-sender");
@@ -406,7 +406,7 @@ async fn malformed_legacy_candidate_boot_isolated_and_retained(fixture: IngressF
         conn.execute(&format!("ALTER TABLE notification_candidates ADD CONSTRAINT notification_candidates_suppressed_reason_check CHECK (suppressed_reason IN ({values})) NOT VALID"), ()).await.expect("retain legacy invalid row with current audit shape");
     }
     conn.commit().await.expect("persist corruption fixture");
-    let reopened = NotificationOutboxStore::new(fixture.db.clone())
+    let reopened = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("malformed scheduler rows must not brick startup");
     assert_eq!(
@@ -484,7 +484,7 @@ async fn malformed_legacy_candidate_boot_isolated_and_retained(fixture: IngressF
         )
         .await
         .expect("manual audit repair");
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("repeat boot after manual repair");
     assert_eq!(
@@ -566,7 +566,7 @@ async fn postgres_malformed_legacy_candidate_boot_isolated_and_retained() {
 }
 
 async fn scanned_parent_collected_before_adoption(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     for (label, malformed) in [("scanned-good", false), ("scanned-malformed", true)] {
@@ -603,7 +603,7 @@ async fn scanned_parent_collected_before_adoption(fixture: IngressFixture) {
         0,
         "never recreate collected authority"
     );
-    NotificationOutboxStore::new(fixture.db.clone())
+    NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("boot after collection");
     fixture.close().await;
@@ -622,7 +622,7 @@ async fn postgres_scanned_parent_collected_before_adoption_is_benign() {
 }
 
 async fn malformed_audit_before_stale_check_rebuild(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let mut item = candidate("stale-audit-check");
@@ -698,7 +698,7 @@ async fn malformed_audit_before_stale_check_rebuild(fixture: IngressFixture) {
             .expect("restore checks");
     }
     tx.commit().await.expect("legacy fixture commit");
-    let reopened = NotificationOutboxStore::new(fixture.db.clone())
+    let reopened = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("quarantine before all CHECK migrations");
     let mut rows = reopened.query("SELECT suppressed_reason,quarantined_suppressed_reason,quarantined_at_ms,last_message_body,delivery_id FROM notification_candidates WHERE stanza_id = ?", crate::db_params![item.archive_stanza_id.id.clone()]).await.expect("preserved evidence");
@@ -752,7 +752,7 @@ async fn postgres_canonical_candidate_lock_fences_other_parent_quarantine() {
     let Some(fixture) = IngressFixture::postgres("candidate_quarantine_lock").await else {
         return;
     };
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let item = candidate("shared-quarantine-target");
@@ -858,10 +858,10 @@ async fn postgres_canonical_candidate_lock_fences_other_parent_quarantine() {
 }
 
 async fn ambiguous_legacy_jobs_preserve_candidate(fixture: IngressFixture, mixed: bool) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
-    let provider = crate::push_service::DatabasePushServiceStore::new(fixture.db.clone())
+    let provider = crate::push_service::DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("provider");
     let wanted = candidate("legacy-missing-real-job");
@@ -884,7 +884,7 @@ async fn ambiguous_legacy_jobs_preserve_candidate(fixture: IngressFixture, mixed
             .expect("node");
         let target = NotificationOutboxTarget::new(
             "push.example.com".parse().expect("service"),
-            PushServiceNodeName::new(node.node()).expect("node"),
+            PushServiceNodeName::try_new(node.node()).expect("node"),
         );
         let mut tx = fixture.db.begin_immediate().await.expect("legacy job");
         enqueue_outbox_job_tx(
@@ -1041,7 +1041,7 @@ async fn legacy_archive_aliases_share_candidate_custody(
     fixture: IngressFixture,
     stored_alias: bool,
 ) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let item = candidate("cross-archive-adoption");
@@ -1170,7 +1170,7 @@ async fn postgres_legacy_stored_archive_alias_preserves_intrinsic_validation() {
 }
 
 async fn malformed_cross_archive_candidate_retains_exact_row_and_parents(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let item = candidate("malformed-cross-archive")
@@ -1184,7 +1184,7 @@ async fn malformed_cross_archive_candidate_retains_exact_row_and_parents(fixture
         .await
         .expect("legacy candidate");
     store.execute("UPDATE notification_candidates SET sender_jid = ?, stanza_id_by = ? WHERE stanza_id = ?", crate::db_params!["invalid sender", alias.archive_stanza_id.by.to_string(), item.archive_stanza_id.id.clone()]).await.expect("malformed stored alias");
-    let reopened = NotificationOutboxStore::new(fixture.db.clone())
+    let reopened = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("quarantine cross-archive preflight");
     assert_eq!(

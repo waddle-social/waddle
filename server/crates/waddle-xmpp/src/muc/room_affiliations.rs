@@ -8,7 +8,7 @@ use waddle_xmpp_core::OccupancySessionGeneration;
 
 impl MucRoom {
     /// Get the affiliation for a JID.
-    pub fn get_affiliation(&self, jid: &BareJid) -> Affiliation {
+    pub fn affiliation(&self, jid: &BareJid) -> Affiliation {
         self.affiliation_list.get(jid)
     }
 
@@ -79,12 +79,12 @@ impl MucRoom {
     }
 
     /// Get all JIDs with a specific affiliation.
-    pub fn get_jids_by_affiliation(&self, affiliation: Affiliation) -> Vec<BareJid> {
+    pub fn jids_by_affiliation(&self, affiliation: Affiliation) -> Vec<BareJid> {
         self.affiliation_list.by_affiliation(affiliation)
     }
 
     /// Get all affiliation entries for the room.
-    pub fn get_all_affiliations(&self) -> Vec<affiliation::AffiliationEntry> {
+    pub fn all_affiliations(&self) -> Vec<affiliation::AffiliationEntry> {
         self.affiliation_list.all()
     }
 
@@ -100,7 +100,7 @@ impl MucRoom {
     /// config normalization so malformed restored state fails closed.
     pub fn can_user_join(&self, jid: &BareJid) -> bool {
         if !self.config.requires_membership() {
-            self.get_affiliation(jid) != Affiliation::Outcast
+            self.affiliation(jid) != Affiliation::Outcast
         } else {
             self.has_affiliation_at_least(jid, Affiliation::Member)
         }

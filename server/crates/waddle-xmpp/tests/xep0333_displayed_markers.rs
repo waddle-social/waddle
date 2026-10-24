@@ -10,7 +10,12 @@ fn xep0333_server_and_muc_disco_advertise_displayed_markers() {
     let server = server_features();
     assert!(server.contains(&Feature::chat_markers()));
 
-    let room = muc_room_features(false, false, true, false, false);
+    let room = muc_room_features(
+        waddle_xmpp_core::disco::info::RoomPersistence::Temporary,
+        waddle_xmpp_core::disco::info::RoomMembership::Open,
+        waddle_xmpp_core::disco::info::RoomVisibility::Public,
+        waddle_xmpp_core::types::Moderation::Unmoderated,
+    );
     assert!(room.contains(&Feature::chat_markers()));
 }
 

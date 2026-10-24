@@ -139,7 +139,7 @@ pub async fn start_with_config(
 
     // Wrap db_pool in Arc for shared ownership between HTTP and XMPP states
     let db_pool = Arc::new(db_pool);
-    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::new(
+    crate::muc_destroy_completion_outbox::MucDestroyCompletionOutboxStore::try_new(
         db_pool.global().clone(),
     )
     .await
@@ -561,7 +561,15 @@ async fn bootstrap_mam_lineage(
 ) -> Result<()> {
     if let Some(pool) = storage.sqlite_pool() {
         let in_memory = crate::db::lineage::sqlite_pool_is_in_memory(pool).await?;
-        let database = crate::db::Database::from_sqlite_pool("mam", pool.clone(), in_memory);
+        let database = crate::db::Database::from_sqlite_pool(
+            "mam",
+            pool.clone(),
+            if in_memory {
+                crate::db::SqlitePoolStorage::InMemory
+            } else {
+                crate::db::SqlitePoolStorage::Persistent
+            },
+        );
         if in_memory {
             state.register_lineage_ephemeral(crate::db::lineage::DurableStore::Mam);
         } else {

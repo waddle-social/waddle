@@ -11,7 +11,7 @@ use waddle_xmpp::{
 };
 
 async fn gone_preserves_newer_activity(fixture: IngressFixture) {
-    let store = NotificationActivityStore::new(fixture.db.clone())
+    let store = NotificationActivityStore::try_new(fixture.db.clone())
         .await
         .expect("activity store");
     let owner = "alice@example.com".parse().expect("owner");
@@ -56,7 +56,7 @@ async fn receipted_activity_is_not_replayed(fixture: IngressFixture) {
     let mut submission = fixture.submission(Some("activity-retry"), "activity");
     let owner = submission.sender.to_bare();
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
-    let store = NotificationActivityStore::new(fixture.db.clone())
+    let store = NotificationActivityStore::try_new(fixture.db.clone())
         .await
         .expect("canonical activity store");
     let mutation = NotificationActivityMutation::ChatStateGone {

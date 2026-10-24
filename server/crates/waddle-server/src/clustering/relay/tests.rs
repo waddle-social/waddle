@@ -273,18 +273,18 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
     let room: jid::BareJid = "room@muc.example.test".parse().expect("room");
     let message = RelayExtensionRoomSend {
         context: InvocationContext {
-            waddle_id: waddle_extensions::WaddleId::new("space").expect("waddle"),
-            plugin_id: waddle_extensions::PluginId::new("stargate").expect("plugin"),
+            waddle_id: waddle_extensions::WaddleId::try_new("space").expect("waddle"),
+            plugin_id: waddle_extensions::PluginId::try_new("stargate").expect("plugin"),
             requester: Some("romeo@example.test".parse().expect("requester")),
             source_room: Some(room.clone()),
             kind: InvocationKind::Command,
             provider_room_grants: vec![room.clone()],
         },
         room: room.clone(),
-        offered_id: waddle_extensions::StanzaId::new("offered-1893").expect("offered"),
+        offered_id: waddle_extensions::StanzaId::try_new("offered-1893").expect("offered"),
         origin_budget: Duration::from_millis(10_500),
-        body: waddle_extensions::DisplayText::new("hello").expect("body"),
-        thread_id: Some(waddle_extensions::ThreadId::new("thread").expect("thread")),
+        body: waddle_extensions::DisplayText::try_new("hello").expect("body"),
+        thread_id: Some(waddle_extensions::ThreadId::try_new("thread").expect("thread")),
         reply_to: None,
         markup: vec![waddle_extensions::MessageMarkupSpan {
             kind: waddle_extensions::MessageMarkupKind::Blockquote,
@@ -306,11 +306,11 @@ fn extension_room_send_is_a_new_message_id_with_round_tripping_shapes() {
 
     for reply in [
         RelayExtensionRoomSendReply::Sent(
-            waddle_extensions::StanzaId::new("canonical").expect("id"),
+            waddle_extensions::StanzaId::try_new("canonical").expect("id"),
         ),
         RelayExtensionRoomSendReply::HostError(HostToolError {
             code: HostToolErrorCode::Denied,
-            message: waddle_extensions::DisplayText::new("denied").expect("message"),
+            message: waddle_extensions::DisplayText::try_new("denied").expect("message"),
         }),
         RelayExtensionRoomSendReply::NotOwner,
     ] {

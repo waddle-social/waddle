@@ -35,7 +35,7 @@ fn fixture_cred() -> TurnCredential {
             .expect("test secret meets min length"),
         webhook_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
             .expect("test secret meets min length"),
-        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+        ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().expect("valid url"))
             .expect("valid ws url"),
         turn_host: TurnHost::new("turn.waddle.social"),
         turn_tls_port: 443,
@@ -44,7 +44,7 @@ fn fixture_cred() -> TurnCredential {
         token_ttl: Duration::seconds(3600),
         turn_ttl: Duration::seconds(3600),
     };
-    let sfu = LiveKitSfu::new(cfg).expect("LiveKitSfu init in test");
+    let sfu = LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test");
     let jid: jid::FullJid = "alice@waddle.social/desktop".parse().expect("valid jid");
     let identity = Identity::from_jid(jid);
     sfu.issue_turn_credentials(&identity)
@@ -58,7 +58,7 @@ fn fixture_sfu() -> Arc<dyn SfuService> {
             .expect("test secret meets min length"),
         webhook_secret: ApiSecret::from_text("api-secret-meets-min-length-32!!")
             .expect("test secret meets min length"),
-        ws_url: WebsocketUrl::new("wss://livekit.test/".parse().expect("valid url"))
+        ws_url: WebsocketUrl::try_new("wss://livekit.test/".parse().expect("valid url"))
             .expect("valid ws url"),
         turn_host: TurnHost::new("turn.waddle.social"),
         turn_tls_port: 443,
@@ -67,7 +67,7 @@ fn fixture_sfu() -> Arc<dyn SfuService> {
         token_ttl: Duration::seconds(3600),
         turn_ttl: Duration::seconds(3600),
     };
-    Arc::new(LiveKitSfu::new(cfg).expect("LiveKitSfu init in test"))
+    Arc::new(LiveKitSfu::try_new(cfg).expect("LiveKitSfu init in test"))
 }
 
 fn session_jid() -> jid::FullJid {

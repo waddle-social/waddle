@@ -72,7 +72,7 @@ async fn lost_offline_notification_candidate_recovers_once(
     fixture: IngressFixture,
     extension: bool,
 ) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("notification schema");
     let environment: Arc<dyn RecoveryEnvironment> = Arc::new(OfflineRecoveryEnvironment {

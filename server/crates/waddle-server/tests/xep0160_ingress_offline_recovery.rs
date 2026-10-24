@@ -302,7 +302,7 @@ async fn postgres_extension_offline_recovers_after_revocation() {
 }
 
 async fn extension_frozen_offline_notification_recovers(f: IngressFixture) {
-    let store = waddle_server::notification_outbox::NotificationOutboxStore::new(f.db.clone())
+    let store = waddle_server::notification_outbox::NotificationOutboxStore::try_new(f.db.clone())
         .await
         .expect("notification schema");
     let env = environment(

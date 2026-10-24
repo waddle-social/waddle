@@ -114,7 +114,7 @@ trait PluginFixture {
 
 impl PluginFixture for &str {
     fn parse_plugin_id(self) -> waddle_extensions::PluginId {
-        waddle_extensions::PluginId::new(self).expect("fixture plugin")
+        waddle_extensions::PluginId::try_new(self).expect("fixture plugin")
     }
 }
 
@@ -128,7 +128,7 @@ async fn message_observer_invokes_only_the_selected_eligible_plugin() {
         .process_message_observer(
             &plugin,
             &message(),
-            waddle_extensions::WaddleId::new("local").expect("waddle"),
+            waddle_extensions::WaddleId::try_new("local").expect("waddle"),
             None,
         )
         .await
@@ -137,7 +137,7 @@ async fn message_observer_invokes_only_the_selected_eligible_plugin() {
         .process_message_observer(
             &"missing-plugin".parse_plugin_id(),
             &message(),
-            waddle_extensions::WaddleId::new("local").expect("waddle"),
+            waddle_extensions::WaddleId::try_new("local").expect("waddle"),
             None,
         )
         .await
@@ -147,7 +147,7 @@ async fn message_observer_invokes_only_the_selected_eligible_plugin() {
 fn subscribed_config() -> ExtensionConfig {
     let mut config = config(ExtensionCapability::MessageObserve);
     config.modules[0].room_observation = Some(waddle_extensions::RoomObservationConfig {
-        generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
+        generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
         scope: waddle_extensions::RoomObservationScope::Rooms(vec!["room@muc.example.com"
             .parse()
             .expect("room")]),
@@ -160,16 +160,16 @@ fn room_source() -> waddle_extensions::RoomMessageSource {
     use waddle_extensions::*;
     RoomMessageSource {
         room: "room@muc.example.com".parse().expect("room"),
-        stanza_id: StanzaId::new("original").expect("stanza"),
-        revision_stanza_id: StanzaId::new("original").expect("revision stanza"),
-        origin_id: Some(OriginId::new("sender-origin").expect("origin")),
+        stanza_id: StanzaId::try_new("original").expect("stanza"),
+        revision_stanza_id: StanzaId::try_new("original").expect("revision stanza"),
+        origin_id: Some(OriginId::try_new("sender-origin").expect("origin")),
         sender: "alice@example.com".parse().expect("sender"),
         revision: MessageRevision::new(0),
-        body_digest: Sha256Digest::new(
+        body_digest: Sha256Digest::try_new(
             "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
         )
         .expect("digest"),
-        observed_at: Timestamp::new("2026-09-26T12:00:00Z").expect("time"),
+        observed_at: Timestamp::try_new("2026-09-26T12:00:00Z").expect("time"),
     }
 }
 
@@ -189,7 +189,7 @@ async fn durable_observations_are_explicit_and_excluded_from_legacy_hooks() {
         .observe_room_message(
             &selected[0],
             source,
-            waddle_extensions::DisplayText::new("hello").expect("body"),
+            waddle_extensions::DisplayText::try_new("hello").expect("body"),
         )
         .await;
     assert!(matches!(
@@ -207,13 +207,13 @@ async fn frozen_observations_reject_changed_config_and_missing_origin() {
     let source = room_source();
     let selected = manager.room_observation_subscriptions(&source.room);
     let mut stale = selected[0].clone();
-    stale.generation = ObservationGeneration::new(2).expect("generation");
+    stale.generation = ObservationGeneration::try_new(2).expect("generation");
     assert_eq!(
         manager
             .observe_room_message(
                 &stale,
                 source.clone(),
-                DisplayText::new("hello").expect("body")
+                DisplayText::try_new("hello").expect("body")
             )
             .await,
         RoomObservationOutcome::NotApplicable(ObservationSkip::SubscriptionUnavailable)
@@ -225,7 +225,7 @@ async fn frozen_observations_reject_changed_config_and_missing_origin() {
             .observe_room_message(
                 &selected[0],
                 missing,
-                DisplayText::new("hello").expect("body")
+                DisplayText::try_new("hello").expect("body")
             )
             .await,
         RoomObservationOutcome::NotApplicable(ObservationSkip::MissingOriginId)
@@ -235,7 +235,7 @@ async fn frozen_observations_reject_changed_config_and_missing_origin() {
             .observe_room_message(
                 &selected[0],
                 source,
-                DisplayText::new("changed").expect("body")
+                DisplayText::try_new("changed").expect("body")
             )
             .await,
         RoomObservationOutcome::PermanentFailure(ObservationFailure::SourceMismatch)

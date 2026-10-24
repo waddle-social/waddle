@@ -44,6 +44,7 @@ pub struct Identity {
 
 impl Identity {
     /// Create a discovery identity with a category, subtype, optional name, and no language tag.
+    #[must_use]
     pub fn new(category: &str, type_: &str, name: Option<&str>) -> Self {
         Self {
             category: category.to_string(),
@@ -54,22 +55,26 @@ impl Identity {
     }
 
     /// Set the lang and return the updated value.
+    #[must_use]
     pub fn with_lang(mut self, lang: Option<&str>) -> Self {
         self.lang = lang.map(str::to_string);
         self
     }
 
     /// Create an identity advertising category `server` and type `im` with the supplied display name.
+    #[must_use]
     pub fn server(name: Option<&str>) -> Self {
         Self::new("server", "im", name)
     }
 
     /// Create an identity advertising category `conference` and type `text` with the supplied display name.
+    #[must_use]
     pub fn muc_service(name: Option<&str>) -> Self {
         Self::new("conference", "text", name)
     }
 
     /// Create an identity advertising category `conference` and type `text` with the supplied display name.
+    #[must_use]
     pub fn muc_room(name: Option<&str>) -> Self {
         Self::new("conference", "text", name)
     }
@@ -79,31 +84,37 @@ impl Identity {
     /// type='audio-video'/>` so a strict client can disco#info the
     /// mixer and discover Muji support before sending a
     /// session-initiate.
+    #[must_use]
     pub fn audio_video_conference(name: Option<&str>) -> Self {
         Self::new("conference", "audio-video", name)
     }
 
     /// Create an identity advertising category `store` and type `file` with the supplied display name.
+    #[must_use]
     pub fn upload_service(name: Option<&str>) -> Self {
         Self::new("store", "file", name)
     }
 
     /// Create an identity advertising category `pubsub` and type `service` with the supplied display name.
+    #[must_use]
     pub fn pubsub_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
 
     /// Create an identity advertising category `pubsub` and type `push` with the supplied display name.
+    #[must_use]
     pub fn pubsub_push(name: Option<&str>) -> Self {
         Self::new("pubsub", "push", name)
     }
 
     /// Create an identity advertising category `pubsub` and type `leaf` with the supplied display name.
+    #[must_use]
     pub fn pubsub_leaf(name: Option<&str>) -> Self {
         Self::new("pubsub", "leaf", name)
     }
 
     /// Create an identity advertising category `pubsub` and type `service` with the supplied display name.
+    #[must_use]
     pub fn spaces_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
@@ -112,27 +123,32 @@ impl Identity {
     /// XEP-0472 social feed and XEP-0501 stories nodes. Same shape
     /// as a generic pubsub service; the name is what shows up in a
     /// disco#items enumeration of the deployment.
+    #[must_use]
     pub fn community_service(name: Option<&str>) -> Self {
         Self::new("pubsub", "service", name)
     }
 
     /// Create an identity advertising category `automation` and type `command-node` with the supplied display name.
+    #[must_use]
     pub fn automation(name: Option<&str>) -> Self {
         Self::new("automation", "command-node", name)
     }
 
     /// XEP-0030 registry `client/bot`: an automated client.
+    #[must_use]
     pub fn client_bot(name: Option<&str>) -> Self {
         Self::new("client", "bot", name)
     }
 
     /// Create an identity advertising category `automation` and type `command-list` with the supplied display name.
+    #[must_use]
     pub fn command_list(name: Option<&str>) -> Self {
         Self::new("automation", "command-list", name)
     }
 }
 
 /// Check if an IQ is a disco#info query.
+#[must_use]
 pub fn is_disco_info_query(iq: &Iq) -> bool {
     match iq {
         Iq::Get { payload, .. } => payload.name() == "query" && payload.ns() == DISCO_INFO_NS,
@@ -350,6 +366,7 @@ fn caps_form_type(form: &Element) -> Option<String> {
 }
 
 /// Build a disco#info response IQ.
+#[must_use]
 pub fn build_disco_info_response(
     original_iq: &Iq,
     identities: &[Identity],
@@ -360,6 +377,7 @@ pub fn build_disco_info_response(
 }
 
 /// Build a disco#info response IQ with extension payloads.
+#[must_use]
 pub fn build_disco_info_response_with_extensions(
     original_iq: &Iq,
     identities: &[Identity],
@@ -442,6 +460,7 @@ pub fn build_disco_info_response_with_extensions(
 }
 
 /// Get the standard server features.
+#[must_use]
 pub fn server_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
@@ -481,11 +500,13 @@ pub fn server_features() -> Vec<Feature> {
 }
 
 /// Get features for the upload service component (XEP-0363).
+#[must_use]
 pub fn upload_service_features() -> Vec<Feature> {
     vec![Feature::disco_info(), Feature::http_upload()]
 }
 
 /// Get features for the PubSub service component (XEP-0060).
+#[must_use]
 pub fn pubsub_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
@@ -509,6 +530,7 @@ pub fn pubsub_service_features() -> Vec<Feature> {
 /// IQ. The two registered command nodes (`register-device` and
 /// `disable-device`) are surfaced via disco#items on
 /// `push.<domain>?node=http://jabber.org/protocol/commands`.
+#[must_use]
 pub fn push_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
@@ -523,6 +545,7 @@ pub fn push_service_features() -> Vec<Feature> {
 }
 
 /// Get features for the PubSub-backed Spaces service component.
+#[must_use]
 pub fn spaces_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
@@ -552,6 +575,7 @@ pub fn spaces_service_features() -> Vec<Feature> {
 /// the XEP-0501 stories node; kept separate from the spaces service
 /// so the spaces disco#items enumeration only surfaces real
 /// community-space bookmarks.
+#[must_use]
 pub fn community_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
@@ -577,6 +601,7 @@ pub fn community_service_features() -> Vec<Feature> {
 }
 
 /// Get the standard MUC service features.
+#[must_use]
 pub fn muc_service_features() -> Vec<Feature> {
     vec![
         Feature::disco_info(),
@@ -589,13 +614,76 @@ pub fn muc_service_features() -> Vec<Feature> {
     ]
 }
 
+/// Lifetime advertised for a MUC room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomPersistence {
+    /// The room is temporary.
+    Temporary,
+    /// The room is persistent.
+    Persistent,
+}
+
+impl RoomPersistence {
+    /// Convert the stored room configuration flag into its advertised mode.
+    #[must_use]
+    pub fn from_persistent_flag(persistent: bool) -> Self {
+        if persistent {
+            Self::Persistent
+        } else {
+            Self::Temporary
+        }
+    }
+}
+
+/// Admission policy advertised for a MUC room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomMembership {
+    /// The room is open.
+    Open,
+    /// Joining the room requires membership.
+    MembersOnly,
+}
+
+impl RoomMembership {
+    /// Convert the stored room configuration flag into its advertised mode.
+    #[must_use]
+    pub fn from_members_only_flag(members_only: bool) -> Self {
+        if members_only {
+            Self::MembersOnly
+        } else {
+            Self::Open
+        }
+    }
+}
+
+/// Discovery visibility advertised for a MUC room.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoomVisibility {
+    /// The room is hidden.
+    Hidden,
+    /// The room is public.
+    Public,
+}
+
+impl RoomVisibility {
+    /// Convert the stored room configuration flag into its advertised mode.
+    #[must_use]
+    pub fn from_public_room_flag(public_room: bool) -> Self {
+        if public_room {
+            Self::Public
+        } else {
+            Self::Hidden
+        }
+    }
+}
+
 /// Get features for a MUC room based on configuration.
+#[must_use]
 pub fn muc_room_features(
-    persistent: bool,
-    members_only: bool,
-    public_room: bool,
-    moderated: bool,
-    forum: bool,
+    persistence: RoomPersistence,
+    membership: RoomMembership,
+    visibility: RoomVisibility,
+    moderation: crate::types::Moderation,
 ) -> Vec<Feature> {
     let mut features = vec![
         Feature::disco_info(),
@@ -653,31 +741,29 @@ pub fn muc_room_features(
         Feature::muc_stable_id(),
     ];
 
-    if persistent {
+    if persistence == RoomPersistence::Persistent {
         features.push(Feature::muc_persistent());
     } else {
         features.push(Feature::muc_temporary());
     }
 
-    if members_only {
+    if membership == RoomMembership::MembersOnly {
         features.push(Feature::muc_membersonly());
     } else {
         features.push(Feature::muc_open());
     }
 
-    if public_room {
+    if visibility == RoomVisibility::Public {
         features.push(Feature::muc_public());
     } else {
         features.push(Feature::muc_hidden());
     }
 
-    if moderated {
+    if moderation == crate::types::Moderation::Moderated {
         features.push(Feature::muc_moderated());
     } else {
         features.push(Feature::muc_unmoderated());
     }
-
-    let _ = forum;
 
     features
 }

@@ -145,7 +145,7 @@ pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
     let snapshot = detached_progress_support::queued(&sm, &target).await;
     let mut stream = StreamManagementState::new();
     stream.restore_from_session(&snapshot);
-    let replay = stream.get_stanzas_to_resend(0);
+    let replay = stream.stanzas_to_resend(0);
     assert_eq!(replay.len(), 1, "XEP-0198 h=0 replays one stored stanza");
     let replayed: minidom::Element = replay[0].stanza_xml.parse().expect("stored stanza XML");
     let expected: minidom::Element = submission.plan.sanitized_message.into();
@@ -158,7 +158,7 @@ pub async fn distinct_sequences_share_durable_append(fixture: IngressFixture) {
         expected.get_child("body", waddle_xmpp_core::xep0201::CLIENT_STANZA_NS)
     );
     stream.acknowledge(1);
-    assert!(stream.get_stanzas_to_resend(1).is_empty());
+    assert!(stream.stanzas_to_resend(1).is_empty());
     drop(sm);
     fixture.close().await;
 }

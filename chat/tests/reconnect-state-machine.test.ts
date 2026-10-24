@@ -25,8 +25,8 @@ type StreamErrorPayload = { detail?: string | null; condition?: string | null };
 type StubXmpp = {
   set_on_error: (cb: (payload: StreamErrorPayload) => void) => void;
   set_on_disconnected: (cb: () => void) => void;
-  get_resume_state: () => { previd: string; inboundH: number; outboundH: number } | null;
-  get_resume_state_handle?: () => unknown;
+  resume_state: () => { previd: string; inboundH: number; outboundH: number } | null;
+  resume_state_handle?: () => unknown;
 };
 
 type PrivateState = {
@@ -79,7 +79,7 @@ function createHarness() {
   const stub: StubXmpp = {
     set_on_error(cb) { fireError = cb; },
     set_on_disconnected(cb) { fireDisconnected = cb; },
-    get_resume_state: () => null,
+    resume_state: () => null,
   };
   state.xmpp = stub;
   state.connected = true;
@@ -154,7 +154,7 @@ describe("transient reconnect with a resume handle", () => {
     const harness = createHarness();
     const { state, stub } = harness;
     const handle = { free: () => {} };
-    stub.get_resume_state_handle = () => handle;
+    stub.resume_state_handle = () => handle;
     state.catchup.onSessionStarted();
     (state.catchup as unknown as {
       recordRoomSeen: (room: string, at: string, archiveId?: string) => void;
@@ -263,11 +263,11 @@ describe("own-resume conflict collateral (#1389)", () => {
     const formerStream: StubXmpp = {
       set_on_error(cb) { fireError = cb; },
       set_on_disconnected(cb) { fireDisconnected = cb; },
-      get_resume_state: () => {
+      resume_state: () => {
         resumeStateReads += 1;
         return { previd: "former-stream", inboundH: 3, outboundH: 5 };
       },
-      get_resume_state_handle: () => {
+      resume_state_handle: () => {
         resumeHandleReads += 1;
         return undefined;
       },
@@ -327,7 +327,7 @@ describe("own-resume conflict collateral (#1389)", () => {
       const stream: StubXmpp = {
         set_on_error(cb) { fireError = cb; },
         set_on_disconnected(cb) { fireDisconnected = cb; },
-        get_resume_state: () => ({ previd: "same-former-stream", inboundH: 3, outboundH: 5 }),
+        resume_state: () => ({ previd: "same-former-stream", inboundH: 3, outboundH: 5 }),
       };
       state.xmpp = stream;
       state.connected = true;
@@ -366,7 +366,7 @@ describe("own-resume conflict collateral (#1389)", () => {
     const resumingHandle: StubXmpp = {
       set_on_error(cb) { fireError = cb; },
       set_on_disconnected(cb) { fireDisconnected = cb; },
-      get_resume_state: () => ({ previd: "former-stream", inboundH: 3, outboundH: 5 }),
+      resume_state: () => ({ previd: "former-stream", inboundH: 3, outboundH: 5 }),
     };
     state.xmpp = resumingHandle;
     state.connected = true;
@@ -426,7 +426,7 @@ describe("own-resume conflict collateral (#1389)", () => {
     const formerStream: StubXmpp = {
       set_on_error(cb) { fireError = cb; },
       set_on_disconnected(cb) { fireDisconnected = cb; },
-      get_resume_state: () => ({ previd: "former-stream", inboundH: 3, outboundH: 5 }),
+      resume_state: () => ({ previd: "former-stream", inboundH: 3, outboundH: 5 }),
     };
     state.xmpp = formerStream;
     state.connected = true;
@@ -568,7 +568,7 @@ describe("own-resume conflict collateral (#1389)", () => {
     const formerStream: StubXmpp = {
       set_on_error(cb) { fireError = cb; },
       set_on_disconnected(cb) { fireDisconnected = cb; },
-      get_resume_state: () => ({ previd: "former-stream", inboundH: 3, outboundH: 5 }),
+      resume_state: () => ({ previd: "former-stream", inboundH: 3, outboundH: 5 }),
     };
     state.xmpp = formerStream;
     state.connected = true;
@@ -609,7 +609,7 @@ describe("own-resume conflict collateral (#1389)", () => {
     const recoveryHandle: StubXmpp = {
       set_on_error: () => undefined,
       set_on_disconnected: () => undefined,
-      get_resume_state: () => null,
+      resume_state: () => null,
     };
     state.doConnect = async () => {
       state.xmpp = recoveryHandle;

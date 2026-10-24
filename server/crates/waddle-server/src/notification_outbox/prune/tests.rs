@@ -153,7 +153,7 @@ async fn candidate_prune_preserves_late_attachment_after_snapshot(
             .expect("isolation value");
         assert_eq!(configured, "repeatable read");
     }
-    let store = NotificationOutboxStore::new(db.clone())
+    let store = NotificationOutboxStore::try_new(db.clone())
         .await
         .expect("outbox");
     if repeatable_read {
@@ -242,7 +242,7 @@ async fn postgres_job_prune_preserves_late_legacy_attachment_after_snapshot() {
     let Some(fixture) = IngressFixture::postgres("job_prune_snapshot").await else {
         return;
     };
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let candidate = candidate("late-prune-job-parent");
@@ -361,7 +361,7 @@ async fn eligibility(fixture: &IngressFixture, key: MessageKey) -> chrono::DateT
 }
 
 async fn candidate_prune_waits_for_frontier_and_full_settlement_tail(fixture: IngressFixture) {
-    let store = NotificationOutboxStore::new(fixture.db.clone())
+    let store = NotificationOutboxStore::try_new(fixture.db.clone())
         .await
         .expect("outbox");
     let candidate = candidate("prune-frontier-tail");

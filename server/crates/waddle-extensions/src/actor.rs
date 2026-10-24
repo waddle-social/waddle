@@ -99,6 +99,7 @@ impl WasmExtensionActor {
 
     /// Install the host service implementation used by future invocations; capabilities
     /// still require explicit grants.
+    #[must_use]
     pub fn with_host_tools(mut self, host_tools: Arc<dyn ExtensionHostTools>) -> Self {
         self.host_tools = host_tools;
         self
@@ -106,18 +107,21 @@ impl WasmExtensionActor {
 
     /// Replace the operator-granted capability set used to authorize host calls and
     /// returned effects.
+    #[must_use]
     pub fn with_grants(mut self, grants: HashSet<ExtensionCapability>) -> Self {
         self.grants = grants;
         self
     }
 
     /// Replace the HTTPS origin allowlist used by outbound HTTP calls during guest execution.
+    #[must_use]
     pub fn with_allowed_http_origins(mut self, origins: Vec<String>) -> Self {
         self.allowed_http_origins = origins;
         self
     }
 
     /// Replace the rooms that provider webhook invocations may target without a user requester.
+    #[must_use]
     pub fn with_provider_room_grants(mut self, rooms: Vec<xmpp_parsers::jid::BareJid>) -> Self {
         self.provider_room_grants = rooms;
         self
@@ -156,7 +160,7 @@ impl WasmExtensionActor {
             .map_err(|_| ObservationInvocationError::NotInvoked)?;
         let context = InvocationContext {
             // This is a display/runtime context only, never tenant authority.
-            waddle_id: WaddleId::new("room-observation").expect("static context"),
+            waddle_id: WaddleId::try_new("room-observation").expect("static context"),
             plugin_id: self.manifest.id.clone(),
             requester: None,
             source_room: Some(event.source.room.clone()),
@@ -193,12 +197,14 @@ impl WasmExtensionActor {
     }
 
     /// Clone the manifest returned by this component's successful initialization.
+    #[must_use]
     pub fn manifest(&self) -> ExtensionManifest {
         self.manifest.clone()
     }
 
     /// Whether the operator granted this capability; test fixtures additionally honor
     /// observation revocation.
+    #[must_use]
     pub fn has_grant(&self, capability: ExtensionCapability) -> bool {
         #[cfg(any(test, feature = "test-support"))]
         if capability == ExtensionCapability::MessageObserve
@@ -214,6 +220,7 @@ impl WasmExtensionActor {
 
     /// Whether the effect matches both the manifest's declarations and this actor's
     /// granted capabilities.
+    #[must_use]
     pub fn validate_effect(&self, effect: &ExtensionEffect) -> bool {
         effect.validate_for_manifest_and_grants(&self.manifest, &self.grants)
     }
@@ -226,7 +233,7 @@ impl WasmExtensionActor {
     /// Panics only if the fixed nonblank `local` community identifier violates the
     /// identifier constructor invariant.
     pub async fn handle_event(&self, event: ExtensionEvent) -> Vec<ExtensionEffect> {
-        self.handle_event_for_waddle(event, WaddleId::new("local").expect("static waddle id"))
+        self.handle_event_for_waddle(event, WaddleId::try_new("local").expect("static waddle id"))
             .await
     }
 
@@ -305,7 +312,7 @@ impl WasmExtensionActor {
                     "extension handle-event failed; continuing fail-open"
                 );
                 vec![ExtensionEffect::HostWarning(
-                    DisplayText::new(message).expect("host warning is non-empty"),
+                    DisplayText::try_new(message).expect("host warning is non-empty"),
                 )]
             }
         }

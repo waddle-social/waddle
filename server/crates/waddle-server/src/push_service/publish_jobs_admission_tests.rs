@@ -43,7 +43,7 @@ async fn assert_refused_publication(
 }
 
 async fn missing_node_refuses_publication(fixture: IngressFixture) {
-    let push = DatabasePushServiceStore::new(fixture.db.clone())
+    let push = DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("push store");
     let missing_node = "urn:waddle:push-node:missing";
@@ -68,7 +68,7 @@ async fn missing_node_refuses_publication(fixture: IngressFixture) {
 }
 
 async fn existing_node_enforces_admission(fixture: IngressFixture) {
-    let push = DatabasePushServiceStore::new(fixture.db.clone())
+    let push = DatabasePushServiceStore::try_new(fixture.db.clone())
         .await
         .expect("push store");
     let disabled = push

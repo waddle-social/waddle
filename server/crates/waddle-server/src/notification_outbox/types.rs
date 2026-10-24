@@ -29,7 +29,7 @@ impl NotificationThreadId {
 pub struct PushServiceNodeName(String);
 
 impl PushServiceNodeName {
-    pub fn new(value: impl Into<String>) -> Result<Self, NotificationOutboxError> {
+    pub fn try_new(value: impl Into<String>) -> Result<Self, NotificationOutboxError> {
         let value = value.into();
         if value.is_empty() {
             return Err(NotificationOutboxError::InvalidNode);

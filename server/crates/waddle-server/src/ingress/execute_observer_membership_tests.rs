@@ -8,7 +8,7 @@ use waddle_extensions::{
 
 fn plugin(name: &str) -> Arc<ObserverTestPlugin> {
     ObserverTestPlugin::new(
-        PluginId::new(name).expect("plugin id"),
+        PluginId::try_new(name).expect("plugin id"),
         ObserverTestBehavior::Success,
     )
 }

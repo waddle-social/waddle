@@ -103,7 +103,7 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
             password: completion.request.password.clone(),
             members: completion
                 .room
-                .get_all_affiliations()
+                .all_affiliations()
                 .into_iter()
                 .filter(|entry| entry.affiliation >= waddle_xmpp::Affiliation::Member)
                 .map(|entry| entry.jid)
@@ -118,11 +118,11 @@ impl TryFrom<&waddle_xmpp::muc::room_registry_actor::DestroyCompletion>
                     .values()
                     .map(|occupant| {
                         (
-                            waddle_xmpp::muc::MucOccupantNick::new(occupant.nick.clone())
+                            waddle_xmpp::muc::MucOccupantNick::try_new(occupant.nick.clone())
                                 .expect("occupant nicks are validated at join"),
                             completion
                                 .room
-                                .get_occupant_sessions(&occupant.nick)
+                                .occupant_sessions(&occupant.nick)
                                 .into_iter()
                                 .collect(),
                         )
@@ -1202,7 +1202,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
     ctx: IqHandlerContext<'_>,
     state: &WebSocketState,
     phase: &ConnectionPhase,
-    authenticated_session: &Option<Session>,
+    authenticated_session: Option<&Session>,
 ) -> ResponseBatch {
     let iq = ctx.iq;
     let id = ctx.id;
@@ -1257,9 +1257,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             )]
             .into();
         };
-        match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session.as_ref())
-            .await
-        {
+        match muc_owner_authorized(state, &room_jid, sender_jid, authenticated_session).await {
             Ok(true) => {}
             Ok(false) => {
                 return vec![build_iq_error_xml_typed(
@@ -1539,7 +1537,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
             state,
             &room_jid,
             iq,
-            authenticated_session.as_ref(),
+            authenticated_session,
             phase.bound_jid(),
         )
         .await
@@ -1712,7 +1710,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         );
 
         if let (Some(target_id), Ok(moderator_jid)) = (
-            RichMessageId::new(request.target_id.clone()),
+            RichMessageId::try_new(request.target_id.clone()),
             moderated_by.parse::<Jid>(),
         ) {
             let archived = ArchivedMessage {
@@ -1741,7 +1739,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                         target_id,
                         moderated_by: moderator_jid,
                         stamp: Some(stamp_time),
-                        reason: request.reason.as_deref().and_then(RichText::new),
+                        reason: request.reason.as_deref().and_then(RichText::try_new),
                     })),
                     reply: None,
                     references: Vec::new(),
@@ -1786,10 +1784,10 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                     // attribute, which would not match the archive
                     // entry clients can resolve.
                     let tombstone = waddle_xmpp::mam::ArchivedTombstone {
-                        retraction_id: waddle_xmpp::mam::RichMessageId::new(archive_id.clone()),
+                        retraction_id: waddle_xmpp::mam::RichMessageId::try_new(archive_id.clone()),
                         stamp: stamp_time,
                         moderation: Some(ArchivedModeration {
-                            target_id: waddle_xmpp::mam::RichMessageId::new(
+                            target_id: waddle_xmpp::mam::RichMessageId::try_new(
                                 request.target_id.clone(),
                             )
                             .expect("target id is non-empty here"),
@@ -1797,7 +1795,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
                                 .parse::<Jid>()
                                 .expect("moderated_by parsed earlier"),
                             stamp: Some(stamp_time),
-                            reason: request.reason.as_deref().and_then(RichText::new),
+                            reason: request.reason.as_deref().and_then(RichText::try_new),
                         }),
                         // Internal tombstone-retry identity only; the
                         // MAM response builders never read this field.
@@ -1932,7 +1930,7 @@ pub(super) async fn handle_muc_owner_and_moderation_iq(
         let mut frames = Vec::new();
         if let Ok(snapshot) = room_actor.ask(GetSnapshot).await {
             for occupant in snapshot.room.occupants.values() {
-                for occupant_jid in snapshot.room.get_occupant_sessions(&occupant.nick) {
+                for occupant_jid in snapshot.room.occupant_sessions(&occupant.nick) {
                     let mut outbound = moderation.clone();
                     outbound.to = Some(jid::Jid::from(occupant_jid.clone()));
                     if occupant_jid == *sender_jid {
@@ -2014,7 +2012,7 @@ mod destroy_completion_tests {
                     generation: leave_attempt.order(),
                     nick_generation: None,
                     outcome: waddle_xmpp::muc::room_actor::DepartureReceiptOutcome::Suppressed {
-                        nick: waddle_xmpp::muc::MucOccupantNick::new("ghost".to_string())
+                        nick: waddle_xmpp::muc::MucOccupantNick::try_new("ghost".to_string())
                             .expect("valid nick"),
                         affiliation: waddle_xmpp::Affiliation::Member,
                     },
@@ -2093,7 +2091,7 @@ mod destroy_completion_tests {
                 "member-b@example.com".parse().expect("valid member jid"),
             ],
             recipients: vec![(
-                waddle_xmpp::muc::MucOccupantNick::new("nick".to_string()).expect("valid nick"),
+                waddle_xmpp::muc::MucOccupantNick::try_new("nick".to_string()).expect("valid nick"),
                 vec![
                     "member-a@example.com/phone"
                         .parse()
@@ -2262,7 +2260,7 @@ mod destroy_completion_tests {
                         None,
                         recipients,
                     ),
-                    origin: &crate::room_effect_outbox::RoomEffectOriginInstanceId::new(
+                    origin: &crate::room_effect_outbox::RoomEffectOriginInstanceId::try_new(
                         "destroy-completion-test-origin".to_string(),
                     )
                     .expect("valid room effect origin"),
@@ -2496,7 +2494,8 @@ mod destroy_completion_tests {
             request: DestroyRequest::default(),
             members: Vec::new(),
             recipients: vec![(
-                waddle_xmpp::muc::MucOccupantNick::new("owner".to_string()).expect("valid nick"),
+                waddle_xmpp::muc::MucOccupantNick::try_new("owner".to_string())
+                    .expect("valid nick"),
                 vec![inline_session.clone()],
             )],
         };
@@ -2505,7 +2504,7 @@ mod destroy_completion_tests {
             &success_room,
             success_lifecycle,
             vec![waddle_xmpp::muc::DestroyRecipient {
-                nick: waddle_xmpp::muc::MucOccupantNick::new("owner".to_string())
+                nick: waddle_xmpp::muc::MucOccupantNick::try_new("owner".to_string())
                     .expect("owner nick"),
                 sessions: vec![inline_session.clone()],
             }],
@@ -2619,7 +2618,8 @@ mod destroy_completion_tests {
             request: DestroyRequest::default(),
             members: Vec::new(),
             recipients: vec![(
-                waddle_xmpp::muc::MucOccupantNick::new("owner".to_string()).expect("valid nick"),
+                waddle_xmpp::muc::MucOccupantNick::try_new("owner".to_string())
+                    .expect("valid nick"),
                 vec![inline_session.clone()],
             )],
         };

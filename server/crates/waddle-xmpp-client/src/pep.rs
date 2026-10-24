@@ -94,6 +94,7 @@ pub enum PepItem {
 }
 
 /// Parse a PEP event from an incoming `<message>` stanza.
+#[must_use]
 pub fn parse(element: &Element) -> Option<PepItem> {
     if element.name() != "message" {
         return None;
@@ -203,6 +204,7 @@ fn parse_tune_payload(element: &Element) -> Option<UserTune> {
 }
 
 /// Build an XEP-0107 mood element from the selected mood token and optional text.
+#[must_use]
 pub fn build_mood_element(mood: &str, text: Option<&str>) -> Element {
     let mut builder =
         Element::builder("mood", NS_MOOD).append(Element::builder(mood, NS_MOOD).build());
@@ -213,16 +215,19 @@ pub fn build_mood_element(mood: &str, text: Option<&str>) -> Element {
 }
 
 /// Build an empty XEP-0107 mood element that clears the current publication.
+#[must_use]
 pub fn build_mood_clear_element() -> Element {
     Element::builder("mood", NS_MOOD).build()
 }
 
 /// Build an XEP-0108 activity element from a broad activity token and optional text.
+#[must_use]
 pub fn build_activity_element(activity: &str, text: Option<&str>) -> Element {
     build_activity_element_with_specific(activity, None, text)
 }
 
 /// Build an XEP-0108 broad activity with an optional specific subactivity and explanatory text.
+#[must_use]
 pub fn build_activity_element_with_specific(
     general: &str,
     specific: Option<&str>,
@@ -240,11 +245,13 @@ pub fn build_activity_element_with_specific(
 }
 
 /// Build an empty XEP-0108 activity element that clears the current publication.
+#[must_use]
 pub fn build_activity_clear_element() -> Element {
     Element::builder("activity", NS_ACTIVITY).build()
 }
 
 /// Build an XEP-0118 tune element containing the supplied optional track metadata.
+#[must_use]
 pub fn build_tune_element(tune: &UserTune) -> Element {
     let mut builder = Element::builder("tune", NS_TUNE);
     if let Some(artist) = tune.artist.as_deref() {
@@ -280,11 +287,13 @@ pub fn build_tune_element(tune: &UserTune) -> Element {
 }
 
 /// Build an empty XEP-0118 tune element that clears the current publication.
+#[must_use]
 pub fn build_tune_clear_element() -> Element {
     Element::builder("tune", NS_TUNE).build()
 }
 
 /// Build an IQ-set publishing the supplied payload to the selected PEP node.
+#[must_use]
 pub fn build_pep_publish_iq(id: &str, node: &str, payload: Element) -> Element {
     build_pep_publish_iq_with_item_id(id, node, "current", payload)
 }
@@ -292,6 +301,7 @@ pub fn build_pep_publish_iq(id: &str, node: &str, payload: Element) -> Element {
 /// PEP publish envelope with an explicit pubsub item id, for nodes whose
 /// item id is content-addressed rather than the singleton `current` —
 /// XEP-0084 §3.1 mandates the SHA-1 of the image bytes as the item id.
+#[must_use]
 pub fn build_pep_publish_iq_with_item_id(
     id: &str,
     node: &str,
@@ -320,6 +330,7 @@ pub fn build_pep_publish_iq_with_item_id(
 }
 
 /// Build an IQ-set clearing the selected PEP user-state node using its empty payload.
+#[must_use]
 pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
     let payload = match node {
         NS_MOOD => build_mood_clear_element(),
@@ -329,23 +340,24 @@ pub fn build_pep_clear_iq(id: &str, node: &str) -> Element {
     };
     build_pep_publish_iq(id, node, payload)
 }
-
 // Every builder below takes the IQ `id` from the caller: ids identify a
 // single request on the stream (RFC 6120 §8.2.3), so each request MUST
 // mint a fresh one (the FFI and wasm callers use UUIDs) — a fixed id
 // would misroute a slow reply onto a later request's waiter.
-
 /// Build a PEP publication IQ-set carrying the supplied XEP-0107 mood.
+#[must_use]
 pub fn build_publish_mood_iq(id: &str, mood: &str, text: Option<&str>) -> Element {
     build_pep_publish_iq(id, NS_MOOD, build_mood_element(mood, text))
 }
 
 /// Build a PEP publication IQ-set clearing the XEP-0107 mood.
+#[must_use]
 pub fn build_retract_mood_iq(id: &str) -> Element {
     build_pep_clear_iq(id, NS_MOOD)
 }
 
 /// Build a PEP publication IQ-set carrying the supplied XEP-0108 activity.
+#[must_use]
 pub fn build_publish_activity_iq(
     id: &str,
     general: &str,
@@ -360,21 +372,25 @@ pub fn build_publish_activity_iq(
 }
 
 /// Build a PEP publication IQ-set clearing the XEP-0108 activity.
+#[must_use]
 pub fn build_retract_activity_iq(id: &str) -> Element {
     build_pep_clear_iq(id, NS_ACTIVITY)
 }
 
 /// Build a PEP publication IQ-set carrying the supplied XEP-0118 tune.
+#[must_use]
 pub fn build_publish_tune_iq(id: &str, tune: &UserTune) -> Element {
     build_pep_publish_iq(id, NS_TUNE, build_tune_element(tune))
 }
 
 /// Build a PEP publication IQ-set clearing the XEP-0118 tune.
+#[must_use]
 pub fn build_retract_tune_iq(id: &str) -> Element {
     build_pep_clear_iq(id, NS_TUNE)
 }
 
 /// Build an IQ-get retrieving the selected PEP user-state node.
+#[must_use]
 pub fn build_pep_items_iq(id: &str, target_jid: &str, node: &str) -> Element {
     Element::builder("iq", NS_CLIENT)
         .attr(minidom::rxml::xml_ncname!("type").to_owned(), "get")
@@ -406,11 +422,13 @@ fn find_pep_iq_payload<'a>(
 }
 
 /// Read the XEP-0107 mood payload from a PEP-items IQ result; missing or cleared values return None.
+#[must_use]
 pub fn parse_pep_mood(iq: &Element) -> Option<UserMood> {
     parse_mood_payload(find_pep_iq_payload(iq, NS_MOOD, "mood", NS_MOOD)?)
 }
 
 /// Read the XEP-0108 activity payload from a PEP-items IQ result; missing or cleared values return None.
+#[must_use]
 pub fn parse_pep_activity(iq: &Element) -> Option<UserActivity> {
     parse_activity_payload(find_pep_iq_payload(
         iq,
@@ -421,6 +439,7 @@ pub fn parse_pep_activity(iq: &Element) -> Option<UserActivity> {
 }
 
 /// Read the XEP-0118 tune payload from a PEP-items IQ result; missing or cleared values return None.
+#[must_use]
 pub fn parse_pep_tune(iq: &Element) -> Option<UserTune> {
     parse_tune_payload(find_pep_iq_payload(iq, NS_TUNE, "tune", NS_TUNE)?)
 }

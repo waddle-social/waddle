@@ -9,7 +9,7 @@ use waddle_xmpp::{ingress::IngressEffectIntent, registry::ConnectionRegistry};
 use xmpp_parsers::message::Message;
 
 fn observer_plugin() -> waddle_extensions::PluginId {
-    waddle_extensions::PluginId::new("message-hook-fixture").expect("fixture plugin")
+    waddle_extensions::PluginId::try_new("message-hook-fixture").expect("fixture plugin")
 }
 
 fn observer_intent(effect: &ExternalRoomEffect) -> IngressEffectIntent {
@@ -29,8 +29,8 @@ fn observer_intent(effect: &ExternalRoomEffect) -> IngressEffectIntent {
         sender: sender.clone(),
         plugin: plugin.clone(),
         correction_target: None,
-        generation: waddle_extensions::ObservationGeneration::new(1).expect("generation"),
-        identity: waddle_extensions::Sha256Digest::new("0".repeat(64)).expect("identity"),
+        generation: waddle_extensions::ObservationGeneration::try_new(1).expect("generation"),
+        identity: waddle_extensions::Sha256Digest::try_new("0".repeat(64)).expect("identity"),
     }
 }
 
@@ -259,7 +259,7 @@ async fn two_observer_plugins_record_distinct_obligations(fixture: IngressFixtur
     let room: jid::BareJid = "room@muc.example.com".parse().expect("room");
     let make_effect = |plugin: &str| ExternalRoomEffect::ObserveRoomMessage {
         room: room.clone(),
-        plugin: waddle_extensions::PluginId::new(plugin).expect("plugin"),
+        plugin: waddle_extensions::PluginId::try_new(plugin).expect("plugin"),
         message: Box::new(submission.plan.sanitized_message.clone()),
         requester: submission.sender.to_bare(),
         sender: submission.sender.clone(),

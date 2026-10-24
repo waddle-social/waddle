@@ -1245,9 +1245,9 @@ fn is_fastening(message: &IncomingMessage) -> bool {
 }
 
 fn ids_of(message: &IncomingMessage) -> RowIds {
-    let non_empty = |id: &Option<String>| id.clone().filter(|id| !id.is_empty());
+    let non_empty = |id: Option<&String>| id.filter(|id| !id.is_empty()).cloned();
     let mut chosen: Vec<String> = Vec::new();
-    for id in [&message.origin_id, &message.message_id]
+    for id in [message.origin_id.as_ref(), message.message_id.as_ref()]
         .into_iter()
         .filter_map(non_empty)
     {
@@ -1256,8 +1256,8 @@ fn ids_of(message: &IncomingMessage) -> RowIds {
         }
     }
     RowIds {
-        stanza: non_empty(&message.stanza_id),
-        reference: non_empty(&message.reference_id),
+        stanza: non_empty(message.stanza_id.as_ref()),
+        reference: non_empty(message.reference_id.as_ref()),
         chosen,
     }
 }
@@ -2099,7 +2099,7 @@ mod judgment_tests {
                     model_version: "model-v1".into(),
                     scores: vec![SafetyScore {
                         category: SafetyCategory::IsQuestion,
-                        probability: Probability::new(probability).unwrap(),
+                        probability: Probability::try_new(probability).unwrap(),
                         taxonomy_version: "question-v1".into(),
                     }],
                 },

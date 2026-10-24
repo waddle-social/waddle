@@ -2169,7 +2169,7 @@ async fn mam_repository_sqlite_preserves_recorded_identity_and_repair_timestamp(
     let db = Database::from_sqlite_pool(
         "mam_repository",
         storage.sqlite_pool().expect("sqlite pool").clone(),
-        true,
+        crate::db::SqlitePoolStorage::InMemory,
     );
     MigrationRunner::single()
         .run(&db)

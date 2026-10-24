@@ -302,7 +302,7 @@ impl CrossNodeReceiver {
             .acquire(&target, &receiver_identity())
             .await
             .expect("target claim");
-        let pool = crate::db::DatabasePool::new(
+        let pool = crate::db::DatabasePool::try_new(
             crate::db::DatabaseConfig::new(fixture.db.driver(), fixture.db.database_url()),
             crate::db::PoolConfig,
         )

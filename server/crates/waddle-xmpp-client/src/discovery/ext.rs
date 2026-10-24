@@ -399,7 +399,8 @@ impl DiscoveryExt for ClientHandle {
             .collect();
 
         let mut spaces = spaces;
-        let standalone_space_id = SpaceNode::new(STANDALONE_SPACE_ID).ok_or_else(parse_error)?;
+        let standalone_space_id =
+            SpaceNode::try_new(STANDALONE_SPACE_ID).ok_or_else(parse_error)?;
         let mut standalone_count = 0usize;
         if let Ok(rooms) = self.discover_items(&services.muc.to_string(), None).await {
             for (offset, room) in rooms.into_iter().enumerate() {

@@ -37,7 +37,7 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
     Ok(CallTeardownJob {
         intent_id: CallTeardownIntentId::from_stored(row.get(0)?),
         intent: CallTeardownIntent {
-            call_id: CallId::new(row.get::<String>(1)?)?,
+            call_id: CallId::try_new(row.get::<String>(1)?)?,
             target,
             generation,
             occupant: row
@@ -58,11 +58,11 @@ pub(super) fn decode_job(row: &Row) -> Result<CallTeardownJob, CallTeardownOutbo
             },
             room_sid: row
                 .get::<Option<String>>(6)?
-                .map(RoomSid::new)
+                .map(RoomSid::try_new)
                 .transpose()?,
             session: row
                 .get::<Option<String>>(19)?
-                .map(SessionBinding::new)
+                .map(SessionBinding::try_new)
                 .transpose()?,
         },
         producing_node: row
@@ -101,7 +101,7 @@ fn decode_target(
             (Some(identity), None) if !identity.is_empty() => Ok(TeardownTarget::Participant {
                 identity: FullJid::from_str(&identity)
                     .map_err(|_| CallTeardownOutboxError::InvalidFullJid(identity))?,
-                participant_sid: participant_sid.map(ParticipantSid::new).transpose()?,
+                participant_sid: participant_sid.map(ParticipantSid::try_new).transpose()?,
             }),
             _ => Err(CallTeardownOutboxError::InvalidTargetShape(
                 action.to_owned(),
@@ -117,7 +117,7 @@ fn decode_target(
                         .map_err(|_| CallTeardownOutboxError::InvalidFullJid(departed))?,
                     room_jid: BareJid::from_str(&room_jid)
                         .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
-                    participant_sid: participant_sid.map(ParticipantSid::new).transpose()?,
+                    participant_sid: participant_sid.map(ParticipantSid::try_new).transpose()?,
                 })
             }
             _ => Err(CallTeardownOutboxError::InvalidTargetShape(
@@ -153,9 +153,9 @@ fn decode_target(
             ) if !anchor_origin_id.is_empty() => Ok(TeardownTarget::CallThreadEndRetry {
                 room_jid: BareJid::from_str(&room_jid)
                     .map_err(|_| CallTeardownOutboxError::InvalidBareJid(room_jid))?,
-                thread_id: waddle_xmpp_core::mam::ThreadId::new(thread_id).ok_or_else(|| {
-                    CallTeardownOutboxError::InvalidTargetShape(action.to_owned())
-                })?,
+                thread_id: waddle_xmpp_core::mam::ThreadId::try_new(thread_id).ok_or_else(
+                    || CallTeardownOutboxError::InvalidTargetShape(action.to_owned()),
+                )?,
                 anchor_origin_id: waddle_xmpp_core::xep0359::OriginId::new(anchor_origin_id),
                 started: chrono::DateTime::from_timestamp_millis(thread_started_at_ms).ok_or_else(
                     || CallTeardownOutboxError::InvalidTargetShape(action.to_owned()),

@@ -160,7 +160,7 @@ mod tests {
                 let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
                 registry.register_with_carbons(resource.clone(), sender, true);
                 let entry = registry
-                    .get_entry(&resource)
+                    .entry(&resource)
                     .expect("registered recipient resource");
                 let mut outbound = copy(&resource, MessageKey::new(), 1);
                 let obligation = outbound
@@ -202,7 +202,7 @@ mod tests {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(8);
         registry.register(resource.clone(), sender);
         let owner = registry
-            .get_entry(&resource)
+            .entry(&resource)
             .expect("registered recipient resource")
             .carbons_enabled;
         let a = copy(&resource, MessageKey::new(), 1);
@@ -239,7 +239,7 @@ mod tests {
         let (sender, mut receiver) = tokio::sync::mpsc::channel(1);
         registry.register(resource.clone(), sender);
         let owner = registry
-            .get_entry(&resource)
+            .entry(&resource)
             .expect("registered recipient resource")
             .carbons_enabled;
         let a = copy(&resource, MessageKey::new(), 1);

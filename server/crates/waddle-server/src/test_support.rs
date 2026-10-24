@@ -19,7 +19,7 @@ pub use crate::server::routes::websocket::WebSocketState;
 
 /// Build a minimal WebSocket state over a caller-owned database pool and ingress authority.
 ///
-/// The ingress authority must come from [`crate::ingress::IngressAuthority::new`] when a test
+/// The ingress authority must come from [`crate::ingress::IngressAuthority::try_new`] when a test
 /// drives recovery through `trigger_maintenance`, because it owns the maintenance task.
 pub async fn websocket_state_with_ingress(
     db_pool: Arc<crate::db::DatabasePool>,
@@ -39,7 +39,7 @@ pub async fn websocket_state_with_ingress(
             database.clone(),
         ),
     );
-    crate::notification_outbox::NotificationOutboxStore::new(database)
+    crate::notification_outbox::NotificationOutboxStore::try_new(database)
         .await
         .expect("notification outbox test schema");
     create_test_websocket_state_with_extension_manager(

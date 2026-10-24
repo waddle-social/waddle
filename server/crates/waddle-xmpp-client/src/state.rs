@@ -77,11 +77,13 @@ pub struct StreamId(String);
 
 impl StreamId {
     /// Wrap the opaque server-assigned stream identifier without additional validation.
+    #[must_use]
     pub fn new(stream_id: impl Into<String>) -> Self {
         Self(stream_id.into())
     }
 
     /// Borrow the stored text without allocating.
+    #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
     }
@@ -108,6 +110,7 @@ pub struct SessionSnapshot {
 
 impl SessionSnapshot {
     /// Create a disconnected session snapshot without a binding or pending requests.
+    #[must_use]
     pub fn new() -> Self {
         Self {
             phase: SessionPhase::Disconnected,
@@ -118,6 +121,7 @@ impl SessionSnapshot {
     }
 
     /// Map the authentication/session phase to the application-facing connection state.
+    #[must_use]
     pub fn client_state(&self) -> ClientState {
         self.phase.into()
     }

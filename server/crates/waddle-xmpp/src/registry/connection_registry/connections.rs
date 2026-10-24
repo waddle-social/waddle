@@ -236,7 +236,7 @@ impl ConnectionRegistry {
     /// Used by handlers that need to inspect or atomically transition
     /// per-connection flags (e.g. the XEP-0160 offline-flush CAS via
     /// [`ConnectionEntry::claim_offline_flush`]).
-    pub fn get_entry(&self, jid: &FullJid) -> Option<ConnectionEntry> {
+    pub fn entry(&self, jid: &FullJid) -> Option<ConnectionEntry> {
         self.connections.get(jid).map(|entry| entry.clone())
     }
 

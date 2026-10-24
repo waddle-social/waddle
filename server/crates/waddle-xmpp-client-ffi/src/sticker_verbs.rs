@@ -139,7 +139,7 @@ impl WaddleClient {
         let owner = owner_jid
             .parse::<BareJid>()
             .map_err(|_| WaddleError::InvalidJid)?;
-        let pack_id = PackId::new(pack_id).ok_or(WaddleError::InvalidArgument)?;
+        let pack_id = PackId::try_new(pack_id).ok_or(WaddleError::InvalidArgument)?;
         let node = node
             .filter(|node| !node.trim().is_empty())
             .unwrap_or_else(|| STICKERS_NODE.to_string());
@@ -186,7 +186,7 @@ impl WaddleClient {
     /// session, or any other stanza error (with an `Error` event
     /// carrying the diagnostic).
     pub async fn retract_sticker_pack(&self, pack_id: String) -> bool {
-        let Some(pack_id) = PackId::new(pack_id) else {
+        let Some(pack_id) = PackId::try_new(pack_id) else {
             self.emit_error("retract_sticker_pack failed: pack id must not be empty".to_string());
             return false;
         };

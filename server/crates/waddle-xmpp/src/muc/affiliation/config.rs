@@ -248,7 +248,7 @@ impl FederatedAffiliationConfig {
     /// 1. JID-specific affiliation override
     /// 2. Domain-specific affiliation override
     /// 3. Default affiliation
-    pub fn get_affiliation_for_jid(&self, jid: &BareJid) -> Affiliation {
+    pub fn affiliation_for_jid(&self, jid: &BareJid) -> Affiliation {
         if let Some(&affiliation) = self.jid_affiliations.get(jid) {
             return affiliation;
         }

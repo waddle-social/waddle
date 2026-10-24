@@ -113,7 +113,7 @@ mod tests {
                 "room".into(),
                 RoomConfig::default(),
             ),
-            OccupantIdSecret::new(vec![b't'; 32]).expect("secret"),
+            OccupantIdSecret::try_new(vec![b't'; 32]).expect("secret"),
         ));
         let grant = Box::new(MucMembershipMutation {
             room: invite.room.clone(),

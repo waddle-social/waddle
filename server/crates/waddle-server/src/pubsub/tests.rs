@@ -925,10 +925,7 @@ async fn database_affiliations_persist_across_reopen() {
     let reopened = DatabasePubSubStorage::open(Some(&url))
         .await
         .expect("reopen");
-    let aff = reopened
-        .get_affiliation(&owner, "n", &bob)
-        .await
-        .expect("get");
+    let aff = reopened.affiliation(&owner, "n", &bob).await.expect("get");
     assert_eq!(aff, Affiliation::Outcast);
 
     for cleanup in [

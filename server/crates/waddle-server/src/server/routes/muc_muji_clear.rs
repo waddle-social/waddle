@@ -189,7 +189,7 @@ async fn enqueue_muji_presence_clear(
     unbound: waddle_sfu::UnboundOccupantPolicy,
     session: Option<&waddle_sfu::SessionBinding>,
 ) -> Result<(), crate::call_teardown_outbox::CallTeardownOutboxError> {
-    let call_id = match waddle_sfu::CallId::new(room_jid.to_string()) {
+    let call_id = match waddle_sfu::CallId::try_new(room_jid.to_string()) {
         Ok(call_id) => call_id,
         Err(error) => {
             warn!(
@@ -303,7 +303,7 @@ fn session_superseded(
     let (Some(session), Some(sfu)) = (session, state.deps.protocol.sfu.as_ref()) else {
         return false;
     };
-    let Ok(call_id) = waddle_sfu::CallId::new(room_jid.to_string()) else {
+    let Ok(call_id) = waddle_sfu::CallId::try_new(room_jid.to_string()) else {
         return false;
     };
     let identity = waddle_sfu::Identity::from_jid(full_jid.clone());
@@ -398,7 +398,7 @@ mod tests {
             .expect("room jid");
         let full_jid: FullJid = "alice@example.com/web".parse().expect("full jid");
         let occupant = waddle_xmpp_core::OccupancySessionGeneration::mint();
-        let session = waddle_sfu::SessionBinding::new("departed-session").expect("session");
+        let session = waddle_sfu::SessionBinding::try_new("departed-session").expect("session");
 
         let outcome = clear_muji_presence_for_departure(
             state.as_ref(),
@@ -499,7 +499,7 @@ mod tests {
             None,
             crate::server::routes::websocket::handlers::presence::MucJoinConnectionContext {
                 occupancy_session: initiator_occupancy_session,
-                authenticated_session: &Some(owner_session),
+                authenticated_session: Some(&owner_session),
                 registry_owner: None,
             },
         )

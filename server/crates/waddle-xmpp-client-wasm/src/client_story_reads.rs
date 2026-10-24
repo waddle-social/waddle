@@ -54,11 +54,13 @@ impl From<&StoryReads> for JsStoryReads {
 /// mandatory — omitting any of them lets a server auto-create the node
 /// with different defaults and silently leak read-state notifications.
 fn story_reads_publish_options() -> PubsubPublishOptions {
-    PubsubPublishOptions {
-        persist_items: Some(true),
-        access_model: Some(PubsubAccessModel::Whitelist),
-        send_last_published_item: Some(PubsubSendLastPublishedItem::Never),
-        max_items: Some(1),
+    {
+        let mut outbound_options = PubsubPublishOptions::default();
+        outbound_options.persist_items = Some(true);
+        outbound_options.access_model = Some(PubsubAccessModel::Whitelist);
+        outbound_options.send_last_published_item = Some(PubsubSendLastPublishedItem::Never);
+        outbound_options.max_items = Some(1);
+        outbound_options
     }
 }
 
@@ -110,8 +112,8 @@ pub(crate) struct JsStoryReadInput {
 fn story_reads_from_js(input: JsStoryReadsInput) -> Result<StoryReads, JsValue> {
     let mut reads = StoryReads::default();
     for entry in input.entries {
-        let id =
-            StoryId::new(entry.id).map_err(|err| js_error(format!("invalid story id: {err}")))?;
+        let id = StoryId::try_new(entry.id)
+            .map_err(|err| js_error(format!("invalid story id: {err}")))?;
         let at = entry
             .at
             .parse::<DateTime<Utc>>()

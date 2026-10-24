@@ -174,7 +174,7 @@ fn committed_link_preview_media_ref_effects(
     stale_refs: Vec<CurrentPreviewRefRow>,
     current_slots: Vec<uuid::Uuid>,
 ) -> Vec<IngressEffectIntent> {
-    let Some(message_id) = RichMessageId::new(message_id.to_string()) else {
+    let Some(message_id) = RichMessageId::try_new(message_id.to_string()) else {
         return Vec::new();
     };
     let archive = jid::Jid::from(archive_jid.clone());
@@ -267,7 +267,7 @@ mod tests {
     use crate::server::routes::websocket::link_preview_telemetry::recorded_events;
 
     async fn db_pool() -> DatabasePool {
-        let pool = DatabasePool::new(DatabaseConfig::default(), PoolConfig)
+        let pool = DatabasePool::try_new(DatabaseConfig::default(), PoolConfig)
             .await
             .expect("db pool");
         MigrationRunner::global()

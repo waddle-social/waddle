@@ -70,10 +70,10 @@ where
         retraction_id: None,
         stamp: chrono::Utc::now(),
         moderation: Some(ArchivedModeration {
-            target_id: RichMessageId::new(archive_id).expect("target id"),
+            target_id: RichMessageId::try_new(archive_id).expect("target id"),
             moderated_by: "owner@example.com".parse::<Jid>().expect("moderator JID"),
             stamp: Some(chrono::Utc::now()),
-            reason: RichText::new("room policy"),
+            reason: RichText::try_new("room policy"),
         }),
         sender_scope: None,
     };
@@ -83,7 +83,7 @@ where
         .expect("install moderation tombstone"));
 
     let author_retry = ArchivedTombstone {
-        retraction_id: RichMessageId::new("author-retraction-retry"),
+        retraction_id: RichMessageId::try_new("author-retraction-retry"),
         stamp: chrono::Utc::now(),
         moderation: None,
         sender_scope: None,
@@ -121,7 +121,7 @@ where
         }
     );
     let author_tombstone = ArchivedTombstone {
-        retraction_id: RichMessageId::new("live-author-retraction"),
+        retraction_id: RichMessageId::try_new("live-author-retraction"),
         stamp: chrono::Utc::now(),
         moderation: None,
         sender_scope: None,
@@ -204,7 +204,16 @@ fn xep0424_muc_rooms_advertise_tombstone_feature_in_every_configuration() {
         for members_only in [false, true] {
             for moderated in [false, true] {
                 for forum in [false, true] {
-                    let feats = muc_room_features(persistent, members_only, true, moderated, forum);
+                    let feats = muc_room_features(
+                        waddle_xmpp_core::disco::info::RoomPersistence::from_persistent_flag(
+                            persistent,
+                        ),
+                        waddle_xmpp_core::disco::info::RoomMembership::from_members_only_flag(
+                            members_only,
+                        ),
+                        waddle_xmpp_core::disco::info::RoomVisibility::Public,
+                        waddle_xmpp_core::types::Moderation::from_moderated_flag(moderated),
+                    );
                     assert!(
                         feats.iter().any(|f| f == &target),
                         "muc_room_features(persistent={persistent}, members_only={members_only}, \
