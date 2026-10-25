@@ -502,6 +502,19 @@ class TimelineStoreTest {
     }
 
     @Test
+    fun `live rows keep arrival order when the device clock steps backward`() {
+        var now = Instant.parse("2026-10-25T12:05:00Z")
+        val store = TimelineStore(nowMillis = { now.toEpochMilli() })
+        store.setOwnBareJid("me@waddle.test")
+        store.onLiveMessage(testMessage(stanzaId = "live-1", body = "first"))
+        now = Instant.parse("2026-10-25T12:00:00Z")
+        store.onLiveMessage(testMessage(stanzaId = "live-2", body = "second"))
+
+        val bodies = store.timeline("alice@waddle.test").value.map { it.body }
+        assertEquals(listOf("first", "second"), bodies)
+    }
+
+    @Test
     fun `distinct conversations stay isolated`() {
         store.onLiveMessage(
             testMessage(stanzaId = "dm-1", from = "alice@waddle.test", messageType = "chat"),

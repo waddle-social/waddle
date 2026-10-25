@@ -23,10 +23,11 @@ import java.time.OffsetDateTime
  * present, else origin id, else message id. Ordering is by timestamp,
  * with insertion order breaking ties. An item without a wire timestamp
  * (an undelayed live message) sorts at the local time it arrived, never
- * before the newest wire timestamp already seen in its conversation: a
- * device clock behind the server cannot drop a fresh live row beneath
- * history already on screen, and archive pages fetched later (catch-up
- * after a stream drop) still sort after the live rows they follow.
+ * before the newest wire timestamp already seen in its conversation nor
+ * the newest row already held: neither a device clock behind the server
+ * nor one stepped backward can drop a fresh live row beneath rows already
+ * on screen, and archive pages fetched later (catch-up after a stream
+ * drop) still sort after the live rows they follow.
  *
  * Mutation messages (XEP-0444 reactions, XEP-0308 corrections, XEP-0424
  * retractions, XEP-0425 moderation, XEP-0422 safety-score fastenings —
@@ -265,13 +266,14 @@ class TimelineStore(
 
     /**
      * Where a new row sorts: its wire timestamp, else when it arrived but
-     * not before the newest wire instant seen. Must hold [lock].
+     * never before the newest wire instant seen or the newest row held
+     * ([list] is sorted, so its last entry). The second floor keeps live
+     * arrivals in order when the device clock steps backward. Must hold [lock].
      */
-    private fun sortInstantOf(conversation: String, item: TimelineItem): Instant {
+    private fun sortInstantOf(conversation: String, list: List<Entry>, item: TimelineItem): Instant {
         item.timestamp?.let(::parseInstant)?.let { return it }
-        val received = Instant.ofEpochMilli(item.receivedAtMillis)
-        val newestWire = newestWireInstant[conversation] ?: return received
-        return maxOf(received, newestWire)
+        val floors = listOfNotNull(newestWireInstant[conversation], list.lastOrNull()?.sortInstant)
+        return floors.fold(Instant.ofEpochMilli(item.receivedAtMillis), ::maxOf)
     }
 
     /** Must hold [lock]. */
@@ -324,7 +326,7 @@ class TimelineStore(
             }
             var entry = Entry(
                 item = item,
-                sortInstant = sortInstantOf(conversation, item),
+                sortInstant = sortInstantOf(conversation, list, item),
                 order = insertionCounter++,
                 mutations = MutationState(tombstone = initialTombstone),
                 dedupeArchiveId = archiveIdOf(item),
