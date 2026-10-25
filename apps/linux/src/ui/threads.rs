@@ -228,12 +228,12 @@ impl WaddleWindow {
 mod tests {
     use super::*;
     use crate::session::Kind;
-    use waddle_client_session::HistoryPage;
     use adw::prelude::{ApplicationExt, ButtonExt, CastNone, GtkWindowExt, ListModelExt};
     use gtk::gio;
     use waddle_client_session::judgments::{
         Probability, SafetyCategory, SafetyScore, SafetyScores, SafetyScoresFastening,
     };
+    use waddle_client_session::HistoryPage;
 
     #[test]
     #[ignore = "requires a GTK display; run with xvfb-run and --ignored --test-threads=1"]
