@@ -19,25 +19,15 @@ Cleanup plan for #2020 and #2024:
 
 ## Environment and secret exposure policy
 
-`WADDLE_VAPID_PRIVATE_KEY` is an optional bootstrap input. The process retains
-the variable after successful persistence as well as on failure. The running
-process and principals that can inspect its environment remain inside the
-secret's trust boundary; clearing the variable never erased the original OS
-environment or other copies reliably. Decoded temporary key material remains
-zeroized, and persisted private key material remains sealed at rest.
+Operator instructions for `WADDLE_VAPID_PRIVATE_KEY`, including the required
+removal from the deployment after the first successful boot, are in the
+[VAPID bootstrap runbook](../../server/docs/operations/vapid-bootstrap.md).
 
-There is no production child-process or exec path after removing the unused
-restart API. Future child launchers must construct an explicit environment
-that excludes `WADDLE_VAPID_PRIVATE_KEY`, `LISTEN_FDS` and `LISTEN_FD_NAMES`
-(for example with `Command::env_remove`), unless implementing a separately
-reviewed listener handoff. The parent environment must not be mutated to
-configure children. Operators can remove the bootstrap variable from subsequent
-deployment configuration after successful provisioning to load the stored key.
-
-`LISTEN_FDS` and `LISTEN_FD_NAMES` also remain in the process environment.
-They describe descriptors transferred exclusively by the launcher at exec.
-Capture is performed only once before runtime startup; descriptors are marked
-close-on-exec after adoption so a future unconfigured child cannot inherit them.
+`LISTEN_FDS` and `LISTEN_FD_NAMES` remain in the process environment. They
+describe descriptors transferred exclusively by the launcher at exec. Capture
+is performed only once before runtime startup; descriptors are marked
+close-on-exec after adoption so a future unconfigured child cannot inherit
+them.
 
 ## Restart behavior
 

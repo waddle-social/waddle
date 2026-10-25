@@ -342,6 +342,16 @@ This chart supports two extra env mechanisms:
   - list rendered directly into `Deployment.spec.template.spec.containers[0].env`
   - supports `value` and `valueFrom`
 
+## VAPID bootstrap
+
+Web Push signing uses a sealed key in the database.
+`WADDLE_VAPID_PRIVATE_KEY` is an optional first-boot bootstrap secret. The
+chart does not render it. Supply it through `extraSecretRefs` or
+`containerExtraEnv` only until the first successful boot has stored the key,
+then remove it from that Secret or env list and roll the pods. The full
+procedure is in
+[`docs/operations/vapid-bootstrap.md`](../../docs/operations/vapid-bootstrap.md).
+
 ## Graceful drain
 
 - `config.drainTimeoutSeconds` sets `WADDLE_DRAIN_TIMEOUT_SECS`.

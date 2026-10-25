@@ -55,4 +55,5 @@
   fences; a process restart alone establishes neither loss nor completion.
 - `WADDLE_DRAIN_TIMEOUT_SECS` configures the drain timeout (default: 30).
 - For startup secret handling and descriptor safety changes, read
-  [the startup safety policy](../docs/planning/startup-safety-2020-2024.md).
+  [the startup safety notes](../docs/planning/startup-safety-2020-2024.md)
+  and the [VAPID bootstrap runbook](docs/operations/vapid-bootstrap.md).
