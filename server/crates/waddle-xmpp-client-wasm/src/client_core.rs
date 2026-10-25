@@ -131,7 +131,7 @@ impl WaddleClient {
     /// Register a callback for inbound XMPP-native call events
     /// (XEP-0353 JMI envelopes + XEP-0166 Jingle session control
     /// carrying a `urn:waddle:transports:livekit:0` transport).
-    /// The callback receives a [`WaddleCallEvent`]-shaped object
+    /// The callback receives a [`crate::WaddleCallEvent`]-shaped object
     /// with a `kind` discriminator and optional `media` / `join` /
     /// `reason` fields. See `messaging::call::parse_call_event` on
     /// the Rust side for the typed input.

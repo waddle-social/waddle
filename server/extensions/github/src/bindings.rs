@@ -1,4 +1,3 @@
-
 wit_bindgen::generate!({
     path: "../../wit",
     world: "waddle-extension",

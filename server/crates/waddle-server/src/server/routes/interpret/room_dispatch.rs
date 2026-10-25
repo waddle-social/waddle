@@ -2,7 +2,7 @@
 use super::resource_constraint_error;
 #[cfg(feature = "clustering")]
 use super::DemoteRoomIfExactActor;
-#[cfg(feature = "clustering")]
+#[cfg(any(feature = "clustering", test))]
 use super::FullJid;
 #[cfg(feature = "clustering")]
 use super::OrderedRelayRouteOrigin;
