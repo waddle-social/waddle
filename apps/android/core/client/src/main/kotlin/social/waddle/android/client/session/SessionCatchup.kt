@@ -17,6 +17,8 @@ import social.waddle.android.client.auth.WaddleSessionInfo
 import social.waddle.android.client.persistQuietly
 import social.waddle.android.client.prefs.SessionPrefs
 import social.waddle.android.client.store.SessionStores
+import social.waddle.client.ffi.WaddleInboxMessageContent
+import social.waddle.client.ffi.WaddleInboxReadFilter
 import social.waddle.client.ffi.WaddleTopology
 
 /**
@@ -104,16 +106,18 @@ internal class SessionCatchup(
      * authoritative per-conversation unread state and INJECT the page
      * into the serialized event stream (the MDS handshake pattern) so
      * absolute-set reconciles never interleave with live increments.
-     * `noMessages = true` deviates from the web's default deliberately:
-     * the FFI page carries no message bodies, so the embedded MAM
-     * `<result/>` payloads the web consumes would be dead weight here.
+     * `WaddleInboxMessageContent.OMIT` deviates from the web's default
+     * deliberately: the FFI page carries no message bodies, so the
+     * embedded MAM `<result/>` payloads the web consumes would be dead
+     * weight here. `ALL` is every conversation, the former
+     * `onlyUnread = false`.
      * Best-effort: a failed fetch keeps the previous counts.
      */
     private suspend fun hydrateInbox(lease: ActiveSession.OwnerLease) {
         val result = try {
             when (
                 val invocation = activeSession.invokeIfCurrent(lease) {
-                it.fetchInbox(inboxReadFilter(onlyUnread = false), inboxMessages(noMessages = true))
+                it.fetchInbox(WaddleInboxReadFilter.ALL, WaddleInboxMessageContent.OMIT)
             }
             ) {
                 ActiveSession.LeaseInvocation.Stale,
